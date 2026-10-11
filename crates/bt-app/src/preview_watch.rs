@@ -1110,4 +1110,55 @@ mod tests {
         );
         assert_eq!(watch.folders, BTreeSet::from([PathBuf::from(r"D:\notes")]));
     }
+
+    /// PIN (T-DIRWATCH-LIFECYCLE round 2) — **a save made between the seat's
+    /// read and the steward's arming of the folder's watch is news.**
+    ///
+    /// The stamp is taken when the file joins the set; the steward arms the
+    /// folder later, on its own thread, so a save in between is heard by no
+    /// watch. The arming puts the folder's files on the clock, and the stamp
+    /// check after the quiet window finds the save. The gap is held open by a
+    /// fake door holding the start.
+    ///
+    /// MUTATION: keep the first `Armed` a no-op in `hear_the_steward` (drop the
+    /// `note_event`) — the save is never reported.
+    #[test]
+    fn a_save_made_before_the_folder_armed_is_news_once_it_arms() {
+        use crate::lane::wait_for_a_wake;
+        use crate::watch_steward::{Steward, fake::FakeDoor};
+        use std::sync::mpsc;
+
+        let door = FakeDoor::default();
+        let steward: &'static Steward = Box::leak(Box::new(Steward::new(door.clone(), |_| {})));
+        let (woke, wakes) = mpsc::channel();
+        steward.install_wake(move || {
+            let _ = woke.send(());
+        });
+        let mut watch = PreviewWatch::default();
+        let page = file("说明.md");
+        let mut stamps = BTreeMap::from([(page.clone(), stamp(10))]);
+        let changed = sync_for_test(&mut watch, &BTreeSet::from([page.clone()]), &stamps);
+        door.hold_starts();
+        tell_the_ear(&mut watch.ear, &watch.folders, changed, || {
+            steward.open_ear(Depth::ShallowNamed, Arc::new(|_: &Path, _| {}))
+        });
+        // The save lands while the start is held: no watch hears it.
+        door.wait_for_a_held_start();
+        stamps.insert(page.clone(), stamp(11));
+        door.release();
+        wait_for_a_wake(&wakes, "the arming");
+
+        let start = Instant::now();
+        assert!(
+            watch
+                .due_with(start, |path| stamps.get(path).copied())
+                .is_empty(),
+            "the folder's files are on the clock, not yet quiet"
+        );
+        assert_eq!(
+            watch.due_with(start + WATCH_QUIET, |path| stamps.get(path).copied()),
+            vec![present(&page)],
+            "the arming asked the file, and the save before it is news"
+        );
+    }
 }

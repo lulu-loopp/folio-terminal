@@ -173,16 +173,10 @@ impl<W: Ord + Copy> GitWatch<W> {
         if !self.want_with(window, wanted, paths_of) {
             return;
         }
-        let paths = all_paths(&self.watched);
-        if self.ear.is_none() && paths.is_empty() {
-            return;
-        }
         let (news, routes) = (&self.news, &self.routes);
-        self.ear
-            .get_or_insert_with(|| {
-                crate::watch_steward::open_ear(Depth::Tree, listener(news, routes, proxy))
-            })
-            .want(&paths, BTreeSet::new());
+        tell_the_ear(&mut self.ear, &self.watched, || {
+            crate::watch_steward::open_ear(Depth::Tree, listener(news, routes, proxy))
+        });
     }
 
     /// [`Self::want`]'s bookkeeping, with the paths a repository needs handed
@@ -200,14 +194,20 @@ impl<W: Ord + Copy> GitWatch<W> {
     /// repository whose news has ripened** — once a pass, before any window
     /// takes its turn, so every window takes the same news on the same pass.
     pub fn ripen(&mut self, now: Instant) {
-        self.hear_the_steward();
+        self.hear_the_steward(now);
         for root in self.due(now) {
             self.seats.tell(&root);
         }
     }
 
     /// Fold in what the steward said about each path: heard, or not.
-    fn hear_the_steward(&mut self) {
+    ///
+    /// **A path that has just armed is news about its repository** (T-DIRWATCH-
+    /// LIFECYCLE round 2). The page read the repository when it opened, and the
+    /// steward armed the watch later, on its own thread: whatever moved between
+    /// the two reached nobody. So the arming is put on the clock like a
+    /// notification, and the repository is read once more when it goes quiet.
+    fn hear_the_steward(&mut self, now: Instant) {
         let Some(ear) = self.ear.as_ref() else {
             return;
         };
@@ -218,7 +218,9 @@ impl<W: Ord + Copy> GitWatch<W> {
                 }
                 match &numbered.report {
                     MemberReport::Armed => {
-                        entry.heard.insert(path.clone());
+                        if entry.heard.insert(path.clone()) {
+                            entry.clock.note_event(now);
+                        }
                     }
                     MemberReport::Failed(cause) => {
                         // **Quietly** (rule 3). A network share, a `\\wsl$`
@@ -381,6 +383,20 @@ fn paths_of(root: &Path) -> Vec<PathBuf> {
         paths.push(gitdir);
     }
     paths
+}
+
+/// **Hand the paths to the ear**, opening it for the first repository; with no
+/// ear and nothing wanted there is nothing to tell.
+fn tell_the_ear(
+    ear: &mut Option<EarHandle>,
+    watched: &BTreeMap<PathBuf, Watched>,
+    open: impl FnOnce() -> EarHandle,
+) {
+    let paths = all_paths(watched);
+    if ear.is_none() && paths.is_empty() {
+        return;
+    }
+    ear.get_or_insert_with(open).want(&paths, BTreeSet::new());
 }
 
 /// Every path every watched repository is watched at: the ear's set.
@@ -1003,6 +1019,56 @@ mod tests {
                 vec![],                      // left on the very pass the news ripened
                 vec![],                      // and still nothing
             ]
+        );
+    }
+
+    /// PIN (T-DIRWATCH-LIFECYCLE round 2) — **a change made between a page's
+    /// opening read and the steward's arming of its watch is read.**
+    ///
+    /// The steward arms on its own thread, after the page has read the
+    /// repository, so a commit made in that gap is heard by no watch. The
+    /// arming itself is the news: once the steward reports the path `Armed`,
+    /// the repository is read again when the clock says it is quiet. Here the
+    /// gap is held open by a fake door that holds the start; the "change" is
+    /// whatever happened while it was held, which no notification will ever
+    /// report.
+    ///
+    /// MUTATION: keep the first `Armed` a no-op in `hear_the_steward` (drop the
+    /// `note_event`) — the window is never told and the second pass is empty.
+    #[test]
+    fn a_change_made_before_the_watch_armed_is_read_once_it_arms() {
+        use crate::lane::wait_for_a_wake;
+        use crate::watch_steward::{Steward, fake::FakeDoor};
+        use std::sync::mpsc;
+
+        let door = FakeDoor::default();
+        let steward: &'static Steward = Box::leak(Box::new(Steward::new(door.clone(), |_| {})));
+        let (woke, wakes) = mpsc::channel();
+        steward.install_wake(move || {
+            let _ = woke.send(());
+        });
+        let mut watch: GitWatch<u32> = GitWatch::default();
+        let root = PathBuf::from("/Users/alice/仓库");
+        watch.seat_windows_with([1]);
+        assert!(watch.want_with(1, BTreeSet::from([root.clone()]), |r| vec![r.to_path_buf()]));
+        door.hold_starts();
+        tell_the_ear(&mut watch.ear, &watch.watched, || {
+            steward.open_ear(Depth::Tree, Arc::new(|_: &Path, _| {}))
+        });
+        // The page reads the repository now; a commit lands while the start is
+        // still held; then the watch arms.
+        door.wait_for_a_held_start();
+        door.release();
+        wait_for_a_wake(&wakes, "the arming");
+
+        let start = Instant::now();
+        watch.ripen(start);
+        assert!(watch.take(1).is_empty(), "news, the tree not yet quiet");
+        watch.ripen(start + crate::watch_clock::WATCH_QUIET);
+        assert_eq!(
+            watch.take(1),
+            BTreeSet::from([root]),
+            "the arming is a reading owed: what moved before it was heard by nobody"
         );
     }
 }

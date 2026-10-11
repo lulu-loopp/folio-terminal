@@ -108,14 +108,7 @@ impl DirNews {
     /// idempotent and every caller leans on that, so a clone taken per arming
     /// would be one taken per asking however many watches were opened.
     pub fn arm(&mut self, directory: &Path, proxy: &EventLoopProxy<AppEvent>, event: AppEvent) {
-        self.hear_the_steward();
-        let rearm = if self.heard == Some(false) {
-            BTreeSet::from([directory.to_path_buf()])
-        } else {
-            BTreeSet::new()
-        };
-        let news = &self.news;
-        let ear = self.ear.get_or_insert_with(|| {
+        self.arm_with(directory, |news| {
             let news = Arc::clone(news);
             let proxy = proxy.clone();
             crate::watch_steward::open_ear(
@@ -129,11 +122,34 @@ impl DirNews {
                 }),
             )
         });
+    }
+
+    /// [`Self::arm`] with the opening of the ear handed in — the product's
+    /// steward, or a test's.
+    fn arm_with(
+        &mut self,
+        directory: &Path,
+        open_ear: impl FnOnce(&Arc<Mutex<Option<Instant>>>) -> EarHandle,
+    ) {
+        self.hear_the_steward();
+        let rearm = if self.heard == Some(false) {
+            BTreeSet::from([directory.to_path_buf()])
+        } else {
+            BTreeSet::new()
+        };
+        let news = &self.news;
+        let ear = self.ear.get_or_insert_with(|| open_ear(news));
         self.directory = Some(directory.to_path_buf());
         ear.want(&BTreeSet::from([directory.to_path_buf()]), rearm);
     }
 
     /// Fold in what the steward said about the folder.
+    ///
+    /// **A folder that has just armed is news** (T-DIRWATCH-LIFECYCLE round 2):
+    /// the folder was read before the steward armed its watch on its own thread,
+    /// and a write in between reached nobody. The arming is stamped in the
+    /// mailbox like a notification, so the folder is read once more when it
+    /// goes quiet.
     fn hear_the_steward(&mut self) {
         let Some(ear) = self.ear.as_ref() else {
             return;
@@ -143,7 +159,16 @@ impl DirNews {
                 continue;
             }
             match numbered.report {
-                MemberReport::Armed => self.heard = Some(true),
+                MemberReport::Armed => {
+                    if self.heard != Some(true) {
+                        *self
+                            .news
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(Instant::now());
+                    }
+                    self.heard = Some(true);
+                }
                 MemberReport::Failed(cause) => {
                     if self.heard != Some(false) {
                         self.failure = Some(cause);
@@ -160,6 +185,7 @@ impl DirNews {
     /// Called once per turn of the event loop, like `GitWatch::due`, and the
     /// whole of the timing lives in [`WatchClock`].
     pub fn due(&mut self, now: Instant) -> bool {
+        self.hear_the_steward();
         if let Some(at) = self
             .news
             .lock()
@@ -232,6 +258,47 @@ mod tests {
         assert!(!news.due(start + Duration::from_millis(310)));
         assert!(news.due(start + Duration::from_millis(311)));
         assert_eq!(news.deadline(), None, "and then it is quiet again");
+    }
+
+    /// PIN (T-DIRWATCH-LIFECYCLE round 2) — **a write made between the folder's
+    /// read and the steward's arming of its watch is read.**
+    ///
+    /// The schemes and storage folders are read at startup and armed after, on
+    /// the steward's thread; a write in between is heard by no watch. The
+    /// arming is the news: once `Armed` is reported, a rescan comes due when
+    /// the folder is quiet. The gap is held open by a fake door holding the
+    /// start.
+    ///
+    /// MUTATION: keep the first `Armed` a no-op in `hear_the_steward` (drop the
+    /// mailbox stamp) — no rescan ever comes due.
+    #[test]
+    fn a_write_made_before_the_watch_armed_is_rescanned_once_it_arms() {
+        use crate::lane::wait_for_a_wake;
+        use crate::watch_steward::{Steward, fake::FakeDoor};
+        use std::sync::mpsc;
+
+        let door = FakeDoor::default();
+        let steward: &'static Steward = Box::leak(Box::new(Steward::new(door.clone(), |_| {})));
+        let (woke, wakes) = mpsc::channel();
+        steward.install_wake(move || {
+            let _ = woke.send(());
+        });
+        let mut news = DirNews::default();
+        door.hold_starts();
+        news.arm_with(Path::new("/Users/alice/配色"), |_| {
+            steward.open_ear(Depth::Tree, Arc::new(|_: &Path, _| {}))
+        });
+        door.wait_for_a_held_start();
+        door.release();
+        wait_for_a_wake(&wakes, "the arming");
+
+        let start = Instant::now();
+        assert!(!news.due(start), "news, the folder not yet quiet");
+        assert!(news.is_armed());
+        assert!(
+            news.due(start + Duration::from_secs(60)),
+            "the arming is a rescan owed: what was written before it was heard by nobody"
+        );
     }
 
     /// A watch that never opened still answers every question — the case of a

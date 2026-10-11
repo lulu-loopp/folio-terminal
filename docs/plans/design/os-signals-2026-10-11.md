@@ -2136,7 +2136,21 @@ calls `FilesWatch::reader_asked`, and the next sync tries the `Failed` folder on
 goes unheard (at start or later) is read again at once when its tree already holds an answer, and
 marks the palette's index of its roots dirty.
 
+### (f)5 · Arming is news for every ear (round 2, after the Kimi review)
+
+Before this ticket a start returned already listening, so a watcher armed and then read. On the
+steward a watch arms later, on the worker, after the reader's opening read, and a change in that
+gap reaches no watch. So every ear treats a member's first `Armed` report as a change: the files
+column re-reads a folder that already holds an answer (its rule 3, as built in round 1); the
+preview seats put the folder's files on the clock, so their stamps are asked once it is quiet (as
+built in round 1); the git pages put the repository on its clock, so it is read once more
+(`GitWatch::hear_the_steward`, round 2); and the schemes and storage folders stamp their mailbox,
+so one rescan comes due (`DirNews::hear_the_steward`, round 2). Each is pinned by a test that
+holds the start open on a fake door and asserts the re-read.
+
 ### Departures
 
 (f)1 departs from (b)4's sentence that the existing users are not moved, as (c)3's capability rule
-and the ticket's row-8 retirement require. Nothing else departs.
+and the ticket's row-8 retirement require. (f)5 adds one reading per arming that the synchronous
+start did not need: one `git status` per repository a page newly shows, and one rescan of the
+schemes and storage folders after startup. Nothing else departs.
