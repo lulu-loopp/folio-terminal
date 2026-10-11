@@ -19849,7 +19849,7 @@ mod macos_window_backend_tests {
             "the observer does not limit itself to nudging the loop"
         );
         assert!(
-            source_test::found(
+            !source_test::found(
                 Needle::new(Pattern::identifier(
                     "addObserver_forKeyPath_options_context"
                 )),
@@ -19857,8 +19857,7 @@ mod macos_window_backend_tests {
                 Scope::Module("crate::macos_impl".to_owned()),
             )
             .in_the_product(source_test::index())
-            .len()
-                >= 1,
+            .is_empty(),
             "nothing is observed, so nothing can arrive"
         );
     }
@@ -21038,9 +21037,9 @@ mod macos_process_door_tests {
             gate.contains("PROGRAM_REFUSED"),
             "the macOS tree opens programs, which the Windows one refuses to do"
         );
-        let lexical = offset_of(&gate, "openable_unix_path(path)?");
-        let resolved = offset_of(&gate, "canonicalize(path)");
-        let refused = offset_of(&gate, "PROGRAM_REFUSED");
+        let lexical = offset_of(gate, "openable_unix_path(path)?");
+        let resolved = offset_of(gate, "canonicalize(path)");
+        let refused = offset_of(gate, "PROGRAM_REFUSED");
         assert!(
             lexical < resolved,
             "a relative path reaches the disk before it is refused for being one"
@@ -21054,9 +21053,9 @@ mod macos_process_door_tests {
         // ④ The door goes through that gate, ⑤ before it builds a URL and hands
         // it over, and ⑥ the URL it builds is of the file the gate judged.
         let door = door_body("open_local_path");
-        let gated = offset_of(&door, "openable_target(path)?");
-        let url = offset_of(&door, "file_url(");
-        let over = offset_of(&door, "hand_over(");
+        let gated = offset_of(door, "openable_target(path)?");
+        let url = offset_of(door, "file_url(");
+        let over = offset_of(door, "hand_over(");
         assert!(
             gated < url && url < over,
             "the macOS open builds a URL, or hands one over, before it has asked \

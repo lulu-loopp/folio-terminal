@@ -354,10 +354,9 @@ fn existing_hidden_callers_keep_the_same_fused_value() {
         assert_eq!(minimized || cloaked, expected);
     }
     assert!(
-        crate::test_support::free_calls_of("window_is_hidden")
+        !crate::test_support::free_calls_of("window_is_hidden")
             .in_the_product(crate::test_support::source())
-            .len()
-            > 0
+            .is_empty()
     );
 }
 
