@@ -1,6 +1,6 @@
 # Who owns a pane: the session / document / view contract, and how `LeafSession` splits — design note, 2026-10-11
 
-Status: **draft, 2026-10-11**, for Codex review. Plan row J5 (T-05-CONTRACTS, 0.4.8), the first of the two contract notes the 2026-09-21 structure review asked for before 0.5; ledger row **D-1** (*session state has no owner independent of the window*, the 0.5 precondition). The companion note is `side-effects-contract-2026-10-11.md` (D-16, D-33). Read at `main` = `77399d57` on `design/05-contracts`. No product code, no test. One cargo run: `cargo test -p bt-source --test census` (10 passed), whose query reports under `target/ownership-census/` are §1's measured column. Facts about Folio are cited `file:line` at `77399d57` (paths under `crates/bt-app/src/` unless another crate is named) with the symbol beside the line.
+Status: **revision (b), 2026-10-11**, after the Codex review (`reports/J5-05-contracts.review-codex.md`, both notes *adopt with changes*). Revision (b) is the dated section at the end. **Where revision (a)'s text and revision (b) differ, revision (b) stands.** Revision (a) was the draft for review. Plan row J5 (T-05-CONTRACTS, 0.4.8), the first of the two contract notes the 2026-09-21 structure review asked for before 0.5; ledger row **D-1** (*session state has no owner independent of the window*, the 0.5 precondition). The companion note is `side-effects-contract-2026-10-11.md` (D-16, D-33). Read at `main` = `77399d57` on `design/05-contracts`. No product code, no test. One cargo run: `cargo test -p bt-source --test census` (10 passed), whose query reports under `target/ownership-census/` are §1's measured column. Facts about Folio are cited `file:line` at `77399d57` (paths under `crates/bt-app/src/` unless another crate is named) with the symbol beside the line.
 
 **Section signs.** A bare `§n` is a section of this note. `A§n` is a section of `docs/ARCHITECTURE.md`; `DESIGN §n` of `docs/DESIGN.md`; `SE§n` of the companion note; `CEN§n` of `docs/plans/design/ownership-census-2026-09-25.md`; `SPLIT§n` of `docs/plans/bt-app-split.md`; `WB§n` of `docs/plans/design/agent-workbench-0.5-2026-09-20.md`.
 
@@ -269,3 +269,161 @@ M8 still keeps session and view in one map entry with one lifetime: **no behavio
 - **Owned facts.** All 41 `LeafSession` facts change their owner type (§1.2). None changes its writer module in M0–M8. O-6 moves sessions from per-tab to per-application, which is an ownership change under RULES 55. O-6 writes its A§4.4 row and A§4.1's table, and O-9 writes another if Q1 is answered "per application".
 - **Doors.** None added or moved by M0–M8. `window_waits.tsv` is unchanged.
 - **Debt.** D-1 is narrowed by O-5 and repaid in part by O-6 (the backend half stays 0.6). D-17 gets its document owner from O-7 and O-8. D-54's epochs come from the registry's `SessionId`. This note adds no debt row. It records the orphaned doc comment (§7) for M1.
+
+---
+
+## Revision (b), 2026-10-11, after the Codex review
+
+Review: `reports/J5-05-contracts.review-codex.md` (trace tree, 0.4.8). Verdict on this note: **adopt with changes**, six items, N1-1 to N1-6. All six are applied, and none is argued. The review's findings that stand unchanged are: all 41 fields placed; the census writer evidence; reader counts as lexical upper bounds until J3; `frame_image_references`, `paste_recipient` and `pending_paste` placed as in §1.2; *0 document fields*; the least-referenced-first order; field names kept for the unknown rows; the freeze windows; and O-6's separate review.
+
+### (b)0 · What changed, item by item
+
+| item | the review's words (abridged) | disposition | where |
+|---|---|---|---|
+| N1-1 | *"The four-door contract is incomplete, and `drain_leaf_pty` is not the stated proof"*; *"Replace 'four doors' with: durable session doors including keyboard-focus reporting; a resize proposal carrying all required sizing facts, not just the grid; explicitly named transitional `bt-term` view-state ports"* | applied | (b)1; replaces §0's contract bullet, §2.1's *view → session* cell, and §1.3 (f)'s "reached only through the view's doors" |
+| N1-2 | *"`ShellLife` is not presently one set of mutually exclusive states … Replace the simple-enum premise with an explicit state/transition table … M6 needs new transition and mutation tests"* | applied | (b)2; replaces §1.3 (a)'s "mutually exclusive" sentence and §3.3's M6 row |
+| N1-3 | *"one window-valued `LeafWake` is not an intrinsic session fact. Mark its present placement as transport debt and state that O-6 moves routing into the application binding/registry"* | applied | (b)3; replaces §1.3 (b) and the owner of §1.2 row 11 |
+| N1-4 | *"Q5's recommendation contradicts the governing lifetime rule … Recommend instead that the registry owns session lifetime … O-6 must depend on Q4 and Q5, not only Q2"* | applied | (b)4; replaces §2.3's last bullet and §6 Q4–Q5 |
+| N1-5 | *"it expressly supersedes DESIGN §7.0's per-tab buffer ruling. The note must specify"* the four consequences; *"Make O-9 an L ticket with its own design/Codex round"* | applied | (b)5; replaces §6 Q1's cost sentence and §5 O-9 |
+| N1-6 | *"O-4 should be L … O-5 is at least M … O-9 is L. Add the `ShellLife` transition pins to O-4 and make O-6 depend on the lifetime/sizing rulings"* | applied | (b)6, the ticket table re-sized and re-ordered |
+
+### (b)1 · The doors between a view and its session (N1-1)
+
+The review is right on both counts.
+- `drain_leaf_pty` takes `holds_the_keyboard`, a fact derived from the view and the window, and passes it to `DualPlaneSession::set_keyboard_focus` (`main.rs:42498`, `:42615`). So the drain does consume something the view knows.
+- M2 needs the cell metrics and the layout key, not just a grid.
+
+The doors from a view (or the window acting for it) to its session become three groups.
+
+1. **Durable session doors**, which outlive the split:
+   - `offer_input(bytes)`: the input ring, or the birth's held queue;
+   - `report_keyboard_focus(bool)`: today the `holds_the_keyboard` argument of `drain_leaf_pty`, computed by the caller from window focus, the active tab and the focused seat (WB§13.2's one definition of "focused pane");
+   - `mark_seen(revision)` (§1.3 d);
+   - `answer_attention(action)`;
+   - `stage_paste(text)` / `take_pending_paste()` (§1.3 e).
+2. **One resize proposal carrying every sizing fact**: `propose_size(SizeProposal { body_px, cell: CellMetrics, wrapping: bool })`.
+   - The session derives `grid` from `body_px`, `cell` and its own `has_rail` (`cmdrail::terminal_grid_for`).
+   - It applies the four cell-size setters and `set_layout_key` to `DualPlaneSession`, and schedules the PTY resize (`schedule_leaf_grid_change`).
+   - Only the sizing view may call it (§2.2 invariant 4).
+   - It replaces `apply_leaf_metrics`'s direct `DualPlaneSession` calls, and the `set_layout_key` calls in `sync_math_layout_key` and `apply_line_wrapping`.
+3. **Transitional `bt-term` view-state ports**, named so they can be counted and removed. Each is a `ShellSession` method that forwards to `DualPlaneSession` and is documented as a port:
+   - `port_set_selection` / `port_clear_selection` (`set_view_selection`);
+   - `port_math_hover` (`set_math_hover`);
+   - `port_math_toggle_presentation` (`set_math_toggle_presentation`, `toggle_math_source`);
+   - `port_scroll_math_block` (`scroll_math_block`);
+   - `port_release_presentation_hold` (`release_presentation_hold_for_user_input`).
+
+   They exist because this state lives in `bt-term` today (§1.3 f). A separate `bt-term` ownership note removes them. Until then each port has exactly one caller, a `TermView` door. As the review notes, search and selection-driven copy read the **view** once `projection` has moved, so they need no port.
+
+**The proof, corrected.** The drain *consumes a focus report* and reaches into no `TermView` field. `drain_leaf_pty` reads no field of §1.2 rows 24–29 or 38–40 (`main.rs:42498–42700`). Its one view-derived input is the `holds_the_keyboard` parameter, which becomes `report_keyboard_focus`. O-3 pins it with `the_drain_takes_focus_as_a_report_and_reads_no_view_field`. MUTATION: the drain reads `leaf.view.projection` to decide whether to scroll to the bottom.
+
+### (b)2 · The shell's life is a phase plus observations (N1-2)
+
+The premise in revision (a) is wrong.
+- `keep_birth_death_face` sets `birth_death_kept` **and** `shell_exit_said`, **and** clears `wake` (`runtime/tabs.rs:115–117`).
+- On an ordinary exit, `shell_exit_age` is set at the first observation (`tabs.rs:3605`, `get_or_insert_with`) and `shell_exit_said` once the line is written (`tabs.rs:3678`). Both coexist with a `pty` that is still `Some`: the exited process stays held until the tab ends.
+
+The record is **one phase** (exactly one at a time), the **payloads** each phase holds, and **orthogonal observations**:
+
+| phase | holds (payload) | entered by | left by |
+|---|---|---|---|
+| `Deciding` | `PaneBirth` with `BirthWait::{Programs, Locale}`; no `pty` | `create_leaf_session` when the rows or the locale are unanswered | `land_pane_birth` → `Bearing`, or → `Shellless` (`Started::Nothing`) |
+| `Bearing` | `PaneBirth` with `BirthWait::Shell(ShellLanding)` | `create_leaf_session` with everything decided | `land_shell_birth` → `Live`, or → `Shellless` (the birth failed) |
+| `Live` | `pty: PtySession`; `wake` until O-6 ((b)3) | the landing | `reap_exited_tabs` first sees `try_wait` answer → `Exited`, or → `FallingBack` (a birth death with a fallback), or → `Kept` (a birth death without one); `close_pane` → retired |
+| `Exited` | `pty` (exited, still held), `exit_age` | `reap_exited_tabs` | the tab ending (`tab_has_ended`) → retired |
+| `FallingBack` | `BirthDeathFallback { landing, exit }`, `exit_age`; the old `pty` already retired | `reap_exited_tabs` (a birth death, fallback available) | `land_birth_death_fallback` → `Live` (the fallback took the pane), or → `Kept` |
+| `Kept` | `exit_age`; no `pty`, no `wake` | `keep_birth_death_face` | `close_pane` → retired |
+| `Shellless` | nothing (the no-program banner; a `BT_PROBE_INPUT` pane) | a landing with `Started::Nothing` | `close_pane` |
+
+Orthogonal to the phase:
+- `shell_exit_said` is an observation: *the one diagnostics line has been written*. It is valid in `Exited`, `FallingBack` and `Kept`.
+- `successor: Option<Box<…>>` is a *Restart shell* in birth beside a `Live` or `Exited` phase. It is a second session record, not a phase of this one, and it lands into this slot through `land_successor`.
+- `spawn_fallback` is a one-shot payload handed from the birth to the binding at the landing, taken once by `land_own_shell` or `land_restart`.
+
+So M6 becomes `ShellLife { phase: Phase, said: bool, successor: Option<Box<ShellSession>>, spawn_fallback: Option<ShellFallback> }`, with `pty`, `exit_age` and the birth records moved into the phases that hold them. **This is a conversion with logic.** Every edge in the table becomes a method, and the existing birth tests are not enough on their own. O-4 ships these pins, each with Chinese and mixed-script samples in the typed input wherever a shell is started, and each followed by its MUTATION:
+- `every_life_transition_is_one_method_and_no_other`: a table test over the seven phases that drives each listed edge through its method and refuses every unlisted edge. MUTATION: let `keep_birth_death_face` leave a `Live` phase directly.
+- `an_exited_shell_keeps_its_pty_until_the_tab_ends`. MUTATION: drop the `pty` on entering `Exited`.
+- `the_exit_line_is_said_once_across_exited_falling_back_and_kept`. MUTATION: reset `said` on `FallingBack → Kept`.
+- `a_successor_lands_into_a_live_or_exited_slot_and_nowhere_else`. MUTATION: let a successor land over `Bearing`.
+
+### (b)3 · `wake` belongs to the binding, and where it sits today is transport debt (N1-3)
+
+Applied. `wake` names *which window to nudge*, and `transfer_tab` rewrites it when the binding moves (`main.rs:63083–63093`). Once a session is attached to views in more than one window, one window-valued cell is not a fact about the session.
+
+- **Target owner: the binding** (§2.1's fourth row). The application registry routes a session's output wake in one of two ways:
+  - it keeps one `LeafWake` per session and rebinds it to the window of the sizing view; or
+  - it replaces the per-window bit with one application-wide wake whose drain asks the registry which windows show the session.
+
+  Choosing between them is O-6's design. Both keep the reader-thread rule: *a thread's wake is handed once, and the cell is where "which window" may change* (`LeafWake`, `main.rs:12460–12476`).
+- **Today:** it stays a field of the session record through M0–M8. O-5 marks it as **transport debt** in its doc comment. No new ledger row is needed, because it is D-1's own content. `keep_birth_death_face`'s clear moves into the `Kept` transition ((b)2).
+- **§1.2 recount:** **31 session** (24 plain + 7 life), **1 binding** (`wake`), **9 view**, 0 document. Row 11's owner now reads **Binding (transport debt until O-6)**.
+
+### (b)4 · Session lifetime belongs to the registry (N1-4)
+
+Applied. Revision (a)'s Q5 made one particular view's disappearance end the session. That is the rule A§4.1 forbids, and WB§13.3 item 3 lists *the source pane closing* among drag-out's open questions. The lifetime rule becomes:
+
+- **The registry owns a session's lifetime.** Closing a view **detaches** it.
+- **Closing the sizing view** either passes the sizing role to another attached view or keeps the last grid; the PTY is not resized while no view holds the role. Which of the two is Q4.
+- **A session ends** in exactly two ways:
+  - by an explicit session-close: the pane's close verb, *Restart shell*'s replacement, or the close of its tab or window and quit, all as today;
+  - or when its last attached view detaches, if the owner rules so (Q5).
+- **Nothing changes in 0.4.x.** There is only ever one view, so "the last view detaches" and "the pane closes" are the same event, and DESIGN §7.1.4's close rules read word for word.
+
+These four points replace §2.3's last bullet. O-6 now depends on **Q2, Q4 and Q5**.
+
+### (b)5 · Application-wide documents, and what they cost (N1-5)
+
+Applied. "Per application" supersedes DESIGN §7.0's *one copy of one file per tab* (`DESIGN.md:1290`). The ticket that builds it states these consequences:
+
+1. **Closing a tab whose document another view still shows loses nothing**, so it raises **no** dirty gate. The old per-tab gate (`GateRequest::ClosePane` and close-tab over the tab's pool) narrows to documents with no other attached view.
+2. **The dirty gate moves to the boundaries where an edit can be lost:**
+   - the **last view** of a dirty document detaching;
+   - an **explicit document close** (a future verb);
+   - **application quit**;
+   - the controlled-failure road (A§11), which keeps its recovery copy.
+3. **Two tabs edit one document through its one revision-checked door**, `edit(at_revision, change, author)`. Each view keeps its own caret, selection, scroll and parse (`PreviewPane`'s fields), healed from the edit log as `step_preview_history` already does within a tab.
+4. **Restore, eviction, disk watching and file identity leave `TabState.preview_pool`:**
+   - the session document's `tab.preview.pool` becomes a list of references into an application pool, with no schema change;
+   - the eviction law counts views application-wide;
+   - `preview_watch` subscribes per document, not per tab;
+   - `PreviewSource` identity is checked once per application.
+
+**O-9 is L**, and gets **its own design note and Codex round** before dispatch (RULES 55: an ownership change). These four consequences replace Q1's cost sentence.
+
+### (b)6 · Tickets, re-sized and re-ordered (N1-6)
+
+| # | ticket | size | after | notes |
+|---|---|---|---|---|
+| O-1 | J3 T-RUNTIME-DEP-MAP's three products (§3.1) | S/M | I1 | unchanged |
+| O-2 | T-CONTRACT-M0-M1 | S | K2, O-1 | unchanged |
+| O-3 | T-CONTRACT-M2-M4: the view fields; `propose_size(SizeProposal)`; the five `port_*` forwards; `report_keyboard_focus`; (b)1's pin | M | O-2 | the doors of (b)1 |
+| O-4 | T-CONTRACT-M5-M7: `LaunchFacts`; **`ShellLife` per (b)2's table, with its four transition pins**; `AttentionAccount` | **L** | O-3 | was M |
+| O-5 | T-CONTRACT-M8: `ShellSession` and `TerminalPane`; the map's new value shape through `transfer_tab`, `move_seat_content`, `pane_into_new_tab`, `absorb_tab_sessions`; `wake` marked as transport debt | **M** | O-4 | was S |
+| O-6 | T-SESSION-REGISTRY (0.5): `SessionId`, the registry, views attaching and detaching, the sizing role, wake routing ((b)3) | L | O-5, **Q2, Q4, Q5** | its own Codex round |
+| O-7 | T-DOCUMENT-PRIVATE | S | — | unchanged |
+| O-8 | T-VIEW-NEEDS-DOCUMENT | M | O-7 | unchanged |
+| O-9 | T-DOCUMENT-REGISTRY (0.5): (b)5's four consequences | **L** | Q1, O-6, **its own design note and Codex round** | was M |
+
+### (b)7 · The owner questions, revised (still five)
+
+1. **Should one file be one buffer per tab (today, DESIGN §7.0) or one per application?** **Recommend per application**, with (b)5's four consequences:
+   - no dirty gate when another view still shows the document;
+   - the gate at last-view detach, explicit close, quit and the failure road;
+   - one revision-checked edit door, with a caret per view;
+   - restore, eviction, watching and identity taken out of the tab.
+
+   O-9 builds it, after its own note.
+2. Unchanged: **should a dragged-out view share its selection until `bt-term` splits view state?** **Recommend yes, for 0.5.** The sharing runs through (b)1's named ports.
+3. Unchanged: **should "unread" be the session's, with views reporting what they painted?** **Recommend yes.**
+4. **When the sizing view closes while other views remain, does the sizing role pass to another view, or does the session keep its last grid?** **Recommend that the role passes to the most recently focused remaining view.** A shell sized for a pane nobody can see is the stale state DESIGN §7.53 already had to repair once, for a minimised window. Revision (a)'s Q4 (*a secondary view has no text size of its own*) stands as a consequence: whichever view holds the sizing role sizes the session, and the others scale.
+5. **When does a session end?** **Recommend** both:
+   - by its explicit close verbs, as today;
+   - **and when its last attached view detaches**, so that closing a drag-out's source pane leaves the dragged-out view's shell running.
+
+   This keeps A§4.1 (*a view disappearing is not a session ending*), keeps every 0.4.x close rule (with one view, the last view is the pane), and never leaves a session without a view to reach it. (Revision (a)'s recommendation, *only when the sizing view's seat closes*, is withdrawn per N1-4.)
+
+### (b)8 · Architecture impact, revised
+
+§9 stands, with two additions:
+- `wake`'s owner becomes the binding (O-6), recorded in A§4.1's table by O-6.
+- O-9 changes who owns the document pool (per tab → per application). It writes its A§4.4 row and a DESIGN entry that supersedes §7.0's per-tab clause.
