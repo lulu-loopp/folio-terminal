@@ -637,7 +637,7 @@ mod tests {
         let table = body
             .find("let selectors = [")
             .expect("the injection table is declared in this file");
-        let table = &SOURCE[table..];
+        let table = &body[table..];
         let terminate = table
             .find("selector: sel!(applicationShouldTerminate:)")
             .expect("the terminate selector is injected");
