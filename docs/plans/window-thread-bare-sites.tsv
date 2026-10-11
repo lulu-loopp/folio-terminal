@@ -162,7 +162,7 @@ bt-platform	[windows]	crate::attention_pipe::AttentionPipe::start	windows::Win32
 bt-platform	[windows]	crate::attention_pipe::AttentionPipe::start	windows::Win32::System::Threading::SetEvent	1
 bt-platform	[windows]	crate::file_replace::carry_metadata	std::fs::metadata	1
 bt-platform	[windows]	crate::file_replace::rename_path	std::fs::rename	1
-bt-platform	[windows]	crate::file_replace::replace_file_preserving_with	std::fs::metadata	1
+bt-platform	[windows]	crate::file_replace::replace_keeping_backup_with	std::fs::metadata	1
 bt-platform	[windows]	crate::http::<Request as Drop>::drop	std::sync::Condvar::wait_timeout	1
 bt-platform	[windows]	crate::http::Shared::wait	std::sync::Condvar::wait_timeout	1
 bt-platform	[windows]	crate::install_evidence::imp::current_account	windows::Win32::Foundation::CloseHandle	1
