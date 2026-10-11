@@ -1873,11 +1873,13 @@ pub fn wheel_scroll_amount() -> Result<WheelScrollAmount, String> {
 ///
 /// `en` when the system names none, which is the portable arm's answer and the
 /// product's own default.
+///
+/// **Any thread.** `+[NSLocale preferredLanguages]` is a Foundation class
+/// method and thread-safe, and the font worker asks this to tag the localized
+/// family names it reads. It used to answer `en` off the window thread, so every
+/// name that worker read was filed as English (AUDIT-hardcode PLT-2).
 #[must_use]
 pub fn os_ui_language() -> String {
-    let Ok(_) = window_thread("reading the system's language") else {
-        return "en".to_owned();
-    };
     NSLocale::preferredLanguages()
         .firstObject()
         .map_or_else(|| "en".to_owned(), |tag| tag.to_string())
@@ -2054,6 +2056,29 @@ impl SystemSettingsObserver {
 
 #[cfg(test)]
 mod tests {
+    /// RED (AUDIT-hardcode PLT-2) — **the system's language is the same answer
+    /// on a worker thread as the system gives**, because the font worker tags
+    /// the localized names it reads with it.
+    ///
+    /// A libtest case never runs on the main thread, which is exactly the
+    /// worker's situation. The system's own first preferred language is read
+    /// beside it; the gate this replaces answered `en` here whatever it was.
+    ///
+    /// MUTATION: put the `window_thread` gate back in `os_ui_language` — this
+    /// answers `en` and goes red (the Mac's tag is a region-qualified `en-…` or
+    /// another language, never the bare `en`).
+    #[test]
+    fn the_systems_language_is_answered_off_the_window_thread() {
+        let system = NSLocale::preferredLanguages()
+            .firstObject()
+            .map(|tag| tag.to_string())
+            .expect("this Mac names a preferred language");
+        let asked = std::thread::spawn(os_ui_language)
+            .join()
+            .expect("the worker answers");
+        assert_eq!(asked, system);
+    }
+
     use super::*;
 
     /// **RED — the platform's run is a rectangle, and both of its numbers are
@@ -2436,7 +2461,6 @@ mod tests {
             },
             "and the desktop has no extent"
         );
-        assert_eq!(os_ui_language(), "en", "and the system names no language");
         assert_eq!(system_uses_light_apps(), None, "and no appearance");
     }
 

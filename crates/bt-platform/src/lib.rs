@@ -19424,6 +19424,10 @@ mod macos_window_backend_tests {
     /// note), and `stand_window_at` is two of the gated doors in a loop. A gate
     /// in front of no call would be a thread check that proves nothing.
     ///
+    /// **And `os_ui_language` asks Foundation, not AppKit** (AUDIT-hardcode
+    /// PLT-2): `+[NSLocale preferredLanguages]` is thread-safe and the font
+    /// worker asks it, so its pin is that `NSLocale` is the only class it names.
+    ///
     /// MUTATION: take `window_thread`/`window_for` out of any other door and
     /// this names it; make either exception touch AppKit directly and it names
     /// that.
@@ -19440,6 +19444,18 @@ mod macos_window_backend_tests {
                     !body.contains("NS"),
                     "`{door}` is exempt from the gate because it reaches no AppKit of its own, \
                      and it now does:\n{body}"
+                );
+                continue;
+            }
+            if door == "os_ui_language" {
+                let classes: Vec<&str> = body
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .filter(|word| word.starts_with("NS"))
+                    .collect();
+                assert!(
+                    classes.iter().all(|class| *class == "NSLocale"),
+                    "`{door}` answers on any thread because it asks Foundation alone, and it \
+                     now names {classes:?}:\n{body}"
                 );
                 continue;
             }
