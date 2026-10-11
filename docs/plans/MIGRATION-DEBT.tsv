@@ -1,156 +1,18 @@
-# MIGRATION-DEBT — every source reader in this workspace that still names a file.
+# MIGRATION-DEBT — source readers blocked on a missing identity seam.
 #
-# **This list only shrinks.** A row is removed by the ticket that migrates its
-# reader onto `bt-source`; no ticket may add one. `scripts/ci/check-migration-debt.ps1`
-# compares this file with the merge base and fails on an added row.
+# This list only shrinks. L1-migration-debt-large-3 ruled every residue row:
+# intentional non-source readers moved to SOURCE-READERS.tsv, and readers for
+# which bt-source has a sufficient identity were migrated. Every remaining row
+# is DEBT and names the seam required to remove it.
 #
-# **It is temporary.** It reaches zero at P20 of `docs/plans/bt-app-split-prep.md`,
-# and it is deleted when it does.
-#
-# **It is not a completeness proof.** It was seeded from a census
-# (`bt-app-split-pins-2026-09-21.tsv`, taken at 1f1d2daa) plus a lexical sweep,
-# and both under-report by construction: a reader assembled at run time, or one
-# split across two functions, is in neither. The tripwire
-# (`crates/bt-source/tests/tripwire.rs`) reads fewer rows still — it scans `.rs`
-# and `.ps1` only, so a Python generator below is on this list and out
-# of its reach. A reader with no row here and no allowlist variant is a gap, and
-# finding one is a finding, not a reason to widen either list.
-#
-# **The sweep over-reported as well, and a row may go because it was never a
-# reader.** 98 rows whose mechanism read `source text read` were the lexical
-# seed matching a string that ends in `.rs` — a fixture path, a buffer's
-# identity, a name a grammar lookup is asked about — inside a test that reads no
-# source at all. Every one was opened and read before it went, and the reasons
-# are in the commit that removed them. That is the only second way off this
-# list: a reading, written down, of why the row was never true. The tripwire is
-# what makes it safe rather than merely tidy — it matches by file, so a row
-# struck wrongly in a file with no other row leaves that file uncovered and the
-# guard goes red naming it.
-#
-# The other list is the file-scoped allowlist, `bt_source::FileScoped`: readers
-# whose concern really is a file. It is permanent and it has three entries.
-#
-# ticket: the ticket of `docs/plans/bt-app-split-prep.md` §§6.3/6.5 that will
-# migrate the row. Assigned by the plan's own batching — body pins P3/P14,
-# counts P4/P15, negatives and text scopes P5/P15, `file_reads_doors.txt` P6/P16,
-# walkers P7/P8/P12/P13, cross-crate and script readers P17, the documentation
-# generators P0 (§6.6) — with the first number where Step 2a disturbs the row and
-# the second where it does not. A ticket may re-claim a row; it may not add one.
-#
-# disturbed_by_2a: the census's own answer, from the `impact` column of the pins
-# TSV. It is not a prediction that the reader will turn red — see §5 of
-# `bt-app-split-inventory-2026-09-21.md`, which is about exactly that confusion.
-#
-# subject: the census's lexical output — the names a reader's own literals
-# spell. **A name is not a resolution**, and one row is on record as the proof:
-# `uninstall_tests::uninstall_source_guard_pins_known_writers_and_inventory`'s
-# `add_to_profile` is `shell_integration.rs`'s free function, which that
-# reader's `syn` walk really does parse, and not `Runtime::add_to_profile`,
-# which it has never read. The package declares the name twice and the
-# generator answered with the first one in `main.rs`. It refuses on the
-# collision now (`scripts/dev/bt-app-split-freshness.py`, P11 dry run
-# 2026-09-22) rather than picking, and the row's `disturbed_by_2a` is `no` on
-# that reading: neither `shell_integration::add_to_profile` nor `main.rs`'s free
-# `install_panic_log_hook` is a `Runtime` method, and Step 2a moves neither. The
-# cell still says `yes` because `scripts/ci/check-migration-debt.ps1` compares
-# rows whole — correcting one is an added row, and this list only shrinks. The
-# correction lives here, where the header is not compared, until the ticket that
-# may remove the row carries it.
-file	owner	mechanism	subject	ticket	disturbed_by_2a
-crates/bt-app/src/attention_codex.rs	attention_codex::tests::a_configuration_file_that_could_not_be_read_is_never_written_over	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_codex.rs	attention_codex::tests::a_configuration_file_that_is_not_there_is_the_one_that_gets_created	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_codex.rs	attention_codex::tests::a_configuration_file_that_is_there_is_copied_before_it_is_changed	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_codex.rs	attention_codex::tests::an_unreadable_configuration_file_is_never_written_over	include_str!	attention_codex.rs	P14	no
-crates/bt-app/src/attention_codex.rs	attention_codex::tests::the_line_this_installs_is_this	include_str!	../../../docs/plans/attention/codex-notify.toml	P14	no
-crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::a_file_at_our_name_that_is_not_ours_is_left_exactly_where_it_is	include_str!	attention_copilot.rs	P14	no
-crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::a_hook_file_that_could_not_be_read_is_never_written_over	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::a_mac_install_writes_direct_exec_without_shell_quoting	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::attention_two_live_copies_require_takeover_and_preserve_bytes	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::every_command_says_which_upstream_it_speaks_for_and_hands_over_nothing	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::taking_it_back_out_leaves_the_directory_that_was_there	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::the_file_this_installs_is_this	include_str!	../../../docs/plans/attention/copilot-hooks.json	P14	no
-crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::the_notification_hook_is_narrowed_to_the_two_subtypes_that_are_waits	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::what_is_written_never_carries_two_layers_of_one_request	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::a_copy_that_cannot_be_kept_refuses_to_write	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::a_dead_owner_can_be_replaced_after_moving_folio	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::a_notification_subtype_is_registered_as_a_matcher	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::a_settings_file_that_could_not_be_read_is_never_written_over	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::a_settings_file_that_is_not_there_is_the_one_that_gets_created	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::a_settings_file_that_is_there_is_copied_before_it_is_changed	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::attention_two_live_copies_require_takeover_and_preserve_bytes	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::installing_twice_changes_nothing_the_second_time	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::no_hook_this_writes_can_hold_up_an_approval	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::taking_them_back_out_leaves_what_was_there	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::the_block_a_mac_installs_is_the_same_direct_exec_block	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::the_block_this_installs_is_this	include_str!	../../../docs/plans/attention/claude-hooks.json	P14	no
-crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::what_is_written_never_carries_two_layers_of_one_request	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::what_lands_is_the_file_and_nothing_beside_it	fixture / manifest read	read	P14	no
-crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_a_linked_config_is_edited_at_its_target_inside_the_agents_folder	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_a_strangers_program_is_never_folios	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_an_operation_resolves_its_configuration_once	fixture / manifest read	target	P14	no
-crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_codex_takeover_never_replaces_a_user_notifier	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_malformed_future_schema_and_readonly_are_byte_identical	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_relative_operand_names_nobody_and_is_removable	fixture / manifest read	remove	P14	no
-crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_untrusted_executable_and_bad_record_refuse_without_config_changes	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/file_reads_doors.txt	animation.rs: read_head: .read	ledger key naming a file	read_head (1 site(s), .read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	attention_ownership.rs: record: Marks::read	ledger key naming a file	record (1 site(s), Marks::read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	psreadline.rs: install_recorded: Marks::read	ledger key naming a file	install_recorded (1 site(s), Marks::read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	psreadline.rs: read: .read	ledger key naming a file	read (1 site(s), .read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_marks.rs: lock: .open	ledger key naming a file	lock (1 site(s), .open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_marks.rs: lock: .read	ledger key naming a file	lock (1 site(s), .read)	P16	no
-crates/bt-app/src/file_reads_source_tests.rs	file_reads_source_tests::file_reads_every_product_content_door_has_a_lane	include_str!	animation.rs	P14	no
-crates/bt-app/src/icons.rs	icons::tests::no_drawing_carries_a_bare_alpha	include_str!	marks.rs	P14	no
-crates/bt-app/src/icons.rs	icons::tests::no_font_character_stands_in_for_a_mark	include_str!	file_peek.rs;float.rs;git_graph.rs;git_panel.rs;notice.rs;peek_strip.rs;profiles.rs;restore.rs;search.rs;seats.rs;settings.rs;toast.rs	P14	no
-crates/bt-app/src/icons.rs	icons::tests::no_surface_reaches_past_the_registry_for_a_disclosure	include_str!	float.rs;git_graph.rs;git_panel.rs;profiles.rs;search.rs;seats.rs;settings.rs	P14	no
-crates/bt-app/src/icons.rs	icons::tests::the_punctuation_that_stayed_a_character_is_set_as_type	include_str!	seats.rs;settings.rs	P14	no
-crates/bt-app/src/preview.rs	preview::tests::md_loading_design_document_has_no_read_only_badge	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/preview.rs	preview::tests::the_block_ranges_partition_the_file_and_the_file_comes_back_whole	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
-crates/bt-app/src/preview.rs	preview::tests::the_bytes_no_block_was_parsed_from_are_blank	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
-crates/bt-app/src/preview.rs	preview::tests::the_latex_corpus_sets_every_section_it_promises	include_str!	../../../tests/assets/latex-render-check.md	P14	no
-crates/bt-app/src/preview.rs	preview::tests::the_stress_sample_carries_every_block_the_measure_has_a_rule_for	include_str!	../../../tests/assets/preview-samples/stress.md	P14	no
-crates/bt-app/src/preview.rs	preview::tests::the_wrapper_hands_back_the_blocks_the_ranged_walk_found	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
-crates/bt-app/src/preview_provenance.rs	preview_provenance::tests::a_file_byte_lands_on_the_nearest_drawn_place	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
-crates/bt-app/src/preview_provenance.rs	preview_provenance::tests::every_drawn_byte_is_a_copy_of_the_byte_it_says_it_is	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
-crates/bt-app/src/preview_provenance.rs	preview_provenance::tests::every_drawn_source_byte_comes_back_to_the_byte_that_drew_it	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
-crates/bt-app/src/preview_provenance.rs	preview_provenance::tests::the_two_directions_are_inverse_on_every_drawn_byte	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
-crates/bt-app/src/preview_provenance.rs	preview_provenance::tests::there_is_one_map_for_every_piece_the_page_reads	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
-crates/bt-app/src/preview_provenance.rs	preview_provenance::tests::what_copies_is_what_copied_before	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
-crates/bt-app/src/preview_typing.rs	preview_typing::md_typing_path_benchmark	fixture / manifest read	insert;open	P14	no
-crates/bt-app/src/preview_typing.rs	preview_typing::md_typing_path_eager_benchmark	fixture / manifest read	insert;open	P14	no
-crates/bt-app/src/preview_viewport_tests.rs	preview_viewport::tests::viewport_open_bounds_prose_and_intrinsics	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/profiles.rs	profiles::tests::every_capability_sentence_agrees_with_the_shell_integration_matrix	include_str!	../../../docs/shell-integration.md	P14	no
-crates/bt-app/src/schemes.rs	schemes::tests::a_broken_file_keeps_the_palette_and_is_reported_once_until_it_is_fixed	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
-crates/bt-app/src/schemes.rs	schemes::tests::a_bundled_scheme_paints_the_chrome_as_well_as_the_grid	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
-crates/bt-app/src/schemes.rs	schemes::tests::a_deletion_this_window_made_raises_one_card_not_two	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
-crates/bt-app/src/schemes.rs	schemes::tests::a_file_that_left_the_folder_falls_to_the_default_and_says_so_once	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
-crates/bt-app/src/schemes.rs	schemes::tests::a_malformed_file_is_skipped_and_named	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
-crates/bt-app/src/schemes.rs	schemes::tests::a_name_that_never_resolved_is_never_reported_as_gone	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
-crates/bt-app/src/schemes.rs	schemes::tests::a_rename_onto_a_name_the_catalogue_holds_replaces_it_and_the_row_follows	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
-crates/bt-app/src/schemes.rs	schemes::tests::a_rescan_moves_the_selected_scheme_and_only_the_selected_one	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
-crates/bt-app/src/schemes.rs	schemes::tests::a_row_offers_only_the_schemes_its_canvas_can_wear	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
-crates/bt-app/src/schemes.rs	schemes::tests::a_scheme_renamed_in_its_own_file_is_followed_by_the_row_that_wore_it	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
-crates/bt-app/src/schemes.rs	schemes::tests::a_scheme_that_is_gone_falls_to_folios_own	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
-crates/bt-app/src/schemes.rs	schemes::tests::a_user_file_may_retune_a_bundled_scheme_without_doubling_its_row	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
-crates/bt-app/src/schemes.rs	schemes::tests::a_written_scheme_is_the_bundled_file_it_was_copied_from	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
-crates/bt-app/src/schemes.rs	schemes::tests::every_bundled_scheme_gives_a_floating_tag_a_face_a_hairline_and_an_ink_that_reads	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
-crates/bt-app/src/schemes.rs	schemes::tests::every_bundled_scheme_parses_and_keeps_the_name_its_row_is_listed_under	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
-crates/bt-app/src/schemes.rs	schemes::tests::folios_own_two_schemes_are_the_constants_the_derivation_is_pinned_to	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
-crates/bt-app/src/schemes.rs	schemes::tests::the_default_is_looked_up_canvas_first_and_not_name_first	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
-crates/bt-app/src/schemes.rs	schemes::tests::the_user_files_list_is_the_folder_and_only_the_folder	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
-crates/bt-app/src/settings.rs	settings::tests::the_advanced_word_stands_on_the_heading_column_and_its_chevron_on_the_control_one	include_str!	../../../docs/design/ui-mockup.html	P14	no
-crates/bt-app/src/settings.rs	settings::tests::the_capped_dialog_holds_every_everyday_page_and_only_the_long_ones_scroll	include_str!	../../../docs/design/ui-mockup.html	P14	no
-crates/bt-app/src/settings.rs	settings::tests::the_maximum_height_row_offers_the_mock_ups_own_four_heights	include_str!	../../../docs/design/ui-mockup.html	P14	no
-crates/bt-app/src/settings.rs	settings::tests::the_mock_up_carries_the_rail_this_slice_gave_it	include_str!	../../../docs/design/ui-mockup.html	P14	no
-crates/bt-app/src/settings.rs	settings::tests::the_theme_row_wears_the_mock_ups_own_order_and_its_own_line	include_str!	../../../docs/design/ui-mockup.html	P14	no
-crates/bt-app/src/shell_integration.rs	shell_integration::tests::every_shell_is_told_this_terminal_renders_hyperlinks_unless_it_was_already_told	include_str!	../../../scripts/shell-integration/folio.ps1	P14	no
-crates/bt-app/src/shell_integration.rs	shell_integration::tests::the_bash_script_ships_with_unix_line_endings	include_str!	../../../scripts/shell-integration/folio.bash	P14	no
-crates/bt-app/src/shell_integration.rs	shell_integration::tests::the_integration_script_knows_the_name_this_terminal_announces	include_str!	../../../scripts/shell-integration/folio.ps1	P14	no
-crates/bt-app/src/shell_integration.rs	shell_integration::tests::the_startup_chain_a_pane_emulates_is_the_one_its_profile_asked_for	include_str!	../../../scripts/shell-integration/folio.bash	P14	no
-crates/bt-app/src/shell_integration.rs	shell_integration::tests::zsh_is_pointed_at_a_directory_and_never_handed_bashs_flag	include_str!	../../../scripts/shell-integration/folio.zsh	P14	no
-crates/bt-app/src/shortcuts.rs	shortcuts::tests::docs_shortcuts_md_is_the_bindings_table	fixture / manifest read	target	P14	no
-crates/bt-app/src/update.rs	update::tests::the_question_carries_nothing_about_the_machine	include_str!	../../../README.md;../../../README.zh-CN.md;../../../docs/PRIVACY.md	P14	no
-crates/bt-app/src/version.rs	version::tests::the_plist_carries_the_workspace_version_twice_and_no_literal	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/version.rs	version::tests::the_version_is_the_manifests_and_nothing_elses	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/wsl.rs	wsl::tests::nothing_in_this_module_boots_a_distribution	runtime fs read	(the file it reads)	P14	no
-crates/bt-platform/src/lib.rs	quiet_door_tests::no_command_is_built_outside_the_quiet_door	runtime fs read	lib.rs	P14	no
-scripts/dev/bt-app-split-freshness.py	manifest() and reference_maps()	script: named files out of git blobs	the two impl Runtime blocks in main.rs	P0	no
+# scripts/ci/check-migration-debt.ps1 compares the six legacy identity fields
+# with the merge base, so explanatory columns may improve without weakening the
+# no-growth rule. The verdict is last by design.
+file	owner	mechanism	subject	ticket	disturbed_by_2a	needed_seam	verdict
+crates/bt-app/src/file_reads_doors.txt	animation.rs: read_head: .read	ledger key naming a file	read_head (1 site(s), .read)	P16	no	collision-safe free-function owner identity independent of the file that holds it	DEBT
+crates/bt-app/src/file_reads_doors.txt	attention_ownership.rs: record: Marks::read	ledger key naming a file	record (1 site(s), Marks::read)	P16	no	collision-safe free-function owner identity independent of the file that holds it	DEBT
+crates/bt-app/src/file_reads_doors.txt	psreadline.rs: install_recorded: Marks::read	ledger key naming a file	install_recorded (1 site(s), Marks::read)	P16	no	collision-safe free-function owner identity independent of the file that holds it	DEBT
+crates/bt-app/src/file_reads_doors.txt	psreadline.rs: read: .read	ledger key naming a file	read (1 site(s), .read)	P16	no	collision-safe free-function owner identity independent of the file that holds it	DEBT
+crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_marks.rs: lock: .open	ledger key naming a file	lock (1 site(s), .open)	P16	no	collision-safe free-function owner identity independent of the file that holds it	DEBT
+crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_marks.rs: lock: .read	ledger key naming a file	lock (1 site(s), .read)	P16	no	collision-safe free-function owner identity independent of the file that holds it	DEBT
+scripts/dev/bt-app-split-freshness.py	manifest() and reference_maps()	script: named files out of git blobs	the two impl Runtime blocks in main.rs	P0	no	bt-source index over an arbitrary git tree or blob snapshot with declared module identities	DEBT

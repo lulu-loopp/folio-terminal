@@ -271,6 +271,7 @@ pub(crate) fn facts_of(distributions: &[&str], default: &str) -> WslFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bt_source::{Needle, Pattern, Scope, View};
     use std::collections::BTreeMap;
 
     /// A registry somebody wrote down, shaped exactly like the one Windows keeps.
@@ -437,23 +438,25 @@ mod tests {
     /// MUTATION: put `ask_login_shell` back, however it is spelled, and this is
     /// red on the word that starts the child.
     ///
-    /// The needles are split with `concat!` — the same trick
-    /// `bt_platform::quiet_door_tests` uses — because a test that spelled them
-    /// whole would be the thing it is looking for.
+    /// The query is product-only, so the rule may name its forbidden doors
+    /// without finding its own assertion.
     #[test]
     fn nothing_in_this_module_boots_a_distribution() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/wsl.rs");
-        let source = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("{} is in the repository: {error}", path.display()));
-        for needle in [
-            concat!("quiet_", "command"),
-            concat!("Command", "::new"),
-            concat!("spawn_at_", "priority"),
+        for (pattern, door) in [
+            (Pattern::call("quiet_command"), "quiet_command"),
+            (Pattern::path("Command::new"), "Command::new"),
+            (Pattern::call("spawn_at_priority"), "spawn_at_priority"),
         ] {
+            let found = crate::test_support::found_in(
+                Needle::new(pattern),
+                View::Identifiers,
+                Scope::Module("crate::wsl".to_owned()),
+            )
+            .in_the_product(crate::test_support::source());
             assert!(
-                !source.contains(needle),
+                found.is_empty(),
                 "a fact about a Linux user account is asked by the pane that needs it, inside \
-                 the distribution, not by a second process started from here: {needle}"
+                 the distribution, not by a second process started from here: {door}"
             );
         }
     }

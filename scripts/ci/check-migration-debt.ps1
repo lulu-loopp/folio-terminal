@@ -1,17 +1,15 @@
 # the_migration_debt_list_only_shrinks
 #
-# `docs/plans/MIGRATION-DEBT.tsv` is one of the two lists of
-# `docs/plans/bt-app-split-prep.md` §6.1: every source reader in this workspace
-# that still names a file, one row each. Its whole value is the direction it
-# moves in. A ticket that migrates a reader deletes its row; nothing adds one.
-# `crates/bt-source/tests/tripwire.rs` is what refuses a reader on neither list,
-# and this is what refuses a reader that was *put* on this one to get past it.
+# `docs/plans/MIGRATION-DEBT.tsv` is the temporary one of the three reader
+# classifications enforced by `crates/bt-source/tests/tripwire.rs`: readers
+# blocked on a missing identity seam. Its whole value is the direction it moves
+# in. A ticket that migrates a reader deletes its row; nothing adds one.
 #
 # The comparison is against the pull request's merge base, not against the
 # previous commit, so a branch is judged on what it did rather than on what main
-# did underneath it. Rows are compared whole and with multiplicity: a duplicated
-# row is an added row. The commented header is not compared, so the prose above
-# the list can be rewritten freely.
+# did underneath it. The six original identity fields are compared with
+# multiplicity: a duplicated identity is an added row. Explanatory columns may
+# follow them without making every retained identity look newly added.
 #
 # It passes, loudly, when the base has no list — that is how the commit that
 # introduces the list passes. It does not pass when there is no base at all: no
@@ -37,14 +35,19 @@ if (-not (Test-Path -LiteralPath $list)) {
     throw "$relative is not in the tree - the debt list is what the tripwire allows readers against"
 }
 
-# A row is a data line: not blank, not a comment, not the column header.
+# A row is keyed by the six legacy identity fields. Later columns explain its
+# ruling and are deliberately not identity.
 function Read-DebtRows([string[]]$lines) {
     $rows = @()
     $header = $false
     foreach ($line in $lines) {
         if ($line.Length -eq 0 -or $line.StartsWith("#")) { continue }
         if (-not $header) { $header = $true; continue }
-        $rows += $line
+        $fields = @($line -split "`t")
+        if ($fields.Count -lt 6) {
+            throw "$relative has a row with $($fields.Count) fields; six identify a debt reader: $line"
+        }
+        $rows += (($fields[0..5]) -join "`t")
     }
     if (-not $header) { throw "$relative has no column header" }
     return , $rows

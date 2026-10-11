@@ -1,15 +1,16 @@
-//! **No source reader names a file outside the two lists** — the plan's §6.1
+//! **No source reader names a file outside the three lists** — the plan's §6.1
 //! tripwire, `no_source_reader_names_a_file_outside_the_two_lists`.
 //!
-//! Two lists stand between this workspace and a new reader bound to a file.
-//! `docs/plans/MIGRATION-DEBT.tsv` is the temporary one: every reader that still
-//! names a file, one row each, shrinking to zero at P20 and never growing —
+//! Three lists classify every reader bound to a file.
+//! `docs/plans/MIGRATION-DEBT.tsv` is the temporary one: every reader blocked on
+//! a missing identity seam, one row each, shrinking and never growing —
 //! `scripts/ci/check-migration-debt.ps1` compares it with the merge base and
-//! refuses an added row. [`bt_source::FileScoped`] is the permanent one: the few
-//! readers whose concern really *is* a file, a variant each, with the reason in
-//! the variant's own doc comment. This test is what makes the pair mean
-//! something: a reader on neither list is a red test naming the hit and both
-//! lists.
+//! refuses an added row. `docs/plans/SOURCE-READERS.tsv` records tests whose
+//! subject intentionally is non-source bytes. [`bt_source::FileScoped`] is the
+//! permanent source-reader list: the few readers whose concern really *is* a
+//! source file, a variant each, with the reason in the variant's own doc
+//! comment. This test is what makes the classification mean something: a
+//! reader on none of them is a red test naming the hit and all three lists.
 //!
 //! # Written without the query layer, on purpose
 //!
@@ -70,14 +71,30 @@ use bt_source::{FileScoped, Scope};
 /// The temporary list, from the workspace root.
 const DEBT_LIST: &str = "docs/plans/MIGRATION-DEBT.tsv";
 
+/// Intentional readers of fixtures, documents, assets, and parser corpora.
+const SOURCE_LIST: &str = "docs/plans/SOURCE-READERS.tsv";
+
 /// The columns the list is written in, in order.
-const DEBT_COLUMNS: [&str; 6] = [
+const DEBT_COLUMNS: [&str; 8] = [
     "file",
     "owner",
     "mechanism",
     "subject",
     "ticket",
     "disturbed_by_2a",
+    "needed_seam",
+    "verdict",
+];
+
+/// The columns of the intentional-reader list, in order.
+const SOURCE_COLUMNS: [&str; 7] = [
+    "file",
+    "owner",
+    "mechanism",
+    "subject",
+    "ticket",
+    "disturbed_by_2a",
+    "reason",
 ];
 
 /// Directory names the scan never descends into.
@@ -465,6 +482,53 @@ fn debt_files(root: &Path) -> BTreeSet<String> {
         .collect()
 }
 
+/// Every intentional non-source reader, as the fields its header names.
+fn source_rows(root: &Path) -> Vec<BTreeMap<&'static str, String>> {
+    let path = root.join(SOURCE_LIST);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{SOURCE_LIST} is in the tree: {error}"));
+    let mut rows = Vec::new();
+    let mut seen_header = false;
+    for (number, line) in text.lines().enumerate() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(
+            fields.len(),
+            SOURCE_COLUMNS.len(),
+            "{SOURCE_LIST}:{} has {} fields and the list has {}",
+            number + 1,
+            fields.len(),
+            SOURCE_COLUMNS.len()
+        );
+        if !seen_header {
+            assert_eq!(
+                fields, SOURCE_COLUMNS,
+                "{SOURCE_LIST} does not begin with the columns it is read by"
+            );
+            seen_header = true;
+            continue;
+        }
+        rows.push(
+            SOURCE_COLUMNS
+                .iter()
+                .zip(fields)
+                .map(|(column, value)| (*column, value.to_owned()))
+                .collect(),
+        );
+    }
+    assert!(seen_header, "{SOURCE_LIST} has no header row");
+    rows
+}
+
+fn source_files(root: &Path) -> BTreeSet<String> {
+    source_rows(root)
+        .into_iter()
+        .map(|row| row["file"].clone())
+        .collect()
+}
+
 fn allowlist() -> BTreeMap<&'static str, FileScoped> {
     FileScoped::ALL
         .iter()
@@ -476,10 +540,15 @@ fn allowlist() -> BTreeMap<&'static str, FileScoped> {
 fn unlisted<'a>(
     hits: &'a [Hit],
     debt: &BTreeSet<String>,
+    sources: &BTreeSet<String>,
     allowed: &BTreeMap<&str, FileScoped>,
 ) -> Vec<&'a Hit> {
     hits.iter()
-        .filter(|hit| !debt.contains(&hit.file) && !allowed.contains_key(hit.file.as_str()))
+        .filter(|hit| {
+            !debt.contains(&hit.file)
+                && !sources.contains(&hit.file)
+                && !allowed.contains_key(hit.file.as_str())
+        })
         .collect()
 }
 
@@ -487,12 +556,13 @@ fn unlisted<'a>(
 fn complaint(
     strays: &[&Hit],
     debt: &BTreeSet<String>,
+    sources: &BTreeSet<String>,
     allowed: &BTreeMap<&str, FileScoped>,
 ) -> String {
     let mut said = String::new();
     let _ = writeln!(
         said,
-        "{} source reader(s) name a file and are on neither list:\n",
+        "{} source reader(s) name a file and are on none of the three lists:\n",
         strays.len()
     );
     for stray in strays {
@@ -500,11 +570,14 @@ fn complaint(
     }
     let _ = writeln!(
         said,
-        "\nThe two lists are:\n\n  * {DEBT_LIST} — the readers not yet migrated, {} files today. \
+        "\nThe three lists are:\n\n  * {DEBT_LIST} — the readers blocked on a missing seam, {} files today. \
          It only shrinks: a row is removed by the ticket that migrates its reader, and \
-         scripts/ci/check-migration-debt.ps1 refuses an added one.\n  * bt_source::FileScoped — \
+         scripts/ci/check-migration-debt.ps1 refuses an added one.\n  * {SOURCE_LIST} — \
+         intentional readers of fixtures, documents, assets, and corpora, {} files today.\n  * \
+         bt_source::FileScoped — \
          the readers whose concern really is a file, {} entries today:",
         debt.len(),
+        sources.len(),
         allowed.len()
     );
     for (path, entry) in allowed {
@@ -546,19 +619,25 @@ fn no_source_reader_names_a_file_outside_the_two_lists() {
     );
 
     let debt = debt_files(&root);
+    let sources = source_files(&root);
     let allowed = allowlist();
-    let strays = unlisted(&hits, &debt, &allowed);
+    let strays = unlisted(&hits, &debt, &sources, &allowed);
     println!(
-        "{} hits over {} files; {} on the debt list, {} on the allowlist",
+        "{} hits over {} files; {} debt files, {} intentional-reader files, {} on the allowlist",
         hits.len(),
         hits.iter()
             .map(|hit| &hit.file)
             .collect::<BTreeSet<_>>()
             .len(),
         debt.len(),
+        sources.len(),
         allowed.len()
     );
-    assert!(strays.is_empty(), "{}", complaint(&strays, &debt, &allowed));
+    assert!(
+        strays.is_empty(),
+        "{}",
+        complaint(&strays, &debt, &sources, &allowed)
+    );
 }
 
 /// RED — **plant a reader of each of the four shapes in a tree of its own and
@@ -599,18 +678,20 @@ fn a_planted_reader_that_is_on_neither_list_makes_the_tripwire_fire() {
     // The real lists, against the planted tree: the plant is on neither.
     let root = workspace_root();
     let debt = debt_files(&root);
+    let sources = source_files(&root);
     let allowed = allowlist();
-    let strays = unlisted(&hits, &debt, &allowed);
+    let strays = unlisted(&hits, &debt, &sources, &allowed);
     assert_eq!(
         strays.len(),
         hits.len(),
         "a planted reader was taken for a listed one"
     );
 
-    let said = complaint(&strays, &debt, &allowed);
+    let said = complaint(&strays, &debt, &sources, &allowed);
     assert!(
         said.contains("crates/planted/src/lib.rs")
             && said.contains(DEBT_LIST)
+            && said.contains(SOURCE_LIST)
             && said.contains("bt_source::FileScoped")
             && said.contains(FileScoped::VendoredAddedFiles.path()),
         "the refusal has to name the hit and both lists; it said:\n{said}"
@@ -620,7 +701,7 @@ fn a_planted_reader_that_is_on_neither_list_makes_the_tripwire_fire() {
     // the claim, and the reason a migration ticket can delete a row and see this
     // test start covering the file it emptied.
     let listed = BTreeSet::from(["crates/planted/src/lib.rs".to_owned()]);
-    assert!(unlisted(&hits, &listed, &BTreeMap::new()).is_empty());
+    assert!(unlisted(&hits, &listed, &BTreeSet::new(), &BTreeMap::new()).is_empty());
 
     std::fs::remove_dir_all(&plot).expect("the plant is taken away again");
 }
@@ -675,8 +756,8 @@ fn each_allowlist_entry_names_one_file_a_reason_and_a_reader() {
 }
 
 /// PIN — **the debt list is machine-readable in the shape the CI check reads
-/// it**: six tab-separated fields a row, a known ticket, a yes-or-no answer
-/// about Step 2a.
+/// it**: eight tab-separated fields a row, a known ticket, a yes-or-no answer
+/// about Step 2a, a needed seam, and the DEBT verdict.
 ///
 /// `debt_rows` does the splitting and the arity, so what is left here is the
 /// vocabulary. The CI check compares whole rows as text and never parses a
@@ -709,6 +790,7 @@ fn every_debt_row_names_a_ticket_of_the_plan_and_an_answer_about_the_move() {
             row["disturbed_by_2a"] == "yes" || row["disturbed_by_2a"] == "no",
             "whether Step 2a disturbs a row is yes or no: {row:?}"
         );
+        assert_eq!(row["verdict"], "DEBT", "the residue list carries only debt");
         for column in DEBT_COLUMNS {
             assert!(
                 !row[column].is_empty(),
@@ -719,6 +801,31 @@ fn every_debt_row_names_a_ticket_of_the_plan_and_an_answer_about_the_move() {
         *counts.entry(row["ticket"].clone()).or_default() += 1;
     }
     println!("rows by ticket: {counts:?}");
+}
+
+/// PIN — the intentional-reader list is complete in itself and disjoint from
+/// the debt list by reader identity.
+#[test]
+fn every_source_reader_names_a_reason_and_is_not_also_debt() {
+    let root = workspace_root();
+    let debt: BTreeSet<(String, String)> = debt_rows(&root)
+        .into_iter()
+        .map(|row| (row["file"].clone(), row["owner"].clone()))
+        .collect();
+    let rows = source_rows(&root);
+    let mut seen = BTreeSet::new();
+    for row in rows {
+        let identity = (row["file"].clone(), row["owner"].clone());
+        assert!(
+            seen.insert(identity.clone()),
+            "SOURCE-READERS repeats {identity:?}"
+        );
+        assert!(
+            !debt.contains(&identity),
+            "{identity:?} is both intentional and debt"
+        );
+        assert!(!row["reason"].is_empty(), "{identity:?} has no KEEP reason");
+    }
 }
 
 // ───────────────────────────────────────────────────────────── the fixture ──

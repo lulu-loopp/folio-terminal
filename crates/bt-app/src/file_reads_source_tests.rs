@@ -34,7 +34,6 @@
 //! refusal rather than a quiet merge.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 use syn::visit::{self, Visit};
 
 fn test_only(attrs: &[syn::Attribute]) -> bool {
@@ -169,7 +168,6 @@ struct Doors {
     trait_name: Option<String>,
     found: BTreeMap<(Owner, String), usize>,
     counted: BTreeMap<Owner, usize>,
-    modules: Vec<(String, Option<String>)>,
 }
 
 impl Doors {
@@ -228,19 +226,6 @@ impl<'ast> Visit<'ast> for Doors {
     fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
         if test_only(&item.attrs) {
             return;
-        }
-        if item.content.is_none() {
-            let explicit = item.attrs.iter().find_map(|attr| {
-                if attr.path().is_ident("path")
-                    && let syn::Meta::NameValue(value) = &attr.meta
-                    && let syn::Expr::Lit(lit) = &value.value
-                    && let syn::Lit::Str(path) = &lit.lit
-                {
-                    return Some(path.value());
-                }
-                None
-            });
-            self.modules.push((item.ident.to_string(), explicit));
         }
         visit::visit_item_mod(self, item);
     }
@@ -341,20 +326,19 @@ impl<'ast> Visit<'ast> for Doors {
     }
 }
 
-fn scan(path: &Path, found: &mut BTreeMap<Door, usize>, counted: &mut BTreeMap<Owner, usize>) {
-    let source = std::fs::read_to_string(path).unwrap();
-    let syntax = syn::parse_file(&source).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+fn scan(
+    source: &str,
+    relative: &str,
+    found: &mut BTreeMap<Door, usize>,
+    counted: &mut BTreeMap<Owner, usize>,
+) {
+    let syntax = syn::parse_file(source).unwrap_or_else(|error| panic!("{relative}: {error}"));
     let mut doors = Doors::default();
     doors.visit_file(&syntax);
-    let relative = path
-        .strip_prefix(Path::new(env!("CARGO_MANIFEST_DIR")).join("src"))
-        .unwrap()
-        .to_string_lossy()
-        .replace('\\', "/");
     for ((owner, door), count) in doors.found {
         *found
             .entry(Door {
-                file: relative.clone(),
+                file: relative.to_owned(),
                 owner,
                 door,
             })
@@ -363,38 +347,23 @@ fn scan(path: &Path, found: &mut BTreeMap<Door, usize>, counted: &mut BTreeMap<O
     for (owner, count) in doors.counted {
         *counted.entry(owner).or_default() += count;
     }
-    let directory = if matches!(
-        path.file_name().unwrap().to_str().unwrap(),
-        "main.rs" | "mod.rs"
-    ) {
-        path.parent().unwrap().to_owned()
-    } else {
-        path.with_extension("")
-    };
-    for (name, explicit) in doors.modules {
-        let child = if let Some(explicit) = explicit {
-            path.parent().unwrap().join(explicit)
-        } else {
-            let sibling = directory.join(format!("{name}.rs"));
-            if sibling.exists() {
-                sibling
-            } else {
-                directory.join(name).join("mod.rs")
-            }
-        };
-        scan(&child, found, counted);
-    }
 }
 
-/// The whole walk, from the crate root through every product `mod`.
+/// The whole walk, over the declared product files in `bt-source`'s universe.
 fn walk() -> (BTreeMap<Door, usize>, BTreeMap<Owner, usize>) {
     let mut found = BTreeMap::new();
     let mut counted = BTreeMap::new();
-    scan(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
-        &mut found,
-        &mut counted,
-    );
+    let index = crate::test_support::source();
+    let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for file in index.files().iter().filter(|file| file.permits_product()) {
+        let relative = file
+            .path()
+            .strip_prefix(&source_root)
+            .unwrap_or_else(|_| panic!("{} is outside bt-app/src", file.path().display()))
+            .to_string_lossy()
+            .replace('\\', "/");
+        scan(index.text(file.span()), &relative, &mut found, &mut counted);
+    }
     (found, counted)
 }
 

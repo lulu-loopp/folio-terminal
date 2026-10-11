@@ -443,17 +443,17 @@ jobs:
           BT_SOURCE_MEASURE_BUDGETS: "1"
         run: cargo test -p bt-source --locked --test measure -- --nocapture
 
-      # `docs/plans/MIGRATION-DEBT.tsv` is the list of every source reader that
-      # still names a file, and its whole value is that it only shrinks. A row
-      # added to it is a reader let past the tripwire; planting one proves the
-      # comparison against the merge base is a comparison and not a read.
+      # `docs/plans/MIGRATION-DEBT.tsv` is the list of source readers blocked on
+      # a missing seam, and its whole value is that it only shrinks. A row added
+      # to it is debt let past the tripwire; planting one proves the comparison
+      # against the merge base is a comparison and not a read.
       - name: the migration-debt gate can actually fail
         shell: pwsh
         run: |
           $file = "docs/plans/MIGRATION-DEBT.tsv"
           $original = [IO.File]::ReadAllText($file)
           try {
-            [IO.File]::AppendAllText($file, "crates/planted/src/lib.rs`tprobe`tinclude_str!`tnothing`tP3`tno`n")
+            [IO.File]::AppendAllText($file, "crates/planted/src/lib.rs`tprobe`tinclude_str!`tnothing`tP3`tno`tmissing seam`tDEBT`n")
             $failed = $false
             try {
               & ./scripts/ci/check-migration-debt.ps1

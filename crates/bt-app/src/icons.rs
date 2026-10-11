@@ -1035,6 +1035,29 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    /// The product bytes of one declared module, addressed by Rust identity
+    /// rather than by the file that happens to hold it today.
+    fn module_source(module_path: &str) -> &'static str {
+        let index = crate::test_support::source();
+        let modules: Vec<_> = index
+            .modules()
+            .iter()
+            .filter(|module| {
+                module.permits_product()
+                    && module
+                        .module_paths()
+                        .iter()
+                        .any(|candidate| candidate == module_path)
+            })
+            .collect();
+        assert_eq!(
+            modules.len(),
+            1,
+            "{module_path} resolves to one product module"
+        );
+        index.text(modules[0].span())
+    }
+
     /// **Every box the chrome draws a mark in**, for the optical gate to walk.
     ///
     /// Two kinds of row, and the difference between them is the whole state of
@@ -2189,18 +2212,18 @@ mod tests {
             ),
         ];
         for (file, source) in [
-            ("settings.rs", include_str!("settings.rs")),
-            ("seats.rs", include_str!("seats.rs")),
-            ("profiles.rs", include_str!("profiles.rs")),
-            ("git_panel.rs", include_str!("git_panel.rs")),
-            ("git_graph.rs", include_str!("git_graph.rs")),
-            ("float.rs", include_str!("float.rs")),
-            ("toast.rs", include_str!("toast.rs")),
-            ("notice.rs", include_str!("notice.rs")),
-            ("search.rs", include_str!("search.rs")),
-            ("peek_strip.rs", include_str!("peek_strip.rs")),
-            ("file_peek.rs", include_str!("file_peek.rs")),
-            ("restore.rs", include_str!("restore.rs")),
+            ("settings.rs", module_source("crate::settings")),
+            ("seats.rs", module_source("crate::seats")),
+            ("profiles.rs", module_source("crate::profiles")),
+            ("git_panel.rs", module_source("crate::git_panel")),
+            ("git_graph.rs", module_source("crate::git_graph")),
+            ("float.rs", module_source("crate::float")),
+            ("toast.rs", module_source("crate::toast")),
+            ("notice.rs", module_source("crate::notice")),
+            ("search.rs", module_source("crate::search")),
+            ("peek_strip.rs", module_source("crate::peek_strip")),
+            ("file_peek.rs", module_source("crate::file_peek")),
+            ("restore.rs", module_source("crate::restore")),
         ] {
             for (codepoint, meaning) in RETIRED {
                 let escape = format!("\\u{{{codepoint}}}");
@@ -2239,12 +2262,12 @@ mod tests {
     /// would be a place to write a sentence that excuses a glyph.
     #[test]
     fn the_punctuation_that_stayed_a_character_is_set_as_type() {
-        let seats = include_str!("seats.rs");
+        let seats = module_source("crate::seats");
         assert!(
             seats.contains("text: PREVIEW_CRUMB_SEPARATOR.to_owned(),"),
             "the preview rail sets its separator as type",
         );
-        let settings = include_str!("settings.rs");
+        let settings = module_source("crate::settings");
         assert!(
             settings.contains("(crumb.separator, CRUMB_SEPARATOR.to_owned(), true, false),"),
             "the editor's breadcrumb sets its separator as type",
@@ -2557,7 +2580,7 @@ mod tests {
     #[test]
     fn no_drawing_carries_a_bare_alpha() {
         const ATTRIBUTE: &str = "opacity=\"";
-        let source = include_str!("marks.rs");
+        let source = module_source("crate::marks");
         let mut bare = Vec::new();
         let mut rest = source;
         while let Some(at) = rest.find(ATTRIBUTE) {
@@ -2660,12 +2683,12 @@ mod tests {
     #[test]
     fn no_surface_reaches_past_the_registry_for_a_disclosure() {
         for (file, source) in [
-            ("seats.rs", include_str!("seats.rs")),
-            ("settings.rs", include_str!("settings.rs")),
-            ("git_panel.rs", include_str!("git_panel.rs")),
-            ("git_graph.rs", include_str!("git_graph.rs")),
-            ("float.rs", include_str!("float.rs")),
-            ("search.rs", include_str!("search.rs")),
+            ("seats.rs", module_source("crate::seats")),
+            ("settings.rs", module_source("crate::settings")),
+            ("git_panel.rs", module_source("crate::git_panel")),
+            ("git_graph.rs", module_source("crate::git_graph")),
+            ("float.rs", module_source("crate::float")),
+            ("search.rs", module_source("crate::search")),
         ] {
             assert!(
                 !source.contains("TreeDisclosure { turned_degrees:"),
@@ -2675,7 +2698,7 @@ mod tests {
         }
         // `profiles.rs` draws both submenu indicators and holds the file menu's
         // `Expand`/`Collapse` row, so it is the file the rule is most about.
-        let profiles = include_str!("profiles.rs");
+        let profiles = module_source("crate::profiles");
         assert!(
             !profiles.contains("TreeDisclosure { turned_degrees:"),
             "the two submenu indicators ask the registry",
