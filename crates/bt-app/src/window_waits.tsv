@@ -60,8 +60,9 @@
 ## `owner-thread` (revision (b)6's closed C7 list only), or the `D-<n>` / `row <n>` that
 ## repairs it. Three rules hold it, each with its test in `hang_watch::window_waits_tests`:
 ## (1) **the ledger is the code's**: every `AppEvent` answer, every `lane::LaneName` and every
-## `open` or `pending` `# rows` entry names a row, every `worker-door-body` of `# effects` runs on a
-## row's thread, and every door is an item of the product; (2) **a conforming door does not wait
+## `open` or `pending` `# rows` entry names a row, every member of the C7 list is an `owner-thread`
+## row, every `worker-door-body` of `# effects` is reached from a row's door, and every door is an
+## item of the product; (2) **a conforming door does not wait
 ## in its own body**: no `# vocabulary` entry there (revision (c)2's interim check — not C1's
 ## gate, which needs S-2a's call graph); (3) **repairs only shrink**: a status that names a repair
 ## only ever becomes `conforms`, and a new row names none (`scripts/ci/check-window-waits.ps1`,
@@ -70,7 +71,7 @@
 # rows
 row	status	call	where	disposition
 1	done	`ShellExecuteW` / `NSWorkspace::openURL:` — synchronous, no timeout; the measured ~1.4 s Ctrl+click stall	`bt-platform::handoff::{windows_handoff,macos_handoff}::hand_over`, reached from `Runtime::open_local_path`, `reveal_in_explorer`, `open_local_path_verified`, `reveal_verified`, `open_preview_link`, `hand_url_to_the_browser`, `activate_local_image_path`, `open_font_settings`	**done** — *a hand-off to the system runs on its own lane, and the window that receives it may take the front* (`DESIGN.md`, 2026-09-22)
-2	open	the marks lock: a wait with no deadline behind our own writer, then `try_lock` and `sleep` up to `OUR_TURN` = 2 s for a holder in another process (`DESIGN.md`, 2026-09-23), then a dated `$PROFILE` copy, an atomic write and two marks writes	`Runtime::add_to_profile`, `spend_powershell_intent` → `profile_runtime::install_recorded`; the agent hook installs (`Runtime::apply_claude_hooks`, `apply_codex_notify`, `apply_copilot_hooks`) → `attention_ownership::record`; `psreadline::install_recorded`, from `Runtime::apply_psreadline`, `Runtime::create`'s `psreadline::upgrade_recorded` and `App::release_trial_writes` (the thread-door note, revision (k)9 item 1)	**0.4.4** — storage lane; the enable and removal halves are already on workers, the install half is not
+2	open	the marks lock: a wait with no deadline behind our own writer, then `try_lock` and `sleep` up to `OUR_TURN` = 2 s for a holder in another process (`DESIGN.md`, 2026-09-23), then a dated `$PROFILE` copy, an atomic write and two marks writes	`Runtime::enable_via_profile` → `begin_profile_install` → `profile_runtime::install_recorded`, on the `powershell-profile-install` worker; the agent hook installs (`Runtime::apply_claude_hooks`, `apply_codex_notify`, `apply_copilot_hooks`) → `attention_ownership::record`; `psreadline::install_recorded`, from `Runtime::apply_psreadline`, `Runtime::create`'s `psreadline::upgrade_recorded` and `App::release_trial_writes` (the thread-door note, revision (k)9 item 1)	**0.4.4** — storage lane; the enable and removal halves are already on workers, the install half is not
 3	open	`psreadline::apply_recorded` — nine files, ~429 KB, under the same lock	`Runtime::apply_psreadline`	**0.4.4** — storage lane; named by the 2026-09-21 history entry
 4	open	`psreadline::installed_copy` — a recursive walk of the module directory	`Runtime::refresh_psreadline_installed`	**0.4.4** — observation lane
 5	done	`bt_platform::monospace_font_families()` — the machine's whole font collection, enumerated inline; the traced cause of the frozen gear	`settings::monospace_family_files` ← `apply_stored_terminal_font`	**done** — *the font list is walked only on its lane, by a numbered request; the face in settings.json is found by its name* (`DESIGN.md`, 2026-09-24); what is left on the window thread is `bt_platform::monospace_family_named`, one family asked of the system collection (station `font family lookup`), measured at 2.6–3.4 ms cold against the walk's 71–80 ms on the development machine
@@ -258,14 +259,14 @@ vtable(	bt-platform crate::video::engine::Machinery::take_frame	1
 class	door	thread	signal	failure	supersession	sink	status
 a pane's shell birth	pty_door::request_shell	bt-pty-birth	PtyOutput	`Born` carries the error; a panic is `PtyError::Backend`; a refused spawn is the door's error	a generation per request; none coalesced	an abandoned number's shell is retired off the window thread	conforms
 the birth-death fallback shell	Runtime::reap_exited_tabs	bt-pty-birth	PtyOutput	a refused spawn or a `Born` error keeps the face, one line	a generation per request; one per leaf	abandoned with its leaf, retired off the window thread	conforms
-shell retirement	Runtime::close_pane	pty-retirement	detached	the retirement thread's own line; a thread that cannot start retires on the caller (D-81)	one thread per session	the retirement thread accepts at once	conforms
-input to a shell	offer_pty_input	window (row 19)	return	`InputRefused` is the terminal	none; whole writes in order	held in `PaneBirth` while the pane is in birth	conforms
-a shell's resize	commit_leaf_resize	window (row 12)	return	a `PtyError` value	coalesced per leaf; the last size is owed to a shell in birth	—	row 12
+shell retirement	Runtime::close_pane	pty-retirement	detached	the retirement thread's own line; a thread that cannot start retires on the caller (D-81); a teardown panic leaves the count up with no line	one thread per session	the retirement thread accepts at once	D-81, D-86
+input to a shell	offer_pty_input	window (row 19)	return	`InputRefused` is the terminal; a dead writer is silent and later pushes queue until the ring refuses	none; whole writes in order	held in `PaneBirth` while the pane is in birth	D-86
+a shell's resize	commit_leaf_resize	window (row 12)	return	a `PtyError` value	coalesced per leaf; the last size is owed to a shell in birth	—	owner-thread
 quit's retirement wait	pty_door::wait_for_retirements	window (row 15)	return	the retirements still going at the deadline, one line	the whole process's count	—	owner-thread
-PSReadLine version and policy	psreadline::begin_probe	psreadline-probe	PsReadLineProbed	`Unknown` is the newest answer; a refused spawn leaves the request standing, one line	numbered; asks while a probe is out are answered by the next probe	the process cell	conforms
+PSReadLine version and policy	psreadline::begin_probe	psreadline-probe	PsReadLineProbed	`Unknown` is the newest answer; a refused spawn leaves the request standing, one line	numbered; asks while a probe is out are answered by the next probe with no outcome of their own	the process cell	D-86, D-87, D-90
 `$PROFILE` observation	spawn_profile_observation	powershell-profile-observation	PowerShellProfileProbed	a refused spawn is discarded	numbered per edition; an older observation is refused	process statics	D-86, D-87
-Copilot version	attention_copilot::begin_probe	copilot-version-probe	CopilotProbed	a missing version is the answer; a refused spawn leaves the request standing, one line	numbered; asks while a probe is out are answered by the next probe	the process cell	conforms
-locale reading	locale_declaration::ask	locale-reading	LocaleAnswered	a refused spawn or a dead reading is published as a failed reading	numbered; asks while a reading is out are answered by the next reading	the cell; births in a closed window are gone	conforms
+Copilot version	attention_copilot::begin_probe	copilot-version-probe	CopilotProbed	a missing version is the answer; a refused spawn leaves the request standing, one line	numbered; asks while a probe is out are answered by the next probe with no outcome of their own	the process cell	D-86, D-87, D-90
+locale reading	locale_declaration::ask	locale-reading	LocaleAnswered	a refused spawn or a dead reading is published as a failed reading	numbered; a waiting ask replaced by a newer one gets no outcome of its own	the cell; births in a closed window are gone	D-90
 foreground program	foreground_program::request	bt-foreground-program-worker	MathReady	`Unknown`; a refused spawn fails the start	one in flight per leaf; later asks collapse into one follow-up; a stale incarnation's answer is dropped	an answer for a gone tab is dropped	D-86
 program walk	programs_lane::request	program-walk	ProgramsAnswered	a refused spawn leaves the request standing, one line; a dead walk is recorded and asked again	numbered; requests made during a walk get no outcome of their own	the process mailbox	D-85
 font list	request_font_walk	font-families	FontsScanned	none: a failed walk is a shorter list	requests made during a walk collapse into one more round with no outcome of their own	process slots	D-72
@@ -275,7 +276,7 @@ recovered edits listing	recovered::ask	bt-recovered	RecoveredEditsListed	a refus
 Explorer package probe	explorer_menu::begin_probe	folio-explorer-probe	ExplorerPackageChanged	a refused spawn panics the caller	its repair takes the deployment latch	the process state	D-86, D-87
 Explorer menu press	explorer_menu::request	folio-explorer-deploy	ExplorerPackageChanged	`Result<bool, String>` in one slot; a refused spawn panics the caller	one job at a time; one queued press, the last wins, an overwritten press gets no outcome	one asking window; its card is dropped if it closed	D-86, D-87, D-90
 PSReadLine installed copy	Runtime::refresh_psreadline_installed	window (row 4)	return	none represented	—	—	row 4
-keyboard layout tables	LayoutTables::shifted_character	folio-layout-tables	LayoutTablesReady	a refused spawn fails the start; a full queue or a dead worker makes the slot `Unavailable`, one line	keyed by layout; a pending layout is not asked twice	one instance for every window	conforms
+keyboard layout tables	LayoutTables::shifted_character	folio-layout-tables	LayoutTablesReady	a refused spawn fails the start; a full queue makes the slot `Unavailable`, one line; a dead worker is learned only by a later lookup, with no wake	keyed by layout; a pending layout is not asked twice	one instance for every window	D-86, D-88
 files column listing	FilesWorker::request	bt-files-worker	FilesReady	errors are values; a dead worker disables the lane, said once; a refused spawn fails the start	newest per target; a replaced request ends with no outcome	an answer for a gone owner is dropped	D-33
 preview read	PreviewWorker::request	bt-preview-worker	PreviewReady	errors are values; a dead worker disables the lane, said once; a refused spawn fails the start	newest per target; a replaced request ends with no outcome; `land_read` refuses a read the buffer has moved past	dropped for a closed tab	D-33
 git questions	GitWorker::request	bt-git-worker	GitReady	a fault answer per question; a dead worker disables the lane, said once	reads coalesce newest per target; a replaced read ends with no outcome	dropped for a closed tab	D-33
@@ -289,7 +290,7 @@ folder chooser	bt_platform::FolderPicker::request	window	polled	the dialog's err
 OS hand-off	Runtime::hand_off	bt-os-handoff	HandoffAnswered	the hand-off's own `Result`; a full lane or a dead worker answers only a later submission	an id per request; none coalesced	a closed window's answers are claimed by nobody	D-70, D-71
 desktop notification	NotificationDesk::show	window	return	a refusal is said once and latched	—	—	D-93
 the session file	SessionStore::flush_if_due	session-writer	polled	a failed write is said once per streak and re-armed on the debounce	a generation per write; a stale receipt only advances what landed	—	D-88, D-89
-the launch's session backup	SessionStore::queue_launch_backup	session-writer	detached	the worker's own line	one per launch	—	conforms
+the launch's session backup	SessionStore::queue_launch_backup	session-writer	detached	a refusal is one line; a writer that dies on it says nothing	one per launch	—	D-86
 quit's session write wait	SessionWriter::wait_for	window (row 16)	return	a timeout lets the quit go on; a stopped writer stops it	the one generation it waits for	—	owner-thread
 the session writer's close	SessionWriter::close	window (row 16b)	return	past the budget the writer is let go	—	—	owner-thread
 an update quit's session receipt	SessionStore::hand_over_final	session-writer	polled	a refused write stops the quit; overdue past `UPDATE_RECEIPT_DEADLINE`	the one generation it waits for	—	D-88
@@ -325,24 +326,26 @@ update launch pass	Job::consider	bt-update-job	UpdateJobOffer	a refused spawn ru
 trial watch	update_trial::begin_watch	folio-trial-watch	TrialWritesReleased	a refused spawn is one line and the held writes are never released	one per trial	the process slot	D-86, D-87
 trial claim	update_trial::take_the_claim_within	main (row 28)	return	not had: one line and the process leaves	—	—	row 28
 update leave guard	update_handoff::leave_armed	main (row 29)	return	a timeout or a dead guard is said here, in a box	one per process	—	owner-thread
-update transaction sweep	<Machine as World>::on_a_worker	bt-update-sweep	detached	a refused spawn keeps the transaction for the next start; a failed step is one line	one per transaction	—	conforms
-stale claim sweep	main	folio-claim-sweep	detached	a refused spawn is discarded; a sweep is one line	one per start	—	conforms
-video prewarm	bt_platform::video::prewarm	folio-video-prewarm	detached	a refused spawn is discarded	one per start	—	conforms
+update transaction sweep	<Machine as World>::on_a_worker	bt-update-sweep	detached	a refused spawn keeps the transaction for the next start; a failed step is one line; a panic is silent	one per transaction	—	D-86
+the uninstaller's door process	uninstall::run	folio-uninstall-cleanup	return	each entry's fate in the door's report; a refused or dead worker is a refused entry	one per process	the door's report and its exit code	conforms
+the copied native remover	uninstall::remover_standalone	folio-uninstall-remove	return	the removal's failure is written beside the plan and is its exit code	one per process	the plan's folder	conforms
+stale claim sweep	main	folio-claim-sweep	detached	a refused spawn is discarded; a sweep is one line	one per start	—	D-86, D-87
+video prewarm	bt_platform::video::prewarm	folio-video-prewarm	detached	a refused spawn is discarded	one per start	—	D-87
 a video seat's engine	VideoSeats::open	folio-video-engine	polled	a refused spawn, or an engine not built within `OPEN_BUDGET`, reads `Unresponsive`	the newest generation	the seat owns it; a replaced seat's engine is shut down	D-86, D-88
 video seat shutdown	VideoSeats::close	window (row 25)	return	past `SHUTDOWN_BUDGET` the engine is let go, one line	—	—	row 25
 media quiet at exit	bt_platform::video::shutdown_media_session	main (row 27)	return	a reader still inside at the deadline is one line	—	—	row 27
-trace lines	trace_sink::stderr_line	bt-trace-sink	detached	a full queue drops the line and counts it	in order	—	conforms
+trace lines	trace_sink::stderr_line	bt-trace-sink	detached	a full queue drops the line and counts it; a writer that never started or died reports nothing	in order	—	D-86, D-87
 trace flush	trace_sink::flush	main (row 17)	return	past `FLUSH_TIMEOUT` the writer is let go	—	—	owner-thread
 launch hand-over	launch_wire::hand_over	main (row 18)	return	every failure opens a window here	—	—	owner-thread
 data directory endpoints	open_the_data_directorys_endpoints	window (row 24)	return	a failed start is latched as no endpoint	once per process	—	row 24
-web environment	WebSeat::start_environment	window (row 21)	WebPageSpoke	an error where it stands or in the callback is the page's fault card; a missing callback meets the start deadline	a generation per seat; a second ask joins the creation out	a gone seat's queue is never drained	D-64
-web controller	WebSeat::step	window (row 21)	WebPageSpoke	an error where it stands or in the callback is the page's fault card	a generation per seat; an orphaned controller is closed when it arrives	an orphaned controller is closed	D-64
+web environment	WebSeat::start_environment	window (row 21)	WebPageSpoke	an error where it stands or in the callback is the page's fault card; a missing callback meets the start deadline	a generation per seat; a second ask joins the creation out	a gone seat's queue is never drained	owner-thread
+web controller	WebSeat::step	window (row 21)	WebPageSpoke	an error where it stands or in the callback is the page's fault card	a generation per seat; an orphaned controller is closed when it arrives	an orphaned controller is closed	owner-thread
 web rehost	WebSeat::rehost	window (row 21)	return	the rehost's report	—	—	owner-thread
 web navigation	WebSeat::step	window	WebPageSpoke	a refused navigation or a failed load is the page's fault card	no request id: matched by address	a gone seat's queue is never drained	D-91
 web thumbnails	PageShrinker::send	folio-web-thumb	WebPageSpoke	a refused spawn panics the window thread; an undecodable page has no picture	a ticket per job; a stale ticket is dropped	per window; a closed window's worker ends	D-86, D-87
-present	Runtime::present_seats_and_commit	window (row 9)	return	a render or commit error goes to device recovery	an unchanged frame is not presented	—	row 9
+present	Runtime::present_seats_and_commit	window (row 9)	return	a render or commit error goes to device recovery	an unchanged frame is not presented	—	owner-thread
 device recovery	FolioApp::recovered_from_a_lost_device	window (row 10)	return	three attempts with sleeps between them; giving up stops the process	—	—	row 10
-first GPU open	gpu_door::open_first_window	window (row 23)	return	an error fails the window's creation	once per process	—	row 23
+first GPU open	gpu_door::open_first_window	window (row 23)	return	an error fails the window's creation	once per process	—	owner-thread
 surface and compositor birth	Runtime::open_window	window	return	an error fails the window's opening	per window	—	owner-thread
 the compositor's window size	Runtime::resize	window	return	an error is the caller's	the same size commits nothing	—	owner-thread
 window title	Runtime::flush_title	window (row 14)	return	a refusal keeps the title wanted	the latest value, at most once a frame	—	owner-thread
