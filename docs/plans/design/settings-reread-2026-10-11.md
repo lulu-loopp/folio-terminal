@@ -1,7 +1,12 @@
 # Hand-edited settings, keybindings, profiles and pins, re-read as a storage transaction: T-SETTINGS-REREAD (0.4.8 B6), design note, 2026-10-11
 
-Status: **revision (a), the draft for the Codex review.** No ticket below has been
-dispatched. Plan row B6 ("hand-edited settings/keybindings/profiles/pins re-read — design
+Status: **revision (b), 2026-10-11, after the Codex review** (`B6-settings-reread-design.review-codex.md`,
+verdict *adopt with changes*, fifteen required changes). Revision (b) is the dated section at
+the end. **Where revision (a)'s text and revision (b) differ, revision (b) stands**: in
+particular §1.5's defect 1 and the failure card, §2.2's filter, §3.1's memory, §3.2's
+fallback, `Displaced` row and receipts, §3.3's base, §3.4's four policies, §3.5's torn-write
+claim, §3.6's wording, §4, §7, §8, §9 and §10 are replaced or amended by (b)1–(b)17.
+Revision (a) was the draft for review. No ticket below has been dispatched. Plan row B6 ("hand-edited settings/keybindings/profiles/pins re-read — design
 first (storage transaction: revision preconditions, field-level merge, explicit conflict,
 durable owed edits), Codex review, then build"). Read at `main` = `77399d57` on
 `design/settings-reread`. No product code, no cargo run, no window, and no read of any
@@ -1115,3 +1120,484 @@ it relies only on the calls the codebase already makes.
     the writer at once".
 - **No timer anywhere.** The only clock is the existing `WatchClock`, and only a
   notification starts it (R31).
+
+---
+
+## Revision (b), 2026-10-11, after the Codex review
+
+The review (`B6-settings-reread-design.review-codex.md`, in the 0.4.8 trace)
+found "the right architecture" and four transaction holes: "unsafe non-exchange fallback,
+incorrect `Displaced` merge base, discarded side-effectful receipts, and a quit path that
+cannot process document answers before exit". It lists fifteen required changes. **All
+fifteen are applied**; none is argued away. One finding outside the list (the pins
+remove-then-re-pin case) is accepted as a stated limit rather than built, and is argued
+under *Departures*. The J5 cross-reference the coordinator asked for is (b)16. The revised
+tickets are (b)17, the revised owner questions (b)18.
+
+Every fact the review cites was checked at `77399d57` before it was adopted:
+- the dynamic write fault is never delivered: the five `take_fault()` calls are all at
+  start (`main.rs:43955`, `:43956`, `:44166`, `:44193`, `:44208`), and nothing later moves a
+  `DocumentWrites` fault to a card;
+- the ordinary quit blocks in its write step (`main.rs:65789-65800`; only an update's quit
+  writes by receipt, across turns);
+- the terminal font is one door for three fields (`SettingChange::TerminalFont`,
+  `settings_bundle.rs:85-89`);
+- keybindings' duplicate ids resolve last-wins (`bt-persist/src/keybindings.rs:71-73`),
+  profiles' first-wins (`ProfileFault::Duplicate`, `profiles.rs:2511-2514`);
+- the macOS deployment minimum is 14.0 (`packaging/macos/Info.plist.in:88-89`);
+- `read_with_fallback_bytes` returns no bytes for a refused document (`migrate.rs:1538-1540`).
+
+### The change table
+
+| # | the review's words | disposition | where |
+|---|---|---|---|
+| 1 | "Replace every plain-rename-after-precheck fallback with a refusal that leaves the edit owed, and add Linux `renameat2(RENAME_EXCHANGE)`." | applied | (b)1 |
+| 2 | "Define the exchange door's metadata, fresh-backup collision, partial-failure, link, and directory-durability contracts per platform." | applied | (b)2 |
+| 3 | "Make `Displaced` merge against the pre-exchange revision, not the document Folio just placed at the target." | applied | (b)3 |
+| 4 | "Serialize/coalesce to one in-flight write per document or process every receipt in order; never drop a receipt carrying displaced bytes or cleanup obligations." | applied, both halves | (b)4 |
+| 5 | "Redesign quit as a bounded terminal document-and-session transaction that finishes merge/sidecar decisions before exit." | applied (the multi-turn form) | (b)5 |
+| 6 | "Define owed state as `writer_of_record && desired_persisted_document != revision.document`, keeping the persisted desired document separate from runtime projection." | applied | (b)6 |
+| 7 | "Route asynchronous refusals into the person-visible failure-card path and add a regression test proving post-start faults are consumed." | applied | (b)7 |
+| 8 | "Complete the settings, keybindings, profiles, and pins merge units and deterministic ordering rules, including every envelope field and duplicate identity." | applied | (b)8 |
+| 9 | "Reframe Q5 so following link targets may remain out of scope, but observed symlinks and multi-link files are refused rather than replaced; include hard links explicitly." | applied | (b)2, (b)18 Q5 |
+| 10 | "Add stable-read handling for in-place/chunked writers and platform-equivalent filename matching to the watch design." | applied | (b)9 |
+| 11 | "Replace the 'few kilobytes' memory claim with the 16 MiB-per-document bound and shared byte ownership." | applied | (b)10 |
+| 12 | "Shorten and bound the conflict notice, leaving complete unit details in diagnostics." | applied | (b)11 |
+| 13 | "Expand E-1–E-3 and the mutation suite with the platform, receipt, quit, link, metadata, and valid-intermediate cases listed above." | applied | (b)13, (b)14 |
+| 14 | "Re-estimate T-STORE-CONDITIONAL-WRITE and T-STORE-MERGE as L or split each into independently gated tickets." | applied (split) | (b)17 |
+| 15 | "Enumerate the exact R33, ARCHITECTURE §9, DESIGN §7.1.6c-2/c-2′/c-6d, `settings_bundle`, storage-watch, and window-waits edits." | applied | (b)15 |
+| — | findings §1: soften defect 1's trigger; the five-failure card is not delivered; the race after a precheck | applied | (b)12 |
+| — | findings §4, pins: "A remove followed by re-pin … cannot be detected by a state-only merge" | accepted as a limit, not built | *Departures* |
+| — | coordinator: the J5 save lane (S-6, T-DOCUMENT-SAVE-LANE) | stated | (b)16 |
+
+### (b)1 · Refuse rather than replace; Linux exchanges too: adopted
+
+§3.2's paragraph "A volume that cannot exchange" is **withdrawn**. The review: "it reopens
+the exact clobber race the design promises to remove. It also contradicts §12". The rule is
+now one sentence: **where the exchange is unavailable, the write is refused, the target is
+not touched, and the edit stays owed.**
+
+- The door answers `Refused(ExchangeUnavailable)` when the platform call says the volume
+  cannot (Windows: `volume_cannot_replace`'s codes, `file_replace.rs:261-275`; macOS:
+  `ENOTSUP`/`EINVAL` from `renamex_np`, and a volume whose `volumeSupportsSwapRenaming` is
+  false; Linux: `EINVAL`, `ENOSYS`, `EXDEV`).
+- `Landed { verified: false }` no longer exists. Every `Landed` is verified.
+- The refusal is a write failure and reaches the person through (b)7's card, naming the
+  file. Such a volume therefore cannot save these four files: that is a behaviour change
+  for anyone whose data directory sits on one, and it is (b)18's Q5.
+- **Linux**: `renameat2(temp, target, RENAME_EXCHANGE)`, which "atomically exchanges two
+  existing paths" (Linux 3.15). The portable arm stops refusing on Linux and refuses
+  elsewhere. Linux still has no ear (§2.2), so there the precondition and the exchange
+  protect the file, and the documents are followed only at start.
+
+### (b)2 · The exchange door's contracts, per platform: adopted
+
+`bt_platform::replace_keeping_displaced(temp, target) -> Result<Displaced, ExchangeRefusal>`,
+worker-only. It answers where the displaced bytes now are; it never deletes them (the
+caller does, (b)4). Per platform:
+
+| contract | Windows (`ReplaceFileW`) | macOS (`renamex_np(RENAME_SWAP)`) | Linux (`renameat2(RENAME_EXCHANGE)`) |
+|---|---|---|---|
+| **metadata** | merged by the call (DACL, streams, creation time, compression, encryption); the attribute word staged on the temp, as today (`file_replace.rs:321-328`) | the swap exchanges entries only, so the temp **first** takes the target's mode, owner, ACL and xattrs through `bt_platform::carry_metadata` (`file_replace.rs:48-60`), born `OwnerOnly` (`atomic.rs:197-210`) | as macOS |
+| **the backup / displaced name** | a fresh sibling `<name>.displaced-<pid>-<nanos>-<n>` (`temp_sibling_path`'s recipe, `atomic.rs:275-303`); asked absent first; **a backup name that exists is a refusal**, never passed to the call, because Microsoft does not specify the call's behaviour for one | none needed: after the swap the temp's name holds the displaced file | as macOS |
+| **partial failure** | 1175, 1176 and 1177 go through the existing ladder, kept **inside** the door, not cited: 1177 renames the backup back (`file_replace.rs:335-339`, `:404-422`); 1175/1176 are asked of the filesystem (`target.exists() && !backup.exists()`, `:334`) before anything is cleaned; a refusal whose ladder cannot restore names where the bytes are, as today (`:418-421`) | the call is one operation: it happened or it did not | as macOS |
+| **links** | **refused before the call**: a target that is a symlink (`symlink_metadata`) or has more than one name (`file_link_count`, `file_replace.rs:4-32`) answers `Refused(Link)`; nothing is written | same | same |
+| **durability** | `REPLACEFILE_WRITE_THROUGH` is documented as unsupported, so after the call the door flushes the directory (`FlushFileBuffers` on a `FILE_FLAG_BACKUP_SEMANTICS` handle, `install_txn`'s step, `ARCHITECTURE.md:1402`); `Landed` means: temp `fsync`ed, exchanged, directory flushed | `F_FULLFSYNC` on the temp and on the directory's descriptor (`install_txn`'s step) | `fsync` of the temp and of the directory |
+
+The first-write case (`expected: None`) keeps `rename_without_replacing`
+(`bt-platform/src/lib.rs:2278-2306`) and the same link, metadata and durability rules.
+
+### (b)3 · `Displaced` merges against the pre-exchange revision: adopted
+
+The review: "That makes Folio's just-written document the base and can turn an O-only edit
+into a file-side change." The `Displaced` row of §3.2's table becomes:
+
+| answer | merge | next precondition |
+|---|---|---|
+| `Displaced { expected, written, theirs, kept }` | `B` = the document of `expected` (the revision the write was conditional on), `O` = the desired document (b)6, `T` = `theirs` | the bytes Folio just wrote (`written`) |
+
+The revision is **not** moved to `written` before the merge. After the merge: revision ←
+`(theirs bytes, T)` for the merge's purposes, and the next write is sent with `expected =
+written`, because that is what the target holds. The receipt carries `expected` so the merge
+never has to remember it. Test: (b)14 item 4.
+
+### (b)4 · One write in flight per document; every receipt processed in order: adopted
+
+Both halves of the review's either/or are taken, because they protect different things:
+
+- **One in flight per document.** A store holds at most one `Document` job on the lane. A
+  change while one is in flight replaces the store's *pending* desired document (one slot,
+  newest wins) and is sent when the in-flight answer has been processed. This is J5's
+  coalescing ("a coalesced request is **still completed**, as *superseded by n*"): the
+  replaced pending document never reached the lane, so it has no receipt to lose.
+- **Every receipt is processed, in worker order.** §3.2's sentence "an answer for a
+  generation older than the store's newest send is dropped" and §5.3's "Stale never over
+  fresh" bullet are **withdrawn for receipts**. Revision transitions, `kept` cleanup,
+  displaced-byte merges and diagnostics are applied for every receipt. Generations remain
+  only to keep a stale answer's *visible* effects (a card, a re-derivation) from landing
+  after a newer one's — the review's words: "generation filtering may suppress stale UI
+  effects, but never cleanup, revision transitions, displaced-byte merges, or
+  diagnostics".
+- `Read` answers are processed in order too; a `Read` answer older than a `Document`
+  receipt for the same document is merged against the revision that receipt set, never
+  against an older one.
+
+### (b)5 · Quit is a bounded, multi-turn document-and-session transaction: adopted
+
+§4.3's "the quit's existing wait covers them" is **withdrawn**. The review is right: "Ordinary
+quit blocks inside `flush_judged()` waiting for the session receipt; it cannot process
+`DocumentsAnswered` meanwhile."
+
+Of the review's two forms, the **multi-turn quit state** is taken, because it is the shape
+the update's quit already has (`writes_by_receipt`, `main.rs:65789-65800`, a clock checked
+per turn, `quit::UPDATE_RECEIPT_DEADLINE`) and the shape J5 asks every document save's close
+gate to have (J5 §6 Q5: "the gate waits for the owed receipt across turns … never a wait on
+the thread"). A worker-owned terminal batch would put merge decisions on the worker, which
+holds no desired document and no merge.
+
+The quit gains one step before `Write`, **`Documents`**:
+1. Each store with an owed desired document (b)6 sends it (or keeps its in-flight job).
+2. The loop turns. Each answer is processed as in the running window — a `Moved` or
+   `Displaced` is merged (pure: no door runs; the windows are leaving) and the merged
+   document sent again — until every store has `Landed` or the deadline passes.
+3. **The deadline is the existing budget, shared**: one `SESSION_SAVE_BUDGET` (3 s,
+   `persist.rs:399`) from the start of `Documents` covers this step and the session write
+   after it. No new wait, and no longer total.
+4. At the deadline, or on a terminal refusal (`Refused`, or `Moved` against a file that will
+   not parse), the store's desired document goes to the worker as a **best-effort sidecar**
+   `<name>.unsaved-<stamp>` (create-new, temp `fsync`ed, directory flushed — "durable"
+   includes the directory). Its own answer is waited for inside the same deadline; a sidecar
+   the disk refuses is **said**: one `diagnostics.log` line naming the file, the units and
+   the sidecar's failure. §4.3's "is kept beside its file" becomes "is kept beside its file
+   when the disk allows, and said when it does not".
+5. Then `Write`, as today, with what is left of the budget.
+
+Tests: (b)14 items 6–7.
+
+### (b)6 · Owed = `writer_of_record && desired != revision.document`; desired is not the projection: adopted
+
+Each store now holds three things, not two:
+- `revision` — the bytes and document on disk, as far as Folio knows (§3.1);
+- `desired` — **the persisted document Folio wants on disk**;
+- the runtime projection — what readers read (`loaded()` for settings and pins, the live
+  table for keybindings and profiles), which is what doors produce.
+
+**Owed** ⇔ `writer_of_record && desired != revision.document`. A non-writer owes nothing
+(§4.2 and §4.1 now agree).
+
+How each is moved:
+- **A press** applies to `desired` exactly the units in which it changed the projection —
+  the unit delta of the press, not the whole projection. So a value the file carries and a
+  door refused or normalised (an unknown keybinding id, a font this machine lacks) stays in
+  `desired` as the file said it, and is never written out as a change.
+- **A merge** sets `desired` to the merged document (§3.3), then runs the doors from the
+  projection to that document (b)8. A clean file-only merge therefore leaves `desired ==
+  revision.document`: no debt.
+- **A landed write** moves the revision; `desired` is untouched.
+
+§3.3's step 3 ("The door's `store` makes that unit equal to the new base") is replaced by
+this. While a merge applies its doors, a door's `store` updates the projection only.
+
+### (b)7 · Asynchronous refusals reach the failure card: adopted
+
+The review: "the four stores' `take_fault()` calls are consumed during startup … I found no
+later transfer of a dynamic write fault to those card fields." Confirmed (the five call sites
+above). Revision (a)'s "five refusals in a row raise the card once" (§1.5, §4.1) was a reading
+of `DocumentWrites` alone; operationally **no write-failure card is raised after start
+today**. That is a fifth present defect (b)12.
+
+The `DocumentsAnswered` handler, after draining every answer, asks each store's
+`take_fault()` and raises what it returns through the toast door the start-up announcement
+uses (`announce_persistence_faults`'s card). A `Refused(ExchangeUnavailable)` or
+`Refused(Link)` is a fault at its **first** occurrence (it will not change by retrying); a
+disk refusal keeps the five-in-a-row streak (`persist.rs:56`). Regression test: (b)14 item 8,
+"a post-start fault is consumed".
+
+### (b)8 · The four policies, completed: adopted
+
+**One rule for all four first:** *what the file says and the reader does not put in force is
+carried, verbatim, in the file's position, and never rewritten by Folio* — an unknown
+keybinding id, an earlier duplicate keybinding line, a later duplicate profile id, a later
+duplicate pin, an unknown pin kind. It lives in `desired` (b)6, not in the projection, so
+it is neither applied nor owed. Each document's envelope: `schema_version` is always this
+build's current version (a newer file is refused before any merge, S§1.3 rule 2).
+
+**`settings.json`.**
+- Units: every field of `SettingsV1`, destructured with no `..` (as `plan_settings`,
+  `settings_bundle.rs:260-318`), merged field by field into the **merged document first**.
+- **The doors are then derived from the runtime state to the merged document**:
+  `plan_settings(projection, merged, platform)`. This is the review's fix for the font: if
+  Folio changed the family and the file changed only the size, the merged document has
+  Folio's family and the file's size, and the one `TerminalFont` door
+  (`settings_bundle.rs:85-89`) is called with both.
+- The three machine receipts: as revision (a) §3.4.
+
+**`keybindings.json`.**
+- Envelope: `writing_platform` of the result is this platform (`keybindings_document`,
+  `persist.rs:1894-1903`). Before merging, `B`, `O` and `T` are each normalised into this
+  platform's dialect with `translate_command_modifier` from their own `writing_platform`
+  (as `import_shortcuts` does, `settings_bundle.rs:517-544`); a line that cannot be
+  translated is carried (the one rule) and named.
+- Duplicate actions: each side is read last-wins (the reader's rule,
+  `bt-persist/src/keybindings.rs:71-73`) into one departure per action for the merge; the
+  shadowed earlier lines of `T` are carried.
+- Unknown actions: carried.
+- Units: one per action id; then chord collisions, file's action keeps the chord (revision
+  (a)).
+- **Output order** (deterministic): the merged result's lines in `T`'s order for actions `T`
+  names; then actions only Folio departs on, in the shortcut table's own order
+  (`Shortcuts::overrides`' walk, `runtime/keyboard.rs:262-272`); carried lines in their file
+  positions.
+
+**`profiles.json`.**
+- Duplicate ids: each side is read first-wins, the installer's rule (`profiles.rs:2511-2514`);
+  later duplicates in `T` are carried.
+- Units: rows by id, fields within a row (revision (a)).
+- **Order, total**: (1) the common rows' relative order: `T`'s if `T` reordered them against
+  `B`, else `O`'s if `O` did, else `B`'s; (2) each added row (on either side) is placed
+  immediately after its nearest predecessor *in its own side's sequence* that is present in
+  the result, or first if it has none; (3) two rows anchored to the same predecessor: `T`'s
+  before `O`'s, each side's in its own order. This places a file-only addition when only
+  Folio reordered, which revision (a) did not.
+- Shipped ids the file never names are appended by the installer as today; they are not
+  merge units.
+
+**`pins.json`.**
+- Duplicate identities: each side is read first-wins (the menus' `row_of`, `pins.rs:108-113`);
+  later duplicates in `T` are carried.
+- **Units and the contradiction resolved.** Per identity, with presence `p` and opaque
+  `extra` `e` on each side:
+  - presence: if `pO == pB`, take `T`'s presence; if `pT == pB`, take `O`'s; if both differ
+    from `B` they agree (both removed, or both added);
+  - **remove against change is a conflict, and the file wins**: Folio removed and the file
+    changed `e` → kept, with `T`'s `e`; the file removed and Folio changed `e` → removed.
+    Revision (a)'s bullet "a row removed on either side is removed" now reads "… unless the
+    other side changed that row, which is a conflict the file wins";
+  - `e` when present on both: three-way per key of `e`; file wins a key changed on both.
+- **Top-level `PinsV1.extra`** (`bt-persist/src/pins.rs:54-58`): three-way per key; file wins
+  a key changed on both.
+- Order: as revision (a) (file order, then Folio's additions appended).
+
+### (b)9 · Stable reads, and names as the volume compares them: adopted
+
+**Stable read.** The `Read` job, and step 1 of every `Document` job, read through one
+function: `metadata` (length, modified time, file id) → bounded read → `metadata` again. A
+mismatch answers `MovedDuringRead` and nothing is merged; the ear has (or will have) a stamp
+for that document, so the next pass reads again. An in-place writer that pauses longer than
+the quiet window between two **valid** intermediate documents is indistinguishable from two
+saves, and is treated as two: the first is merged, the second merged after it. Because every
+write is conditional, that costs at most one extra merge and a flicker, never a loss. §3.5's
+sentence "for these four documents that read is always refused" is **narrowed** to: a torn
+*prefix* is always refused; a valid intermediate document is merged as a save, and the
+document it is followed by is merged next.
+
+**Names.** The filter compares case-insensitively (ASCII folding: the four names are ASCII)
+on every platform. On a case-sensitive volume an extra stamp for a different file costs one
+read that finds the revision's bytes and does nothing; a missed stamp would cost a hand
+edit. Windows may also report a short (8.3) name; a name containing `~` whose extension
+begins `.JSO` (case-folded) stamps all four. E-3 measures which names arrive.
+
+### (b)10 · Memory: the real bound, shared ownership: adopted
+
+§3.1's "four documents of a few kilobytes each" is **withdrawn**. Each document is bounded at
+16 MiB (`MAX_DOCUMENT_BYTES`, `migrate.rs:1446`). Revision, in-flight and pending bytes are
+`Arc<[u8]>`, so one buffer is shared by the revision, the job and its receipt. Worst case per
+document: the revision's bytes, one in-flight buffer, one displaced buffer in a receipt (each
+≤ 16 MiB) and their parsed documents — about 48 MiB of bytes per document, about 192 MiB for
+all four, in a pathological run; the ordinary case is a few kilobytes each. Startup's refused
+bytes need a new read outcome: `read_with_fallback_bytes` gains `Refused { bytes }` for a
+document refused with its bytes in hand (`migrate.rs:1538-1540` today returns none).
+
+### (b)11 · The conflict card, shorter and bounded: adopted
+
+The review's form, adopted: **"`settings.json`: Theme and Font size came from disk."** One line
+per file, at most three names per line, then "and N more" (`// zh: pending`). One card per pass
+as before, at most four lines. The full list of units, with both values, goes to
+`diagnostics.log` (§3.6's merge line gains the names).
+
+### (b)12 · Corrections to §1.5: adopted
+
+- **Defect 1's trigger is softened.** "The failed write's own temporary file is enough to wake
+  the watch" holds when the failure comes after the temporary file was made; a failure at
+  serialisation, open or temp creation makes no event. The loss happens on the next pass,
+  however triggered (a `session.json` flush is enough today, since the watch is a tree).
+- **Defect 2 is wider than the quiet window.** None of the four stores checks the disk before
+  writing, so a hand edit landing at any moment before Folio's rename is overwritten — for all
+  four files, not only profiles and pins.
+- **Defect 5 (new): no write-failure card after start** (b)7.
+
+### (b)13 · Experiments, expanded: adopted
+
+- **E-1 (Windows)** adds: a backup name that already exists (what the call does — the door
+  never relies on it, (b)2); metadata, streams and ACL after the exchange; driving 1175, 1176
+  and 1177 through the existing injected-operation seam (`replace_file_preserving_with`,
+  `file_replace.rs:311-318`); the directory flush after the call.
+- **E-2 (macOS)** adds: `volumeSupportsSwapRenaming` against the call's answer on APFS, HFS+
+  and SMB; mode, owner, ACL and xattrs after `carry_metadata` + swap.
+- **E-3 (both)** adds: case-only names; 8.3 names on Windows; a symlinked and a hard-linked
+  document; an in-place, chunked writer whose intermediate states are valid JSON.
+- **E-5 (Linux, new)**: `renameat2(RENAME_EXCHANGE)` on ext4 (required), and the errno on an
+  unsupported volume (a FUSE or network mount).
+- E-4: unchanged.
+
+### (b)14 · Tests, added (each with its mutation)
+
+1. `bt-platform` `exchange_tests::an_unsupported_exchange_refuses_and_leaves_the_target`. MUTATION: fall back to a plain rename.
+2. `exchange_tests::linux_rename_exchange_hands_back_the_displaced_file` (Linux CI). MUTATION: `RENAME_NOREPLACE` in place of `RENAME_EXCHANGE`.
+3. `exchange_tests::replace_file_partial_states_1175_1176_1177_keep_the_document` and `…::an_existing_backup_name_is_refused` (Windows, injected operations). MUTATIONS: drop the 1177 restore / pass an existing backup name to the call.
+4. `persist::conditional_write_tests::displaced_merges_against_the_pre_exchange_revision` — Folio changed field A only, the crossing edit changed field B; result keeps both and names no conflict. MUTATION: set the revision to `written` before the merge.
+5. `…::a_stale_receipt_with_displaced_bytes_is_never_dropped`. MUTATION: filter receipts by generation.
+6. `quit_tests::a_moved_or_displaced_answer_at_quit_is_merged_and_written_before_the_session` (fake disk, fake clock). MUTATION: send the session job without the `Documents` step.
+7. `quit_tests::a_document_refused_at_quit_is_kept_or_said` — the sidecar lands; and, with the disk refusing the sidecar too, one diagnostics line. MUTATIONS: skip the sidecar / swallow its failure.
+8. `app_diagnostics_tests::a_write_fault_after_start_reaches_a_card`. MUTATION: never call `take_fault` after start (today's code).
+9. `settings_merge::tests::folios_font_family_and_the_files_font_size_both_survive`. MUTATION: build the door change from `T`.
+10. `keybindings_merge::tests::a_file_written_on_another_platform_merges_in_this_dialect` and `…::duplicate_and_unknown_lines_are_carried`. MUTATIONS: skip the translation / drop carried lines.
+11. `profiles_merge::tests::a_file_only_row_is_placed_when_only_folio_reordered` and `…::a_later_duplicate_id_is_carried`. MUTATIONS: revision (a)'s order rule / drop the duplicate.
+12. `pins::tests::top_level_extra_merges_by_key`, `…::remove_against_change_goes_to_the_file`, `…::a_later_duplicate_pin_is_carried`. MUTATIONS: take `O`'s top-level `extra` / removal always wins / collapse duplicates.
+13. `exchange_tests::a_symlinked_or_hard_linked_document_is_refused_not_replaced`. MUTATION: drop the link check.
+14. `storage_watch::tests::case_equivalent_and_short_names_stamp_the_document`. MUTATION: exact-case comparison.
+15. `persist::stable_read_tests::a_valid_intermediate_document_is_merged_then_the_final_one` and `…::a_read_that_raced_a_writer_is_not_merged`. MUTATIONS: no second `metadata` / merge a `MovedDuringRead`.
+16. `persist::revision_tests::identical_bytes_and_a_return_to_old_bytes_are_no_change`. MUTATION: compare modified times instead of bytes.
+17. `persist::owed_tests::a_value_a_door_refused_is_not_written_back` (an unknown keybinding id from the file). MUTATION: derive `desired` from the projection.
+
+### (b)15 · The exact text edits, enumerated: adopted
+
+DESIGN.md is append-only (CONVENTIONS; `_codex-rules.md`): each change below to an earlier
+entry is made by a **new dated entry** that names the entry it supersedes; no earlier entry is
+edited.
+
+| file:line | today's words | becomes | ticket |
+|---|---|---|---|
+| `RULES.md:990` (R33) | "applied in process at its own door and **not re-read from disk during a run**" | "applied in process at its own door, and re-read from disk when the storage watch hears it (§ this note)" | T-STORE-MERGE-SETTINGS |
+| `RULES.md:1030-1034` (R33) | "The contrast that matters: `profiles.json` and the pins are watched live … while `settings.json` is not. Two reload disciplines already" | one sentence: the four documents are followed live by one discipline (named watch, revision, conditional write, merge) | T-STORE-MERGE-SETTINGS |
+| `RULES.md:1053-1054` (R33) | "never by writing `settings.json` and waiting" | unchanged in meaning (an import still goes through the doors); add: "a hand edit enters by the same doors" | T-STORE-MERGE-SETTINGS |
+| `ARCHITECTURE.md:1659` (§9 table) | "two disciplines … `settings.json` is applied in process … and is not re-read from disk during a run" | one discipline for all four | T-STORE-MERGE-SETTINGS |
+| `ARCHITECTURE.md:1669-1671` (§9) | "… each row's own apply function, never through a re-read" | "… each row's own apply function, which a re-read also uses" | T-STORE-MERGE-SETTINGS |
+| `ARCHITECTURE.md:1239`, `window_waits.tsv:74` (row 20) | "settings/keybindings/profiles writes" | removed from row 20's call cell; disposition notes the lane | T-DOCUMENT-SAVE-LANE |
+| DESIGN §7.1.6c-2 (`DESIGN.md:2418`) | "每一次点击当场落盘" | new entry: a press is handed to the storage lane at once and lands by receipt | T-DOCUMENT-SAVE-LANE |
+| DESIGN §7.1.6c-2′ / `DESIGN.md:8193` | "`store_keybindings` 当场落盘 … 它存的东西现在没有一刻不在磁盘上" | new entry: the table is live at once; the file follows by receipt | T-DOCUMENT-SAVE-LANE |
+| DESIGN §7.1.6c-6d (`DESIGN.md:2815`) | "不在通知那一端过滤" and the tree watch | new entry: a named shallow watch, names filtered on the watcher thread | T-STORAGE-EAR-NAMED |
+| DESIGN §7.1.6c-6d (`DESIGN.md:2811`, scope) | `profiles.json` (and later pins) followed live | new entry: all four followed live, by merge | T-STORE-MERGE-SETTINGS |
+| DESIGN §7.1.6c-6d (`DESIGN.md:2817`, mid-run broken file) | "一个字都不取 … + 一张卡" | unchanged; extended to settings and keybindings; no `.rejected-` copy mid-run | T-DOCUMENT-SAVE-LANE |
+| `settings_bundle.rs:28-29` | "Never by writing `settings.json` and waiting — nothing re-reads that file during a run." | "Never by writing `settings.json` and waiting for the re-read: an import uses the doors directly." | T-STORE-MERGE-SETTINGS |
+| `storage_watch.rs:1-52` (header; `:33-45` the filter paragraph, `:47-52` the meaning) | tree watch, nameless, two files | named shallow watch, four documents, the stamp rule | T-STORAGE-EAR-NAMED |
+| `main.rs:715-729` (`AppEvent::StorageChanged` doc), `main.rs:12712-12725` (`App::storage_watch` doc), `main.rs:48484-48500` (`advance_storage_watch` doc) | "both files … re-reading each and comparing" | the four documents, by stamp | T-STORAGE-EAR-NAMED |
+| `persist.rs:1995-2018`, `pins.rs:209-215` (`reread` docs) | "a document identical to the one in force is `Unchanged`" | compared with the revision's bytes | T-STORE-REVISION |
+| `CHANGELOG.md` `## Unreleased` | — | revision (a)'s line | T-STORE-MERGE-SETTINGS |
+
+### (b)16 · The J5 save lane: this protocol **is** that lane's protocol
+
+J5's ticket S-6, T-DOCUMENT-SAVE-LANE (`side-effects-contract-2026-10-11.md:240`), asks for a
+document's save as "a request on a storage lane, `save(revision)` → `Saved { revision }` /
+`Conflict` / `Failed`", with "B6's settings stores join[ing] the same lane when B6 is built".
+**The conditional write of §3.2 as revised by (b)1–(b)5 is that lane's protocol.** The
+mapping:
+
+| J5 | this note |
+|---|---|
+| `save(revision)` | `Document { expected: Option<Arc<[u8]>>, bytes, mode, link_policy }` — `expected` is the disk revision as exact bytes |
+| `Saved { revision }` | `Landed { bytes }` — the new disk revision is the bytes written |
+| `Conflict` | `Moved { theirs }` (the precondition saw another file; nothing written) and `Displaced { expected, written, theirs, kept }` (another file crossed the exchange) |
+| `Failed` | `Refused { cause }`, with `ExchangeUnavailable`, `Link` and the disk's own errors |
+| "serialised per document", "a coalesced request is still completed, as *superseded by n*" | (b)4: one in flight per document, a pending slot, every receipt processed |
+| §6 Q5, the close gate waits across turns | (b)5: the quit's `Documents` step, across turns, inside the shared budget |
+
+**What the join costs this design** — nothing in the protocol; four parameters and one
+scheduling dependency:
+
+1. **A mode per request.** A preview buffer has no merger, so a `Displaced` answer for it
+   cannot be merged. The lane takes `mode: Merge | Restore`. In `Restore` the worker, on
+   finding displaced bytes that are not `expected`, exchanges again to put them back
+   (conditional on the target still holding `written`) and answers `Conflict` with nothing
+   lost; if that second exchange is itself crossed, both files are kept and named. The four
+   stores use `Merge`; the preview uses `Restore`, which also closes the race its mtime check
+   leaves open today (`preview.rs:5785-5791`). The four stores also use `Restore` between the
+   lane's ticket and the merge tickets (b)17, which is what lets those land separately.
+2. **A link policy per request.** The four documents refuse links (b)2. The preview today
+   writes a linked file with the plain writer, a gap "nobody has ruled" (`preview.rs:5766-5773`);
+   that ruling is not this note's. The lane takes `link_policy: Refuse | PlainWriter`, the
+   preview keeps `PlainWriter` until it is ruled, and J5 owns that question.
+3. **Two revisions for a buffer.** J5's dirty flag follows the *body* revision (the undo log's,
+   `preview.rs:5794-5800`); the lane's precondition is the *disk* revision. A preview request
+   carries both; the four stores need only the disk one. The preview's disk revision becomes
+   exact bytes instead of a modified time (`preview.rs:5785`), which costs one encoded copy of
+   the file per open buffer, bounded by the preview's own read cap.
+4. **Metadata.** The preview's save already keeps metadata through `ReplaceFileW`
+   (`atomic.rs:150-164`); (b)2's exchange door keeps the same on Windows and adds the carry on
+   macOS and Linux, so the preview loses nothing by moving onto it.
+5. **Scheduling.** S-6 depends on J5's S-3 and OC O-7 (`side-effects-contract-2026-10-11.md:240`).
+   The lane is therefore **one ticket, jointly owned** ((b)17 ticket 4): if S-3 is not ready, the
+   lane ships with the four stores and the preview joins under S-6 with no protocol change.
+   Head-of-line: one worker means a large preview save on a slow share delays a settings write
+   and the session autosave. Nothing in (b)4–(b)5 relies on one thread any longer (the quit no
+   longer relies on FIFO), so the lane may later serialise per document on more than one worker
+   without changing the protocol; this note does not split it.
+
+### (b)17 · The tickets, revised (split, independently gated)
+
+| # | ticket | size | after | the work | tests |
+|---|---|---|---|---|---|
+| 1 | T-STORAGE-EAR-NAMED | S | — (E-3) | §2.2 with (b)9's names; the edits of (b)15 for the watch | 1; the two of §9.1; (b)14-14 |
+| 2 | T-STORE-REVISION | S | 1 | §3.1 with `Arc<[u8]>` and the refused-bytes outcome (b)10; profiles/pins compare against the revision | 2; §9.2's; (b)14-16 |
+| 3 | T-EXCHANGE-DOOR | M | — (E-1, E-2, E-5) | (b)1–(b)2: `replace_keeping_displaced` on three platforms, its refusals, metadata, links, durability | 7; (b)14-1, -2, -3, -13 |
+| 4 | **T-DOCUMENT-SAVE-LANE** (= J5 S-6, jointly owned) | M | 2, 3 | the lane (b)16; `Document`/`Read` jobs with stable reads (b)9; one in flight, every receipt (b)4; `desired` and owed (b)6; `Restore` mode for the four stores until 6; faults to cards (b)7; no mid-run `.rejected-`; row 20 | 2's in-flight variant, 5, 8, 9, 10, 17, 18, 19; (b)14-5, -8, -15, -17 |
+| 5 | T-QUIT-DOCUMENTS | M | 4 | (b)5: the `Documents` quit step, the shared budget, the sidecar | 4; (b)14-6, -7 |
+| 6 | T-STORE-MERGE-SETTINGS | M | 4 | §3.3 with (b)3 and (b)6; the one carried-units rule; settings by (b)8; `Merge` mode; settings and keybindings join the pass; R33, A§9 and the rest of (b)15 | 3, 15, 16; (b)14-4, -9 |
+| 7 | T-STORE-MERGE-KEYBINDINGS | S | 6 | (b)8 keybindings | 14; (b)14-10 |
+| 8 | T-STORE-MERGE-PROFILES-PINS | M | 6 | (b)8 profiles and pins | 11, 12, 13; (b)14-11, -12 |
+| 9 | T-STORE-NOTICE | S | 7, 8 | (b)11's card; the two "kept" sentences; diagnostics | 6; §9.5's |
+
+Ticket 5 may run beside 6–8; 7 and 8 beside each other. Every ticket is S or M; none is L.
+
+### (b)18 · The owner questions, revised (five)
+
+**Q1. When a value was changed both in Folio (not yet saved) and in the file, does the file's
+stand?** Unchanged from revision (a), with one addition: a pin unpinned and pinned again in
+Folio looks untouched to the merge, so a removal of that pin in the file stands.
+**Recommendation: yes, the file wins every conflict, and one short card names what came from
+disk.**
+
+**Q2. Should a hand edit that conflicts with nothing take effect silently?** Unchanged.
+**Recommendation: yes.**
+
+**Q3. Should `settings.json` and `keybindings.json` be followed while Folio runs?** Unchanged.
+**Recommendation: yes.**
+
+**Q4. When you quit, a change Folio could not write is kept as a copy beside the file when the
+disk allows, and named in `diagnostics.log` when it does not. Keep it?** **Recommendation:
+yes.**
+
+**Q5 (reframed). When Folio cannot replace one of these files safely, should it refuse and say
+so rather than overwrite?** This covers three cases: the file is a symbolic link, the file has
+a second name (a hard link — a dotfiles tree that links it in), or the volume cannot exchange
+two files in one step (some network shares). In each, Folio writes nothing to that file, keeps
+the change for the run, and raises the "could not be saved" card naming the file. Following a
+link to its target stays out of scope. **Recommendation: yes.** Today a save replaces a link
+with a plain file, splits a hard link, and on such a volume can overwrite a hand edit; each is
+the silent loss this design exists to end.
+
+### Departures
+
+- **Pins: a remove followed by a re-pin in Folio is not detected.** The review: "A remove
+  followed by re-pin that returns `O` to the same state as `B` cannot be detected by a
+  state-only merge; the file removal wins unless the design introduces an operation log." Not
+  built, and argued: the state Folio holds after an unpin and a re-pin is the state it held
+  before both, and the merge is a merge of states by design (§3.3); an operation log for one
+  document would be a second record of what the pin table already says, with the drift that
+  §4.1 avoids by deriving "owed" from documents. The case is named in Q1 so the owner rules on
+  it with the rest of the conflict policy.
+- **Revision (a)'s "§3.2 a volume that cannot exchange" is not argued; it is withdrawn** (b)1.
+
+### Sources added
+
+- The review: `B6-settings-reread-design.review-codex.md` (the 0.4.8 trace, 2026-10-11).
+- J5: `docs/plans/design/side-effects-contract-2026-10-11.md` (on `j5-contracts`), §2.3 V1,
+  §4 "A save the agent and the person both asked for", §5 S-6, §6 Q5.
+- `ReplaceFileW`: https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew
+  (backup name, error codes 1175–1177, `REPLACEFILE_WRITE_THROUGH` unsupported), as the review
+  reports it; E-1 confirms.
+- `volumeSupportsSwapRenaming`: https://developer.apple.com/documentation/foundation/urlresourcevalues/volumesupportsswaprenaming
+- `renameat2(2)`: https://man7.org/linux/man-pages/man2/renameat2.2.html
+- Folio at `77399d57`: `main.rs:43955-44208` (the five `take_fault` calls), `main.rs:65789-65800`,
+  `settings_bundle.rs:85-89`, `bt-persist/src/keybindings.rs:71-73`, `profiles.rs:2511-2514`,
+  `migrate.rs:1538-1540`, `preview.rs:5766-5801`, `packaging/macos/Info.plist.in:88-89`.
