@@ -115,8 +115,13 @@ pub enum ExchangeRefusal {
 ///
 /// `temp` is the caller's: written and flushed beside `target`. On `Ok`, the
 /// target holds `temp`'s bytes and [`Displaced`] names the file that holds the
-/// bytes the target held; on a refusal, the temporary file is still the
-/// caller's to remove. See the module's contract for each platform.
+/// bytes the target held. On a refusal before the exchange — `Link`,
+/// `ExchangeUnavailable`, `BackupNameTaken`, `Failed` — the temporary file
+/// still holds the caller's new bytes and is the caller's to remove. On
+/// `NotDurable` the exchange has happened: the target holds the new bytes and
+/// `displaced` (on macOS and Linux, the temporary file's own name) holds the
+/// person's old bytes, which the caller keeps until its merge lands, exactly
+/// as after `Ok`. See the module's contract for each platform.
 ///
 /// # Errors
 /// An [`ExchangeRefusal`].
@@ -527,6 +532,8 @@ mod exchange_tests {
         exchange: Answer<'a>,
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         volume_exchanges: bool,
+        /// The code a directory flush answers with, or `None` for success.
+        flush_refuses: Option<i32>,
         asked: RefCell<Vec<String>>,
     }
 
@@ -536,6 +543,7 @@ mod exchange_tests {
                 exchange: Box::new(exchange),
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 volume_exchanges: true,
+                flush_refuses: None,
                 asked: RefCell::new(Vec::new()),
             }
         }
@@ -572,7 +580,8 @@ mod exchange_tests {
             self.asked
                 .borrow_mut()
                 .push(format!("flush {}", directory.display()));
-            Ok(())
+            self.flush_refuses
+                .map_or(Ok(()), |code| Err(io::Error::from_raw_os_error(code)))
         }
     }
 
@@ -895,6 +904,58 @@ mod exchange_tests {
             surface.asked(),
             ["exchange".to_owned(), format!("flush {}", root.display())]
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An exchange that really happens, the way this platform's call does it:
+    /// Windows moves the target to the displaced name and the temporary file
+    /// under the target's; a swap trades the two names.
+    fn exchanges_for_real(temp: &Path, target: &Path, displaced: &Path) -> io::Result<()> {
+        if displaced == temp {
+            let aside = temp.with_extension("aside");
+            fs::rename(target, &aside)?;
+            fs::rename(temp, target)?;
+            fs::rename(&aside, temp)
+        } else {
+            fs::rename(target, displaced)?;
+            fs::rename(temp, target)
+        }
+    }
+
+    /// RED (review nit 2) — **a directory flush that fails after the exchange
+    /// answers `NotDurable`, and both files are where the answer says**: the
+    /// target holds the new bytes and `displaced` the old ones, so a caller
+    /// that keeps `displaced` loses nothing, and one told the write was refused
+    /// would not know the target had changed.
+    ///
+    /// MUTATION: map a flush failure to `Ok` in `exchange_with` and the
+    /// `expect_err` gets an `Ok`.
+    #[test]
+    fn a_failed_flush_answers_not_durable_with_both_files_in_place() {
+        let root = temp_root("not-durable");
+        let target = root.join("settings.json");
+        let temp = root.join("settings.json.tmp-1");
+        fs::write(&target, b"old").unwrap();
+        fs::write(&temp, b"new").unwrap();
+        let displaced = displaced_for(&temp, &target);
+        let mut surface = Recording::new(exchanges_for_real);
+        surface.flush_refuses = Some(5);
+
+        let refusal = exchange_with(&surface, &temp, &target, &displaced)
+            .expect_err("the directory flush failed");
+
+        match refusal {
+            ExchangeRefusal::NotDurable {
+                displaced: answered,
+                error,
+            } => {
+                assert_eq!(answered.path, displaced);
+                assert_eq!(error.raw_os_error(), Some(5));
+            }
+            other => panic!("a failed flush after the exchange is NotDurable: {other:?}"),
+        }
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+        assert_eq!(fs::read(&displaced).unwrap(), b"old");
         fs::remove_dir_all(root).unwrap();
     }
 
