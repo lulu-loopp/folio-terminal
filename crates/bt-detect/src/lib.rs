@@ -1361,13 +1361,38 @@ fn ascii_line_looks_like_prose(line: &str) -> bool {
     multi_letter_words >= 2 || (multi_letter_words >= 1 && words >= 3)
 }
 
+/// A letter of Chinese, Japanese or Korean prose — the scripts a body line can be prose in
+/// without one Latin word (AUDIT-hardcode LIB-4: kana and Hangul were missing, so a Japanese line
+/// in kana or a Korean line was never recognised as prose).
 fn is_cjk_prose_char(character: char) -> bool {
+    is_written_without_spaces(character) || is_hangul(character)
+}
+
+/// **The CJK characters a line is written in without spaces between words**: ideographs, kana,
+/// and the CJK punctuation and fullwidth forms set among them. Hangul is not here — Korean puts
+/// a space between words, as Latin does. Read by the prose guard (through [`is_cjk_prose_char`])
+/// and by the table rejoin, which must not invent a space between two of these.
+pub(crate) fn is_written_without_spaces(character: char) -> bool {
     matches!(character,
         '\u{3000}'..='\u{303f}'      // CJK punctuation
+        | '\u{3040}'..='\u{309f}'    // hiragana
+        | '\u{30a0}'..='\u{30ff}'    // katakana
+        | '\u{31f0}'..='\u{31ff}'    // katakana phonetic extensions
         | '\u{3400}'..='\u{4dbf}'    // CJK extension A
         | '\u{4e00}'..='\u{9fff}'    // CJK unified ideographs
         | '\u{f900}'..='\u{faff}'    // compatibility ideographs
-        | '\u{ff00}'..='\u{ffef}'    // fullwidth forms
+        | '\u{ff00}'..='\u{ffef}'    // fullwidth and halfwidth forms
+        | '\u{20000}'..='\u{3ffff}'  // ideographs beyond the basic plane (extensions B onward)
+    )
+}
+
+/// Hangul: the conjoining jamo, the compatibility jamo and the syllables.
+fn is_hangul(character: char) -> bool {
+    matches!(character,
+        '\u{1100}'..='\u{11ff}'
+        | '\u{3130}'..='\u{318f}'
+        | '\u{a960}'..='\u{a97f}'
+        | '\u{ac00}'..='\u{d7ff}'
     )
 }
 
@@ -4144,6 +4169,27 @@ pub fn render_placeholder(task: &DetectionTask) -> PlaceholderArtifact {
 
 #[cfg(test)]
 mod tests {
+    /// RED (AUDIT-hardcode LIB-4) — **a line of Japanese kana or of Korean is prose to the
+    /// guard that stops an orphan `$$` from swallowing a paragraph**, as a line of Chinese
+    /// already was; one-letter algebra still is not.
+    ///
+    /// MUTATION: drop the kana and Hangul ranges from the prose classifier — the Japanese
+    /// and Korean rows go red.
+    #[test]
+    fn kana_and_hangul_lines_are_prose_to_the_body_guard() {
+        for line in [
+            "これはふつうのぶんしょうです",
+            "テキストをコピーしました",
+            "이것은 평범한 문장입니다",
+            "这是一段普通的中文",
+        ] {
+            assert!(body_line_looks_like_prose(line), "{line:?} is prose");
+        }
+        for line in [r"x = y + 1", r"\frac{a}{b}", "a^2 + b^2 = c^2"] {
+            assert!(!body_line_looks_like_prose(line), "{line:?} is not prose");
+        }
+    }
+
     use super::*;
     use bt_transcript::{CapturedRow, TranscriptStore};
     use std::{num::NonZeroU32, num::NonZeroUsize};
