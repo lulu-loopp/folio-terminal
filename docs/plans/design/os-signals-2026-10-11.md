@@ -1,6 +1,6 @@
 # OS-level change signals and the deep palette refresh: T-OS-SIGNALS and T-PALETTE-DEEP (0.4.8 B5), design note, 2026-10-11
 
-Status: **revision (b), 2026-10-11**, after the Codex review of `3de187a4`
+Status: **ticket 1 built** (T-DIRWATCH-LIFECYCLE, 2026-10-11; revision (f) records it as built). Before that, **revision (b), 2026-10-11**, after the Codex review of `3de187a4`
 (`B5-os-signals-design.review-codex.md`, verdict *adopt with changes*, twelve required
 changes). Revision (b) is the dated section at the end. **Where revision (a)'s text and
 revision (b) differ, revision (b) stands**: in particular §2's totals, §3.1's forced-removal
@@ -2081,3 +2081,62 @@ None. The ruling is applied as written.
 - `B5-os-signals-design.review-codex-d.md` (0.4.8 trace, 2026-10-11): the three open items,
   quoted verbatim in (e)1.
 - The coordinator's ruling of 2026-10-11 on this protocol (relayed with that review).
+
+## Revision (f), 2026-10-11, ticket 1 as built (T-DIRWATCH-LIFECYCLE)
+
+T-DIRWATCH-LIFECYCLE is built as (e)3 specifies, with `Active` named `Armed` in the reports.
+What follows records where the build had to choose, in the order of the sections it touches.
+
+### (f)1 · Every existing watch moved to the steward, not only the new ears
+
+(b)4 kept the files, git, preview, scheme and storage watches on the window thread as row 8's
+debt. (c)3 then gave every `DirWatch` start a `WorkerCtx`, which no window-thread caller has, and
+the ticket's brief asks for row 8 to be retired. So all five existing watchers became ears of the
+steward: `files_watch` (shallow, per window), `preview_watch` (shallow and named, per window),
+`git_watch` (tree, the application's), and `dir_news::DirNews` for the schemes and storage folders
+(tree). Row 8 is `done`; the window thread holds no `DirWatch`.
+
+### (f)2 · The steward's door, as written
+
+- `WatchSteward::serve(self, ctx: &WorkerCtx)` is the worker's body and owns every watch. The
+  window thread's side is an `EarHandle` per ear, opened with `watch_steward::open_ear(depth,
+  listener)`; (c)3's `request(ear, wanted, reasons)` is `EarHandle::want(&wanted, rearm)`, where
+  `rearm` is the set of `Failed` members the reader asked about. An unchanged set with nothing to
+  rearm is not sent.
+- `REPORTS` is one `Mutex<BTreeMap<(Ear, PathBuf), Numbered>>` for the process (ears are numbered
+  process-wide), each value a `MemberReport` (`Armed` or `Failed(cause)`) with its number. A served
+  ear's every member is reported, so an ear that forgot a member and wants it again learns its
+  state on the round its request brings. Each ear drains its own reports on its own turn.
+- The wake is `AppEvent::WatchStewardAnswered`, installed at startup (`watch_steward::install_wake`)
+  rather than handed over with the first request; the report is published before it.
+- The volume hook is `Steward::volume_arrived(root)`: every `Failed` member under `root`, of
+  every ear, is tried once. It has no product caller until B5 ticket 2 (a dated `dead_code`
+  expectation on the product wrapper).
+
+### (f)3 · `DirWatch`'s doors and its end
+
+- The three doors take `&WorkerCtx` ((c)3). `Drop` cannot take one; that only the steward drops a
+  watch is held by a source guard instead
+  (`watch_steward::tests::only_the_steward_starts_or_drops_a_watch`: `DirWatch` is named in
+  `bt-app`'s product only inside `crate::watch_steward`).
+- The two nameless doors hand their callers `DirChange` too, through `DirChange::nameless()`
+  (every change `Unknown`, the end `Ended`): with `Fn()` an end could not be told from a change,
+  and the steward must tell them apart for every depth. No door reads more names than before.
+- On Windows a failed wait on the stop and completion events is an end as well as a refused read
+  or a failed completion; `ERROR_NOTIFY_ENUM_DIR` from a completion is the overflow's word
+  (`Unknown`), not an end. On macOS the run loop now also ends on `RootGone`: before this ticket
+  `on_events` stopped the run loop on it and the loop entered it again, so the thread lived on.
+  The unmount flag ends the watch only when the event's path is the root or one of its ancestors.
+
+### (f)4 · The files column's reader-triggered event
+
+For the files column the reader's ask is the person's refresh of that folder: every
+`Runtime::refresh_files_dir` (unfolding a folder, opening a path to it, the column's own writes)
+calls `FilesWatch::reader_asked`, and the next sync tries the `Failed` folder once. A folder that
+goes unheard (at start or later) is read again at once when its tree already holds an answer, and
+marks the palette's index of its roots dirty.
+
+### Departures
+
+(f)1 departs from (b)4's sentence that the existing users are not moved, as (c)3's capability rule
+and the ticket's row-8 retirement require. Nothing else departs.

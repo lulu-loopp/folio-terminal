@@ -6185,3 +6185,29 @@ constructor; the guard now excludes only that fully qualified call in Taskbar's 
 a mutation that restores the false edge. Keeping the row would turn a closed inventory into a
 list of harmless destructors. `EXCEPTIONS` therefore contracts 14 → 13 and `PINNED` 41 → 40; the
 source walker still closes every retained chain. No structural-debt row is closed or changed.
+
+## Revision (o), 2026-10-11 — the watch steward's row (T-DIRWATCH-LIFECYCLE)
+
+The B5 design note's ticket 1 (`docs/plans/design/os-signals-2026-10-11.md`, revisions (c)3, (e)3
+and (f)) adds one door-spawned worker and changes where TD-1 and TD-2 are reached.
+
+**The census.** One spawn site more, through the door: `bt-app` `watch_steward::Steward::see_it_served`
+starts `watch-steward` at `BelowNormal`, whose body is `WatchSteward::serve(self, &WorkerCtx)`.
+The live census is 55 production spawn sites (36 → 37 in `bt-app`), 51 through the door.
+`serve` is a `worker-door-body` row of the registry's `# effects` (`Condvar::wait` ×1), and so are
+both arms' `DirWatch::start_scoped` (Windows `Receiver::recv` ×1, `JoinHandle::join` ×1; macOS
+`canonicalize` ×1, `metadata` ×1, `Receiver::recv` ×1, `JoinHandle::join` ×2), whose doors now
+take a `WorkerCtx`; their six bare-site rows left the inventory.
+
+**The exception table.** The steward's row is the reach of TD-1 and TD-2:
+
+| id | live exception | debt / present justification | 2026-10-11 disposition |
+|---|---|---|---|
+| TD-1 | `DirWatch` (Windows) | D-40; `Drop` signals and joins the watcher — reached only on the `watch-steward` worker (`WatchSteward::serve`), never on the window thread | retained; body chain unchanged |
+| TD-2 | `DirWatch` (macOS) | D-40; `Drop` stops and joins the event stream — reached only on the `watch-steward` worker | retained; body chain unchanged |
+
+Both `Drop` bodies are unchanged, so `EXCEPTIONS` stays at 13 and `PINNED` at 40. What changed is
+who can reach them: `DirWatch` is named in `bt-app`'s product only inside `crate::watch_steward`
+(`watch_steward::tests::only_the_steward_starts_or_drops_a_watch`), so every drop happens on the
+steward's thread. Row 8 of §5.3 is `done`. D-40 stays open for the unbounded join itself, which
+a worker now waits on.

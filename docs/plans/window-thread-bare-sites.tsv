@@ -139,10 +139,6 @@ bt-platform	[target_os = "macos"]	crate::install_txn::arm::<Os as Surface>::rena
 bt-platform	[target_os = "macos"]	crate::macos_files::recycle	std::fs::metadata	1
 bt-platform	[target_os = "macos"]	crate::macos_identity::arm::run	std::thread::sleep	1
 bt-platform	[target_os = "macos"]	crate::macos_watch::<DirWatch as Drop>::drop	std::thread::JoinHandle::join	1
-bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start_scoped	std::fs::canonicalize	1
-bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start_scoped	std::fs::metadata	1
-bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start_scoped	std::sync::mpsc::Receiver::recv	1
-bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start_scoped	std::thread::JoinHandle::join	2
 bt-platform	[unix]	crate::attention_pipe::<AttentionPipe as Drop>::drop	libc::close	1
 bt-platform	[unix]	crate::attention_pipe::<AttentionPipe as Drop>::drop	libc::write	1
 bt-platform	[unix]	crate::attention_pipe::<AttentionPipe as Drop>::drop	std::thread::JoinHandle::join	1
@@ -190,8 +186,6 @@ bt-platform	[windows]	crate::video::engine::can_play_types	std::thread::JoinHand
 bt-platform	[windows]	crate::video::within_budget	std::sync::mpsc::Receiver::recv_timeout	1
 bt-platform	[windows]	crate::windows_impl::<DirWatch as Drop>::drop	std::thread::JoinHandle::join	1
 bt-platform	[windows]	crate::windows_impl::<DirWatch as Drop>::drop	windows::Win32::System::Threading::SetEvent	1
-bt-platform	[windows]	crate::windows_impl::DirWatch::start_scoped	std::sync::mpsc::Receiver::recv	1
-bt-platform	[windows]	crate::windows_impl::DirWatch::start_scoped	std::thread::JoinHandle::join	1
 bt-platform	[windows]	crate::windows_impl::close	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::windows_impl::directory_folds_case	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::windows_impl::open_clipboard_with_retry	std::thread::sleep	1
