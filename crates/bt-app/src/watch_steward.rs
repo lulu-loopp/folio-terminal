@@ -764,6 +764,14 @@ pub(crate) mod fake {
             }
         }
 
+        /// Say that named entries moved, as a named watcher thread would.
+        pub(crate) fn named(&self, path: &Path, names: &[std::ffi::OsString]) {
+            let wakes = self.0.wakes.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(wake) = wakes.get(path) {
+                wake(DirChange::Named(names));
+            }
+        }
+
         /// Hold every start where it happens until [`Self::release`].
         pub(crate) fn hold_starts(&self) {
             self.state().hold_starts = true;
