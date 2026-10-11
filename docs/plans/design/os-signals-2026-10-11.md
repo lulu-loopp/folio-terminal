@@ -10,7 +10,10 @@ replaced by (b)1–(b)14. **Revision (c)**, after the Codex confirmation round
 (c)1–(c)10 replace (b)3's callback, (b)4's tests, (b)6's rerun, (b)11's probe door and
 retry rule, (b)13's ticket sizes and (b)14's Q2, Q3 and Q5. **Revision (d)**, after the
 scoped confirmation (`B5-os-signals-design.review-codex-c.md`), replaces (c)1's slot protocol
-(a close-request bit; one closer in every interleaving) and stands over (c) there. Revision (a) was the draft for review, written before any ticket
+(a close-request bit; one closer in every interleaving) and stands over (c) there. **Revision (e)**
+reclassifies that whole eject-release protocol ((b)3, (c)1, (d)1–(d)3) as a DRAFT, not a build
+specification, moves it to a separate design slice that opens only if E-2 shows blocking, and
+revises the tickets and Q3. Revision (a) was the draft for review, written before any ticket
 below was dispatched.
 Plan row B5 ("OS-level change signals; deep palette refresh"), the last in the chain
 B1 → B2 → B3 → B4, all four landed. Read at `main` = `ae933eb7` on
@@ -1950,3 +1953,131 @@ races the review names are rows 1a and 2b of (d)2, and the model test enumerates
 - No new external source. (d)1 uses `fetch_or`/`compare_exchange` semantics as the Rust
   standard library defines them (`std::sync::atomic::AtomicU32`), and [S10] (return quickly)
   and [S31] (drain before reuse) as in (c).
+
+---
+
+## Revision (e), 2026-10-11, the eject-release protocol leaves this note
+
+Codex's scoped look at (d) (`B5-os-signals-design.review-codex-d.md`) returned **adopt with
+changes**, with three blockers, all inside the eject-release protocol. The coordinator then
+ruled that the protocol stops being refined here. It has taken three rounds, it is the
+least valuable part of the note (it exists only so an eject is not refused, Q3), and E-2 may
+show that Folio's watches do not block an eject at all. This revision applies that ruling.
+**Where (e) and earlier revisions differ, (e) stands.**
+
+### (e)1 · The protocol is a draft; T-WATCH-LETS-GO becomes experiment-first
+
+The eject-release protocol of (b)3, (c)1 and (d)1–(d)3 is **reclassified as a DRAFT, not a
+build specification**. This covers the atomic slot, the `CLOSE` bit, the `intent` byte, the
+boundary-race table and the interleaving model test. It stays in the note as the starting
+point for later work, and no ticket builds from it.
+
+**T-WATCH-LETS-GO**, Windows, now reads:
+
+1. **E-2 first**, as specified in (b)10, in the clean VM.
+2. **If E-2 shows that an armed watch blocks an eject**, a separate design slice,
+   `docs/plans/design/os-signals-eject-release-<date>.md`, resolves the three open items
+   below. It gets its own Codex round before any code is written. Only after that slice is
+   accepted is an implementation ticket cut, with its size decided by the slice.
+3. **If E-2 shows that the watches do not block an eject**, the ticket closes with the
+   experiment's record (the cases, the observed results, the Windows build). The draft is
+   then marked superseded in this note.
+
+**Open items of T-WATCH-LETS-GO**, recorded verbatim from `B5-os-signals-design.review-codex-d.md`:
+
+> - The `Draining → Reopening` handoff still loses a close: after `QUERYREMOVEFAILED` sets
+>   `Rearm`, the watcher can consume it, a second `QUERYREMOVE` can set `CLOSE` on
+>   `Draining`, and the watcher's unconditional `store(Reopening)` then clears that request
+>   and opens a handle, so this transition needs a `CLOSE`-aware CAS/versioned handoff.
+> - The invariant and test pin need correction: transitions into `Closing` consume `CLOSE`
+>   before the actual `CloseHandle`, and an honest model must schedule the intent operation
+>   and subsequent word transition separately, specify production memory ordering, and count
+>   closes per handle generation—otherwise it abstracts away the counterexample above.
+> - A-1 is not established by E-2: Microsoft documents the required callback responses but
+>   does not promise per-registration serialization, while an experiment can only falsify
+>   that assumption, so concurrent callbacks need a fully specified and modeled
+>   sequence-number protocol or an authoritative contractual guarantee.
+
+### (e)2 · Everything else stands as accepted
+
+Every other part of the note stands as accepted across the four Codex rounds
+(`B5-os-signals-design.review-codex.md`, `…review-codex-b.md`, `…review-codex-c.md`,
+`…review-codex-d.md`), whose only open findings are the three items above. That covers:
+- the inventory and its eight classes ((b)1);
+- the `WM_DEVICECHANGE` header reader and the `Volumes` arm ((b)2, (§3.1));
+- the watch steward with its door, wake and two held-door tests ((b)4, (c)3);
+- terminal failure and the unheard states ((b)5), with `Failed` and its rearm rule ((c)2);
+- the PATH ear and the walk's snapshot ((§3.2), (b)9, (b)10);
+- the locale probe door with one ten-second budget, the in-birth wait, and the retry on the
+  newest outcome ((b)11, (c)4, (c)5);
+- the palette refresh, with per-root watches, one running walk, a clock-gated rerun and the
+  directory-only filter ((§4), (b)6, (b)7, (c)6, (c)7);
+- the two directory bounds and their one `truncated` flag ((b)8, (c)8);
+- tickets 1, 3, 4 and 5, as adjusted in (e)3 and (e)4;
+- owner questions Q1, Q2, Q4 and Q5 as in (c)10, and Q3 as in (e)4.
+
+### (e)3 · T-DIRWATCH-LIFECYCLE does not depend on the draft
+
+Revisions (c)7, (c)9 and (d)3 put "(c)1's atomic slot" and the slot's model test into
+T-DIRWATCH-LIFECYCLE. **They are removed from it.** The ticket is specified without any
+eject state:
+- **Member states: `Active` and `Failed` only.** `Active` means the watch is armed.
+  `Failed` (unheard) covers an initial start error, a terminal read error, an `Ended` wake
+  not caused by removal, and an FSEvents root change, with (c)2's rearm rule. `Suspended` and
+  `Absent` arrive with the eject slice if E-2 calls for one. Until then, a volume that
+  vanishes ends its watch through terminal failure, which makes the member `Failed`, as
+  (b)2's fallback already says. A `Volumes` arrival covering the path is one of `Failed`'s
+  rearm events ((c)2).
+- **No handle-slot refactor.** `DirWatch` keeps today's handle ownership: the watcher
+  thread uses it, and `Drop` closes it after the join (`lib.rs:16407-16430`). The join now
+  happens on the steward ((c)3), never on the window thread. The ticket adds only what
+  (b)5 needs: the stored terminal error, a real `is_armed`, a real `take_failure`, and an
+  `Ended` wake.
+- **Tests**: (b)5's unavailable-root and failure-after-arming pair; (c)2's two `Failed`
+  rearm tests; (c)3's held-start and held-drop tests; and the source guard that only the
+  steward starts or drops a watch. (d)3's interleaving test is **not** in this ticket; it
+  belongs to the eject slice if one is opened.
+- **Size: M** (was L). (c)7 sized it L for four parts, and the Windows handle-slot refactor
+  is one of the four that leaves. What remains is the cross-platform failure contract, the
+  `Failed` rule and the steward lane.
+
+### (e)4 · Ticket order, dependencies, and Q3
+
+**Removable volumes.** (b)9 made watching removable `PATH` entries and palette roots wait
+for T-WATCH-LETS-GO. They now wait for **E-2's answer**:
+- If the watches do not block an eject, they are watched from the start.
+- If they do, they stay unwatched until the eject slice's implementation lands.
+
+The flag is one constant, `WATCH_REMOVABLE_VOLUMES`, in the steward. The ticket that records
+E-2's outcome sets it.
+
+**Tickets, in order:**
+1. **T-DIRWATCH-LIFECYCLE (M; first).** (e)3.
+2. **T-OS-SIGNALS-WIN (M).** As (b)13 item 3. It depends on ticket 1 only, and no longer on
+   T-WATCH-LETS-GO.
+3. **T-OS-SIGNALS-MAC (M).** As (c)9 item 4. It depends on ticket 1, and its `DirWatchSet`
+   half follows ticket 2's Windows arm.
+4. **T-PALETTE-DEEP (M).** As (c)9 item 5. It depends on tickets 1 and 2 (2 for `Volumes`),
+   not on 3.
+5. **T-WATCH-LETS-GO (S: an experiment and its record; Windows).** (e)1. It depends on
+   nothing and can run at any time, in parallel with the others. Its outcome only sets
+   `WATCH_REMOVABLE_VOLUMES`, and only if E-2 finds blocking does it open the eject slice
+   (its size is set by that slice).
+
+Order: 1 → 2 → 3, and 1 + 2 → 4. Ticket 5 is independent.
+
+**Q3, reworded:** "When Windows asks to eject a drive Folio is watching, let it go
+silently and never refuse?" The answer is **yes, pending E-2.** If E-2 shows that the watches
+never block an eject, nothing needs to be built and the answer is already true. If they do
+block, the eject slice designs the release, and until it lands, watches are not placed on
+removable volumes. Q1, Q2, Q4 and Q5 are unchanged from (c)10, so the total stays at five.
+
+### Departures
+
+None. The ruling is applied as written.
+
+### Sources
+
+- `B5-os-signals-design.review-codex-d.md` (0.4.8 trace, 2026-10-11): the three open items,
+  quoted verbatim in (e)1.
+- The coordinator's ruling of 2026-10-11 on this protocol (relayed with that review).
