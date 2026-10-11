@@ -965,6 +965,9 @@ pub struct GitChangeRow {
     pub renamed_from: Option<String>,
     /// Whether a discard here deletes rather than restores.
     pub untracked: bool,
+    /// The file is not on the disk (`GitStatusEntry::is_absent_from_the_working_tree`),
+    /// so the row has nothing to glance at.
+    pub gone: bool,
     /// A write about this path is in flight (R13).
     ///
     /// **The truth, and the fade below is only how it is drawn.** This is what
@@ -1493,10 +1496,12 @@ pub fn row_document(row: &GitRow, root: &Path) -> Option<GitRowOpen> {
 /// [`PreviewSource::GitShow`] the row would open into a pane, which is what makes
 /// the card and the pane one document instead of two.
 ///
-/// **A row whose every letter says the file is gone has no glance.** There is
-/// nothing at that path to look at, and a card reading "No preview" over a
-/// deletion says the window is broken rather than that the file is not there. It
-/// keeps the silence a directory row keeps.
+/// **A row whose file is not on the disk has no glance.** There is nothing at
+/// that path to look at, and a card reading "No preview" over a deletion says
+/// the window is broken rather than that the file is not there. It keeps the
+/// silence a directory row keeps. Whether the file is there is the status
+/// codes' answer, not the badges' ink: a conflict wears the error ink on every
+/// letter and its file is very much on the disk (AUDIT-hardcode SHL-G2).
 ///
 /// The key is the row's identity within its page and carries the group, because
 /// R11 puts one file in two groups at once and two rows answering to one key
@@ -1505,12 +1510,7 @@ pub fn row_document(row: &GitRow, root: &Path) -> Option<GitRowOpen> {
 pub fn row_peek(row: &GitRow, root: &Path) -> Option<GitRowPeek> {
     match row {
         GitRow::Change(change) => {
-            let gone = !change.badges.is_empty()
-                && change
-                    .badges
-                    .iter()
-                    .all(|badge| badge.ink == GitBadgeInk::Gone);
-            if gone {
+            if change.gone {
                 return None;
             }
             Some(GitRowPeek {
@@ -2223,6 +2223,7 @@ fn change_row(entry: &GitStatusEntry, group: GitGroup, cache: &GitCache) -> GitC
         badges,
         group,
         untracked,
+        gone: entry.is_absent_from_the_working_tree(),
     }
 }
 
@@ -8264,5 +8265,41 @@ mod tests {
             )),
             "and there is no untracked group for it to hide in"
         );
+    }
+
+    /// RED (AUDIT-hardcode SHL-G2) — **a conflicted file has a glance; a file
+    /// that is not on the disk has none.**
+    ///
+    /// The glance used to be refused when every badge wore the "gone" ink, and
+    /// a conflict wears that ink on every letter — so `UU`, `AA`, `DU` and `UD`
+    /// rows, whose files are on the disk with the conflict in them, had no
+    /// card. Built through the real parser and the real rows.
+    ///
+    /// MUTATION: decide `gone` from the badges' ink again (every badge
+    /// `GitBadgeInk::Gone`) — the four conflict rows lose their glance.
+    #[test]
+    fn a_conflicted_file_has_a_glance_and_a_deleted_one_has_none() {
+        let cache = answered(
+            "## main\0UU 合并.rs\0AA both.rs\0DU ours.rs\0UD theirs.rs\0DD neither.rs\0 D worked.rs\0D  removed.rs\0 M kept.rs\0"
+                .as_bytes(),
+            Vec::new(),
+            false,
+        );
+        let content = rows_of(&cache);
+        let root = Path::new(ROOT);
+        let glance = |path: &str| {
+            let row = content
+                .rows
+                .iter()
+                .find(|row| matches!(row, GitRow::Change(change) if change.path == path))
+                .unwrap_or_else(|| panic!("{path} has a row"));
+            row_peek(row, root).is_some()
+        };
+        for path in ["合并.rs", "both.rs", "ours.rs", "theirs.rs", "kept.rs"] {
+            assert!(glance(path), "{path} is on the disk and has a glance");
+        }
+        for path in ["neither.rs", "worked.rs", "removed.rs"] {
+            assert!(!glance(path), "{path} is not on the disk and has none");
+        }
     }
 }

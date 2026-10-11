@@ -1272,6 +1272,30 @@ impl GitStatusEntry {
             )
     }
 
+    /// **Whether the file is absent from the working tree** — read off the two
+    /// porcelain columns, never off the colour a row wears (AUDIT-hardcode
+    /// SHL-G2).
+    ///
+    /// Outside a merge the columns are index and working tree: the working
+    /// tree's `D` is a deletion there, and an index `D` with nothing in the
+    /// working-tree column is a `git rm`, whose file is gone too. In a merge
+    /// the columns are *ours* and *theirs*, and only `DD` — both sides deleted
+    /// it — leaves no file: `UD` and `DU` keep the surviving side's file on the
+    /// disk, and `UU`, `AA`, `AU`, `UA` keep a file with the conflict in it.
+    #[must_use]
+    pub fn is_absent_from_the_working_tree(&self) -> bool {
+        if self.is_conflict() {
+            return matches!(
+                (self.staged, self.unstaged),
+                (Some(StatusCode::Deleted), Some(StatusCode::Deleted))
+            );
+        }
+        matches!(
+            (self.staged, self.unstaged),
+            (_, Some(StatusCode::Deleted)) | (Some(StatusCode::Deleted), None)
+        )
+    }
+
     /// Whether this entry belongs in one of the three lists.
     ///
     /// Untracked is decided by the letter and not by the column, because `??`
