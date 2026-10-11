@@ -1503,6 +1503,43 @@ mod source_test {
         index().text(record.body().expect("the item has a body"))
     }
 
+    pub(super) fn module_body_in_reaching_variant(
+        module: &str,
+        declarations: usize,
+        predicate: &str,
+    ) -> &'static str {
+        let reaching: Vec<_> = index()
+            .files()
+            .iter()
+            .flat_map(|file| {
+                file.owners()
+                    .iter()
+                    .filter(move |owner| owner.module_path == module)
+                    .map(move |owner| (file, owner))
+            })
+            .collect();
+        assert_eq!(
+            reaching.len(),
+            declarations,
+            "`{module}` has {declarations} reaching declarations"
+        );
+        let matching: Vec<_> = reaching
+            .into_iter()
+            .filter(|(_, owner)| {
+                owner
+                    .steps
+                    .iter()
+                    .any(|step| step.predicates.iter().any(|actual| actual == predicate))
+            })
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "`{module}` has one body reached through #[cfg({predicate})]"
+        );
+        index().text(matching[0].0.span())
+    }
+
     pub(super) fn fields_in_reaching_variant(
         type_owner: &str,
         module: &str,
@@ -19860,6 +19897,73 @@ mod macos_window_backend_tests {
             .is_empty(),
             "nothing is observed, so nothing can arrive"
         );
+        let observer_classes: Vec<_> = source_test::index()
+            .macros()
+            .iter()
+            .filter(|invocation| {
+                invocation.name() == "define_class"
+                    && source_test::index()
+                        .text(invocation.tokens())
+                        .contains("struct SystemSettingsObserver")
+            })
+            .collect();
+        assert_eq!(
+            observer_classes.len(),
+            1,
+            "one Objective-C class owns the system-settings callbacks"
+        );
+        let observer_class = observer_classes[0].tokens();
+        let callback = source_test::found(
+            Needle::new(Pattern::identifier("observe_value")),
+            View::Identifiers,
+            Scope::Module("crate::macos_impl".to_owned()),
+        );
+        let callbacks: Vec<_> = callback
+            .spans()
+            .into_iter()
+            .filter(|span| span.within(observer_class))
+            .collect();
+        assert_eq!(callbacks.len(), 1, "the observer has one value callback");
+        let callback = callbacks[0];
+        let next_callback = ["preferences_changed", "display_changed"]
+            .into_iter()
+            .flat_map(|name| {
+                source_test::found(
+                    Needle::new(Pattern::identifier(name)),
+                    View::Identifiers,
+                    Scope::Module("crate::macos_impl".to_owned()),
+                )
+                .spans()
+            })
+            .filter(|span| span.within(observer_class) && span.start() > callback.end())
+            .map(bt_source::Span::start)
+            .min()
+            .unwrap_or_else(|| observer_class.end());
+        for (pattern, forbidden) in [
+            (
+                Pattern::call("effectiveAppearance"),
+                "effectiveAppearance()",
+            ),
+            (
+                Pattern::identifier("appearance_is_light"),
+                "appearance_is_light",
+            ),
+            (Pattern::identifier("NSScreen"), "NSScreen"),
+        ] {
+            let inside_callback = source_test::found(
+                Needle::new(pattern),
+                View::Identifiers,
+                Scope::Module("crate::macos_impl".to_owned()),
+            )
+            .spans()
+            .into_iter()
+            .any(|span| span.start() >= callback.end() && span.end() <= next_callback);
+            assert!(
+                !inside_callback,
+                "the observer reads `{forbidden}` inside AppKit's own delivery instead of on the \
+                 loop's next turn"
+            );
+        }
     }
 }
 
@@ -20629,8 +20733,10 @@ mod watch_contract_tests {
             );
             source_test::declaration(&ItemQuery::type_item(name).in_module("crate::macos_watch"));
         }
-        source_test::declaration(
+        source_test::declaration_in_reaching_variant(
             &ItemQuery::method("DirWatch", "start").in_module("crate::portable_impl"),
+            1,
+            "not(any(windows, target_os = \"macos\"))",
         );
         let portable_reexport = source_test::found(
             Needle::new(Pattern::text(
@@ -20918,12 +21024,14 @@ mod macos_process_door_tests {
         );
         assert_eq!(
             source_test::found(
-                Needle::new(Pattern::identifier("macos_fonts")),
-                View::Identifiers,
+                bt_source::needle!(Pattern::text(
+                    "pub use macos_fonts::{cjk_font_families, monospace_family_named, monospace_font_families};"
+                )),
+                View::CodeKeepingLiterals,
                 Scope::Module("crate".to_owned()),
             )
             .len(),
-            2,
+            1,
             "macOS takes its font list from the CoreText arm"
         );
     }
@@ -24871,6 +24979,8 @@ mod macos_attention_signature_tests {
     #[test]
     fn the_doorbell_asks_who_you_are_and_not_what_you_are_running() {
         let admit = ItemQuery::function("admit").in_module("crate::attention_pipe");
+        let unix_arm =
+            source_test::module_body_in_reaching_variant("crate::attention_pipe", 3, "unix");
         assert!(
             source_test::body(&admit).contains("crate::peer::uid(&stream)"),
             "the peer's user is asked of the kernel, not read out of a frame"
@@ -24909,7 +25019,7 @@ mod macos_attention_signature_tests {
             "crate::peer::credentials",
         ] {
             assert!(
-                !source_test::body(&admit).contains(absent),
+                !unix_arm.contains(absent),
                 "the doorbell looked up its peer's image (`{absent}`), which would refuse \
                  `claude`, `codex` and every other program that legitimately rings it"
             );
