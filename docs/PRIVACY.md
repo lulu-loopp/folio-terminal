@@ -265,6 +265,12 @@ profile. Do not put a secret in one.
   and looks for the one winget wrote for Folio, to see whether it names this
   copy's folder. Other programs' entries are passed over. What it found is one
   line of `diagnostics.log`, naming winget's entry and no folder.
+- **Program-search folders are watched locally.** On Windows, each program walk
+  reads the current account's `PATH` and `PATHEXT`, then keeps a shallow
+  filesystem watch on each existing local directory named by `PATH` so a newly
+  installed program can appear without another menu opening. It reads entry
+  names only when Windows reports a change; it does not read file contents,
+  contact remote `PATH` entries, or watch removable-volume entries.
 - Several `BT_*` environment variables make Folio write terminal content to a
   file you name — `BT_PTY_DUMP` writes every byte of every pane. None is set
   unless you set it. `docs/BT-ENVIRONMENT.md` lists all of them.
@@ -443,6 +449,10 @@ rm -rf ~/Library/WebKit/<Folio 的 bundle identifier> ~/Library/Caches/<Folio �
 - **以上五项加上更新检查，正是初次设置卡所问的全部。** 它在从未运行过 Folio 的机器上
   出现一次，自己什么也不写：按下**完成**按的就是上面列举的那几行设置，而**暂不**一行
   也不按。卡本身记下的只有一件事：它已经出现过。
+- **程序搜索文件夹只在本机受到监视。** Windows 上每次程序扫描都会读取当前账户的
+  `PATH` 和 `PATHEXT`，并浅层监视 `PATH` 中现有的本地文件夹，让新安装的程序不必等到
+  再次打开菜单就能出现。只有 Windows 报告变化时才读取条目名称；不读取文件内容，
+  不连接远程 `PATH` 条目，也不监视可移除卷上的条目。
 - 若干 `BT_*` 环境变量会让 Folio 把终端内容写到你指定的文件——`BT_PTY_DUMP` 写的是每个
   窗格的每一个字节。你不设，它们就都不生效。全部列在 `docs/BT-ENVIRONMENT.md`。
 - **卸载**（设置 ▸ 关于 ▸ 卸载 Folio、`uninstall.cmd` 或 `folio --uninstall`）移除上述 Folio 写入的全部内容以及 Folio 自身的文件；设置和会话目录保留，除非你要求一并移除。

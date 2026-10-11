@@ -8,6 +8,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
+- Programs installed while Folio runs appear in + and the default profile without opening a menu; a drive that arrives is read where a folder was waiting for it. <!-- zh: pending T-OS-SIGNALS-WIN -->
 - A Folio installed with Homebrew now updates itself in place from About, like a copy you dragged to Applications; Homebrew keeps managing and uninstalling it. <!-- zh: 用 Homebrew 安装的 Folio 现在也能在关于页中就地更新，和拖进应用程序文件夹的副本一样；Homebrew 仍负责管理和卸载。 -->
 - After a graphics failure, Folio tells you at its next start where it kept your unsaved edit, with a button that opens the folder. <!-- zh: pending T-RECOVERED-FOLDER -->
 
