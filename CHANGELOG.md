@@ -13,6 +13,19 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- Pasting while the files column, a read-only preview or a switcher menu has the keyboard no longer types the clipboard into the shell behind it. <!-- zh: pending H2 -->
+- Renaming a file can no longer replace another file that takes the new name at the same moment. <!-- zh: pending H2 -->
+- When the Git page has more changed files than it lists, it now says so even if none of them are untracked. <!-- zh: pending H2 -->
+- A conflicted file on the Git page shows its hover preview again. <!-- zh: pending H2 -->
+- A Git refusal notice in a Chinese window is now in Chinese. <!-- zh: pending H2 -->
+- A diff or an old version of a file that is not UTF-8 is marked as not shown exactly, and a UTF-16 file reads correctly. <!-- zh: pending H2 -->
+- With "one screen at a time" scrolling on, a notch over the commit graph moves one screenful instead of a distance that depended on the number of commits. <!-- zh: pending H2 -->
+- On a Mac, the card-scroll hint and the reserved rows in Shortcuts say Option instead of Alt. <!-- zh: pending H2 -->
+- The pane strip's "more do not fit" line is part of the translated text. <!-- zh: pending H2 -->
+- A space can be typed into the commit graph's search and the Git branch prompt, and Ctrl+Backspace deletes a word in every one-line box. <!-- zh: pending H2 -->
+- Web page thumbnails on the focus cards now appear at display scales above 200%. <!-- zh: pending H2 -->
+- On a Mac, the names of Chinese fonts in Settings follow the system language. <!-- zh: pending H2 -->
+- A wrapped table row in accented Latin, Cyrillic, Greek or Korean keeps the space between its words, and a formula block next to Japanese or Korean prose is no longer drawn as a formula. <!-- zh: pending H2 -->
 - A system shell that replaces one which stopped during startup now opens at the pane's current size, even when the window was resized while the replacement was starting. <!-- zh: pending T-FALLBACK-OWED-RESIZE -->
 - Folio keeps one `session.prev.json` copy of the layout it saw at startup, so a useful earlier layout remains available if a later session save goes wrong. <!-- zh: Folio 会在 `session.prev.json` 中保留启动时看到的一份布局；之后的会话保存若出错，仍可找回此前有用的布局。 -->
 - A shell that stops as Folio starts no longer removes its restored pane or tab: Folio falls back to the system shell when it can, or keeps the shell's output and the pane in place. <!-- zh: pending T-SHELL-BIRTH-DEATH -->
