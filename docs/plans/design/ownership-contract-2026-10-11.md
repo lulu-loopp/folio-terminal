@@ -1,6 +1,6 @@
 # Who owns a pane: the session / document / view contract, and how `LeafSession` splits — design note, 2026-10-11
 
-Status: **revision (b), 2026-10-11**, after the Codex review (`reports/J5-05-contracts.review-codex.md`, both notes *adopt with changes*). Revision (b) is the dated section at the end. **Where revision (a)'s text and revision (b) differ, revision (b) stands.** Revision (a) was the draft for review. Plan row J5 (T-05-CONTRACTS, 0.4.8), the first of the two contract notes the 2026-09-21 structure review asked for before 0.5; ledger row **D-1** (*session state has no owner independent of the window*, the 0.5 precondition). The companion note is `side-effects-contract-2026-10-11.md` (D-16, D-33). Read at `main` = `77399d57` on `design/05-contracts`. No product code, no test. One cargo run: `cargo test -p bt-source --test census` (10 passed), whose query reports under `target/ownership-census/` are §1's measured column. Facts about Folio are cited `file:line` at `77399d57` (paths under `crates/bt-app/src/` unless another crate is named) with the symbol beside the line.
+Status: **revision (c), 2026-10-11**, after the Codex confirmation round (`reports/J5-05-contracts.review-codex-b.md`); revision (c) stands over (b) where they differ, and (b) over (a). Before that, **revision (b)**, after the Codex review (`reports/J5-05-contracts.review-codex.md`, both notes *adopt with changes*). Revision (b) is the dated section at the end. **Where revision (a)'s text and revision (b) differ, revision (b) stands.** Revision (a) was the draft for review. Plan row J5 (T-05-CONTRACTS, 0.4.8), the first of the two contract notes the 2026-09-21 structure review asked for before 0.5; ledger row **D-1** (*session state has no owner independent of the window*, the 0.5 precondition). The companion note is `side-effects-contract-2026-10-11.md` (D-16, D-33). Read at `main` = `77399d57` on `design/05-contracts`. No product code, no test. One cargo run: `cargo test -p bt-source --test census` (10 passed), whose query reports under `target/ownership-census/` are §1's measured column. Facts about Folio are cited `file:line` at `77399d57` (paths under `crates/bt-app/src/` unless another crate is named) with the symbol beside the line.
 
 **Section signs.** A bare `§n` is a section of this note. `A§n` is a section of `docs/ARCHITECTURE.md`; `DESIGN §n` of `docs/DESIGN.md`; `SE§n` of the companion note; `CEN§n` of `docs/plans/design/ownership-census-2026-09-25.md`; `SPLIT§n` of `docs/plans/bt-app-split.md`; `WB§n` of `docs/plans/design/agent-workbench-0.5-2026-09-20.md`.
 
@@ -427,3 +427,66 @@ Applied. "Per application" supersedes DESIGN §7.0's *one copy of one file per t
 §9 stands, with two additions:
 - `wake`'s owner becomes the binding (O-6), recorded in A§4.1's table by O-6.
 - O-9 changes who owns the document pool (per tab → per application). It writes its A§4.4 row and a DESIGN entry that supersedes §7.0's per-tab clause.
+
+---
+
+## Revision (c), 2026-10-11, after the Codex confirmation round
+
+Review: `reports/J5-05-contracts.review-codex-b.md`. Verdict on this note: **adopt with changes (blockers only)**. N1-1 and N1-3 through N1-6 are confirmed against the code. One blocker remains under N1-2, in three parts, and the review makes two observations under N1-1. All five are applied; none is argued. **Where (b) and (c) differ, (c) stands.**
+
+### (c)0 · What changed
+
+| # | the review's words (abridged) | disposition | where |
+|---|---|---|---|
+| (a) | *"The drain proof is guardable with today's `bt-source`: after `TermView` enters the census, assert that `drain_leaf_pty` has no access site for any `TermView` field … This does not require a call graph."* | applied | (c)1 replaces the guard sentence in (b)1 |
+| (b) | *"`report_keyboard_focus` belongs on the session door: the window/view computes the truth, but the session consumes it to maintain DEC 1004 protocol state and emit PTY bytes."* | confirmed; kept, with the reason written in | (c)1 |
+| (c) | *"The birth-death rule is specifically `elapsed <= BIRTH_GRACE && !had_output && has_fallback` → `FallingBack`; within the grace, either output or no fallback → `Kept`; beyond it → ordinary `Exited` … the `output_is_drained` gate in `reap_exited_tabs`"* | applied | (c)2 replaces (b)2's table |
+| (d) | *"Retirement/close edges exist from every phase, not only the phases where the table mentions them."* | applied | (c)2's close column |
+| (e) | *"The proposed pin 'successor lands into a live or exited slot and nowhere else' contradicts main. `restart_shell` checks only that no successor already exists … make successor birth/replacement genuinely orthogonal to the old phase. A kept-pane restart needs an explicit pin."* | applied: main's behaviour is the rule, and it is pinned. No product change is proposed. | (c)3 replaces (b)2's fourth pin |
+
+### (c)1 · The drain proof, as a census assertion
+
+Once O-2 adds `TermView` to the census `STRUCTS`, O-3 adds `the_drain_reads_no_view_field` to `bt-source`'s `census` test: **the census has no `write`, `access` or `inner` site of any `TermView.*` fact whose function is `drain_leaf_pty`**. This uses what the census already resolves (fields through receivers), and needs no call graph. MUTATION: `drain_leaf_pty` reads `leaf.view.projection` to decide whether to scroll to the bottom. That adds an access row, and the assertion fails. It replaces (b)1's runtime pin `the_drain_takes_focus_as_a_report_and_reads_no_view_field`.
+
+**Why `report_keyboard_focus` is a session door** (the review confirms it). The view and the window compute the truth (WB§13.2's definition of the focused pane). The **session** consumes it: `DualPlaneSession::set_keyboard_focus` keeps the DEC 1004 focus-reporting state and queues the `CSI I` / `CSI O` bytes for the child (`main.rs:42605–42617`). So the door is the session's, and the drain's `holds_the_keyboard` parameter is its present spelling.
+
+### (c)2 · The shell's life, exactly as main decides it
+
+`reap_exited_tabs` (`runtime/tabs.rs:3585–3730`) and `birth_death_disposition` (`tabs.rs:42–52`; `BIRTH_GRACE` = 3 s, `tabs.rs:34`) give eight phases. *Close* means any of `close_pane`, `close_tab`, a window close, or the quit's retirement.
+
+| phase | payload | entered when | leaves to | what a close does |
+|---|---|---|---|---|
+| `Deciding` | `PaneBirth { waiting: Programs \| Locale }` | `create_leaf_session` with rows or locale unanswered | `land_pane_birth` → `Bearing`, or → `Shellless` (`Started::Nothing`) | drops the `PaneBirth`; `PaneWaits` released |
+| `Bearing` | `PaneBirth { waiting: Shell(ShellLanding) }` | decided at creation or at `land_pane_birth` | `land_shell_birth` → `Live`, or → `Shellless` (the birth failed) | drops `ShellBirth` → the number abandoned, and the answer retired off thread (`pty_door.rs:397`) |
+| `Live` | `pty`, `wake` | a landing | `try_wait` answers → `ExitDraining` or `Exited` (below) | `bt_pty::retire_session(pty)` |
+| `ExitDraining` | `pty` (exited), `exit_age` | `try_wait` answered, `elapsed <= BIRTH_GRACE`, and `!pty.output_is_drained()` (`tabs.rs:3613–3617`; the tab counts as live) | once drained, the disposition below | `retire_session(pty)` |
+| `FallingBack` | `BirthDeathFallback { landing, exit }`, `exit_age`; old `pty` retired | drained, `elapsed <= BIRTH_GRACE && !had_output && has_fallback`, **and** `wake` present **and** `pty_door::request` accepted (`tabs.rs:3626–3661`) | `land_birth_death_fallback`: `FellBack` → `Live`; `Kept` → `Kept`; `Waiting` stays | drops the landing's `ShellBirth` → abandoned, as `Bearing` |
+| `Kept` | `exit_age`; no `pty`, no `wake`; `said` set | drained, `elapsed <= BIRTH_GRACE` and any of: `had_output`, `!has_fallback`, no `wake`, or the fallback request refused (`tabs.rs:3663–3678`, `keep_birth_death_face`) | close only | nothing to retire |
+| `Exited` | `pty` (exited, held), `exit_age`; `said` set once | `try_wait` answered with `elapsed > BIRTH_GRACE` (no output gate on this road) | the reaper itself: `close_pane` for the active tab's exited panes when the tab has other panes; `close_tab` when every pane of the tab has ended (`tab_has_ended`, `exited_tabs_the_loop_may_close`, `tabs.rs:3700–3728`) | `retire_session(pty)` |
+| `Shellless` | nothing (the no-program banner; a `BT_PROBE_INPUT` pane) | a landing with `Started::Nothing` | close only | nothing |
+
+Every close also expires the pane's attention (`expire_leaf_attention`).
+
+Orthogonal to the phase, as in (b)2: `said`; `spawn_fallback` (taken once at a landing); and `successor` ((c)3).
+
+O-4's table test `every_life_transition_is_one_method_and_no_other` drives exactly these edges, including the four guards of the `FallingBack`/`Kept` split and the `ExitDraining` hold, plus a close from each of the eight phases. Mutations, each going red:
+- treat `had_output` as falling back;
+- skip the `output_is_drained` hold;
+- use `<` for `<=` at `BIRTH_GRACE`;
+- leave a closed `Bearing` without abandoning its number.
+
+`an_exited_shell_keeps_its_pty_until_the_tab_ends` stays. `the_exit_line_is_said_once_across_exited_falling_back_and_kept` stays.
+
+### (c)3 · A restart is orthogonal to the phase, as main has it
+
+`restart_shell` (`runtime/terminal.rs:640–720`) refuses only when a `successor` already exists. It reads the old record only for its profile, its place and its text size. A replacement that is in birth waits in `successor`. One that is not in birth replaces the record at once. `land_restart` (`runtime/panes.rs:171–206`) replaces the **whole record** whatever the old phase is. So a restart is available from **every** phase, including `Kept`, `Shellless` and a pane whose own birth is still pending. In that last case, the successor's landing drops the old `PaneBirth`, and its number is abandoned by `ShellBirth`'s drop.
+
+**That is the contract.** No product change is proposed, so no ticket is needed. The pins replacing (b)2's fourth:
+- `a_restart_replaces_the_record_from_every_phase` — a table over the eight phases. MUTATION: refuse a restart unless the phase is `Live` or `Exited` (revision (b)'s wrong pin, as a mutation).
+- `a_kept_pane_restarts_into_a_live_shell` — the explicit pin the review asks for: a birth death kept with its face, *Restart shell*, the successor lands, and the pane is `Live`, with Chinese and mixed-script input typed after the landing reaching the new shell. MUTATION: `land_restart` keeps a `Kept` record.
+- `a_second_restart_while_one_is_in_birth_is_ignored`. MUTATION: replace the existing successor.
+- `a_restart_over_a_pending_birth_abandons_the_old_birth` (a fake birth door). MUTATION: let the old `PaneBirth` survive the replacement.
+
+### (c)4 · Tickets and questions
+
+The tickets are unchanged from (b)6. O-4 stays **L** and carries (c)2's table test and (c)3's four pins. O-3 carries (c)1's census assertion. The owner questions are unchanged from (b)7.
