@@ -52935,13 +52935,12 @@ impl Runtime<'_> {
     /// `every_surface_the_menu_defers_to_stands_above_the_clipboard_rung` holds
     /// the two functions to.
     fn clipboard_focus(&mut self) -> menubar::ClipboardFocus {
+        let rung = ime_owner(self.keyboard_owner());
         menubar::ClipboardFocus {
             swallowing: self.a_surface_above_the_clipboard_rung_holds_the_keyboard(),
-            field: text_field_holding(
-                ime_owner(self.keyboard_owner()),
-                self.settings_field_holds_the_keyboard(),
-            ),
+            field: text_field_holding(rung, self.settings_field_holds_the_keyboard()),
             preview_edit: self.preview_edit_focus().is_some(),
+            shell: rung == ImeOwner::Shell,
         }
     }
 
@@ -77649,6 +77648,67 @@ mod edit_menu_clipboard_tests {
         }
     }
 
+    /// RED (T-HARDCODE-047 slice 2, census #22) — **a paste reaches the
+    /// terminal only while the shell holds the keyboard.**
+    ///
+    /// A files column, a read-only preview and every popup (the switchers
+    /// among them) take each typed character themselves, so a `Ctrl+V`,
+    /// `Shift+Insert`, `Cmd+V` or Edit ▸ Paste over one of them used to be the
+    /// one piece of typing that went through them, into the shell behind. The
+    /// rungs are walked from the ladder (`ImeOwner::ALL`), not listed: every
+    /// rung but the shell's answers something other than the terminal, the
+    /// shell's answers the terminal, and the two other seats keep theirs — the
+    /// quick edit takes its own paste, a field takes its own.
+    ///
+    /// MUTATION: drop the `Terminal if !focus.shell` arm from
+    /// `menubar::paste_seat` — the `FilesTree`, `Preview` and `Modal` rows
+    /// answer `Terminal` and go red.
+    #[test]
+    fn a_paste_reaches_the_terminal_only_while_the_shell_holds_the_keyboard() {
+        use super::{ImeOwner, text_field_holding};
+        use crate::menubar::{ClipboardFocus, ClipboardSeat, paste_seat};
+
+        let mut refused = Vec::new();
+        for rung in ImeOwner::ALL {
+            let shell = rung == ImeOwner::Shell;
+            let field = text_field_holding(rung, false);
+            let seat = paste_seat(ClipboardFocus {
+                swallowing: false,
+                field,
+                preview_edit: false,
+                shell,
+            });
+            if shell {
+                assert_eq!(seat, ClipboardSeat::Terminal, "the shell takes its paste");
+            } else {
+                assert_ne!(
+                    seat,
+                    ClipboardSeat::Terminal,
+                    "{rung:?} holds the keyboard and a paste went to the shell behind it"
+                );
+                if field.is_none() {
+                    assert_eq!(seat, ClipboardSeat::Nobody, "{rung:?} takes no paste");
+                    refused.push(rung);
+                }
+            }
+        }
+        // The three surfaces census #22 named are among the rungs refused: the
+        // files column, a read-only preview, and a switcher popup (`Modal`).
+        for rung in [ImeOwner::FilesTree, ImeOwner::Preview, ImeOwner::Modal] {
+            assert!(refused.contains(&rung), "{rung:?} was not asked");
+        }
+        // The quick edit still takes its own paste on the preview's rung.
+        assert_eq!(
+            paste_seat(ClipboardFocus {
+                swallowing: false,
+                field: None,
+                preview_edit: true,
+                shell: false,
+            }),
+            ClipboardSeat::PreviewDocument
+        );
+    }
+
     /// RED (B-AUDIT-046 RT-1) — **a paste goes to the text field that holds the
     /// keyboard, by either shortcut and by Edit ▸ Paste, and never to the shell
     /// behind it.**
@@ -77709,6 +77769,7 @@ mod edit_menu_clipboard_tests {
                             swallowing,
                             field,
                             preview_edit,
+                            shell: rung == ImeOwner::Shell,
                         });
                         let takes_text = ime_caret_source(rung) == ImeCaretSource::Field;
                         if takes_text && rung != ImeOwner::Preview {
@@ -77742,7 +77803,10 @@ mod edit_menu_clipboard_tests {
         }
         // The shell itself still gets its paste when nothing else holds the keys.
         assert_eq!(
-            paste_seat(ClipboardFocus::default()),
+            paste_seat(ClipboardFocus {
+                shell: true,
+                ..ClipboardFocus::default()
+            }),
             ClipboardSeat::Terminal
         );
         // The two fields the defect was reported in are among the ones reached.

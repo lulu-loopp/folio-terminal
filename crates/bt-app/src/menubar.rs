@@ -656,6 +656,13 @@ pub(crate) struct ClipboardFocus {
     /// The preview document has the keyboard and is editable, which is the one
     /// condition the clipboard rung itself forks on (`editing`).
     pub preview_edit: bool,
+    /// **The shell holds the keyboard** — the ladder's bottom rung
+    /// (`ime_owner(keyboard_owner()) == ImeOwner::Shell`), the one owner that
+    /// has a PTY. A files column, a read-only preview or a switcher popup
+    /// holding the keyboard is not the shell, and a paste typed over one of
+    /// them has no business in the terminal behind it (T-HARDCODE-047 slice 2,
+    /// census #22).
+    pub shell: bool,
 }
 
 /// **Who answers Edit ▸ Copy and Edit ▸ Paste.**
@@ -712,7 +719,13 @@ pub(crate) const fn clipboard_seat(focus: ClipboardFocus) -> ClipboardSeat {
 /// A text field holding the keyboard owns the paste, whatever else is true:
 /// the field is what the reader is typing into, and the terminal behind a find
 /// bar or a graph search is exactly the shell a paste must not reach. Below
-/// that it is [`clipboard_seat`]'s answer, which is the copy's too.
+/// that it is [`clipboard_seat`]'s answer, which is the copy's too — **except
+/// that the terminal takes a paste only while the shell holds the keyboard**
+/// (T-HARDCODE-047 slice 2, census #22). A paste is text written into a child,
+/// the same as typing, so it goes where typing goes: a files column, a
+/// read-only preview and a switcher popup each take every typed character
+/// themselves, and a paste over one of them reaches nobody rather than the
+/// shell standing behind it.
 ///
 /// Copy is not changed by this: a field that holds the keyboard has its own
 /// copy chord where it has one, and Edit ▸ Copy keeps [`clipboard_seat`].
@@ -720,7 +733,10 @@ pub(crate) const fn clipboard_seat(focus: ClipboardFocus) -> ClipboardSeat {
 pub(crate) const fn paste_seat(focus: ClipboardFocus) -> ClipboardSeat {
     match focus.field {
         Some(field) => ClipboardSeat::Field(field),
-        None => clipboard_seat(focus),
+        None => match clipboard_seat(focus) {
+            ClipboardSeat::Terminal if !focus.shell => ClipboardSeat::Nobody,
+            seat => seat,
+        },
     }
 }
 
@@ -1262,6 +1278,7 @@ mod tests {
                 swallowing,
                 field: None,
                 preview_edit,
+                shell: !preview_edit,
             })
         };
         assert_eq!(seat(true, false), ClipboardSeat::Nobody);

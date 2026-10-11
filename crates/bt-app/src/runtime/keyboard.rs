@@ -1832,8 +1832,9 @@ impl Runtime<'_> {
                 }
                 // The quick edit's own rung below takes its paste.
                 menubar::ClipboardSeat::PreviewDocument => {}
-                // Every surface that swallows the keyboard has returned above;
-                // should one ever stand below, the paste still reaches no shell.
+                // Something other than the shell holds the keyboard — a card, a
+                // popup, a files column, a read-only preview — and a paste is
+                // typing, so it reaches no shell behind it (census #22).
                 menubar::ClipboardSeat::Nobody => return Ok(()),
             }
         }
@@ -1945,9 +1946,11 @@ impl Runtime<'_> {
         //
         // It sits *here*, under every popup and over the encoder, and the
         // placement is the rule: a column holding the keyboard is not a modal,
-        // so the window's own chords, the copy and paste commands and a
-        // terminal's `Shift+PageUp` all keep working over the top of it — none
-        // of those is typing. What it stops is everything that *is* typing,
+        // so the window's own chords, the terminal's copy and a terminal's
+        // `Shift+PageUp` all keep working over the top of it — none of those is
+        // typing. A paste is typing, and it was answered at the clipboard rung
+        // above: with the column holding the keyboard it reaches nobody
+        // ([`menubar::paste_seat`]). What it stops is everything that *is* typing,
         // which is the mock-up's `/* files pane focused: nothing to type into */`
         // (6199) and the reason Esc is answered inside rather than encoded: with
         // this owner, Esc is how you give the keyboard back, and it must never
@@ -2112,8 +2115,10 @@ impl Runtime<'_> {
     /// The three menus that are **not** here — the profile, root and preview
     /// switchers, and the graph's branch filter — are not an omission either.
     /// "A popup is not a modal, so it owns exactly one key: the one that puts it
-    /// away", and the ladder duly lets a clipboard chord past them to the pane
-    /// underneath. This answers the same way because it is the same sentence.
+    /// away", and the ladder duly lets a copy past them to the pane underneath.
+    /// A paste is the one clipboard verb that is typing, and it asks the
+    /// keyboard's owner as well ([`menubar::paste_seat`]): with one of these up
+    /// the owner is not the shell, so a paste reaches nobody (census #22).
     pub(crate) fn a_surface_above_the_clipboard_rung_holds_the_keyboard(&mut self) -> bool {
         self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
             || self.window.dirty_gate.is_open()
