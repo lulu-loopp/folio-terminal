@@ -75,11 +75,12 @@ pub struct SchemeWatch {
 }
 
 impl SchemeWatch {
-    /// Open the folder's watch, if it is not open and the folder is there.
+    /// Ask for the folder's watch, if it is not heard.
     ///
     /// Failure is quiet and is retried only at the next of the two moments named
     /// in the module header — retrying on a schedule is a timer, and a timer is
-    /// the thing this mechanism exists to avoid.
+    /// the thing this mechanism exists to avoid. The watch steward starts it; a
+    /// refusal comes back on a later turn and is said by [`Self::due`].
     pub fn arm(&mut self, proxy: &EventLoopProxy<AppEvent>) {
         let directory = crate::persist::storage_dir().join(crate::schemes::USER_SCHEME_DIR);
         if let Some(error) = self.news.take_failure()
@@ -90,15 +91,7 @@ impl SchemeWatch {
                 directory.display()
             );
         }
-        self.news.cancel_unarmed();
-        if let Err(error) = self.news.arm(&directory, proxy, AppEvent::SchemesChanged)
-            && worth_a_line(&error)
-        {
-            eprintln!(
-                "recoverable scheme watch failure on {}: {error}",
-                directory.display()
-            );
-        }
+        self.news.arm(&directory, proxy, AppEvent::SchemesChanged);
     }
 
     /// Fold in whatever the watcher thread has said and answer whether a rescan
@@ -169,9 +162,16 @@ mod tests {
     fn a_schemes_folder_that_is_not_there_is_not_a_line_on_stderr() {
         let missing = bt_testpath::temp_path("folio-schemes-that-were-never-customised");
         let _ = std::fs::remove_dir_all(&missing);
-        let error = bt_platform::DirWatch::start(&missing, || {})
-            .err()
-            .expect("a folder that is not there cannot be watched");
+        // On a worker, where the steward starts every watch.
+        let error = bt_platform::spawn_at_priority(
+            "scheme-watch-test",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |ctx| bt_platform::DirWatch::start(ctx, &missing, |_| {}).err(),
+        )
+        .expect("start a worker")
+        .join()
+        .expect("the worker answered")
+        .expect("a folder that is not there cannot be watched");
         assert!(
             !worth_a_line(&error),
             "a fresh install is not a fault to report: {error}"

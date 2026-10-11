@@ -213,6 +213,7 @@ mod update_txn;
 mod version;
 mod video_seat;
 mod watch_clock;
+mod watch_steward;
 mod web_spare;
 mod web_thumb;
 mod web_trace;
@@ -771,6 +772,10 @@ enum AppEvent {
     /// carries nothing — it is the loop being nudged to look at a clock, and the
     /// clock may well decide the news is not ripe yet.
     FilesDirChanged,
+    /// **The watch steward published** (T-DIRWATCH-LIFECYCLE): a member of some ear armed or went
+    /// unheard. Carries nothing: the reports wait in `watch_steward::REPORTS`, and each ear drains
+    /// its own on the turn this brings (`advance_files_watch` and its four neighbours).
+    WatchStewardAnswered,
     /// **The application delegate said something** (M3-1, `app_delegate_wire`).
     ///
     /// The twelfth of the family and owed a wake for [`Self::LaunchAsked`]'s
@@ -902,6 +907,7 @@ impl AppEvent {
             | Self::GitChanged
             | Self::PreviewFileChanged
             | Self::FilesDirChanged
+            | Self::WatchStewardAnswered
             | Self::QuakeSummoned
             | Self::LaunchAsked
             | Self::InstallChannelRead
@@ -43907,6 +43913,14 @@ impl Runtime<'_> {
                 let _ = proxy.send_event(AppEvent::ProgramsAnswered);
             });
         }
+        {
+            // The watch steward's wake, before any ear asks it for anything
+            // (T-DIRWATCH-LIFECYCLE).
+            let proxy = proxy.clone();
+            watch_steward::install_wake(move || {
+                let _ = proxy.send_event(AppEvent::WatchStewardAnswered);
+            });
+        }
         // **The probe can repair and renew the package registration**, which
         // is O's until an update's trial is committed (`update_trial`, F-7,
         // F-18): the probe asks the trial's gate itself
@@ -67257,6 +67271,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // `about_to_wait` is where the quiet window is read and where the
             // columns showing that folder are told to ask for it again.
             AppEvent::FilesDirChanged => Ok(()),
+            // And nothing here either: the steward's reports wait in its map, and every ear
+            // drains its own on the turn `about_to_wait` runs next.
+            AppEvent::WatchStewardAnswered => Ok(()),
         };
         hang_watch::at(leaving_station);
         if let Err(error) = applied {

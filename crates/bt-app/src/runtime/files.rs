@@ -1116,8 +1116,17 @@ impl Runtime<'_> {
     /// cache is kept across a fold so that re-opening is instant, and re-asking
     /// is what keeps it from being instant *and wrong*. The kept rows stay on
     /// screen until the new answer lands, so a refresh never blinks.
+    ///
+    /// **And it is the reader's ask `files_watch` waits for** (its rule 4): a
+    /// folder nobody can hear is tried again on this gesture, once, and never on
+    /// a turn of the loop.
     fn refresh_files_dir(&mut self, seat: SeatId, key: &str) {
-        let tab = self.window.tabs[self.window.active_tab].id;
+        let active = self.window.active_tab;
+        if let Some(state) = self.window.tabs[active].files.get(&seat) {
+            let path = files::full_path(&state.root, key);
+            self.window.files_watch.reader_asked(&path);
+        }
+        let tab = self.window.tabs[active].id;
         self.ask_files_dir(files::FilesHost::Docked(LeafId { tab, seat }), key);
     }
 
@@ -1180,9 +1189,9 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn advance_files_watch(&mut self, now: Instant) -> Result<()> {
         let showing = self.watched_files_dirs();
         let wanted: BTreeSet<PathBuf> = showing.keys().cloned().collect();
-        let armed = self.window.files_watch.sync(&wanted, &self.app.event_proxy);
+        let synced = self.window.files_watch.sync(&wanted, &self.app.event_proxy);
         let due = self.window.files_watch.due(now);
-        if armed.is_empty() && due.is_empty() {
+        if synced.is_empty() && due.is_empty() {
             return Ok(());
         }
         let mut asks: Vec<(files::FilesHost, String)> = Vec::new();
@@ -1201,7 +1210,11 @@ impl Runtime<'_> {
         // asked about yet is left alone — the walk that put it on screen is
         // about to ask for it for the first time, and that read is on the far
         // side of this arming.
-        for directory in &armed {
+        //
+        // And its rule 4: a folder that has just gone unheard is read again for
+        // the same reason read backwards — what moved between its last
+        // notification and the end reached nobody.
+        for directory in synced.armed.iter().chain(&synced.unheard) {
             let Some(trees) = showing.get(directory) else {
                 continue;
             };
@@ -1229,7 +1242,11 @@ impl Runtime<'_> {
         // would otherwise be walked all day for a box nobody has opened; the
         // walk is asked for by the next `ask_for_file_indexes`, which is to
         // say by the next time somebody actually raises the palette.
-        for directory in &due {
+        //
+        // A folder gone unheard marks it too (B5 design note, revision (b)5):
+        // news may have been lost between its last notification and the end, and
+        // the next opening of the palette walks again rather than trusting it.
+        for directory in due.iter().chain(&synced.unheard) {
             for root in self.palette_files_roots() {
                 if directory.starts_with(&root) {
                     self.app.file_indexes.mark_dirty(&root);

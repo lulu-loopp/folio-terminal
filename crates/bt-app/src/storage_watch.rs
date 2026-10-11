@@ -81,14 +81,12 @@ impl StorageWatch {
     /// an ordinary case at all — it is the interesting half of the news, and
     /// swallowing it would hide the machine where nothing this product writes is
     /// landing anywhere.
+    ///
+    /// The watch steward starts the watch; a refusal comes back on a later turn
+    /// and is said by [`Self::due`], every one of them.
     pub fn arm(&mut self, proxy: &EventLoopProxy<AppEvent>) {
         let directory = crate::persist::storage_dir();
-        if let Err(error) = self.news.arm(&directory, proxy, AppEvent::StorageChanged) {
-            eprintln!(
-                "recoverable storage watch failure on {}: {error}",
-                directory.display()
-            );
-        }
+        self.news.arm(&directory, proxy, AppEvent::StorageChanged);
     }
 
     /// Fold in whatever the watcher thread has said and answer whether a re-read

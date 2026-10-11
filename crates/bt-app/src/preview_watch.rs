@@ -90,7 +90,11 @@ use std::{
 
 use winit::event_loop::EventLoopProxy;
 
-use crate::{AppEvent, watch_clock::WatchClock};
+use crate::{
+    AppEvent,
+    watch_clock::WatchClock,
+    watch_steward::{Depth, EarHandle, Listener, MemberReport},
+};
 
 /// **What a file looked like the last time this window read it.**
 ///
@@ -193,23 +197,22 @@ pub struct PreviewWatch {
     /// regard to case and the kernel reports the entry as it is spelled on disk,
     /// which is not necessarily how the reader spelled it.
     listening_for: Arc<Mutex<BTreeMap<PathBuf, BTreeSet<String>>>>,
-    /// One live subscription per directory, however many watched files are in
-    /// it. **The handle is the subscription**: dropping it cancels.
-    folders: BTreeMap<PathBuf, bt_platform::DirWatch>,
-    /// **And the directories this process could not take one out on** — a
-    /// network share, a `\\wsl$` mount, a folder it may not open.
-    ///
-    /// A second membership rather than a `None` beside the handles, and the
-    /// reason is that this set is *read* and not merely recorded: rule 4's
-    /// second road is exactly "the files in these folders", and a state that
-    /// something depends on deserves a name rather than a reading of an
-    /// `Option`. Kept — rather than the folder simply being absent — so that the
+    /// One subscription per directory, however many watched files are in it —
+    /// the set this window's preview ear asks the watch steward for
+    /// ([`crate::watch_steward`], T-DIRWATCH-LIFECYCLE), whose worker starts and
+    /// drops the watches. **Leaving this set is the cancellation.**
+    folders: BTreeSet<PathBuf>,
+    /// **The folders the steward says are heard.** Every other folder of
+    /// `folders` is one no kernel is speaking for — not armed yet, or one this
+    /// process could not take a watch out on (a network share, a `\\wsl$`
+    /// mount, a folder it may not open) — and that difference is *read*, not
+    /// merely recorded: rule 4's second road is exactly "the files in those
+    /// folders". A folder that could not be watched stays in `folders`, so the
     /// attempt is made once per time a file in it is opened rather than once per
     /// turn of the event loop.
-    ///
-    /// The two are exclusive by construction: one folder goes into exactly one
-    /// of them, in [`Self::sync_with`], and leaves both together.
-    unwatchable: BTreeSet<PathBuf>,
+    heard: BTreeSet<PathBuf>,
+    /// This window's preview ear, opened by the first folder it wants.
+    ear: Option<EarHandle>,
     files: BTreeMap<PathBuf, Watched>,
 }
 
@@ -232,37 +235,69 @@ impl PreviewWatch {
     /// on macOS, a new run loop source added to the main run loop and a
     /// **wake-up** of it. This is asked on every turn, so a clone taken at the
     /// top of it would schedule the next turn and the turn after that, for ever,
-    /// over a window nobody is looking at. The clone belongs in [`subscribe`],
-    /// once per folder a subscription is opened on, and nowhere on this path.
+    /// over a window nobody is looking at. The clone belongs in [`listener`],
+    /// once per window, when its ear opens, and nowhere on this path.
     pub fn sync(&mut self, wanted: &BTreeSet<PathBuf>, proxy: &EventLoopProxy<AppEvent>) -> bool {
-        let news = Arc::clone(&self.news);
-        let listening_for = Arc::clone(&self.listening_for);
-        let changed = self.sync_with(
-            wanted,
-            |directory| subscribe(&news, &listening_for, proxy, directory),
-            Stamp::of,
-        );
+        let changed = self.sync_with(wanted, Stamp::of);
+        tell_the_ear(&mut self.ear, &self.folders, changed, || {
+            crate::watch_steward::open_ear(
+                Depth::ShallowNamed,
+                listener(&self.news, &self.listening_for, proxy),
+            )
+        });
         if changed {
             let (files, folders) = self.counts();
             trace(&format!(
-                "{files} previewed files, in {folders} folders this process could open"
+                "{files} previewed files, in {folders} folders being heard"
             ));
         }
         changed
     }
 
-    /// [`Self::sync`]'s bookkeeping, with the opening of a watch and the reading
-    /// of a stamp handed in.
+    /// **Fold in what the steward said about each folder.** A folder that has
+    /// just armed was not being listened to while its files' stamps were taken,
+    /// so its files are asked again once its quiet window passes — one
+    /// `metadata` each, and news only if a stamp moved. A folder that could not
+    /// be heard joins rule 4's second road.
+    fn hear_the_steward(&mut self, now: Instant) {
+        let Some(ear) = self.ear.as_ref() else {
+            return;
+        };
+        for (directory, numbered) in ear.take_reports() {
+            if !self.folders.contains(&directory) {
+                continue;
+            }
+            match numbered.report {
+                MemberReport::Armed => {
+                    if self.heard.insert(directory.clone()) {
+                        for (path, entry) in &mut self.files {
+                            if path.parent() == Some(directory.as_path()) {
+                                entry.clock.note_event(now);
+                            }
+                        }
+                    }
+                }
+                MemberReport::Failed(cause) => {
+                    // **Quietly.** A network share, a `\\wsl$` mount, a folder
+                    // this process may not open: the answer is to have no
+                    // watcher, and rule 4's second road covers its files.
+                    trace(&format!("cannot watch {}: {cause}", directory.display()));
+                    self.heard.remove(&directory);
+                }
+            }
+        }
+    }
+
+    /// [`Self::sync`]'s bookkeeping, with the reading of a stamp handed in.
     ///
     /// One derivation for the real thing and for the tests, on
     /// `GitWatch::sync_with`'s own reasoning: what the gate *is* — the map
-    /// follows the set, departures drop their handles, arrivals are armed once —
+    /// follows the set, departures leave the ear's set, arrivals join it once —
     /// is the same code whether a kernel subscription is actually taken out or
     /// not, and a second copy of it in the tests would be a test of the copy.
     fn sync_with(
         &mut self,
         wanted: &BTreeSet<PathBuf>,
-        mut open: impl FnMut(&Path) -> Option<bt_platform::DirWatch>,
         mut stamp: impl FnMut(&Path) -> Option<Stamp>,
     ) -> bool {
         // **A window with no preview open touches nothing at all**, not even the
@@ -315,26 +350,9 @@ impl PreviewWatch {
                     .insert(name.to_string_lossy().to_lowercase());
             }
         }
-        let held = self.folders.len() + self.unwatchable.len();
-        self.folders
-            .retain(|directory, _| folders.contains(directory));
-        self.unwatchable
-            .retain(|directory| folders.contains(directory));
-        changed |= self.folders.len() + self.unwatchable.len() != held;
-        for directory in &folders {
-            if self.folders.contains_key(directory) || self.unwatchable.contains(directory) {
-                continue;
-            }
-            changed = true;
-            match open(directory) {
-                Some(watch) => {
-                    self.folders.insert(directory.clone(), watch);
-                }
-                None => {
-                    self.unwatchable.insert(directory.clone());
-                }
-            }
-        }
+        changed |= self.folders != folders;
+        self.heard.retain(|directory| folders.contains(directory));
+        self.folders = folders.clone();
         // A folder that stopped being watched left its unread news behind, and a
         // stale timestamp for it would be acted on the next time somebody opened
         // a file in it — after the fresh read that opening already performs.
@@ -361,17 +379,7 @@ impl PreviewWatch {
         if self.files.is_empty() {
             return Vec::new();
         }
-        let mut failed = Vec::new();
-        for (directory, watch) in &mut self.folders {
-            if let Some(error) = watch.take_failure() {
-                trace(&format!("cannot watch {}: {error}", directory.display()));
-                failed.push(directory.clone());
-            }
-        }
-        for directory in failed {
-            self.folders.remove(&directory);
-            self.unwatchable.insert(directory);
-        }
+        self.hear_the_steward(now);
         for (directory, at) in std::mem::take(&mut *lock(&self.news)) {
             for (path, entry) in &mut self.files {
                 if path.parent() == Some(directory.as_path()) {
@@ -405,7 +413,7 @@ impl PreviewWatch {
     /// 2026-08-29).
     ///
     /// A folder on a network share, on a `\wsl$` mount, or one this process may
-    /// not open comes back from [`subscribe`] as `None`, and every rule above
+    /// not open is reported unheard by the watch steward, and every rule above
     /// this one is then silent about the files in it: nothing arrives in the
     /// mailbox, no clock ever runs, and a document opened off such a folder is
     /// the one document in this window that would go on showing the bytes it
@@ -436,17 +444,17 @@ impl PreviewWatch {
         &mut self,
         mut stamp: impl FnMut(&Path) -> Option<Stamp>,
     ) -> Vec<FileNews> {
-        // **A window whose folders are all watched touches no disk at all**, and
-        // this is the line that says so: the common case is that every handle is
-        // held, and then there is nothing here to walk.
-        if self.unwatchable.is_empty() {
+        // **A window whose folders are all heard touches no disk at all**, and
+        // this is the line that says so: the common case is that every folder is
+        // heard, and then there is nothing here to walk.
+        if self.heard == self.folders {
             return Vec::new();
         }
         let mut moved = Vec::new();
         for (path, entry) in &mut self.files {
             let unwatched = path
                 .parent()
-                .is_some_and(|directory| self.unwatchable.contains(directory));
+                .is_some_and(|directory| !self.heard.contains(directory));
             if !unwatched {
                 continue;
             }
@@ -477,65 +485,57 @@ impl PreviewWatch {
             .min()
     }
 
-    /// How many files are subscribed to, and how many of their folders the
-    /// platform could actually open a watch on. For the tests and the trace
-    /// line.
+    /// How many files are subscribed to, and how many of their folders are
+    /// being heard. For the tests and the trace line.
     #[must_use]
     pub fn counts(&self) -> (usize, usize) {
-        (
-            self.files.len(),
-            self.folders
-                .values()
-                .filter(|watch| watch.is_armed())
-                .count(),
-        )
+        (self.files.len(), self.heard.len())
     }
 }
 
-/// Open the one watch a folder needs.
+/// **Hand the folders to the ear when they changed**, opening it for the first
+/// folder; an unchanged set sends nothing.
+fn tell_the_ear(
+    ear: &mut Option<EarHandle>,
+    folders: &BTreeSet<PathBuf>,
+    changed: bool,
+    open: impl FnOnce() -> EarHandle,
+) {
+    if !changed || (ear.is_none() && folders.is_empty()) {
+        return;
+    }
+    ear.get_or_insert_with(open).want(folders, BTreeSet::new());
+}
+
+/// **The preview ear's listener**: what a watcher thread does when a folder
+/// moves.
 ///
-/// A free function and not a method for `git_watch::subscribe`'s reason: it is
-/// called from inside a closure `sync_with` holds while it holds `self` mutably,
-/// and what it needs is the mailbox and the proxy rather than the registry.
-///
-/// **And it is the only place in this file the proxy is cloned** — once per
-/// folder a watch is opened on, for the reason [`PreviewWatch::sync`] states.
-fn subscribe(
+/// **The only place in this file the proxy is cloned** — once per window, when
+/// its ear opens, for the reason [`PreviewWatch::sync`] states.
+fn listener(
     news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
     listening_for: &Arc<Mutex<BTreeMap<PathBuf, BTreeSet<String>>>>,
     proxy: &EventLoopProxy<AppEvent>,
-    directory: &Path,
-) -> Option<bt_platform::DirWatch> {
+) -> Listener {
     let mailbox = Arc::clone(news);
     let listening_for = Arc::clone(listening_for);
     let proxy = proxy.clone();
-    let key = directory.to_path_buf();
-    // Shallow (rule 2), and **named** (rule 3, defect #186): this folder's own
-    // entries, and the kernel's own word about which of them moved.
-    let started = bt_platform::DirWatch::start_shallow_named(directory, move |change| {
-        if !change_is_ours(&listening_for, &key, change) {
+    // Shallow (rule 2), and **named** (rule 3, defect #186): the ear's depth is
+    // `ShallowNamed`, so each change carries the kernel's own word about which
+    // entries moved.
+    Arc::new(move |directory: &Path, change| {
+        if !change_is_ours(&listening_for, directory, change) {
             // The whole of the fix: a `target` that a build is writing into is an
             // entry of this folder and says so on every object file. Nothing is
             // recorded, no event is sent, and the loop this window is asleep in
             // does not turn.
             return;
         }
-        lock(&mailbox).insert(key.clone(), Instant::now());
+        lock(&mailbox).insert(directory.to_path_buf(), Instant::now());
         // The loop is woken, not told what to do: what a change means is decided
         // on the main thread, where the clocks and the seats are.
         let _ = proxy.send_event(AppEvent::PreviewFileChanged);
-    });
-    match started {
-        Ok(watch) => Some(watch),
-        Err(error) => {
-            // **Quietly.** A network share, a `\\wsl$` mount, a folder this
-            // process may not open: the answer is to have no watcher, and a
-            // preview that does not refresh itself is exactly what this product
-            // did until today. There is nothing here a reader could act on.
-            trace(&format!("cannot watch {}: {error}", directory.display()));
-            None
-        }
-    }
+    })
 }
 
 /// **Does this completion name a file this window is reading?** (defect #186).
@@ -609,7 +609,7 @@ mod tests {
         wanted: &BTreeSet<PathBuf>,
         stamps: &BTreeMap<PathBuf, Stamp>,
     ) -> bool {
-        watch.sync_with(wanted, |_| None, |path| stamps.get(path).copied())
+        watch.sync_with(wanted, |path| stamps.get(path).copied())
     }
 
     fn stamp(len: u64) -> Stamp {
@@ -619,11 +619,10 @@ mod tests {
         }
     }
 
-    /// How many folders this watch is following at all — the ones it holds a
-    /// handle on and the ones it has recorded it cannot. The tests' `open`
-    /// answers `None` for everything, so the second is where they all land.
+    /// How many folders this watch is following at all — heard or not. The
+    /// tests have no steward, so none of them is heard.
     fn subscribed(watch: &PreviewWatch) -> usize {
-        watch.folders.len() + watch.unwatchable.len()
+        watch.folders.len()
     }
 
     fn named(names: &[&str]) -> Vec<std::ffi::OsString> {
@@ -935,7 +934,7 @@ mod tests {
     ///
     /// The second road, and both of its halves in one test because they are one
     /// property seen from two sides. A share, a `\\wsl$` mount or a folder the
-    /// process may not open comes back from `subscribe` as `None`; every clock
+    /// process may not open is reported unheard by the steward; every clock
     /// in this file is then silent about the documents in it, and without this
     /// road they would show the bytes they were opened with until the window
     /// closed. What must be equally true is that the road is **closed** over a
@@ -954,15 +953,14 @@ mod tests {
         let share = PathBuf::from(r"\\server\team").join("plan.md");
         let local = file("a.md");
         let mut stamps = BTreeMap::from([(share.clone(), stamp(10)), (local.clone(), stamp(20))]);
-        // A `DirWatch` is a kernel object and cannot be fabricated, so the
-        // difference the test is about is stated where this module keeps it:
-        // every folder arrives unwatchable, and the local one is then recorded
-        // as having taken a handle. That is exactly what `sync_with` writes on a
-        // real machine, said in one line instead of through a `CreateFileW`.
+        // The difference the test is about is stated where this module keeps
+        // it: every folder arrives unheard, and the local one is then recorded
+        // as heard. That is exactly what an `Armed` report from the steward
+        // writes on a real machine, said in one line.
         let wanted = BTreeSet::from([share.clone(), local.clone()]);
-        watch.sync_with(&wanted, |_| None, |path| stamps.get(path).copied());
+        watch.sync_with(&wanted, |path| stamps.get(path).copied());
         let local_folder = local.parent().expect("a folder").to_path_buf();
-        watch.unwatchable.remove(&local_folder);
+        watch.heard.insert(local_folder);
 
         assert!(
             watch
@@ -1017,14 +1015,10 @@ mod tests {
         let mut watch = PreviewWatch::default();
         let watched = file("a.md");
         let stamps = BTreeMap::from([(watched.clone(), stamp(10))]);
-        watch.sync_with(
-            &BTreeSet::from([watched]),
-            |_| None,
-            |path| stamps.get(path).copied(),
-        );
-        // Every handle taken — see the test above for why this is written rather
-        // than opened.
-        watch.unwatchable.clear();
+        watch.sync_with(&BTreeSet::from([watched]), |path| stamps.get(path).copied());
+        // Every folder heard — see the test above for why this is written
+        // rather than opened.
+        watch.heard = watch.folders.clone();
         assert!(
             watch
                 .ask_the_unwatched_with(|path| panic!("asked the disk about {}", path.display()))
@@ -1070,43 +1064,51 @@ mod tests {
     ///
     /// The half of a macOS defect a test without an event loop can hold. `sync`
     /// is walked on every turn of the loop, and the proxy the watcher threads
-    /// wake it with is cloned inside `open` — in [`subscribe`] — because on that
+    /// wake it with is cloned inside the ear's listener — in [`listener`] — because on that
     /// platform a clone is not an `Arc` bump: it is a new run loop source, added
     /// to the main run loop, and a wake-up of the loop. One taken per turn
     /// therefore schedules the turn that takes the next one, and an idle window
     /// holds a processor core at full tilt for as long as it stays open.
     ///
     /// So what is asserted here is the rule that keeps the clone where it
-    /// belongs, and it is a rule this module wanted anyway: `open` runs once per
-    /// new directory and not once per asking. The two files share a folder, so
-    /// the first turn opens one subscription and the two after it open none.
+    /// belongs, and it is a rule this module wanted anyway: the ear (and its
+    /// listener's clone) is opened once per window, and an unchanged set is not
+    /// even sent to it. The two files share a folder, so the first turn asks for
+    /// one folder and the two after it ask for nothing.
     ///
-    /// MUTATIONS: call `open` for every wanted path rather than every new one
-    /// and the first assertion goes; drop the `contains_key` skip in
-    /// [`PreviewWatch::sync_with`] and the repeated turns each open a folder
-    /// again — which is exactly the shape the defect had.
+    /// MUTATIONS: open the ear on every turn rather than once and the first
+    /// assertion goes; tell the ear on every turn rather than on a change and
+    /// the steward's attempt count is unchanged but the second assertion goes —
+    /// the set was sent three times.
     #[test]
     fn a_folder_is_subscribed_to_once_however_many_turns_go_by() {
+        let door = crate::watch_steward::fake::FakeDoor::default();
+        let steward: &'static crate::watch_steward::Steward = Box::leak(Box::new(
+            crate::watch_steward::Steward::new(door.clone(), |_| {}),
+        ));
         let mut watch = PreviewWatch::default();
         let wanted = BTreeSet::from([file("one.md"), file("two.md")]);
-        let mut opened: Vec<PathBuf> = Vec::new();
+        let mut opened = 0;
+        let mut told = 0;
 
         for _ in 0..3 {
-            watch.sync_with(
-                &wanted,
-                |directory| {
-                    opened.push(directory.to_path_buf());
-                    None
-                },
-                |_| None,
-            );
+            let changed = watch.sync_with(&wanted, |_| None);
+            told += usize::from(changed);
+            tell_the_ear(&mut watch.ear, &watch.folders, changed, || {
+                opened += 1;
+                steward.open_ear(Depth::ShallowNamed, Arc::new(|_: &Path, _| {}))
+            });
         }
 
         assert_eq!(
-            opened,
-            vec![PathBuf::from(r"D:\notes")],
-            "one folder holds both files, and the two turns after the first open \
-             nothing at all"
+            opened, 1,
+            "one ear for the window, opened by its first folder"
         );
+        assert_eq!(
+            told, 1,
+            "one folder holds both files, and the two turns after the first ask \
+             for nothing at all"
+        );
+        assert_eq!(watch.folders, BTreeSet::from([PathBuf::from(r"D:\notes")]));
     }
 }

@@ -39,9 +39,7 @@ lede_in_tail: .read_to_end
 transcript_lede: File::open
 reserve: .open
 append_note: .open
-FilesWatch::sync_with: open
 drain: .read_to_end
-GitWatch::sync_with: open
 append_healed: .open
 append_panic_report: .open
 Runtime::commit_web_page: .open
@@ -79,7 +77,6 @@ count_pages: .read
 read_capped: .read_to_end
 SessionStore::open: SessionWriter::open
 read_up_to: .read_to_end
-PreviewWatch::sync_with: open
 Registry::table: .read
 title: .read
 with_table: read

@@ -30,23 +30,41 @@
 //! touches wakes nothing, arms no clock and asks for no deadline, which is what
 //! keeps R31's "a repository is not read because time passed" true of a watch
 //! that is never dropped.
+//!
+//! # Where the watch lives
+//!
+//! Not here (T-DIRWATCH-LIFECYCLE): the folder is this type's ear on the watch
+//! steward ([`crate::watch_steward`]), whose worker starts the watch, keeps it
+//! and drops it, so arming never waits on the window thread. Its answer —
+//! heard, or not and why — comes back as a report, read on the next turn.
 
 use std::{
-    path::Path,
+    collections::BTreeSet,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Instant,
 };
 
 use winit::event_loop::EventLoopProxy;
 
-use crate::{AppEvent, watch_clock::WatchClock};
+use crate::{
+    AppEvent,
+    watch_clock::WatchClock,
+    watch_steward::{Cause, Depth, EarHandle, MemberReport},
+};
 
 /// A folder's watch, the time it last moved, and the debounce between them.
 #[derive(Default)]
 pub struct DirNews {
-    /// `None` before an attempt or after a reported failure; `Some` while a
-    /// subscription is armed.
-    watch: Option<bt_platform::DirWatch>,
+    /// The folder's ear on the watch steward, opened by the first arming.
+    ear: Option<EarHandle>,
+    /// The folder the ear asks for.
+    directory: Option<PathBuf>,
+    /// What the steward last said: `None` before its first answer, `Some(true)`
+    /// while the folder is heard, `Some(false)` while it is not.
+    heard: Option<bool>,
+    /// The refusal or end the steward reported and nobody has taken yet.
+    failure: Option<Cause>,
     /// When the watcher thread last saw something move, written there and read
     /// here. One `Option<Instant>` and not a queue: every notification says the
     /// same word, so the only thing worth keeping is the most recent time it was
@@ -56,8 +74,8 @@ pub struct DirNews {
 }
 
 impl DirNews {
-    /// Whether the folder's watch is open — the one fact a test can check
-    /// without a filesystem event.
+    /// Whether the steward says the folder is heard — the one fact a test can
+    /// check without a filesystem event.
     ///
     /// Behind `cfg(test)` because arming is idempotent by itself: no caller ever
     /// has to ask before arming, and a question only the suite asks is a
@@ -65,55 +83,75 @@ impl DirNews {
     #[cfg(test)]
     #[must_use]
     pub fn is_armed(&self) -> bool {
-        self.watch.as_ref().is_some_and(|watch| watch.is_armed())
+        self.heard == Some(true)
     }
 
-    /// Take a watch failure and retire the failed subscription.
+    /// The refusal or end the steward reported for this folder, handed over
+    /// once.
     pub(crate) fn take_failure(&mut self) -> Option<std::io::Error> {
-        let error = self.watch.as_mut()?.take_failure()?;
-        self.watch = None;
-        Some(error)
+        self.hear_the_steward();
+        self.failure.take().map(|cause| cause.to_error())
     }
 
-    /// Drop a watch that is no longer armed before an explicit re-arm request.
-    pub(crate) fn cancel_unarmed(&mut self) {
-        if self.watch.as_ref().is_some_and(|watch| !watch.is_armed()) {
-            self.watch = None;
-        }
-    }
-
-    /// Start the folder's watch and wake the loop with `event` whenever it moves.
+    /// **Ask for the folder's watch**, waking the loop with `event` whenever it
+    /// moves. Never waits: the steward starts it, and its answer is read on a
+    /// later turn ([`Self::take_failure`]).
     ///
-    /// No separate existence check: a folder that is not there fails to open.
-    /// A failed attempt returns before a watch is stored. Whether a missing folder is ordinary
-    /// is a fact about *which* folder, and this type does not know which folder it holds.
+    /// An arming of a folder that is not heard is the reader-triggered attempt
+    /// the steward's `Failed` rule waits for: it is tried once more. An arming of
+    /// a folder that is heard, or still being started, asks nothing new.
     ///
-    /// **The existing-subscription answer comes before the proxy is cloned, and that
-    /// order is load-bearing** — the reason is written out at
+    /// **The ear is opened before the proxy is cloned only once, and that order
+    /// is load-bearing** — the reason is written out at
     /// [`crate::git_watch::GitWatch::want`]: a clone is an `Arc` bump on Windows
     /// and, on macOS, a new run loop source and a wake-up of the loop. Arming is
-    /// idempotent and every caller leans on that, so a clone above the early
-    /// return would be one taken per asking however many watches were opened.
-    pub fn arm(
-        &mut self,
-        directory: &Path,
-        proxy: &EventLoopProxy<AppEvent>,
-        event: AppEvent,
-    ) -> Result<(), std::io::Error> {
-        if self.watch.is_some() {
-            return Ok(());
+    /// idempotent and every caller leans on that, so a clone taken per arming
+    /// would be one taken per asking however many watches were opened.
+    pub fn arm(&mut self, directory: &Path, proxy: &EventLoopProxy<AppEvent>, event: AppEvent) {
+        self.hear_the_steward();
+        let rearm = if self.heard == Some(false) {
+            BTreeSet::from([directory.to_path_buf()])
+        } else {
+            BTreeSet::new()
+        };
+        let news = &self.news;
+        let ear = self.ear.get_or_insert_with(|| {
+            let news = Arc::clone(news);
+            let proxy = proxy.clone();
+            crate::watch_steward::open_ear(
+                Depth::Tree,
+                Arc::new(move |_: &Path, _| {
+                    *news
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
+                    // The loop is woken, not told what to do.
+                    let _ = proxy.send_event(event);
+                }),
+            )
+        });
+        self.directory = Some(directory.to_path_buf());
+        ear.want(&BTreeSet::from([directory.to_path_buf()]), rearm);
+    }
+
+    /// Fold in what the steward said about the folder.
+    fn hear_the_steward(&mut self) {
+        let Some(ear) = self.ear.as_ref() else {
+            return;
+        };
+        for (directory, numbered) in ear.take_reports() {
+            if self.directory.as_ref() != Some(&directory) {
+                continue;
+            }
+            match numbered.report {
+                MemberReport::Armed => self.heard = Some(true),
+                MemberReport::Failed(cause) => {
+                    if self.heard != Some(false) {
+                        self.failure = Some(cause);
+                    }
+                    self.heard = Some(false);
+                }
+            }
         }
-        let news = Arc::clone(&self.news);
-        let proxy = proxy.clone();
-        let watch = bt_platform::DirWatch::start(directory, move || {
-            *news
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
-            // The loop is woken, not told what to do.
-            let _ = proxy.send_event(event);
-        })?;
-        self.watch = Some(watch);
-        Ok(())
     }
 
     /// Fold in whatever the watcher thread has said and answer whether a rescan

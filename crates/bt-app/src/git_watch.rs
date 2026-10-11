@@ -31,6 +31,11 @@
 //!    reported by `bt_platform::DirWatch` exactly like every other notification,
 //!    because it carries the same information this file uses.
 //!
+//! **No watch is held here** (T-DIRWATCH-LIFECYCLE): the paths go to the
+//! application's git ear on the watch steward ([`crate::watch_steward`]), whose
+//! worker starts and drops every watch, so neither a page opening nor a window
+//! closing waits on the window thread for a watcher thread.
+//!
 //! # What is deliberately not here
 //!
 //! **No `.gitignore` matching.** A notification says *something changed*; whether
@@ -56,28 +61,29 @@ use winit::event_loop::EventLoopProxy;
 use crate::{
     AppEvent,
     watch_clock::WatchClock,
+    watch_steward::{Depth, EarHandle, Listener, MemberReport},
     window_news::{SeatedByDirectory, WindowSeats},
 };
 
 /// One repository's subscription, and the clock its notifications feed.
 struct Watched {
-    /// The working tree's own recursive watch, and — for a linked worktree,
-    /// whose `.git` is a *file* pointing elsewhere — a second one on the
-    /// directory that file names.
+    /// The working tree, recursively, and — for a linked worktree, whose `.git`
+    /// is a *file* pointing elsewhere — the directory that file names.
+    paths: Vec<PathBuf>,
+    /// Which of `paths` the steward says are heard.
     ///
     /// **Empty is a real state and not a failure to retry.** A repository on a
     /// network share or a `\\wsl$` mount cannot be watched; the entry is kept
-    /// anyway, holding no handles, so that the attempt is made once per time the
+    /// anyway, heard by nothing, so that the attempt is made once per time the
     /// page is opened rather than once per turn of the event loop. Retrying on a
     /// schedule is the poll this whole file exists to avoid.
-    watches: Vec<PathWatch>,
+    heard: BTreeSet<PathBuf>,
     clock: WatchClock,
 }
 
-struct PathWatch {
-    path: PathBuf,
-    watch: bt_platform::DirWatch,
-}
+/// Which repository each watched path belongs to: the listener's map from the
+/// path a watcher thread speaks for to the root its news is filed under.
+type Routes = Arc<Mutex<BTreeMap<PathBuf, PathBuf>>>;
 
 /// **Every repository some open window is showing, and which window shows it.**
 ///
@@ -99,7 +105,11 @@ pub struct GitWatch<W = winit::window::WindowId> {
     /// Stamped on the watcher thread rather than when the loop gets round to
     /// looking, so that a busy main thread cannot make a storm look like a lull.
     news: Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
+    routes: Routes,
     watched: BTreeMap<PathBuf, Watched>,
+    /// The application's git ear on the watch steward, opened by the first
+    /// repository a page wants.
+    ear: Option<EarHandle>,
     /// Each open window's roots and the ripened news it has not taken yet.
     seats: WindowSeats<W, PathBuf>,
 }
@@ -108,7 +118,9 @@ impl<W> Default for GitWatch<W> {
     fn default() -> Self {
         Self {
             news: Arc::default(),
+            routes: Arc::default(),
             watched: BTreeMap::new(),
+            ear: None,
             seats: WindowSeats::default(),
         }
     }
@@ -129,7 +141,11 @@ impl<W: Ord + Copy> GitWatch<W> {
     ///
     /// Answers whether the subscriptions changed.
     fn seat_windows_with(&mut self, open_windows: impl IntoIterator<Item = W>) -> bool {
-        self.seats.level_with(open_windows) && self.sync(|_| Vec::new())
+        let changed = self.seats.level_with(open_windows) && self.sync(|_| Vec::new());
+        if changed && let Some(ear) = self.ear.as_mut() {
+            ear.want(&all_paths(&self.watched), BTreeSet::new());
+        }
+        changed
     }
 
     /// **What this window's drawn Git pages are showing now** (rule 1), asked
@@ -151,31 +167,69 @@ impl<W: Ord + Copy> GitWatch<W> {
     /// dropping it invalidates the source again. This is called on every turn,
     /// so a clone taken at the top of it would schedule the very turn that takes
     /// the next one — a window nobody is looking at, holding a core at full tilt
-    /// for as long as it stays open. So the clone is taken once per
-    /// subscription, in [`subscribe`], and never per turn.
+    /// for as long as it stays open. So the clone is taken once, in
+    /// [`listener`], when the application's git ear opens, and never per turn.
     pub fn want(&mut self, window: W, wanted: BTreeSet<PathBuf>, proxy: &EventLoopProxy<AppEvent>) {
-        let news = Arc::clone(&self.news);
-        self.want_with(window, wanted, |root| subscribe(&news, proxy, root));
+        if !self.want_with(window, wanted, paths_of) {
+            return;
+        }
+        let paths = all_paths(&self.watched);
+        if self.ear.is_none() && paths.is_empty() {
+            return;
+        }
+        let (news, routes) = (&self.news, &self.routes);
+        self.ear
+            .get_or_insert_with(|| {
+                crate::watch_steward::open_ear(Depth::Tree, listener(news, routes, proxy))
+            })
+            .want(&paths, BTreeSet::new());
     }
 
-    /// [`Self::want`] with the opening of a watch handed in.
+    /// [`Self::want`]'s bookkeeping, with the paths a repository needs handed
+    /// in. Answers whether the subscriptions changed.
     fn want_with(
         &mut self,
         window: W,
         wanted: BTreeSet<PathBuf>,
-        open: impl FnMut(&Path) -> Vec<PathWatch>,
-    ) {
-        if self.seats.want(window, wanted) {
-            self.sync(open);
-        }
+        paths: impl FnMut(&Path) -> Vec<PathBuf>,
+    ) -> bool {
+        self.seats.want(window, wanted) && self.sync(paths)
     }
 
     /// **Fold in what the kernel has said, and tell every window that wants a
     /// repository whose news has ripened** — once a pass, before any window
     /// takes its turn, so every window takes the same news on the same pass.
     pub fn ripen(&mut self, now: Instant) {
+        self.hear_the_steward();
         for root in self.due(now) {
             self.seats.tell(&root);
+        }
+    }
+
+    /// Fold in what the steward said about each path: heard, or not.
+    fn hear_the_steward(&mut self) {
+        let Some(ear) = self.ear.as_ref() else {
+            return;
+        };
+        for (path, numbered) in ear.take_reports() {
+            for entry in self.watched.values_mut() {
+                if !entry.paths.contains(&path) {
+                    continue;
+                }
+                match &numbered.report {
+                    MemberReport::Armed => {
+                        entry.heard.insert(path.clone());
+                    }
+                    MemberReport::Failed(cause) => {
+                        // **Quietly** (rule 3). A network share, a `\\wsl$`
+                        // mount, a folder this process may not open: the answer
+                        // is to have no watcher and let the window-focus trigger
+                        // and the page's own refresh cover it.
+                        trace(&format!("cannot watch {}: {cause}", path.display()));
+                        entry.heard.remove(&path);
+                    }
+                }
+            }
         }
     }
 
@@ -188,12 +242,11 @@ impl<W: Ord + Copy> GitWatch<W> {
     /// **Bring the subscriptions level with what the seats want** (rule 1).
     ///
     /// The union of every seat is the whole of the gate: a root that leaves it
-    /// has its subscriptions dropped here, which cancels the read and leaves
-    /// retirement to the platform. Nothing else in this file decides to watch or
-    /// stop watching anything.
-    fn sync(&mut self, open: impl FnMut(&Path) -> Vec<PathWatch>) -> bool {
+    /// leaves the ear's set, and the steward drops its watches. Nothing else in
+    /// this file decides to watch or stop watching anything.
+    fn sync(&mut self, paths: impl FnMut(&Path) -> Vec<PathBuf>) -> bool {
         let wanted = self.seats.wanted();
-        let changed = self.sync_with(&wanted, open);
+        let changed = self.sync_with(&wanted, paths);
         if changed {
             let (held, watching) = self.counts();
             trace(&format!(
@@ -213,7 +266,7 @@ impl<W: Ord + Copy> GitWatch<W> {
     fn sync_with(
         &mut self,
         wanted: &BTreeSet<PathBuf>,
-        mut open: impl FnMut(&Path) -> Vec<PathWatch>,
+        mut paths: impl FnMut(&Path) -> Vec<PathBuf>,
     ) -> bool {
         // **With no Git page open in any window nothing is touched at all**, not
         // even the mailbox's lock. The mailbox can only hold news for a
@@ -234,10 +287,22 @@ impl<W: Ord + Copy> GitWatch<W> {
             self.watched.insert(
                 root.clone(),
                 Watched {
-                    watches: open(root),
+                    paths: paths(root),
+                    heard: BTreeSet::new(),
                     clock: WatchClock::default(),
                 },
             );
+        }
+        if changed {
+            // The listener's routes follow the set, so a path that left it files
+            // no news under a root nobody shows.
+            let mut routes = lock(&self.routes);
+            routes.clear();
+            for (root, entry) in &self.watched {
+                for path in &entry.paths {
+                    routes.insert(path.clone(), root.clone());
+                }
+            }
         }
         // A root that stopped being watched left its unread news behind, and a
         // stale timestamp for it would be acted on the next time somebody opened
@@ -256,18 +321,6 @@ impl<W: Ord + Copy> GitWatch<W> {
     fn due(&mut self, now: Instant) -> Vec<PathBuf> {
         if self.watched.is_empty() {
             return Vec::new();
-        }
-        for entry in self.watched.values_mut() {
-            entry.watches.retain_mut(|subscription| {
-                let Some(error) = subscription.watch.take_failure() else {
-                    return true;
-                };
-                trace(&format!(
-                    "cannot watch {}: {error}",
-                    subscription.path.display()
-                ));
-                false
-            });
         }
         for (root, at) in std::mem::take(&mut *lock(&self.news)) {
             if let Some(entry) = self.watched.get_mut(&root) {
@@ -301,12 +354,7 @@ impl<W: Ord + Copy> GitWatch<W> {
             self.watched.len(),
             self.watched
                 .values()
-                .filter(|entry| {
-                    entry
-                        .watches
-                        .iter()
-                        .any(|subscription| subscription.watch.is_armed())
-                })
+                .filter(|entry| !entry.heard.is_empty())
                 .count(),
         )
     }
@@ -320,19 +368,8 @@ impl<W: Ord + Copy> SeatedByDirectory<W> for GitWatch<W> {
     }
 }
 
-/// Open the one or two watches a repository needs.
-///
-/// A free function and not a method because it is called from inside a closure
-/// that [`GitWatch::sync_with`] holds while it holds `self` mutably; what it
-/// needs is the mailbox and the proxy, not the registry.
-///
-/// **And it is the only place in this file the proxy is cloned** — once per
-/// watch opened, for the reason [`GitWatch::want`] states.
-fn subscribe(
-    news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
-    proxy: &EventLoopProxy<AppEvent>,
-    root: &Path,
-) -> Vec<PathWatch> {
+/// The one or two paths a repository is watched at.
+fn paths_of(root: &Path) -> Vec<PathBuf> {
     // The working tree, recursively — which already covers `.git` in the ordinary
     // case, because there it is a subdirectory of exactly this tree.
     let mut paths = vec![root.to_path_buf()];
@@ -344,32 +381,38 @@ fn subscribe(
         paths.push(gitdir);
     }
     paths
-        .into_iter()
-        .filter_map(|path| {
-            let news = Arc::clone(news);
-            let proxy = proxy.clone();
-            let root = root.to_path_buf();
-            let started = bt_platform::DirWatch::start(&path, move || {
-                lock(&news).insert(root.clone(), Instant::now());
-                // The loop is woken, not told what to do: what a change means is
-                // decided on the main thread, where the clocks are.
-                let _ = proxy.send_event(AppEvent::GitChanged);
-            });
-            match started {
-                Ok(watch) => Some(PathWatch { path, watch }),
-                Err(error) => {
-                    // **Quietly** (rule 3). A network share, a `\\wsl$` mount, a
-                    // folder this process may not open: the answer is to have no
-                    // watcher and let the window-focus trigger and the page's own
-                    // refresh cover it. There is nothing here a reader could act
-                    // on, so nothing is raised — only a line for whoever is
-                    // holding the door open.
-                    trace(&format!("cannot watch {}: {error}", path.display()));
-                    None
-                }
-            }
-        })
+}
+
+/// Every path every watched repository is watched at: the ear's set.
+fn all_paths(watched: &BTreeMap<PathBuf, Watched>) -> BTreeSet<PathBuf> {
+    watched
+        .values()
+        .flat_map(|entry| entry.paths.iter().cloned())
         .collect()
+}
+
+/// **The git ear's listener**: what a watcher thread does when a path moves —
+/// file the news under its repository and wake the loop.
+///
+/// **The only place in this file the proxy is cloned** — once, when the ear
+/// opens, for the reason [`GitWatch::want`] states.
+fn listener(
+    news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
+    routes: &Routes,
+    proxy: &EventLoopProxy<AppEvent>,
+) -> Listener {
+    let news = Arc::clone(news);
+    let routes = Arc::clone(routes);
+    let proxy = proxy.clone();
+    Arc::new(move |path: &Path, _| {
+        let Some(root) = lock(&routes).get(path).cloned() else {
+            return;
+        };
+        lock(&news).insert(root, Instant::now());
+        // The loop is woken, not told what to do: what a change means is
+        // decided on the main thread, where the clocks are.
+        let _ = proxy.send_event(AppEvent::GitChanged);
+    })
 }
 
 /// The directory a linked worktree's `.git` file points at, if this root is one.
@@ -686,7 +729,7 @@ mod tests {
     /// one is held, and that half is [`GitWatch::sync_with`] itself rather than a
     /// second copy of it here.
     fn sync_for_test(watch: &mut GitWatch<u32>, wanted: &BTreeSet<PathBuf>) -> bool {
-        watch.sync_with(wanted, |_| Vec::new())
+        watch.sync_with(wanted, |root| vec![root.to_path_buf()])
     }
 
     // ── T-WINDOWS-ALL: one seat per window ─────────────────────────────────
@@ -706,7 +749,9 @@ mod tests {
     /// One window's turn: say what it draws, take what it was told, and answer
     /// which of its surfaces are read again.
     fn turn(watch: &mut GitWatch<u32>, window: u32, surfaces: &Surfaces) -> Vec<GitOrigin> {
-        watch.want_with(window, git_roots_on_glass(surfaces), |_| Vec::new());
+        watch.want_with(window, git_roots_on_glass(surfaces), |root| {
+            vec![root.to_path_buf()]
+        });
         git_surfaces_the_kernel_moved(surfaces, &watch.take(window))
     }
 
