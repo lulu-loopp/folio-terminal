@@ -5354,6 +5354,15 @@ mod tests {
         parts.iter().collect()
     }
 
+    /// A row from this build's seed, for tests of its native shell mechanisms.
+    #[cfg(not(windows))]
+    fn host_row(id: &str) -> Profile {
+        profiles::shipped_for(profiles::SeedPlatform::of_this_build(), &bare())
+            .into_iter()
+            .find(|profile| profile.id == id)
+            .unwrap_or_else(|| panic!("a host seed id: {id}"))
+    }
+
     /// That row with an environment of its own.
     fn row_with(id: &str, env: &[(&str, &str)]) -> Profile {
         Profile {
@@ -8430,6 +8439,7 @@ mod tests {
     /// script, because bash consults the init file only for a non-login shell.
     /// Nothing about that is visible — the shell starts, the prompt is right,
     /// and no marker ever arrives.
+    #[cfg(windows)]
     #[test]
     fn git_bash_trades_its_login_flag_for_the_init_file() {
         let script = Path::new(r"C:\Users\dev\AppData\Roaming\Folio\shell-integration\folio.bash");
@@ -8462,6 +8472,42 @@ mod tests {
                 &bare()
             )),
             ["--login", "-i"]
+        );
+    }
+
+    /// Native Bash gets the same init-file door, and its profile's login switch
+    /// selects which startup chain Folio restores.
+    #[cfg(not(windows))]
+    #[test]
+    fn native_bash_trades_its_login_flag_for_the_init_file() {
+        let script = Path::new("/tmp/folio/shell-integration/folio.bash");
+        let login = Profile {
+            login: true,
+            ..host_row("bash")
+        };
+        let command = shell_command(&login, &[], bash_only(script), &bare());
+        assert_eq!(
+            args(&command),
+            ["--init-file", script.to_str().unwrap(), "-i"]
+        );
+        assert_eq!(
+            value_of(&command, INSTALLED_MARKER).as_deref(),
+            Some(MODE_LOGIN)
+        );
+
+        let interactive = Profile {
+            args: vec!["--noediting".to_owned()],
+            login: false,
+            ..host_row("bash")
+        };
+        let command = shell_command(&interactive, &[], bash_only(script), &bare());
+        assert_eq!(
+            args(&command),
+            ["--init-file", script.to_str().unwrap(), "--noediting", "-i"]
+        );
+        assert_eq!(
+            value_of(&command, INSTALLED_MARKER).as_deref(),
+            Some(MODE_INTERACTIVE)
         );
     }
 
@@ -8613,6 +8659,7 @@ mod tests {
     /// is told only where to stand, which is what every WSL pane did before
     /// there was a script to hand over. Injecting a path the distribution cannot
     /// open is strictly worse than not injecting.
+    #[cfg(windows)]
     #[test]
     fn a_script_wsl_cannot_name_is_not_handed_to_it() {
         let place = [OsString::from("--cd"), OsString::from("/mnt/d/Developer")];
@@ -8738,30 +8785,34 @@ mod tests {
     /// MUTATION: send `1` again and every pane emulates a login shell, so a
     /// reader who kept their aliases in `~/.bashrc` — which is where bash's own
     /// documentation puts them — has none of them.
+    #[cfg(not(windows))]
     #[test]
     fn the_startup_chain_a_pane_emulates_is_the_one_its_profile_asked_for() {
         let login = shell_command(
-            &row("gitbash"),
+            &Profile {
+                login: true,
+                ..host_row("bash")
+            },
             &[],
-            bash_only(Path::new(r"C:\Folio\folio.bash")),
+            bash_only(Path::new("/folio/folio.bash")),
             &bare(),
         );
         assert_eq!(
             value_of(&login, INSTALLED_MARKER).as_deref(),
             Some(MODE_LOGIN),
-            "the shipped Git Bash row says `--login`"
+            "a profile that asks for login gets the login startup chain"
         );
         // A row switched off its login shell (0.4.6 ticket 74: the switch, and no
         // login word left in its arguments).
         let plain = Profile {
             args: vec!["-i".to_owned()],
             login: false,
-            ..row("gitbash")
+            ..host_row("bash")
         };
         let plain = shell_command(
             &plain,
             &[],
-            bash_only(Path::new(r"C:\Folio\folio.bash")),
+            bash_only(Path::new("/folio/folio.bash")),
             &bare(),
         );
         assert_eq!(
@@ -8792,6 +8843,7 @@ mod tests {
     ///
     /// MUTATION: map `zsh` back to the init file and every zsh pane is handed an
     /// argument its shell does not take.
+    #[cfg(windows)]
     #[test]
     fn zsh_is_pointed_at_a_directory_and_never_handed_bashs_flag() {
         assert_eq!(
@@ -8829,6 +8881,44 @@ mod tests {
             Some(r"D:\dotfiles\zsh")
         );
         // And the script it will read is the one that puts them back.
+        let script = script_source_zsh();
+        assert!(script.contains("BT_USER_ZDOTDIR"));
+        for name in ZDOTDIR_FILES {
+            assert!(script.contains(name), "{name} is one of the three");
+        }
+    }
+
+    /// Native Unix zsh uses `ZDOTDIR` with POSIX paths and keeps the user's
+    /// existing startup directory beside Folio's temporary one.
+    #[cfg(not(windows))]
+    #[test]
+    fn native_zsh_is_pointed_at_its_own_directory() {
+        let zsh = Profile {
+            program: ProgramSource::Path(PathBuf::from("/usr/bin/zsh")),
+            args: vec!["-l".to_owned()],
+            paths: profiles::PathNamespace::Windows,
+            ..host_row("bash")
+        };
+        let command = shell_command(
+            &zsh,
+            &[],
+            both("/folio/shell-integration/folio.bash", "/folio/zdotdir"),
+            &Env(vec![("ZDOTDIR", "/home/alice/zsh config")]),
+        );
+        assert_eq!(args(&command), ["-l"], "zsh's door adds no argument");
+        assert_eq!(
+            value_of(&command, "ZDOTDIR").as_deref(),
+            Some("/folio/zdotdir")
+        );
+        assert_eq!(
+            value_of(&command, "BT_USER_ZDOTDIR").as_deref(),
+            Some("/home/alice/zsh config")
+        );
+        assert_eq!(
+            profiles::served_by(&zsh),
+            Integration::ZshDotDir,
+            "the executable name selects zsh's startup mechanism"
+        );
         let script = script_source_zsh();
         assert!(script.contains("BT_USER_ZDOTDIR"));
         for name in ZDOTDIR_FILES {
@@ -9261,6 +9351,49 @@ mod tests {
         );
     }
 
+    /// Native shells get the same terminal hyperlink declaration even when a
+    /// shell such as fish has no OSC integration door.
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_shells_are_told_this_terminal_renders_hyperlinks() {
+        for (program, door) in [
+            ("/bin/bash", Integration::BashInitFile),
+            ("/usr/bin/zsh", Integration::ZshDotDir),
+            ("/usr/bin/fish", Integration::None),
+            ("/bin/sh", Integration::None),
+        ] {
+            let profile = Profile {
+                program: ProgramSource::Path(PathBuf::from(program)),
+                ..host_row("bash")
+            };
+            assert_eq!(profiles::served_by(&profile), door, "{program}");
+            let command = shell_command(
+                &profile,
+                &[],
+                both("/folio/folio.bash", "/folio/zdotdir"),
+                &bare(),
+            );
+            assert_eq!(
+                value_of(&command, FORCE_HYPERLINK).as_deref(),
+                Some("1"),
+                "{program}"
+            );
+            for theirs in ["0", "1", ""] {
+                let command = shell_command(
+                    &profile,
+                    &[],
+                    both("/folio/folio.bash", "/folio/zdotdir"),
+                    &Env(vec![("FORCE_HYPERLINK", theirs)]),
+                );
+                assert_eq!(
+                    value_of(&command, FORCE_HYPERLINK),
+                    None,
+                    "{program} must preserve the inherited {theirs:?}"
+                );
+            }
+        }
+    }
+
     /// PIN — the macOS twin of
     /// `every_shell_is_told_this_terminal_renders_hyperlinks_unless_it_was_already_told`:
     /// every shell a Mac ships is told that this terminal renders hyperlinks, and none is
@@ -9527,6 +9660,7 @@ mod tests {
     /// `pwsh` a PowerShell and `cmd` a `cmd`. Red gate: break the derivation and
     /// every shipped profile silently loses its integration at once, with no
     /// symptom but the absence of markers.
+    #[cfg(windows)]
     #[test]
     fn auto_derives_the_door_every_shipped_profile_has_always_had() {
         for (id, door) in [
@@ -9580,6 +9714,68 @@ mod tests {
                 program.display()
             );
         }
+    }
+
+    /// Unix shipped rows derive integration from their shell, while fish keeps
+    /// the account's own shell and receives no protocol hooks.
+    #[cfg(not(windows))]
+    #[test]
+    fn auto_derives_the_unix_doors_for_bash_zsh_fish_and_sh() {
+        struct UnixShells(&'static str);
+        impl ShellEnvironment for UnixShells {
+            fn var_os(&self, key: &str) -> Option<OsString> {
+                (key == "SHELL").then(|| OsString::from(self.0))
+            }
+
+            fn is_file(&self, path: &Path) -> bool {
+                path == Path::new(self.0)
+                    || path == Path::new("/bin/bash")
+                    || path == Path::new("/bin/sh")
+            }
+        }
+
+        let zsh = profiles::shipped_for(
+            profiles::SeedPlatform::OtherUnix,
+            &UnixShells("/usr/bin/zsh"),
+        );
+        assert_eq!(
+            zsh.iter()
+                .map(|profile| profile.id.as_str())
+                .collect::<Vec<_>>(),
+            [profiles::USER_SHELL_ID, "bash", "sh"]
+        );
+        for profile in &zsh {
+            assert_eq!(
+                profile.integration,
+                profiles::IntegrationChoice::Auto,
+                "{}",
+                profile.id
+            );
+            assert_eq!(
+                profiles::served_by(profile),
+                profiles::derive_integration(&profile.program),
+                "{}",
+                profile.id
+            );
+        }
+        assert_eq!(profiles::served_by(&zsh[0]), Integration::ZshDotDir);
+        assert_eq!(profiles::served_by(&zsh[1]), Integration::BashInitFile);
+        assert_eq!(profiles::served_by(&zsh[2]), Integration::None);
+
+        let fish = profiles::shipped_for(
+            profiles::SeedPlatform::OtherUnix,
+            &UnixShells("/usr/bin/fish"),
+        );
+        assert_eq!(fish[0].id, profiles::USER_SHELL_ID);
+        assert_eq!(profiles::served_by(&fish[0]), Integration::None);
+        assert!(matches!(
+            &fish[0].program,
+            ProgramSource::Path(path) if path == Path::new("/usr/bin/fish")
+        ));
+        assert_eq!(
+            bt_pty::resolve_default_shell(&UnixShells("/usr/bin/fish")).program,
+            OsStr::new("/usr/bin/fish")
+        );
     }
 
     /// PIN - **a WSL profile's own variables are listed so that they cross.**
@@ -9778,6 +9974,7 @@ mod tests {
     }
 
     /// Which programs are asked about at all.
+    #[cfg(windows)]
     #[test]
     fn the_program_name_says_whether_this_is_a_powershell() {
         assert!(is_powershell(&joined(&[
@@ -9805,6 +10002,15 @@ mod tests {
         assert!(!is_powershell(&joined(&[
             r"C:\", "Windows", "System32", "cmd.exe"
         ])));
+    }
+
+    /// Unix path leaves use the same PowerShell family check.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_unix_program_name_says_whether_this_is_a_powershell() {
+        assert!(is_powershell(Path::new("/opt/microsoft/powershell/7/pwsh")));
+        assert!(is_powershell(Path::new("/usr/bin/powershell")));
+        assert!(!is_powershell(Path::new("/usr/bin/bash")));
     }
 
     /// The criterion, and the whole of it: a line that dot-sources the script.

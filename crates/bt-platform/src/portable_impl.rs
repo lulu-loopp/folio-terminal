@@ -64,8 +64,13 @@ use std::path::Path;
 // `PathBuf` is a chooser's answer and nothing else in this module's, so on macOS
 // — where M2-3 took the two choosers next door — there is nothing left here that
 // names one.
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 use std::path::PathBuf;
+
+#[cfg(target_os = "linux")]
+pub use crate::linux_dialogs::{FolderPicker, ImagePicker, SaveFilePicker};
+#[cfg(target_os = "linux")]
+pub use crate::linux_notifications::Notifier;
 
 use crate::{ContextMenuShape, ContextMenuTree, NativeWindow};
 // The one type only the Dock tile names, which on macOS is `macos_notify`'s and
@@ -485,18 +490,13 @@ impl Taskbar {
 
 /// **A wake when the system's own settings change** (M1-3, M3-3).
 ///
-/// `WM_SETTINGCHANGE` on Windows; `NSDistributedNotificationCenter` and
-/// `NSWorkspace`'s notifications here. Already best-effort at the call site —
-/// step 16 of the startup path installs it with `.ok()` — so this arm is
-/// constructible and silent rather than refusing, because a refusal would print
-/// a line for every window opened about a subscription nobody has missed yet.
-///
-/// What is lost where this arm still stands: the reader switching the system
-/// between light and dark while Folio is open is not noticed. The theme is still
-/// read once at startup. **On macOS it no longer stands** — `macos_impl` is the
-/// arm there, and it observes the application's appearance and the
-/// accessibility display options.
-#[cfg(not(any(windows, target_os = "macos")))]
+/// A host with no system-settings notification source. Already best-effort at
+/// the call site — step 16 of the startup path installs it with `.ok()` — so
+/// this arm is constructible and silent rather than refusing, because a
+/// refusal would print a line for every window opened about a subscription
+/// nobody has missed yet. Windows and macOS have native notification sources;
+/// Linux uses `linux_system_settings` and the XDG Settings portal.
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub struct SystemSettingsWatch {
     /// The callback, held so that its lifetime is the watch's exactly as on
     /// Windows — a wake that could fire after the watch was dropped is the one
@@ -505,7 +505,7 @@ pub struct SystemSettingsWatch {
     _wake: Box<dyn Fn(crate::SystemNews)>,
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 impl SystemSettingsWatch {
     /// Install the watch. Constructs, subscribes to nothing, and never wakes.
     pub fn install(
@@ -531,13 +531,13 @@ impl SystemSettingsWatch {
 /// **Off on macOS since M4-6**, where `macos_notify::Notifier` really speaks to
 /// the notification centre — and where the unbundled refusal this arm describes
 /// is the one that arm now gives, in its own words and for the same reason.
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub struct Notifier {
     /// Never constructed: [`Notifier::new`] refuses.
     _never: std::convert::Infallible,
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 impl Notifier {
     /// Refused. Notifications are M4-6.
     pub fn new(wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
@@ -644,14 +644,14 @@ impl MathContextMenu {
 /// AppKit's modal loops do not drain the main dispatch queue, so a panel run
 /// from the wrong place stops the event loop that would answer it. The answer
 /// there was a sheet, which is not a modal loop at all.
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub struct FolderPicker {
     /// Held so that this arm's type keeps the shape of the other two; a refusal
     /// needs no window, hence the leading underscore.
     _window: NativeWindow,
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 impl FolderPicker {
     /// Install the deferred chooser. Never fails.
     pub fn new(window: NativeWindow) -> Result<Self, String> {
@@ -678,14 +678,14 @@ impl FolderPicker {
 /// macOS has `macos_dialogs::ImagePicker`, which restricts the picture row to
 /// [`crate::IMAGE_FILE_EXTENSIONS`] through `allowedContentTypes` and leaves the
 /// program row unfiltered.
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub struct ImagePicker {
     /// Held so that this arm's type keeps the shape of the other two; a refusal
     /// needs no window, hence the leading underscore.
     _window: NativeWindow,
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 impl ImagePicker {
     /// Install the deferred chooser. Never fails.
     pub fn new(window: NativeWindow) -> Result<Self, String> {
@@ -711,14 +711,14 @@ impl ImagePicker {
 /// As [`ImagePicker`]: constructed harmlessly, refuses when asked, and
 /// **Linux-only** — macOS sheets a real `NSSavePanel` onto the window
 /// (`macos_dialogs::SaveFilePicker`).
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub struct SaveFilePicker {
     /// Held so that this arm's type keeps the shape of the other two; a refusal
     /// needs no window, hence the leading underscore.
     _window: NativeWindow,
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 impl SaveFilePicker {
     /// Install the deferred dialog. Never fails.
     pub fn new(window: NativeWindow) -> Result<Self, String> {
@@ -774,19 +774,18 @@ impl ImeSystemCaret {
     pub fn destroy(&mut self) {}
 }
 
-// ── the directory watch (M2-1 for everything but macOS) ────────────────────
+// ── the Linux directory adapter and unsupported-platform refusal ────────────
 //
-// M2-1 gave macOS a real arm over FSEvents (`macos_watch.rs`), so the three
-// doors below are now what a third platform meets and nothing else. They keep
-// the shape rather than the behaviour: the contracts are three constructors and
-// the enum is not part of the interface, which is what a Linux arm will have to
-// preserve when it is written.
+// Windows owns its implementation in `windows_impl`, macOS uses FSEvents in
+// `macos_watch.rs`, and Linux uses inotify in `linux_watch.rs`. This wrapper
+// keeps the same three constructor contracts for Linux and for platforms that
+// still have no watch backend.
 
 /// **What one completion of the watch said changed.**
 ///
-/// The same two answers FSEvents gives — named entries, or *more than I could
-/// write down* — which is why the enum travels unchanged. M2-1 owns all three
-/// of the contracts the three constructors carry.
+/// The backends share two answers: named entries or *more than I could write
+/// down*. The enum travels unchanged because all three constructors carry the
+/// same tree, shallow and named-shallow contracts.
 #[cfg(not(any(windows, target_os = "macos")))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DirChange<'a> {
@@ -797,41 +796,60 @@ pub enum DirChange<'a> {
     Unknown,
 }
 
-/// **A subscription to a directory, before FSEvents** (M2-1).
+/// **The Linux watcher or an explicit refusal when this target has no backend.**
 ///
-/// The three contracts — `Tree`, `HereOnly`, named `HereOnly` — are three
-/// constructors here as on Windows, and M2-1 must preserve all three rather
-/// than folding them: the inventory's §6 ⑤ notes that the depth enum is not
-/// part of the public interface, so the contracts *are* the doors.
-///
-/// Refused rather than silently never waking, because the caller's failure
-/// policy is already "log it, and the watch is absent": a files column that is
-/// not being watched is a files column that needs refreshing by hand, and a
-/// reader is better served by one line saying so than by a tree that quietly
-/// stops agreeing with the disk.
+/// The three contracts — `Tree`, `HereOnly`, named `HereOnly` — remain separate
+/// constructors. Linux wraps `linux_watch::Subscription`; unsupported targets
+/// keep the same doors but refuse rather than silently never waking, so a files
+/// column can report that its folder is not being watched.
 #[cfg(not(any(windows, target_os = "macos")))]
 pub struct DirWatch {
+    #[cfg(target_os = "linux")]
+    _inner: crate::linux_watch::Subscription,
     /// Never constructed: every constructor refuses.
+    #[cfg(not(target_os = "linux"))]
     _never: std::convert::Infallible,
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
 impl DirWatch {
+    /// Take a deferred Linux watch-start failure.
+    #[cfg(target_os = "linux")]
+    pub fn take_failure(&mut self) -> Option<std::io::Error> {
+        self._inner.take_failure()
+    }
+
+    /// Whether the Linux watcher has armed its subscription.
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub fn is_armed(&self) -> bool {
+        self._inner.is_armed()
+    }
+
     /// Whether a successfully created subscription remains armed.
+    #[cfg(not(target_os = "linux"))]
     #[must_use]
     pub fn is_armed(&self) -> bool {
         match self._never {}
     }
 
     /// Take a subscription failure, if the platform reports failures asynchronously.
+    #[cfg(not(target_os = "linux"))]
     pub fn take_failure(&mut self) -> Option<std::io::Error> {
         match self._never {}
     }
 
     /// The tree contract. Refused; M2-1.
     pub fn start(path: &Path, wake: impl Fn() + Send + 'static) -> Result<Self, std::io::Error> {
-        let _ = (path, wake);
-        Err(unwatched())
+        #[cfg(target_os = "linux")]
+        {
+            crate::linux_watch::Subscription::start(path, wake).map(|inner| Self { _inner: inner })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (path, wake);
+            Err(unwatched())
+        }
     }
 
     /// The here-only contract. Refused; M2-1.
@@ -839,8 +857,16 @@ impl DirWatch {
         path: &Path,
         wake: impl Fn() + Send + 'static,
     ) -> Result<Self, std::io::Error> {
-        let _ = (path, wake);
-        Err(unwatched())
+        #[cfg(target_os = "linux")]
+        {
+            crate::linux_watch::Subscription::start_shallow(path, wake)
+                .map(|inner| Self { _inner: inner })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (path, wake);
+            Err(unwatched())
+        }
     }
 
     /// The named here-only contract. Refused; M2-1.
@@ -848,13 +874,21 @@ impl DirWatch {
         path: &Path,
         wake: impl Fn(DirChange<'_>) + Send + 'static,
     ) -> Result<Self, std::io::Error> {
-        let _ = (path, wake);
-        Err(unwatched())
+        #[cfg(target_os = "linux")]
+        {
+            crate::linux_watch::Subscription::start_shallow_named(path, wake)
+                .map(|inner| Self { _inner: inner })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (path, wake);
+            Err(unwatched())
+        }
     }
 }
 
 /// The one error every [`DirWatch`] door answers with.
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 fn unwatched() -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -872,8 +906,15 @@ fn unwatched() -> std::io::Error {
 /// The window's outer rectangle. `NSWindow.frame`, flipped; M1-3.
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn get_window_rect(window: NativeWindow) -> Result<WindowRect, String> {
-    let _ = window;
-    Err(not_here("reading a window's rectangle"))
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_display::get_window_rect(window)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = window;
+        Err(not_here("reading a window's rectangle"))
+    }
 }
 
 /// Place the window's outer rectangle. `setFrame:display:`; M1-3.
@@ -893,15 +934,29 @@ pub fn stand_window_at(window: NativeWindow, rect: WindowRect) -> Result<(), Str
 /// The work area of the display this window is on. `NSScreen.visibleFrame`; M1-3.
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn get_work_area(window: NativeWindow) -> Result<WindowRect, String> {
-    let _ = window;
-    Err(not_here("reading a display's work area"))
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_display::get_work_area(window)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = window;
+        Err(not_here("reading a display's work area"))
+    }
 }
 
 /// The work area of the display under a point. M1-3.
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn work_area_at(x: i32, y: i32) -> Result<WindowRect, String> {
-    let _ = (x, y);
-    Err(not_here("reading a display's work area"))
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_display::work_area_at(x, y)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (x, y);
+        Err(not_here("reading a display's work area"))
+    }
 }
 
 /// The union of every display. M1-3.
@@ -915,11 +970,18 @@ pub fn work_area_at(x: i32, y: i32) -> Result<WindowRect, String> {
 #[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn virtual_screen_rect() -> WindowRect {
-    WindowRect {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_display::virtual_screen_rect()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        WindowRect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        }
     }
 }
 
@@ -931,8 +993,15 @@ pub fn virtual_screen_rect() -> WindowRect {
 #[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn dpi_at(x: i32, y: i32) -> u32 {
-    let _ = (x, y);
-    96
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_display::dpi_at(x, y)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (x, y);
+        96
+    }
 }
 
 /// This window's authoritative DPI. `NSWindow.backingScaleFactor` × 96; M1-3.
@@ -955,8 +1024,15 @@ pub fn get_dpi_for_window(window: NativeWindow) -> Result<u32, String> {
 #[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn monitor_id_at(x: i32, y: i32) -> Option<String> {
-    let _ = (x, y);
-    None
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_display::monitor_id_at(x, y)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (x, y);
+        None
+    }
 }
 
 /// Where the pointer is, in screen coordinates. `NSEvent.mouseLocation`,
@@ -964,7 +1040,14 @@ pub fn monitor_id_at(x: i32, y: i32) -> Option<String> {
 #[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn pointer_position() -> Option<(i32, i32)> {
-    None
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_display::pointer_position()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
 }
 
 /// Where the pointer is inside one window's client area, in physical pixels from
@@ -973,8 +1056,15 @@ pub fn pointer_position() -> Option<(i32, i32)> {
 #[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn pointer_position_in_window(window: NativeWindow) -> Option<(i32, i32)> {
-    let _ = window;
-    None
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_display::pointer_position_in_window(window)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = window;
+        None
+    }
 }
 
 /// Which top-level window the window manager puts under a screen point. M1-3.
@@ -1251,11 +1341,11 @@ pub fn client_area_animation_enabled() -> Result<bool, String> {
     Err(not_here("the reduce-motion preference"))
 }
 
-/// Whether the system is in light mode. `AppleInterfaceStyle`; M1-3.
+/// Whether the system is in light mode, on a host with no appearance provider.
 ///
 /// `None` is "the system has no opinion", which the theme resolver already
 /// handles: a `System` theme with no system answer takes the product's default.
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 #[must_use]
 pub fn system_uses_light_apps() -> Option<bool> {
     None
@@ -1277,58 +1367,62 @@ pub fn os_ui_language() -> String {
 
 // ── the shell, the trash, the volume (M2-2) ────────────────────────────────
 
-/// Move a path to the trash, on a platform whose desktop has not been asked.
+/// Refuse synchronous trash operations on this platform.
 ///
-/// **`macos_files` is where this really happens** (M2-2). What is left here is
-/// the third platform's answer, and it is a refusal rather than a
-/// `remove_file`: the product's own sentence is that a deleted file goes
-/// somewhere it can be fetched back from, and a door that quietly destroyed one
-/// because this platform has no trash implementation would be keeping the
-/// signature and breaking the promise. X11 desktops do have a trash — the
-/// freedesktop.org spec puts it at `$XDG_DATA_HOME/Trash` with a `.trashinfo`
-/// file per entry — and writing it is a Linux backend's decision, which this
-/// workspace has not scheduled.
+/// Linux callers use `recycle_on_worker` through the application's trash lane.
+/// Other portable targets refuse rather than delete a file permanently.
 #[cfg(not(target_os = "macos"))]
 pub fn recycle(path: &Path) -> Result<bool, String> {
     let _ = path;
     Err(not_here("moving a file to the trash"))
 }
 
-/// **The monospaced families this machine has**, on a platform with no font
-/// enumeration written (M2-4).
-///
-/// A `Vec` and not a refusal, because the type has no empty answer and the
-/// caller is a picker that has to draw something: what comes back is
-/// [`crate::order_monospace_families`]'s guarantee and nothing else — one row,
-/// the family the renderer is already drawing. That is exactly what
-/// `bt-app`'s settings page did behind its own `#[cfg(not(windows))]` until
-/// M2-4; the arm moved here so that the application names one function on every
-/// platform and asks no question about the machine it is on.
+/// **The monospaced families this machine has**, on the portable backend.
+/// Linux delegates to its Fontconfig-backed font database. Other portable
+/// targets keep the default row because this function has no error arm.
 #[cfg(not(target_os = "macos"))]
 #[must_use]
 pub fn monospace_font_families() -> Vec<crate::MonospaceFamily> {
-    crate::order_monospace_families(Vec::new())
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_fonts::monospace_font_families()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        crate::order_monospace_families(Vec::new())
+    }
 }
 
-/// **One family by name**, on a platform with no font system written (ticket
-/// 50). `None`: there is no family this arm can locate, and the renderer then
-/// draws the face it falls back to — the same one-row answer
-/// [`monospace_font_families`] gives here.
+/// **One family by name**, on the portable backend (ticket 50).
 #[cfg(not(target_os = "macos"))]
 #[must_use]
 pub fn monospace_family_named(
     token: crate::admission::WaitToken<'_, crate::admission::doors::FontFamilyLookup>,
     name: &str,
 ) -> Option<crate::MonospaceFamily> {
-    let _ = (token, name);
-    None
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_fonts::monospace_family_named(token, name)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (token, name);
+        None
+    }
 }
 
-/// No portable font-database enumeration is available on this target.
+/// Installed CJK families, on the portable backend.
 #[cfg(not(target_os = "macos"))]
 #[must_use]
 pub fn cjk_font_families() -> Vec<crate::CjkFamily> {
-    Vec::new()
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_fonts::cjk_font_families()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Vec::new()
+    }
 }
 
 /// **Whether this volume treats two spellings of one name as one file.**
@@ -1845,11 +1939,9 @@ mod refusal_tests {
             assert!(ImagePicker::new(window()).is_ok(), "the picture chooser");
             assert!(SaveFilePicker::new(window()).is_ok(), "the save dialog");
         }
-        // The settings watch is only this module's where no backend has one:
-        // on macOS it is `macos_impl`'s, and the constructor that has to be
-        // harmless there is that one (`a_window_door_asked_off_the_window_thread_refuses`
-        // is where it is held).
-        #[cfg(not(any(windows, target_os = "macos")))]
+        // The settings watch remains inert only on other Unix hosts: Windows
+        // and macOS have native broadcasts, and Linux has the portal source.
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         assert!(
             SystemSettingsWatch::install(window(), Box::new(|_| {})).is_ok(),
             "the system settings watch"
@@ -1886,21 +1978,24 @@ mod refusal_tests {
                 "a request that refused leaves no answer to collect"
             );
 
-            let folder = FolderPicker::new(window()).expect("built above");
-            assert!(folder.request(None).is_err(), "there is no panel to sheet");
+            #[cfg(not(target_os = "linux"))]
+            {
+                let folder = FolderPicker::new(window()).expect("built above");
+                assert!(folder.request(None).is_err(), "there is no panel to sheet");
 
-            let picture = ImagePicker::new(window()).expect("built above");
-            assert!(
-                picture.request(ShellPickKind::Image, None).is_err(),
-                "there is no panel to sheet"
-            );
+                let picture = ImagePicker::new(window()).expect("built above");
+                assert!(
+                    picture.request(ShellPickKind::Image, None).is_err(),
+                    "there is no panel to sheet"
+                );
 
-            let save = SaveFilePicker::new(window()).expect("built above");
-            assert!(
-                save.request(None, "folio-settings.json").is_err(),
-                "there is no save panel to sheet"
-            );
-            assert!(save.take_result().is_none());
+                let save = SaveFilePicker::new(window()).expect("built above");
+                assert!(
+                    save.request(None, "folio-settings.json").is_err(),
+                    "there is no save panel to sheet"
+                );
+                assert!(save.take_result().is_none());
+            }
         }
 
         // The composition is only this module's where no backend has one:

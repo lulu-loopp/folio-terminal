@@ -3060,6 +3060,8 @@ impl Runtime<'_> {
             promoted: promoted.is_some(),
             // A menu row names no place — see [`TearOut::at`].
             at: None,
+            #[cfg(target_os = "linux")]
+            screen: None,
         };
         let like = self.window_id();
         self.app
@@ -4499,23 +4501,21 @@ impl Runtime<'_> {
                 // gesture. What it must *not* inherit from the rest of the drag
                 // engine is the cached aim — see [`Self::paste_offer_kept`].
                 RowVerb::PastePath(_) => {
-                    let Some(target) = self.paste_offer_kept(drag, &plan) else {
-                        return Ok(false);
-                    };
-                    let path = payload.path.clone();
-                    // **And the keyboard follows the path, strictly afterwards**
-                    // (owner's ruling 2026-09-17). Behind the write's own
-                    // answer, so a release that reached no shell — a stale
-                    // target, a name the shell cannot spell — moves nothing:
-                    // the reader is left exactly where they were, which is what
-                    // every other refusal on this road already does. And it is
-                    // the seat of the `PasteTarget` the two readings agreed on
-                    // — never the hover-time seat, and never whichever pane
-                    // happens to be holding the keyboard.
-                    if self.paste_paths_into(target, vec![path], "write dragged path to PTY")? {
-                        self.focus_the_pane_a_path_landed_in(target.seat)?;
+                    #[cfg(target_os = "linux")]
+                    {
+                        return self.queue_linux_paste_path(drag, &plan, payload.path.clone());
                     }
-                    return Ok(true);
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        let Some(target) = self.paste_offer_kept(drag, &plan) else {
+                            return Ok(false);
+                        };
+                        let path = payload.path.clone();
+                        if self.paste_paths_into(target, vec![path], "write dragged path to PTY")? {
+                            self.focus_the_pane_a_path_landed_in(target.seat)?;
+                        }
+                        return Ok(true);
+                    }
                 }
                 RowVerb::Split => {}
             }

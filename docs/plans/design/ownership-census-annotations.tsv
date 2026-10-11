@@ -35,6 +35,7 @@ App.git_watch	-	OBS	the application (git_watch)	T-WINDOWS-ALL (2026-10-08): the 
 App.handoff_lane	-	RES	handoff	the 2026-09-25 table
 App.keybindings_store	-	DUR	keyboard	proposed by census-1
 App.layout_tables	-	OBS	keyboard	round 5: the application-owned per-HKL observation map is written only when a key requests a miss or a worker answer lands
+App.notifications	-	RES	the application (FolioApp)	Linux census: App holds one NotificationDesk; Runtime::raise_attention submits, FolioApp drains failure; refusal stays latched until exit, desk drop cancels helper sends and DesktopRetire reaps them
 App.pending_application_change	-	PROJ	diagnostics	the 2026-09-25 table
 App.pending_handover	-	LIFE	windows	the 2026-09-25 table
 App.pending_new_windows	-	LIFE	windows	the 2026-09-25 table
@@ -171,4 +172,5 @@ WindowRuntime.web_thumbs	-	PROJ	web	the 2026-09-25 table
 App.update_job	-	ASYNC	the application (update_job)	proposed at the census-1 merge (2026-09-26): U-19's card and row press the job on the window thread; the job stays the application's
 WindowRuntime.update_card	-	VIEW	update_card	proposed at the census-1 merge (2026-09-26): U-19's card state, written by the card module and by the window's pointer and settle roads
 WindowRuntime.powershell_profile_undo	-	ASYNC	profiles	T-INTEGRATION-INJECT-4: the success toast owns its one managed-line undo
+WindowRuntime.pending_external_drop	-	ASYNC	runtime::mouse	Linux drop observation: the window owns the captured batch; mouse queues and consumes its addressed answer, files withdraws it when a new batch starts.
 WindowRuntime.pane_head_clicks	-	VIEW	panes	T-POINTER-CAPTURE cut 3: the release ladder moved into runtime::pointer::release, which interrupts the pane-head click chain as the ladder did

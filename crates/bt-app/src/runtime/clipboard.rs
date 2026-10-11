@@ -3,14 +3,16 @@
 
 use crate::PtyTarget;
 use crate::{
-    ClipboardWriteEffect, Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey,
+    ClipboardWriteEffect, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey,
     PasteOffer, PasteTarget, PreparedClipboardPaste, PreviewSurface, Runtime, StagedPaste,
     TextFieldSeat, UserInputKind, copy_selection, hang_watch, input_line_needs_a_space_first,
-    offer_pty_input, paste_answer_text, paste_body, paste_card_step, paste_offer_is_kept,
-    paste_target_is_live, pending_paste_in, prepare_clipboard_paste, prepare_dropped_paste,
-    profile_banner_name, recoverable_clipboard_write, restore, seats, stage_paste,
-    take_pending_paste, text_field, toast, write_selection_text, write_terminal_clipboard_text,
+    offer_pty_input, paste_answer_text, paste_body, paste_card_step, paste_target_is_live,
+    pending_paste_in, prepare_clipboard_paste, prepare_dropped_paste, profile_banner_name,
+    recoverable_clipboard_write, restore, stage_paste, take_pending_paste, text_field, toast,
+    write_selection_text, write_terminal_clipboard_text,
 };
+#[cfg(not(target_os = "linux"))]
+use crate::{Drag, seats};
 use anyhow::{Context, Result, anyhow};
 use bt_layout::SeatId;
 use bt_render::{FrameSource, FrameTrigger};
@@ -276,24 +278,19 @@ impl Runtime<'_> {
     /// Answers the address to write to — the one **both** readings agree on —
     /// rather than a `bool`, so that no caller can take the verdict from here and
     /// the destination from somewhere older.
+    /// **Check a path drop against the pointer answer already delivered** (release review 2026-09-17).
+    ///
+    /// The native release path reads the cursor here; the asynchronous Linux X11 path supplies its
+    /// own release position. Both paths recheck the offer, target shell, and plan before writing.
+    /// The synchronous native pointer road used where the platform returns from the release event.
+    #[cfg(not(target_os = "linux"))]
     pub(in crate::runtime) fn paste_offer_kept(
         &self,
         drag: &Drag,
         plan: &seats::DropPlan,
     ) -> Option<PasteTarget> {
-        let released_at = self.platform_pointer_now()?;
-        // The seam latch is this gesture's and the runtime holds none of it; a
-        // copy is passed because this reading must not move the live one — the
-        // gesture is over.
-        let mut seam = drag.seam;
-        let at_release = self.survey_drop(&drag.source, drag.home, released_at, &mut seam);
-        paste_offer_is_kept(
-            self.glass_here(released_at),
-            drag.paste_offer,
-            self.paste_offer_at(at_release),
-            plan.fits(),
-            self.a_modal_holds_the_window(),
-        )
+        self.platform_pointer_now()
+            .and_then(|released_at| self.paste_offer_kept_at(drag, plan, released_at))
     }
 
     /// **What the clipboard can put into a one-line field**, or nothing when

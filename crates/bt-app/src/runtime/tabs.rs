@@ -189,7 +189,7 @@ impl Runtime<'_> {
     /// day the seed grows a third field.
     ///
     /// **The pair travels together and is taken from one leaf**, which is the
-    /// rule [`new_tab_cwd`] already states: a profile from one pane and a folder
+    /// rule [`new_tab_leaf_seed`] already states: a profile from one pane and a folder
     /// from another describes a pane that does not exist.
     pub(in crate::runtime) fn new_tab_seeded_from(
         &mut self,
@@ -1465,6 +1465,8 @@ impl Runtime<'_> {
             // where every other new window opens, because a reader who pressed a
             // *verb* pointed at a verb and not at a rectangle.
             at: None,
+            #[cfg(target_os = "linux")]
+            screen: None,
         };
         let like = self.window_id();
         self.app
