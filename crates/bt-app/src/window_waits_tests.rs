@@ -7519,8 +7519,8 @@ fn every_completions_status_and_signal_is_the_vocabulary() {
 /// `AppEvent`), and each is either some row's `signal` or one of [`NOT_ANSWERS`], the news nobody
 /// asked for — never both, and no entry of that list names a variant the enum no longer has.
 ///
-/// MUTATION: add a variant `ClipboardWritten` to `AppEvent` (an answer with no row) and it goes
-/// red naming it.
+/// MUTATION: write the keyboard layout tables' signal as `return`, which leaves
+/// `AppEvent::LayoutTablesReady` an answer with no row, and it goes red naming it.
 #[test]
 fn every_answering_app_event_is_the_signal_of_a_completions_row() {
     let world = World::new();
@@ -8091,6 +8091,63 @@ fn every_worker_door_body_runs_on_a_completions_thread() {
     assert!(
         failures.is_empty(),
         "the worker door bodies and the ledger's threads:\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// RED (S-1; revision (c)2's interim check) — **a conforming request door holds no wait in its
+/// own body.**
+///
+/// For every `conforms` row, the door's own body — direct, not the functions it calls — holds no
+/// `# vocabulary` entry: no `recv`, `recv_timeout`, `join`, `Condvar::wait`, sleep, file-system,
+/// child-process or GPU call, read with the source guard's receiver typing ([`Reader`]), exactly
+/// as the bare-site inventory and `# effects` read them. **This is not C1's gate**: a helper the
+/// door calls is not looked into, which is the gap revision (c)2 names; the transitive walk to the
+/// door's enqueue boundary is S-2a's call graph and S-2b's guard.
+///
+/// MUTATION: put `let rx: std::sync::mpsc::Receiver<()> = std::sync::mpsc::channel().1;` and
+/// `let _ = rx.recv_timeout(std::time::Duration::ZERO);` in `offer_pty_input`'s body (the
+/// `conforms` input row's door) and it goes red naming the door and `recv_timeout 1`.
+#[test]
+fn every_conforming_request_door_holds_no_wait_of_its_own() {
+    let world = World::new();
+    let (bare, in_doors) = vocabulary_sites(&world);
+    let mut failures = Vec::new();
+    for row in completions() {
+        if standing(row.status) != Ok(Standing::Conforms) {
+            continue;
+        }
+        let records = match door_records(&world, row.door) {
+            Ok(records) => records,
+            Err(why) => {
+                failures.push(format!("`{}`: {why}", row.class));
+                continue;
+            }
+        };
+        let package = door_key(row.door).package;
+        for record in records {
+            let (item, arm) = item_and_arm(record);
+            let mut held: Vec<String> = bare
+                .iter()
+                .filter(|((p, a, i, _), _)| *p == package && *a == arm && *i == item)
+                .map(|((_, _, _, entry), count)| format!("{entry} {count}"))
+                .collect();
+            if let Some((_, effects)) = in_doors.get(&(package.clone(), arm.clone(), item.clone()))
+            {
+                held.push(effects_spelled(effects));
+            }
+            if !held.is_empty() {
+                failures.push(format!(
+                    "`{}`: the door {item} {arm} holds {} in its own body",
+                    row.class,
+                    held.join(", ")
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "conforming request doors that wait in their own body:\n  {}",
         failures.join("\n  ")
     );
 }
