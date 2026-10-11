@@ -7399,19 +7399,25 @@ fn door_records(world: &World, key: &str) -> Result<Vec<&'static ItemRecord>, St
     Ok(found)
 }
 
-/// The items a `# doors` line of a C7 door names in its `call` and `minted at` cells, as written
-/// between backticks.
-fn c7_items() -> BTreeSet<&'static str> {
-    let mut items = BTreeSet::new();
+/// The items each C7 door's `# doors` line names in its `call` and `minted at` cells, as written
+/// between backticks, by door.
+fn c7_items_by_door() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
+    let mut by_door: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for cells in section("doors", &DOOR_COLUMNS) {
         if !C7_DOORS.contains(&cells[0]) {
             continue;
         }
+        let items = by_door.entry(cells[0]).or_default();
         for cell in [cells[4], cells[5]] {
             items.extend(cell.split('`').skip(1).step_by(2));
         }
     }
-    items
+    by_door
+}
+
+/// Every item a C7 door's `# doors` line names.
+fn c7_items() -> BTreeSet<&'static str> {
+    c7_items_by_door().into_values().flatten().collect()
 }
 
 /// The `AppEvent` variants, asked of the crate.
@@ -7470,13 +7476,16 @@ fn every_completions_door_is_an_item_of_the_product() {
 ///
 /// The status is `conforms`, `owner-thread`, or the rows that repair it: `D-<n>` naming a row of
 /// `docs/plans/structural-debt.md`, `row <n>` naming an `open` or `pending` `# rows` entry.
-/// `owner-thread` is for revision (b)6's closed C7 list alone ([`C7_DOORS`]): the row's door is an
-/// item that list's `# doors` lines name, its threads are the owner's, and its signal is `return`.
+/// `owner-thread` is for revision (b)6's closed C7 list alone ([`C7_DOORS`]), and exactly: the
+/// row's door is an item that list's `# doors` lines name and its threads are the owner's, and
+/// every member of the list is some `owner-thread` row's door (the interim members — present, the
+/// PTY resize, the first GPU open — included until their lanes land, owner ruling Q1).
 /// The signal is an `AppEvent` variant or one of [`SIGNAL_WORDS`]; a thread cell's `(row <n>)`
 /// names a `# rows` entry.
 ///
 /// MUTATION: write the desktop notification's status as `owner-thread` (it is not a C7 member,
-/// revision (c)1), or any status as `closed`, and it goes red naming the row.
+/// revision (c)1), or any status as `closed`, and it goes red naming the row; write `present`'s
+/// status as `row 9` and it goes red naming `PresentFrame`.
 #[test]
 fn every_completions_status_and_signal_is_the_vocabulary() {
     let world = World::new();
@@ -7523,11 +7532,6 @@ fn every_completions_status_and_signal_is_the_vocabulary() {
                         "`{class}`: an owner-thread effect runs on {OWNER_THREADS:?}"
                     ));
                 }
-                if row.signal != "return" {
-                    failures.push(format!(
-                        "`{class}`: a C7 member's completion is its return value"
-                    ));
-                }
             }
             Ok(Standing::Repaired(repairs)) => {
                 for repair in repairs {
@@ -7551,6 +7555,20 @@ fn every_completions_status_and_signal_is_the_vocabulary() {
                     }
                 }
             }
+        }
+    }
+    // The other way: every member of the closed list is an `owner-thread` row's door.
+    let owner_doors: BTreeSet<&str> = completions()
+        .iter()
+        .filter(|row| row.status == "owner-thread")
+        .map(|row| row.door)
+        .collect();
+    for (door, items) in c7_items_by_door() {
+        if items.is_disjoint(&owner_doors) {
+            failures.push(format!(
+                "`{door}` is a member of revision (b)6's closed C7 list, and no `owner-thread` \
+                 row's door is an item its `# doors` line names ({items:?})"
+            ));
         }
     }
     assert!(
@@ -7601,37 +7619,64 @@ fn every_answering_app_event_is_the_signal_of_a_completions_row() {
     );
 }
 
-/// The door each lane of the lane suite enters by — an exhaustive match, so a lane added to
-/// [`crate::lane::LaneName`] does not compile until it names its door here.
-fn lane_door(lane: crate::lane::LaneName) -> &'static str {
-    use crate::lane::LaneName;
-    match lane {
-        LaneName::Handoff => "Runtime::hand_off",
-        LaneName::Font => "request_font_walk",
-        LaneName::Taskbar => "taskbar_lane::request",
-        LaneName::Computation => "dispatch_decoration_task",
-        LaneName::Programs => "programs_lane::request",
-    }
-}
+/// The door each lane of the lane suite enters by, by its `LaneName` variant.
+const LANE_DOORS: [(&str, &str); 5] = [
+    ("Handoff", "Runtime::hand_off"),
+    ("Font", "request_font_walk"),
+    ("Taskbar", "taskbar_lane::request"),
+    ("Computation", "dispatch_decoration_task"),
+    ("Programs", "programs_lane::request"),
+];
 
-/// RED (S-1) — **every lane of the lane suite is a row of the ledger.**
+/// RED (S-1, rounds 1 and 2) — **every lane of the lane suite is a row of the ledger.**
 ///
-/// Each [`crate::lane::LaneName`] names the door its requests enter by ([`lane_door`]), and that
-/// door is a `# completions` row's.
+/// The lanes are the variants of `lane::LaneName`, asked of the crate (`bt-source`'s items of kind
+/// `Variant` owned by `LaneName` in `crate::lane`) — never the hand-kept `LaneName::ALL`. Each
+/// names its door in [`LANE_DOORS`], and that door is a `# completions` row's; a door listed for a
+/// variant the enum no longer has is refused too.
 ///
-/// MUTATION: add a lane to `LaneName` (and to `ALL`) whose door has no row, or point a lane's
-/// door at an item no row names, and it goes red naming the lane.
+/// MUTATION: add a variant `Clipboard` to `LaneName` (and nowhere else that compiles without it)
+/// or drop a line of [`LANE_DOORS`], and it goes red naming the lane.
 #[test]
 fn every_lane_is_a_completions_row() {
-    let doors: BTreeSet<&str> = completions().iter().map(|row| row.door).collect();
-    let missing: Vec<String> = crate::lane::LaneName::ALL
+    let world = World::new();
+    let src = world.src("bt-app");
+    let variants: BTreeSet<&str> = src
+        .index
+        .items()
         .iter()
-        .filter(|lane| !doors.contains(lane_door(**lane)))
-        .map(|lane| format!("{lane:?} (door `{}`)", lane_door(*lane)))
+        .filter(|record| {
+            record.kind() == ItemKind::Variant
+                && record.type_owner() == Some("LaneName")
+                && record.module_paths().contains(&"crate::lane")
+        })
+        .map(ItemRecord::name)
         .collect();
+    assert!(!variants.is_empty(), "`crate::lane::LaneName` has variants");
+    let doors: BTreeSet<&str> = completions().iter().map(|row| row.door).collect();
+    let mut failures = Vec::new();
+    for variant in &variants {
+        match LANE_DOORS.iter().find(|(lane, _)| lane == variant) {
+            None => failures.push(format!("{variant}: a lane that names no door")),
+            Some((_, door)) if !doors.contains(door) => {
+                failures.push(format!(
+                    "{variant}: door `{door}` is no `# completions` row's"
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    for (lane, _) in LANE_DOORS {
+        if !variants.contains(lane) {
+            failures.push(format!(
+                "{lane}: a door listed for a lane `LaneName` does not have"
+            ));
+        }
+    }
     assert!(
-        missing.is_empty(),
-        "lanes with no `# completions` row: {missing:?}"
+        failures.is_empty(),
+        "lanes with no `# completions` row:\n  {}",
+        failures.join("\n  ")
     );
 }
 
@@ -7668,6 +7713,10 @@ struct WorkerRoot {
     at: String,
     /// `(crate, arm, item)`, as `# effects` keys a function.
     reached: BTreeSet<(String, String, String)>,
+    /// The function the thread door is called in.
+    spawner: (usize, &'static ItemRecord),
+    /// The functions taking its `WorkerCtx`, as records.
+    bodies: Vec<(usize, &'static ItemRecord)>,
 }
 
 /// The parameters of a declaration whose type names `WorkerCtx`, by their bound names.
@@ -7952,6 +8001,7 @@ fn worker_roots(world: &World) -> Vec<WorkerRoot> {
                 };
                 let mut work = carried_by(&body, last);
                 let mut reached = BTreeSet::new();
+                let mut bodies = Vec::new();
                 let mut seen: BTreeSet<(u8, usize, usize, usize)> = BTreeSet::new();
                 while let Some(carried) = work.pop() {
                     match carried {
@@ -7965,6 +8015,7 @@ fn worker_roots(world: &World) -> Vec<WorkerRoot> {
                             }
                             let (item, arm) = item_and_arm(callee);
                             reached.insert((callee_src.package.to_owned(), arm, item));
+                            bodies.push((at_callee, callee));
                             let inner = Body::new(world, at_callee, callee);
                             work.extend(capability_calls(&inner, &names, 0, usize::MAX));
                         }
@@ -7998,6 +8049,8 @@ fn worker_roots(world: &World) -> Vec<WorkerRoot> {
                     standalone,
                     at: src.location(at),
                     reached,
+                    spawner: (at_src, record),
+                    bodies,
                 });
             }
         }
@@ -8035,6 +8088,104 @@ fn builder_thread_names(world: &World) -> BTreeSet<String> {
     names
 }
 
+/// The first-party callables one call site names **unambiguously**: what the resolver answers,
+/// unless the call is a method on a receiver whose type the source does not state and the name is
+/// carried by more than one first-party method — then the call names nobody in particular, and it
+/// is left out rather than taken to be every method of that name (which would make every door
+/// reach nearly every function).
+fn named_callees(body: &Body<'_>, site: &Site) -> Vec<(usize, &'static ItemRecord)> {
+    let callees = resolved(body, site);
+    let untyped_method = matches!(site.form, Form::Method(_)) && !body.receiver_is_typed(site);
+    if untyped_method && callees.len() > 1 {
+        Vec::new()
+    } else {
+        callees
+    }
+}
+
+/// **The functions a door reaches**: the door's own declarations and every product function
+/// their calls name unambiguously ([`named_callees`]), followed to a fixed point. `callees`
+/// caches each function's answer across doors.
+fn door_reach(
+    world: &World,
+    door: &[&'static ItemRecord],
+    package: usize,
+    callees: &mut HashMap<(usize, usize), Vec<(usize, &'static ItemRecord)>>,
+) -> BTreeMap<(usize, usize), &'static ItemRecord> {
+    let mut reach = BTreeMap::new();
+    let mut work: Vec<(usize, &'static ItemRecord)> =
+        door.iter().map(|record| (package, *record)).collect();
+    while let Some((at, record)) = work.pop() {
+        let key = (at, record.whole().start());
+        if reach.insert(key, record).is_some() {
+            continue;
+        }
+        let next = callees.entry(key).or_insert_with(|| {
+            let body = Body::new(world, at, record);
+            body.sites()
+                .iter()
+                .flat_map(|site| named_callees(&body, site))
+                .collect()
+        });
+        work.extend(next.iter().copied());
+    }
+    reach
+}
+
+/// The first-party type names a function's declaration writes — its parameters and its return:
+/// the values a request is carried in and answered with.
+fn declared_types(
+    world: &World,
+    at: usize,
+    record: &ItemRecord,
+    types: &BTreeSet<&'static str>,
+) -> BTreeSet<&'static str> {
+    let src = &world.srcs[at];
+    src.lex(record.declaration().start(), record.declaration().end())
+        .into_iter()
+        .map(|tok| src.text(tok))
+        .filter(|name| types.contains(name) && *name != "WorkerCtx")
+        .collect()
+}
+
+/// **Whether a door's reach leads to a thread**: it calls the function that starts the thread;
+/// or it calls a method of the type whose method starts it (a lane is a type: `HandoffLane::submit`
+/// beside `HandoffLane::start`); or, for a free function that starts it outside the crate root,
+/// it calls into that module; or the request travels in a value of a first-party type that both
+/// a function the door reaches and a body the thread runs declare (`Sender<MathWorkerRequest>`
+/// beside `Receiver<MathWorkerRequest>`).
+fn leads_to(
+    world: &World,
+    reach: &BTreeMap<(usize, usize), &'static ItemRecord>,
+    root: &WorkerRoot,
+    types: &BTreeSet<&'static str>,
+) -> bool {
+    let (at, spawner) = root.spawner;
+    if reach.contains_key(&(at, spawner.whole().start())) {
+        return true;
+    }
+    let module = spawner.module_paths()[0];
+    let by_owner = reach.iter().any(|((src, _), record)| {
+        *src == at
+            && match spawner.type_owner() {
+                Some(owner) => record.type_owner() == Some(owner),
+                None => module != "crate" && record.module_paths()[0] == module,
+            }
+    });
+    if by_owner {
+        return true;
+    }
+    let carried: BTreeSet<&str> = root
+        .bodies
+        .iter()
+        .flat_map(|(at, body)| declared_types(world, *at, body, types))
+        .collect();
+    !carried.is_empty()
+        && reach.iter().any(|((src, _), record)| {
+            !declared_types(world, *src, record, types).is_disjoint(&carried)
+        })
+}
+
 /// **The worker door bodies no product code asks for yet**, by `# effects` key, each with why: a
 /// body here is compiled into the product and reached from no thread it starts, so it belongs to
 /// no protocol until its caller exists. A listed body that a thread reaches, or that `# effects`
@@ -8045,23 +8196,37 @@ const UNASKED_WORKER_BODIES: [(&str, &str); 1] = [(
      (design note admin-terminal-2026-10-04) has no product caller yet",
 )];
 
-/// RED (S-1) — **every worker's door body runs on a thread a `# completions` row names.**
+/// RED (S-1, rounds 1 and 2) — **every worker's door body is reached from a row's door**
+/// (the side-effects contract §3.1, the fourth held equality).
 ///
-/// A `worker-door-body` of `# effects` is a function that takes a `WorkerCtx`, so it runs on a
-/// thread the thread door started — or in a door process's main, which revision (b)1 keeps out
-/// of the ledger (its contract is the update journal, A§4.4). [`worker_roots`] follows each
-/// thread's capability from the closure it was handed to the functions that take it; every body
-/// must be reached from a thread that some row's `thread` cell names, or from a door process's
-/// main alone, or be one of [`UNASKED_WORKER_BODIES`]. A row's thread that the product starts
-/// under no such name is refused too.
+/// For each `# completions` row the walk starts at the row's `door` item and follows the calls it
+/// names unambiguously ([`door_reach`]). A `worker-door-body` of `# effects` is reached from that
+/// row when a thread the row names runs the body ([`worker_roots`]: the thread door's closure and
+/// the `WorkerCtx` it lends, followed to every function that takes one) and the door's reach
+/// leads to that thread ([`leads_to`]). Every body must be reached from some row, or be one of
+/// [`UNASKED_WORKER_BODIES`]; a door process's body (`enter_standalone_main`) needs its row like
+/// any other. A row's thread that the product starts under no such name is refused too. This is
+/// the interim reachability `bt-source`'s items allow: a call through a trait object, a stored
+/// closure or an untyped receiver whose name is shared is not followed (S-2a's call graph is).
 ///
-/// MUTATION: rename the hand-off row's thread to `bt-os-hand-off` and it goes red twice: the
-/// name starts no thread, and `run_handoff_lane` runs on a thread no row names.
+/// MUTATION: give the hand-off row the door `Runtime::flush_title` (its thread still
+/// `bt-os-handoff`) and it goes red: `run_handoff_lane` is reached from no row's door.
 #[test]
-fn every_worker_door_body_runs_on_a_completions_thread() {
+fn every_worker_door_body_is_reached_from_a_completions_door() {
     let world = World::new();
     let roots = worker_roots(&world);
     let rows = completions();
+    let types: BTreeSet<&'static str> = world
+        .srcs
+        .iter()
+        .flat_map(|src| {
+            src.index
+                .items()
+                .iter()
+                .filter(|record| record.kind().is_type() && src.product_item(record))
+                .map(ItemRecord::name)
+        })
+        .collect();
     let named: BTreeSet<&str> = rows
         .iter()
         .flat_map(|row| row.threads.iter().copied())
@@ -8074,6 +8239,24 @@ fn every_worker_door_body_runs_on_a_completions_thread() {
         .filter(|thread| !started.contains(**thread))
         .map(|thread| format!("a row names thread `{thread}`, which the product never starts"))
         .collect();
+    // Which roots each row's door leads to, among the threads the row names.
+    let mut callees = HashMap::new();
+    let mut served: BTreeSet<usize> = BTreeSet::new();
+    for row in &rows {
+        let Ok(records) = door_records(&world, row.door) else {
+            continue; // `every_completions_door_is_an_item_of_the_product` says why.
+        };
+        let package = door_key(row.door).package;
+        let Some(at) = world.srcs.iter().position(|src| src.package == package) else {
+            continue;
+        };
+        let reach = door_reach(&world, &records, at, &mut callees);
+        for (index, root) in roots.iter().enumerate() {
+            if row.threads.contains(&root.name.as_str()) && leads_to(&world, &reach, root, &types) {
+                served.insert(index);
+            }
+        }
+    }
     let mut listed = BTreeSet::new();
     for cells in section("effects", &EFFECT_COLUMNS) {
         if cells[4] != "worker-door-body" {
@@ -8084,16 +8267,17 @@ fn every_worker_door_body_runs_on_a_completions_thread() {
             cells[1].to_owned(),
             cells[2].to_owned(),
         );
-        let on: Vec<&WorkerRoot> = roots
-            .iter()
-            .filter(|root| root.reached.contains(&key))
-            .collect();
         let spelled = format!("{} {} {}", key.0, key.1, key.2);
-        let unasked = UNASKED_WORKER_BODIES
-            .iter()
-            .any(|(body, _)| *body == spelled);
         listed.insert(spelled.clone());
-        if unasked {
+        let on: Vec<(usize, &WorkerRoot)> = roots
+            .iter()
+            .enumerate()
+            .filter(|(_, root)| root.reached.contains(&key))
+            .collect();
+        if UNASKED_WORKER_BODIES
+            .iter()
+            .any(|(body, _)| *body == spelled)
+        {
             if !on.is_empty() {
                 failures.push(format!(
                     "{spelled}: listed as asked for by nobody, and a thread the product starts \
@@ -8102,28 +8286,25 @@ fn every_worker_door_body_runs_on_a_completions_thread() {
             }
             continue;
         }
-        let served = on
-            .iter()
-            .any(|root| !root.standalone && named.contains(root.name.as_str()));
-        let door_process_only = !on.is_empty() && on.iter().all(|root| root.standalone);
-        if served || door_process_only {
+        if on.iter().any(|(index, _)| served.contains(index)) {
             continue;
         }
         let threads: Vec<String> = on
             .iter()
-            .map(|root| format!("`{}` ({})", root.name, root.at))
+            .map(|(_, root)| {
+                let kind = if root.standalone {
+                    "a door process's main"
+                } else {
+                    "a thread"
+                };
+                format!("{kind} `{}` ({})", root.name, root.at)
+            })
             .collect();
         failures.push(if threads.is_empty() {
-            format!(
-                "{} {} {}: no thread the product starts reaches it",
-                key.0, key.1, key.2
-            )
+            format!("{spelled}: no thread the product starts reaches it")
         } else {
             format!(
-                "{} {} {}: runs on {}, which no `# completions` row names",
-                key.0,
-                key.1,
-                key.2,
+                "{spelled}: runs on {}, and no `# completions` row's door leads there",
                 threads.join(", ")
             )
         });
@@ -8137,7 +8318,7 @@ fn every_worker_door_body_runs_on_a_completions_thread() {
     }
     assert!(
         failures.is_empty(),
-        "the worker door bodies and the ledger's threads:\n  {}",
+        "the worker door bodies and the ledger's doors:\n  {}",
         failures.join("\n  ")
     );
 }
