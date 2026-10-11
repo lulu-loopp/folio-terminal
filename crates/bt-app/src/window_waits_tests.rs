@@ -3985,12 +3985,9 @@ const JOIN_WITHIN: &str = "bt-pty crate::join_within";
 const PTY_ERROR_FROM: &str = "bt-pty crate::PtyError::from (generated)";
 const REQUEST: &str = "bt-platform crate::http::<Request as Drop>::drop [windows]";
 const SHARED_LOCKED: &str = "bt-platform crate::http::Shared::locked [windows]";
-const MACOS_TASKBAR: &str =
-    "bt-platform crate::macos_notify::<Taskbar as Drop>::drop [target_os = \"macos\"]";
-
-/// **The exception table** (revision (e)3 as corrected by (f)2 and (g)): the `Drop`s that may
+/// **The exception table** (revision (e)3 as corrected by (f)2, (g), and (n)): the `Drop`s that may
 /// reach the vocabulary, each owed a repayment in `docs/plans/structural-debt.md`.
-const EXCEPTIONS: [Exception; 14] = [
+const EXCEPTIONS: [Exception; 13] = [
     Exception {
         row: "DirWatch (Windows)",
         drop: DIRWATCH_WINDOWS,
@@ -4043,14 +4040,10 @@ const EXCEPTIONS: [Exception; 14] = [
         row: "http::Request (Windows)",
         drop: REQUEST,
     },
-    Exception {
-        row: "Taskbar (macOS)",
-        drop: MACOS_TASKBAR,
-    },
 ];
 
 /// **Every pinned body**, walked from the exceptions: nothing a listed `Drop` reaches is exempt.
-const PINNED: [Pinned; 41] = [
+const PINNED: [Pinned; 40] = [
     Pinned {
         body: DIRWATCH_WINDOWS,
         edges: &[&[CLOSE_WINDOWS], &[CLOSE_WINDOWS], &[CLOSE_WINDOWS]],
@@ -4314,12 +4307,6 @@ const PINNED: [Pinned; 41] = [
         effects: &[],
         leaves: &[],
     },
-    Pinned {
-        body: MACOS_TASKBAR,
-        edges: &[],
-        effects: &[],
-        leaves: &["new"],
-    },
 ];
 
 /// The exception rows whose chain reaches `body`, for a failure's message.
@@ -4493,6 +4480,25 @@ fn every_drop_that_may_wait_is_a_row_of_the_closed_inventory(
                     "`{key}` is a `Drop` outside the exception table that waits: `{effect}` at {}",
                     body.s().location(site.at)
                 ));
+            }
+            // `MainThreadMarker` is an objc2 foreign type, so this source-only resolver has no
+            // declaration to narrow `MainThreadMarker::new` to and would otherwise lend it every
+            // first-party `new` in reach — including the compositor constructor. The call is a
+            // non-blocking AppKit-thread proof and the exact foreign path is the evidence; only
+            // Taskbar's retired row owns this exclusion.
+            //
+            // MUTATION: remove this arm and the closed inventory names Taskbar's `Drop` as an
+            // unlisted call to the compositor constructor.
+            if key
+                == "bt-platform crate::macos_notify::<Taskbar as Drop>::drop [target_os = \"macos\"]"
+                && site.name == "new"
+                && matches!(
+                    &site.form,
+                    Form::Path(qualifiers)
+                        if qualifiers.last().copied() == Some("MainThreadMarker")
+                )
+            {
+                continue;
             }
             let candidates: Vec<String> = body
                 .resolve(&site)

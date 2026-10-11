@@ -770,16 +770,6 @@ mod tests {
         assert_eq!(document.to_string(), theirs);
     }
 
-    /// A file this build cannot read is left alone.
-    #[test]
-    fn an_unreadable_configuration_file_is_never_written_over() {
-        assert!("model = = \"gpt-5\"\n".parse::<DocumentMut>().is_err());
-        // The refusal is `apply`'s, and it is the reason `state` has a third answer: `Absent` would
-        // have made the row offer to write over it.
-        let source = include_str!("attention_codex.rs");
-        assert!(source.contains("is not one this build can read"));
-    }
-
     /// RED — **a configuration file that could not be read is left byte for byte.**
     ///
     /// Release audit 2026-09-16 (C-3): `read_to_string(&path).unwrap_or_default()` took a file this
@@ -791,6 +781,7 @@ mod tests {
     /// RED GATE: put the `unwrap_or_default` back and this file comes back as Folio's own.
     #[test]
     fn a_configuration_file_that_could_not_be_read_is_never_written_over() {
+        assert!("model = = \"gpt-5\"\n".parse::<DocumentMut>().is_err());
         let dir = scratch("unreadable");
         let path = dir.join(CONFIG_FILE);
         // A Latin-1 comment: an ordinary line on an ordinary machine, and not UTF-8.

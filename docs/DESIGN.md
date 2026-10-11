@@ -14812,3 +14812,10 @@ spellings of a path. The audit road never needs a maintainer's tap checkout.
 **Pinned by**
 `install_channel::tests::a_default_prefix_record_without_attributes_is_homebrew`;
 its `mutation-default-record` arm refuses to derive the Homebrew channel.
+
+### 2026-10-10 — The macOS Dock badge destructor is not a thread-door exception (H5)
+
+`macos_notify::Taskbar::drop` performs only an atomic owner comparison and, when still on AppKit's
+main thread, clears the shared Dock badge. It starts and waits for nothing. The closed `Drop`
+inventory therefore retires its precautionary row; the thirteen debt-backed exception chains
+remain unchanged and are labelled TD-1 through TD-13 in the thread-door note's revision (n).
