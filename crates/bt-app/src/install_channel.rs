@@ -754,7 +754,9 @@ fn recorded_target(bundle: &Path, caskroom: &[u8]) -> Result<(), &'static str> {
     let target = std::fs::read_link(&link).map_err(|_| "the Caskroom records no app")?;
     // `Moved#move_back` joins a relative link to its folder, as here.
     let target = caskroom.join(&version).join(target);
-    if bt_platform::instance::canonical_path(&target) == bundle {
+    if bt_platform::instance::canonical_path(&target)
+        == bt_platform::instance::canonical_path(bundle)
+    {
         Ok(())
     } else {
         Err("the Caskroom records another app")

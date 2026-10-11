@@ -1429,10 +1429,10 @@ Before committing the tap's cask:
 
 - [ ] Render `Casks/folio.rb` with `scripts/release/macos/cask.sh` from
   `packaging/homebrew/folio.rb`; never hand-edit the rendered cask.
-- [ ] Run `brew audit --cask --strict --online --new` on the rendered cask and
-  require a clean result.
-- [ ] Run `brew livecheck` on the rendered cask and require it to return the
-  release's new version.
+- [ ] Require CI's macOS `cask-audit` job — a throwaway local tap — to pass
+  `brew style --cask` and `brew audit --cask --strict --online --new` cleanly.
+- [ ] Require that job's `brew livecheck --cask` result to return the release's
+  new version.
 
 ### The lane, and its four secrets
 

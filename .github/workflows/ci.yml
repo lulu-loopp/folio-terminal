@@ -59,6 +59,30 @@ jobs:
         shell: pwsh
         run: ./scripts/release/update-manifests-tests.ps1
 
+  # Homebrew 7 audits casks by token, not by a source-file path. Give the
+  # checked-in source a disposable local tap on an ephemeral macOS runner so
+  # style, the online strict audit (including the DMG) and livecheck exercise
+  # the same road an official cask takes, without touching a maintainer's tap.
+  cask-audit:
+    if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
+    runs-on: macos-latest
+    timeout-minutes: 10
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_FROM_API: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Audit the cask in a throwaway tap
+        run: |
+          set -euo pipefail
+          brew tap-new --no-git local/folio-audit
+          tap="$(brew --repository local/folio-audit)"
+          mkdir -p "$tap/Casks"
+          cp packaging/homebrew/folio.rb "$tap/Casks/folio.rb"
+          brew style --cask local/folio-audit/folio
+          brew audit --cask --strict --online --new local/folio-audit/folio
+          brew livecheck --cask local/folio-audit/folio
+
   # ── the gates that prove themselves ────────────────────────────────────────
   #
   # Each of these plants a violation, demands red, and puts the file back. This

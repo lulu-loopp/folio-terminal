@@ -9,17 +9,19 @@ Mac, `scripts/release/macos/cask.sh`) renders it for a release — `version` and
 "Distribution manifests"). A change to the cask is made here; an edit made in the
 tap by hand is taken away by the next release.
 
-Before the rendered cask is committed to the tap, check it with Homebrew 7:
+The macOS `cask-audit` job in `.github/workflows/ci.yml` gives this file a
+throwaway `local/folio-audit` tap and runs Homebrew 7's three gates by token:
 
 ```sh
-HOMEBREW_CACHE="$(mktemp -d)" HOMEBREW_NO_AUTO_UPDATE=1 \
-  brew audit --cask --strict --online --new /path/to/folio.rb
+brew style --cask local/folio-audit/folio
+brew audit --cask --strict --online --new local/folio-audit/folio
+brew livecheck --cask local/folio-audit/folio
 ```
 
-Run `brew style --cask /path/to/folio.rb` and `brew livecheck --cask
-/path/to/folio.rb` with the same environment. `livecheck` follows the latest
-GitHub release tagged `v<version>-preview` and returns the manifest version
-without the tag's `v` and `-preview` parts.
+The job sets `HOMEBREW_NO_AUTO_UPDATE=1` and `HOMEBREW_NO_INSTALL_FROM_API=1`;
+the runner and tap are disposable, and no maintainer checkout is used.
+`livecheck` follows the latest GitHub release tagged `v<version>-preview` and
+returns the manifest version without the tag's `v` and `-preview` parts.
 
 ## The hooks (0.4.6, U-2)
 

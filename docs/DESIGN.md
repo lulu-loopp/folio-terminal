@@ -14788,3 +14788,19 @@ bytes but never invents a missing marker or Caskroom attribute.
 `install_channel::tests::{a_default_prefix_record_without_attributes_is_homebrew, another_apps_record_and_no_default_record_leave_the_copy_row}`,
 `update_prepare_macos::tests::{homebrews_record_is_read_as_homebrew_reads_it, a_homebrew_carry_writes_each_existing_attribute_and_no_missing_one}`,
 and the existing Homebrew Prepare/Activate M rows.
+
+### 2026-10-10 — Homebrew record identity follows canonical bundle paths (D2 round 2)
+
+**What is built.** The Caskroom link target and the running bundle are both
+canonicalized before they are compared. A bundle reached through a symlinked
+ancestor — including macOS's `/var` spelling of `/private/var` — is therefore
+recognized by Homebrew's record without weakening the requirement that the
+record name that exact bundle. The cask source carries the current 0.4.7
+release and CI audits it by token in a throwaway local tap on a macOS runner.
+
+**The rule.** Homebrew evidence compares filesystem identity, not two textual
+spellings of a path. The audit road never needs a maintainer's tap checkout.
+
+**Pinned by**
+`install_channel::tests::a_default_prefix_record_without_attributes_is_homebrew`;
+its `mutation-default-record` arm refuses to derive the Homebrew channel.
