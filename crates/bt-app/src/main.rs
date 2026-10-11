@@ -137,6 +137,7 @@ mod preview_viewport;
 mod preview_watch;
 mod preview_wrap;
 mod profiles;
+mod programs_ear;
 mod programs_lane;
 mod psreadline;
 mod pty_door;
@@ -473,6 +474,9 @@ enum AppEvent {
     VolumesChanged {
         arrived: bool,
     },
+    /// A watched PATH directory has executable-name news. This only brings the loop round;
+    /// `ProgramsEar` owns the timestamps and coalescing.
+    PathDirectoryChanged,
     /// **A display changed mode, or one came or went** (T-FRESH-FACTS;
     /// `bt_platform::SystemNews::Display`). The rate each window paces its frames to
     /// is read again in every window, which a rate changed on the same panel moves
@@ -915,6 +919,7 @@ impl AppEvent {
             | Self::GitChanged
             | Self::PreviewFileChanged
             | Self::FilesDirChanged
+            | Self::PathDirectoryChanged
             | Self::WatchStewardAnswered
             | Self::QuakeSummoned
             | Self::LaunchAsked
@@ -12619,6 +12624,8 @@ struct App {
     /// repository. It is on the window rather than on a tab because the set it
     /// follows is "what is on the glass", which only the window knows.
     git_watch: git_watch::GitWatch,
+    /// The process-wide shallow watches for the exact PATH snapshot the last program walk used.
+    programs_ear: programs_ear::ProgramsEar,
     /// The thread that reads directories, and whether it is still there.
     ///
     /// One for the window rather than one per column, exactly as `math_worker`
@@ -44642,6 +44649,7 @@ impl Runtime<'_> {
             animation_serials: 0,
             event_proxy: proxy.clone(),
             git_watch: git_watch::GitWatch::default(),
+            programs_ear: programs_ear::ProgramsEar::default(),
             handoff_lane,
             layout_tables,
             math_worker,
@@ -62609,6 +62617,10 @@ impl FolioApp {
         if answers.is_empty() {
             return Ok(());
         }
+        let program_environment = answers
+            .facts
+            .as_ref()
+            .map(|facts| facts.program_environment.clone());
         let mut shown = BTreeMap::new();
         self.for_each_window(|runtime| {
             shown.insert(runtime.window_id(), runtime.shown_program_rows());
@@ -62640,6 +62652,10 @@ impl FolioApp {
         // to say something at its landing (`birth_here`) waits on rows that were already known.
         let ended = answers.finished.is_some();
         let news = adopt_program_answers(&mut app.profile_programs, answers);
+        if let Some(snapshot) = program_environment {
+            let proxy = app.event_proxy.clone();
+            app.programs_ear.sync(&snapshot, &proxy);
+        }
         if !news.any() && !ended {
             return Ok(());
         }
@@ -63820,6 +63836,20 @@ impl FolioApp {
                 app.git_watch.ripen(now);
             });
         }
+    }
+
+    /// Turn the application-wide PATH ear once. A due clock asks the existing program lane;
+    /// otherwise silence is only an optional deadline already earned by kernel news.
+    fn advance_programs_ear(&mut self, now: Instant) -> Option<Instant> {
+        let app = self.app.as_mut()?;
+        if app.programs_ear.advance(now) {
+            programs_lane::request(
+                programs_lane::Trigger::PathDirectory,
+                &app.settings_store.loaded().default_profile,
+                &[],
+            );
+        }
+        app.programs_ear.deadline()
     }
 
     /// **Tell the two windows the ring moved between** (B9).
@@ -66329,6 +66359,8 @@ impl FolioApp {
                 return;
             }
         }
+        let programs_deadline = self.advance_programs_ear(now);
+        wake_deadline = earliest_deadline([wake_deadline, programs_deadline]);
         if self.windows.is_empty() {
             // **An application with no windows waits, and waits properly**
             // (M3-1). Until this ticket an empty registry was a loop that had
@@ -67217,6 +67249,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 self.for_each_window(|runtime| runtime.volume_arrived())
             })
             .unwrap_or(Ok(())),
+            AppEvent::PathDirectoryChanged => Ok(()),
             AppEvent::ProgramsAnswered => self.adopt_program_walk(),
             // **Every window asks its display again** (T-FRESH-FACTS): a rate changed on the
             // panel a window stands on moves neither the window nor its scale, the two events

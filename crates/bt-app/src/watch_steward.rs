@@ -38,6 +38,10 @@ use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError
 use bt_platform::DirChange;
 use bt_platform::admission::WorkerCtx;
 
+/// Whether program-search directories on removable volumes are watched. E-2 owns turning this
+/// on; until then arrivals can rearm explicitly named folders but PATH watches stay off them.
+pub const WATCH_REMOVABLE_VOLUMES: bool = false;
+
 /// **How far under a member the kernel listens, and whether the names reach the listener** — the
 /// three doors of `bt_platform::DirWatch`, one each.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

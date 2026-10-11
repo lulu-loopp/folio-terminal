@@ -51,7 +51,7 @@
 //! and Git pages opening; Windows saying a setting moved (`WM_SETTINGCHANGE`, the one listener
 //! `SystemSettingsWatch` already has); and a pane's birth that finds a row it needs unknown.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -75,6 +75,7 @@ pub enum Trigger {
     AgentsPage,
     GitPage,
     Environment,
+    PathDirectory,
     Birth,
     /// The walk before it ended before its last answer ([`ProgramsLane::request_after_death`]).
     AfterDeath,
@@ -90,6 +91,7 @@ impl Trigger {
             Self::AgentsPage => "Agents page opened",
             Self::GitPage => "Git page opened",
             Self::Environment => "system setting changed",
+            Self::PathDirectory => "PATH directory changed",
             Self::Birth => "a pane waits for its program",
             Self::AfterDeath => "the walk before it ended early",
         }
@@ -131,6 +133,17 @@ pub struct MachineFacts {
     /// Where the agents keep their configuration, out of the same environment
     /// (`attention_hooks::AGENT_HOMES`, T-FRESH-FACTS).
     pub agent_homes: AgentHomes,
+    /// The exact program-search variables frozen for this walk, and the eligible directories
+    /// derived from that same value on the worker.
+    pub program_environment: ProgramEnvironmentSnapshot,
+}
+
+/// The program-search environment one completed walk actually used.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProgramEnvironmentSnapshot {
+    pub path: Option<OsString>,
+    pub pathext: Option<OsString>,
+    pub directories: Vec<PathBuf>,
 }
 
 /// **What the window thread finds** when it drains the mailbox.
@@ -163,6 +176,15 @@ pub trait Machine: Send + Sync {
     fn environment(&self, ctx: &WorkerCtx, note: &dyn Fn(&str)) -> Box<dyn ShellEnvironment>;
     /// WSL's installation, asked only once the walk has found `wsl.exe`.
     fn wsl(&self) -> WslFacts;
+    /// Classify one absolute PATH directory. Test machines are local unless they say otherwise;
+    /// the product delegates the worker-only filesystem question to `bt-platform`.
+    fn path_directory(
+        &self,
+        _ctx: &WorkerCtx,
+        _path: &Path,
+    ) -> std::io::Result<bt_platform::ProgramPathDirectory> {
+        Ok(bt_platform::ProgramPathDirectory::Local)
+    }
 }
 
 /// **The product's machine**: the current logon environment, `PATH` probed through the real
@@ -190,6 +212,14 @@ impl Machine for ThisMachine {
 
     fn wsl(&self) -> WslFacts {
         crate::wsl::read_this_machine()
+    }
+
+    fn path_directory(
+        &self,
+        ctx: &WorkerCtx,
+        path: &Path,
+    ) -> std::io::Result<bt_platform::ProgramPathDirectory> {
+        bt_platform::program_path_directory(ctx, path)
     }
 }
 
@@ -220,6 +250,28 @@ fn same_variable(name: &OsStr, key: &str) -> bool {
 struct Counting<'a> {
     inner: &'a dyn ShellEnvironment,
     file_questions: std::cell::Cell<u64>,
+}
+
+/// Freeze the two search variables so every row and the published snapshot see one environment,
+/// even when the fallback environment is the live process environment on a non-Windows host.
+struct WalkEnvironment<'a> {
+    inner: &'a dyn ShellEnvironment,
+    path: Option<OsString>,
+    pathext: Option<OsString>,
+}
+
+impl ShellEnvironment for WalkEnvironment<'_> {
+    fn var_os(&self, key: &str) -> Option<OsString> {
+        match key {
+            "PATH" => self.path.clone(),
+            "PATHEXT" => self.pathext.clone(),
+            _ => self.inner.var_os(key),
+        }
+    }
+
+    fn is_file(&self, path: &Path) -> bool {
+        self.inner.is_file(path)
+    }
 }
 
 impl ShellEnvironment for Counting<'_> {
@@ -253,8 +305,15 @@ fn walk(
     note: &dyn Fn(&str),
 ) -> (usize, u64) {
     let environment = machine.environment(ctx, note);
-    let counting = Counting {
+    let path = environment.var_os("PATH");
+    let pathext = environment.var_os("PATHEXT");
+    let frozen = WalkEnvironment {
         inner: environment.as_ref(),
+        path: path.clone(),
+        pathext: pathext.clone(),
+    };
+    let counting = Counting {
+        inner: &frozen,
         file_questions: std::cell::Cell::new(0),
     };
     let mut wsl_found = false;
@@ -279,11 +338,31 @@ fn walk(
     };
     let git = profiles::find_git(&counting);
     let agent_homes = AgentHomes::in_environment(&|name| counting.var_os(name));
+    let mut seen = BTreeSet::new();
+    let directories = path
+        .as_ref()
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(path))
+        .filter(|directory| directory.is_absolute())
+        .filter(|directory| seen.insert(directory.clone()))
+        .filter(|directory| match machine.path_directory(ctx, directory) {
+            Ok(bt_platform::ProgramPathDirectory::Local) => true,
+            Ok(bt_platform::ProgramPathDirectory::Removable) => {
+                crate::watch_steward::WATCH_REMOVABLE_VOLUMES
+            }
+            Ok(bt_platform::ProgramPathDirectory::Remote) | Err(_) => false,
+        })
+        .collect();
     publish(Published::Facts(MachineFacts {
         generation,
         wsl,
         git,
         agent_homes,
+        program_environment: ProgramEnvironmentSnapshot {
+            path,
+            pathext,
+            directories,
+        },
     }));
     let path_entries = counting
         .var_os("PATH")
@@ -713,6 +792,7 @@ pub(crate) mod tests {
     #[derive(Default)]
     struct FakeState {
         path: Vec<PathBuf>,
+        path_kinds: BTreeMap<PathBuf, std::io::Result<bt_platform::ProgramPathDirectory>>,
         files: Vec<PathBuf>,
         wsl: WslFacts,
         /// Variables other than `PATH`, as the account has them now.
@@ -745,6 +825,14 @@ pub(crate) mod tests {
             let mut state = self.lock();
             state.variables.retain(|(held, _)| held != name);
             state.variables.push((name.to_owned(), value.into()));
+        }
+
+        pub(crate) fn set_path_kind(
+            &self,
+            path: &Path,
+            kind: std::io::Result<bt_platform::ProgramPathDirectory>,
+        ) {
+            self.lock().path_kinds.insert(path.to_path_buf(), kind);
         }
 
         /// From now on every walk stops at its first file question until [`Self::release`].
@@ -811,6 +899,21 @@ pub(crate) mod tests {
 
         fn wsl(&self) -> WslFacts {
             self.lock().wsl.clone()
+        }
+
+        fn path_directory(
+            &self,
+            _ctx: &WorkerCtx,
+            path: &Path,
+        ) -> std::io::Result<bt_platform::ProgramPathDirectory> {
+            self.lock()
+                .path_kinds
+                .get(path)
+                .map(|result| match result {
+                    Ok(kind) => Ok(*kind),
+                    Err(error) => Err(std::io::Error::new(error.kind(), error.to_string())),
+                })
+                .unwrap_or(Ok(bt_platform::ProgramPathDirectory::Local))
         }
     }
 
@@ -996,6 +1099,49 @@ pub(crate) mod tests {
             ),
             "the variable set after the first walk is in the second walk's facts"
         );
+    }
+
+    /// RED (T-OS-SIGNALS-WIN) — the walk publishes the exact frozen PATH/PATHEXT it used and
+    /// admits only distinct, existing local absolute directories under the current policy.
+    ///
+    /// MUTATIONS: reread either variable at publication; admit remote, removable, failed or
+    /// relative entries; the snapshot differs.
+    #[test]
+    fn a_walk_publishes_its_exact_eligible_program_environment() {
+        use bt_platform::ProgramPathDirectory::{Remote, Removable};
+
+        let local = bin_dir();
+        let remote = PathBuf::from(r"\\server.invalid\tools");
+        let removable = PathBuf::from(r"R:\portable\bin");
+        let missing = PathBuf::from(r"C:\missing\bin");
+        let relative = PathBuf::from("relative-bin");
+        let entries = vec![
+            local.clone(),
+            remote.clone(),
+            removable.clone(),
+            missing.clone(),
+            relative,
+            local.clone(),
+        ];
+        let exact_path = std::env::join_paths(&entries).unwrap();
+        let machine = FakeMachine::with_path(&entries);
+        machine.set_variable("PATHEXT", ".EXE;.Cmd");
+        machine.set_path_kind(&remote, Ok(Remote));
+        machine.set_path_kind(&removable, Ok(Removable));
+        machine.set_path_kind(
+            &missing,
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        );
+        let (lane, wakes, _) = lane(machine);
+
+        let generation = lane.request(request(&[], Trigger::Launch));
+        let snapshot = answers_through(lane, &wakes, generation)
+            .facts
+            .expect("the walk publishes facts")
+            .program_environment;
+        assert_eq!(snapshot.path, Some(exact_path));
+        assert_eq!(snapshot.pathext, Some(OsString::from(".EXE;.Cmd")));
+        assert_eq!(snapshot.directories, vec![local]);
     }
 
     /// RED — **requests made while a walk is out are answered by one later walk, and that is

@@ -8603,8 +8603,8 @@ mod windows_impl {
             FILE_NOTIFY_CHANGE, FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_DIR_NAME,
             FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
             FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileCaseSensitiveInfo,
-            GetFileInformationByHandleEx, GetFileVersionInfoSizeW, GetFileVersionInfoW,
-            OPEN_EXISTING, ReadDirectoryChangesW, VerQueryValueW,
+            GetDriveTypeW, GetFileInformationByHandleEx, GetFileVersionInfoSizeW,
+            GetFileVersionInfoW, OPEN_EXISTING, ReadDirectoryChangesW, VerQueryValueW,
         },
         System::{
             Com::{
@@ -8695,6 +8695,60 @@ mod windows_impl {
         hold_pending_pos_to, logical_px_for_dpi, window_skirt,
     };
     use crate::admission::{WaitToken, doors};
+
+    /// Classify one absolute `PATH` directory without ever touching a remote server. Drive type
+    /// is asked from the lexical root first; only a local or removable path reaches metadata.
+    pub(super) fn program_path_directory(
+        _worker: &crate::admission::WorkerCtx,
+        path: &Path,
+    ) -> std::io::Result<crate::ProgramPathDirectory> {
+        use crate::ProgramPathDirectory;
+
+        if !path.is_absolute() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "PATH entry is not absolute",
+            ));
+        }
+        let units: Vec<u16> = path.as_os_str().encode_wide().collect();
+        let verbatim_disk =
+            units.starts_with(&[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16])
+                && units.get(5) == Some(&(b':' as u16));
+        if units.starts_with(&[b'\\' as u16, b'\\' as u16]) && !verbatim_disk {
+            return Ok(ProgramPathDirectory::Remote);
+        }
+        let drive = if units.get(1) == Some(&(b':' as u16)) {
+            units.first().copied()
+        } else if verbatim_disk {
+            units.get(4).copied()
+        } else {
+            None
+        }
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "PATH entry has no drive root",
+            )
+        })?;
+        let root = [drive, b':' as u16, b'\\' as u16, 0];
+        // SAFETY: `root` is a NUL-terminated drive-root string and remains live for the call.
+        let kind = unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) };
+        if kind == 4 {
+            return Ok(ProgramPathDirectory::Remote);
+        }
+        let removable = kind == 2;
+        if !std::fs::metadata(path)?.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                "PATH entry is not a directory",
+            ));
+        }
+        Ok(if removable {
+            ProgramPathDirectory::Removable
+        } else {
+            ProgramPathDirectory::Local
+        })
+    }
 
     /// GDI brush currently owned by this process and installed on winit's shared window class.
     /// The class itself outlives individual windows; theme switches replace this handle in place.
@@ -17687,6 +17741,37 @@ pub fn dock_badge_label(progress: TaskbarProgress) -> Option<String> {
     Some(format!("{percent}%"))
 }
 
+/// The kind of filesystem behind an absolute program-search directory. The PATH ear refuses
+/// remote directories outright and admits removable ones only under its explicit policy switch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProgramPathDirectory {
+    Local,
+    Removable,
+    Remote,
+}
+
+/// Classify and validate one program-search directory on a worker thread.
+///
+/// Windows asks the lexical drive root before metadata so a remote entry is never contacted.
+/// Other platforms deliberately decline this Windows ticket; their native PATH ear is ticket 3.
+pub fn program_path_directory(
+    worker: &admission::WorkerCtx,
+    path: &std::path::Path,
+) -> std::io::Result<ProgramPathDirectory> {
+    #[cfg(windows)]
+    {
+        windows_impl::program_path_directory(worker, path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (worker, path);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "the PATH directory ear is not built on this platform yet",
+        ))
+    }
+}
+
 /// **What a window's system-settings ear heard** ([`SystemSettingsWatch`]), so the loop
 /// re-reads the one fact it is about (T-FRESH-FACTS).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21955,6 +22040,34 @@ mod system_preference_message_tests {
             })
         };
         assert_eq!(unsafe { device_header(LPARAM(at as isize)) }, None);
+    }
+}
+
+/// The PATH classifier's lexical refusal: a remote path must be identified before metadata could
+/// contact it, and a relative path is not a watchable PATH directory.
+#[cfg(all(test, windows))]
+mod program_path_directory_tests {
+    use super::{ProgramPathDirectory, ThreadPriority, program_path_directory, spawn_at_priority};
+    use std::path::Path;
+
+    /// RED (T-OS-SIGNALS-WIN) — replacing the root-first branch with `metadata` contacts the
+    /// deliberately nonexistent host; treating every absolute spelling as local changes the row.
+    #[test]
+    fn a_remote_path_is_classified_without_contacting_it() {
+        let answer = spawn_at_priority("path-kind-test", ThreadPriority::BelowNormal, |ctx| {
+            (
+                program_path_directory(ctx, Path::new(r"\\server.invalid\share\bin")),
+                program_path_directory(ctx, Path::new("relative-bin")),
+            )
+        })
+        .expect("start worker")
+        .join()
+        .expect("worker answers");
+        assert_eq!(answer.0.unwrap(), ProgramPathDirectory::Remote);
+        assert_eq!(
+            answer.1.unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
     }
 }
 
