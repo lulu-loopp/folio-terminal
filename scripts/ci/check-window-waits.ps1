@@ -1,7 +1,7 @@
 # the_window_threads_checks_that_are_not_rust
 #
-# Five checks — four the thread-door note 2026-09-26 gives A2a (revisions (j)1,
-# (j)3, (j)11.4-(j)11.6; budget note C-2) and one the side-effects contract
+# Six checks — four the thread-door note 2026-09-26 gives A2a (revisions (j)1,
+# (j)3, (j)11.4-(j)11.6; budget note C-2) and two the side-effects contract
 # 2026-10-11 gives S-1 — each reported under its own name, all run before the
 # script answers:
 #
@@ -17,7 +17,9 @@
 #   4. a registry row added without a ruling is refused, and the rows pending
 #      a ruling only shrink (M9).
 #   5. the completions ledger's repairs only shrink: a status that names a
-#      D-row or a registry row may only lose them, to `conforms` (S-1).
+#      D-row or a registry row may only lose them, to `conforms` (S-1);
+#   6. the completions doors joined to a thread started elsewhere
+#      (`docs/plans/completions-door-starts.tsv`) only shrink (S-1 round 3).
 #
 # ── 1. the_bare_site_inventory_only_shrinks
 #
@@ -336,6 +338,41 @@ if ($ledgerThen.Count -eq 0) {
         $repairsAdded = @($repairsNow | Where-Object { $repairsBefore -notcontains $_ })
         if ($repairsAdded.Count -gt 0) {
             $failures += "[completions] '$class' was '$($ledgerThen[$class])' at the merge base and is '$($ledgerNow[$class])': a status's repairs only shrink, to conforms ($($repairsAdded -join ', ') added)"
+        }
+    }
+}
+
+# ── 6. the doors joined to a thread started elsewhere only shrink (S-1 round 3) ──────────────
+# `docs/plans/completions-door-starts.tsv` names the `# completions` doors that reach a lane started
+# once with the application by its channel rather than by a call path. The test refuses a stale or
+# unused line; this refuses a (door, starter) pair the merge base does not have.
+$startsRelative = "docs/plans/completions-door-starts.tsv"
+function Read-DoorStarts([string[]]$lines) {
+    $pairs = @()
+    $header = $false
+    foreach ($line in $lines) {
+        if ($line.Length -eq 0 -or $line.StartsWith("#")) { continue }
+        if (-not $header) { $header = $true; continue }
+        $cells = $line -split "`t"
+        $pairs += "$($cells[0])`t$($cells[1])"
+    }
+    return $pairs
+}
+$startsNow = Read-DoorStarts ([IO.File]::ReadAllLines((Join-Path $repo $startsRelative)))
+Push-Location $repo
+try {
+    $startsText = (& git show "${base}:${startsRelative}" 2>$null) | Out-String
+    $startsAtBase = $LASTEXITCODE -eq 0
+} finally {
+    Pop-Location
+}
+if (-not $startsAtBase) {
+    Write-Host "the merge base has no $startsRelative`: this change introduces it ($($startsNow.Count) lines), and there is nothing to compare."
+} else {
+    $startsBefore = Read-DoorStarts ($startsText -split "`r?`n")
+    foreach ($pair in $startsNow) {
+        if ($startsBefore -notcontains $pair) {
+            $failures += "[door-starts] $startsRelative adds '$($pair -replace "`t", ' -> ')': a door reaches its thread by a call path, and this list only shrinks"
         }
     }
 }

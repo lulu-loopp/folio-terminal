@@ -7715,8 +7715,6 @@ struct WorkerRoot {
     reached: BTreeSet<(String, String, String)>,
     /// The function the thread door is called in.
     spawner: (usize, &'static ItemRecord),
-    /// The functions taking its `WorkerCtx`, as records.
-    bodies: Vec<(usize, &'static ItemRecord)>,
 }
 
 /// The parameters of a declaration whose type names `WorkerCtx`, by their bound names.
@@ -8001,7 +7999,6 @@ fn worker_roots(world: &World) -> Vec<WorkerRoot> {
                 };
                 let mut work = carried_by(&body, last);
                 let mut reached = BTreeSet::new();
-                let mut bodies = Vec::new();
                 let mut seen: BTreeSet<(u8, usize, usize, usize)> = BTreeSet::new();
                 while let Some(carried) = work.pop() {
                     match carried {
@@ -8015,7 +8012,6 @@ fn worker_roots(world: &World) -> Vec<WorkerRoot> {
                             }
                             let (item, arm) = item_and_arm(callee);
                             reached.insert((callee_src.package.to_owned(), arm, item));
-                            bodies.push((at_callee, callee));
                             let inner = Body::new(world, at_callee, callee);
                             work.extend(capability_calls(&inner, &names, 0, usize::MAX));
                         }
@@ -8050,7 +8046,6 @@ fn worker_roots(world: &World) -> Vec<WorkerRoot> {
                     at: src.location(at),
                     reached,
                     spawner: (at_src, record),
-                    bodies,
                 });
             }
         }
@@ -8132,58 +8127,56 @@ fn door_reach(
     reach
 }
 
-/// The first-party type names a function's declaration writes — its parameters and its return:
-/// the values a request is carried in and answered with.
-fn declared_types(
-    world: &World,
-    at: usize,
-    record: &ItemRecord,
-    types: &BTreeSet<&'static str>,
-) -> BTreeSet<&'static str> {
-    let src = &world.srcs[at];
-    src.lex(record.declaration().start(), record.declaration().end())
-        .into_iter()
-        .map(|tok| src.text(tok))
-        .filter(|name| types.contains(name) && *name != "WorkerCtx")
+/// The doors that hand work to a thread started elsewhere, each with the function that starts it
+/// and why no call path joins them (`docs/plans/completions-door-starts.tsv`; shrink-only against
+/// the merge base, `scripts/ci/check-window-waits.ps1`).
+const DOOR_STARTS: &str = include_str!("../../../docs/plans/completions-door-starts.tsv");
+const DOOR_START_COLUMNS: [&str; 3] = ["door", "starter", "reason"];
+
+/// `(door, starter)` pairs of [`DOOR_STARTS`], each line checked for its columns.
+fn door_starts() -> BTreeSet<(&'static str, &'static str)> {
+    let mut lines = DOOR_STARTS
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'));
+    let header: Vec<&str> = lines
+        .next()
+        .expect("completions-door-starts.tsv has a header")
+        .split('\t')
+        .collect();
+    assert_eq!(
+        header, DOOR_START_COLUMNS,
+        "completions-door-starts.tsv's columns"
+    );
+    lines
+        .map(|line| {
+            let cells: Vec<&str> = line.split('\t').collect();
+            assert_eq!(cells.len(), 3, "completions-door-starts.tsv: {line}");
+            assert!(!cells[2].trim().is_empty(), "{line}: no reason");
+            (cells[0], cells[1])
+        })
         .collect()
 }
 
-/// **Whether a door's reach leads to a thread**: it calls the function that starts the thread;
-/// or it calls a method of the type whose method starts it (a lane is a type: `HandoffLane::submit`
-/// beside `HandoffLane::start`); or, for a free function that starts it outside the crate root,
-/// it calls into that module; or the request travels in a value of a first-party type that both
-/// a function the door reaches and a body the thread runs declare (`Sender<MathWorkerRequest>`
-/// beside `Receiver<MathWorkerRequest>`).
+/// The function that starts a thread, as `<crate> <item>` (`bt-app crate::handoff_lane::start`).
+fn starter_key(world: &World, root: &WorkerRoot) -> String {
+    let (at, spawner) = root.spawner;
+    format!("{} {}", world.srcs[at].package, item_and_arm(spawner).0)
+}
+
+/// **Whether a door leads to a thread: a call path.** The door's reach ([`door_reach`]) holds the
+/// function that starts the thread — the thread door's caller. A shared type or module is not a
+/// path. A lane started once elsewhere (with the application) is joined to its door only by a
+/// listed line of [`DOOR_STARTS`].
 fn leads_to(
     world: &World,
     reach: &BTreeMap<(usize, usize), &'static ItemRecord>,
     root: &WorkerRoot,
-    types: &BTreeSet<&'static str>,
+    door: &str,
+    starts: &BTreeSet<(&str, &str)>,
 ) -> bool {
     let (at, spawner) = root.spawner;
-    if reach.contains_key(&(at, spawner.whole().start())) {
-        return true;
-    }
-    let module = spawner.module_paths()[0];
-    let by_owner = reach.iter().any(|((src, _), record)| {
-        *src == at
-            && match spawner.type_owner() {
-                Some(owner) => record.type_owner() == Some(owner),
-                None => module != "crate" && record.module_paths()[0] == module,
-            }
-    });
-    if by_owner {
-        return true;
-    }
-    let carried: BTreeSet<&str> = root
-        .bodies
-        .iter()
-        .flat_map(|(at, body)| declared_types(world, *at, body, types))
-        .collect();
-    !carried.is_empty()
-        && reach.iter().any(|((src, _), record)| {
-            !declared_types(world, *src, record, types).is_disjoint(&carried)
-        })
+    reach.contains_key(&(at, spawner.whole().start()))
+        || starts.contains(&(door, starter_key(world, root).as_str()))
 }
 
 /// **The worker door bodies no product code asks for yet**, by `# effects` key, each with why: a
@@ -8203,30 +8196,24 @@ const UNASKED_WORKER_BODIES: [(&str, &str); 1] = [(
 /// names unambiguously ([`door_reach`]). A `worker-door-body` of `# effects` is reached from that
 /// row when a thread the row names runs the body ([`worker_roots`]: the thread door's closure and
 /// the `WorkerCtx` it lends, followed to every function that takes one) and the door's reach
-/// leads to that thread ([`leads_to`]). Every body must be reached from some row, or be one of
+/// holds the function that starts that thread — a call path, never a shared type or module
+/// ([`leads_to`]); a lane started once elsewhere is joined to its door only by a line of
+/// `docs/plans/completions-door-starts.tsv`, which is refused when stale or unused. Every body must be reached from some row, or be one of
 /// [`UNASKED_WORKER_BODIES`]; a door process's body (`enter_standalone_main`) needs its row like
 /// any other. A row's thread that the product starts under no such name is refused too. This is
 /// the interim reachability `bt-source`'s items allow: a call through a trait object, a stored
 /// closure or an untyped receiver whose name is shared is not followed (S-2a's call graph is).
 ///
-/// MUTATION: give the hand-off row the door `Runtime::flush_title` (its thread still
-/// `bt-os-handoff`) and it goes red: `run_handoff_lane` is reached from no row's door.
+/// MUTATION: give the hand-off row the door `HandoffLane::answers` (it drains the lane's answers
+/// and starts nothing; its thread still `bt-os-handoff`) and it goes red: `run_handoff_lane` is
+/// reached from no row's door.
 #[test]
 fn every_worker_door_body_is_reached_from_a_completions_door() {
     let world = World::new();
     let roots = worker_roots(&world);
     let rows = completions();
-    let types: BTreeSet<&'static str> = world
-        .srcs
-        .iter()
-        .flat_map(|src| {
-            src.index
-                .items()
-                .iter()
-                .filter(|record| record.kind().is_type() && src.product_item(record))
-                .map(ItemRecord::name)
-        })
-        .collect();
+    let starts = door_starts();
+    let mut used_starts: BTreeSet<(&str, &str)> = BTreeSet::new();
     let named: BTreeSet<&str> = rows
         .iter()
         .flat_map(|row| row.threads.iter().copied())
@@ -8252,9 +8239,35 @@ fn every_worker_door_body_is_reached_from_a_completions_door() {
         };
         let reach = door_reach(&world, &records, at, &mut callees);
         for (index, root) in roots.iter().enumerate() {
-            if row.threads.contains(&root.name.as_str()) && leads_to(&world, &reach, root, &types) {
+            if !row.threads.contains(&root.name.as_str()) {
+                continue;
+            }
+            let starter = starter_key(&world, root);
+            let by_call = reach.contains_key(&(root.spawner.0, root.spawner.1.whole().start()));
+            if let Some(start) = starts
+                .iter()
+                .find(|(door, listed)| *door == row.door && *listed == starter)
+            {
+                if by_call {
+                    failures.push(format!(
+                        "completions-door-starts.tsv: `{}` reaches `{starter}` by a call path; \
+                         its line is stale",
+                        row.door
+                    ));
+                }
+                used_starts.insert(*start);
+            }
+            if leads_to(&world, &reach, root, row.door, &starts) {
                 served.insert(index);
             }
+        }
+    }
+    for (door, starter) in &starts {
+        if !used_starts.contains(&(*door, *starter)) {
+            failures.push(format!(
+                "completions-door-starts.tsv: `{door}` → `{starter}` joins no row's door to a \
+                 thread it names that this starter starts"
+            ));
         }
     }
     let mut listed = BTreeSet::new();
@@ -8297,7 +8310,12 @@ fn every_worker_door_body_is_reached_from_a_completions_door() {
                 } else {
                     "a thread"
                 };
-                format!("{kind} `{}` ({})", root.name, root.at)
+                format!(
+                    "{kind} `{}` started in `{}` ({})",
+                    root.name,
+                    starter_key(&world, root),
+                    root.at
+                )
             })
             .collect();
         failures.push(if threads.is_empty() {

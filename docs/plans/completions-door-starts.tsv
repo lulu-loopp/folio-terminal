@@ -1,0 +1,14 @@
+# The completions ledger's doors that hand work to a thread started elsewhere — a lane started once
+# with the application, which the door's requests then reach by a channel and not by a call.
+# `hang_watch::window_waits_tests::every_worker_door_body_is_reached_from_a_completions_door`
+# accepts a door as reaching a thread by a call path from the door to the function that starts
+# it; a line here is the one other way, naming that function and why no call path joins them. A
+# line the test finds stale (the door now reaches the starter by a call) or unused is refused, and
+# `scripts/ci/check-window-waits.ps1` refuses a line added against the merge base: this list only
+# shrinks (side-effects contract 2026-10-11, S-1 round 3).
+door	starter	reason
+Runtime::hand_off	bt-app crate::handoff_lane::HandoffLane::start	the hand-off lane is started once, with the application (`HandoffLane::spawn` in `Runtime::create`); the door submits to its channel
+foreground_program::request	bt-app crate::foreground_program::Worker::spawn	the foreground-program worker is started once, with the application; the door sends to its channel
+GitWorker::request	bt-app crate::git::GitWorker::spawn	the git worker is started once, with the application; the door sends to its channel
+LayoutTables::shifted_character	bt-app crate::layout_tables::LayoutTables::spawn	the layout-table worker is started once, with the application; the door sends to its bounded queue
+dispatch_decoration_task	bt-app crate::MathWorker::spawn	the computation lane's three threads are started once, with the application; the door sends on their channels
