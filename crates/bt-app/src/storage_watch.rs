@@ -40,12 +40,16 @@
 //!
 //! # Arming, failure and silence
 //!
-//! A first [`MemberReport::Armed`] stamps all four: the documents were read
-//! when their stores opened, before the steward was listening, and a write in
-//! between reached nobody. A `Failed` member is tried again once at the next
-//! reader-triggered event — a store accepting a write of one of the four
-//! ([`StorageWatch::reader_writes`]) — and never because time passed. Silence
-//! starts no clock and schedules no wake. Where `DirWatch` refuses (the portable
+//! A first [`MemberReport::Armed`] owes a pass over all four: the documents
+//! were read when their stores opened, before the steward was listening, and a
+//! write in between reached nobody. That debt is the window thread's — it goes
+//! straight into the pass's pending set and the clock — so the mailbox keeps
+//! one writer, the listener. A `Failed` member is tried again once at the next
+//! reader-triggered event — a store accepting a write of one of the four — and
+//! never because time passed. [`StorageWatch::advance`] hears the steward first
+//! and only then compares the stores' write generations, so a `Failed`
+//! published in the same turn as the first accepted write is retried by that
+//! write. Silence starts no clock and schedules no wake. Where `DirWatch` refuses (the portable
 //! arm), the member stays `Failed` and the documents are the ones read at
 //! start.
 
@@ -186,9 +190,11 @@ impl Mailbox {
 /// clock.
 #[derive(Default)]
 pub struct StorageWatch {
-    /// One writer, the listener on the watcher thread; drained by [`Self::due`].
+    /// One writer, the listener on the watcher thread; drained by
+    /// [`Self::advance`] on the window thread, which never writes it.
     news: Arc<Mutex<Mailbox>>,
-    /// The documents stamped since the last pass, waiting for the clock.
+    /// The documents owed by the next pass, waiting for the clock: the drained
+    /// mailbox stamps, and all four after a first `Armed`. Window thread only.
     pending: DocumentSet,
     clock: WatchClock,
     /// The folder's ear on the watch steward, opened by [`Self::arm`].
@@ -234,11 +240,10 @@ impl StorageWatch {
         ear.want(&BTreeSet::from([directory.to_path_buf()]), BTreeSet::new());
     }
 
-    /// **The four stores' write generations, read once per turn.** A store's
-    /// generation moves when it accepts a write the reader asked for; a moved
-    /// generation while the folder is unheard is the reader-triggered event the
-    /// steward's `Failed` rule waits for, and the member is tried again once.
-    pub fn reader_writes(&mut self, write_generations: [u64; 4]) {
+    /// A moved write generation while the folder is unheard is the
+    /// reader-triggered event the steward's `Failed` rule waits for: the member
+    /// is tried again once.
+    fn reader_writes(&mut self, write_generations: [u64; 4]) {
         if !self.retry_owed(write_generations) {
             return;
         }
@@ -257,10 +262,19 @@ impl StorageWatch {
         moved && self.heard == Some(false)
     }
 
-    /// **Fold in the steward's reports and the mailbox, and answer the documents
-    /// one due pass is owed** — empty while no pass is due.
-    pub fn due(&mut self, now: Instant) -> DocumentSet {
+    /// **One turn of the storage watch, and the documents one due pass is
+    /// owed** — empty while no pass is due.
+    ///
+    /// In this order: the steward's reports first (a first `Armed` owes all
+    /// four; a `Failed` makes the folder unheard), then the stores' write
+    /// generations (`write_generations`, in [`Document`] order — a store's
+    /// moves when it accepts a write the reader asked for, and a moved one
+    /// while the folder is unheard retries it), then the mailbox, then the
+    /// clock. Hearing first is what lets the write that arrives in the same
+    /// turn as a just-published `Failed` retry it.
+    pub fn advance(&mut self, now: Instant, write_generations: [u64; 4]) -> DocumentSet {
         self.hear_the_steward(now);
+        self.reader_writes(write_generations);
         let news = std::mem::take(&mut *lock(&self.news));
         for document in Document::ALL {
             if let Some(at) = news.0[document.index()] {
@@ -282,7 +296,8 @@ impl StorageWatch {
     }
 
     /// Fold in what the steward said about the folder: a first `Armed` (or one
-    /// after `Failed`) stamps all four; a transition to `Failed` is said once.
+    /// after `Failed`) owes a pass over all four, noted in the window thread's
+    /// own pending set and clock; a transition to `Failed` is said once.
     fn hear_the_steward(&mut self, now: Instant) {
         let Some(ear) = self.ear.as_ref() else {
             return;
@@ -294,7 +309,8 @@ impl StorageWatch {
             match numbered.report {
                 MemberReport::Armed => {
                     if self.heard != Some(true) {
-                        lock(&self.news).stamp(DocumentSet::ALL, now);
+                        self.pending = DocumentSet::ALL;
+                        self.clock.note_event(now);
                     }
                     self.heard = Some(true);
                 }
@@ -383,6 +399,8 @@ mod tests {
         listener_now: Arc<Mutex<Instant>>,
         /// How many times the listener woke the loop.
         loop_wakes: Arc<AtomicUsize>,
+        /// The four stores' write generations a turn hands over.
+        generations: [u64; 4],
     }
 
     impl Rig {
@@ -404,6 +422,7 @@ mod tests {
                     .join("folio 笔记"),
                 listener_now: Arc::new(Mutex::new(start)),
                 loop_wakes: Arc::new(AtomicUsize::new(0)),
+                generations: [0; 4],
             }
         }
 
@@ -432,9 +451,14 @@ mod tests {
             let mut rig = Self::new(start);
             rig.arm([0; 4]);
             wait_for_a_wake(&rig.wakes, "the storage ear arming");
-            assert_eq!(rig.watch.due(start), DocumentSet::default());
-            assert_eq!(rig.watch.due(start + WATCH_QUIET), DocumentSet::ALL);
+            assert_eq!(rig.due(start), DocumentSet::default());
+            assert_eq!(rig.due(start + WATCH_QUIET), DocumentSet::ALL);
             rig
+        }
+
+        /// One turn of the loop at `now`, with the stores' current generations.
+        fn due(&mut self, now: Instant) -> DocumentSet {
+            self.watch.advance(now, self.generations)
         }
 
         /// The kernel names `names` at `at`, on the watcher thread.
@@ -455,16 +479,13 @@ mod tests {
         let mut rig = Rig::armed_and_settled(start);
         let edit = start + WATCH_QUIET + WATCH_FLOOR;
         rig.kernel_names(edit, &["settings.json.tmp-更纱黑体", "settings.json"]);
-        assert_eq!(rig.watch.due(edit), DocumentSet::default());
+        assert_eq!(rig.due(edit), DocumentSet::default());
         assert_eq!(rig.watch.deadline(), Some(edit + WATCH_QUIET));
         assert_eq!(
-            rig.watch.due(edit + WATCH_QUIET - Duration::from_millis(1)),
+            rig.due(edit + WATCH_QUIET - Duration::from_millis(1)),
             DocumentSet::default()
         );
-        assert_eq!(
-            rig.watch.due(edit + WATCH_QUIET),
-            set(&[Document::Settings])
-        );
+        assert_eq!(rig.due(edit + WATCH_QUIET), set(&[Document::Settings]));
         assert_eq!(rig.watch.deadline(), None);
     }
 
@@ -495,7 +516,7 @@ mod tests {
             rig.kernel_names(at, names);
         }
         assert_eq!(rig.loop_wakes.load(Ordering::SeqCst), woken);
-        assert_eq!(rig.watch.due(at), DocumentSet::default());
+        assert_eq!(rig.due(at), DocumentSet::default());
         assert_eq!(rig.watch.deadline(), None);
     }
 
@@ -508,12 +529,47 @@ mod tests {
         let mut rig = Rig::new(start);
         rig.arm([0; 4]);
         wait_for_a_wake(&rig.wakes, "the storage ear arming");
-        assert_eq!(rig.watch.due(start), DocumentSet::default());
+        assert_eq!(rig.due(start), DocumentSet::default());
         assert!(rig.watch.is_armed());
         assert_eq!(rig.watch.deadline(), Some(start + WATCH_QUIET));
-        assert_eq!(rig.watch.due(start + WATCH_QUIET), DocumentSet::ALL);
-        assert_eq!(rig.watch.due(start + WATCH_QUIET), DocumentSet::default());
+        assert_eq!(rig.due(start + WATCH_QUIET), DocumentSet::ALL);
+        assert_eq!(rig.due(start + WATCH_QUIET), DocumentSet::default());
         assert_eq!(rig.watch.deadline(), None);
+    }
+
+    /// RED (T-STORAGE-EAR-NAMED round 2) — the window thread never writes the
+    /// mailbox: hearing a first `Armed` puts the pass over all four in the
+    /// window's own pending set and clock, and the mailbox stays the listener's.
+    /// MUTATION: stamp the `Armed` debt into the mailbox (two writers).
+    #[test]
+    fn hearing_armed_leaves_the_mailbox_to_the_listener() {
+        let start = Instant::now();
+        let mut rig = Rig::new(start);
+        rig.arm([0; 4]);
+        wait_for_a_wake(&rig.wakes, "the storage ear arming");
+        rig.watch.hear_the_steward(start);
+        assert!(lock(&rig.watch.news).0.iter().all(Option::is_none));
+        assert_eq!(rig.watch.pending, DocumentSet::ALL);
+        assert_eq!(rig.watch.deadline(), Some(start + WATCH_QUIET));
+    }
+
+    /// RED (T-STORAGE-EAR-NAMED round 2) — a `Failed` the steward published
+    /// but the window has not heard yet, met in the same turn by the first
+    /// accepted document write, is retried by that write.
+    /// MUTATION: compare the write generations before hearing the steward.
+    #[test]
+    fn a_failure_heard_in_the_same_turn_as_the_first_write_is_retried_by_it() {
+        let start = Instant::now();
+        let mut rig = Rig::armed_and_settled(start);
+        assert_eq!(rig.door.attempts(&rig.directory), 1);
+        rig.door.end(&rig.directory);
+        wait_for_a_wake(&rig.wakes, "the storage watch ending on its own");
+        rig.generations = [0, 0, 0, 1];
+        assert_eq!(rig.due(start + WATCH_QUIET), DocumentSet::default());
+        wait_for_a_wake(&rig.wakes, "the retry by the same turn's write");
+        let _ = rig.due(start + WATCH_QUIET);
+        assert_eq!(rig.door.attempts(&rig.directory), 2);
+        assert!(rig.watch.is_armed());
     }
 
     /// RED (T-STORAGE-EAR-NAMED; design note (b)14-14) — a long name in any
@@ -653,16 +709,16 @@ mod tests {
         }
         rig.kernel_names(at, &[".git"]);
         let last = at - Duration::from_micros(400);
-        assert_eq!(rig.watch.due(at), DocumentSet::default());
+        assert_eq!(rig.due(at), DocumentSet::default());
         assert_eq!(rig.watch.deadline(), Some(last + WATCH_QUIET));
         let first_document_quiet = checkout + Duration::from_micros(800);
         assert_eq!(
-            rig.watch.due(first_document_quiet + WATCH_QUIET),
+            rig.due(first_document_quiet + WATCH_QUIET),
             DocumentSet::default(),
             "the first document's quiet window is not the folder's"
         );
-        assert_eq!(rig.watch.due(last + WATCH_QUIET), DocumentSet::ALL);
-        assert_eq!(rig.watch.due(last + WATCH_QUIET), DocumentSet::default());
+        assert_eq!(rig.due(last + WATCH_QUIET), DocumentSet::ALL);
+        assert_eq!(rig.due(last + WATCH_QUIET), DocumentSet::default());
         assert_eq!(rig.watch.deadline(), None);
     }
 
@@ -678,19 +734,20 @@ mod tests {
         rig.door.refuse(&rig.directory);
         rig.arm([0; 4]);
         wait_for_a_wake(&rig.wakes, "the storage ear's refusal");
-        assert_eq!(rig.watch.due(start), DocumentSet::default());
+        assert_eq!(rig.due(start), DocumentSet::default());
         assert!(!rig.watch.is_armed());
         assert_eq!(rig.door.attempts(&rig.directory), 1);
 
         assert!(!rig.watch.retry_owed([0; 4]), "a turn is no retry");
         rig.door.admit(&rig.directory);
-        rig.watch.reader_writes([0, 0, 1, 0]);
+        rig.generations = [0, 0, 1, 0];
+        assert_eq!(rig.due(start), DocumentSet::default());
         wait_for_a_wake(&rig.wakes, "the reader-triggered retry");
-        assert_eq!(rig.watch.due(start), DocumentSet::default());
+        assert_eq!(rig.due(start), DocumentSet::default());
         assert_eq!(rig.door.attempts(&rig.directory), 2);
         assert!(rig.watch.is_armed());
         assert_eq!(
-            rig.watch.due(start + WATCH_QUIET),
+            rig.due(start + WATCH_QUIET),
             DocumentSet::ALL,
             "a member that has just armed is news"
         );
@@ -702,7 +759,10 @@ mod tests {
     fn an_unarmed_watch_is_inert_rather_than_absent() {
         let mut watch = StorageWatch::default();
         assert!(!watch.is_armed());
-        assert_eq!(watch.due(Instant::now()), DocumentSet::default());
+        assert_eq!(
+            watch.advance(Instant::now(), [0; 4]),
+            DocumentSet::default()
+        );
         assert_eq!(watch.deadline(), None);
     }
 }

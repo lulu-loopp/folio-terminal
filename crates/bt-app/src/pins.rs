@@ -198,7 +198,7 @@ impl PinsStore {
     }
 
     /// How many writes of this document the reader has asked for
-    /// (`storage_watch::StorageWatch::reader_writes`).
+    /// (`storage_watch::StorageWatch::advance`).
     pub(crate) fn write_generation(&self) -> u64 {
         self.writes.generation()
     }

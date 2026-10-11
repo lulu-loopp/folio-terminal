@@ -48498,12 +48498,12 @@ impl Runtime<'_> {
     /// absorbs this window's own writes. A stamp on `settings.json` or
     /// `keybindings.json` is drained without a read.
     ///
-    /// The stores' write generations are handed over first: a write accepted
-    /// while the folder is unheard is the event that retries its watch.
+    /// The stores' write generations go with it: the watch hears the steward
+    /// before it compares them, so a write accepted in the turn a failure is
+    /// heard retries the folder's watch (`StorageWatch::advance`).
     fn advance_storage_watch(&mut self, now: Instant) -> Result<()> {
         let write_generations = self.app.storage_write_generations();
-        self.app.storage_watch.reader_writes(write_generations);
-        let documents = self.app.storage_watch.due(now);
+        let documents = self.app.storage_watch.advance(now, write_generations);
         if documents.contains(storage_watch::Document::Profiles) {
             self.reread_profiles()?;
         }
