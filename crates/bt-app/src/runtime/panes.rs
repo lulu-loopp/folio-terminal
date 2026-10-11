@@ -13,9 +13,9 @@ use crate::{
     NewWindowPlan, NoticeHost, PaneDraw, PaneMenuState, PaneTransform, PopoverTrigger, Popup,
     PopupOwner, PresentIntent, PreviewSurface, RAIL_TEXT_FADE, RAIL_TEXT_FADE_OPEN_DELAY,
     RAIL_TRANSITION, RevealTween, RowHost, RowPayload, RowPayloadKind, RowVerb, Runtime, SplitSeed,
-    TabId, TabState, TabSurface, TearOut, animated_pane_viewports, attention, auto_split_axis,
-    card_trace, clamp_into_body, closing_this_pane_closes_the_tab, cmdrail, column_notch,
-    create_leaf_session, divider_drag_still_holds_its_pointer, expire_leaf_attention,
+    TabId, TabState, TabSurface, TearOut, animated_pane_viewports, attention, attention_trace,
+    auto_split_axis, card_trace, clamp_into_body, closing_this_pane_closes_the_tab, cmdrail,
+    column_notch, create_leaf_session, divider_drag_still_holds_its_pointer, expire_leaf_attention,
     file_menu_powers, files, float, float_dock_label, glyph_trace, hang_watch, host_screen_after,
     leaf_resize_plan, marks, mouse_trace, native_window, notice, notify,
     pages_that_move_with_their_panes, palette, pane_fade_veil_layers, panel_opacity,
@@ -1520,6 +1520,7 @@ impl Runtime<'_> {
                 &mut leaf,
                 &mut self.window.attention_next_place,
                 Instant::now(),
+                attention_trace::global(),
             );
             // **Taken, and taken apart somewhere else** (T-PANE-CLOSE-OFF-THREAD).
             // The leaf is already out of `sessions`; the session comes out of the

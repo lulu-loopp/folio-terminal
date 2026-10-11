@@ -6,17 +6,18 @@ use crate::{
     App, AppEvent, BrokerRelease, Drag, DragHandover, FormulaSwitches, HandoverInto,
     INITIAL_HEIGHT, INITIAL_WIDTH, LaunchPlan, LeafSeed, NewWindowParts, NewWindowPlan,
     PreviewRestore, PtyWakeSignal, RAIL_TRANSITION, RenameExit, RevealTween, Runtime, TabSeed,
-    TabState, WindowPosture, WindowRuntime, broker_verdict, create_tab_state, dpi_snapshot,
-    dwm_dark_mode_owed, ensure_metrics_match_authoritative_scale, ensure_swapchain_matches_inner,
-    first_term_leaf, float, focus_leaf_index, git, hang_watch, i18n, ime_outbound, ime_report,
-    install_page_ground_color, install_theme_class_background, marks, mouse_trace, native_window,
-    new_window_runtime, opening_window_attributes, persisted_preview_pages,
-    persisted_window_bounds, plan_launch, presentation_physical_size, preview,
-    preview_source_of_recent, profiles, quit, rail_state_for, recorded_window_placement,
-    render_sidebar_mode, render_tab_layout, restore, restore_row_seed, restore_window_placement,
-    revive_plan, scrollback_quota, seats, seed, seeded_tab, session_sidebar_mode,
-    session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at, startup_window_rect,
-    tear_out_rect, toast, unsaved_line, window_minimum_changed, window_surface_target,
+    TabState, WindowPosture, WindowRuntime, attention_trace, broker_verdict, create_tab_state,
+    dpi_snapshot, dwm_dark_mode_owed, ensure_metrics_match_authoritative_scale,
+    ensure_swapchain_matches_inner, expire_every_leaf_of_a_window, first_term_leaf, float,
+    focus_leaf_index, git, hang_watch, i18n, ime_outbound, ime_report, install_page_ground_color,
+    install_theme_class_background, marks, mouse_trace, native_window, new_window_runtime,
+    opening_window_attributes, persisted_preview_pages, persisted_window_bounds, plan_launch,
+    presentation_physical_size, preview, preview_source_of_recent, profiles, quit, rail_state_for,
+    recorded_window_placement, render_sidebar_mode, render_tab_layout, restore, restore_row_seed,
+    restore_window_placement, revive_plan, scrollback_quota, seats, seed, seeded_tab,
+    session_sidebar_mode, session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at,
+    startup_window_rect, tear_out_rect, toast, unsaved_line, window_minimum_changed,
+    window_surface_target,
 };
 use crate::{LeafView, TextScale, owner_door, revived_profile};
 use anyhow::Context;
@@ -2030,8 +2031,22 @@ impl Runtime<'_> {
     /// where a child that will not die is now said out loud. The tabs are taken
     /// off the window first, as they always were, so nothing here is reaching
     /// into a window that is still holding them.
+    ///
+    /// **And every pane's place is given up before its shell is**, here and not
+    /// in the [`Self::close_window`] that follows: the panes leave the window on
+    /// this road, so this road is the one that ends them, and the close after it
+    /// finds no tab left to end a second time.
     pub(crate) fn abandon_a_window_nothing_arrived_in(&mut self) -> Result<()> {
-        for mut tab in std::mem::take(&mut self.window.tabs) {
+        let mut tabs = std::mem::take(&mut self.window.tabs);
+        expire_every_leaf_of_a_window(
+            &mut tabs,
+            self.window.active_tab,
+            self.window.place(),
+            &mut self.window.attention_next_place,
+            Instant::now(),
+            attention_trace::global(),
+        );
+        for mut tab in tabs {
             tab.retire_all_shells();
         }
         self.window.active_tab = 0;
@@ -2103,6 +2118,20 @@ impl Runtime<'_> {
         // to a window that has already gone. The quit does not walk out in front
         // of them: its `Retire` step waits on
         // [`bt_pty::wait_for_retirements`] once every window has let go.
+        //
+        // **Every place first, then every shell** — the order `close_tab` and
+        // `close_pane` keep. The window's tabs are all still here: a tab closed
+        // as the last one left them here for this road to end, so each pane's
+        // place is given up once, on this walk.
+        let place = self.window.place();
+        expire_every_leaf_of_a_window(
+            &mut self.window.tabs,
+            self.window.active_tab,
+            place,
+            &mut self.window.attention_next_place,
+            Instant::now(),
+            attention_trace::global(),
+        );
         for tab in &mut self.window.tabs {
             tab.retire_all_shells();
         }

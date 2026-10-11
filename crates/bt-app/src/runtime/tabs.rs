@@ -7,8 +7,8 @@ use crate::{
     PaneArrival, PaneMotion, Popup, PreviewRestore, PreviewSurface, RenameExit, RenameSubject,
     RowPayload, RowPayloadKind, Runtime, TabCarry, TabClick, TabCloseAction, TabId, TabMenuState,
     TabPress, TabRename, TabSeed, TabState, TabSurface, TablePaint, TearOut,
-    absorb_tab_into_layout, absorb_tab_into_strip, attention, banner_line, blank_page_return,
-    create_tab_state, diagnostics, exit_diagnostics, expire_leaf_attention, float,
+    absorb_tab_into_layout, absorb_tab_into_strip, attention_trace, banner_line, blank_page_return,
+    create_tab_state, diagnostics, exit_diagnostics, expire_every_leaf_of, float,
     new_tab_leaf_seed, notify, pane_can_become_a_tab, pane_into_tab, pane_strip_landing,
     presentation_physical_size, profiles, pty_door, recoverable_wheel_scroll_amount, restore,
     row_strip_landing, scrollback_quota, seats, seed, settling, solve_seats, stepped_tab,
@@ -472,19 +472,14 @@ impl Runtime<'_> {
                 // Every place this tab's panes held, given up before its shells are — the same
                 // door `close_pane` uses, asked of every leaf because a tab closes all of them.
                 let reach = notify::desktop_reach(was_active, self.window.place());
-                let now = Instant::now();
-                for (seat, leaf) in removed.leaves_mut() {
-                    expire_leaf_attention(
-                        attention::Site {
-                            tab: index,
-                            seat: *seat,
-                        },
-                        reach,
-                        leaf,
-                        &mut self.window.attention_next_place,
-                        now,
-                    );
-                }
+                expire_every_leaf_of(
+                    &mut removed,
+                    index,
+                    reach,
+                    &mut self.window.attention_next_place,
+                    Instant::now(),
+                    attention_trace::global(),
+                );
                 // Every leaf's shell, not the focused one's. Reaching for
                 // `removed.pty` went through the deref and closed exactly one of
                 // them — see [`TabState::retire_all_shells`] for the ConPTY a
