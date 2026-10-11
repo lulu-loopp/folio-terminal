@@ -2246,3 +2246,5 @@ is, because macOS now has its PATH ear.
 (g)2's answer type departs from (c)4's signature, for the reason given. (g)3 reads (b)11's
 "failure gives no declaration" as today's failure outcome, which is what Q5 keeps. (g)7 keeps one
 stream per `PATH` directory instead of (a)'s `DirWatchSet`. Nothing else departs.
+
+4. **Process, not design:** the six commits of ticket 3 were cut by hunk from one finished tree and only the final head was built and tested; two intermediate commits do not compile on their own (a `use` placed inside a struct body in 41887c1e; `Locale` listed in a re-export instead of the enum in 8853bd33). The branch lands by fast-forward as a whole, so this is cosmetic for the history and said here so nobody bisects into them.

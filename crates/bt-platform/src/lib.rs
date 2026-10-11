@@ -5404,6 +5404,10 @@ mod probe_run_tests {
     /// MUTATION: give each child the whole `total` (`ProbePatience::fixed(total)` in
     /// `probe_outputs_within`) — the second child ends by itself at about 140 % of the budget and
     /// the run answers `Finished` with two answers.
+    ///
+    /// Real clock: two 2 s children against a 3 s budget leave about 1 s of margin, so a
+    /// severely stalled runner can fail this test falsely; the body itself neither sleeps nor
+    /// measures.
     #[test]
     fn two_children_share_one_budget() {
         let hygiene = Hygiene::new();

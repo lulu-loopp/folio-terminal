@@ -274,8 +274,9 @@ profile. Do not put a secret in one.
   contact remote `PATH` entries, or watch removable-volume entries.
 - **Your region, on macOS.** Folio asks the system for your region setting
   (`defaults read -g AppleLocale`) and the list of installed locales
-  (`locale -a`) when it starts and again when the system says your region
-  changed, to tell each new pane its `LANG`. Nothing is written, and the
+  (`locale -a`) when it starts, again when the system says your region
+  changed, and again when a pane is born after the last reading failed, to
+  tell each new pane its `LANG`. Nothing is written, and the
   answer stays in memory.
 - Several `BT_*` environment variables make Folio write terminal content to a
   file you name — `BT_PTY_DUMP` writes every byte of every pane. None is set
