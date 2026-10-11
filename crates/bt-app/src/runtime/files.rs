@@ -10,7 +10,7 @@ use crate::{
     files_row_activation, files_row_counts_clicks, files_row_entry, files_row_menu_subject, float,
     float_dock_label, folder_pick_outcome, foot_revealed_label, git_panel, hang_watch,
     home_shortened_path, i18n, marks, palette_index, press_files_node, preview, profiles,
-    rename_would_replace_another_entry, reroot_files_state, seats, settings, toast,
+    reroot_files_state, seats, settings, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -90,12 +90,12 @@ impl Runtime<'_> {
     /// see whether it worked; a handle another program is holding is a fact
     /// about the machine that no box can show, so it raises a card.
     ///
-    /// **The collision check is this window's and not `MoveFileExW`'s**, again
-    /// for that function's reason: `std::fs::rename` carries
-    /// `MOVEFILE_REPLACE_EXISTING` on this platform, and a rename that eats
-    /// somebody's file is not a rename. Case is ignored against the old path so
-    /// that `notes.md` → `Notes.md` is the legitimate rename of one entry into
-    /// its own name rather than a collision with itself.
+    /// **The move itself refuses a collision**, for that function's reason: a
+    /// rename that eats somebody's file is not a rename, so the move is
+    /// [`bt_platform::rename_without_replacing`] — never `std::fs::rename`,
+    /// which replaces — and `notes.md` → `Notes.md` is still the legitimate
+    /// rename of one entry into its own name rather than a collision with
+    /// itself.
     ///
     /// What follows the row is the *folder*, not a buffer: the tree re-reads the
     /// directory the entry lives in, which is the same call a rename made in the
@@ -129,21 +129,23 @@ impl Runtime<'_> {
             return Ok(());
         }
         let new = directory.join(name);
-        // A name another entry already holds is refused in silence, the road
-        // every collision takes; the question is the file's identity, not its
-        // spelling (B-AUDIT-046 RT-3).
-        if rename_would_replace_another_entry(&old, &new) {
-            return Ok(());
-        }
-        if let Err(error) = hang_watch::during(hang_watch::Station::RenameDisk, || {
-            std::fs::rename(&old, &new)
+        // The move refuses rather than replaces (`bt_platform::rename_without_replacing`),
+        // so a name another entry holds — already, or by the time the move runs — is
+        // refused in silence, the road every collision takes; a case-only rename of
+        // the entry itself is a rename (B-AUDIT-046 RT-3; T-HARDCODE-047 slice 2).
+        match hang_watch::during(hang_watch::Station::RenameDisk, || {
+            bt_platform::rename_without_replacing(&old, &new)
         }) {
-            return self.toast(
-                toast::ToastKind::Error,
-                toast::ToastAnchor::FilesColumn(leaf.seat),
-                Some(was),
-                i18n::not_renamed(&error.to_string()),
-            );
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(error) => {
+                return self.toast(
+                    toast::ToastKind::Error,
+                    toast::ToastAnchor::FilesColumn(leaf.seat),
+                    Some(was),
+                    i18n::not_renamed(&error.to_string()),
+                );
+            }
         }
         // A file that is also open in a preview keeps one identity across the
         // window, which is the one-buffer-per-file law read from the other end:

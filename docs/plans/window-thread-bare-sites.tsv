@@ -64,9 +64,7 @@ bt-app	-	crate::raster_peek_page	std::fs::metadata	1
 bt-app	-	crate::revived_page_of	std::fs::canonicalize	1
 bt-app	-	crate::run_path_verify_worker	std::sync::mpsc::Receiver::recv	1
 bt-app	-	crate::run_scale_worker	std::sync::mpsc::Receiver::recv	1
-bt-app	-	crate::runtime::files::Runtime::rename_files_row	std::fs::rename	1
 bt-app	-	crate::runtime::preview::Runtime::open_preview_web_file_on	std::fs::canonicalize	1
-bt-app	-	crate::runtime::preview::Runtime::rename_preview_file	std::fs::rename	1
 bt-app	-	crate::runtime::profiles::Runtime::toggle_root_menu	std::fs::metadata	1
 bt-app	-	crate::schemes::read_scheme_file	std::fs::metadata	1
 bt-app	-	crate::schemes::user_dir	std::fs::create_dir_all	1

@@ -2157,6 +2157,83 @@ pub fn same_file(one: &std::path::Path, other: &std::path::Path) -> bool {
     }
 }
 
+/// **Rename `from` to `to`, and never over another entry** — the move both
+/// rename doors make (the Files column's and the preview head's), as one call
+/// that refuses rather than replaces (T-HARDCODE-047 slice 2, RT-3's remainder).
+///
+/// `std::fs::rename` replaces whatever `to` names on every platform, so a
+/// check that asks first and then moves leaves a window in which a file that
+/// appears under the new name is destroyed. The refusal belongs inside the
+/// move itself:
+///
+/// * **Windows**: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`.
+/// * **macOS**: `renamex_np(…, RENAME_EXCL)`.
+/// * **Linux**: `renameat2(…, RENAME_NOREPLACE)`.
+///
+/// A destination that names another entry — a file, a folder, a dangling
+/// link — is refused with the operating system's "already exists" error
+/// (`io::ErrorKind::AlreadyExists`) and neither entry changes. **A case-only
+/// rename of the entry itself is a rename**: measured on case-insensitive
+/// APFS and on NTFS, both calls respell `notes.md` as `Notes.md` in place,
+/// because the destination the volume finds is the source.
+///
+/// # Errors
+/// The operating system's error for the move; `Unsupported`, naming this door,
+/// on a platform with none of the three calls.
+pub fn rename_without_replacing(
+    from: &std::path::Path,
+    to: &std::path::Path,
+) -> std::io::Result<()> {
+    rename_without_replacing_on(from, to)
+}
+
+#[cfg(windows)]
+use windows_impl::rename_without_replacing as rename_without_replacing_on;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn rename_without_replacing_on(
+    from: &std::path::Path,
+    to: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = |path: &std::path::Path| {
+        std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in a path"))
+    };
+    let (from, to) = (c_path(from)?, c_path(to)?);
+    // SAFETY: both strings are NUL-terminated and live across the call.
+    #[cfg(target_os = "macos")]
+    let moved = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+    // SAFETY: as above; `AT_FDCWD` resolves both relative paths the way `rename` does.
+    #[cfg(target_os = "linux")]
+    let moved = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if moved == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+fn rename_without_replacing_on(
+    from: &std::path::Path,
+    to: &std::path::Path,
+) -> std::io::Result<()> {
+    let _ = (from, to);
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "rename_without_replacing has no call on this platform",
+    ))
+}
+
 /// The identity [`same_file`] compares, or `None` when the path cannot be asked.
 #[cfg(unix)]
 fn file_identity(path: &std::path::Path) -> Option<(u64, u64)> {
@@ -14025,6 +14102,44 @@ mod windows_impl {
             Ok(()) => info.Flags & FILE_CS_FLAG_CASE_SENSITIVE_DIR == 0,
             Err(_) => true,
         }
+    }
+
+    /// See [`crate::rename_without_replacing`]: `MoveFileExW` with no flag, so an
+    /// existing destination that is another entry is `ERROR_ALREADY_EXISTS`.
+    pub(crate) fn rename_without_replacing(
+        from: &std::path::Path,
+        to: &std::path::Path,
+    ) -> std::io::Result<()> {
+        use windows::Win32::Storage::FileSystem::{MOVE_FILE_FLAGS, MoveFileExW};
+
+        let wide = |path: &std::path::Path| {
+            let mut value: Vec<u16> = path.as_os_str().encode_wide().collect();
+            if value.contains(&0) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "NUL in a path",
+                ));
+            }
+            value.push(0);
+            Ok(value)
+        };
+        let (from, to) = (wide(from)?, wide(to)?);
+        // SAFETY: both strings are NUL-terminated UTF-16 and live across the call.
+        unsafe {
+            MoveFileExW(
+                PCWSTR(from.as_ptr()),
+                PCWSTR(to.as_ptr()),
+                MOVE_FILE_FLAGS(0),
+            )
+        }
+        .map_err(|error| {
+            let code = error.code().0.cast_unsigned();
+            if code & 0xFFFF_0000 == 0x8007_0000 {
+                std::io::Error::from_raw_os_error((code & 0xFFFF).cast_signed())
+            } else {
+                std::io::Error::from_raw_os_error(code.cast_signed())
+            }
+        })
     }
 
     /// The identity [`crate::same_file`] compares, or `None` when the path cannot be asked.

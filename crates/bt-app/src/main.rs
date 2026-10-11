@@ -21994,42 +21994,6 @@ enum TabClick {
     Double,
 }
 
-/// The strip's own click counter — [`ClickTracker`] for tabs.
-///
-/// It counts to two and no further: the tab strip has one multi-click verb and
-/// the terminal's word/line/paragraph ladder has no counterpart here.
-///
-/// Identity is the tab, not a pixel neighbourhood, and that is the faithful
-/// reading rather than a shortcut: `dblclick` fires on the element both clicks
-/// share, so "the same tab" *is* the browser's own slop test. It also survives
-/// the one thing a pixel test would get wrong — a strip that scrolled between
-/// the two clicks, where the same tab is at a different address.
-/// **Whether renaming `old` to `new` would replace a different entry** — the
-/// question both rename doors ask before `std::fs::rename`, which replaces
-/// whatever `new` names on every platform (B-AUDIT-046 RT-3).
-///
-/// Asked of the **file's identity**, [`bt_platform::same_file`], never of the
-/// two strings. The string rule this replaces lower-cased both paths, which
-/// was right on a volume that folds case and wrong on one that does not: on
-/// case-sensitive APFS, Linux, a Windows directory with the case-sensitivity
-/// flag or a WSL tree, `readme.md` → `README.md` with a separate `README.md`
-/// present passed the check and replaced that file with no prompt and no undo.
-///
-/// Two cases, one question:
-///
-/// * `notes.md` → `Notes.md` on a volume that folds case: the destination
-///   "exists" because it **is** the source, `same_file` says so, and the OS
-///   renames in place — a rename somebody means;
-/// * the same press where `Notes.md` is a second file: `same_file` says it is
-///   not the source, and the rename is refused on the road every collision
-///   takes.
-///
-/// `symlink_metadata` rather than `exists`, so a dangling link at `new` is an
-/// entry in the way too, not an empty name.
-fn rename_would_replace_another_entry(old: &std::path::Path, new: &std::path::Path) -> bool {
-    new.symlink_metadata().is_ok() && !bt_platform::same_file(old, new)
-}
-
 /// The files tree's stable id for `directory`, under a column rooted at `root` —
 /// or `None` when that column is not looking at it.
 ///

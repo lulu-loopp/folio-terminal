@@ -45,13 +45,13 @@ use crate::{
     preview_rail_tip_text, preview_select, preview_selection_bands, preview_tab_index_among,
     preview_text, preview_text_box_at, preview_text_boxes, preview_text_grain, preview_trace,
     preview_viewport, preview_watch, preview_wide_blocks, preview_wrap, preview_wrap_columns,
-    profiles, rename_would_replace_another_entry, resolve_document_pictures,
-    revealable_preview_file, scroll_bar_layer, scrollback_quota, seats, settings, settle_attention,
-    shown_address, source_opens_as_a_page, step_preview_caret_by_row, strip_animation_tick_is_due,
-    surface_pixels, surface_subject_of, surface_takes_image_zoom, switcher_rows, tab_owes_frame,
-    tab_trailing_targets, table_block, text_field, tick_owes_a_present, toast, tooltip, trace_sink,
-    video_frame_texture_key, video_seat, video_still_destination, viewport_of_rect, visible_range,
-    webhost, webnav, wheel_points_sideways, window_taskbar_progress, write_terminal_clipboard_text,
+    profiles, resolve_document_pictures, revealable_preview_file, scroll_bar_layer,
+    scrollback_quota, seats, settings, settle_attention, shown_address, source_opens_as_a_page,
+    step_preview_caret_by_row, strip_animation_tick_is_due, surface_pixels, surface_subject_of,
+    surface_takes_image_zoom, switcher_rows, tab_owes_frame, tab_trailing_targets, table_block,
+    text_field, tick_owes_a_present, toast, tooltip, trace_sink, video_frame_texture_key,
+    video_seat, video_still_destination, viewport_of_rect, visible_range, webhost, webnav,
+    wheel_points_sideways, window_taskbar_progress, write_terminal_clipboard_text,
 };
 use crate::{LeafView, TextScale};
 use anyhow::Context;
@@ -1256,18 +1256,20 @@ impl Runtime<'_> {
     /// the press came from — which is `save_preview_on`'s own answer to the same
     /// question one function along.
     ///
-    /// # Why the collision is checked and not left to Windows
+    /// # Why the move is one that refuses
     ///
-    /// `std::fs::rename` is `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, so
-    /// on this platform it would **silently overwrite** a file that already had
-    /// the new name. A rename that eats somebody's file is not a rename, so the
-    /// collision is decided here.
+    /// `std::fs::rename` replaces whatever the new name holds on every platform
+    /// (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, POSIX `rename`), so it
+    /// would **silently overwrite** a file that already had the new name — or
+    /// one that appeared under it between a check and the move. A rename that
+    /// eats somebody's file is not a rename, so the move is
+    /// [`bt_platform::rename_without_replacing`], which refuses in the same call
+    /// that moves.
     ///
-    /// It is decided *case-insensitively against the old path*, which is the
-    /// other half: `notes.md` → `Notes.md` is a legitimate rename of one file
-    /// into its own name, and on a case-insensitive filesystem the destination
-    /// "already exists" because it IS the source. So a destination that exists
-    /// refuses only when it is a different entry.
+    /// The other half: `notes.md` → `Notes.md` is a legitimate rename of one
+    /// file into its own name, and on a case-insensitive filesystem the
+    /// destination "already exists" because it IS the source. That call
+    /// respells it in place; it refuses only a different entry.
     ///
     /// # What follows the file
     ///
@@ -1303,22 +1305,24 @@ impl Runtime<'_> {
             return Ok(());
         }
         let new = directory.join(name);
-        // A name another entry already holds is refused in silence, the road
-        // every collision takes; the question is the file's identity, not its
-        // spelling (B-AUDIT-046 RT-3).
-        if rename_would_replace_another_entry(&old, &new) {
-            return Ok(());
-        }
-        if let Err(error) = hang_watch::during(hang_watch::Station::RenameDisk, || {
-            std::fs::rename(&old, &new)
+        // The move refuses rather than replaces (`bt_platform::rename_without_replacing`),
+        // so a name another entry holds — already, or by the time the move runs — is
+        // refused in silence, the road every collision takes; a case-only rename of
+        // the entry itself is a rename (B-AUDIT-046 RT-3; T-HARDCODE-047 slice 2).
+        match hang_watch::during(hang_watch::Station::RenameDisk, || {
+            bt_platform::rename_without_replacing(&old, &new)
         }) {
-            let anchor = surface.toast_anchor();
-            return self.toast(
-                toast::ToastKind::Error,
-                anchor,
-                Some(was),
-                i18n::not_renamed(&error.to_string()),
-            );
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(error) => {
+                let anchor = surface.toast_anchor();
+                return self.toast(
+                    toast::ToastKind::Error,
+                    anchor,
+                    Some(was),
+                    i18n::not_renamed(&error.to_string()),
+                );
+            }
         }
         self.follow_renamed_preview(source, &new, name);
         self.refresh_files_dirs_at(&directory);

@@ -305,13 +305,15 @@ fn press_with_clipboard(
 /// PIN (user ruling 2026-08-19) — **a rename moves the file, refuses a
 /// collision, and never overwrites.**
 ///
-/// `std::fs::rename` is `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` on
-/// this platform, so a rename onto an existing name would eat it silently.
-/// This walks the real filesystem because that is the only place that claim
-/// is true or false.
+/// `std::fs::rename` replaces whatever the new name holds, so both rename
+/// doors move through `bt_platform::rename_without_replacing`, which refuses in
+/// the same call that moves — so no name can be taken between a check and the
+/// move. This walks the real filesystem because that is the only place that
+/// claim is true or false.
 ///
-/// Red gate: drop the identity question in `rename_would_replace_another_entry`
-/// and the first half of this test finds one file where it left two.
+/// MUTATION (T-HARDCODE-047 slice 2): drop `RENAME_EXCL` (macOS) / give
+/// `MoveFileExW` `MOVEFILE_REPLACE_EXISTING` (Windows) in the door — the first
+/// half finds `taken.md` holding "one".
 #[test]
 fn a_rename_never_eats_the_file_that_already_has_the_name() {
     let directory = bt_testpath::temp_path("folio-rename-pin");
@@ -324,9 +326,12 @@ fn a_rename_never_eats_the_file_that_already_has_the_name() {
     // The door both rename surfaces go through, asked for real: a destination
     // that exists and is a different entry is refused and nothing moves.
     let onto_taken = directory.join("taken.md");
-    assert!(
-        rename_would_replace_another_entry(&from, &onto_taken),
-        "a name another file holds is refused"
+    let refused = bt_platform::rename_without_replacing(&from, &onto_taken)
+        .expect_err("a name another file holds is refused");
+    assert_eq!(refused.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(
+        std::fs::read_to_string(&from).expect("the renamed file stayed put"),
+        "one"
     );
     assert_eq!(
         std::fs::read_to_string(&taken).expect("the file in the way is still there"),
@@ -337,8 +342,7 @@ fn a_rename_never_eats_the_file_that_already_has_the_name() {
     // A name nothing else has moves the file and leaves no copy behind.
     let onto_free = directory.join("todo.md");
     assert!(!onto_free.exists());
-    assert!(!rename_would_replace_another_entry(&from, &onto_free));
-    std::fs::rename(&from, &onto_free).expect("the filesystem lets it go");
+    bt_platform::rename_without_replacing(&from, &onto_free).expect("the filesystem lets it go");
     assert!(!from.exists(), "the old name is gone");
     assert_eq!(
         std::fs::read_to_string(&onto_free).expect("the new name holds the bytes"),
@@ -368,13 +372,12 @@ fn a_rename_never_eats_the_file_that_already_has_the_name() {
 /// test then asserts the identity comparison directly on two distinct files.
 /// Either way the case-only rename of one file is walked for real.
 ///
-/// The rename doors' own sequence is walked for real: the identity question
-/// both doors ask, then `std::fs::rename` exactly when it says the name is
-/// free.
+/// The rename doors' own move is walked for real:
+/// `bt_platform::rename_without_replacing`, which refuses another entry in the
+/// same call that moves and respells the entry itself in place.
 ///
-/// MUTATION: in `rename_would_replace_another_entry`, replace
-/// `bt_platform::same_file(old, new)` with a comparison of the two paths
-/// lower-cased — the collision road finds `theirs` replaced by `mine`.
+/// MUTATION: make the door's move one that replaces (`std::fs::rename`) — the
+/// collision road finds `theirs` replaced by `mine`.
 #[test]
 fn a_case_only_rename_never_replaces_a_different_file() {
     let directory = bt_testpath::temp_path("bt-audit046-rename");
@@ -421,10 +424,10 @@ fn a_case_only_rename_never_replaces_a_different_file() {
                 !bt_platform::same_file(&from, &onto),
                 "the volume says these are two files"
             );
-            // The doors' own sequence: ask, and move only when the name is free.
-            if !rename_would_replace_another_entry(&from, &onto) {
-                std::fs::rename(&from, &onto).expect("the filesystem lets it go");
-            }
+            // The doors' own move: it refuses the other entry.
+            let refused = bt_platform::rename_without_replacing(&from, &onto)
+                .expect_err("the other file's name is refused");
+            assert_eq!(refused.kind(), std::io::ErrorKind::AlreadyExists);
             assert_eq!(
                 std::fs::read_to_string(&onto).expect("the other file is still there"),
                 "theirs",
@@ -454,11 +457,8 @@ fn a_case_only_rename_never_replaces_a_different_file() {
     std::fs::create_dir_all(&folder).expect("a folder for the own-name rename");
     std::fs::write(folder.join("notes.md"), "own").expect("write the file");
     let (own, recased) = (folder.join("notes.md"), folder.join("Notes.md"));
-    assert!(
-        !rename_would_replace_another_entry(&own, &recased),
-        "a case-only rename of one file is a rename"
-    );
-    std::fs::rename(&own, &recased).expect("the filesystem lets it go");
+    bt_platform::rename_without_replacing(&own, &recased)
+        .expect("a case-only rename of one file is a rename");
     let names: Vec<String> = std::fs::read_dir(&folder)
         .expect("list the folder")
         .filter_map(Result::ok)
