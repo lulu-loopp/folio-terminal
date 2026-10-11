@@ -377,6 +377,7 @@ ledger's.
 | D-83 | the `bt-app` and `bt-term` suites are not portable: on macOS 294 of `bt-app`'s 4,600 tests (282 after ticket 72) and 43 of `bt-term`'s fail, each asserting a Windows fact on every host | ticket 72's report (Mac mini, 2026-09-26) | none yet | 0.4.8 — H1 (T-D83), then H7 | open; **2026-10-08 (J4):** **narrowed**: core-macos runs `bt-app`'s updater modules (T-GUARDS-BLIND, `5f7ba1fe`) and its uninstall tests (`1d914d1a`); the rest of `bt-app` and all of `bt-term` are checked, not tested; was 0.4.7 |
 | D-84 | aggregate turn scheduling beyond deferrable work: a turn's deadline is one number shared by every window, and only deferrable work is scheduled against it | budget note §R-B, §R-G (Codex's Q2; the owner's ruling of 2026-09-25, 1); A4 | none yet — owed a 0.4.7 ticket, *The window thread's turn is scheduled across windows and sources*, after B4–B9 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open — opened by A4 (2026-09-27); **2026-10-08 (J4):** untouched: its ticket was to follow B4–B9, none of which was cut; was 0.4.7 |
 | D-85 | the program-walk lane: the requests made while a walk is out are answered by the next walk and get no outcome of their own; the line `diagnostics.log` gets when that walk ends is the only record of them | A5 (Programs × every request ends exactly once); T-PROGRAMS-REFRESH (2026-10-08) | none yet | unassigned — listed for the coordinator (2026-10-08) | open |
+| D-95 | the ending step's wiring: the five roads that end a pane (`close_pane`, `close_tab`, `let_go_of_this_window` for a window close and the quit, `abandon_a_window_nothing_arrived_in`, `answer_restore`'s placeholder removal) each call `end_leaves_of` before their shells go, and no test drives those calls — a `Runtime` is a window and no test builds one; the step itself is pinned (`every_road_that_ends_a_pane_emits_leaf_gone_once`), as the 5400 bt-app tests drive `TabState` the same way | T-ATTENTION-WINDOW-EXPIRY (2026-10-11) | O-4 | 0.4.8 — O-4 gives `WindowRuntime` a window-free core the roads can be driven through | open |
 
 ---
 
@@ -1680,3 +1681,11 @@ wait on some road, and none has a ruling that it may.
   worker gone and reports the walk that died, and the next request starts a new
   worker), so only the outcome half is owed: a "superseded by walk N" outcome the
   drain can report once per request, if a consumer ever needs one.
+
+## D-95 — the row added on 2026-10-11 by T-ATTENTION-WINDOW-EXPIRY
+
+- **D-95 · the ending step's wiring.** The roads' calls into the ending step are unpinned until O-4 gives
+  `WindowRuntime` a window-free core; the 5400 bt-app tests drive `TabState` the same way. The step
+  (`end_leaves_of`: the per-leaf mark, the skip of a handover's cargo, expire before retire) is pinned
+  behaviourally; that each of the five roads calls it, once and before its shells, is read by review
+  only, because a `Runtime` holds a real window, renderer and compositor and no test constructs one.
