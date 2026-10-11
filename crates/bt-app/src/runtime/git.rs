@@ -299,7 +299,7 @@ impl Runtime<'_> {
                             .window
                             .peek_buffer
                             .as_mut()
-                            .filter(|peek| peek.source == source)
+                            .filter(|peek| *peek.source() == source)
                         {
                             match outcome {
                                 Ok(bytes) => peek.accept(preview::composed_read(&bytes)),
@@ -510,7 +510,7 @@ impl Runtime<'_> {
                 .find(|seat| {
                     matches!(
                         self.preview_buffer_on(self.preview_here(*seat))
-                            .map(|buffer| &buffer.source),
+                            .map(|buffer| buffer.source()),
                         Some(preview::PreviewSource::GitGraph { root: showing })
                             if showing == root
                     )
@@ -733,7 +733,7 @@ impl Runtime<'_> {
         let unread = self
             .preview_pool
             .get(&source)
-            .is_some_and(|buffer| buffer.load == preview::PreviewLoad::Pending);
+            .is_some_and(|buffer| *buffer.load() == preview::PreviewLoad::Pending);
         if !unread {
             return Ok(());
         }
@@ -1200,7 +1200,7 @@ impl Runtime<'_> {
             .preview_surfaces()
             .into_iter()
             .filter_map(|surface| {
-                let source = self.preview_buffer_on(surface)?.source.clone();
+                let source = self.preview_buffer_on(surface)?.source().clone();
                 match source {
                     preview::PreviewSource::GitGraph { root } => Some((surface, root)),
                     _ => None,
@@ -1832,7 +1832,7 @@ impl Runtime<'_> {
         let unread = self
             .preview_pool
             .get(&source)
-            .is_some_and(|buffer| buffer.load == preview::PreviewLoad::Pending);
+            .is_some_and(|buffer| *buffer.load() == preview::PreviewLoad::Pending);
         if !unread {
             return Ok(());
         }
@@ -4106,7 +4106,7 @@ impl Runtime<'_> {
         let unread = self
             .preview_pool
             .get(&source)
-            .is_some_and(|buffer| buffer.load == preview::PreviewLoad::Pending);
+            .is_some_and(|buffer| *buffer.load() == preview::PreviewLoad::Pending);
         if !unread {
             return Ok(());
         }
@@ -4274,7 +4274,7 @@ impl Runtime<'_> {
         let surface = PreviewSurface::Float(id);
         let Some(preview::PreviewSource::GitGraph { root }) = self
             .preview_buffer_on(surface)
-            .map(|buffer| buffer.source.clone())
+            .map(|buffer| buffer.source().clone())
         else {
             return float::FloatBody::default();
         };

@@ -3836,7 +3836,7 @@ impl Runtime<'_> {
                 let Some(name) = self
                     .preview_pool
                     .get(&source)
-                    .map(|buffer| buffer.name.clone())
+                    .map(|buffer| buffer.name().to_owned())
                 else {
                     return Ok(());
                 };

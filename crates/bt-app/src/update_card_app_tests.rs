@@ -23,7 +23,7 @@ fn the_last_preview_pane_leaving_a_tab_takes_the_whole_pool_with_it() {
     let shown = buffer_saying(r"D:\notes\todo.txt", "todo.txt", "milk\n");
     let history = buffer_saying(r"D:\notes\README.md", "README.md", "# hi\n");
     let mut stranded = buffer_saying(r"D:\notes\draft.txt", "draft.txt", "half a thought");
-    stranded.dirty = true;
+    stranded.set_dirty_for_test(true);
 
     let (mut source, _) = tab_with_a_preview(1, vec![shown, history, stranded]);
     let arrived = arriving_as(&source, 90);

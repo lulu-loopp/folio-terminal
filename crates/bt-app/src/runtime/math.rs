@@ -710,7 +710,7 @@ impl Runtime<'_> {
         if let Some(caret) = self.preview_live_caret(surface)
             && !caret.is_empty()
         {
-            let content = self.preview_buffer_on(surface)?.content.as_deref()?;
+            let content = self.preview_buffer_on(surface)?.text()?;
             let text = caret.selected(content);
             return (!text.is_empty()).then(|| text.to_owned());
         }

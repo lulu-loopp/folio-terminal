@@ -209,7 +209,7 @@ impl Runtime<'_> {
                 None => tab
                     .preview_pool
                     .get(pane.buffer.as_ref()?)
-                    .map(|buffer| buffer.name.clone()),
+                    .map(|buffer| buffer.name().to_owned()),
             }
         };
         // The peek reads the caption through the same door the head does, and
@@ -1014,14 +1014,14 @@ impl Runtime<'_> {
             // over a card full of legible source is the card contradicting
             // itself.
             ftype: match preview::preview_ftype(&peek.name) {
-                preview::PreviewFtype::Unknown => buffer.ftype,
+                preview::PreviewFtype::Unknown => buffer.ftype(),
                 named => named,
             },
             // A network path or a type this window will not read says so in the
             // card's own one line, exactly as the preview pane's unknown card
             // does — the refusal is the preview's judgement, borrowed.
             refused: buffer.refusal().is_some(),
-            dirty: buffer.dirty,
+            dirty: buffer.dirty(),
             anchor: self.peek_anchor(peek),
         })
     }

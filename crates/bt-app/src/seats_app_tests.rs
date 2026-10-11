@@ -1048,7 +1048,7 @@ fn an_engine_page_alone_in_a_tab_reaches_the_glass_through_the_retained_present(
         bt_layout::SeatKind::Preview,
     ));
     let document = buffer_saying(r"D:\notes\report.html", "report.html", "<p>hi</p>");
-    let source = document.source.clone();
+    let source = document.source().clone();
     let mut pool = preview::PreviewPool::default();
     pool.insert(document);
     let mut panes = PreviewPanes::default();
@@ -3618,7 +3618,7 @@ fn tab_with_two_previews(
     let mut pool = preview::PreviewPool::default();
     let mut panes = PreviewPanes::default();
     for (seat, buffer) in [first, second].into_iter().zip(buffers) {
-        panes.entry(seat_of(TabId(id), seat)).buffer = Some(buffer.source.clone());
+        panes.entry(seat_of(TabId(id), seat)).buffer = Some(buffer.source().clone());
         pool.insert(buffer);
     }
     let (layout, overflow) = cross_solve(&seats);
@@ -3689,7 +3689,7 @@ fn a_preview_pane_dropped_on_another_tab_arrives_showing_the_same_document() {
     assert!(
         into.preview_pool
             .get(&preview::PreviewSource::file("D:\\work\\notes.md"))
-            .is_some_and(|buffer| buffer.dirty),
+            .is_some_and(|buffer| buffer.dirty()),
         "the dirty bit crossed with the bytes, so the gates that ask about \
              unsaved work ask the tab the work is now in"
     );

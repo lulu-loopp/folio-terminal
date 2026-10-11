@@ -5393,9 +5393,9 @@ fn preview_document_key(
 ) -> PreviewDocumentKey {
     PreviewDocumentKey {
         parse: PreviewParseKey {
-            source: buffer.source.clone(),
+            source: buffer.source().clone(),
             md_source,
-            revision: buffer.revision,
+            revision: buffer.revision(),
             scale_ppm: scale_ppm(scale),
         },
         body_width_px: body_width_px.max(0.0).to_bits(),
@@ -18361,10 +18361,10 @@ impl TabState {
             .preview_pool
             .buffers()
             .filter_map(|buffer| {
-                let (path, source) = persisted_preview_row(&buffer.source)?;
+                let (path, source) = persisted_preview_row(buffer.source())?;
                 Some(bt_persist::PreviewPoolEntryV1 {
                     path,
-                    name: buffer.name.clone(),
+                    name: buffer.name().to_owned(),
                     source,
                 })
             })
@@ -18887,7 +18887,7 @@ impl TabState {
             None => self
                 .preview_pool
                 .get(pane.buffer.as_ref()?)
-                .map(|buffer| buffer.name.clone()),
+                .map(|buffer| buffer.name().to_owned()),
         }
     }
 
@@ -19066,7 +19066,7 @@ impl TabState {
                 // that order are the whole rule, and the first of them is the
                 // red line: is there text here already, without asking a disk.
                 if let Some(buffer) = buffer
-                    && buffer.content.is_some()
+                    && buffer.content().is_some()
                     && let Some(mono) = Self::mini_document_face(
                         buffer.view(pane.is_some_and(|pane| pane.md_source)),
                     )
@@ -36247,14 +36247,14 @@ fn switcher_rows(
         .buffers()
         .enumerate()
         .map(|(index, buffer)| profiles::PreviewMenuItem {
-            name: buffer.name.clone(),
-            dirty: buffer.dirty,
-            current: Some(&buffer.source) == current,
+            name: buffer.name().to_owned(),
+            dirty: buffer.dirty(),
+            current: Some(buffer.source()) == current,
             // **A file and a page can both be kept, and each under its own
             // category** (W2 slice ③). A diff and a commit's reading of a file
             // cannot: they are documents this window computed, and keeping one
             // would be keeping the question.
-            keep: preview_menu_target(&buffer.source),
+            keep: preview_menu_target(buffer.source()),
             pinned: false,
             pool: Some(index),
         })
@@ -43556,7 +43556,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
 fn files_a_tab_stands_on(tab: &TabState) -> BTreeSet<PathBuf> {
     let mut wanted = BTreeSet::new();
     for buffer in tab.preview_pool.buffers() {
-        if let Some(path) = buffer.source.file_path() {
+        if let Some(path) = buffer.source().file_path() {
             wanted.insert(path.to_path_buf());
         }
     }
@@ -49440,7 +49440,7 @@ impl Runtime<'_> {
         surface: PreviewSurface,
         offset: usize,
     ) -> Option<std::ops::Range<usize>> {
-        let content = self.preview_buffer_on(surface)?.content.as_deref()?;
+        let content = self.preview_buffer_on(surface)?.text()?;
         let PreviewDocument::Markdown { ranges, .. } = &self.preview_pane(surface)?.doc else {
             return None;
         };
@@ -49564,7 +49564,7 @@ impl Runtime<'_> {
         caret: Option<preview_edit::EditCaret>,
     ) -> Option<preview_live::SourceSpan> {
         let caret = caret?;
-        let content = self.preview_buffer_on(surface)?.content.as_deref()?;
+        let content = self.preview_buffer_on(surface)?.text()?;
         let pane = self.preview_pane(surface)?;
         let PreviewDocument::Markdown {
             blocks,
@@ -58617,7 +58617,7 @@ mod focus_mode_door_tests {
         // file and read a body that is not the one it means to.
         let source = item_body(&ItemQuery::method("TabState", "mini_source"));
         assert!(
-            source.contains("buffer.content.is_some()"),
+            source.contains("buffer.content().is_some()"),
             "the red line is 'is there text here already, without asking a disk'"
         );
         // And the page arm, added by W2 slice 6, is under the same line: a
@@ -70834,7 +70834,7 @@ mod floated_page_tests {
         );
         buffer.read_a_pages_bytes_as_text();
         assert_eq!(
-            buffer.ftype,
+            buffer.ftype(),
             PreviewFtype::Text,
             "the door both the glance and the `</>` go through promotes it"
         );

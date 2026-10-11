@@ -1295,7 +1295,7 @@ impl Runtime<'_> {
         };
         let content = self
             .preview_buffer_on(surface)
-            .and_then(|b| b.content.clone())
+            .and_then(|b| b.content().cloned())
             .unwrap_or_default();
         let mut pass = self.window.markdown_wraps.resume(&wrap);
         let palette = bt_render::chrome_palette();
