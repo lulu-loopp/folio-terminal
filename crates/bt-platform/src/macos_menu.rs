@@ -587,6 +587,7 @@ pub(crate) fn installed_plan() -> Option<MenuPlan> {
 mod tests {
     use super::*;
     use crate::menu::{AppMenuAction, MenuNamedKey};
+    use bt_source::ItemQuery;
 
     /// PIN — a chord becomes a key equivalent AppKit can read: the character
     /// lower-cased, the modifiers in the mask.
@@ -662,11 +663,9 @@ mod tests {
     /// in for a press made in the window they are looking at.
     #[test]
     fn a_declined_clipboard_row_comes_back_on_the_bars_own_sender() {
-        let source = include_str!("macos_menu.rs");
-        let (_, body) = source
-            .split_once("pub(crate) fn the_chain_declined(action: AppMenuAction) {")
-            .expect("the floor under the responder chain is this module's");
-        let (body, _) = body.split_once("\n}\n").expect("and it is one function");
+        let body = crate::source_test::body(
+            &ItemQuery::function("the_chain_declined").in_module("crate::macos_menu"),
+        );
         assert!(
             body.contains("(installed.send)("),
             "a declined clipboard row is parked somewhere other than the menu's own inbox"
@@ -703,13 +702,15 @@ mod tests {
     /// which is why they are written this way.
     #[test]
     fn the_dock_menu_is_handed_over_autoreleased() {
-        let source = include_str!("macos_menu.rs");
+        let body = crate::source_test::body(
+            &ItemQuery::function("dock_menu").in_module("crate::macos_menu"),
+        );
         assert!(
-            source.contains(concat!("Retained::", "autorelease_return(menu)")),
+            body.contains(concat!("Retained::", "autorelease_return(menu)")),
             "the Dock menu is not handed over autoreleased"
         );
         assert!(
-            !source.contains(concat!("Retained::", "into_raw")),
+            !body.contains(concat!("Retained::", "into_raw")),
             "a menu whose retain count is still this module's leaks once per right-click"
         );
     }
@@ -724,9 +725,11 @@ mod tests {
     /// MUTATION: add a `terminate:` arm to `standard_selector` and this goes red.
     #[test]
     fn the_menu_bar_does_not_end_the_process_where_it_stands() {
-        let source = include_str!("macos_menu.rs");
+        let body = crate::source_test::body(
+            &ItemQuery::function("standard_selector").in_module("crate::macos_menu"),
+        );
         assert!(
-            !source.contains(concat!("sel!(", "terminate:)")),
+            !body.contains(concat!("sel!(", "terminate:)")),
             "the menu bar sends AppKit's own terminate:, which quits past the session document"
         );
     }

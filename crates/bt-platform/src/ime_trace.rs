@@ -45,6 +45,7 @@ pub fn caret_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bt_source::ItemQuery;
 
     #[test]
     fn ime_native_format_values_and_privacy() {
@@ -68,24 +69,17 @@ mod tests {
 
     #[test]
     fn ime_native_outbound_sites_are_traced() {
-        let source = include_str!("lib.rs");
-        let cancel = source
-            .split("pub fn cancel_composition(reason:")
-            .nth(1)
-            .unwrap()
-            .split("fn active_layout_is_chinese")
-            .next()
-            .unwrap();
+        let cancel = crate::source_test::body_in_reaching_variant(
+            &ItemQuery::function("cancel_composition"),
+            3,
+            "windows",
+        );
         assert!(cancel.contains("ime_trace::notify_line(reason, \"call\", None)"));
         assert!(cancel.contains("ime_trace::notify_line(reason, \"return\", Some(told))"));
         for action in ["update", "destroy"] {
-            let method = source
-                .split(&format!("pub fn {action}(&mut self"))
-                .nth(1)
-                .unwrap()
-                .split("\n        }\n")
-                .next()
-                .unwrap();
+            let method = crate::source_test::body(
+                &ItemQuery::method("ImeSystemCaret", action).in_module("crate::windows_impl"),
+            );
             assert!(method.contains("ime_trace::caret_line"), "{action}");
         }
     }

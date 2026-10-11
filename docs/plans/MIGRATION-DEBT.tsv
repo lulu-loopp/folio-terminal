@@ -181,17 +181,5 @@ crates/bt-app/src/webhost.rs	webhost::fault_tests::a_zoom_notch_reports_the_fact
 crates/bt-app/src/webhost.rs	webhost::machine_tests::the_host_asks_its_own_gate_before_it_issues_its_own_navigation	include_str!	webhost.rs	P14	no
 crates/bt-app/src/webhost.rs	webhost::refusal_card_tests::the_engine_is_only_ever_told_what_the_door_answered	include_str!	webhost.rs	P14	no
 crates/bt-app/src/wsl.rs	wsl::tests::nothing_in_this_module_boots_a_distribution	runtime fs read	(the file it reads)	P14	no
-crates/bt-platform/src/app_delegate.rs	tests::PROVIDER	include_str!	macos_services.rs	P14	no
-crates/bt-platform/src/hang.rs	tests::SOURCE	include_str!	hang.rs	P14	no
-crates/bt-platform/src/ime_trace.rs	tests::ime_native_outbound_sites_are_traced	include_str!	lib.rs	P14	no
-crates/bt-platform/src/instance.rs	tests::the_runtime_directory_is_asked_of_the_system_and_not_of_the_environment	include_str!	instance.rs	P14	no
-crates/bt-platform/src/instance.rs	tests::the_unix_claim_is_a_flock_on_a_descriptor_in_a_private_runtime_directory	include_str!	instance.rs	P14	no
 crates/bt-platform/src/lib.rs	quiet_door_tests::no_command_is_built_outside_the_quiet_door	runtime fs read	lib.rs	P14	no
-crates/bt-platform/src/macos_app.rs	tests::SOURCE	include_str!	macos_app.rs	P14	no
-crates/bt-platform/src/macos_menu.rs	tests::a_declined_clipboard_row_comes_back_on_the_bars_own_sender	include_str!	macos_menu.rs	P14	no
-crates/bt-platform/src/macos_menu.rs	tests::the_dock_menu_is_handed_over_autoreleased	include_str!	macos_menu.rs	P14	no
-crates/bt-platform/src/macos_menu.rs	tests::the_menu_bar_does_not_end_the_process_where_it_stands	include_str!	macos_menu.rs	P14	no
-crates/bt-platform/src/webview.rs	third_door_shape_tests::DOOR	include_str!	macos_webview.rs	P14	no
-crates/bt-pty/src/lib.rs	tests::SOURCE	include_str!	lib.rs	P14	no
-crates/bt-pty/src/lib.rs	tests::input_dump_off_write_path_has_only_the_option_gate	include_str!	lib.rs	P14	no
 scripts/dev/bt-app-split-freshness.py	manifest() and reference_maps()	script: named files out of git blobs	the two impl Runtime blocks in main.rs	P0	no

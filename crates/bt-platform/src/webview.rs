@@ -5052,14 +5052,7 @@ mod guard_naming_tests {
 /// keep** (RA-3).
 #[cfg(test)]
 mod third_door_shape_tests {
-    /// The macOS file read as text, which is why this pin runs everywhere.
-    ///
-    /// `macos_webview.rs` and its own `#[cfg(test)]` module are
-    /// `#[cfg(target_os = "macos")]`, so a rule held only in there is a rule
-    /// nobody working on Windows can break *and see*. This one is about the
-    /// shape of the source, so it does not need the platform — the same move
-    /// `app_delegate.rs` makes over `macos_services.rs`.
-    const DOOR: &str = include_str!("macos_webview.rs");
+    use bt_source::{ItemKind, ItemQuery};
 
     /// RED — **`ThirdDoor::let_go` names every cell on the struct.**
     ///
@@ -5080,21 +5073,18 @@ mod third_door_shape_tests {
     /// list comparison goes red first, naming it.
     #[test]
     fn let_go_names_every_cell_of_the_third_door() {
-        let after = |needle: &str| {
-            DOOR.split_once(needle)
-                .unwrap_or_else(|| panic!("`{needle}` is in macos_webview.rs"))
-                .1
-        };
-        let declaration = after("struct ThirdDoor {")
-            .split_once("\n}")
-            .expect("the struct's own closing brace")
-            .0;
-        let cells = declaration
-            .lines()
-            .map(str::trim)
-            .filter_map(|line| line.split_once(": "))
-            .filter(|(_, held)| held.starts_with("Cell<") || held.starts_with("RefCell<"))
-            .map(|(name, _)| name)
+        let index = crate::source_test::index();
+        let cells = index
+            .items()
+            .iter()
+            .filter(|item| item.kind() == ItemKind::Field)
+            .filter(|item| item.type_owner() == Some("ThirdDoor"))
+            .filter(|item| item.module_paths().contains(&"crate::webview::macos"))
+            .filter(|item| {
+                let declaration = index.text(item.declaration());
+                declaration.contains("Cell<") || declaration.contains("RefCell<")
+            })
+            .map(|item| item.name())
             .collect::<Vec<_>>();
         assert_eq!(
             cells,
@@ -5115,10 +5105,9 @@ mod third_door_shape_tests {
              `let_go` does with it, then list it here"
         );
 
-        let let_go = after("fn let_go(&self) {")
-            .split_once("\n    }")
-            .expect("the method's own closing brace")
-            .0;
+        let let_go = crate::source_test::body(
+            &ItemQuery::method("ThirdDoor", "let_go").in_module("crate::webview::macos"),
+        );
         for cell in cells {
             // Written out rather than matched loosely, because `page` is a
             // substring of `on_the_page` and a pin that a neighbour can satisfy
