@@ -55,7 +55,7 @@ impl ProgramsEar {
         &mut self,
         snapshot: &ProgramEnvironmentSnapshot,
         now: Instant,
-        open: impl FnOnce() -> EarHandle,
+        make_ear: impl FnOnce() -> EarHandle,
     ) {
         *lock(&self.extensions) = extensions(snapshot.pathext.as_deref());
         let wanted: BTreeSet<PathBuf> = snapshot.directories.iter().cloned().collect();
@@ -74,7 +74,7 @@ impl ProgramsEar {
         }
         lock(&self.news).retain(|path, _| wanted.contains(path));
         if !wanted.is_empty() && self.ear.is_none() {
-            self.ear = Some(open());
+            self.ear = Some(make_ear());
         }
         if let Some(ear) = self.ear.as_mut() {
             ear.want(&wanted, rearm);
