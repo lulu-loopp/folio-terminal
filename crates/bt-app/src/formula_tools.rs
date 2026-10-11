@@ -1074,9 +1074,9 @@ mod tests {
     // the *next* method's declaration and doc comment, which the slice ran on
     // into — `turn`'s was 45,871 bytes around a 44,426-byte body.
     //
-    // `include_str!("formula_tools.rs")` stays: it belongs to P14's row for
-    // `the_marks_fade_in_travel_and_fade_out_on_the_tips_own_ninety_milliseconds`,
-    // which reads this file's own text above its tests.
+    // L1-large-1 removed the last file-named reader too: the timing pin below
+    // asks the index for this declared module's product universe, so moving the
+    // test module cannot move the boundary it reads.
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
