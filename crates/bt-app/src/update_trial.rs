@@ -2840,6 +2840,80 @@ mod tests {
             .collect()
     }
 
+    /// RED (T-STORE-PWSH-AND-SESSION-BACKUP round 2) — **when a trial's watch
+    /// commits before the window thread handles its release event, a session
+    /// flush still queues the launch backup ahead of its write.**
+    ///
+    /// This is the exact inter-thread gap: `Gate::decide(Committed)` has made
+    /// `defer(Session)` false, but `SessionStore::release_trial` has not run.
+    /// The session receipt proves the writer reached the later FIFO job, so the
+    /// backup must already exist when that receipt returns.
+    ///
+    /// MUTATION: remove `queue_launch_backup()` from the head of
+    /// `SessionStore::flush_judged`; the session lands and the backup is absent.
+    #[test]
+    fn a_flush_in_the_trial_release_gap_keeps_the_launch_backup_first() {
+        const SELECTOR: &str =
+            "update_trial::tests::a_flush_in_the_trial_release_gap_keeps_the_launch_backup_first";
+        if let Some(root) = child_root(SELECTOR) {
+            crate::test_support::on_the_window_thread_exiting();
+            assert!(update_startup::become_trial(
+                TXN,
+                nonce(),
+                Home::at(root.join("install").join(".folio-update"))
+            ));
+            let session_path = root.join("session.json");
+            let launch = bt_persist::SessionV1 {
+                windows: vec![bt_persist::SessionWindowV1 {
+                    tabs: vec![crate::test_support::saved_tab(
+                        "default",
+                        "/试运行/launch",
+                        Some("launch"),
+                        false,
+                    )],
+                    ..bt_persist::SessionWindowV1::default()
+                }],
+                ..bt_persist::SessionV1::default()
+            };
+            let launch_bytes = bt_persist::serialize_session(&launch).unwrap();
+            std::fs::write(&session_path, &launch_bytes).unwrap();
+
+            let mut store =
+                persist::SessionStore::launched_at(session_path.clone(), root.join("session.lock"));
+            assert!(GATE.pending().contains(&Writer::Session));
+            assert!(!root.join("session.prev.json").exists());
+
+            assert!(GATE.decide(TrialSight::Committed));
+            let current = bt_persist::SessionV1 {
+                windows: vec![bt_persist::SessionWindowV1 {
+                    tabs: vec![crate::test_support::saved_tab(
+                        "default",
+                        "/试运行/current",
+                        Some("current"),
+                        false,
+                    )],
+                    ..bt_persist::SessionWindowV1::default()
+                }],
+                ..bt_persist::SessionV1::default()
+            };
+            store.record(current.clone(), std::time::Instant::now());
+            assert_eq!(store.flush_judged(), Ok(()));
+
+            assert_eq!(
+                std::fs::read(root.join("session.prev.json")).unwrap(),
+                launch_bytes,
+                "the launch bytes landed before the session receipt"
+            );
+            assert_eq!(bt_persist::read_session(&session_path).0, current);
+            store.close();
+            return;
+        }
+
+        let root = scratch("session-release-gap");
+        run_in_a_process_of_its_own(SELECTOR, &root);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// RED (U-13) — **a trial start writes nothing durable before its
     /// transaction is committed**: after the stores are opened and changed,
     /// the update check's state changed, the marks' migration, the scripts and

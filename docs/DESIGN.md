@@ -14767,6 +14767,14 @@ The engine ledger has one owner on every platform, `bt_platform::engine_ledger`:
 
 **Pinned by** `update_apply_macos::tests::{a_live_trial_that_takes_its_mark_back_leaves_no_not_kept_card, a_commit_after_a_trial_held_a_change_notes_it_and_the_next_start_says_so}`, their Windows twins, and the ready arm of `update_apply_windows::tests::a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers`, which commits from the hand-back while the real live watch takes its mark back.
 
+### 2026-10-10 — A launch keeps one manual-recovery generation of the session it read (T-STORE-PWSH-AND-SESSION-BACKUP)
+
+**What is built.** A writer-of-record that successfully reads a `session.json` containing at least one tab keeps the exact bytes that passed the reader and queues them as `session.prev.json` on the existing session storage worker; unknown fields and leaves are therefore not lost to this build's migration or degradation. The backup job is first in that worker's FIFO, before this run can hand over a new `session.json`. An update trial holds the request; every road that can enqueue a session document idempotently takes and queues the held backup immediately before that document, including the watch-thread-commit/window-thread-release gap, and `release_trial` uses the same operation. The backup uses a temporary sibling, sync and atomic rename, carrying the source session's permissions and metadata. There is one generation. A missing or tabless session leaves any older generation untouched. A failed backup writes one line to `diagnostics.log` and does not stop startup. No product reader opens `session.prev.json`.
+
+**The rule.** `session.prev.json` means exactly “the layout Folio had when it last started,” not the most recent autosave and not an automatic fallback. It stays under the one data-directory claim, one `SessionWriter` and the update trial's existing `Writer::Session` gate; it adds neither a write thread nor a restore road.
+
+**Pinned by** `persist::tests::{launch_keeps_the_session_it_read_before_this_runs_first_write, an_empty_session_leaves_the_prior_backup_untouched, an_absent_session_creates_no_backup}`, `update_trial::tests::a_flush_in_the_trial_release_gap_keeps_the_launch_backup_first`, and `bt-persist`'s `atomic::tests::a_sibling_write_carries_its_sources_mode`. The launch test goes red if the request is dropped, snapshots the later in-memory document, or reserializes away the mixed-script unknown field; the trial test deterministically goes red when the head call to `queue_launch_backup` is removed from `flush_judged`; the other two app tests go red if an empty or absent launch replaces or invents a generation, and the atomic test goes red if the sibling writer stops carrying the source mode.
+
 ### 2026-10-10 — Homebrew's own record recognizes an official-cask copy without install-time attributes (D2)
 
 **What is built.** A macOS bundle is Homebrew-managed when the installed
