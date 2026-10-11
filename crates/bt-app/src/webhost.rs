@@ -4765,12 +4765,10 @@ mod machine_tests {
     /// in exactly one place inside it.
     #[test]
     fn the_host_asks_its_own_gate_before_it_issues_its_own_navigation() {
-        let source: String = include_str!("webhost.rs")
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect();
+        let issue = crate::test_support::squeezed_body("WebSeat", "issue");
+        let step = crate::test_support::squeezed_body("WebSeat", "step");
         assert!(
-            source.contains(concat!(
+            step.contains(concat!(
                 "}elseifself.minted.ad",
                 "mits(url).is_some(){self.minted.clone()"
             )),
@@ -4779,17 +4777,17 @@ mod machine_tests {
         );
         let gate = concat!("check(url,Origin::Host", "Minted(minted))");
         assert_eq!(
-            source.matches(gate).count(),
+            issue.matches(gate).count(),
             1,
             "exactly one host-minted gate"
         );
         let navigate = concat!("self.host.na", "vigate(&target)?;");
         assert_eq!(
-            source.matches(navigate).count(),
+            step.matches(navigate).count(),
             1,
             "exactly one road to the engine"
         );
-        let arm = &source[source
+        let arm = &step[step
             .find(concat!("WebEffect::", "Navigate(url)=>{"))
             .expect("the arm that issues a navigation")..];
         let asked = arm
@@ -6273,10 +6271,7 @@ mod fault_tests {
     /// engine now answers is `docs/CONVENTIONS.md` §3's write-only field.
     #[test]
     fn a_zoom_notch_reports_the_factor_the_engine_ended_up_at() {
-        let source: String = include_str!("webhost.rs")
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect();
+        let source = crate::test_support::squeezed_body("WebSeat", "zoom_by");
         let step = concat!(
             "letcurrent=self.host.z",
             "oom();letnext=zoom_step(current,up);"
@@ -6928,25 +6923,7 @@ mod engine_absence_tests {
     /// MUTATION: put the `?` back and this says so.
     #[test]
     fn open_answers_a_refusing_engine_with_a_seat_that_wears_the_card() {
-        let source: String = include_str!("webhost.rs")
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect();
-        let slice = |from: &str, to: &str| -> String {
-            let start = source.find(from).unwrap_or_else(|| panic!("{from}"));
-            let end = source[start..]
-                .find(to)
-                .unwrap_or_else(|| panic!("{to} follows {from}"));
-            source[start..start + end].to_owned()
-        };
-        let open = slice(
-            concat!("pub(crate)fn", "open("),
-            concat!("pub(crate)fn", "go("),
-        );
+        let open = crate::test_support::squeezed_body("WebSeat", "open");
         assert!(
             !open.contains(concat!("start_environment", "()")),
             "an engine that refuses to start is an answer about the engine, not \
@@ -6964,10 +6941,7 @@ mod engine_absence_tests {
         );
         // Every door into "ask the engine to exist" ends at the same two places:
         // the clock when the ask was taken, the card when it was refused.
-        let asks = slice(
-            concat!("fnstart_", "environment(&mutself"),
-            concat!("fnthe_engine_did", "_not_start("),
-        );
+        let asks = crate::test_support::squeezed_body("WebSeat", "start_environment");
         assert!(
             asks.contains("self.engine_owes_an_answer=Some(Instant::now()+ENGINE_START_DEADLINE)"),
             "an ask that was taken starts the clock that answers for it"
@@ -7624,14 +7598,7 @@ mod refusal_card_tests {
     /// computed and thrown away.
     #[test]
     fn the_engine_is_only_ever_told_what_the_door_answered() {
-        let source: String = include_str!("webhost.rs")
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect();
+        let source = crate::test_support::squeezed_body("WebSeat", "step");
         let start = source
             .find(concat!("WebEffect::", "Navigate(url)=>{"))
             .expect("the arm that issues a navigation");

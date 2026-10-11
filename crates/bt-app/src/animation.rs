@@ -1430,6 +1430,7 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
+    use bt_source::ItemQuery;
 
     fn fixture() -> Vec<u8> {
         std::fs::read(
@@ -1705,12 +1706,9 @@ mod tests {
     /// assertion goes red; drop it and the verdicts below go red.
     #[test]
     fn a_declared_screen_this_window_will_not_hold_is_refused_before_it_is_allocated() {
-        const SOURCE: &str = include_str!("animation.rs");
-        let at = SOURCE
-            .find("\nfn open(")
-            .expect("the container walk is a free function in this file");
-        let rest = &SOURCE[at..];
-        let walk = &rest[..rest.find("\n}\n").expect("and it ends") + 3];
+        let walk = crate::test_support::item_body(
+            &ItemQuery::function("open").in_module("crate::animation"),
+        );
         let side = walk
             .find("MAX_ANIMATION_SIDE_PX")
             .expect("the declared screen is judged against the side this window can draw");
@@ -1769,13 +1767,10 @@ mod tests {
     /// bytes happen to guess as, after all of them have been read.
     #[test]
     fn a_gif_past_the_encoded_cap_is_not_read_whole() {
-        const SOURCE: &str = include_str!("animation.rs");
-        for function in ["\npub fn decode(", "\nfn file_source("] {
-            let at = SOURCE
-                .find(function)
-                .expect("the file reader is a free function in this file");
-            let rest = &SOURCE[at..];
-            let reader = &rest[..rest.find("\n}\n").expect("and it ends") + 3];
+        for function in ["decode", "file_source"] {
+            let reader = crate::test_support::item_body(
+                &ItemQuery::function(function).in_module("crate::animation"),
+            );
             assert!(
                 !reader.contains("fs::read("),
                 "a file is read behind a cap and not whole:\n{reader}",
@@ -2456,12 +2451,7 @@ mod tests {
 
         // And the structure: the way back to frame zero is the source winding
         // itself back, not a second decoder over bytes this window is carrying.
-        const SOURCE: &str = include_str!("animation.rs");
-        let at = SOURCE
-            .find("    fn start_again(&mut self) -> bool {")
-            .expect("the loop's own function is in this file");
-        let rest = &SOURCE[at..];
-        let again = &rest[..rest.find("\n    }\n").expect("and it ends") + 6];
+        let again = crate::test_support::method_body("AnimationCursor", "start_again");
         assert!(
             again.contains("restart()"),
             "coming round is a seek on the source:\n{again}",
@@ -2470,11 +2460,7 @@ mod tests {
             !again.contains("Arc::clone(&self.bytes)"),
             "and not a second reader over a held copy of the file:\n{again}",
         );
-        let at = SOURCE
-            .find("pub struct AnimationCursor {")
-            .expect("the cursor is declared in this file");
-        let rest = &SOURCE[at..];
-        let declared = &rest[..rest.find("\n}\n").expect("and it ends") + 3];
+        let declared = crate::test_support::item_body(&ItemQuery::type_item("AnimationCursor"));
         assert!(
             !declared.contains("Arc<[u8]>"),
             "the cursor holds no copy of the file:\n{declared}",

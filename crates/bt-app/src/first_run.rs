@@ -2332,23 +2332,25 @@ mod tests {
     /// the line.
     #[test]
     fn the_card_names_no_platform_of_its_own() {
-        const SOURCE: &str = include_str!("first_run.rs");
         // Split so that neither of these two lines is itself a line that opens
         // the question *and* names a platform — this file is walked by the
         // crate-wide gate too, and a needle that tripped it would be a test
         // that forbids itself.
         const OPENERS: [&str; 3] = ["cfg(", "cfg!(", "cfg_attr("];
         const PLATFORMS: [&str; 5] = ["windows", "unix", "macos", "target_os", "target_family"];
-        let code = crate::source_pin::code_of(SOURCE);
-        let asking: Vec<(usize, &str)> = code
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| {
-                OPENERS.iter().any(|opener| line.contains(opener))
-                    && PLATFORMS.iter().any(|word| line.contains(word))
-            })
-            .map(|(index, line)| (index + 1, line.trim()))
-            .collect();
+        let mut asking = Vec::new();
+        for opener in OPENERS {
+            for platform in PLATFORMS {
+                let spelling = format!("{opener}{platform}");
+                let found = crate::test_support::found_in(
+                    bt_source::Needle::new(bt_source::Pattern::text(&spelling)),
+                    bt_source::View::Raw,
+                    bt_source::Scope::Module("crate::first_run".to_owned()),
+                )
+                .in_the_product(crate::test_support::source());
+                asking.extend(found.spans());
+            }
+        }
         assert!(
             asking.is_empty(),
             "the first-run card decides what platform it is on instead of asking \

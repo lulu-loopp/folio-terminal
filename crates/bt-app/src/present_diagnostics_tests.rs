@@ -340,14 +340,7 @@ fn freshness_format_counts_attempts_and_actual_dispatch_progress() {
 
 #[test]
 fn existing_hidden_callers_keep_the_same_fused_value() {
-    let source = include_str!("main.rs");
-    let body = source
-        .split("fn window_is_hidden(token: WaitToken<'_, doors::PlaceHidden>, window: &Window) -> bool {")
-        .nth(1)
-        .unwrap()
-        .split("\n}")
-        .next()
-        .unwrap();
+    let body = crate::test_support::item_body(&bt_source::ItemQuery::function("window_is_hidden"));
     assert!(body.contains("return false;"));
     assert!(body.contains(
         "bt_platform::is_window_minimized(native) || bt_platform::is_window_cloaked(native)"
@@ -360,7 +353,12 @@ fn existing_hidden_callers_keep_the_same_fused_value() {
     ] {
         assert_eq!(minimized || cloaked, expected);
     }
-    assert!(source.contains("window_is_hidden(token, window)"));
+    assert!(
+        crate::test_support::free_calls_of("window_is_hidden")
+            .in_the_product(crate::test_support::source())
+            .len()
+            > 0
+    );
 }
 
 #[test]

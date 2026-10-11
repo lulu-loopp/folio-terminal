@@ -26354,18 +26354,17 @@ mod tests {
     /// second assertion finds the arithmetic that was supposed to have one home.
     #[test]
     fn one_function_draws_every_inline_name_editors_caret() {
-        // Split at the test module rather than at the first `#[cfg(test)]`:
-        // this file carries test-only helpers well above it, and a split there
-        // would read a tenth of the file and call it the whole.
-        let source = include_str!("seats.rs")
-            .split(
-                "
-mod tests {",
+        let count = |pattern| {
+            crate::test_support::found_in(
+                bt_source::Needle::new(pattern),
+                bt_source::View::Identifiers,
+                bt_source::Scope::Module("crate::seats".to_owned()),
             )
-            .next()
-            .expect("a split always yields a first piece");
+            .in_the_product(crate::test_support::source())
+            .len()
+        };
         assert_eq!(
-            source.matches("inline_rename_marks(").count(),
+            count(bt_source::Pattern::call("inline_rename_marks")),
             7,
             "one definition and six callers — the strip, the rail, the preview \
              head, the address row that took the head's field on 2026-08-24, \
@@ -26375,14 +26374,18 @@ mod tests {",
         // The hairline's width and the line it stands on are named in exactly
         // one place each, and that place is the shared function.
         assert_eq!(
-            source.matches("TAB_RENAME_CARET_LOGICAL_PX").count(),
+            count(bt_source::Pattern::identifier(
+                "TAB_RENAME_CARET_LOGICAL_PX"
+            )),
             2,
             "the caret's width is declared once and read once"
         );
         assert_eq!(
-            source.matches("INLINE_RENAME_LINE_LOGICAL_PX").count(),
-            3,
-            "and so is the line it stands in — its declaration, the doc line              that names it from `inline_rename_marks`, and the one read"
+            count(bt_source::Pattern::identifier(
+                "INLINE_RENAME_LINE_LOGICAL_PX"
+            )),
+            2,
+            "and so is the line it stands in — its declaration and the one read"
         );
     }
 
@@ -45439,15 +45442,14 @@ mod tests {",
     /// and the count drops.
     #[test]
     fn one_predicate_says_which_trailing_controls_a_tab_wears() {
-        let source = include_str!("seats.rs")
-            .split(
-                "
-mod tests {",
-            )
-            .next()
-            .expect("a split always yields a first piece");
+        let found = crate::test_support::found_in(
+            bt_source::Needle::new(bt_source::Pattern::call("tab_trailer_controls")),
+            bt_source::View::Identifiers,
+            bt_source::Scope::Module("crate::seats".to_owned()),
+        )
+        .in_the_product(crate::test_support::source());
         assert_eq!(
-            source.matches("tab_trailer_controls(").count(),
+            found.len(),
             4,
             "one definition and three callers — the strip's chip, the rail's row \
              and a card's head"
@@ -45720,15 +45722,14 @@ mod tests {",
     /// Red gate: write the walk out again at any call site and the count drops.
     #[test]
     fn one_ladder_says_where_every_surfaces_badge_docks() {
-        let source = include_str!("seats.rs")
-            .split(
-                "
-mod tests {",
-            )
-            .next()
-            .expect("a split always yields a first piece");
+        let found = crate::test_support::found_in(
+            bt_source::Needle::new(bt_source::Pattern::call("trailing_edge_of")),
+            bt_source::View::Identifiers,
+            bt_source::Scope::Module("crate::seats".to_owned()),
+        )
+        .in_the_product(crate::test_support::source());
         assert_eq!(
-            source.matches("trailing_edge_of(").count(),
+            found.len(),
             5,
             "one definition and four readings — the strip's chip, the rail's row \
              in its geometry and again for its badge, and a card's head"
@@ -54305,23 +54306,6 @@ mod drop_plan_tests {
 mod reveal_tests {
     use super::*;
 
-    /// This file up to its own test module — the half the source-level gates
-    /// below read.
-    ///
-    /// Split at the test module rather than at the first `#[cfg(test)]`, for
-    /// `one_function_draws_every_inline_name_editors_caret`'s stated reason: this
-    /// file carries test-only helpers well above it, and a split there would read
-    /// a tenth of the file and call it the whole.
-    fn seats_source() -> &'static str {
-        include_str!("seats.rs")
-            .split(
-                "
-mod tests {",
-            )
-            .next()
-            .expect("a split always yields a first piece")
-    }
-
     /// RED — **an entry in the reveal register is a gain over the predicate, and
     /// never a substitute for it** (the animation slice's second half).
     ///
@@ -54371,18 +54355,10 @@ mod tests {",
     /// it.
     #[test]
     fn the_hit_test_never_asks_how_faded_a_control_is() {
-        let source = seats_source();
-        let body = |name: &str| {
-            let at = source
-                .find(&format!("fn {name}("))
-                .unwrap_or_else(|| panic!("{name} is not in this file"));
-            let rest = &source[at..];
-            let end = rest.find("\n}\n").unwrap_or(rest.len());
-            &rest[..end]
-        };
         for asker in ["hit_chrome", "head_run_revealed", "hit_files_root"] {
             assert!(
-                !body(asker).contains("head_ink"),
+                !crate::test_support::item_body(&bt_source::ItemQuery::function(asker))
+                    .contains("head_ink"),
                 "`{asker}` asks how faded a control is, and a hit test may not"
             );
         }
@@ -54391,10 +54367,13 @@ mod tests {",
         // Both halves of the paint's own gate, spelled apart so that `rustfmt`
         // may wrap the call however it likes: the ink is asked *and* the
         // predicate is what it is asked with.
-        let at = source
+        let paint = crate::test_support::item_body(&bt_source::ItemQuery::function(
+            "build_chrome_for_tabs",
+        ));
+        let at = paint
             .find("let head_ink_here = head_ink.of(")
             .expect("the paint's gate is in this file");
-        let gate = &source[at..at + 300];
+        let gate = &paint[at..at + 300];
         assert!(
             gate.contains("head_run_revealed("),
             "the paint no longer asks the predicate, so the two have come apart"
@@ -54440,14 +54419,10 @@ mod tests {",
             "the tab that has just stopped being it"
         );
 
-        let source = seats_source();
-        let at = source
-            .find("pub fn tab_strip_geometry(")
-            .expect("the geometry is in this file");
-        let rest = &source[at..];
-        let end = rest.find("\n}\n").unwrap_or(rest.len());
+        let geometry =
+            crate::test_support::item_body(&bt_source::ItemQuery::function("tab_strip_geometry"));
         assert!(
-            !rest[..end].contains("active_ink"),
+            !geometry.contains("active_ink"),
             "the strip's geometry has learned about the handover, and boxes must \
              not move while a colour changes"
         );

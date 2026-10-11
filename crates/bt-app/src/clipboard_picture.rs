@@ -580,6 +580,7 @@ fn names_in(folder: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bt_source::ItemQuery;
     use std::time::Duration;
 
     fn at(seconds: u64) -> SystemTime {
@@ -881,15 +882,8 @@ mod tests {
             "and an ordinary screenshot is a picture this paste decodes"
         );
 
-        const SOURCE: &str = include_str!("clipboard_picture.rs");
-        let body = |signature: &str| -> &'static str {
-            let at = SOURCE
-                .find(signature)
-                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-            let rest = &SOURCE[at + signature.len()..];
-            &rest[..rest.find("\n}\n").unwrap_or(rest.len())]
-        };
-        let dispatch = body("fn png_from(picture: &PictureBytes) -> Result<Vec<u8>, String> {");
+        let body = |name: &str| crate::test_support::item_body(&ItemQuery::function(name));
+        let dispatch = body("png_from");
         // One arm per line of the match, which is how they are written — a
         // `DibV5 | Dib` arm names the type twice and is still one arm.
         let arms: Vec<&str> = dispatch
@@ -908,14 +902,10 @@ mod tests {
                 "an encoding is decoded without its shape being judged:\n{arm}"
             );
         }
-        for signature in [
-            "fn png_handed_through(",
-            "fn png_from_pixels(bytes: &[u8]) -> Result<Vec<u8>, String> {",
-            "fn png_from_dib(encoding: PictureEncoding, dib: &[u8]) -> Result<Vec<u8>, String> {",
-        ] {
+        for function in ["png_handed_through", "png_from_pixels", "png_from_dib"] {
             assert!(
-                body(signature).contains("refuse_oversize"),
-                "an arm the dispatch delegates to no longer judges the shape: {signature}"
+                body(function).contains("refuse_oversize"),
+                "an arm the dispatch delegates to no longer judges the shape: {function}"
             );
         }
     }

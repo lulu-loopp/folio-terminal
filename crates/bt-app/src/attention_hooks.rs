@@ -1185,10 +1185,15 @@ mod tests {
         // The names are spelled in halves so that this assertion is not its own counter-example —
         // `concat!` puts them back together at compile time, and what `include_str!` reads is the
         // source, which never contains one whole.
-        let source = include_str!("attention_hooks.rs");
-        for reaching in [concat!("current", "_dir"), concat!("project", "_dir")] {
+        for reaching in ["current_dir", "project_dir"] {
+            let found = crate::test_support::found_in(
+                Needle::new(Pattern::identifier(reaching)),
+                View::Identifiers,
+                Scope::Module("crate::attention_hooks".to_owned()),
+            )
+            .in_the_product(crate::test_support::source());
             assert!(
-                !source.contains(reaching),
+                found.is_empty(),
                 "`{reaching}` would let a working directory decide where automation is written"
             );
         }

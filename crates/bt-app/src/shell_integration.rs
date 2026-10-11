@@ -5179,8 +5179,9 @@ mod tests {
 
     #[test]
     fn shell_integration_startup_and_removal_doors_are_above_window_work() {
-        let source = include_str!("main.rs");
-        let main = source.rsplit_once("fn main()").unwrap().1;
+        let main = crate::test_support::item_body(
+            &bt_source::ItemQuery::function("main").in_module("crate"),
+        );
         let removed = main
             .find("shell_integration::remove_shell_integration(")
             .unwrap();
@@ -5192,19 +5193,30 @@ mod tests {
         ] {
             assert!(removed < main.find(later).unwrap(), "{later}");
         }
-        let prepare = source
+        let create = crate::test_support::method_body("Runtime", "create");
+        let prepare = create
             .find("shell_integration::begin_startup_migration();")
             .expect("startup prepares the PowerShell script");
-        assert!(prepare < source.find("opening_window_attributes(").unwrap());
-        assert!(source.contains("shell_integration::begin_removal();"));
-        let runtime = include_str!("shell_integration/profile_runtime.rs");
-        let worker = runtime
-            .split_once("pub fn begin_startup_migration() {")
-            .unwrap()
-            .1
-            .split_once("fn candidates")
-            .unwrap()
-            .0;
+        assert!(prepare < create.find("opening_window_attributes(").unwrap());
+        assert!(
+            !crate::test_support::found(
+                bt_source::Needle::new(bt_source::Pattern::text(
+                    "shell_integration::begin_removal();",
+                )),
+                bt_source::View::CodeKeepingLiterals,
+            )
+            .in_the_product(crate::test_support::source())
+            .is_empty()
+        );
+        let begin = crate::test_support::item_body(
+            &bt_source::ItemQuery::function("begin_startup_migration")
+                .in_module("crate::shell_integration::profile_runtime"),
+        );
+        assert!(begin.contains("spawn_profile_observation("));
+        let worker = crate::test_support::item_body(
+            &bt_source::ItemQuery::function("spawn_profile_observation")
+                .in_module("crate::shell_integration::profile_runtime"),
+        );
         assert!(worker.contains("\"powershell-profile-observation\""));
         assert!(
             !worker.contains(".join()"),
@@ -5212,16 +5224,16 @@ mod tests {
         );
         // The script is prepared before the window; the parser questions about the PowerShell
         // rows follow the program walk's answers (T-PROGRAMS-REFRESH), read before the panes.
-        let warmed = source
+        let warmed = create
             .find("shell_integration::begin_powershell_script_preparation();")
             .expect("launch starts the script's preparation");
-        assert!(warmed < source.find("opening_window_attributes(").unwrap());
-        let asked = source
+        assert!(warmed < create.find("opening_window_attributes(").unwrap());
+        let asked = create
             .find("shell_integration::begin_powershell_preparation_for(&profile_programs);")
             .expect("launch asks about the PowerShell rows the walk answered");
         assert!(
             asked
-                < source
+                < create
                     .find("let (tab, conpty_source) = create_tab_state(")
                     .unwrap()
         );
@@ -5230,15 +5242,20 @@ mod tests {
         assert!(command.contains("environment.program(program)"));
         assert!(command.contains("bt_platform::quiet_command(resolved)"));
         assert!(probe.contains("-NoProfile"));
-        assert!(include_str!("shell_integration.rs").contains("const POWERSHELL_PROBE_PATIENCE:"));
+        assert!(
+            !crate::test_support::found_in(
+                bt_source::Needle::new(
+                    bt_source::Pattern::identifier("POWERSHELL_PROBE_PATIENCE",)
+                ),
+                bt_source::View::Identifiers,
+                bt_source::Scope::Module("crate::shell_integration".to_owned()),
+            )
+            .in_the_product(crate::test_support::source())
+            .is_empty()
+        );
         assert!(REMOVAL_PROBE_PATIENCE.quiet > POWERSHELL_PROBE_PATIENCE.quiet);
-        let parse_probe = include_str!("shell_integration.rs")
-            .split_once("fn run_parse_probe(")
-            .expect("the Windows target parser probe")
-            .1
-            .split_once("fn profile_key")
-            .expect("the item after that probe")
-            .0;
+        let parse_probe =
+            crate::test_support::item_body(&bt_source::ItemQuery::function("run_parse_probe"));
         assert!(parse_probe.contains("POWERSHELL_PROBE_PATIENCE"));
         assert!(probe.contains("ProbeStdio::FED"));
         assert!(probe.contains("input.as_bytes()"));
@@ -5309,23 +5326,11 @@ mod tests {
     }
 
     fn source_for_profile_probe() -> &'static str {
-        include_str!("shell_integration.rs")
-            .split_once("fn run_powershell_probe(")
-            .unwrap()
-            .1
-            .split_once("/// **Where this PowerShell keeps `$PROFILE`, and nothing else**")
-            .unwrap()
-            .0
+        crate::test_support::item_body(&bt_source::ItemQuery::function("run_powershell_probe"))
     }
 
     fn source_for_probe_command() -> &'static str {
-        include_str!("shell_integration.rs")
-            .split_once("fn powershell_probe_command(")
-            .unwrap()
-            .1
-            .split_once("fn stopped_output")
-            .unwrap()
-            .0
+        crate::test_support::item_body(&bt_source::ItemQuery::function("powershell_probe_command"))
     }
 
     #[test]
@@ -8298,10 +8303,10 @@ mod tests {
     fn the_term_variables_a_pane_is_given_are_the_same_on_every_platform() {
         const DECLARED: [&str; 4] = ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION"];
         // One function, in the crate that spawns, naming all four and no platform.
-        let region = crate::source_pin::code_of(crate::source_pin::source_region(
-            include_str!("../../bt-pty/src/lib.rs"),
-            "fn resolved_environment_layers(&self)",
-        ));
+        let region = crate::test_support::package_item_body(
+            "bt-pty",
+            &bt_source::ItemQuery::method("PtyCommand", "resolved_environment_layers"),
+        );
         for name in DECLARED {
             assert!(
                 region.contains(&format!("\"{name}\"")),
@@ -10012,18 +10017,14 @@ mod tests {
             "and the line is in the file the shell will read"
         );
 
-        let source = include_str!("shell_integration.rs");
-        let body = source
-            .split_once("fn replace_profile(")
-            .expect("the writer")
-            .1;
-        let end = body.find("\n}\n").expect("its end");
+        let body =
+            crate::test_support::item_body(&bt_source::ItemQuery::function("replace_profile"));
         assert!(
-            body[..end].contains("bt_persist::atomic_replace_preserving(profile"),
+            body.contains("bt_persist::atomic_replace_preserving(profile"),
             "the profile is replaced atomically, not truncated and rewritten"
         );
         assert!(
-            !body[..end].contains("std::fs::write(profile"),
+            !body.contains("std::fs::write(profile"),
             "and the truncating write is gone"
         );
     }

@@ -2513,20 +2513,20 @@ mod tests {
         // The strip's own drawing point and nothing else in the file: a menu
         // row elsewhere in either module is welcome to the act's folder, and a
         // gate that read the whole source would forbid it.
-        for (name, source, opens_at) in [
-            ("seats.rs", include_str!("seats.rs"), "fn push_files_foot("),
+        for (name, body) in [
+            (
+                "seats.rs",
+                crate::test_support::item_body(
+                    &bt_source::ItemQuery::function("push_files_foot").in_module("crate::seats"),
+                ),
+            ),
             (
                 "float.rs",
-                include_str!("float.rs"),
-                "if geometry.wears_a_foot()",
+                crate::test_support::item_body(
+                    &bt_source::ItemQuery::function("build").in_module("crate::float"),
+                ),
             ),
         ] {
-            let at = source
-                .find(opens_at)
-                .unwrap_or_else(|| panic!("{name} still has a foot to draw"));
-            let body = &source[at..source[at..]
-                .find("\n}\n")
-                .map_or(source.len(), |end| at + end)];
             assert!(
                 body.contains("ActionIcon::OpenFolderObject.mark()"),
                 "{name}'s foot no longer names the object's folder",

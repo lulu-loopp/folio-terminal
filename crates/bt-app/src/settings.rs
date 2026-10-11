@@ -17363,14 +17363,8 @@ mod tests {
             }
         }
         assert_eq!(before, monospace_scans());
-        let source = include_str!("settings.rs");
-        let files = source
-            .split("pub fn cjk_family_files(")
-            .nth(1)
-            .unwrap()
-            .split("/// Which row")
-            .next()
-            .unwrap();
+        let files =
+            crate::test_support::item_body(&bt_source::ItemQuery::function("cjk_family_files"));
         assert!(!files.contains("bt_platform::cjk_font_families()"));
         assert!(files.contains("begin_monospace_scan"));
     }

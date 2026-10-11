@@ -591,31 +591,10 @@ mod tests {
         Channel, LOG_ROTATE_AT, append_note, console_was_asked_for, named_file,
         names_a_crash_report, newest_crash_report, rotate_if_oversized, switched_on,
     };
+    use bt_source::ItemQuery;
 
     fn names(list: &[&str]) -> Vec<OsString> {
         list.iter().map(|name| OsString::from(*name)).collect()
-    }
-
-    /// This file's own text, for the two source pins below.
-    const DIAGNOSTICS: &str = include_str!("diagnostics.rs");
-
-    /// The channel chooser's declaration, at column zero. Named once so that the
-    /// two pins that read its body cannot come to mean two different functions.
-    const CHOOSER: &str = "\nfn choose_resident_channel(storage: &Path, previous_run_last_wrote: Option<SystemTime>) -> Channel {";
-
-    /// The text of the free function `opener` opens, to the `}` in column zero
-    /// that closes it. The caller and nothing else — a whole-file search would
-    /// answer with this crate's own tests, which quote these names to pin the
-    /// order they are called in.
-    fn body(source: &str, opener: &str) -> String {
-        let at = source
-            .find(opener)
-            .unwrap_or_else(|| panic!("`{opener}` is declared once, at column zero"));
-        let rest = &source[at..];
-        let end = rest
-            .find("\n}\n")
-            .expect("a free function is closed by a `}` at column zero");
-        rest[..end].to_owned()
     }
 
     /// RED (D3, the 0.4.2 release of 2026-09-18) — **the first line of a run's
@@ -702,14 +681,16 @@ mod tests {
 
         // The source half: the header has one owner, and it is not the arm that
         // chose a stream. This is the assertion that is red on `main`.
-        let chooser = body(DIAGNOSTICS, CHOOSER);
+        let chooser =
+            crate::test_support::item_body(&ItemQuery::function("choose_resident_channel"));
         assert!(
             !chooser.contains("run_header"),
             "the channel chooser writes the header again, so a run that kept its \
              console or could not open its log writes none:\n{chooser}"
         );
         assert!(
-            body(DIAGNOSTICS, "\npub fn open_run_log(").contains("append_note(&log, &run_header("),
+            crate::test_support::item_body(&ItemQuery::function("open_run_log"))
+                .contains("append_note(&log, &run_header("),
             "the header is no longer written by the step that opens the log"
         );
 
@@ -919,18 +900,18 @@ mod tests {
     /// whether the file opened.
     #[test]
     fn nothing_branches_on_the_two_console_no_ops() {
-        const MAIN: &str = include_str!("main.rs");
-
-        for (source, opener, where_it_is, call) in [
+        for (caller, where_it_is, call) in [
             (
-                MAIN,
-                "\nfn main() -> Result<()> {",
+                crate::test_support::item_body(&ItemQuery::function("main")),
                 "main.rs",
                 "adopt_parent_console",
             ),
-            (DIAGNOSTICS, CHOOSER, "diagnostics.rs", "detach_console"),
+            (
+                crate::test_support::item_body(&ItemQuery::function("choose_resident_channel")),
+                "diagnostics.rs",
+                "detach_console",
+            ),
         ] {
-            let caller = body(source, opener);
             let statement = format!("    bt_platform::{call}();\n");
             assert!(
                 caller.contains(&statement),
@@ -946,7 +927,8 @@ mod tests {
             );
         }
         assert!(
-            DIAGNOSTICS.contains("if bt_platform::redirect_std_streams_to_file(&log) {"),
+            crate::test_support::item_body(&ItemQuery::function("choose_resident_channel"))
+                .contains("if bt_platform::redirect_std_streams_to_file(&log) {"),
             "the channel is no longer chosen off the door that reports whether \
              the log file took the streams, which is the one door here that can \
              fail on every platform"

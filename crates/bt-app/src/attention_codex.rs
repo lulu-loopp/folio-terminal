@@ -491,6 +491,7 @@ fn rendered(document: &DocumentMut, existing: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_support::{host_path, host_spelling};
+    use bt_source::{Needle, Pattern, Scope, View};
 
     #[test]
     fn attention_two_live_copies_require_takeover_and_preserve_bytes() {
@@ -598,10 +599,15 @@ mod tests {
         // **Nothing in this module can be steered by where the process happens to be standing**,
         // asserted over the source itself because that is the only form the rule has. The names are
         // spelled in halves so this assertion is not its own counter-example.
-        let source = include_str!("attention_codex.rs");
-        for reaching in [concat!("current", "_dir"), concat!("project", "_dir")] {
+        for reaching in ["current_dir", "project_dir"] {
+            let found = crate::test_support::found_in(
+                Needle::new(Pattern::identifier(reaching)),
+                View::Identifiers,
+                Scope::Module("crate::attention_codex".to_owned()),
+            )
+            .in_the_product(crate::test_support::source());
             assert!(
-                !source.contains(reaching),
+                found.is_empty(),
                 "`{reaching}` would let a working directory decide where automation is written"
             );
         }

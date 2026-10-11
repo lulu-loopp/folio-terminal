@@ -1773,8 +1773,6 @@ mod summon_road_tests {
     use super::{hotkey_for, summon_key};
     use crate::shortcuts::{Action, Shortcuts};
 
-    const MAIN: &str = include_str!("main.rs");
-
     /// RED (T-MAC-SUMMON-DIAG) — **the macOS build ships a summon chord, and it
     /// is one `bt_platform::hotkey::register` can actually claim.**
     ///
@@ -1839,14 +1837,12 @@ mod summon_road_tests {
     /// `reconcile` call, and this names the one that moved.
     #[test]
     fn the_summon_claim_is_asked_for_on_every_platform_at_every_turn() {
+        let turn = crate::test_support::method_body("FolioApp", "about_to_wait_inner");
         assert!(
-            MAIN.contains(".and_then(|()| self.settle_quake(event_loop))"),
+            turn.contains(".and_then(|()| self.settle_quake(event_loop))"),
             "settle_quake is on about_to_wait_inner's chain"
         );
-        let settle = MAIN
-            .split_once("fn settle_quake(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {")
-            .expect("settle_quake is declared in main.rs")
-            .1;
+        let settle = crate::test_support::method_body("FolioApp", "settle_quake");
         let claim = settle
             .split_once("app.quake.reconcile(wanted.as_ref());")
             .expect("and it reconciles the claim")

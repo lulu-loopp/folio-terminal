@@ -1181,6 +1181,7 @@ mod tests {
     use super::*;
     use crate::attention::{MappedAction, Tier};
     use crate::test_support::{host_path, host_spelling};
+    use bt_source::{Needle, Pattern, Scope, View};
     use std::sync::{Arc, Condvar, mpsc};
 
     /// **A copilot a test writes**: what each probe answers, in order, and a gate that holds a
@@ -1519,10 +1520,15 @@ mod tests {
         // **Nothing in this module can be steered by where the process happens to be standing**,
         // asserted over the source because that is the only form the rule has. The names are
         // spelled in halves so this assertion is not its own counter-example.
-        let source = include_str!("attention_copilot.rs");
-        for reaching in [concat!("current", "_dir"), concat!("project", "_dir")] {
+        for reaching in ["current_dir", "project_dir"] {
+            let found = crate::test_support::found_in(
+                Needle::new(Pattern::identifier(reaching)),
+                View::Identifiers,
+                Scope::Module("crate::attention_copilot".to_owned()),
+            )
+            .in_the_product(crate::test_support::source());
             assert!(
-                !source.contains(reaching),
+                found.is_empty(),
                 "`{reaching}` would let a working directory decide where automation is written"
             );
         }
@@ -1884,9 +1890,14 @@ mod tests {
     /// The user's own switch, read out of their own file and never written to it.
     #[test]
     fn the_settings_file_is_read_and_never_written() {
-        let source = include_str!("attention_copilot.rs");
+        let writes = crate::test_support::found_in(
+            Needle::new(Pattern::text("write(&settings_path")),
+            View::Raw,
+            Scope::Module("crate::attention_copilot".to_owned()),
+        )
+        .in_the_product(crate::test_support::source());
         assert!(
-            !source.contains(concat!("write(&settings", "_path")),
+            writes.is_empty(),
             "the user's settings file is somebody else's and this module only reads it"
         );
         for (text, off) in [
