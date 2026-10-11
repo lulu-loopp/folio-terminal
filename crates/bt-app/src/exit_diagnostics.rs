@@ -289,7 +289,7 @@ mod tests {
         let fallback = bt_pty::ShellFallback {
             requested: PathBuf::from("private").join("pwsh.exe").into_os_string(),
             started: bt_pty::LAST_RESORT_SHELL,
-            error: "access denied at C:\\Users\\private\\pwsh.exe\nby the package broker"
+            error: "access denied at C:\\Users\\alice\\pwsh.exe\nby the package broker"
                 .to_owned(),
         };
         let mut lines = Vec::new();
@@ -302,7 +302,7 @@ mod tests {
                 program_basename(Some(Path::new(bt_pty::LAST_RESORT_SHELL)))
             )
         );
-        assert!(!lines[0].contains("private"));
+        assert!(!lines[0].contains("alice"));
     }
 
     /// MUTATION (observed RED): omit the error from the resident spawn-failure line, or write it
