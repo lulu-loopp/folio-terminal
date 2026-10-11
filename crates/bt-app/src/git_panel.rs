@@ -1885,15 +1885,21 @@ pub fn build(
                 .rows
                 .push(GitRow::Change(change_row(entry, group, cache)));
         }
-        // R33: the cap read everything and shows the first two thousand, and it
-        // says so in a row of its own rather than by quietly being short.
-        if status.dropped > 0 && group == GitGroup::Untracked {
-            content
-                .rows
-                .push(GitRow::Notice(crate::i18n::git_more_changed_files(
-                    status.dropped,
-                )));
-        }
+    }
+    // R33: the cap read everything and shows the first two thousand, and it
+    // says so in a row of its own rather than by quietly being short — once,
+    // under the last group, whichever groups have rows. It used to be pushed
+    // inside the untracked group's turn, which an empty group skips, so a capped
+    // list with nothing untracked was short and said nothing (AUDIT-hardcode
+    // SHL-G1).
+    if let Some(status) = status
+        && status.dropped > 0
+    {
+        content
+            .rows
+            .push(GitRow::Notice(crate::i18n::git_more_changed_files(
+                status.dropped,
+            )));
     }
 
     // History. Unconditional (R7 keeps the count on the heading and the heading
@@ -8214,5 +8220,49 @@ mod tests {
             crate::i18n::git_renamed_from("src/main.rs", "src/old.rs")
         );
         assert_eq!(lines[1], "Renamed · R");
+    }
+
+    /// RED (AUDIT-hardcode SHL-G1) — **a capped status says it is capped
+    /// whichever groups have rows.**
+    ///
+    /// The "N more changed files" row was pushed inside the untracked group's
+    /// turn, and an empty group is skipped, so a repository with more edited
+    /// files than the cap and nothing untracked showed a list that was simply
+    /// short. Built through the real parser: one more modified file than the
+    /// cap, none untracked.
+    ///
+    /// MUTATION: push the notice only when the untracked group has rows (the
+    /// old placement) — the notice is missing and this goes red.
+    #[test]
+    fn a_capped_status_says_so_when_nothing_is_untracked() {
+        let mut porcelain = b"## main\0".to_vec();
+        for index in 0..=crate::git::GIT_STATUS_CAP {
+            porcelain.extend_from_slice(format!(" M src/文件{index}.rs\0").as_bytes());
+        }
+        let cache = answered(&porcelain, Vec::new(), false);
+        let content = build(
+            &cache,
+            GitPanelLook::default(),
+            1.0,
+            TEST_COLUMN_PX,
+            &mut ruler,
+        );
+        let notice = crate::i18n::git_more_changed_files(1);
+        let notices = content
+            .rows
+            .iter()
+            .filter(|row| matches!(row, GitRow::Notice(words) if *words == notice))
+            .count();
+        assert_eq!(notices, 1, "one row says the list is capped");
+        assert!(
+            !content.rows.iter().any(|row| matches!(
+                row,
+                GitRow::Heading {
+                    group: Some(GitGroup::Untracked),
+                    ..
+                }
+            )),
+            "and there is no untracked group for it to hide in"
+        );
     }
 }
