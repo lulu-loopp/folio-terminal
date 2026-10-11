@@ -11754,6 +11754,13 @@ struct LeafSession {
     /// away. Looking at the tab is not one of them —
     /// [`attention::Event::MarkSeen`] is the arrival with nothing to say.
     attention: attention::AttentionLedger,
+    /// **Whether a road that ends this pane has already given its place up** ([`end_leaves_of`]).
+    ///
+    /// Set by that walk and read by nothing else. A window closed and then retired by a quit
+    /// before it is reaped is walked twice, and the ledger answers a second
+    /// [`attention::Event::LeafGone`] silently, so only this tells the second walk that the pane
+    /// has already ended.
+    attention_ended: bool,
     /// **Whether the bell this pane currently has latched has already been announced** (`attention`
     /// plan §11.7's fourth source).
     ///
@@ -28163,18 +28170,9 @@ fn answer_attention_in(
 
 /// **A pane is going away, so the place it held goes with it** (`attention` plan §4 B4).
 ///
-/// **Every road that ends a pane retires its shell and expires its attention exactly once**, and
-/// this is the second half for all four of them. One leaf, because each door names its leaves one
-/// at a time: a pane closed on its own (`close_pane`), every pane of a tab closed together
-/// (`close_tab`, through [`expire_every_leaf_of`]), every pane of a window that closes or is
-/// retired by the quit (`let_go_of_this_window`), and every pane of a window a refused move had
-/// opened (`abandon_a_window_nothing_arrived_in`) — the last two through
-/// [`expire_every_leaf_of_a_window`]. Each road asks it before it retires the shells, and each
-/// asks it of the leaves it takes out of the window, so a road that hands its leaves on to another
-/// (`close_tab` closing the last tab, `abandon` before the window's own close) has not asked.
-///
-/// The window's serial is not wound back — a place that was handed out was handed out, and the
-/// ledger says why in its own words.
+/// One leaf, and only ever asked by [`end_leaves_of`], which is the one step all five roads that
+/// end a pane take. The window's serial is not wound back — a place that was handed out was handed
+/// out, and the ledger says why in its own words.
 fn expire_leaf_attention(
     at: attention::Site,
     reach: attention::Reach,
@@ -28190,45 +28188,62 @@ fn expire_leaf_attention(
     emit_attention_lines(trace, lines);
 }
 
-/// Every pane of one tab that is leaving its window, its place given up — a pane still in birth
-/// included, since its ledger is the leaf's from creation on.
-fn expire_every_leaf_of(
-    tab: &mut TabState,
-    index: usize,
-    reach: attention::Reach,
+/// **The ending step: every road that ends a pane retires its shell and expires its attention
+/// exactly once.**
+///
+/// Five doors take it, and nothing else ends a pane: a pane closed on its own (`close_pane`, with
+/// `only` naming it), a tab closed (`close_tab`), a window closed or retired by the quit
+/// (`let_go_of_this_window`), a window a refused move had opened
+/// (`abandon_a_window_nothing_arrived_in`), and the launch placeholder taken away once the restored
+/// tabs stand (`answer_restore`). Each leaf of `tabs` — every one, or the one `only` names, a pane
+/// still in birth included — is handed `LeafGone` and then has its shell retired, in that order.
+///
+/// **Exactly once** is two rules, both kept here. A leaf a walk has already ended is not handed
+/// `LeafGone` again ([`LeafSession::attention_ended`]): a window closed and then retired by a quit
+/// before it is reaped is walked twice. And a leaf `moving` names — the cargo of a cross-window
+/// handover from this window that is decided and not yet performed — is not ending, so its place
+/// stays; its `LeafGone` comes from whichever road ends it in the window it lands in. Its shell is
+/// still retired, as it was before this step existed (finding F-2 of
+/// T-ATTENTION-WINDOW-EXPIRY, left to the shell's own lifecycle).
+///
+/// Answers the places it gave up, in walk order.
+fn end_leaves_of<'t>(
+    tabs: impl IntoIterator<Item = (usize, &'t mut TabState)>,
+    only: Option<SeatId>,
+    moving: Option<&DragSource>,
+    reach: impl Fn(usize) -> attention::Reach,
     next_place: &mut attention::Places,
     now: Instant,
     trace: Option<&attention_trace::Trace>,
-) {
-    for (seat, leaf) in tab.leaves_mut() {
-        expire_leaf_attention(
-            attention::Site {
-                tab: index,
-                seat: *seat,
-            },
-            reach,
-            leaf,
-            next_place,
-            now,
-            trace,
-        );
+) -> Vec<attention::Site> {
+    let mut ended = Vec::new();
+    for (index, tab) in tabs {
+        let id = tab.id;
+        let reach = reach(index);
+        for (seat, leaf) in tab.leaves_mut() {
+            if only.is_some_and(|only| only != *seat) {
+                continue;
+            }
+            let moves = moving.is_some_and(|cargo| match cargo {
+                DragSource::Tab(tab) => *tab == id,
+                DragSource::Pane(pane) => pane.tab == id && pane.seat == *seat,
+                DragSource::Row(_) => false,
+            });
+            if !moves && !leaf.attention_ended {
+                let at = attention::Site {
+                    tab: index,
+                    seat: *seat,
+                };
+                expire_leaf_attention(at, reach, leaf, next_place, now, trace);
+                leaf.attention_ended = true;
+                ended.push(at);
+            }
+            if let Some(pty) = leaf.pty.take() {
+                bt_pty::retire_session(pty);
+            }
+        }
     }
-}
-
-/// Every pane of every tab of a window that is ending — the two window roads' one walk, with
-/// each tab's reach as the window would have answered it for that tab.
-fn expire_every_leaf_of_a_window(
-    tabs: &mut [TabState],
-    active_tab: usize,
-    place: notify::WindowPlace,
-    next_place: &mut attention::Places,
-    now: Instant,
-    trace: Option<&attention_trace::Trace>,
-) {
-    for (index, tab) in tabs.iter_mut().enumerate() {
-        let reach = notify::desktop_reach(index == active_tab, place);
-        expire_every_leaf_of(tab, index, reach, next_place, now, trace);
-    }
+    ended
 }
 
 /// The next instant any pane in this window owes the loop a wake-up on the ledger's account.
@@ -40459,6 +40474,7 @@ fn bare_leaf(
         session,
         // Nobody has asked for anything yet.
         attention: attention::AttentionLedger::default(),
+        attention_ended: false,
         bell_reported: false,
         attention_clock: attention_wire::WaitClock::default(),
         attention_capability: capability,

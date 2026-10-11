@@ -3,21 +3,20 @@
 
 use super::pointer::touch::let_the_system_translate_touch;
 use crate::{
-    App, AppEvent, BrokerRelease, Drag, DragHandover, FormulaSwitches, HandoverInto,
+    App, AppEvent, BrokerRelease, Drag, DragHandover, DragSource, FormulaSwitches, HandoverInto,
     INITIAL_HEIGHT, INITIAL_WIDTH, LaunchPlan, LeafSeed, NewWindowParts, NewWindowPlan,
     PreviewRestore, PtyWakeSignal, RAIL_TRANSITION, RenameExit, RevealTween, Runtime, TabSeed,
     TabState, WindowPosture, WindowRuntime, attention_trace, broker_verdict, create_tab_state,
-    dpi_snapshot, dwm_dark_mode_owed, ensure_metrics_match_authoritative_scale,
-    ensure_swapchain_matches_inner, expire_every_leaf_of_a_window, first_term_leaf, float,
-    focus_leaf_index, git, hang_watch, i18n, ime_outbound, ime_report, install_page_ground_color,
-    install_theme_class_background, marks, mouse_trace, native_window, new_window_runtime,
-    opening_window_attributes, persisted_preview_pages, persisted_window_bounds, plan_launch,
-    presentation_physical_size, preview, preview_source_of_recent, profiles, quit, rail_state_for,
-    recorded_window_placement, render_sidebar_mode, render_tab_layout, restore, restore_row_seed,
-    restore_window_placement, revive_plan, scrollback_quota, seats, seed, seeded_tab,
-    session_sidebar_mode, session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at,
-    startup_window_rect, tear_out_rect, toast, unsaved_line, window_minimum_changed,
-    window_surface_target,
+    dpi_snapshot, dwm_dark_mode_owed, end_leaves_of, ensure_metrics_match_authoritative_scale,
+    ensure_swapchain_matches_inner, first_term_leaf, float, focus_leaf_index, git, hang_watch,
+    i18n, ime_outbound, ime_report, install_page_ground_color, install_theme_class_background,
+    marks, mouse_trace, native_window, new_window_runtime, notify, opening_window_attributes,
+    persisted_preview_pages, persisted_window_bounds, plan_launch, presentation_physical_size,
+    preview, preview_source_of_recent, profiles, quit, rail_state_for, recorded_window_placement,
+    render_sidebar_mode, render_tab_layout, restore, restore_row_seed, restore_window_placement,
+    revive_plan, scrollback_quota, seats, seed, seeded_tab, session_sidebar_mode,
+    session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at, startup_window_rect,
+    tear_out_rect, toast, unsaved_line, window_minimum_changed, window_surface_target,
 };
 use crate::{LeafView, TextScale, owner_door, revived_profile};
 use anyhow::Context;
@@ -1039,12 +1038,24 @@ impl Runtime<'_> {
                 .position(|tab| tab.id == placeholder)
         {
             let mut removed = self.window.tabs.remove(index);
-            // The same leak `close_tab` carried, on the path that retires the
-            // launch placeholder once the session file's own tabs are standing.
-            // A placeholder holds one shell today and always has; asking for all
-            // of them costs nothing and stops this being the copy that is still
-            // wrong the day it holds two.
-            removed.retire_all_shells();
+            // **The fifth road that ends a pane** ([`end_leaves_of`]). The
+            // launch placeholder holds a real shell, which can have asked for
+            // attention before the first keystroke would have kept it — so its
+            // place is given up before its shell is retired, like every other
+            // road's. Every leaf and not the focused one: the same leak
+            // `close_tab` carried, and asking for all of them stops this being
+            // the copy that is still wrong the day a placeholder holds two.
+            let (active, place) = (self.window.active_tab, self.window.place());
+            let moving = self.cargo_in_flight();
+            end_leaves_of(
+                [(index, &mut removed)],
+                None,
+                moving.as_ref(),
+                |index| notify::desktop_reach(index == active, place),
+                &mut self.window.attention_next_place,
+                Instant::now(),
+                attention_trace::global(),
+            );
         }
         self.apply_window_min_inner_size()?;
         let landing = first_revived.saturating_sub(usize::from(placeholder.is_some()));
@@ -2016,6 +2027,22 @@ impl Runtime<'_> {
         self.let_go_of_this_window()
     }
 
+    /// **What a decided, not yet performed cross-window handover is carrying out
+    /// of this window**, if one is — the cargo [`end_leaves_of`] does not end,
+    /// because it is about to stand in another window.
+    ///
+    /// The handover is recorded at the button-up and spent at the loop's door
+    /// later in the same turn, and a window closing in that turn is settled
+    /// before it ([`FolioApp::settle_drag_handover`]).
+    pub(in crate::runtime) fn cargo_in_flight(&self) -> Option<DragSource> {
+        let here = self.window.window.id();
+        self.app
+            .pending_handover
+            .as_ref()
+            .filter(|handover| handover.from == here)
+            .map(|handover| handover.cargo.clone())
+    }
+
     /// **Empty a window that was opened to receive a tab which never arrived**
     /// (multiwindow slice F1c).
     ///
@@ -2038,17 +2065,17 @@ impl Runtime<'_> {
     /// finds no tab left to end a second time.
     pub(crate) fn abandon_a_window_nothing_arrived_in(&mut self) -> Result<()> {
         let mut tabs = std::mem::take(&mut self.window.tabs);
-        expire_every_leaf_of_a_window(
-            &mut tabs,
-            self.window.active_tab,
-            self.window.place(),
+        let (active, place) = (self.window.active_tab, self.window.place());
+        let moving = self.cargo_in_flight();
+        end_leaves_of(
+            tabs.iter_mut().enumerate(),
+            None,
+            moving.as_ref(),
+            |index| notify::desktop_reach(index == active, place),
             &mut self.window.attention_next_place,
             Instant::now(),
             attention_trace::global(),
         );
-        for mut tab in tabs {
-            tab.retire_all_shells();
-        }
         self.window.active_tab = 0;
         self.window.placeholder_tab = None;
         Ok(())
@@ -2119,22 +2146,25 @@ impl Runtime<'_> {
         // of them: its `Retire` step waits on
         // [`bt_pty::wait_for_retirements`] once every window has let go.
         //
-        // **Every place first, then every shell** — the order `close_tab` and
-        // `close_pane` keep. The window's tabs are all still here: a tab closed
-        // as the last one left them here for this road to end, so each pane's
-        // place is given up once, on this walk.
-        let place = self.window.place();
-        expire_every_leaf_of_a_window(
-            &mut self.window.tabs,
-            self.window.active_tab,
-            place,
+        //
+        // **Every place first, then every shell**, through the one ending step
+        // ([`end_leaves_of`]). The window's tabs are all still here: a tab
+        // closed as the last one left them here for this road to end. A window
+        // closed and then retired by a quit before it is reaped comes down this
+        // road twice, and the step's own mark makes the second walk give no
+        // place up; a tab a pending handover is carrying out of this window is
+        // not ending, and keeps its places.
+        let (active, place) = (self.window.active_tab, self.window.place());
+        let moving = self.cargo_in_flight();
+        end_leaves_of(
+            self.window.tabs.iter_mut().enumerate(),
+            None,
+            moving.as_ref(),
+            |index| notify::desktop_reach(index == active, place),
             &mut self.window.attention_next_place,
             Instant::now(),
             attention_trace::global(),
         );
-        for tab in &mut self.window.tabs {
-            tab.retire_all_shells();
-        }
         Ok(())
     }
 

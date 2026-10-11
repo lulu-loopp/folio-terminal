@@ -51,10 +51,11 @@
 //! # Where a pane ends
 //!
 //! **Every road that ends a pane retires its shell and expires its attention exactly once.** The
-//! window has four such roads — a pane closed, a tab closed, a window closed or retired by the
-//! quit, and a window a refused move had opened — and each hands every leaf it takes away
-//! [`Event::LeafGone`] before its shell is retired. A ledger that is not told is a request whose
-//! closing line the trace never writes.
+//! window has five such roads — a pane closed, a tab closed, a window closed or retired by the
+//! quit, a window a refused move had opened, and the launch placeholder taken away — and all five
+//! take one ending step, which hands each leaf [`Event::LeafGone`] before its shell is retired,
+//! never twice, and not to a pane a pending handover is carrying to another window. A ledger that
+//! is not told is a request whose closing line the trace never writes.
 //!
 //! # What is deliberately not here
 //!

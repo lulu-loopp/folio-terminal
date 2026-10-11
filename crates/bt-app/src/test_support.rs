@@ -2427,6 +2427,7 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         born_named: false,
         session,
         attention: attention::AttentionLedger::default(),
+        attention_ended: false,
         bell_reported: false,
         attention_clock: attention_wire::WaitClock::default(),
         // A fixture has no shell, so nothing was ever told a capability — and an empty string
