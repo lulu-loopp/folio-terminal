@@ -3947,25 +3947,30 @@ impl GitCache {
     }
 }
 
-/// One line for a write that would not go through — **the words a notice
-/// carries** (toast ruling, 2026-08-16).
+/// **One line for a fault** — the words a write's refusal notice carries
+/// (toast ruling, 2026-08-16) and the words a page, a graph or a document
+/// shows when git could not answer (W3). One table for both: the notice's
+/// copy used to be a second, English-only one, so a Chinese window raised an
+/// English toast for the same fault its page said in Chinese
+/// (AUDIT-hardcode SHL-G3).
 ///
-/// git's own sentence wherever there is one, and this module's only wording
-/// otherwise — a killed child and a missing executable have no sentence of their
-/// own to pass through, so the two of them are the whole of what is written here.
-/// [`GitFault::NotARepository`] cannot reach this function: a write is only
-/// offered from a page that already found a repository.
-///
-/// Public since the ruling, because the caller moved rather than the words: it
-/// used to be read by the cache filing a refusal, and it is now read by the
-/// runtime raising a toast off the same answer.
+/// git's own sentence wherever there is one — this window does not paraphrase
+/// a program that has already explained itself — and Folio's words for the two
+/// faults that have none: a killed child and a folder that is not a repository.
 #[must_use]
-pub fn write_refusal(fault: &GitFault) -> String {
+pub fn fault_sentence(fault: &GitFault) -> String {
+    fault_sentence_in(fault, crate::i18n::current())
+}
+
+/// [`fault_sentence`] in a named language.
+#[must_use]
+pub fn fault_sentence_in(fault: &GitFault, lang: crate::i18n::Lang) -> String {
     match fault {
-        GitFault::Refused(words) => words.clone(),
-        GitFault::GitMissing(words) => words.clone(),
-        GitFault::TimedOut => "git did not answer and was stopped".to_owned(),
-        GitFault::NotARepository => "the repository is no longer there".to_owned(),
+        GitFault::GitMissing(words) | GitFault::Refused(words) => words.clone(),
+        GitFault::TimedOut => crate::i18n::Text::GitFaultTimedOut.in_lang(lang).to_owned(),
+        GitFault::NotARepository => crate::i18n::Text::GitNotARepository
+            .in_lang(lang)
+            .to_owned(),
     }
 }
 
@@ -5434,7 +5439,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
         // notice from it (toast ruling, 2026-08-16). The cache keeps no copy: a
         // refusal is a thing that happened, not a state this repository is in.
         assert_eq!(
-            write_refusal(&GitFault::Refused(refusal.to_owned())),
+            fault_sentence(&GitFault::Refused(refusal.to_owned())),
             refusal
         );
         assert_eq!(cache.checkout_pending(), None, "the row stops waiting");
@@ -7364,7 +7369,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
             "and nothing is asked again, because nothing changed"
         );
         assert_eq!(
-            write_refusal(&refusal),
+            fault_sentence(&refusal),
             "error: the branch 'goner' is not fully merged.",
             "git's own sentence, unparaphrased — it is what the card carries"
         );
@@ -7440,6 +7445,45 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
         assert!(
             !location.adopt(Some(installed)),
             "the same answer again is no move"
+        );
+    }
+
+    /// RED (AUDIT-hardcode SHL-G3) — **a refused write's notice and the page say
+    /// a fault in one language, the window's.**
+    ///
+    /// The notice's words came from a second table with English literals, so a
+    /// Chinese window raised "git did not answer and was stopped" for the fault
+    /// its own page said in Chinese. The notice now reads the page's table; in
+    /// both languages its words are the page's words, and git's own sentence
+    /// passes through untouched.
+    ///
+    /// MUTATION: put the English literal back in `fault_sentence_in`'s
+    /// `TimedOut` arm — the Chinese row goes red.
+    #[test]
+    fn a_fault_says_itself_in_the_windows_language_once() {
+        use crate::i18n::{Lang, Text};
+        for lang in [Lang::English, Lang::Chinese] {
+            assert_eq!(
+                fault_sentence_in(&GitFault::TimedOut, lang),
+                Text::GitFaultTimedOut.in_lang(lang),
+                "{lang:?}"
+            );
+            assert_eq!(
+                fault_sentence_in(&GitFault::NotARepository, lang),
+                Text::GitNotARepository.in_lang(lang),
+                "{lang:?}"
+            );
+            let refusal = "error: 分支 'goner' 没有完全合并。";
+            assert_eq!(
+                fault_sentence_in(&GitFault::Refused(refusal.to_owned()), lang),
+                refusal,
+                "git's own words are carried as they are"
+            );
+        }
+        assert_ne!(
+            Text::GitFaultTimedOut.in_lang(Lang::Chinese),
+            Text::GitFaultTimedOut.in_lang(Lang::English),
+            "the two languages differ, so the Chinese row can tell the tables apart"
         );
     }
 }

@@ -1760,7 +1760,12 @@ pub fn build(
         // is transient: nothing about a machine with no git will change while
         // you look at it, so none of them is a toast either.
         GitSlot::Failed(fault) => {
-            content.empty = Some(empty_lines(&fault_sentence(fault), column, scale, measure));
+            content.empty = Some(empty_lines(
+                &crate::git::fault_sentence(fault),
+                column,
+                scale,
+                measure,
+            ));
             return content;
         }
         GitSlot::Ready(_) => {}
@@ -1774,7 +1779,7 @@ pub fn build(
     // over the whole column could never say.
     let (status, status_fault) = match cache.status() {
         GitSlot::Ready(status) => (Some(status), None),
-        GitSlot::Failed(fault) => (None, Some(fault_sentence(fault))),
+        GitSlot::Failed(fault) => (None, Some(crate::git::fault_sentence(fault))),
         GitSlot::Idle | GitSlot::Pending => (None, None),
     };
 
@@ -1850,7 +1855,9 @@ pub fn build(
             }
         }
         GitSlot::Failed(fault) => {
-            content.rows.push(GitRow::Notice(fault_sentence(fault)));
+            content
+                .rows
+                .push(GitRow::Notice(crate::git::fault_sentence(fault)));
         }
         // A repository with no local branches at all is an unborn one, and the
         // masthead has already said so — a heading over nothing would be a
@@ -1942,7 +1949,9 @@ pub fn build(
             }
         }
         GitSlot::Failed(fault) => {
-            content.rows.push(GitRow::Notice(fault_sentence(fault)));
+            content
+                .rows
+                .push(GitRow::Notice(crate::git::fault_sentence(fault)));
         }
         GitSlot::Idle | GitSlot::Pending => {}
     }
@@ -1978,7 +1987,9 @@ fn push_expansion(rows: &mut Vec<GitRow>, cache: &GitCache, hash: &str) {
         None | Some(GitSlot::Idle | GitSlot::Pending) => {
             rows.push(GitRow::Notice(git_reading().to_owned()));
         }
-        Some(GitSlot::Failed(fault)) => rows.push(GitRow::Notice(fault_sentence(fault))),
+        Some(GitSlot::Failed(fault)) => {
+            rows.push(GitRow::Notice(crate::git::fault_sentence(fault)))
+        }
     }
 }
 
@@ -2288,16 +2299,6 @@ fn commit_row(
         first,
         last,
         expanded,
-    }
-}
-
-/// One line for a fault, in git's own words wherever there are any (W3).
-#[must_use]
-pub fn fault_sentence(fault: &GitFault) -> String {
-    match fault {
-        GitFault::GitMissing(words) | GitFault::Refused(words) => words.clone(),
-        GitFault::TimedOut => Text::GitFaultTimedOut.text().to_owned(),
-        GitFault::NotARepository => git_not_a_repository().to_owned(),
     }
 }
 
@@ -5225,7 +5226,7 @@ mod tests {
             );
             assert_eq!(
                 content.empty.as_deref(),
-                Some(wrapped(&fault_sentence(&fault)).as_slice())
+                Some(wrapped(&crate::git::fault_sentence(&fault)).as_slice())
             );
             assert!(content.rows.is_empty(), "and the page is otherwise bare");
         }
@@ -5640,7 +5641,7 @@ mod tests {
     ///
     /// The words used to be a red strip carved off the top of this column. They
     /// are now a notice raised by the runtime from the answer itself
-    /// ([`crate::git::write_refusal`]), so what this test pins is the *silence*
+    /// ([`crate::git::fault_sentence`]), so what this test pins is the *silence*
     /// here: no empty state, no row moved, no dimming left behind, and — the
     /// point of the whole ruling — no permanent evidence of a thing that has
     /// finished happening.
@@ -5686,7 +5687,7 @@ mod tests {
         );
         // The words the notice will carry are the answer's, and they are git's.
         assert_eq!(
-            crate::git::write_refusal(&GitFault::Refused(
+            crate::git::fault_sentence(&GitFault::Refused(
                 "fatal: Unable to create '.git/index.lock': File exists.".to_owned()
             )),
             "fatal: Unable to create '.git/index.lock': File exists."

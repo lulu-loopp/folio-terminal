@@ -42738,7 +42738,7 @@ fn revealable_preview_file(source: &preview::PreviewSource) -> Option<PathBuf> {
 /// looked, and would then take the report away again. Those keep the page's own
 /// quiet sentence instead, standing where the rows would be (`git_panel::build`).
 ///
-/// The words are always git's own, through [`git::write_refusal`] — this window
+/// The words are always git's own, through [`git::fault_sentence`] — this window
 /// does not paraphrase a program that has already explained itself.
 fn git_answer_notice(answer: &git::GitAnswer) -> Option<String> {
     match answer {
@@ -42749,7 +42749,7 @@ fn git_answer_notice(answer: &git::GitAnswer) -> Option<String> {
         | git::GitAnswer::Checkout {
             outcome: Err(fault),
             ..
-        } => Some(git::write_refusal(fault)),
+        } => Some(git::fault_sentence(fault)),
         _ => None,
     }
 }

@@ -214,7 +214,7 @@ const CHROME_LINE_HEIGHT: f32 = 1.4;
 pub enum ToastKind {
     /// `status_err` — the rose. Git refused, a write would not go through.
     ///
-    /// The first and, today, the only caller: [`crate::git::write_refusal`]'s
+    /// The first and, today, the only caller: [`crate::git::fault_sentence`]'s
     /// sentence, raised where the verb was pressed.
     Error,
     /// `accent` — a fact, in the colour this product says "look here" in.

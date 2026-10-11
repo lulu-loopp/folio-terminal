@@ -314,7 +314,7 @@ impl Runtime<'_> {
                                     lossy: false,
                                 }),
                                 Err(fault) => {
-                                    peek.decline(git_panel::fault_sentence(&fault));
+                                    peek.decline(git::fault_sentence(&fault));
                                 }
                             }
                             body |= index == self.window.active_tab;
@@ -336,7 +336,7 @@ impl Runtime<'_> {
                             encoding: preview::HeadEncoding::Utf8,
                             lossy: false,
                         }),
-                        Err(fault) => buffer.decline(git_panel::fault_sentence(&fault)),
+                        Err(fault) => buffer.decline(git::fault_sentence(&fault)),
                     }
                     body |= index == self.window.active_tab;
                     continue;

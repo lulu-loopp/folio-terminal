@@ -2157,7 +2157,7 @@ pub fn build(
         // not a toast (2026-08-16): a history git refuses to read stays refused
         // until something outside this window changes.
         crate::git::GitSlot::Failed(fault) => {
-            content.empty = Some(crate::git_panel::fault_sentence(fault));
+            content.empty = Some(crate::git::fault_sentence(fault));
             return content;
         }
         crate::git::GitSlot::Idle | crate::git::GitSlot::Pending => {
