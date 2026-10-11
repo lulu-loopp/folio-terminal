@@ -61,7 +61,7 @@ hand-editing the generated architecture region.
 
 The registry's `# completions` section (S-1, 2026-10-11) is the side-effects
 contract's ledger, one row per request protocol, held by the
-`every_*completions*` tests and `every_conforming_request_door_holds_no_wait_of_its_own`
+`every_*completions*` tests (among them `every_worker_door_body_is_reached_from_a_completions_door`) and `every_conforming_request_door_holds_no_wait_of_its_own`
 in `window_waits_tests` and by the fifth check of `scripts/ci/check-window-waits.ps1`.
 When red, give the new answer, lane, thread or registry row its ledger row (or
 correct the row the code moved past); a status names the D-row or registry row
