@@ -46,8 +46,8 @@ fn viewport_open_bounds_prose_work() {
 #[test]
 fn typing_snapshots_share_the_content_allocation() {
     let buffer = buffer("ordinary prose\n\n".repeat(12000));
-    let snapshot = buffer.content.clone().unwrap();
-    assert_eq!(snapshot.as_ptr(), buffer.content.as_ref().unwrap().as_ptr());
+    let snapshot = buffer.content().cloned().unwrap();
+    assert_eq!(snapshot.as_ptr(), buffer.content().unwrap().as_ptr());
 }
 
 /// Mutation: copy/diff the full body instead of recording the replacement.
@@ -55,7 +55,7 @@ fn typing_snapshots_share_the_content_allocation() {
 fn typing_undo_copies_only_the_replaced_bytes() {
     let mut buffer = buffer("ordinary prose\n\n".repeat(12000));
     let mut caret = preview_edit::EditCaret::default();
-    caret.place(buffer.content.as_deref().unwrap(), 100, false);
+    caret.place(buffer.text().unwrap(), 100, false);
     WORK.with_borrow_mut(BTreeMap::clear);
     buffer.edit_by_caret(&mut caret, |text, caret| {
         preview_edit::insert(text, caret, "x")
@@ -63,10 +63,7 @@ fn typing_undo_copies_only_the_replaced_bytes() {
     assert_eq!(work("edit copied bytes"), 0);
     assert!(work("undo compared bytes") <= 1);
     assert_eq!(buffer.undo_edit().unwrap().caret, 100);
-    assert_eq!(
-        buffer.content.as_deref().unwrap(),
-        "ordinary prose\n\n".repeat(12000)
-    );
+    assert_eq!(buffer.text().unwrap(), "ordinary prose\n\n".repeat(12000));
 }
 
 /// Mutation: restore a widest-line scan across the complete document on edit.
@@ -74,7 +71,7 @@ fn typing_undo_copies_only_the_replaced_bytes() {
 fn typing_width_work_is_confined_to_changed_lines() {
     let mut buffer = buffer("ordinary prose\n\n".repeat(12000));
     let mut caret = preview_edit::EditCaret::default();
-    caret.place(buffer.content.as_deref().unwrap(), 100, false);
+    caret.place(buffer.text().unwrap(), 100, false);
     WORK.with_borrow_mut(BTreeMap::clear);
     buffer.edit_by_caret(&mut caret, |text, caret| {
         preview_edit::insert(text, caret, "x")
@@ -84,7 +81,7 @@ fn typing_width_work_is_confined_to_changed_lines() {
         "measured {} bytes",
         work("width bytes")
     );
-    assert_eq!(buffer.max_columns, 15);
+    assert_eq!(buffer.max_columns(), 15);
 }
 
 pub(crate) struct Timer(&'static str, Option<Instant>);
@@ -167,8 +164,7 @@ fn md_typing_path_eager_benchmark() {
         let wraps = preview_wrap::WindowCache::default();
         let mut caret = preview_edit::EditCaret::default();
         // Choose a prose block near the byte midpoint, then the following prose block.
-        let (blocks, ranges, _) =
-            preview::parse_markdown_mapped(buffer.content.as_deref().unwrap());
+        let (blocks, ranges, _) = preview::parse_markdown_mapped(buffer.text().unwrap());
         let candidates: Vec<_> = blocks
             .iter()
             .zip(&ranges)
@@ -176,11 +172,7 @@ fn md_typing_path_eager_benchmark() {
             .map(|(_, r)| r.clone())
             .take(2)
             .collect();
-        caret.place(
-            buffer.content.as_deref().unwrap(),
-            candidates[0].start,
-            false,
-        );
+        caret.place(buffer.text().unwrap(), candidates[0].start, false);
         println!(
             "\n{name}: {bytes} bytes, {} blocks; milliseconds (percentage of measured total)",
             blocks.len()
@@ -201,16 +193,16 @@ fn md_typing_path_eager_benchmark() {
             if matches!(action, "within" | "across") {
                 if action == "across" {
                     caret.place(
-                        buffer.content.as_deref().unwrap(),
+                        buffer.text().unwrap(),
                         preview_edit::previous_boundary(
-                            buffer.content.as_deref().unwrap(),
+                            buffer.text().unwrap(),
                             candidates[1].start,
                         ),
                         false,
                     );
                 }
                 let clock = Timer::new("caret copy");
-                let content = buffer.content.as_deref().unwrap();
+                let content = buffer.text().unwrap();
                 drop(clock);
                 preview_edit::move_caret_indexed(
                     content,
@@ -252,14 +244,14 @@ fn md_typing_path_eager_benchmark() {
                     (blocks, ranges, maps, Some(intrinsic))
                 } else {
                     let clock = Timer::new("rebuild copy");
-                    let content = buffer.content.clone().unwrap();
+                    let content = buffer.content().cloned().unwrap();
                     drop(clock);
                     let clock = Timer::new("parse");
                     let (blocks, ranges, maps) = preview::parse_markdown_mapped(&content);
                     drop(clock);
                     (blocks, ranges, maps, None)
                 };
-                let content = buffer.content.as_deref().unwrap();
+                let content = buffer.text().unwrap();
                 let source = SourceBlocks::from(source_at(content, &blocks, &ranges, caret.caret));
                 let math = DocumentMath::default();
                 let pictures = DocumentPictures::default();
@@ -365,15 +357,9 @@ pub(super) fn assert_one_character_edit_reuses_work() {
     let mut cache = MarkdownIntrinsicCache::default();
     let wraps = preview_wrap::WindowCache::default();
     let mut doc = PreviewDocument::default();
-    let at = buffer
-        .content
-        .as_deref()
-        .unwrap()
-        .find("Paragraph 512")
-        .unwrap()
-        + 2;
+    let at = buffer.text().unwrap().find("Paragraph 512").unwrap() + 2;
     let mut caret = preview_edit::EditCaret::default();
-    caret.place(buffer.content.as_deref().unwrap(), at, false);
+    caret.place(buffer.text().unwrap(), at, false);
     for edit in [false, true] {
         if edit {
             buffer.edit_by_caret(&mut caret, |text, caret| {
@@ -381,7 +367,7 @@ pub(super) fn assert_one_character_edit_reuses_work() {
             });
         }
         let mut pass = wraps.prepare(&doc, true, preview_wrap::Frame::new(1000.0, 1.0, 0));
-        let content = buffer.content.as_deref().unwrap();
+        let content = buffer.text().unwrap();
         WORK.with_borrow_mut(BTreeMap::clear);
         let (blocks, ranges, maps) = preview::parse_markdown_mapped(content);
         let parsed_bytes = work("parsed bytes");
@@ -464,7 +450,7 @@ fn typing_indexes_match_full_scans_through_edits_undo_and_redo() {
     let mut buffer = buffer("wide\t中文\r\nsmall\n🙂 e\u{301}\n\n".repeat(4));
     let mut caret = preview_edit::EditCaret::default();
     for step in 0..128 {
-        let content = buffer.content.as_deref().unwrap();
+        let content = buffer.text().unwrap();
         let boundaries: Vec<_> = content
             .char_indices()
             .map(|(at, _)| at)
@@ -485,9 +471,9 @@ fn typing_indexes_match_full_scans_through_edits_undo_and_redo() {
             if direction == 2 {
                 let _ = buffer.redo_edit();
             }
-            let content = buffer.content.as_deref().unwrap();
+            let content = buffer.text().unwrap();
             assert_eq!(buffer.line_starts(), preview_edit::line_starts(content));
-            assert_eq!(buffer.max_columns, preview::widest_line_columns(content));
+            assert_eq!(buffer.max_columns(), preview::widest_line_columns(content));
             for motion in [
                 preview_edit::Motion::Left,
                 preview_edit::Motion::Right,
@@ -536,8 +522,7 @@ fn md_typing_path_benchmark() {
             TIMES.with_borrow(|t| t.get("width/index").copied().unwrap_or_default());
         let mut h = preview_viewport::tests::Harness::default();
         h.width = 1000.0;
-        let (blocks, ranges, _) =
-            preview::parse_markdown_mapped(buffer.content.as_deref().unwrap());
+        let (blocks, ranges, _) = preview::parse_markdown_mapped(buffer.text().unwrap());
         let index = blocks
             .iter()
             .zip(&ranges)
@@ -547,11 +532,7 @@ fn md_typing_path_benchmark() {
             .map(|(index, _)| index)
             .unwrap();
         let mut caret = preview_edit::EditCaret::default();
-        caret.place(
-            buffer.content.as_deref().unwrap(),
-            ranges[index].start,
-            false,
-        );
+        caret.place(buffer.text().unwrap(), ranges[index].start, false);
         println!(
             "\n{name}: {bytes} bytes, {} blocks; viewport 1000 x 600, scale 1; milliseconds",
             blocks.len()
@@ -563,11 +544,7 @@ fn md_typing_path_benchmark() {
         for action in ["open", "scroll", "insert", "delete"] {
             // Match the eager benchmark's already active raw prose block for the edit.
             if action == "insert" {
-                h.rebuild_borrowed(
-                    buffer.content.as_deref().unwrap(),
-                    Some(&[]),
-                    Some(caret.caret),
-                );
+                h.rebuild_borrowed(buffer.text().unwrap(), Some(&[]), Some(caret.caret));
             }
             TIMES.with_borrow_mut(BTreeMap::clear);
             reset_work();
@@ -578,18 +555,18 @@ fn md_typing_path_benchmark() {
             }
             let start = Instant::now();
             match action {
-                "open" => h.rebuild_borrowed(buffer.content.as_deref().unwrap(), None, None),
+                "open" => h.rebuild_borrowed(buffer.text().unwrap(), None, None),
                 "scroll" => {
                     let timer = Timer::new("layout");
                     h.scroll_bytes(
                         h.layout().get(index).unwrap().top + h.view.padding,
                         false,
-                        buffer.content.as_deref().unwrap(),
+                        buffer.text().unwrap(),
                     );
                     drop(timer);
                 }
                 _ => {
-                    let revision = buffer.revision;
+                    let revision = buffer.revision();
                     buffer.edit_by_caret(&mut caret, |text, caret| {
                         if action == "insert" {
                             preview_edit::insert(text, caret, "x")
@@ -598,11 +575,7 @@ fn md_typing_path_benchmark() {
                         }
                     });
                     let edits = buffer.viewport_edits_since(revision).unwrap();
-                    h.rebuild_borrowed(
-                        buffer.content.as_deref().unwrap(),
-                        Some(&edits),
-                        Some(caret.caret),
-                    );
+                    h.rebuild_borrowed(buffer.text().unwrap(), Some(&edits), Some(caret.caret));
                 }
             }
             let total = (start.elapsed()

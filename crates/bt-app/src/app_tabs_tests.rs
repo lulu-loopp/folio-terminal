@@ -2909,7 +2909,7 @@ fn the_lone_preview_pane_of_a_tab_brings_its_whole_pool_back_with_it() {
     assert_eq!(
         back.preview_pool
             .get(&preview::PreviewSource::file("D:\\work\\read.md"))
-            .and_then(|buffer| buffer.content.as_deref()),
+            .and_then(|buffer| buffer.text()),
         Some("history"),
         "and the history behind it came too: 若是原 tab 最后一个预览 pane \
              则整池随行"

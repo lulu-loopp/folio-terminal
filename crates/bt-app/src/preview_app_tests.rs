@@ -2654,7 +2654,7 @@ fn a_same_length_edit_rebuilds_the_cached_document() {
         content.replace_range(8..9, "2");
         true
     });
-    assert_eq!(buffer.content.as_deref(), Some("let x = 2;\n"));
+    assert_eq!(buffer.text(), Some("let x = 2;\n"));
     let after = document_key(&buffer, false, 400.0, 2.0);
     assert_ne!(
         before, after,
@@ -2750,7 +2750,7 @@ fn a_body_with_unsaved_edits_is_not_overwritten_and_says_so() {
         text.push_str("typed by hand\n");
         true
     }));
-    assert!(buffer.dirty);
+    assert!(buffer.dirty());
 
     // ① Somebody else writes the file.
     std::fs::write(&path, "# two\n").expect("rewrite");
@@ -2760,15 +2760,14 @@ fn a_body_with_unsaved_edits_is_not_overwritten_and_says_so() {
         preview::DiskVerdict::Say,
         "a strip, not a read"
     );
-    assert_eq!(buffer.disk, preview::DiskNews::Changed);
+    assert_eq!(buffer.disk(), preview::DiskNews::Changed);
     assert!(
         !buffer.is_behind_the_disk(),
         "nothing is owed to the worker: the body on the glass is not going anywhere"
     );
     assert!(
         buffer
-            .content
-            .as_deref()
+            .text()
             .is_some_and(|body| body.contains("typed by hand")),
         "and the words that were typed are still there"
     );
@@ -2789,12 +2788,11 @@ fn a_body_with_unsaved_edits_is_not_overwritten_and_says_so() {
     // ② Keep my edits: the strip goes down, the text stays, and the save is
     // still guarded.
     assert!(buffer.keep_this_body());
-    assert_eq!(buffer.disk, preview::DiskNews::Level);
-    assert!(buffer.dirty, "keeping is not saving");
+    assert_eq!(buffer.disk(), preview::DiskNews::Level);
+    assert!(buffer.dirty(), "keeping is not saving");
     assert!(
         buffer
-            .content
-            .as_deref()
+            .text()
             .is_some_and(|body| body.contains("typed by hand"))
     );
     assert_eq!(
@@ -2809,10 +2807,10 @@ fn a_body_with_unsaved_edits_is_not_overwritten_and_says_so() {
         preview::DiskVerdict::Say
     );
     assert!(buffer.take_the_disks_copy(), "a head read is now owed");
-    assert!(!buffer.dirty);
-    assert_eq!(buffer.disk, preview::DiskNews::Level);
+    assert!(!buffer.dirty());
+    assert_eq!(buffer.disk(), preview::DiskNews::Level);
     buffer.accept(preview::read_head(&path));
-    assert_eq!(buffer.content.as_deref(), Some("# two\n"));
+    assert_eq!(buffer.text(), Some("# two\n"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2845,13 +2843,13 @@ fn a_deleted_file_keeps_the_body_that_was_read_from_it() {
         buffer.note_disk_moved(false, None),
         preview::DiskVerdict::Say
     );
-    assert_eq!(buffer.disk, preview::DiskNews::Deleted);
+    assert_eq!(buffer.disk(), preview::DiskNews::Deleted);
     assert!(
         !buffer.is_behind_the_disk(),
         "nothing is asked of a disk that has nothing to answer with"
     );
     assert_eq!(
-        buffer.content.as_deref(),
+        buffer.text(),
         Some("# still here\n"),
         "what the reader was reading is what the reader is still reading"
     );
@@ -2897,8 +2895,8 @@ fn a_deleted_file_keeps_the_body_that_was_read_from_it() {
 fn a_preview_pane_changing_tabs_arrives_holding_the_edit_it_left_with() {
     let path = preview::PreviewSource::file(r"D:\notes\todo.txt");
     let mut edited = buffer_saying(r"D:\notes\todo.txt", "todo.txt", "milk\nbread\n");
-    edited.dirty = true;
-    let revision_before = edited.revision;
+    edited.set_dirty_for_test(true);
+    let revision_before = edited.revision();
 
     let (mut source, seat) = tab_with_a_preview(1, vec![edited]);
     {
@@ -2936,12 +2934,13 @@ fn a_preview_pane_changing_tabs_arrives_holding_the_edit_it_left_with() {
         .get(&path)
         .expect("the buffer it names is in the pool it arrived in");
     assert!(
-        buffer.dirty,
+        buffer.dirty(),
         "the unsaved work is still unsaved, not re-read"
     );
-    assert_eq!(buffer.content.as_deref(), Some("milk\nbread\n"));
+    assert_eq!(buffer.text(), Some("milk\nbread\n"));
     assert_eq!(
-        buffer.revision, revision_before,
+        buffer.revision(),
+        revision_before,
         "the same object: an uncontested arrival is not a content change"
     );
     assert!(
@@ -2970,19 +2969,19 @@ fn merging_two_tabs_leaves_one_buffer_per_file_and_the_dirty_one_wins() {
     let plan = preview::PreviewSource::file(r"D:\notes\plan.md");
 
     let mut arriving_notes = buffer_saying(r"D:\notes\notes.md", "notes.md", "ARRIVING EDIT");
-    arriving_notes.dirty = true;
+    arriving_notes.set_dirty_for_test(true);
     let arriving_plan = buffer_saying(r"D:\notes\plan.md", "plan.md", "clean arrival");
     let (mut source, _) = tab_with_a_preview(1, vec![arriving_notes, arriving_plan]);
 
     let staying_notes = buffer_saying(r"D:\notes\notes.md", "notes.md", "on disk");
     let mut staying_plan = buffer_saying(r"D:\notes\plan.md", "plan.md", "STAYING EDIT");
-    staying_plan.dirty = true;
+    staying_plan.set_dirty_for_test(true);
     let (mut target, host) = tab_with_a_preview(2, vec![staying_notes, staying_plan]);
     let host_revision = target
         .preview_pool
         .get(&notes)
         .expect("the host is holding it")
-        .revision;
+        .revision();
 
     let arrived = arriving_as(&source, 90);
     absorb_tab_sessions(&mut source, &mut target, &arrived);
@@ -2994,23 +2993,23 @@ fn merging_two_tabs_leaves_one_buffer_per_file_and_the_dirty_one_wins() {
     );
     let merged = target.preview_pool.get(&notes).expect("notes.md survived");
     assert_eq!(
-        merged.content.as_deref(),
+        merged.text(),
         Some("ARRIVING EDIT"),
         "dirty wins: the unsaved copy is the one that stands"
     );
-    assert!(merged.dirty);
+    assert!(merged.dirty());
     assert!(
-        merged.revision > host_revision,
+        merged.revision() > host_revision,
         "and every surface on that path is told the body under it changed"
     );
 
     let held = target.preview_pool.get(&plan).expect("plan.md survived");
     assert_eq!(
-        held.content.as_deref(),
+        held.text(),
         Some("STAYING EDIT"),
         "and a clean arrival never walks over unsaved work already here"
     );
-    assert!(held.dirty);
+    assert!(held.dirty());
 
     assert_eq!(
         target
@@ -3042,27 +3041,26 @@ fn the_pool_merge_law_prefers_dirt_then_the_incumbent_and_appends_the_rest() {
     let untouched = target
         .get(&preview::PreviewSource::file(r"D:\a.txt"))
         .unwrap()
-        .revision;
+        .revision();
     target.merge_buffer(buffer_saying(r"D:\a.txt", "a.txt", "clean there"));
     let a = target
         .get(&preview::PreviewSource::file(r"D:\a.txt"))
         .unwrap();
-    assert_eq!(a.content.as_deref(), Some("clean here"));
-    assert_eq!(a.revision, untouched);
+    assert_eq!(a.text(), Some("clean here"));
+    assert_eq!(a.revision(), untouched);
 
     // Two dirty copies: the one already here stands.
     let mut here = buffer_saying(r"D:\b.txt", "b.txt", "DIRTY HERE");
-    here.dirty = true;
+    here.set_dirty_for_test(true);
     target.insert(here);
     let mut there = buffer_saying(r"D:\b.txt", "b.txt", "DIRTY THERE");
-    there.dirty = true;
+    there.set_dirty_for_test(true);
     target.merge_buffer(there);
     assert_eq!(
         target
             .get(&preview::PreviewSource::file(r"D:\b.txt"))
             .unwrap()
-            .content
-            .as_deref(),
+            .text(),
         Some("DIRTY HERE"),
         "a tie stays with the incumbent, so nobody's unsaved work is discarded"
     );
@@ -3074,12 +3072,12 @@ fn the_pool_merge_law_prefers_dirt_then_the_incumbent_and_appends_the_rest() {
     // And the winner keeps the loser's place in the history, rather than
     // jumping to the front of a list the switcher reads in order.
     let mut winner = buffer_saying(r"D:\a.txt", "a.txt", "DIRTY THERE");
-    winner.dirty = true;
+    winner.set_dirty_for_test(true);
     target.merge_buffer(winner);
     assert_eq!(
         target
             .buffers()
-            .map(|buffer| buffer.name.as_str())
+            .map(|buffer| buffer.name())
             .collect::<Vec<_>>(),
         vec!["a.txt", "b.txt", "c.txt"]
     );

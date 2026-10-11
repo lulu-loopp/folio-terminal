@@ -807,8 +807,8 @@ impl SeatDemand<'_> {
                 rows: self.rows,
             },
             SeatSource::Document { buffer, mono } => Damage::Document {
-                source: buffer.source.clone(),
-                revision: buffer.revision,
+                source: buffer.source().clone(),
+                revision: buffer.revision(),
                 columns: self.columns,
                 rows: self.rows,
                 mono: *mono,
@@ -1754,8 +1754,7 @@ fn files_head(
 /// painter's clip has at most one column's worth of text left to bite off.
 fn document_head(buffer: &PreviewBuffer, columns: usize, rows: usize) -> Vec<String> {
     buffer
-        .content
-        .as_deref()
+        .text()
         .unwrap_or_default()
         .lines()
         .take(rows)
@@ -3509,13 +3508,13 @@ mod tests {
             "notes.md".to_owned(),
         );
         assert!(
-            buffer.content.is_none(),
+            buffer.content().is_none(),
             "a buffer nobody has read has nothing to quote"
         );
         // The caller's own rule (`Runtime::mini_source`) is what turns this into
         // a face; asserted here as the fact it turns on, so the two cannot
         // disagree about what "loaded" means.
-        assert_eq!(buffer.load, crate::preview::PreviewLoad::Pending);
+        assert_eq!(*buffer.load(), crate::preview::PreviewLoad::Pending);
 
         let mut thumbs = FocusThumbnails::default();
         thumbs.project(
@@ -3758,7 +3757,8 @@ mod tests {
         let first = loaded_buffer("a.rs", "the first file\n");
         let second = loaded_buffer("b.rs", "the second file\n");
         assert_eq!(
-            first.revision, second.revision,
+            first.revision(),
+            second.revision(),
             "two freshly-read buffers are at the same revision, which is the trap"
         );
         let mut thumbs = FocusThumbnails::default();

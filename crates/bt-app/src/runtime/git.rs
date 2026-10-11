@@ -299,7 +299,7 @@ impl Runtime<'_> {
                             .window
                             .peek_buffer
                             .as_mut()
-                            .filter(|peek| peek.source == source)
+                            .filter(|peek| *peek.source() == source)
                         {
                             match outcome {
                                 Ok(bytes) => peek.accept(preview::composed_read(&bytes)),
@@ -510,7 +510,7 @@ impl Runtime<'_> {
                 .find(|seat| {
                     matches!(
                         self.preview_buffer_on(self.preview_here(*seat))
-                            .map(|buffer| &buffer.source),
+                            .map(|buffer| buffer.source()),
                         Some(preview::PreviewSource::GitGraph { root: showing })
                             if showing == root
                     )
@@ -733,7 +733,7 @@ impl Runtime<'_> {
         let unread = self
             .preview_pool
             .get(&source)
-            .is_some_and(|buffer| buffer.load == preview::PreviewLoad::Pending);
+            .is_some_and(|buffer| *buffer.load() == preview::PreviewLoad::Pending);
         if !unread {
             return Ok(());
         }
@@ -1200,7 +1200,7 @@ impl Runtime<'_> {
             .preview_surfaces()
             .into_iter()
             .filter_map(|surface| {
-                let source = self.preview_buffer_on(surface)?.source.clone();
+                let source = self.preview_buffer_on(surface)?.source().clone();
                 match source {
                     preview::PreviewSource::GitGraph { root } => Some((surface, root)),
                     _ => None,
@@ -1832,7 +1832,7 @@ impl Runtime<'_> {
         let unread = self
             .preview_pool
             .get(&source)
-            .is_some_and(|buffer| buffer.load == preview::PreviewLoad::Pending);
+            .is_some_and(|buffer| *buffer.load() == preview::PreviewLoad::Pending);
         if !unread {
             return Ok(());
         }
@@ -2344,18 +2344,19 @@ impl Runtime<'_> {
                         // **A pill is more specific than the row it is on.** The
                         // rectangles come from the same run the painter draws
                         // from, so a pill you can see is a pill you can press.
-                        let pill = self.graph_row_rect(surface, index).and_then(|rect| {
-                            git_graph::graph_ref_pill_at(
-                                commit,
-                                rect,
-                                content.lane_width,
-                                content.columns,
-                                self.window.renderer.scale_factor() as f32,
-                                position.x as f32,
-                                position.y as f32,
-                            )
-                            .and_then(|at| commit.refs.get(at))
-                        });
+                        let pill: Option<&git_graph::GraphRefPill> =
+                            self.graph_row_rect(surface, index).and_then(|rect| {
+                                git_graph::graph_ref_pill_at(
+                                    commit,
+                                    rect,
+                                    content.lane_width,
+                                    content.columns,
+                                    self.window.renderer.scale_factor() as f32,
+                                    position.x as f32,
+                                    position.y as f32,
+                                )
+                                .and_then(|at| commit.refs.get(at))
+                            });
                         match pill {
                             Some(pill) => match pill.kind {
                                 git::GitRefKind::Local => profiles::GitMenuTarget::LocalBranch {
@@ -3351,7 +3352,7 @@ impl Runtime<'_> {
             .and_then(|state| state.cache.refs().ready())
             .map(|refs| {
                 git::local_branches(refs)
-                    .map(|entry| entry.name.clone())
+                    .map(|entry: &git::GitRefEntry| entry.name.clone())
                     .collect()
             })
             .unwrap_or_default()
@@ -4106,7 +4107,7 @@ impl Runtime<'_> {
         let unread = self
             .preview_pool
             .get(&source)
-            .is_some_and(|buffer| buffer.load == preview::PreviewLoad::Pending);
+            .is_some_and(|buffer| *buffer.load() == preview::PreviewLoad::Pending);
         if !unread {
             return Ok(());
         }
@@ -4274,7 +4275,7 @@ impl Runtime<'_> {
         let surface = PreviewSurface::Float(id);
         let Some(preview::PreviewSource::GitGraph { root }) = self
             .preview_buffer_on(surface)
-            .map(|buffer| buffer.source.clone())
+            .map(|buffer| buffer.source().clone())
         else {
             return float::FloatBody::default();
         };

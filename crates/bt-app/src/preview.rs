@@ -4746,18 +4746,24 @@ pub enum GitDiffAgainst {
 /// Owned by the tab's [`PreviewPool`] and *referred* to by the panes showing it,
 /// which is what makes "a file open in two panes is one buffer" true by
 /// construction rather than by two panes agreeing.
+///
+/// **Its state changes only through its own doors**: the fields are private,
+/// so the dirty flag, the body, its revision, the disk news and the undo log
+/// are written by this type's methods and read elsewhere through its accessors
+/// (the ownership contract's §2.2 invariant 3; the ownership census holds the
+/// type to one writer per field).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewBuffer {
     /// The identity — see [`PreviewSource`].
-    pub source: PreviewSource,
+    source: PreviewSource,
     /// What the header and the switcher call it.
-    pub name: String,
-    pub ftype: PreviewFtype,
+    name: String,
+    ftype: PreviewFtype,
     /// The complete file or explicitly incomplete fallback, once read.
-    pub content: Option<crate::preview_text::Text>,
+    content: Option<crate::preview_text::Text>,
     line_index: crate::preview_text::LineIndex,
     /// Whether this body omits bytes from the file. Incomplete bodies never edit.
-    pub truncated: bool,
+    truncated: bool,
     /// Unsaved edits.
     ///
     /// **The body is somewhere other than where the disk last saw it**, and
@@ -4778,7 +4784,7 @@ pub struct PreviewBuffer {
     /// tail, or fallen off the front of a very long session — is dirty from then
     /// on, because the bytes the file holds are no longer anywhere in this
     /// history.
-    pub dirty: bool,
+    dirty: bool,
     /// How many times this body has changed.
     ///
     /// **A revision, not a length.** Everything derived from the content — the
@@ -4786,7 +4792,7 @@ pub struct PreviewBuffer {
     /// length it replaced was a counter that could not see a same-length edit:
     /// swapping one letter for another left the cache convinced it was still
     /// looking at the old text.
-    pub revision: u64,
+    revision: u64,
     /// Coordinate-only edit history for pane-local occurrence remapping.
     viewport_edits: std::collections::VecDeque<(u64, crate::preview_viewport::Edit)>,
     /// **Which buffer this is**, told apart from every other buffer this process
@@ -4828,8 +4834,8 @@ pub struct PreviewBuffer {
     /// compares this against what the disk says *now*, and a disagreement means
     /// somebody else wrote the file while it was open here. `None` for a buffer
     /// that has no body yet — there is nothing to be stale.
-    pub disk_mtime: Option<SystemTime>,
-    pub load: PreviewLoad,
+    disk_mtime: Option<SystemTime>,
+    load: PreviewLoad,
     /// **A head read is out with the worker** — the question, filed.
     ///
     /// [`PreviewLoad::Pending`] cannot carry this: it says "asked, *or about to
@@ -4861,7 +4867,7 @@ pub struct PreviewBuffer {
     ///
     /// Written through one door ([`Self::note_disk_moved`]) and closed by three:
     /// the two verbs on the strip and the answer to a read.
-    pub disk: DiskNews,
+    disk: DiskNews,
     /// **The disk moved under this body** (W2 slice 5, `preview_watch`).
     ///
     /// A third bit beside the load and beside [`Self::head_asked`], for the
@@ -4879,7 +4885,7 @@ pub struct PreviewBuffer {
     ///
     /// Initialized when the body lands and maintained from replacement deltas.
     /// The horizontal scroller reads this maximum without scanning the body.
-    pub max_columns: usize,
+    max_columns: usize,
     /// **What the bytes said when this buffer was last read** (user ruling
     /// 2026-08-27; `docs/DESIGN.md` §7.32).
     ///
@@ -4908,7 +4914,7 @@ pub struct PreviewBuffer {
     /// [`HeadEncoding::Utf8`] until a body lands, which is what a file with no
     /// mark is anyway and therefore the only default that cannot invent a
     /// sentence the file never said.
-    pub encoding: HeadEncoding,
+    encoding: HeadEncoding,
     /// **The decode had to invent characters this file does not contain** (T2 ②,
     /// 2026-09-10).
     ///
@@ -4946,7 +4952,7 @@ pub struct PreviewBuffer {
     ///
     /// Not persisted, and emptied whenever the body is replaced by the disk's:
     /// every offset in it names a place in the body it was recorded against.
-    pub undo: crate::preview_undo::UndoLog,
+    undo: crate::preview_undo::UndoLog,
 }
 
 impl PreviewBuffer {
@@ -5080,9 +5086,73 @@ impl PreviewBuffer {
         }
     }
 
-    /// **This buffer's file was renamed** — take the new name, and re-ask what
-    /// it means without throwing away what the bytes already said (user ruling
-    /// 2026-08-27; `docs/DESIGN.md` §7.32).
+    /// The identity — see [`PreviewSource`].
+    pub fn source(&self) -> &PreviewSource {
+        &self.source
+    }
+
+    /// What the header and the switcher call it.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub const fn ftype(&self) -> PreviewFtype {
+        self.ftype
+    }
+
+    /// The body, once read.
+    pub const fn content(&self) -> Option<&crate::preview_text::Text> {
+        self.content.as_ref()
+    }
+
+    /// The body as a string slice, once read.
+    pub fn text(&self) -> Option<&str> {
+        self.content.as_deref()
+    }
+
+    /// Whether the body has edits the file does not hold — see the field's note.
+    pub const fn dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// How many times this body has changed — see the field's note.
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub const fn load(&self) -> &PreviewLoad {
+        &self.load
+    }
+
+    /// What this window last heard about the file under this body.
+    pub const fn disk(&self) -> DiskNews {
+        self.disk
+    }
+
+    /// The widest line of the body, in drawn columns.
+    pub const fn max_columns(&self) -> usize {
+        self.max_columns
+    }
+
+    /// **This body replaces `twin`'s in the pool** — its revision moves past
+    /// both counters, so nothing cached against the twin's revision reads as
+    /// this body (see [`PreviewPool::merge_buffer`]).
+    fn count_past(&mut self, twin: &Self) {
+        self.revision = self.revision.max(twin.revision) + 1;
+    }
+
+    /// **A test stands the buffer in either state of the dot without making the
+    /// edit that would put it there** — unsaved work for a dirty gate, a merge
+    /// or a quit to find. The product writes it only through this type's own
+    /// doors.
+    #[cfg(test)]
+    pub fn set_dirty_for_test(&mut self, dirty: bool) {
+        self.dirty = dirty;
+    }
+
+    /// **This buffer's file was renamed** — take the new identity and name, and
+    /// re-ask what it means without throwing away what the bytes already said
+    /// (user ruling 2026-08-27; `docs/DESIGN.md` §7.32).
     ///
     /// The suffix is what the body is drawn from, so a rename that changes it
     /// changes the view: `notes.md` to `notes.txt` really does turn a rendered
@@ -5096,7 +5166,8 @@ impl PreviewBuffer {
     /// earlier would be this window forgetting an answer it already has. So the
     /// name's judgement is asked first and `Unknown` — and only `Unknown` — is
     /// overruled by the evidence.
-    pub fn rename(&mut self, name: String) {
+    pub fn rename(&mut self, source: PreviewSource, name: String) {
+        self.source = source;
         self.name = name;
         self.ftype = match preview_ftype(&self.name) {
             PreviewFtype::Unknown if self.content_says_text => PreviewFtype::Text,
@@ -6406,9 +6477,8 @@ impl PreviewPool {
             return;
         };
         let twin = &self.buffers[index];
-        let (twin_is_dirty, twin_revision) = (twin.dirty, twin.revision);
-        if incoming.dirty && !twin_is_dirty {
-            incoming.revision = incoming.revision.max(twin_revision) + 1;
+        if incoming.dirty && !twin.dirty {
+            incoming.count_past(twin);
             self.buffers[index] = incoming;
         }
     }
@@ -8241,7 +8311,7 @@ mod tests {
             "main.rs".to_owned(),
             &[],
         )
-        .dirty = true;
+        .set_dirty_for_test(true);
         assert_eq!(pool.len(), 5, "a repeat of one triple opens nothing new");
         assert!(
             pool.get(&diff(&repo_a, GitDiffAgainst::Index))
@@ -8478,7 +8548,7 @@ mod tests {
     fn a_second_open_of_the_same_path_is_the_same_buffer() {
         let mut pool = PreviewPool::default();
         pool.open(PreviewSource::file(r"C:\w\a.rs"), "a.rs".to_owned(), &[])
-            .dirty = true;
+            .set_dirty_for_test(true);
         pool.open(PreviewSource::file(r"C:\w\a.rs"), "a.rs".to_owned(), &[]);
         assert_eq!(pool.len(), 1);
         assert!(buffer(&pool, r"C:\w\a.rs").dirty);
@@ -8500,7 +8570,7 @@ mod tests {
         // is the first evictable one.
         pool.get_mut(&PreviewSource::file(r"C:\w\f0.rs"))
             .unwrap()
-            .dirty = true;
+            .set_dirty_for_test(true);
         let shown = vec![PreviewSource::file(r"C:\w\f1.rs")];
         pool.open(
             PreviewSource::file(r"C:\w\new.rs"),
@@ -8524,7 +8594,7 @@ mod tests {
         for index in 0..=PV_BUFFER_CAP {
             let source = PreviewSource::file(format!(r"C:\w\f{index}.rs"));
             pool.open(source.clone(), format!("f{index}.rs"), &[]);
-            pool.get_mut(&source).unwrap().dirty = true;
+            pool.get_mut(&source).unwrap().set_dirty_for_test(true);
         }
         assert_eq!(pool.len(), PV_BUFFER_CAP + 1);
     }
@@ -8549,7 +8619,9 @@ mod tests {
         for name in ["a.txt", "b.md", "c.rs"] {
             let source = PreviewSource::file(format!(r"C:\w\{name}"));
             pool.open(source.clone(), name.to_owned(), &[]);
-            pool.get_mut(&source).unwrap().dirty = name != "c.rs";
+            pool.get_mut(&source)
+                .unwrap()
+                .set_dirty_for_test(name != "c.rs");
         }
         let shown = PreviewSource::file(r"C:\w\a.txt");
         // The badge: everything dirty except the one on screen.
@@ -8563,10 +8635,10 @@ mod tests {
             vec!["a.txt", "b.md"]
         );
         // And a pool with nothing dirty asks nothing of anybody.
-        pool.get_mut(&shown).unwrap().dirty = false;
+        pool.get_mut(&shown).unwrap().set_dirty_for_test(false);
         pool.get_mut(&PreviewSource::file(r"C:\w\b.md"))
             .unwrap()
-            .dirty = false;
+            .set_dirty_for_test(false);
         assert_eq!(pool.dirty_names(None).count(), 0);
         pool.clear();
         assert_eq!(pool.len(), 0);
@@ -8590,7 +8662,9 @@ mod tests {
         for name in ["a.txt", "b.md", "c.rs"] {
             let source = PreviewSource::file(format!(r"C:\w\{name}"));
             pool.open(source.clone(), name.to_owned(), &[]);
-            pool.get_mut(&source).unwrap().dirty = name == "b.md";
+            pool.get_mut(&source)
+                .unwrap()
+                .set_dirty_for_test(name == "b.md");
         }
         pool.discard_dirty();
         assert_eq!(
@@ -11688,7 +11762,7 @@ mod tests {
             buffer.accept(read(&"a".repeat(1_600_000), false));
             allocations.push(buffer.content.as_ref().unwrap().weak());
             if i == 1 {
-                buffer.dirty = true;
+                buffer.set_dirty_for_test(true);
             }
         }
         assert_eq!(pool.buffers.len(), PV_BUFFER_CAP);
@@ -11808,11 +11882,11 @@ mod tests {
         for source in &sources {
             let buffer = pool.open(source.clone(), "protected.md".into(), &[]);
             buffer.accept(read(&"x".repeat(1024 * 1024), false));
-            buffer.dirty = true;
+            buffer.set_dirty_for_test(true);
         }
         assert_eq!(pool.buffers.len(), 10);
-        pool.get_mut(&sources[2]).unwrap().dirty = false;
-        pool.get_mut(&sources[3]).unwrap().dirty = false;
+        pool.get_mut(&sources[2]).unwrap().set_dirty_for_test(false);
+        pool.get_mut(&sources[3]).unwrap().set_dirty_for_test(false);
         let weak = pool
             .get(&sources[3])
             .unwrap()

@@ -774,12 +774,13 @@ fn installed_version(caskroom: &Path) -> Result<String, &'static str> {
         crate::files::DirOutcome::Listed(listing) => Ok(listing
             .entries
             .into_iter()
-            .filter(|entry| !entry.name.starts_with('.'))),
+            .filter(|entry: &crate::files::DirEntry| !entry.name.starts_with('.'))),
         crate::files::DirOutcome::Failed(_) => Err(unreadable),
     };
     let metadata = caskroom.join(".metadata");
     let mut latest: Option<(String, String)> = None;
     for version in listed(&metadata)?.filter(|entry| entry.is_dir) {
+        let version: crate::files::DirEntry = version;
         for stamp in listed(&metadata.join(&version.name))? {
             if latest.as_ref().is_none_or(|(name, _)| stamp.name > *name) {
                 latest = Some((stamp.name, version.name.clone()));

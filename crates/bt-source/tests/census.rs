@@ -25,10 +25,23 @@ use bt_source::{
     TargetId, TargetKind, TargetRoot, Universe, Vendor, Workspace, is_vendored, report, universes,
 };
 
-/// The census's four structs, as the note's §1 names them. `Runtime` is not
-/// one of them: its two fields are the way to `App` and `WindowRuntime`, and
-/// its `Deref` target is `TabState`.
-const STRUCTS: [&str; 4] = ["App", "WindowRuntime", "TabState", "LeafSession"];
+/// The census note's four structs, as its §1 names them — the fixtures declare
+/// these. `Runtime` is not one of them: its two fields are the way to `App`
+/// and `WindowRuntime`, and its `Deref` target is `TabState`.
+const FIXTURE_STRUCTS: [&str; 4] = ["App", "WindowRuntime", "TabState", "LeafSession"];
+
+/// The structs whose fields the census holds over `bt-app`: the note's four,
+/// and the document and its view (ticket O-7; the ownership contract's §2.2
+/// invariant 1), so a write into a document is a row of its own and not only
+/// a lend of `TabState.preview_pool`.
+const STRUCTS: [&str; 6] = [
+    "App",
+    "WindowRuntime",
+    "TabState",
+    "LeafSession",
+    "PreviewBuffer",
+    "PreviewPane",
+];
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
@@ -62,7 +75,8 @@ fn fixture(name: &str) -> Arc<Index> {
 
 fn census_of(name: &str) -> FieldCensus {
     let index = fixture(name);
-    let census = FieldCensus::take(&index, &STRUCTS, &[&index]).expect("the fixture's four");
+    let census =
+        FieldCensus::take(&index, &FIXTURE_STRUCTS, &[&index]).expect("the fixture's four");
     assert!(
         census.unparsed().is_empty(),
         "every declaration of the fixture parses: {:?}",
@@ -605,13 +619,13 @@ fn the_committed_census_has_annotations_and_no_new_unknowns() {
     );
 }
 
-/// RED (census-1) — **every field of the four structs has an inventory row**,
+/// RED (census-1) — **every field of the census's structs has an inventory row**,
 /// counted apart from the query by the index's own field identities.
 ///
 /// The census note's figure was 436 at `f7826bd4`. The number is not pinned
 /// here, because a field added or removed is a row of the committed inventory
 /// already; what is pinned is that the query's facts are exactly the fields
-/// the index says the four declare, so no field is left out of the gate.
+/// the index says the structs declare, so no field is left out of the gate.
 ///
 /// MUTATION: skip a struct's `cfg`-gated fields when the query reads the
 /// declarations, and the two lists differ by those fields.
