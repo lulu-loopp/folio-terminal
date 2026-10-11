@@ -365,6 +365,9 @@ Push-Location $repo
 try {
     $startsText = (& git show "${base}:${startsRelative}" 2>$null) | Out-String
     $startsAtBase = $LASTEXITCODE -eq 0
+    # A file missing at the merge base is the change that introduces it, not a failure: the probe's
+    # status must not become the script's.
+    $global:LASTEXITCODE = 0
 } finally {
     Pop-Location
 }
@@ -386,6 +389,9 @@ Push-Location $repo
 try {
     $uncalledText = (& git show "${base}:${uncalledRelative}" 2>$null) | Out-String
     $uncalledAtBase = $LASTEXITCODE -eq 0
+    # A file missing at the merge base is the change that introduces it, not a failure: the probe's
+    # status must not become the script's.
+    $global:LASTEXITCODE = 0
 } finally {
     Pop-Location
 }
@@ -442,3 +448,7 @@ Write-Host "no workflow, cargo configuration or script flag lowers the lint; its
 Write-Host "the completions ledger: $($ledgerNow.Count) rows, no repair added against the merge base."
 Write-Host "no registry row was added without a ruling; $(@($rowsNow.Values | Where-Object { $_.status -eq 'pending' }).Count) row(s) pending."
 Write-Host "the window thread's bare sites: $total pending (docs/ARCHITECTURE.md section 6)."
+
+# Every failure above throws with its lines; reaching here is a pass, said as one. No native
+# command's status (a `git show` of a file the merge base lacks) may stand as the exit code.
+exit 0
