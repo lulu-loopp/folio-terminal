@@ -2836,9 +2836,8 @@ impl Runtime<'_> {
             .collect()
     }
 
-    /// **The palette opened: every root it lists is walked again** (T-FRESH-FACTS;
-    /// [`palette_index::FileIndexes::reopened`]). An open that a walk already out answers is said
-    /// once in `diagnostics.log`.
+    /// **The palette opened: stale or unheard roots walk; clean heard roots are already ready.**
+    /// An open that a walk already out answers is said once in `diagnostics.log`.
     pub(in crate::runtime) fn ask_for_file_indexes_on_open(&mut self) {
         let roots = self.palette_files_roots();
         self.app.index_ear.reader_asked(&roots);

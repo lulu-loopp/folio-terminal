@@ -704,14 +704,14 @@ impl FileIndexes {
         }
     }
 
-    /// **The palette opened over this root: walk it again** (T-FRESH-FACTS).
+    /// **The palette opened over this root: walk only when its held answer may be stale.**
     ///
     /// The files watch hears only the folders a tree has unfolded (`watched_files_dirs`), so a
-    /// file made under a folded subfolder never marked its root dirty, and the palette offered
-    /// the walk it took the first time for as long as the column stood. An open is the reader
-    /// asking, so it asks the disk: a walk on the index worker, with the index held shown until
-    /// it lands. **A walk already out answers the open** — [`Reopened::Merged`], said by the
-    /// caller in diagnostics — so a palette opened three times in a second is one walk, not three.
+    /// A heard, clean root is already current and answers [`Reopened::Current`] without touching
+    /// the worker. Missing, dirty and unheard roots keep B3's reader-triggered walk, with the held
+    /// index shown until it lands. **A walk already out answers the open** —
+    /// [`Reopened::Merged`], said by the caller in diagnostics — so a palette opened three times
+    /// in a second is one walk, not three.
     pub fn reopened(&mut self, root: &Path) -> Reopened {
         if let Some(entry) = self.roots.get_mut(root) {
             if entry.running {
@@ -1352,7 +1352,9 @@ mod tests {
     fn an_open_over_a_heard_clean_root_does_not_walk() {
         let root = PathBuf::from("/roots/heard");
         let mut register = FileIndexes::default();
-        let request = register.claim(&root).expect("the first open walks");
+        let Reopened::Asked(request) = register.reopened(&root) else {
+            panic!("the first open walks a missing root");
+        };
         register.accept(IndexResponse {
             root: root.clone(),
             epoch: request.epoch,
@@ -1360,7 +1362,11 @@ mod tests {
         });
         register.mark_heard(&root);
 
-        assert_eq!(register.reopened(&root), Reopened::Current);
+        assert_eq!(
+            register.reopened(&root),
+            Reopened::Current,
+            "two opens with no change cost one walk"
+        );
         assert_eq!(register.state(&root), IndexState::Ready);
     }
 
