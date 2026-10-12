@@ -59,9 +59,18 @@ pub enum PrintedPathSpelling {
 /// not a candidate at all, and never reaches the ledger or the probe queue.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum PrintedPathNamespace {
-    /// This machine's own: a path is rooted by a drive letter and nothing else is rooted.
+    /// A Windows machine's own: a path is rooted by a drive letter and nothing else is rooted.
     #[default]
     Windows,
+    /// A POSIX machine's own — macOS or another Unix — where a path is rooted by `/` and every
+    /// shell, zsh and bash alike, prints the one filesystem this machine reads (T-MAC-PRINTED-
+    /// NAMESPACE, 2026-10-12).
+    ///
+    /// Not [`Self::Msys`]: `/d/Demo` is a drive mount only inside Git for Windows' layer, and on a
+    /// Mac it is the directory `d` under the root. Nothing here is foreign, so nothing is
+    /// translated ([`Self::reads_a_foreign_spelling`] is `false`) and the rooted scan reads the
+    /// line with the grammar a POSIX host already has.
+    Posix,
     /// Git for Windows' MSYS layer, where `/d/Demo` is `D:\Demo` and `~` is the Windows home.
     ///
     /// The drive map is MSYS's own and it is the one thing about that layer this window needs: a
@@ -116,7 +125,7 @@ impl PrintedPathNamespace {
     pub fn to_pane_spelling(&self, host: &str) -> String {
         #[cfg(windows)]
         {
-            if !matches!(self, Self::Windows) {
+            if self.reads_a_foreign_spelling() {
                 let bytes = host.as_bytes();
                 if bytes.len() >= 3
                     && bytes[0].is_ascii_alphabetic()
@@ -159,7 +168,7 @@ impl PrintedPathNamespace {
     /// the scan asks before it runs at all, so a Windows pane pays nothing for this rule.
     #[must_use]
     pub fn reads_a_foreign_spelling(&self) -> bool {
-        !matches!(self, Self::Windows)
+        !matches!(self, Self::Windows | Self::Posix)
     }
 
     /// What this machine calls the place `printed` names, or `None` when it has no name for it.
@@ -179,7 +188,7 @@ impl PrintedPathNamespace {
     #[must_use]
     pub fn to_local_path(&self, printed: &str) -> Option<PathBuf> {
         match self {
-            Self::Windows => None,
+            Self::Windows | Self::Posix => None,
             Self::Msys { home } => match printed.strip_prefix('~') {
                 Some(tail) => Some(join_below(home.as_deref()?, tail.strip_prefix('/')?)),
                 None => drive_mount_to_local_path(printed.strip_prefix('/')?),
