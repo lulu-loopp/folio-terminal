@@ -453,7 +453,7 @@ jobs:
           $file = "docs/plans/MIGRATION-DEBT.tsv"
           $original = [IO.File]::ReadAllText($file)
           try {
-            [IO.File]::AppendAllText($file, "crates/planted/src/lib.rs`tprobe`tinclude_str!`tnothing`tP3`tno`tmissing seam`tDEBT`n")
+            [IO.File]::AppendAllText($file, "crates/planted/src/lib.rs`tprobe`tinclude_str!`tnothing`tP3`tno`texception`tmissing seam`tDEBT`n")
             $failed = $false
             try {
               & ./scripts/ci/check-migration-debt.ps1
@@ -467,6 +467,14 @@ jobs:
             [IO.File]::WriteAllText($file, $original)
           }
           exit 0
+
+      # The gate finds the six identity columns by name, so the `category`
+      # column (or any column added or moved beside them) is no new row. Its
+      # scratch-repository suite holds that, the growth and duplicate
+      # refusals, and a header missing an identity column.
+      - name: the migration-debt gate reads its identity by column name
+        shell: pwsh
+        run: ./scripts/ci/check-migration-debt-tests.ps1
 
       # `lane::EXPECTED_FAILURES` only shrinks: a lane does not gain a declared
       # failure for a claim the merge base already had. Planting one proves the
