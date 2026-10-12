@@ -3053,9 +3053,50 @@ fn names_a_constant(name: &str) -> bool {
 
 /// The constants found, each with the scope its value is read in, or the
 /// value that stands for none.
+#[derive(Clone)]
 enum Resolved<'a> {
     Found(Vec<(Evaluation<'a>, Rc<Constant>)>),
     Missing(Value),
+}
+
+/// A name asked of a module: what the module holds under it.
+type Asked = (ModuleKey, String);
+
+/// The modules asked for a name in one resolution: those on the way to the
+/// one being asked now, and the answer of each one asked before. Globs and
+/// files are alternative routes to a name, and a module many routes lead
+/// through is followed once — a layered diamond of globs is as many answers
+/// as it has modules, not a walk per route. An answer carries each constant
+/// with whether the `use`s below the module admit the reader; the `use`s
+/// above it are each route's own ([`through`]), and
+/// [`Evaluation::disambiguated`] joins the routes that meet.
+#[derive(Default)]
+struct Routes<'a> {
+    /// The modules on the way: asked again, they hold nothing along that
+    /// way (a cycle of globs, `use super::*` beside `pub use child::*`).
+    on_way: BTreeSet<Asked>,
+    /// For each module being asked, the others its answer has asked so far.
+    asking: Vec<BTreeSet<Asked>>,
+    answered: BTreeMap<Asked, Answer<'a>>,
+}
+
+/// What a module was found to hold under a name, with the other modules
+/// asked on the way to it and which of those were on the way then: the way
+/// counts only where it cuts a cycle short, so the answer stands wherever
+/// the same ones are on the way.
+struct Answer<'a> {
+    resolved: Resolved<'a>,
+    asked: BTreeSet<Asked>,
+    on_way: BTreeSet<Asked>,
+}
+
+impl Routes<'_> {
+    /// The module being asked has asked these.
+    fn note<'b>(&mut self, asked: impl IntoIterator<Item = &'b Asked>) {
+        if let Some(asking) = self.asking.last_mut() {
+            asking.extend(asked.into_iter().cloned());
+        }
+    }
 }
 
 /// A file's syntax, its place in the scan, and a module written in it.
@@ -3066,6 +3107,7 @@ struct Place {
 }
 
 /// One expression, evaluated as a path in the scope of one call.
+#[derive(Clone)]
 struct Evaluation<'a> {
     world: &'a World<'a>,
     syntax: Rc<FileSyntax>,
@@ -3652,7 +3694,7 @@ impl<'a> Evaluation<'a> {
             [] => match self.module.clone() {
                 Some(module) => {
                     let viewer = module.clone();
-                    self.constant_in(module, name, &mut BTreeSet::new(), Some(&viewer))
+                    self.constant_in(module, name, &mut Routes::default(), Some(&viewer))
                 }
                 None => {
                     let here: Vec<(FileId, Rc<Constant>)> = self
@@ -3674,7 +3716,7 @@ impl<'a> Evaluation<'a> {
                 self.module.clone(),
                 modules,
                 name,
-                &mut BTreeSet::new(),
+                &mut Routes::default(),
                 self.module.as_ref(),
             ),
         };
@@ -3730,11 +3772,11 @@ impl<'a> Evaluation<'a> {
         from: Option<ModuleKey>,
         modules: &[String],
         name: &str,
-        seen: &mut BTreeSet<(ModuleKey, String)>,
+        routes: &mut Routes<'a>,
         viewer: Option<&ModuleKey>,
     ) -> Resolved<'a> {
         match self.world.walk(from.as_ref(), modules) {
-            Walk::Module(key) => self.constant_in(key, name, seen, viewer),
+            Walk::Module(key) => self.constant_in(key, name, routes, viewer),
             Walk::Item { module, at } if at + 1 == modules.len() => {
                 let Some(((number, _), _)) = self
                     .world
@@ -3991,21 +4033,67 @@ impl<'a> Evaluation<'a> {
     /// The constant a module holds under a name: written there, brought
     /// there by a `use` or a `use …::*`, or declared there by
     /// `thread_local!` (which is never a path). One it holds by none of
-    /// these is unreduced.
+    /// these is unreduced. A module already answered in this resolution
+    /// answers the same wherever the same modules are on the way.
     fn constant_in(
         &self,
         key: ModuleKey,
         name: &str,
-        seen: &mut BTreeSet<(ModuleKey, String)>,
+        routes: &mut Routes<'a>,
         viewer: Option<&ModuleKey>,
     ) -> Resolved<'a> {
+        let asked = (key, name.to_owned());
+        routes.note([&asked]);
         // Glob imports may lead back to a module already asked (`use
         // super::*` in a child, `pub use child::*` in its parent): the name is
         // not held along that way.
-        if !seen.insert((key.clone(), name.to_owned())) {
+        if routes.on_way.contains(&asked) {
             return Resolved::Missing(Value::Unreduced(Why::elsewhere()));
         }
-        let Some(placements) = self.world.modules.get(&key).cloned() else {
+        if let Some(answer) = routes.answered.get(&asked) {
+            let stands = answer
+                .asked
+                .iter()
+                .all(|other| routes.on_way.contains(other) == answer.on_way.contains(other));
+            if stands {
+                let resolved = answer.resolved.clone();
+                let others: Vec<Asked> = answer.asked.iter().cloned().collect();
+                routes.note(&others);
+                return resolved;
+            }
+        }
+        routes.on_way.insert(asked.clone());
+        routes.asking.push(BTreeSet::new());
+        let resolved = self.held_by(&asked.0, name, routes, viewer);
+        routes.on_way.remove(&asked);
+        let mut others = routes.asking.pop().expect("the answer being asked");
+        others.remove(&asked);
+        routes.note(&others);
+        let on_way = others
+            .iter()
+            .filter(|other| routes.on_way.contains(*other))
+            .cloned()
+            .collect();
+        routes.answered.insert(
+            asked,
+            Answer {
+                resolved: resolved.clone(),
+                asked: others,
+                on_way,
+            },
+        );
+        resolved
+    }
+
+    /// What the files of a module hold under a name, asked afresh.
+    fn held_by(
+        &self,
+        key: &ModuleKey,
+        name: &str,
+        routes: &mut Routes<'a>,
+        viewer: Option<&ModuleKey>,
+    ) -> Resolved<'a> {
+        let Some(placements) = self.world.modules.get(key).cloned() else {
             return Resolved::Missing(Value::Unreduced(Why::elsewhere()));
         };
         // Each file the module is written in answers for its own `cfg`; what
@@ -4013,11 +4101,7 @@ impl<'a> Evaluation<'a> {
         let mut found = Vec::new();
         let mut missing = None;
         for (file, inline) in placements {
-            // Files and glob imports are alternative routes to the name. A
-            // cycle on one route must not hide a later route to the same
-            // constant that has different visibility.
-            let mut route_seen = seen.clone();
-            match self.held_in(&key, file, &inline, name, &mut route_seen, viewer) {
+            match self.held_in(key, file, &inline, name, routes, viewer) {
                 Resolved::Found(more) => found.extend(more),
                 Resolved::Missing(Value::Unreduced(Why::Elsewhere(_))) => {}
                 Resolved::Missing(value) => missing = missing.or(Some(value)),
@@ -4042,7 +4126,7 @@ impl<'a> Evaluation<'a> {
         file: FileId,
         inline: &[String],
         name: &str,
-        seen: &mut BTreeSet<(ModuleKey, String)>,
+        routes: &mut Routes<'a>,
         viewer: Option<&ModuleKey>,
     ) -> Resolved<'a> {
         let syntax = if file == self.file {
@@ -4066,7 +4150,7 @@ impl<'a> Evaluation<'a> {
                 return Resolved::Missing(Value::Unreduced(Why::elsewhere()));
             };
             return through(
-                self.locate(Some(key.clone()), modules, last, seen, viewer),
+                self.locate(Some(key.clone()), modules, last, routes, viewer),
                 visibility.admits(key, viewer),
             );
         }
@@ -4076,10 +4160,9 @@ impl<'a> Evaluation<'a> {
         let mut candidates = Vec::new();
         let mut missing = None;
         for (glob, visibility) in syntax.globs.get(inline).into_iter().flatten() {
-            let mut route_seen = seen.clone();
             match self.world.walk(Some(key), glob) {
                 Walk::Module(next) => match through(
-                    self.constant_in(next, name, &mut route_seen, viewer),
+                    self.constant_in(next, name, routes, viewer),
                     visibility.admits(key, viewer),
                 ) {
                     Resolved::Missing(Value::Unreduced(Why::Elsewhere(_))) => {}
@@ -4852,8 +4935,9 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
 /// `tests::reads_one_of_two_glob_constants` reads `structural-debt.md`; let
 /// it take every candidate and it reads both; let it ignore the `use`s'
 /// visibility (`scope.admitted`) and `tests::reads_through_the_public_glob`
-/// is a false ambiguity in the diagnostic. Share `seen` across sibling
-/// globs and keep the first identical candidate's admission, and
+/// is a false ambiguity in the diagnostic. Let a module already answered
+/// hold nothing (one `seen` shared by sibling globs) and keep the first
+/// identical candidate's admission, and
 /// `tests::reads_through_one_of_two_routes` is the same false ambiguity.
 #[test]
 fn a_name_two_globs_bring_in_is_the_constant_visible_to_the_reader() {
@@ -4946,6 +5030,72 @@ fn a_name_two_globs_bring_in_is_the_constant_visible_to_the_reader() {
     assert!(
         unresolved.is_empty(),
         "every name the planted crates use is one constant: {unresolved:#?}"
+    );
+    std::fs::remove_dir_all(&plot).expect("the plant is taken away again");
+}
+
+/// RED (T-SOURCE-READERS-TSV-TRIPWIRE round 11) — **every module on the way
+/// to a name is asked once, however many routes lead through it**. Thirty
+/// layers of two modules, each `pub use`-ing the modules of the layer
+/// below with a glob, bring one constant to the crate's root along 2^30
+/// routes through 61 modules; the read at the top is that one constant.
+///
+/// MUTATION: follow each glob with its own copy of the modules already on
+/// the way and keep no answer (round 10), and the scan walks every route,
+/// twice as long for each layer: this test does not finish.
+#[test]
+fn a_constant_a_diamond_of_globs_brings_in_is_one_constant() {
+    let plot = temporary_directory("planted-diamond");
+    let committed = committed_files(&workspace_root());
+    let name = "planted_diamond";
+    let package = plot.join("crates").join(name);
+    let module = package.join("src");
+    std::fs::create_dir_all(&module).expect("a tree of our own");
+    std::fs::write(module.join("lib.rs"), planted_diamond()).expect("the plant");
+    let universe = Universe::declare(
+        name,
+        vec![TargetRoot {
+            id: TargetId {
+                package: name.to_owned(),
+                kind: TargetKind::Library,
+                name: name.to_owned(),
+            },
+            file: module.join("lib.rs"),
+        }],
+        vec![DiskScope::under(&module)],
+        Vendor::Excluded,
+    )
+    .expect("the plant is there");
+    let index =
+        Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+    let (readers, unresolved) = document_readers(&[(package, index)], &plot, &committed);
+    let found: Vec<(String, String, Vec<String>)> = readers
+        .iter()
+        .map(|reader| {
+            (
+                reader.file.clone(),
+                reader
+                    .owners
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" / "),
+                reader.subjects.iter().cloned().collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [(
+            "crates/planted_diamond/src/lib.rs".to_owned(),
+            "tests::reads_through_the_diamond".to_owned(),
+            vec!["docs/RULES.md".to_owned()],
+        )],
+        "the scan found {readers:#?}"
+    );
+    assert!(
+        unresolved.is_empty(),
+        "the name at the top of the diamond is one constant: {unresolved:#?}"
     );
     std::fs::remove_dir_all(&plot).expect("the plant is taken away again");
 }
@@ -5329,6 +5479,58 @@ mod tests {
 }
 "#
     .to_owned()
+}
+
+/// A crate whose root brings in one constant through a layered diamond of
+/// globs: `bottom` defines it, the two modules of the first layer `pub
+/// use` it with a glob, each of the twenty-nine layers above has two
+/// modules that `pub use` both modules of the layer below with a glob, and
+/// the root `pub use`s both modules of the top layer; its test reads the
+/// constant from the root.
+///
+/// Assembled rather than spelled: forty modules written out would bury the
+/// one read.
+fn planted_diamond() -> String {
+    const LAYERS: usize = 30;
+    let mut text = String::from(
+        "//! A planted diamond of glob re-exports.\n\
+         mod bottom {\n    pub const DIAMOND_DOC: &str = \"docs/RULES.md\";\n}\n",
+    );
+    for layer in 1..=LAYERS {
+        let below = if layer == 1 {
+            vec!["bottom".to_owned()]
+        } else {
+            ["left", "right"]
+                .map(|side| format!("layer{}_{side}", layer - 1))
+                .to_vec()
+        };
+        for side in ["left", "right"] {
+            text.push_str(&format!("mod layer{layer}_{side} {{\n"));
+            for module in &below {
+                text.push_str(&format!("    pub use super::{module}::*;\n"));
+            }
+            text.push_str("}\n");
+        }
+    }
+    text.push_str(&format!(
+        "pub use layer{LAYERS}_left::*;\npub use layer{LAYERS}_right::*;\n"
+    ));
+    text.push_str(
+        r#"
+#[cfg(test)]
+mod tests {
+    fn root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+    }
+
+    #[test]
+    fn reads_through_the_diamond() {
+        let _ = std::fs::read_to_string(root().join(crate::DIAMOND_DOC));
+    }
+}
+"#,
+    );
+    text
 }
 
 /// A directory of our own under the machine's temporary one.
