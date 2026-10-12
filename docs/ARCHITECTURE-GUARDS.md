@@ -118,7 +118,9 @@ Where and what to do:
 `lane_contract_tests::every_lane_runs_every_claim_and_fails_only_where_the_ledger_says`
 holds each lane to `EXPECTED_FAILURES` both ways (an undeclared failure and an
 unexpected pass are red), and `scripts/ci/check-expected-failures.ps1` holds the
-list to the merge base: no lane gains a row for a claim the merge base already
+list — kept as data in `crates/bt-app/src/lane_expected_failures.tsv`, equal to
+the code by `lane_contract_tests::the_expected_failures_are_this_list` — to the
+merge base: no lane gains a row for a claim the merge base already
 had; a claim new to the suite brings the rows of the lanes that do not keep it
 yet. When red, repair the lane (a repair removes its row in the same change),
 or restore the behaviour the claim caught; do not add a row to quiet it.

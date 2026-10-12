@@ -1634,3 +1634,41 @@ fn a_task_panic_fails_its_request_and_a_worker_s_end_leaves_the_owed_ones_worker
         "the worker runs as the thread door named it"
     );
 }
+
+/// The declared failures as data (`lane_expected_failures.tsv`), for the history to compare.
+const EXPECTED_FAILURES_LIST: &str = include_str!("lane_expected_failures.tsv");
+
+/// The lines of the list's section `name`, its column header first.
+fn list_section(name: &str) -> Vec<&'static str> {
+    EXPECTED_FAILURES_LIST
+        .lines()
+        .skip_while(|line| *line != format!("# {name}"))
+        .skip(1)
+        .take_while(|line| !line.starts_with("# "))
+        .filter(|line| !line.is_empty() && !line.starts_with("##"))
+        .collect()
+}
+
+/// PIN (S-3) — **The declared failures are this list, and the claims are its claims**:
+/// `lane_expected_failures.tsv` holds every claim of [`Claim::ALL`] and every row of
+/// [`EXPECTED_FAILURES`] (lane, claim, failure kind, repair), in order, so that
+/// `scripts/ci/check-expected-failures.ps1` can hold the rows to the merge base without reading
+/// the code.
+///
+/// MUTATION: delete a row from the list (or add a row to `EXPECTED_FAILURES` alone) — red.
+#[test]
+fn the_expected_failures_are_this_list() {
+    let claims: Vec<String> = std::iter::once("claim".to_owned())
+        .chain(Claim::ALL.iter().map(|claim| format!("{claim:?}")))
+        .collect();
+    assert_eq!(list_section("claims"), claims, "the claims");
+    let rows: Vec<String> = std::iter::once("lane\tclaim\tfailure\trepair".to_owned())
+        .chain(EXPECTED_FAILURES.iter().map(|row| {
+            format!(
+                "{:?}\t{:?}\t{:?}\t{}",
+                row.lane, row.claim, row.failure, row.repair
+            )
+        }))
+        .collect();
+    assert_eq!(list_section("rows"), rows, "the rows");
+}

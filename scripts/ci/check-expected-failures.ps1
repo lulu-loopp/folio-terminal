@@ -4,24 +4,24 @@
 # the lane contract a lane is known to fail, each with the structural-debt row
 # that repairs it. The suite holds the tree to the list both ways
 # (`lane_contract_tests::every_lane_runs_every_claim_and_fails_only_where_the_ledger_says`:
-# an undeclared failure is red, and so is a declared one that passes). This
-# script is the history half: against the merge base with origin/main, no lane
-# gains a declared failure. A row is keyed by its lane and its claim; a key the
-# merge base does not have is refused - unless its claim is not a variant of the
-# merge base's `Claim` at all, because a claim new to the suite arrives with the
-# rows of the lanes that do not keep it yet, and those rows are its baseline
-# (S-3, 2026-10-11). A row whose failure kind changed is reported, not refused:
-# the claim still fails, and the suite says how.
+# an undeclared failure is red, and so is a declared one that passes), and
+# `lane_contract_tests::the_expected_failures_are_this_list` holds the code equal
+# to `crates/bt-app/src/lane_expected_failures.tsv`: its `# claims` section is
+# every claim of the suite, its `# rows` section every declared failure.
 #
-# The rows are read from the source text: the block from
-# `pub(crate) const EXPECTED_FAILURES` to its closing `];`, each row's
-# `lane: LaneName::X`, `claim: Claim::Y` and `failure: FailureKind::Z` in that
-# order. It passes, loudly, when the merge base has no such block; it refuses
-# (exit 2) when there is no merge base at all.
+# This script is the history half, over that file: against the merge base with
+# origin/main, no lane gains a declared failure. A row is keyed by its lane and
+# its claim; a key the merge base does not have is refused - unless its claim is
+# not in the merge base's `# claims`, because a claim new to the suite arrives
+# with the rows of the lanes that do not keep it yet, and those rows are its
+# baseline. A row whose failure kind or repair changed is reported, not
+# refused: the claim still fails, and the suite says how. It passes, loudly,
+# when the merge base has no list; it refuses (exit 2) when there is no merge
+# base at all.
 
 param(
     [string]$Repo = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
-    [string]$Relative = "crates/bt-app/src/lane.rs",
+    [string]$Relative = "crates/bt-app/src/lane_expected_failures.tsv",
     [string]$MainRef = "origin/main"
 )
 
@@ -31,44 +31,50 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -Er
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
-$source = Join-Path $Repo $Relative
-if (-not (Test-Path -LiteralPath $source)) {
-    throw "$Relative is not in the tree - it holds the lane contract's expected failures"
+$list = Join-Path $Repo $Relative
+if (-not (Test-Path -LiteralPath $list)) {
+    throw "$Relative is not in the tree - it is the lane contract's declared failures"
 }
 
-# The declared failures as an ordered map "Lane x Claim" -> failure kind, or $null when the text
-# has no `EXPECTED_FAILURES` block.
-function Read-ExpectedFailures([string]$Text) {
-    $start = $Text.IndexOf("pub(crate) const EXPECTED_FAILURES")
-    if ($start -lt 0) { return $null }
-    $end = $Text.IndexOf("`n];", $start)
-    if ($end -lt 0) { throw "$Relative has an EXPECTED_FAILURES block with no closing '];'" }
-    $block = $Text.Substring($start, $end - $start)
+# The list as @{ Claims = [claim names]; Rows = ordered "Lane x Claim" -> "failure repair" }.
+function Read-List([string[]]$Lines) {
+    $claims = @()
     $rows = [ordered]@{}
-    $pattern = 'ExpectedFailure\s*\{\s*lane:\s*LaneName::(\w+),\s*claim:\s*Claim::(\w+),\s*failure:\s*FailureKind::(\w+),'
-    foreach ($match in [regex]::Matches($block, $pattern)) {
-        $key = "$($match.Groups[1].Value) x $($match.Groups[2].Value)"
-        if ($rows.Contains($key)) { throw "$Relative declares $key twice" }
-        $rows[$key] = $match.Groups[3].Value
+    $section = $null
+    $header = $false
+    foreach ($line in $Lines) {
+        if ($line.Length -eq 0 -or $line.StartsWith("##")) { continue }
+        if ($line.StartsWith("# ")) {
+            $section = $line.Substring(2)
+            $header = $false
+            continue
+        }
+        if (-not $header) {
+            $expected = if ($section -eq "claims") { "claim" } else { "lane`tclaim`tfailure`trepair" }
+            if ($line -ne $expected) { throw "$Relative # $section has the wrong column header: $line" }
+            $header = $true
+            continue
+        }
+        switch ($section) {
+            "claims" { $claims += $line }
+            "rows" {
+                $columns = $line.Split("`t")
+                if ($columns.Count -ne 4 -or @($columns | Where-Object { $_.Length -eq 0 }).Count -gt 0) {
+                    throw "$Relative row is not four non-empty columns: $line"
+                }
+                $key = "$($columns[0]) x $($columns[1])"
+                if ($rows.Contains($key)) { throw "$Relative declares $key twice" }
+                $rows[$key] = "$($columns[2]) $($columns[3])"
+            }
+            default { throw "$Relative has a line outside # claims and # rows: $line" }
+        }
     }
-    $declared = [regex]::Matches($block, 'ExpectedFailure\s*\{').Count
-    if ($declared -ne $rows.Count) {
-        throw "$Relative has $declared expected-failure rows and $($rows.Count) read as lane, claim, failure"
-    }
-    return $rows
-}
-
-# The variants of `enum Claim` in the text: its body runs to the first line that is a lone `}`.
-function Read-Claims([string]$Text) {
-    $match = [regex]::Match($Text, '(?ms)^pub\(crate\) enum Claim \{\r?\n(?<body>.*?)^\}')
-    if (-not $match.Success) { return @() }
-    return @([regex]::Matches($match.Groups['body'].Value, '(?m)^    (\w+),\s*$') | ForEach-Object { $_.Groups[1].Value })
+    return @{ Claims = $claims; Rows = $rows }
 }
 
 Push-Location $Repo
 try {
-    $now = Read-ExpectedFailures ([IO.File]::ReadAllText($source))
-    if ($null -eq $now) { throw "$Relative has no EXPECTED_FAILURES block" }
+    $now = Read-List ([IO.File]::ReadAllLines($list))
     & git rev-parse --verify --quiet $MainRef *> $null
     if ($LASTEXITCODE -ne 0) {
         Write-Host "no $MainRef in this clone - the expected-failures comparison did not run"
@@ -82,30 +88,29 @@ try {
         exit 2
     }
     $text = (& git show "${base}:${Relative}" 2>$null) | Out-String
-    $before = if ($LASTEXITCODE -eq 0) { Read-ExpectedFailures $text } else { $null }
-    if ($null -eq $before) {
-        Write-Host "$Relative has no EXPECTED_FAILURES at $base - no base list exists; the tree declares $($now.Count) rows. PASS"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "$Relative is not in $base - no base list exists; the tree declares $($now.Rows.Count) rows. PASS"
         exit 0
     }
-    $claimsBefore = Read-Claims $text
+    $before = Read-List ($text -split "`r?`n")
 } finally {
     Pop-Location
 }
 
 $added = @()
 $baseline = @()
-foreach ($key in $now.Keys) {
-    if ($before.Contains($key)) {
-        if ($before[$key] -ne $now[$key]) {
-            Write-Host "  $key now fails with $($now[$key]), at the merge base with $($before[$key])"
+foreach ($key in $now.Rows.Keys) {
+    if ($before.Rows.Contains($key)) {
+        if ($before.Rows[$key] -ne $now.Rows[$key]) {
+            Write-Host "  $key now reads $($now.Rows[$key]), at the merge base $($before.Rows[$key])"
         }
         continue
     }
     $claim = ($key -split ' x ')[1]
-    if ($claimsBefore -contains $claim) { $added += $key } else { $baseline += $key }
+    if ($before.Claims -contains $claim) { $added += $key } else { $baseline += $key }
 }
-$removed = @($before.Keys | Where-Object { -not $now.Contains($_) }).Count
-Write-Host ("$Relative EXPECTED_FAILURES against $($base.Substring(0, 12)): $($before.Count) rows -> $($now.Count), " +
+$removed = @($before.Rows.Keys | Where-Object { -not $now.Rows.Contains($_) }).Count
+Write-Host ("$Relative against $($base.Substring(0, 12)): $($before.Rows.Count) rows -> $($now.Rows.Count), " +
     "$removed removed, $($baseline.Count) brought by claims new to the suite, $($added.Count) added.")
 if ($added.Count -gt 0) {
     $details = ($added | ForEach-Object { "    $_" }) -join [Environment]::NewLine

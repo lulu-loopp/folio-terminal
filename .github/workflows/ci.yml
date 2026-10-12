@@ -474,16 +474,16 @@ jobs:
       - name: the expected-failures gate can actually fail
         shell: pwsh
         run: |
-          $file = "crates/bt-app/src/lane.rs"
+          $file = "crates/bt-app/src/lane_expected_failures.tsv"
+          $base = @(& git merge-base HEAD origin/main)[0]
+          & git cat-file -e "${base}:${file}" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "$file is new against the merge base: the canary runs once the list is on main"
+            exit 0
+          }
           $original = [IO.File]::ReadAllText((Resolve-Path $file))
-          $opening = "pub(crate) const EXPECTED_FAILURES: &[ExpectedFailure] = &[`n"
-          $row = "    ExpectedFailure {`n        lane: LaneName::Handoff,`n        claim: Claim::OrderIsAsDeclared,`n        failure: FailureKind::OrderBroken,`n        repair: `"D-70`",`n        why: `"planted`",`n    },`n"
           try {
-            $planted = $original.Replace($opening, $opening + $row)
-            if ($planted -eq $original) {
-              throw "the expected-failures block was not found to plant a row in"
-            }
-            [IO.File]::WriteAllText((Resolve-Path $file), $planted)
+            [IO.File]::AppendAllText((Resolve-Path $file), "Handoff`tOrderIsAsDeclared`tOrderBroken`tD-70`n")
             $failed = $false
             try {
               & ./scripts/ci/check-expected-failures.ps1
