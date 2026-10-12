@@ -16,6 +16,10 @@
 //!   task) is reported by the executor through [`Ends::worker_ended`]. Both the task and the
 //!   worker's body run inside `contained_panic::contain`, so under the resident panic hook, which
 //!   ends the process for any other panic, a panic in either reaches the seam (S-5 round 3);
+//!   a thread-door refusal is returned synchronously as `WorkerEnd::NotStarted` and also reported
+//!   through `Ends`; a lane started before its request door may treat that as its failed start,
+//!   while [`Coalescing`] interposes before minting, refuses only that request, and lets the next
+//!   new request try the start again without faulting the lane (revision (b)5, rule 1);
 //! - a [`Ledger`], which mints each request's identity or refuses it at the door (C1's admission),
 //!   records what each identity is owed — the sink its terminal goes to when its requester has
 //!   gone (C6) — and turns every identity into exactly one [`Terminal`]: `Done`, `Failed`,
@@ -155,6 +159,11 @@ pub(crate) enum Refused {
     Faulted(WorkerEnd),
     /// The request asked to join one that has already ended.
     TwinEnded,
+    /// The lane's worker could not be started for this request, in the thread door's words: the
+    /// request is refused, and the lane is not in fault — its worker never ran — so the next
+    /// request starts it again (revision (b)5, rule 1: a new request, not a retry). Answered only
+    /// by a lane that starts its worker on a request ([`Coalescing`]).
+    NotStarted(String),
 }
 
 /// How often the ledger says a failure (C3).
@@ -394,6 +403,16 @@ where
         self.end(book, id, terminal, out);
     }
 
+    /// **Say a worker start the thread door refused**, once, for the request it refused (C3): the
+    /// refusal is that request's terminal, given at the door, and the lane is not in fault.
+    fn say_not_started(&self, end: &WorkerEnd) {
+        (self.say)(&format!(
+            "{}: the worker was not started — {end}; the request is refused, and the next \
+             request starts it again",
+            self.lane
+        ));
+    }
+
     /// **The earliest identity still owed a terminal**, or `None` when every identity minted and
     /// not yet delivered has one. On a lane that ends its identities in the order it minted them
     /// (one worker, first in first out, its end ending the rest), every identity below this one
@@ -606,6 +625,17 @@ impl Executor {
     ) -> Result<(), WorkerEnd> {
         #[cfg(test)]
         let script = self.script.clone();
+        // The suite's gate can have the thread door refuse this start, as a machine out of
+        // threads would (`Gate::refuse_next_start`); the refusal is reported as the door's is.
+        #[cfg(test)]
+        if script
+            .as_ref()
+            .is_some_and(|gate| gate.take_refused_start())
+        {
+            let cause = WorkerEnd::NotStarted(REFUSED_START.to_owned());
+            ends.worker_ended(cause.clone());
+            return Err(cause);
+        }
         let ended = Arc::clone(&ends);
         let started = bt_platform::spawn_at_priority(name, self.band, move |ctx| {
             #[cfg(test)]
@@ -682,6 +712,11 @@ pub(crate) struct Waiting<Id, Op> {
     pub(crate) op: Op,
 }
 
+/// What [`Coalescing::ask`] admitted: the request's identity.
+pub(crate) struct Admitted<Id> {
+    pub(crate) id: Id,
+}
+
 /// **A latest-value lane on the seam** (the side-effects contract's C2 and C4, revision (b)4):
 /// coalescing kept as the policy — one run out, at most one waiting, and a newer answer serves
 /// every request standing — with every request its own terminal.
@@ -720,15 +755,27 @@ where
     waiting: Option<Waiting<Id, Op>>,
     /// Every request the application made and has not taken the terminal of, by identity.
     held: BTreeMap<Id, Request<Id, O>>,
-    /// Whether the lane's worker has been started — by the first request.
+    /// Whether the lane's worker has been started — by the first request whose start the thread
+    /// door did not refuse.
     started: bool,
 }
 
-/// What [`Coalescing::ask`] admitted: the request's identity, and whether this request is the one
-/// that has to start the lane's worker.
-pub(crate) struct Asked<Id> {
-    pub(crate) id: Id,
-    pub(crate) start: bool,
+/// **The ledger as a started worker reports its end to it** — what [`Coalescing::ask`] hands the
+/// executor. A worker that ran and ended faults the lane ([`Ledger::worker_ended`]); a start the
+/// thread door refused is not such an end — the worker never ran, and nothing is owed on it — and
+/// is answered at the door instead, as the refusal of the request that would have started it.
+pub(crate) struct Ran<Id, O: Owed<Id>>(Arc<Ledger<Id, O>>);
+
+impl<Id, O> Ends for Ran<Id, O>
+where
+    Id: Copy + Ord + fmt::Debug + From<u64> + Send + 'static,
+    O: Owed<Id>,
+{
+    fn worker_ended(&self, cause: WorkerEnd) {
+        if !matches!(cause, WorkerEnd::NotStarted(_)) {
+            self.0.worker_ended(cause);
+        }
+    }
 }
 
 impl<Id, O, Op> Coalescing<Id, O, Op>
@@ -757,14 +804,29 @@ where
     /// **Admit one request (C1): mint its identity, join it to the waiting run or displace that
     /// run, and hold it for the application** — or refuse it at once, minting nothing, with the
     /// ledger's refusal (revision (b)3). Never waits for the worker.
+    ///
+    /// **The lane's worker is started by the first request that finds it not started**, through
+    /// `start` — the lane's own `Executor::start_worker` call, handed the ledger as a started
+    /// worker reports to it ([`Ran`]) — before anything is minted. A start the thread door refuses
+    /// refuses this request at the door, [`Refused::NotStarted`], said once; the lane is not in
+    /// fault, and the next request starts the worker again (revision (b)5, rule 1: a new request
+    /// tries again, and nothing is retried on its own).
     pub(crate) fn ask(
         &self,
         op: Op,
         owed: O,
         same: impl Fn(&Op, &Op) -> bool,
         fold: impl FnOnce(Op, Op) -> Op,
-    ) -> Result<Asked<Id>, Refused> {
+        start: impl FnOnce(Arc<Ran<Id, O>>) -> Result<(), WorkerEnd>,
+    ) -> Result<Admitted<Id>, Refused> {
         let mut book = lock(&self.book);
+        if !book.started {
+            if let Err(end) = start(Arc::new(Ran(Arc::clone(&self.ledger)))) {
+                self.ledger.say_not_started(&end);
+                return Err(Refused::NotStarted(end.to_string()));
+            }
+            book.started = true;
+        }
         let (request, waiting) = match book.waiting.take() {
             Some(waiting) if same(&waiting.op, &op) => {
                 match self.ledger.admit_joined(waiting.operation, owed) {
@@ -813,10 +875,9 @@ where
         let id = request.id();
         book.waiting = Some(waiting);
         book.held.insert(id, request);
-        let start = !std::mem::replace(&mut book.started, true);
         drop(book);
         self.asked.notify_one();
-        Ok(Asked { id, start })
+        Ok(Admitted { id })
     }
 
     /// **The worker's: the next run**, waiting on the lane's condition variable until a request
@@ -1588,6 +1649,8 @@ pub(crate) struct Gate {
 #[derive(Default)]
 struct GateState {
     held: bool,
+    /// How many of the next worker starts the thread door refuses.
+    refused_starts: usize,
     kill: bool,
     killed: bool,
     entered: usize,
@@ -1600,6 +1663,10 @@ struct GateState {
 /// row are one streak.
 #[cfg(test)]
 pub(crate) const PLANTED_PANIC: &str = "the lane contract suite fails this request on purpose";
+
+/// What the thread door says when the suite has it refuse a worker's start.
+#[cfg(test)]
+pub(crate) const REFUSED_START: &str = "the lane contract suite refuses this thread on purpose";
 
 #[cfg(test)]
 impl Gate {
@@ -1627,6 +1694,19 @@ impl Gate {
         lock(&self.state).executed.push(question);
         self.changed.notify_all();
         self.fire(question);
+    }
+
+    /// The next worker start the suite's executor is asked for is refused by the thread door,
+    /// with [`REFUSED_START`].
+    pub(crate) fn refuse_next_start(&self) {
+        lock(&self.state).refused_starts += 1;
+    }
+
+    fn take_refused_start(&self) -> bool {
+        let mut state = lock(&self.state);
+        let refused = state.refused_starts > 0;
+        state.refused_starts = state.refused_starts.saturating_sub(1);
+        refused
     }
 
     /// Every later execution of `question` panics with [`PLANTED_PANIC`].

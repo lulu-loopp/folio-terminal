@@ -209,24 +209,26 @@ impl TaskbarLane {
 
     /// **The lane's one admission**: the request's identity minted by the ledger — joined to the
     /// waiting ask, or waiting for the next — or the ledger's refusal, at once. The first request
-    /// starts the worker; a thread the door refuses is the worker's end, which the executor
-    /// reports to the ledger.
+    /// starts the worker; a thread the door refuses refuses that request at the door
+    /// (`Refused::NotStarted`, said once) and leaves the lane as it was, so the next request starts
+    /// the worker again.
     fn ask(&'static self, now: Instant) -> Result<TaskbarId, Refused> {
         *self
             .last_request
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(now);
-        let asked = self
-            .requests
-            .ask((), TaskbarOwed::owed(), |(), ()| true, |(), ()| ())?;
-        if asked.start {
-            let _ = self.executor.start_worker(
-                "taskbar-state",
-                Arc::clone(self.requests.ledger()),
-                move |ctx| run_taskbar_lane(ctx, self),
-            );
-        }
-        Ok(asked.id)
+        self.requests
+            .ask(
+                (),
+                TaskbarOwed::owed(),
+                |(), ()| true,
+                |(), ()| (),
+                |ran| {
+                    self.executor
+                        .start_worker("taskbar-state", ran, move |ctx| run_taskbar_lane(ctx, self))
+                },
+            )
+            .map(|admitted| admitted.id)
     }
 
     fn last_request(&self) -> Option<Instant> {
@@ -497,6 +499,40 @@ pub(crate) mod tests {
             "a request made while one waited joined it and carries its answer"
         );
         assert_eq!(gate.entered(), 2, "two asks of the shell for four requests");
+    }
+
+    /// RED (S-4 round 2) — **A start the thread door refuses refuses that request at the door,
+    /// says so once, and the next request starts the worker** (revision (b)5, rule 1: a new
+    /// request tries again; the lane is not in fault, because its worker never ran).
+    ///
+    /// MUTATION: fault the lane on a refused start (`lane::Ran::worker_ended` handing
+    /// `NotStarted` to the ledger) — the next request is refused `Faulted`.
+    #[test]
+    fn a_refused_spawn_refuses_this_request_and_the_next_request_starts_the_worker() {
+        let gate = Arc::new(Gate::default());
+        let (lane, wakes, said) = scripted_lane(&gate, |_| true);
+        let start = Instant::now();
+        gate.refuse_next_start();
+        assert!(
+            matches!(lane.ask(start), Err(crate::lane::Refused::NotStarted(_))),
+            "the request whose start was refused is refused at the door"
+        );
+        assert_eq!(
+            lane.requests.ledger().earliest_owed(),
+            None,
+            "minting nothing"
+        );
+        let lines = said.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1, "said once: {lines:?}");
+        assert!(lines[0].contains(crate::lane::REFUSED_START), "{lines:?}");
+        let next = lane.ask(start).expect("the next request starts the worker");
+        assert_eq!(next, TaskbarId(1), "the refused request took no identity");
+        let ended = terminals_through(lane, &wakes, next);
+        assert_eq!(
+            ended,
+            [(next, Terminal::Done(true))],
+            "and the worker it started asks"
+        );
     }
 
     /// RED (S-4; D-73) — **A worker that dies ends every request it owes `WorkerGone`, wakes the

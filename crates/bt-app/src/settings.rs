@@ -2081,21 +2081,21 @@ impl FontLane {
     /// **Number a request and see that a walk serves it** — the lane's one
     /// admission, returning at once with the request's identity or the ledger's
     /// refusal. The first request starts the worker; a thread the door refuses
-    /// is the worker's end, which the executor reports to the ledger — every
-    /// request owed then ends `WorkerGone`, said once, and every later request
-    /// is refused.
+    /// refuses that request at the door (`Refused::NotStarted`, said once) and
+    /// leaves the lane as it was, so the next request starts the worker again.
     fn request_walk(&'static self) -> Result<FontId, crate::lane::Refused> {
-        let asked = self
-            .requests
-            .ask((), FontOwed::owed(), |(), ()| true, |(), ()| ())?;
-        if asked.start {
-            let _ = self.executor.start_worker(
-                "font-families",
-                std::sync::Arc::clone(self.requests.ledger()),
-                move |ctx| run_font_lane(ctx, self),
-            );
-        }
-        Ok(asked.id)
+        self.requests
+            .ask(
+                (),
+                FontOwed::owed(),
+                |(), ()| true,
+                |(), ()| (),
+                |ran| {
+                    self.executor
+                        .start_worker("font-families", ran, move |ctx| run_font_lane(ctx, self))
+                },
+            )
+            .map(|admitted| admitted.id)
     }
 
     /// **Take every terminal the lane has ended, in the order its requests were
@@ -17974,6 +17974,48 @@ mod tests {
         assert!(
             said[0].contains("3 request(s) owed end as WorkerGone"),
             "{said:?}"
+        );
+    }
+
+    /// RED (S-4 round 2) — **A start the thread door refuses refuses that request at the door,
+    /// says so once, and the next request starts the worker.**
+    ///
+    /// The worker is started by the first request that finds it not started. A machine that will
+    /// not give this process a thread refuses that request (`Refused::NotStarted`, no identity
+    /// minted, one line said); the lane is not in fault — its worker never ran — so the next
+    /// request, new input, starts it again and is walked (revision (b)5, rule 1).
+    ///
+    /// MUTATION: fault the lane on a refused start (`lane::Ran::worker_ended` handing
+    /// `NotStarted` to the ledger) — the next request is refused `Faulted`.
+    #[test]
+    fn a_refused_spawn_refuses_this_request_and_the_next_request_starts_the_worker() {
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        let (lane, wakes, said) =
+            font_lane(&gate, |_| Ok((vec![family("等宽 Consolas")], Vec::new())));
+        gate.refuse_next_start();
+        assert!(
+            matches!(
+                lane.request_walk(),
+                Err(crate::lane::Refused::NotStarted(_))
+            ),
+            "the request whose start was refused is refused at the door"
+        );
+        assert_eq!(
+            lane.requests.ledger().earliest_owed(),
+            None,
+            "minting nothing"
+        );
+        let lines = said.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1, "said once: {lines:?}");
+        assert!(lines[0].contains(crate::lane::REFUSED_START), "{lines:?}");
+        let next = lane
+            .request_walk()
+            .expect("the next request starts the worker");
+        assert_eq!(next, FontId(1), "the refused request took no identity");
+        let ended = terminals_through(lane, &wakes, next);
+        assert!(
+            matches!(ended[..], [(id, crate::lane::Terminal::Done(_))] if id == next),
+            "and the worker it started walks: {ended:?}"
         );
     }
 

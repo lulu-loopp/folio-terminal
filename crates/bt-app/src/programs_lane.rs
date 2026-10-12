@@ -579,29 +579,26 @@ impl ProgramsLane {
     /// **Make a request and see that the worker serves it** — the lane's one admission. Never
     /// waits for a walk: a lock, a ledger entry and a condition-variable signal or — the first
     /// time — a thread start. Answers the request's number, or the ledger's refusal at the door:
-    /// it already owes [`BOUND`], or the worker has ended (a thread the door refused is that end,
-    /// which the executor reports to the ledger and the ledger says once).
+    /// it already owes [`BOUND`], or the worker ran and has ended; or the thread door refused to
+    /// start the worker for this request (`Refused::NotStarted`, said once), which leaves the lane
+    /// as it was, so the next request starts the worker again.
     pub(crate) fn request(&'static self, request: WalkRequest) -> Result<u64, Refused> {
         let mut asks = self.lock();
         let urgent = request.trigger.urgent() || asks.panes_waiting > 0;
-        let asked = self.requests.ask(
+        let admitted = self.requests.ask(
             Walk { request, urgent },
             ProgramsOwed::owed(),
             Walk::same,
             Walk::fold,
+            |ran| {
+                self.executor
+                    .start_worker("program-walk", ran, move |ctx| run_program_walk(ctx, self))
+            },
         )?;
         if let Some((_, _, joined)) = asks.out.as_mut() {
             *joined += 1;
         }
-        drop(asks);
-        if asked.start {
-            let _ = self.executor.start_worker(
-                "program-walk",
-                Arc::clone(self.requests.ledger()),
-                move |ctx| run_program_walk(ctx, self),
-            );
-        }
-        Ok(asked.id.0)
+        Ok(admitted.id.0)
     }
 
     /// **Count a pane in birth until the answer is dropped.** One lock; never waits for the worker.
@@ -698,6 +695,7 @@ fn run_program_walk(ctx: &WorkerCtx, lane: &ProgramsLane) {
                 request,
                 mut urgent,
             },
+            ..
         } = lane.requests.next(ctx);
         let generation = newest.0;
         lane.lock().out = Some((generation, request.trigger, 0));
@@ -1519,6 +1517,46 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(gate.entered(), 2, "two walks for four requests");
+    }
+
+    /// RED (S-4 round 2) — **A start the thread door refuses refuses that request at the door,
+    /// says so once, and the next request starts the worker** (revision (b)5, rule 1: a new
+    /// request tries again; the lane is not in fault, because its worker never ran). In round 1
+    /// the request was minted, ended `WorkerGone`, and faulted the lane; now it is refused without
+    /// an identity, and the next request walks.
+    ///
+    /// MUTATION: fault the lane on a refused start (`lane::Ran::worker_ended` handing
+    /// `NotStarted` to the ledger) — the next request is refused `Faulted`.
+    #[test]
+    fn a_refused_spawn_refuses_this_request_and_the_next_request_starts_the_worker() {
+        let gate = Arc::new(Gate::default());
+        let (lane, wakes, notes) = scripted_lane(&gate, FakeMachine::with_path(&[bin_dir()]));
+        let rows = [row("rg", "rg.exe")];
+        gate.refuse_next_start();
+        assert!(
+            matches!(
+                lane.request(request(&rows, Trigger::Launch)),
+                Err(crate::lane::Refused::NotStarted(_))
+            ),
+            "the request whose start was refused is refused at the door"
+        );
+        assert_eq!(
+            lane.requests.ledger().earliest_owed(),
+            None,
+            "minting nothing"
+        );
+        let said: Vec<String> = notes.try_iter().collect();
+        assert_eq!(said.len(), 1, "said once: {said:?}");
+        assert!(said[0].contains(crate::lane::REFUSED_START), "{said:?}");
+        let next = lane
+            .request(request(&rows, Trigger::ProgramMenu))
+            .expect("the next request starts the worker");
+        assert_eq!(next, 1, "the refused request took no number");
+        let answers = answers_through(lane, &wakes, next);
+        assert_eq!(
+            answers.verdicts[0].generation, next,
+            "and the worker it started walks"
+        );
     }
 
     /// RED (S-4; D-85) — **A worker that dies ends every request it owes `WorkerGone`, wakes the
