@@ -4087,7 +4087,9 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// PIN — **one writer, and it is not the window thread.**
+    /// GUARD — **one writer, and it is not the window thread.** Its subject is how the session
+    /// file is reached in the source: one raw atomic write in `persist`, inside the writer
+    /// thread's spawn, and no other road (CONVENTIONS, "A test pins behaviour by running it").
     ///
     /// The behavioural half above is about when a verdict is known; this is about there being
     /// only one road to the file at all. Two roads — a thread and a window thread that sometimes
