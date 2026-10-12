@@ -9000,11 +9000,10 @@ fn driver_prepare_implementations(world: &World) -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
     for src in &world.srcs {
         for block in src.index.impls() {
-            if !block
+            let implements_driver = block
                 .trait_name()
-                .is_some_and(|name| bare_trait(name) == "Driver")
-                || !src.in_product(block.whole().start())
-            {
+                .is_some_and(|name| bare_trait(name) == "Driver");
+            if !implements_driver || !src.in_product(block.whole().start()) {
                 continue;
             }
             keys.extend(
