@@ -81,7 +81,6 @@ bt-app	-	crate::shell_integration::profile_marks::lock	std::fs::create_dir_all	1
 bt-app	-	crate::shell_integration::profile_marks::lock	std::thread::sleep	1
 bt-app	-	crate::shell_integration::replace_profile	std::fs::File::sync_all	1
 bt-app	-	crate::shell_integration::replace_profile	std::fs::create_dir_all	1
-bt-app	-	crate::taskbar_lane::TaskbarLane::serve	std::sync::Condvar::wait	1
 bt-app	-	crate::trace::TraceFile::append	std::io::Write::write_fmt	1
 bt-app	-	crate::trace::TraceFile::open	std::io::Write::write_fmt	2
 bt-app	-	crate::trace_sink::flush_sink	std::sync::mpsc::Receiver::recv_timeout	1
