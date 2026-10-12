@@ -65,6 +65,15 @@ fn by_id<'a>(rows: &[&'a ProfileEntryV1]) -> HashMap<&'a str, &'a ProfileEntryV1
     rows.iter().map(|entry| (entry.id.as_str(), *entry)).collect()
 }
 
+/// The ids `rows` names, each once, after those already in `ids`.
+fn push_ids<'a>(ids: &mut Vec<&'a str>, rows: &[&'a ProfileEntryV1]) {
+    for entry in rows {
+        if !ids.contains(&entry.id.as_str()) {
+            ids.push(entry.id.as_str());
+        }
+    }
+}
+
 /// Count one unit's row of the table into `account`, under `name`.
 fn count(account: &mut Account, row: Unit, name: impl FnOnce() -> String) {
     match row {
@@ -194,10 +203,8 @@ pub(crate) fn merge(
 
     // Each id's row in the result, or none.
     let mut ids: Vec<&str> = Vec::new();
-    for entry in t_rows.iter().chain(&o_rows).chain(&b_rows) {
-        if !ids.contains(&entry.id.as_str()) {
-            ids.push(entry.id.as_str());
-        }
+    for rows in [&t_rows, &o_rows, &b_rows] {
+        push_ids(&mut ids, rows);
     }
     let mut result: HashMap<String, ProfileEntryV1> = HashMap::new();
     for id in ids {
