@@ -816,9 +816,11 @@ time through `bt_compose::pump`.
 
 The seams that already implement this shape: `bt-app::main::run_path_verify_worker`
 (*one question, one call, one answer, and nothing else runs here*),
-`bt-app::handoff_lane` (the OS hand-off lane: request id, the asking window's
-`Pending` as the target incarnation, press order, a bound of 32 with no
-coalescing, completion as the door's own `Result`),
+`bt-app::handoff_lane` (the OS hand-off lane, on the completion seam since S-5:
+a ledger-minted request id, the asking window's `Pending` holding the request as
+the target incarnation, press order, 32 waiting behind the one running with no
+coalescing and the press past them refused at the door, completion as the door's
+own `Result`, a closed window's request ending in the lane's sink),
 `bt-pty::PtySession`, `bt-app::persist::SessionWriter`,
 `bt-app::trace_sink::Queue`, `bt-app::main::Runtime::present_seats_and_commit`.
 
@@ -1181,9 +1183,8 @@ adapter that drives the lane's own admission, publication and acceptance. **A
 lane that fails a claim is not declared conformant**: the failure is a row of
 `lane::EXPECTED_FAILURES` with its exact kind and the ledger row that repairs
 it, and the suite is red on an unexpected pass, a different failure, a skipped
-lane and a claim that exercised no request. The hand-off lane is the reference
-for its partial contract: it passes six claims and is declared to fail two
-(D-70, D-71); the font and taskbar lanes fail per-request outcomes and worker
+lane and a claim that exercised no request. The hand-off lane is the reference:
+since S-5 it passes every claim (D-70 and D-71 repaid); the font and taskbar lanes fail per-request outcomes and worker
 death (D-72, D-73); the computation lane fails bounds, identity and death
 (D-74…D-76). Path verification, the ten probes (D-3) and the files, preview,
 index and git workers have no adapter yet. **The completion seam** (S-3,
@@ -1199,10 +1200,14 @@ wakes the consumer through the wake the ledger is built with, and a
 panic inside one request's task fails that request while the worker goes on.
 Four claims hold it: **(9)** a superseded request says so; **(10)** a joined
 request carries its twin's outcome; **(11)** a failure is said once (or once per
-declared streak); **(12)** an orphaned answer reaches its sink. No lane is
-built on the seam yet; the rows the new claims add name D-70, D-72, D-73, D-75,
-D-76 and D-85, and S-4, S-5, S-6a and S-7 move the lanes onto it
-(`docs/ARCHITECTURE-GUARDS.md`, *Lane contract and the completion seam*).
+declared streak); **(12)** an orphaned answer reaches its sink. The OS hand-off
+lane is built on the seam (S-5, 2026-10-12): its `bt-os-handoff` worker is
+started by `Executor::start_worker`, its ledger owes at most 33 identities and
+refuses the next press at the door, each hand-off runs in `lane::task`, and its
+adapter hands the real lane the suite's scripted executor. The rows the new
+claims add for the other lanes name D-72, D-73, D-75, D-76 and D-85, and S-4,
+S-6a and S-7 move those lanes onto it (`docs/ARCHITECTURE-GUARDS.md`, *Lane
+contract and the completion seam*).
 **The return rule:** a lane whose
 answer is the latest value of one fact publishes into a slot the window reads
 (3) and wakes the loop through (1) or (2); a lane whose every request is owed
@@ -2138,7 +2143,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23.
 | `floats.rs` | 61 | floating windows, popups and chevron menus; the file, terminal and page menus | observation (files, git); hand-off (reveal) | — |
 | `frame.rs` | 23 | chrome refresh, frame publication and present attempts, `turn`, hyperlink activation | presentation (on this thread); session (the drain frame); observation (math); hand-off (refusals) | row 6 (the search refresh in `publish_frame`) |
 | `git.rs` | 103 | the git column, graph, compare and checkout; its menus, prompts and writes to a repository | observation (`bt-git-worker`, whose `git` children go through `quiet_command`); ingress (`git_watch`) | — |
-| `handoff.rs` | 4 | the `Runtime` side of the OS hand-off lane: submit, owe a duty, answer | hand-off | never calls `bt_platform::handoff` itself (`no_handoff_runs_on_the_window_thread`) |
+| `handoff.rs` | 4 | the `Runtime` side of the OS hand-off lane: submit, hold each request with its duty, answer a refusal at the door at once and the rest when they end | hand-off | never calls `bt_platform::handoff` itself (`no_handoff_runs_on_the_window_thread`) |
 | `i18n.rs` | 2 | applying and adopting the language | — | — |
 | `keyboard.rs` | 35 | `keyboard_input` and its rung order (§8), shortcuts and key hints, the IME caret, cursor blink | session (input) | IME native affinity (§5.2); `store_keybindings`, row 20 |
 | `math.rs` | 46 | formulas in terminal and preview: requests, results, hover tools, toggles, copying LaTeX | observation (`bt-math-worker`) | — |

@@ -135,7 +135,8 @@ for a joined identity is refused) and `WorkerGone` comes from the ledger; it
 says no failure line of its own (the ledger says each failed request once, a
 joined one carrying a failure included, or once per streak); and its
 `LaneUnderTest` adapter hands the real lane `Executor::scripted` and reports
-`sunk` and `said`. What the proof covers:
+`sunk` and `said`. The OS hand-off lane (`handoff_lane`, S-5) is the first
+lane built this way. What the proof covers:
 `lane_contract_tests::the_ledger_ends_every_identity_exactly_once_in_every_interleaving`
 plays every order of three identities' outcomes (the six terminals, a racing
 answer after a cancel, a terminal published for a joined identity itself),
