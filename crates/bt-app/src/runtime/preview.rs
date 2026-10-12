@@ -1377,8 +1377,7 @@ impl Runtime<'_> {
             // The panes on the old name go where their buffer went: a pane names
             // only a buffer its pool holds, so the panes that were on `source`
             // are exactly the readers of this one.
-            let held = buffer.held();
-            tab.preview_pool.insert(buffer);
+            let held = tab.preview_pool.insert(buffer);
             for (_, pane) in tab.preview_panes.iter_mut() {
                 if pane.source() == Some(source) {
                     pane.show_source(held.clone());
@@ -1855,12 +1854,10 @@ impl Runtime<'_> {
     ) -> Option<&preview::PreviewBuffer> {
         if surface == PreviewSurface::Peek {
             let source = self.window.peek_pane.source()?;
-            return self.preview_pool.get(source).or_else(|| {
-                self.window
-                    .peek_buffer
-                    .as_ref()
-                    .filter(|buffer| buffer.source() == source)
-            });
+            return self
+                .preview_pool
+                .get(source)
+                .or_else(|| self.window.peek_buffer.get(source));
         }
         // **A page turned to its source reads that file's buffer** (user ruling
         // 2026-08-26). One fork, at the door every host asks its body, its view,
@@ -2235,11 +2232,9 @@ impl Runtime<'_> {
         for (surface, error) in faulted {
             self.mouse_trace(|| format!("video_seat surface={surface:?} fault={error:?}"));
             self.window.video.close(surface);
-            if let Some(picture) = self.preview_picture_mut(surface) {
-                picture.failure = Some(PictureRefusal::this_window_cannot(
-                    i18n::Text::VideoFormatCannotPlay.text(),
-                ));
-            }
+            self.preview_pane_mut(surface).refuse_picture(Some(
+                PictureRefusal::this_window_cannot(i18n::Text::VideoFormatCannotPlay.text()),
+            ));
         }
         membership_moved
     }
@@ -2860,14 +2855,12 @@ impl Runtime<'_> {
             // Filed on the `PreviewImageState`, which is the one place a
             // surface's failures already live and already draw — the same slot a
             // picture that would not decode writes into.
-            if let Some(picture) = self.preview_picture_mut(surface) {
-                picture.failure = Some(PictureRefusal::this_window_cannot(
-                    i18n::Text::VideoFormatCannotPlay.text(),
-                ));
-            }
-        } else if let Some(picture) = self.preview_picture_mut(surface) {
+            self.preview_pane_mut(surface).refuse_picture(Some(
+                PictureRefusal::this_window_cannot(i18n::Text::VideoFormatCannotPlay.text()),
+            ));
+        } else {
             // And a play that worked clears whatever the last one said.
-            picture.failure = None;
+            self.preview_pane_mut(surface).refuse_picture(None);
         }
         // The still comes off the glass and the layer goes on in the same pass,
         // which is the pass that already owns both — see
@@ -2983,19 +2976,24 @@ impl Runtime<'_> {
         self.clear_preview_image(surface);
         let tab = self.id;
         let shown = self.preview_panes.showing();
-        let buffer = self.preview_pool.open(source.clone(), name, &shown);
+        let (held, buffer) = self.preview_pool.open_held(source.clone(), name, &shown);
         // Claimed rather than merely asked about: every send on this channel
         // goes through the one door, so a file already out with the worker —
         // opened into a second pane, or armed by the card column a frame ago —
         // is read once (user ruling 2026-08-21).
         let wants_read = buffer.claim_head_read();
-        let held = buffer.held();
         // The outgoing view is filed and the incoming one is found: a caret and
         // a scroll are the pane's memory of a file, and a switch that reset them
-        // would make the switcher a thing you pay for using (ruling 8⑧).
-        self.leave_preview_buffer(surface);
+        // would make the switcher a thing you pay for using (ruling 8⑧). A pane
+        // turned to the buffer it is already on keeps its view whole, a line it
+        // still owes that buffer included, and files nothing.
         let view = self.preview_views.restore(&source);
-        self.preview_pane_mut(surface).stand_on(held, view);
+        let index = self.preview_tab_index(surface);
+        let left = self.preview_pane_mut(surface).turn_to(held, view);
+        if let Some((left, at)) = left {
+            self.window.tabs[index].preview_views.remember(&left, at);
+        }
+        self.let_go_of_preview_gestures_on(surface);
         if let Some(want) = wants_read
             && !self.app.preview_worker.request(preview::PreviewRequest {
                 window: self.window_id(),
@@ -3114,6 +3112,15 @@ impl Runtime<'_> {
                     .remember(&source, view);
             }
         }
+        self.let_go_of_preview_gestures_on(surface);
+    }
+
+    /// **What the keyboard and the hand were doing on this surface ends with
+    /// the document it was doing it to** — the tab's singletons, cleared only
+    /// when they name this surface: there is one pointer and one keyboard, so a
+    /// pane leaving a document has no business answering for a gesture that is
+    /// happening in the pane beside it.
+    fn let_go_of_preview_gestures_on(&mut self, surface: PreviewSurface) {
         if self.preview_edit_focus == Some(surface) {
             self.preview_edit_focus = None;
         }
@@ -9887,9 +9894,7 @@ impl Runtime<'_> {
         }
         if image_zoom_settles(held, zoom) {
             let now = Instant::now();
-            if let Some(picture) = self.preview_picture_mut(surface) {
-                picture.defer_scale_settle(now);
-            }
+            self.preview_pane_mut(surface).defer_picture_settle(now);
         }
         self.preview_pane_mut(surface).zoom_to(zoom);
         // **What one notch costs, split by the layer that spends it.** The zoom
@@ -9987,11 +9992,6 @@ impl Runtime<'_> {
         self.preview_pane(surface)?.image()
     }
 
-    /// The same, mutably.
-    fn preview_picture_mut(&mut self, surface: PreviewSurface) -> Option<&mut PreviewImageState> {
-        self.preview_pane_mut(surface).image_mut()
-    }
-
     /// **This surface's picture is not on screen this frame.**
     ///
     /// One door for every refusal below — the decode is still out, the body has
@@ -10007,9 +10007,7 @@ impl Runtime<'_> {
     /// moment the refusal lifts — which is exactly the resample storm R2 exists
     /// to forbid.
     fn hide_preview_picture(&mut self, surface: PreviewSurface) {
-        if let Some(picture) = self.preview_picture_mut(surface) {
-            picture.drawn = None;
-        }
+        self.preview_pane_mut(surface).place_picture_drawn(None);
     }
 
     /// The earliest settle boundary any picture on screen is waiting on.
@@ -10034,9 +10032,8 @@ impl Runtime<'_> {
 
     pub(in crate::runtime) fn defer_preview_resample(&mut self, observed_at: Instant) {
         for surface in self.preview_picture_hosts() {
-            if let Some(picture) = self.preview_picture_mut(surface) {
-                picture.defer_scale_settle(observed_at);
-            }
+            self.preview_pane_mut(surface)
+                .defer_picture_settle(observed_at);
         }
         if self.window.markdown_pictures.settle_deadline.is_some() {
             self.window.markdown_pictures.settle_deadline = Some(observed_at + WINDOW_RESIZE_QUIET);
@@ -10046,9 +10043,9 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn finish_preview_scale_if_quiet(&mut self, now: Instant) -> Result<()> {
         let mut due = false;
         for surface in self.preview_picture_hosts() {
-            if let Some(picture) = self.preview_picture_mut(surface) {
-                due |= picture.finish_scale_settle_if_quiet(now);
-            }
+            due |= self
+                .preview_pane_mut(surface)
+                .finish_picture_settle_if_quiet(now);
         }
         if self
             .window
@@ -10775,9 +10772,7 @@ impl Runtime<'_> {
                     // withheld and the two fact lines carry the surface — see
                     // [`Self::video_meta_sentence`], whose degraded form exists for exactly this
                     // frame.
-                    if !preview::path_names_a_video(&path)
-                        && let Some(picture) = self.preview_picture_mut(surface)
-                    {
+                    if !preview::path_names_a_video(&path) {
                         // **The decoder's own reason, not this pane's guess**
                         // (owner's ruling 2026-09-12). A surface that opens a file
                         // this window has already refused reads its answer out of
@@ -10785,9 +10780,8 @@ impl Runtime<'_> {
                         // picture too long or too many pixels says which, here as
                         // much as on the surface that was watching when the answer
                         // arrived.
-                        picture
-                            .failure
-                            .get_or_insert_with(|| PictureRefusal::decoded(&reason));
+                        self.preview_pane_mut(surface)
+                            .refuse_picture_unless_said(PictureRefusal::decoded(&reason));
                     }
                     self.hide_preview_picture(surface);
                     return None;
@@ -10795,11 +10789,11 @@ impl Runtime<'_> {
                 SurfacePixels::Nothing { asked } => {
                     self.hide_preview_picture(surface);
                     if !self.app.math_worker_running {
-                        if let Some(picture) = self.preview_picture_mut(surface) {
-                            picture.failure = Some(PictureRefusal::this_window_cannot(
+                        self.preview_pane_mut(surface).refuse_picture(Some(
+                            PictureRefusal::this_window_cannot(
                                 i18n::Text::PreviewFailedImageWorker.text(),
-                            ));
-                        }
+                            ),
+                        ));
                         return None;
                     }
                     if asked {
@@ -10809,9 +10803,11 @@ impl Runtime<'_> {
                         self.window
                             .peek_cache
                             .insert(cache_key, PeekCacheEntry::Pending);
-                    } else if let Some(picture) = self.preview_picture_mut(surface) {
-                        picture.failure = Some(PictureRefusal::this_window_cannot(
-                            i18n::Text::PreviewFailedImageWorker.text(),
+                    } else {
+                        self.preview_pane_mut(surface).refuse_picture(Some(
+                            PictureRefusal::this_window_cannot(
+                                i18n::Text::PreviewFailedImageWorker.text(),
+                            ),
                         ));
                     }
                     return None;
@@ -10823,14 +10819,12 @@ impl Runtime<'_> {
         let stated = preview::path_names_a_video(&path)
             .then(|| self.video_facts_of(&path).native)
             .flatten();
-        if let Some(picture) = self.preview_picture_mut(surface) {
-            picture.native = Some((native_width, native_height));
-            // **A reduced picture parts the same two sizes a recording does**
-            // (owner's ruling 2026-09-12), so it is filed in the same field: a
-            // 6000×4000 photograph decoded down to the pixel budget is a file
-            // whose picture is 6000×4000 and pixels that are not.
-            picture.stated_size = stated.or(reduced_from);
-        }
+        // **A reduced picture parts the same two sizes a recording does**
+        // (owner's ruling 2026-09-12), so it is filed in the same field: a
+        // 6000×4000 photograph decoded down to the pixel budget is a file whose
+        // picture is 6000×4000 and pixels that are not.
+        self.preview_pane_mut(surface)
+            .hear_picture_native((native_width, native_height), stated.or(reduced_from));
         // `.pv-image svg { max-width: 86%; max-height: 70% }` (mock-up 606).
         //
         // **The 30% of height the picture gives up is not slack** — it is where
@@ -10855,11 +10849,9 @@ impl Runtime<'_> {
             || native_width == 0
             || native_height == 0
         {
-            if let Some(picture) = self.preview_picture_mut(surface) {
-                picture.failure = Some(PictureRefusal::this_window_cannot(
-                    i18n::Text::PreviewFailedSeatTooSmall.text(),
-                ));
-            }
+            self.preview_pane_mut(surface).refuse_picture(Some(
+                PictureRefusal::this_window_cannot(i18n::Text::PreviewFailedSeatTooSmall.text()),
+            ));
             self.hide_preview_picture(surface);
             return None;
         }
@@ -10922,11 +10914,9 @@ impl Runtime<'_> {
             native_width,
             native_height,
         ) else {
-            if let Some(picture) = self.preview_picture_mut(surface) {
-                picture.failure = Some(PictureRefusal::this_window_cannot(
-                    i18n::Text::PreviewFailedSeatTooSmall.text(),
-                ));
-            }
+            self.preview_pane_mut(surface).refuse_picture(Some(
+                PictureRefusal::this_window_cannot(i18n::Text::PreviewFailedSeatTooSmall.text()),
+            ));
             self.hide_preview_picture(surface);
             return None;
         };
@@ -10976,9 +10966,8 @@ impl Runtime<'_> {
             }),
             (Some(_), None) | (None, _) => None,
         };
-        if let Some(picture) = self.preview_picture_mut(surface) {
-            picture.drawn = Some(drawn);
-        }
+        self.preview_pane_mut(surface)
+            .place_picture_drawn(Some(drawn));
         // **And what this surface must do about its pixels** (§7.1.3u ③). The
         // first answer is the one that ends the loop: a surface holding the very
         // raster this frame wants asks nobody anything, whatever either store
@@ -11035,13 +11024,10 @@ impl Runtime<'_> {
             })
             .is_ok()
         {
-            if let Some(picture) = self.preview_picture_mut(surface) {
-                picture.pending = Some(target);
-                picture.failure = None;
-            }
-        } else if let Some(picture) = self.preview_picture_mut(surface) {
-            picture.failure = Some(PictureRefusal::this_window_cannot(
-                i18n::Text::PreviewFailedImageWorker.text(),
+            self.preview_pane_mut(surface).ask_picture_scale(target);
+        } else {
+            self.preview_pane_mut(surface).refuse_picture(Some(
+                PictureRefusal::this_window_cannot(i18n::Text::PreviewFailedImageWorker.text()),
             ));
         }
         produced
@@ -11139,12 +11125,7 @@ impl Runtime<'_> {
                     {
                         let landed = buffer.land_read(outcome, base);
                         Some((landed, buffer.content().cloned()))
-                    } else if let Some(peek) = self
-                        .window
-                        .peek_buffer
-                        .as_mut()
-                        .filter(|peek| *peek.source() == response.source)
-                    {
+                    } else if let Some(peek) = self.window.peek_buffer.get_mut(&response.source) {
                         let landed = peek.land_read(outcome, base);
                         Some((landed, peek.content().cloned()))
                     } else {
@@ -13418,9 +13399,8 @@ impl Runtime<'_> {
             }
             Err(error) => {
                 for surface in &waiting {
-                    if let Some(picture) = self.preview_picture_mut(*surface) {
-                        picture.failure = Some(PictureRefusal::decoded(&error));
-                    }
+                    self.preview_pane_mut(*surface)
+                        .refuse_picture(Some(PictureRefusal::decoded(&error)));
                 }
                 // **Filed with its reason** (owner's ruling 2026-09-12), so that
                 // a surface which opens this file later says the same sentence
@@ -13576,10 +13556,7 @@ impl Runtime<'_> {
         else {
             return Ok(());
         };
-        if !self
-            .preview_picture_mut(surface)
-            .is_some_and(|picture| picture.accept_scaled(scaled))
-        {
+        if !self.preview_pane_mut(surface).accept_scaled_picture(scaled) {
             return Ok(());
         }
         self.refresh_preview_for_layout();

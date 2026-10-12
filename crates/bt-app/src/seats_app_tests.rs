@@ -3622,8 +3622,7 @@ fn tab_with_two_previews(
     let mut pool = preview::PreviewPool::default();
     let mut panes = PreviewPanes::default();
     for (seat, buffer) in [first, second].into_iter().zip(buffers) {
-        let held = buffer.held();
-        pool.insert(buffer);
+        let held = pool.insert(buffer);
         panes.entry(seat_of(TabId(id), seat)).show_source(held);
     }
     let (layout, overflow) = cross_solve(&seats);
@@ -4637,7 +4636,7 @@ fn a_pinned_preview_keeps_its_own_buffer_and_scroll_when_the_next_file_opens() {
         let surface = seat_of(TAB_ONE, seat);
         panes
             .entry(surface)
-            .show_source(crate::test_support::held_alone(
+            .show_source(crate::test_support::test_shortcut_held(
                 preview::PreviewSource::file(path),
             ));
         surface

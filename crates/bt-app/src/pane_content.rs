@@ -11,11 +11,11 @@
 //! its pool was found holding.
 
 use crate::{
-    DocumentPictures, ImageZoom, PreviewDocument, PreviewDocumentKey, PreviewImageState,
-    PreviewLink, PreviewTextBox, PreviewViewState, Reparse, preview, preview_edit, preview_live,
-    preview_select,
+    DocumentPictures, ImageZoom, PeekThumbnailTarget, PictureRefusal, PreviewDocument,
+    PreviewDocumentKey, PreviewImageState, PreviewLink, PreviewTextBox, PreviewViewState, Reparse,
+    preview, preview_edit, preview_live, preview_select,
 };
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -70,17 +70,17 @@ impl PaneContent {
         Self::of(view)
     }
 
-    /// **Show the picture at `path`.** A picture replacing a picture keeps the
-    /// zoom (the door that opens a picture resets it on purpose; see
+    /// **Show this picture.** A picture replacing a picture keeps the zoom (the
+    /// door that opens a picture resets it on purpose; see
     /// [`PictureView::zoom`]); anything else starts at fit.
-    pub(crate) fn picturing(self, path: PathBuf) -> Self {
+    pub(crate) fn picturing(self, image: PreviewImageState) -> Self {
         let zoom = match &self {
             Self::Picture(picture) => picture.zoom,
             Self::Empty | Self::Document(_) | Self::Page(_) | Self::GitGraph(_) => {
                 ImageZoom::default()
             }
         };
-        Self::Picture(PictureView::new(path, zoom))
+        Self::Picture(PictureView { image, zoom })
     }
 
     /// The view of the pool buffer this surface is on, when it is on one.
@@ -570,6 +570,11 @@ impl DocumentView {
 }
 
 /// **How one surface is looking at one picture**: the picture, and the zoom.
+///
+/// No `&mut` to either field leaves this type, and neither does one to a
+/// [`DocumentView`] field: the ownership census counts a `&mut` lend as an
+/// access and not as a write, so a write made through one would be a second
+/// writer it cannot see. Every change is one of the doors below.
 pub(crate) struct PictureView {
     image: PreviewImageState,
     /// How this surface is looking at the picture (ticket #60) —
@@ -587,19 +592,69 @@ pub(crate) struct PictureView {
 }
 
 impl PictureView {
-    fn new(path: PathBuf, zoom: ImageZoom) -> Self {
-        Self {
-            image: PreviewImageState::new(path),
-            zoom,
-        }
-    }
-
     pub(crate) fn image(&self) -> &PreviewImageState {
         &self.image
     }
 
-    pub(crate) fn image_mut(&mut self) -> &mut PreviewImageState {
-        &mut self.image
+    /// Why there is no picture here, or nothing to say.
+    pub(crate) fn refuse(&mut self, why: Option<PictureRefusal>) {
+        self.image.failure = why;
+    }
+
+    /// Why there is no picture here — unless a reason is already standing.
+    pub(crate) fn refuse_unless_said(&mut self, why: PictureRefusal) {
+        self.image.failure.get_or_insert(why);
+    }
+
+    /// A resample at this size has been asked for, and nothing is refused.
+    pub(crate) fn ask_scale(&mut self, target: PeekThumbnailTarget) {
+        self.image.pending = Some(target);
+        self.image.failure = None;
+    }
+
+    /// A resample has landed; answers whether it was the one asked for.
+    pub(crate) fn accept_scaled(&mut self, scaled: bt_term::ScaledInlineImage) -> bool {
+        self.image.accept_scaled(scaled)
+    }
+
+    /// A gesture moved the boundary the exact resample waits for.
+    pub(crate) fn defer_scale_settle(&mut self, observed_at: Instant) {
+        self.image.defer_scale_settle(observed_at);
+    }
+
+    /// Whether the boundary has gone quiet, settling it if it has.
+    pub(crate) fn finish_scale_settle_if_quiet(&mut self, now: Instant) -> bool {
+        self.image.finish_scale_settle_if_quiet(now)
+    }
+
+    /// Where the picture was drawn this frame, or that it was not.
+    pub(crate) fn place_drawn(&mut self, drawn: Option<[f32; 4]>) {
+        self.image.drawn = drawn;
+    }
+
+    /// The decode's native size, and the size the file states when the two
+    /// part.
+    pub(crate) fn hear_native(&mut self, native: (u32, u32), stated: Option<(u32, u32)>) {
+        self.image.native = Some(native);
+        self.image.stated_size = stated;
+    }
+
+    /// **The picture at `path` is `bytes` long**, if it is this one. Answers
+    /// whether it was.
+    pub(crate) fn hear_size(&mut self, path: &Path, bytes: Option<u64>) -> bool {
+        if self.image.path != path {
+            return false;
+        }
+        self.image.bytes = bytes;
+        true
+    }
+
+    /// Drop the decoded pixels when this is the picture whose path key is
+    /// `key`.
+    pub(crate) fn forget_pixels_of(&mut self, key: &str) {
+        if bt_term::normalized_local_image_path_key(&self.image.path) == key {
+            self.image.forget_its_pixels();
+        }
     }
 
     pub(crate) fn zoom(&self) -> ImageZoom {

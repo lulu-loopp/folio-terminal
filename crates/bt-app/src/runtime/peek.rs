@@ -837,7 +837,7 @@ impl Runtime<'_> {
         // sixty hertz. It stands on the buffer it reads, which is the tab's
         // when the tab's pool has one and the glance's own otherwise.
         self.window.peek_pane = PreviewPane::default();
-        if let Some(pooled) = self.preview_pool.get_mut(&source) {
+        if let Some((held, pooled)) = self.preview_pool.held_mut(&source) {
             // A restored pool remembers names, never text (P151) — so "in the
             // pool" is not "has something to show". A buffer that still wants
             // its head read gets the same request a stranger would; the answer
@@ -846,9 +846,8 @@ impl Runtime<'_> {
             // 2026-08-14: hovering a restored, never-opened pool entry showed
             // an empty card forever.)
             let wants_read = pooled.claim_head_read();
-            let held = pooled.held();
             self.window.peek_pane.show_source(held);
-            self.window.peek_buffer = None;
+            self.window.peek_buffer.clear();
             if let Some(want) = wants_read {
                 let tab = self.id;
                 if !self.app.preview_worker.request(preview::PreviewRequest {
@@ -869,8 +868,8 @@ impl Runtime<'_> {
         // this window ever shows.
         let mut buffer = preview::PreviewBuffer::glancing(source.clone(), name);
         let wants_read = buffer.claim_head_read();
-        self.window.peek_pane.show_source(buffer.held());
-        self.window.peek_buffer = Some(buffer);
+        let held = self.window.peek_buffer.put(buffer);
+        self.window.peek_pane.show_source(held);
         // **A composed document waits for git and never for a disk.** A glance
         // over a commit's file is a `GitShow`, and `wants_head_read` answers
         // `false` for it by construction — so without this the card would sit
@@ -939,7 +938,7 @@ impl Runtime<'_> {
         // open a window over a file nobody is pointing at any more.
         self.drop_file_peek_press();
         self.drop_glance_thumb();
-        self.window.peek_buffer = None;
+        self.window.peek_buffer.clear();
         // And the parsed document with it: a card that is down is holding a
         // markdown layout for a file nobody is looking at.
         self.window.peek_pane = PreviewPane::default();

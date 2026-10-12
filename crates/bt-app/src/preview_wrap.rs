@@ -901,7 +901,7 @@ mod tests {
         step(&mut h, "**hello** world", Some(0));
         let old = h.keys();
         let mut pane = PreviewPane::default();
-        pane.show_source(crate::test_support::held_alone(
+        pane.show_source(crate::test_support::test_shortcut_held(
             crate::preview::PreviewSource::file("notes.md"),
         ));
         pane.reflow_document(h.doc.clone());
@@ -941,7 +941,7 @@ mod tests {
         let mut h = Harness::default();
         step(&mut h, &format!("{table}\n\n{table}"), None);
         let mut pane = PreviewPane::default();
-        pane.show_source(crate::test_support::held_alone(
+        pane.show_source(crate::test_support::test_shortcut_held(
             crate::preview::PreviewSource::file("notes.md"),
         ));
         pane.reflow_document(h.doc.clone());

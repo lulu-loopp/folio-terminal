@@ -1655,10 +1655,9 @@ fn a_picture_torn_off_into_a_window_still_takes_delivery_of_its_resample() {
     let float = 3_u64;
     let target: PeekThumbnailTarget = ("push-pin".to_owned(), 320, 180);
     let mut panes = PreviewPanes::default();
-    crate::test_support::show_picture_state(
-        panes.entry(seat_of(TAB_ONE, seat)),
-        pending_picture("push-pin.png", target.clone()),
-    );
+    panes
+        .entry(seat_of(TAB_ONE, seat))
+        .show_picture_state(pending_picture("push-pin.png", target.clone()));
 
     assert_eq!(
         panes.awaiting_scale(&target),
@@ -1688,20 +1687,22 @@ fn a_picture_torn_off_into_a_window_still_takes_delivery_of_its_resample() {
     );
 
     let surface = panes.awaiting_scale(&target).expect("an asker");
-    let picture = panes
-        .entry(surface)
-        .image_mut()
-        .expect("the picture that asked");
     assert!(
-        picture.accept_scaled(bt_term::scale_inline_image(
-            &bt_term::InlineImageScaleTask {
-                display_width_px: 320,
-                display_height_px: 180,
-                ..scale_task("push-pin", 320)
-            },
-        )),
+        panes
+            .entry(surface)
+            .accept_scaled_picture(bt_term::scale_inline_image(
+                &bt_term::InlineImageScaleTask {
+                    display_width_px: 320,
+                    display_height_px: 180,
+                    ..scale_task("push-pin", 320)
+                },
+            )),
         "the answer lands on the picture that asked for it"
     );
+    let picture = panes
+        .get(surface)
+        .and_then(PreviewPane::image)
+        .expect("the picture that asked");
     assert_eq!(picture.pending, None, "and retires the question with it");
     assert!(picture.raster.is_some(), "leaving the pixels behind");
     assert_eq!(
@@ -1720,10 +1721,9 @@ fn an_in_flight_resample_cannot_outlive_the_surface_that_asked_for_it() {
     let seat = seat_of(TAB_ONE, SeatId(9));
     let target: PeekThumbnailTarget = ("push-pin".to_owned(), 64, 64);
     let mut panes = PreviewPanes::default();
-    crate::test_support::show_picture_state(
-        panes.entry(seat),
-        pending_picture("push-pin.png", target.clone()),
-    );
+    panes
+        .entry(seat)
+        .show_picture_state(pending_picture("push-pin.png", target.clone()));
     assert_eq!(panes.awaiting_scale(&target), Some(seat));
 
     panes.remove(seat);
@@ -1734,10 +1734,9 @@ fn an_in_flight_resample_cannot_outlive_the_surface_that_asked_for_it() {
     );
 
     // And the same when the surface stays but stops showing a picture.
-    crate::test_support::show_picture_state(
-        panes.entry(seat),
-        pending_picture("push-pin.png", target.clone()),
-    );
+    panes
+        .entry(seat)
+        .show_picture_state(pending_picture("push-pin.png", target.clone()));
     panes.entry(seat).take_picture_down();
     assert_eq!(
         panes.awaiting_scale(&target),
@@ -3435,7 +3434,7 @@ fn a_decode_that_lands_for_a_picture_the_page_holds_owes_it_no_reflow() {
 /// One surface holding a markdown page whose pictures are these.
 fn a_page_holding(pictures: DocumentPictures) -> PreviewPane {
     let mut pane = PreviewPane::default();
-    pane.show_source(crate::test_support::held_alone(
+    pane.show_source(crate::test_support::test_shortcut_held(
         preview::PreviewSource::file("page.md"),
     ));
     pane.reflow_document(PreviewDocument::Markdown {
@@ -3627,11 +3626,10 @@ fn a_watched_file_moving_clears_the_glance_cards_standing_answer() {
     let mut card = a_page_holding(pictures);
     // And a picture pane in a tab, standing on the same file.
     let mut pane = PreviewPane::default();
-    pane.show_picture(file.clone());
-    if let Some(picture) = pane.image_mut() {
-        picture.raster = Some(a_held_raster("content-a", (500, 375)));
-        picture.native = Some((1024, 768));
-    }
+    let mut decoded = PreviewImageState::new(file.clone());
+    decoded.raster = Some(a_held_raster("content-a", (500, 375)));
+    decoded.native = Some((1024, 768));
+    pane.show_picture_state(decoded);
     let mut tabs = Vec::new();
 
     forget_standing_answers(
@@ -6608,7 +6606,7 @@ fn a_seat_and_a_float_that_share_a_number_are_still_two_surfaces() {
     for surface in [seat, float] {
         panes
             .entry(surface)
-            .show_source(crate::test_support::held_alone(
+            .show_source(crate::test_support::test_shortcut_held(
                 preview::PreviewSource::file("notes.md"),
             ));
     }
@@ -7169,7 +7167,7 @@ fn a_seat_that_changes_content_drops_its_video() {
     // A document, landed the way `land_preview_source_on` lands one: the
     // picture is cleared and a buffer takes its place.
     let mut after_a_document = PreviewPane::default();
-    after_a_document.show_source(crate::test_support::held_alone(
+    after_a_document.show_source(crate::test_support::test_shortcut_held(
         preview::PreviewSource::file(document.clone()),
     ));
     // Another picture and another recording both come down the picture
@@ -7178,7 +7176,7 @@ fn a_seat_that_changes_content_drops_its_video() {
     let after_another = playing(&another);
     // A commit graph: content with no path of its own.
     let mut after_a_graph = PreviewPane::default();
-    after_a_graph.show_source(crate::test_support::held_alone(
+    after_a_graph.show_source(crate::test_support::test_shortcut_held(
         preview::PreviewSource::GitGraph {
             root: assets.clone(),
         },
@@ -7574,4 +7572,92 @@ fn a_document_view_always_resolves_in_its_pool() {
     assert_eq!(pane.leave_document().map(|(source, _)| source), Some(notes));
     assert!(pane.source().is_none(), "leaving lets go of the buffer");
     assert!(matches!(pane.content(), pane_content::PaneContent::Empty));
+}
+
+/// GUARD — **a `Held` is minted only by the two keepers of a buffer** (the
+/// ownership contract's §2.2 invariant 2; O-8 review round 2). This guard's
+/// subject is how the code is written: every construction of
+/// [`preview::Held`] in the product sits in an item of
+/// [`preview::PreviewPool`] or [`preview::GlanceSlot`], the two owners that
+/// keep a buffer alive while a view reads it — never in a door that could mint
+/// one from a buffer in hand, which nothing keeps. The behaviour half: neither
+/// keeper answers for a source it does not hold.
+///
+/// MUTATION: give `PreviewBuffer` a `pub fn held(&self) -> Held` again and the
+/// guard names it.
+#[test]
+fn a_held_is_minted_only_by_the_keepers_of_its_buffer() {
+    let index = source();
+    let minted = crate::test_support::found(needle!(Pattern::call("Held")), View::Identifiers)
+        .in_the_product(index);
+    // The callables that construct one; the tuple struct's own declaration is
+    // where the shape is written, not a construction.
+    let mut minters: Vec<String> = minted
+        .owners(index)
+        .into_keys()
+        .filter(|identity| {
+            matches!(
+                identity.kind,
+                bt_source::ItemKind::Function | bt_source::ItemKind::AssociatedFunction
+            )
+        })
+        .map(|identity| identity.type_owner.unwrap_or(identity.name))
+        .collect();
+    minters.sort();
+    minters.dedup();
+    assert_eq!(
+        minters,
+        vec!["GlanceSlot".to_owned(), "PreviewPool".to_owned()],
+        "a view's name for a buffer is minted only where the buffer is kept"
+    );
+
+    let kept = preview::PreviewSource::file(r"C:\w\已打开 kept.md");
+    let stranger = preview::PreviewSource::file(r"C:\w\陌生 stranger.md");
+    let mut pool = preview::PreviewPool::default();
+    pool.open(kept.clone(), "kept.md".to_owned(), &[]);
+    assert!(pool.held(&stranger).is_none());
+    assert!(pool.held_mut(&stranger).is_none());
+    let mut slot = preview::GlanceSlot::default();
+    slot.put(preview::PreviewBuffer::new(kept, "kept.md".to_owned()));
+    assert!(
+        slot.get(&stranger).is_none(),
+        "and the card's slot keeps only the buffer it was handed"
+    );
+}
+
+/// **Reopening the buffer a pane is already on keeps its view, a line it still
+/// owes included** (O-8 review round 2). Only a different buffer replaces the
+/// view: a line asked of one file is never spent on another.
+///
+/// MUTATION: drop the same-source arm of [`PreviewPane::turn_to`] (so the
+/// pane always leaves its view) and the pending line is gone after the reopen.
+#[test]
+fn reopening_the_same_source_keeps_the_pending_jump() {
+    let mut pool = preview::PreviewPool::default();
+    let notes = preview::PreviewSource::file(r"C:\w\笔记 notes.rs");
+    let other = preview::PreviewSource::file(r"C:\w\另一个 other.rs");
+    pool.open(notes.clone(), "notes.rs".to_owned(), &[]);
+    pool.open(other.clone(), "other.rs".to_owned(), &[]);
+    let mut pane = PreviewPane::default();
+    pane.stand_on(
+        pool.held(&notes).expect("held"),
+        PreviewViewState::default(),
+    );
+    pane.aim_at_line(Some(40));
+    pane.scroll_to([0.0, 120.0]);
+
+    let left = pane.turn_to(
+        pool.held(&notes).expect("held"),
+        PreviewViewState::default(),
+    );
+    assert!(left.is_none(), "the same buffer leaves nothing to file");
+    assert_eq!(pane.goto_line(), Some(40), "the line still owed survives");
+    assert_eq!(pane.scroll(), [0.0, 120.0], "and so does where it was");
+
+    let left = pane.turn_to(
+        pool.held(&other).expect("held"),
+        PreviewViewState::default(),
+    );
+    assert_eq!(left.map(|(source, _)| source), Some(notes));
+    assert_eq!(pane.goto_line(), None, "a different file owes nothing");
 }

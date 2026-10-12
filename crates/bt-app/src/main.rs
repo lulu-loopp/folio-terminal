@@ -4727,14 +4727,27 @@ fn preview_tab_index_among(tabs: &[TabState], tab: TabId) -> Option<usize> {
 ///
 /// The content is one [`pane_content::PaneContent`]: nothing, a picture, or a
 /// view of one pool buffer (a document, a page, a commit graph). A view of a
-/// pool buffer is built only from a [`preview::Held`], which only a buffer in
-/// hand or the pool that holds it can mint, so a surface names a buffer only
-/// where that buffer was found; the pool's eviction law never evicts a buffer
-/// a surface is reading ([`Self::reading`]). Everything a view of a buffer
-/// holds — the parse, the caret, both selection models, the scrolls, the boxes
-/// measured this frame, the notice, a pending line — lives in that view and
-/// goes with it, and a picture's zoom lives with the picture. Every write is
-/// one of the doors below or the view's own.
+/// pool buffer is built only from a [`preview::Held`], which only the two
+/// keepers of a buffer mint — the tab's pool and the hover card's
+/// [`preview::GlanceSlot`] — and only for a buffer they hold at that moment,
+/// never from a buffer in hand: **constructing a view requires a held
+/// buffer**. The pool's eviction law never evicts a buffer a surface is
+/// reading ([`Self::reading`]).
+///
+/// **What the type does not prevent today:** [`preview::PreviewPool::clear`],
+/// `discard_dirty` and `take` can still remove a buffer a surface stands on.
+/// Their callers keep the two together by order (closing drops the views with
+/// the pool; a migration or a rename puts the buffer back and moves the panes
+/// in the same step); making the removal impossible is the document
+/// registry's (`docs/plans/structural-debt.md` D-17).
+///
+/// Everything a view of a buffer holds — the parse, the caret, both selection
+/// models, the scrolls, the boxes measured this frame, the notice, a pending
+/// line — lives in that view and goes with it, and a picture's zoom and decode
+/// state live with the picture. Every write is one of the doors below or the
+/// view's own, and **no `&mut` to a field of either view leaves it**: the
+/// ownership census counts a `&mut` lend as an access, not a write, so that
+/// rule is held by review and not by the census.
 #[derive(Default)]
 struct PreviewPane {
     /// What this surface is showing.
@@ -4839,13 +4852,6 @@ impl PreviewPane {
     /// The picture on this surface, if it is showing one.
     fn image(&self) -> Option<&PreviewImageState> {
         self.content.picture().map(pane_content::PictureView::image)
-    }
-
-    /// The same, mutably — the decode lane's answers land in it.
-    fn image_mut(&mut self) -> Option<&mut PreviewImageState> {
-        self.content
-            .picture_mut()
-            .map(pane_content::PictureView::image_mut)
     }
 
     /// How this surface is looking at its picture; fit when it shows none.
@@ -4979,6 +4985,24 @@ impl PreviewPane {
         self.content = std::mem::take(&mut self.content).showing(held);
     }
 
+    /// **Turn this surface to the buffer `held` names**, standing where it was
+    /// last left on it (`view`), and hand back what it leaves for the caller
+    /// to file. A surface turned to the buffer it is already on keeps its view
+    /// whole — caret, scroll, parse, marks, and a line it still owes that
+    /// buffer — and leaves nothing; only a different buffer replaces it.
+    fn turn_to(
+        &mut self,
+        held: preview::Held,
+        view: PreviewViewState,
+    ) -> Option<(preview::PreviewSource, PreviewViewState)> {
+        if self.source() == Some(held.source()) {
+            return None;
+        }
+        let left = self.leave_document();
+        self.stand_on(held, view);
+        left
+    }
+
     /// **Let go of the buffer this surface is showing**, and hand back what it
     /// was on and where, for the caller to file against that buffer: the caret
     /// and the scroll go with it, and so does everything else the view held —
@@ -5020,19 +5044,19 @@ impl PreviewPane {
             pane_content::PaneContent::Document(view)
             | pane_content::PaneContent::Page(view)
             | pane_content::PaneContent::GitGraph(view) => view.forget_pictures_of(key),
-            pane_content::PaneContent::Picture(picture) => {
-                let image = picture.image_mut();
-                if bt_term::normalized_local_image_path_key(&image.path) == key {
-                    image.forget_its_pixels();
-                }
-            }
+            pane_content::PaneContent::Picture(picture) => picture.forget_pixels_of(key),
             pane_content::PaneContent::Empty => {}
         }
     }
 
     /// Show the picture at `path` on this surface.
     fn show_picture(&mut self, path: PathBuf) {
-        self.content = std::mem::take(&mut self.content).picturing(path);
+        self.show_picture_state(PreviewImageState::new(path));
+    }
+
+    /// Show this picture, in the state it is in.
+    fn show_picture_state(&mut self, image: PreviewImageState) {
+        self.content = std::mem::take(&mut self.content).picturing(image);
     }
 
     /// Take this surface's picture down.
@@ -5045,12 +5069,64 @@ impl PreviewPane {
     /// **The picture at `path` is `bytes` long**, if it is the one on this
     /// surface. Answers whether it was.
     fn hear_picture_size(&mut self, path: &Path, bytes: Option<u64>) -> bool {
-        match self.image_mut().filter(|image| image.path == path) {
-            Some(image) => {
-                image.bytes = bytes;
-                true
-            }
-            None => false,
+        self.content
+            .picture_mut()
+            .is_some_and(|picture| picture.hear_size(path, bytes))
+    }
+
+    /// Why there is no picture here, or nothing to say.
+    fn refuse_picture(&mut self, why: Option<PictureRefusal>) {
+        if let Some(picture) = self.content.picture_mut() {
+            picture.refuse(why);
+        }
+    }
+
+    /// Why there is no picture here — unless a reason is already standing.
+    fn refuse_picture_unless_said(&mut self, why: PictureRefusal) {
+        if let Some(picture) = self.content.picture_mut() {
+            picture.refuse_unless_said(why);
+        }
+    }
+
+    /// A resample of this surface's picture at this size has been asked for.
+    fn ask_picture_scale(&mut self, target: PeekThumbnailTarget) {
+        if let Some(picture) = self.content.picture_mut() {
+            picture.ask_scale(target);
+        }
+    }
+
+    /// A resample has landed; answers whether this surface's picture took it.
+    fn accept_scaled_picture(&mut self, scaled: bt_term::ScaledInlineImage) -> bool {
+        self.content
+            .picture_mut()
+            .is_some_and(|picture| picture.accept_scaled(scaled))
+    }
+
+    /// A gesture moved the boundary this surface's picture settles towards.
+    fn defer_picture_settle(&mut self, observed_at: Instant) {
+        if let Some(picture) = self.content.picture_mut() {
+            picture.defer_scale_settle(observed_at);
+        }
+    }
+
+    /// Whether this surface's picture has gone quiet, settling it if it has.
+    fn finish_picture_settle_if_quiet(&mut self, now: Instant) -> bool {
+        self.content
+            .picture_mut()
+            .is_some_and(|picture| picture.finish_scale_settle_if_quiet(now))
+    }
+
+    /// Where this surface's picture was drawn this frame, or that it was not.
+    fn place_picture_drawn(&mut self, drawn: Option<[f32; 4]>) {
+        if let Some(picture) = self.content.picture_mut() {
+            picture.place_drawn(drawn);
+        }
+    }
+
+    /// The decode's native size, and the size the file states.
+    fn hear_picture_native(&mut self, native: (u32, u32), stated: Option<(u32, u32)>) {
+        if let Some(picture) = self.content.picture_mut() {
+            picture.hear_native(native, stated);
         }
     }
 
@@ -5336,7 +5412,7 @@ mod card_answer_route_tests {
 
     fn on(path: &str) -> PreviewPane {
         let mut pane = PreviewPane::default();
-        pane.show_source(crate::test_support::held_alone(
+        pane.show_source(crate::test_support::test_shortcut_held(
             preview::PreviewSource::file(path),
         ));
         pane
@@ -15183,10 +15259,10 @@ struct WindowRuntime {
     /// slot that the next glance overwrites, and the read that fills it goes
     /// down the same worker lane a real open uses.
     ///
-    /// `None` whenever the pool answers instead, which is P145's "shows the
+    /// Empty whenever the pool answers instead, which is P145's "shows the
     /// tab's POOL buffer when the file is already open, so the glance never lies
     /// about unsaved edits".
-    peek_buffer: Option<preview::PreviewBuffer>,
+    peek_buffer: preview::GlanceSlot,
     /// The glance card's own view of whatever it is reading —
     /// [`PreviewSurface::Peek`]'s pane.
     ///
@@ -41503,10 +41579,7 @@ fn create_tab_state(
                     Some(path) => files_row_display_name(path),
                     None => source.web_url().map(webnav::site_label).unwrap_or_default(),
                 };
-                let buffer = preview::PreviewBuffer::new(source.clone(), name);
-                let held = buffer.held();
-                preview_pool.insert(buffer);
-                held
+                preview_pool.insert(preview::PreviewBuffer::new(source.clone(), name))
             }
         };
         preview_panes.entry(surface_of(seat)).show_source(held);
@@ -43737,7 +43810,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         flight_chrome: seats::ChromeGroup::default(),
         last_drawn_rail: None,
         file_peek: None,
-        peek_buffer: None,
+        peek_buffer: preview::GlanceSlot::default(),
         peek_pane: PreviewPane::default(),
         peek_picture: None,
         peek_card_pending: None,
@@ -71067,7 +71140,7 @@ mod floated_page_tests {
         let other = PreviewSource::file(PathBuf::from(r"D:\site\other.html"));
 
         let mut plain = PreviewPane::default();
-        plain.show_source(crate::test_support::held_alone(file.clone()));
+        plain.show_source(crate::test_support::test_shortcut_held(file.clone()));
         assert!(
             plain.is_reading(&file),
             "an ordinary pane reads what it is on"
@@ -71076,7 +71149,7 @@ mod floated_page_tests {
         assert_eq!(plain.reading(), vec![file.clone()]);
 
         let mut flipped = PreviewPane::default();
-        flipped.show_source(crate::test_support::held_alone(page.clone()));
+        flipped.show_source(crate::test_support::test_shortcut_held(page.clone()));
         flipped.turn_page_to(Some(PathBuf::from(r"D:\site\index.html")));
         assert!(
             flipped.is_reading(&file),

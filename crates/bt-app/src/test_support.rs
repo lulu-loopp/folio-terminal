@@ -283,17 +283,13 @@ pub(crate) fn a_local_folder() -> bt_term::PathVerdict {
 /// stopped compiling on the day a seat number stopped being a name. A test
 /// that does not care which tab says `TAB_ONE` and means it — and the two
 /// that do care say two different tabs, which is the whole point.
-/// **A view's name for a buffer, minted by a buffer of its own** — for a test
-/// whose subject is the panes and not the pool, so there is no pool to ask.
-pub(crate) fn held_alone(source: preview::PreviewSource) -> preview::Held {
-    preview::PreviewBuffer::new(source, String::new()).held()
-}
-
-/// Put this picture, in this state, on a pane — the way the decode lane leaves
-/// one.
-pub(crate) fn show_picture_state(pane: &mut PreviewPane, image: PreviewImageState) {
-    pane.show_picture(image.path.clone());
-    *pane.image_mut().expect("the picture just shown") = image;
+/// **A test shortcut, and nothing a product path does**: the name a view
+/// stands on, minted by a pool that is dropped as soon as it has answered — for
+/// a test whose subject is the panes and not the pool. The view it builds
+/// names a buffer nobody keeps, which is exactly what the product's two
+/// keepers ([`preview::PreviewPool`], [`preview::GlanceSlot`]) never hand out.
+pub(crate) fn test_shortcut_held(source: preview::PreviewSource) -> preview::Held {
+    preview::PreviewPool::default().insert(preview::PreviewBuffer::new(source, String::new()))
 }
 
 pub(crate) fn seat_of(tab: TabId, seat: SeatId) -> PreviewSurface {
@@ -2143,9 +2139,10 @@ pub(crate) fn tab_with_a_preview(
         .expect("the preview seat lands");
     let focused = seats.identity();
     let mut pool = preview::PreviewPool::default();
-    let showing = buffers.first().map(preview::PreviewBuffer::held);
+    let mut showing = None;
     for buffer in buffers {
-        pool.insert(buffer);
+        let held = pool.insert(buffer);
+        showing.get_or_insert(held);
     }
     let mut panes = PreviewPanes::default();
     let pane = panes.entry(seat_of(TabId(id), preview_seat));

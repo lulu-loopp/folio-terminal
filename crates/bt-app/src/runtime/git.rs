@@ -295,12 +295,7 @@ impl Runtime<'_> {
                         // nowhere. Matched by source, so a pointer that
                         // has moved on is the cancellation arriving as a
                         // dropped result.
-                        if let Some(peek) = self
-                            .window
-                            .peek_buffer
-                            .as_mut()
-                            .filter(|peek| *peek.source() == source)
-                        {
+                        if let Some(peek) = self.window.peek_buffer.get_mut(&source) {
                             match outcome {
                                 Ok(bytes) => peek.accept(preview::composed_read(&bytes)),
                                 Err(fault) => {

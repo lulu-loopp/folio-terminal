@@ -142,7 +142,7 @@ fn a_band_is_cropped_to_the_window_its_own_block_is_seen_through() {
 fn a_freshly_parsed_document_leaves_no_selection_standing() {
     let marked = || {
         let mut pane = PreviewPane::default();
-        pane.show_source(crate::test_support::held_alone(
+        pane.show_source(crate::test_support::test_shortcut_held(
             preview::PreviewSource::file("notes.md"),
         ));
         pane.select(Some(preview_select::Selection::collapsed(

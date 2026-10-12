@@ -1662,7 +1662,7 @@ impl Runtime<'_> {
             || webnav::site_label(&key),
             |buffer| buffer.name().to_owned(),
         );
-        let held = tab.preview_pool.open(source, name, &shown).held();
+        let (held, _) = tab.preview_pool.open_held(source, name, &shown);
         // No caret and no scroll to file or restore: a page's view is the
         // engine's, and this window has never held one.
         tab.preview_panes.entry(surface).show_source(held);
