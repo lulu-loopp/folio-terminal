@@ -89,9 +89,10 @@ pub(crate) enum Terminal<Id, T, E> {
         not(test),
         expect(
             dead_code,
-            reason = "S-6a until 2026-11-30: no lane on the seam cancels a request yet; the \
-                      contract's terminal set keeps it (C2), and the storage worker's document \
-                      saves are the first lane that may drop one at its requester's word"
+            reason = "T-DOCUMENT-SAVE-LANE until 2026-11-30: no lane on the seam cancels a \
+                      request yet; the contract's terminal set keeps it (C2), and the storage \
+                      worker's document saves (S-6a) are the first lane that may drop one at its \
+                      requester's word"
         )
     )]
     Cancelled,
@@ -835,9 +836,9 @@ where
         }
     }
 
-    /// What `read` makes of the run waiting now, if one is. One lock; never waits for the worker.
-    pub(crate) fn waiting<R>(&self, read: impl FnOnce(Option<&Waiting<Id, Op>>) -> R) -> R {
-        read(lock(&self.book).waiting.as_ref())
+    /// What `look` makes of the run waiting now, if one is. One lock; never waits for the worker.
+    pub(crate) fn waiting<R>(&self, look: impl FnOnce(Option<&Waiting<Id, Op>>) -> R) -> R {
+        look(lock(&self.book).waiting.as_ref())
     }
 
     /// **The application takes every terminal it is owed below the earliest request still owed**
