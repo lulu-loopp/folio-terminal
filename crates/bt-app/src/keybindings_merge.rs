@@ -69,8 +69,8 @@ use crate::persist::KEYBINDINGS_FILE_NAME;
 use crate::settings_bundle::{dialect_of, read_keybindings};
 use crate::settings_merge::{Account, PassOutcome, Unit, unit};
 use crate::shortcuts::{
-    Chord, ChordVerdict, Override, OverrideFault, Shortcuts, format_chord_on, parse_chord,
-    parse_chord_in, read_chord_in,
+    Chord, ChordVerdict, Override, Shortcuts, format_chord_on, parse_chord, parse_chord_in,
+    read_chord_in,
 };
 
 /// **One action's departure as a side states it**: the chord as the merged document
@@ -555,7 +555,7 @@ mod tests {
     use super::*;
     use crate::document_request::{DocumentAnswer, Outcome};
     use crate::persist::{KeybindingsStore, ScriptedJob, ScriptedJobs, StorageLane};
-    use crate::shortcuts::Chord;
+    use crate::shortcuts::{Chord, OverrideFault};
 
     const PLATFORM: bt_platform::HostPlatform = bt_platform::HostPlatform::Windows;
 
