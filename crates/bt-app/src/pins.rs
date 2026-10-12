@@ -41,12 +41,10 @@
 
 use std::path::{Path, PathBuf};
 
-use bt_persist::{
-    DocumentBytes, PinEntryV1, PinKind, PinsV1, ReadReport, read_pins, read_pins_keeping_bytes,
-    write_pins_atomic,
-};
+use bt_persist::{PinEntryV1, PinKind, PinsV1, read_pins, read_pins_keeping_bytes};
 
-use crate::persist::Revision;
+use crate::document_request::{DocumentState, ReadNews};
+use crate::persist::{Revision, StorageLane};
 
 /// The name the pin file wears on disk, which is also what a notice about it has
 /// to say out loud.
@@ -122,46 +120,25 @@ fn row_of(table: &PinsV1, kind: PinKind, target: &str) -> Option<usize> {
 /// must not have three different stores behind them, or "when does the window
 /// notice" becomes a question about which file you edited.
 pub struct PinsStore {
-    path: PathBuf,
-    loaded: PinsV1,
-    /// What `pins.json` is known to hold ([`Revision`]) — what a re-read
-    /// compares with.
-    revision: Revision<PinsV1>,
+    /// The table, what the file holds — what a re-read compares with — and the
+    /// requests on the worker.
+    document: DocumentState<PinsV1>,
     /// Why the file on disk was not usable, if it was not.
     fault: Option<String>,
-    writes: crate::persist::DocumentWrites,
-    /// Whether this process writes this file at all — review row R4-5.
-    writer_of_record: bool,
-}
-
-/// What a re-read of `pins.json` found — [`PinsStore::reread`]'s answer.
-///
-/// [`crate::persist::ProfilesNews`]'s three outcomes, for its reason: a document
-/// that will not parse is neither "nothing happened" nor "here is the new table".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PinsNews {
-    /// The file holds the bytes the store's revision records — this window's own
-    /// write, or a file nobody touched — or a second spelling of the revision's
-    /// table. The ordinary answer.
-    Unchanged,
-    /// The file has been read and is now the table in force.
-    Changed,
-    /// The file would not parse, so nothing was taken from it and the last table
-    /// that did parse is still in force.
-    Unreadable,
 }
 
 impl PinsStore {
-    /// Read `pins.json`, falling back to *an empty table* on every failure.
-    pub fn open() -> Self {
+    /// Read `pins.json`, falling back to *an empty table* on every failure. Its
+    /// writes and re-reads go to the storage worker on `lane`.
+    pub(crate) fn open(lane: StorageLane) -> Self {
         let dir = crate::persist::storage_dir();
         crate::persist::make_data_folder(&dir);
-        Self::at(dir.join(PINS_FILE_NAME))
+        Self::at_on(dir.join(PINS_FILE_NAME), lane)
     }
 
     /// The same store over a named file, which is what makes every rule below
     /// testable without a `%APPDATA%`.
-    pub(crate) fn at(path: PathBuf) -> Self {
+    pub(crate) fn at_on(path: PathBuf, lane: StorageLane) -> Self {
         let (file, report, bytes) = read_pins_keeping_bytes(&path, crate::update_trial::keeping());
         crate::update_trial::owe_copy(&report, &path, keep_pins);
         // §5.4 case 1 — no file — is the ordinary state of a machine where
@@ -176,44 +153,52 @@ impl PinsStore {
         // else never touches.
         let writer_of_record = crate::persist::is_writer_of_document(&path);
         Self {
-            path,
-            revision: Revision::opened(file.clone(), bytes),
-            loaded: file,
+            document: DocumentState::opened(
+                PINS_FILE_NAME,
+                path,
+                Revision::opened(file, bytes),
+                writer_of_record,
+                crate::update_trial::Writer::Pins,
+                lane,
+            ),
             fault,
-            writes: crate::persist::DocumentWrites::new(),
-            writer_of_record,
         }
+    }
+
+    /// [`Self::at_on`], with a worker of its own.
+    #[cfg(test)]
+    pub(crate) fn at(path: PathBuf) -> Self {
+        Self::at_on(path, StorageLane::of_its_own())
     }
 
     /// What `pins.json` is known to hold.
     #[cfg(test)]
     pub(crate) fn revision(&self) -> &Revision<PinsV1> {
-        &self.revision
+        self.document.revision()
     }
 
-    /// **Whether a read found the file Folio left** —
-    /// [`crate::persist::ProfilesStore`]'s question, one file over: the bytes,
-    /// never the document in memory.
-    fn is_folios_own_write(&self, read: &DocumentBytes) -> bool {
-        self.revision.holds(read)
+    /// The document half, for a test to look into.
+    #[cfg(test)]
+    pub(crate) fn document(&mut self) -> &mut DocumentState<PinsV1> {
+        &mut self.document
     }
 
     /// Take the read fault, so a notice about it is raised once and not once a
     /// frame. A write that has stopped landing comes through the same door.
     pub fn take_fault(&mut self) -> Option<String> {
-        self.fault.take().or_else(|| self.writes.take_fault())
+        self.fault.take().or_else(|| self.document.take_fault())
     }
 
     /// Every pinned target of one category, in the file's own order.
     pub fn targets(&self, kind: PinKind) -> Vec<String> {
-        pinned_targets(&self.loaded, kind)
+        pinned_targets(self.document.projection(), kind)
             .map(str::to_owned)
             .collect()
     }
 
     /// Every pinned row of any of these categories — see [`pinned_rows`].
     pub fn rows_of(&self, kinds: &[PinKind]) -> Vec<(PinKind, String)> {
-        pinned_rows(&self.loaded, kinds)
+        pinned_rows(self.document.projection(), kinds)
             .map(|(kind, target)| (kind, target.to_owned()))
             .collect()
     }
@@ -221,82 +206,64 @@ impl PinsStore {
     /// How many writes of this document the reader has asked for
     /// (`storage_watch::StorageWatch::advance`).
     pub(crate) fn write_generation(&self) -> u64 {
-        self.writes.generation()
+        self.document.write_generation()
     }
 
-    /// Pin or unpin one target and put the table on disk. Answers whether it is
-    /// pinned now, which is what the row that was just clicked has to draw.
+    /// Pin or unpin one target and hand the table to the storage worker.
+    /// Answers whether it is pinned now, which is what the row that was just
+    /// clicked has to draw.
     pub fn toggle(&mut self, kind: PinKind, target: &str) -> bool {
-        let mut next = self.loaded.clone();
+        let mut next = self.document.projection().clone();
         let pinned = toggle_pin(&mut next, kind, target);
         self.store(next);
         pinned
     }
 
-    /// **Read the file again, because the storage watch heard it.**
+    /// **Ask for the file to be read again, because the storage watch heard
+    /// it.**
     ///
-    /// [`crate::persist::ProfilesStore::reread`]'s three answers and its whole
-    /// argument, one file over. The file's bytes are compared with the
+    /// [`crate::persist::ProfilesStore::ask_reread`]'s three answers and its
+    /// whole argument, one file over. The file's bytes are compared with the
     /// revision's, never the table with the one in memory, so a pin this store
     /// holds but has not written is not undone by a read of the older file. A
     /// document that will not parse is **not** taken, and the table already in
     /// force stays in force: emptying the PINNED sections *because* the reader
     /// typed a comma wrong is the one outcome a hand-editable file must not have.
-    pub fn reread(&mut self) -> PinsNews {
-        let (file, report, bytes) =
-            read_pins_keeping_bytes(&self.path, crate::update_trial::keeping());
-        crate::update_trial::owe_copy(&report, &self.path, keep_pins);
-        if self.is_folios_own_write(&bytes) {
-            return PinsNews::Unchanged;
-        }
-        if let ReadReport::FellBackToDefaults { reason, kept } = &report {
-            eprintln!("BT_PERSIST {PINS_FILE_NAME} would not parse: {reason:?} kept={kept:?}");
-            return PinsNews::Unreadable;
-        }
-        if !self.revision.adopt(file, bytes) {
-            return PinsNews::Unchanged;
-        }
-        self.loaded = self.revision.document.clone();
-        PinsNews::Changed
+    pub(crate) fn ask_reread(&mut self) {
+        self.document.ask_read();
     }
 
-    /// Record the table as it stands now and put it on disk.
+    /// Record the table as it stands now and hand it to the storage worker.
     ///
     /// Returns whether anything changed, so a press that moved nothing costs no
     /// write.
     pub fn store(&mut self, file: PinsV1) -> bool {
-        let changed = self.loaded != file;
-        if !self.writes.wants_write(changed) {
-            return false;
-        }
-        self.writes.requested();
-        self.loaded = file;
-        if changed {
-            self.writes.rearm();
-        }
-        self.write_now();
-        changed
+        self.document.store(file, false)
     }
 
-    /// **An update's trial was committed: the table as it stands reaches the
-    /// disk** (`update_trial`).
+    /// **An update's trial was committed: the table as it stands is handed
+    /// over** (`update_trial`).
     pub fn release_trial(&mut self) {
-        self.write_now();
+        self.document.send_owed();
     }
 
-    /// Put the table in force on disk, now — unless this process is not the
-    /// writer or an update's trial holds its writes back (`update_trial`, F-7).
-    fn write_now(&mut self) {
-        if !self.writer_of_record || crate::update_trial::defer(crate::update_trial::Writer::Pins) {
-            return;
-        }
-        let written = write_pins_atomic(&self.path, &self.loaded);
-        self.writes.record(
-            PINS_FILE_NAME,
-            written
-                .map(|bytes| self.revision.landed(bytes, self.loaded.clone()))
-                .map_err(|error| error.to_string()),
-        );
+    /// **Take what the storage worker has answered** (`AppEvent::DocumentsAnswered`):
+    /// the re-reads' news for the reader.
+    pub(crate) fn take_answers(&mut self) -> ReadNews {
+        self.document.take_answers()
+    }
+
+    /// Let the worker answer everything this store asked, and take it.
+    #[cfg(test)]
+    pub(crate) fn settle(&mut self) -> ReadNews {
+        self.document.settle()
+    }
+
+    /// Read the file again on the worker and take the answer — a pass, in a test.
+    #[cfg(test)]
+    pub(crate) fn reread(&mut self) -> crate::document_request::Heard {
+        self.ask_reread();
+        self.settle().heard()
     }
 }
 
@@ -341,6 +308,7 @@ pub fn lift_pinned<K: Clone + PartialEq, T: Clone>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document_request::Heard;
 
     /// Whether one target is on the table under one category — the question the
     /// suite asks in the shape the store answers it, without a filesystem.
@@ -455,6 +423,7 @@ mod tests {
         assert!(!path.exists(), "and nothing is written to announce that");
 
         assert!(store.toggle(PinKind::Folder, r"C:\work"));
+        store.settle();
         assert!(path.exists());
         assert!(
             !dir.read_dir()
@@ -475,17 +444,18 @@ mod tests {
         // The watcher's three answers: this window's own write is `Unchanged`,
         // somebody else's edit is `Changed`, and a broken file is `Unreadable`
         // with the table that was in force still in force.
-        assert_eq!(reopened.reread(), PinsNews::Unchanged);
+        assert_eq!(reopened.reread(), Heard::Unchanged);
         let mut other = PinsStore::at(path.clone());
         other.toggle(PinKind::Folder, r"D:\repos");
-        assert_eq!(reopened.reread(), PinsNews::Changed);
+        other.settle();
+        assert_eq!(reopened.reread(), Heard::Changed);
         assert_eq!(
             reopened.targets(PinKind::Folder),
             vec![r"C:\work".to_owned(), r"D:\repos".to_owned()]
         );
 
         std::fs::write(&path, b"{ not json").expect("the file is writable");
-        assert_eq!(reopened.reread(), PinsNews::Unreadable);
+        assert_eq!(reopened.reread(), Heard::Unreadable);
         assert_eq!(
             reopened.targets(PinKind::Folder),
             vec![r"C:\work".to_owned(), r"D:\repos".to_owned()],
@@ -578,6 +548,7 @@ mod tests {
 
         let mut free_store = PinsStore::at(free.join(PINS_FILE_NAME));
         assert!(free_store.toggle(PinKind::Folder, r"C:\work"));
+        free_store.settle();
         assert!(
             free.join(PINS_FILE_NAME).exists(),
             "a store over a folder nobody holds writes it, whatever else this machine is running"
@@ -588,6 +559,7 @@ mod tests {
             held_store.toggle(PinKind::Folder, r"C:\work"),
             "the table is live in this window either way"
         );
+        held_store.settle();
         assert!(
             !held.join(PINS_FILE_NAME).exists(),
             "and a store over a folder somebody else holds writes nothing into it"

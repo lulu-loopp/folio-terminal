@@ -57,8 +57,8 @@ mod update;
 mod write_tracker;
 
 pub use atomic::{
-    atomic_replace_keeping_metadata, atomic_replace_preserving, atomic_write,
-    atomic_write_carrying_from,
+    Staging, atomic_replace_keeping_metadata, atomic_replace_preserving, atomic_write,
+    atomic_write_carrying_from, stage_beside,
 };
 pub use debounce::Debouncer;
 pub use error::WriteError;
@@ -76,7 +76,7 @@ pub use layout::{
 pub use migrate::{
     DocumentBytes, FallbackReason, KEYBINDINGS_MIGRATIONS, Keeping, MAX_DOCUMENT_BYTES,
     MigrationStep, PINS_MIGRATIONS, PROFILES_MIGRATIONS, ReadReport, SESSION_MIGRATIONS,
-    SETTINGS_MIGRATIONS, UPDATE_CHECK_MIGRATIONS,
+    SETTINGS_MIGRATIONS, StableRead, UPDATE_CHECK_MIGRATIONS, read_stable, read_stable_between,
 };
 pub use pins::{PINS_SCHEMA_VERSION, PinEntryV1, PinKind, PinsV1};
 pub use profiles::{
@@ -177,12 +177,24 @@ pub fn read_session_keeping_bytes(
 /// Pretty-printed (§1.1: "人可读可 diff" is one of the reasons `settings.json`
 /// is JSON at all).
 pub fn write_settings_atomic(path: &Path, settings: &SettingsV1) -> Result<Arc<[u8]>, WriteError> {
-    let bytes = serde_json::to_vec_pretty(settings).map_err(|source| WriteError::Serialize {
-        what: "SettingsV1",
-        source,
-    })?;
+    let bytes = serialize_settings(settings)?;
     atomic_write(path, &bytes)?;
     Ok(bytes.into())
+}
+
+/// `settings` as the bytes [`write_settings_atomic`] writes, without touching a disk — what the
+/// storage worker is handed ([`serialize_session`]'s split, one file over).
+pub fn serialize_settings(settings: &SettingsV1) -> Result<Vec<u8>, WriteError> {
+    serde_json::to_vec_pretty(settings).map_err(|source| WriteError::Serialize {
+        what: "SettingsV1",
+        source,
+    })
+}
+
+/// `bytes` read as `settings.json` is read — the version envelope, the migrations, the typed
+/// parse — without a disk: the chain [`read_settings`] applies to what it read.
+pub fn parse_settings(bytes: &[u8]) -> Result<SettingsV1, FallbackReason> {
+    migrate::parse_document(bytes, SETTINGS_SCHEMA_VERSION, SETTINGS_MIGRATIONS)
 }
 
 /// Reads `keybindings.json` from `path`, applying the same §5.4 fallback chain
@@ -227,12 +239,22 @@ pub fn write_keybindings_atomic(
     path: &Path,
     keybindings: &KeybindingsV1,
 ) -> Result<Arc<[u8]>, WriteError> {
-    let bytes = serde_json::to_vec_pretty(keybindings).map_err(|source| WriteError::Serialize {
-        what: "KeybindingsV1",
-        source,
-    })?;
+    let bytes = serialize_keybindings(keybindings)?;
     atomic_write(path, &bytes)?;
     Ok(bytes.into())
+}
+
+/// `keybindings` as the bytes [`write_keybindings_atomic`] writes, without touching a disk.
+pub fn serialize_keybindings(keybindings: &KeybindingsV1) -> Result<Vec<u8>, WriteError> {
+    serde_json::to_vec_pretty(keybindings).map_err(|source| WriteError::Serialize {
+        what: "KeybindingsV1",
+        source,
+    })
+}
+
+/// `bytes` read as `keybindings.json` is read, without a disk ([`parse_settings`]'s rule).
+pub fn parse_keybindings(bytes: &[u8]) -> Result<KeybindingsV1, FallbackReason> {
+    migrate::parse_document(bytes, KEYBINDINGS_SCHEMA_VERSION, KEYBINDINGS_MIGRATIONS)
 }
 
 /// Reads `profiles.json` from `path`, applying the same §5.4 fallback chain the
@@ -265,12 +287,22 @@ pub fn read_profiles_keeping_bytes(
 /// [`write_keybindings_atomic`] is: this is the other file a user is invited to
 /// open and read top to bottom.
 pub fn write_profiles_atomic(path: &Path, profiles: &ProfilesV1) -> Result<Arc<[u8]>, WriteError> {
-    let bytes = serde_json::to_vec_pretty(profiles).map_err(|source| WriteError::Serialize {
-        what: "ProfilesV1",
-        source,
-    })?;
+    let bytes = serialize_profiles(profiles)?;
     atomic_write(path, &bytes)?;
     Ok(bytes.into())
+}
+
+/// `profiles` as the bytes [`write_profiles_atomic`] writes, without touching a disk.
+pub fn serialize_profiles(profiles: &ProfilesV1) -> Result<Vec<u8>, WriteError> {
+    serde_json::to_vec_pretty(profiles).map_err(|source| WriteError::Serialize {
+        what: "ProfilesV1",
+        source,
+    })
+}
+
+/// `bytes` read as `profiles.json` is read, without a disk ([`parse_settings`]'s rule).
+pub fn parse_profiles(bytes: &[u8]) -> Result<ProfilesV1, FallbackReason> {
+    migrate::parse_document(bytes, PROFILES_SCHEMA_VERSION, PROFILES_MIGRATIONS)
 }
 
 /// Reads `pins.json` from `path`, applying the same §5.4 fallback chain the
@@ -302,12 +334,22 @@ pub fn read_pins_keeping_bytes(
 /// the bytes that landed. Pretty-printed for [`write_settings_atomic`]'s reason: this is a short file
 /// of paths, and the shortest one there is any point opening by hand.
 pub fn write_pins_atomic(path: &Path, pins: &PinsV1) -> Result<Arc<[u8]>, WriteError> {
-    let bytes = serde_json::to_vec_pretty(pins).map_err(|source| WriteError::Serialize {
-        what: "PinsV1",
-        source,
-    })?;
+    let bytes = serialize_pins(pins)?;
     atomic_write(path, &bytes)?;
     Ok(bytes.into())
+}
+
+/// `pins` as the bytes [`write_pins_atomic`] writes, without touching a disk.
+pub fn serialize_pins(pins: &PinsV1) -> Result<Vec<u8>, WriteError> {
+    serde_json::to_vec_pretty(pins).map_err(|source| WriteError::Serialize {
+        what: "PinsV1",
+        source,
+    })
+}
+
+/// `bytes` read as `pins.json` is read, without a disk ([`parse_settings`]'s rule).
+pub fn parse_pins(bytes: &[u8]) -> Result<PinsV1, FallbackReason> {
+    migrate::parse_document(bytes, PINS_SCHEMA_VERSION, PINS_MIGRATIONS)
 }
 
 /// Reads `update-check.json` from `path`, on the same §5.4 fallback chain as the

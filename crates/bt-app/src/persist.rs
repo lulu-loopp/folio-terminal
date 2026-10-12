@@ -22,8 +22,9 @@ use bt_persist::{
     WriteAlertAction, WriteFailureTracker, create_sentinel, probe_sentinel, read_keybindings,
     read_keybindings_keeping_bytes, read_profiles, read_profiles_keeping_bytes, read_session,
     read_settings, read_settings_keeping, read_settings_keeping_bytes, remove_sentinel,
-    write_keybindings_atomic, write_profiles_atomic, write_settings_atomic,
 };
+
+use crate::document_request::{DocumentState, ReadNews};
 
 /// The name the session document wears on disk, which is also what a notice
 /// about it has to say out loud — [`KEYBINDINGS_FILE_NAME`]'s rule, one file
@@ -68,13 +69,13 @@ const MAX_WRITE_ATTEMPTS: u32 = 5;
 /// per press, for ever.
 ///
 /// So the value is adopted — the window must show what the reader chose — and
-/// this records that it is **not on the disk**, which is what makes the next
-/// press a real attempt rather than a comparison that matches.
+/// whether it is on the disk is the store's own comparison: for a hand-editable
+/// document, the document Folio wants against the revision the file is known to
+/// hold (`document_request::DocumentState::owed`, design note 2026-10-11 (b)6);
+/// for the session, the debounce this records a failure on.
 #[derive(Debug)]
 pub(crate) struct DocumentWrites {
     failures: WriteFailureTracker,
-    /// The document the store holds has not reached the disk.
-    unsaved: bool,
     /// Failures since the last success or the last re-arming.
     streak: u32,
     /// The sentence the reader is owed, once, when the streak has run out.
@@ -88,21 +89,10 @@ impl DocumentWrites {
     pub(crate) fn new() -> Self {
         Self {
             failures: WriteFailureTracker::new(),
-            unsaved: false,
             streak: 0,
             fault: None,
             generation: 0,
         }
-    }
-
-    /// Whether a store asked to hold a document it already holds should
-    /// nonetheless write it.
-    ///
-    /// The whole of R4-10's fix in one line: an unchanged value is normally
-    /// nothing to do, and is exactly something to do when the last attempt at it
-    /// did not land.
-    pub(crate) fn wants_write(&self, changed: bool) -> bool {
-        changed || self.unsaved
     }
 
     /// Whether there is any point trying again on a clock rather than on a
@@ -134,7 +124,6 @@ impl DocumentWrites {
             // §5.3: one line per failure streak, not one per attempt.
             eprintln!("BT_PERSIST could not write {file}: {error}");
         }
-        self.unsaved = !landed;
         if landed {
             self.streak = 0;
             return true;
@@ -145,6 +134,17 @@ impl DocumentWrites {
                 .get_or_insert_with(|| crate::i18n::persisted_file_unwritable(file));
         }
         false
+    }
+
+    /// **A refusal that trying again will not change** — a link, a volume that
+    /// cannot exchange two files (design note 2026-10-11 (b)7): said at its
+    /// first occurrence, not after a streak.
+    pub(crate) fn refused_for_good(&mut self, file: &str, error: String) {
+        eprintln!("BT_PERSIST could not write {file}: {error}");
+        self.failures.record(false);
+        self.streak = self.streak.saturating_add(1);
+        self.fault
+            .get_or_insert_with(|| crate::i18n::persisted_file_unwritable(file));
     }
 
     /// A new decision has been made, so the retrying starts again.
@@ -499,6 +499,67 @@ const NO_WRITER_THREAD: &str = "the session writer could not be started";
 /// waiting to hear about: nothing is on its way, so this is a refusal.
 const WRITER_STOPPED: &str = "the session writer stopped before this document reached the disk";
 
+/// What a hand-editable document's store says when no storage worker took its
+/// request (`document_request::DocumentState::send_owed`): a refusal, and the
+/// next trigger asks for a worker again.
+pub(crate) const NO_STORAGE_WORKER: &str = "the storage worker could not be started";
+
+/// What it says when the worker ended before answering a request it took.
+pub(crate) const STORAGE_WORKER_GONE: &str =
+    "the storage worker stopped before this document reached the disk";
+
+/// **How the storage worker wakes the loop after a document answer**
+/// (`AppEvent::DocumentsAnswered`): installed once, by the process's first
+/// window ([`install_documents_wake`]). Unset in a test, where no loop waits.
+static DOCUMENTS_WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// Install [`DOCUMENTS_WAKE`]. The first install stands.
+pub(crate) fn install_documents_wake(wake: impl Fn() + Send + Sync + 'static) {
+    let _ = DOCUMENTS_WAKE.set(Box::new(wake));
+}
+
+/// Wake the loop: a document answer is in its channel, or the worker ended
+/// and every request it held is now answered by its absence. A product lane's
+/// wake ([`StorageLane::wake`]).
+fn wake_documents() {
+    if let Some(wake) = DOCUMENTS_WAKE.get() {
+        wake();
+    }
+}
+
+/// The lane's wake: what tells the loop a document answer is in its channel.
+type LaneWake = Arc<dyn Fn() + Send + Sync>;
+
+/// **The storage worker's end, however it ends** (review round 3, C2). It owns
+/// the worker's channel ends, so the queue's receiver lives exactly as long as
+/// it. Under the queue's lock — the lock a document door admits under — it
+/// marks the lane down and drops every job still queued, so each such request's
+/// answer channel disconnects (its terminal: refused, no worker); no request can
+/// be admitted after that, because admission asks `up` under the same lock. Only
+/// then is the loop woken, so the wake follows every terminal.
+struct WorkerEnd {
+    ends: SessionWriterEnds,
+    /// The queue's sending end, weakly: the worker must not keep its own queue
+    /// open.
+    requests: std::sync::Weak<Mutex<Option<mpsc::Sender<StorageJob>>>>,
+    up: Arc<std::sync::atomic::AtomicBool>,
+    wake: LaneWake,
+}
+
+impl Drop for WorkerEnd {
+    fn drop(&mut self) {
+        {
+            let requests = self.requests.upgrade();
+            let _admission = requests.as_deref().map(lane_lock);
+            self.up.store(false, std::sync::atomic::Ordering::Release);
+            for job in self.ends.incoming.try_iter() {
+                drop(job);
+            }
+        }
+        (self.wake)();
+    }
+}
+
 /// What a save that ran out of budget says, on `stderr` and to the caller.
 ///
 /// One sentence for both, because they are the same fact: the document in hand did not reach
@@ -575,7 +636,9 @@ struct SessionBackupRequest {
 }
 
 /// **One job for the storage worker**: a session document, an update
-/// trial's receipt (U-13), or an update's hand-over to its applier (U-21).
+/// trial's receipt (U-13), an update's hand-over to its applier (U-21), or a
+/// hand-editable document's request — its conditional write or its stable
+/// read (`document_request`, T-STORAGE-WORKER-REQUEST).
 enum StorageJob {
     Session(SessionWriteRequest),
     /// Queued before this run's first `Session` job, on the same one writer.
@@ -595,6 +658,11 @@ enum StorageJob {
         job: crate::update_handoff::HandoffJob,
         answer: mpsc::Sender<crate::update_handoff::HandedOff>,
     },
+    /// A hand-editable document, written only if the file still holds what
+    /// the request expects, and answered on its own channel.
+    Document(crate::document_request::DocumentJob),
+    /// A hand-editable document, read while it stands still.
+    Read(crate::document_request::ReadJob),
 }
 
 /// **What became of a trial's receipt**, and the thread that wrote it.
@@ -623,6 +691,185 @@ struct SessionWriterEnds {
     outgoing: mpsc::Sender<SessionWriteReceipt>,
 }
 
+/// **The storage worker's queue, as every asker holds it**
+/// (T-STORAGE-WORKER-REQUEST).
+///
+/// One queue and one thread for the process: the session store holds it, and
+/// so do the four hand-editable documents' stores, each a clone of the same
+/// lane. That is what makes per-file order a property rather than a promise:
+/// every request naming one path is served in the order it was queued,
+/// whichever asker queued it (design note 2026-10-11, revision (c)3 item 5).
+///
+/// The thread is started by [`SessionWriter::start`], the only place one is,
+/// on the first request any asker hands over, and again on a later one while
+/// there is none. A worker that has ended takes no request again: the request
+/// is refused where it was handed over.
+#[derive(Clone)]
+pub(crate) struct StorageLane {
+    shared: Arc<LaneShared>,
+}
+
+/// What the lane's clones share.
+struct LaneShared {
+    /// The queue's sending end; `None` once the session store closed the lane.
+    /// Its lock is the one document admission is decided under, and the one the
+    /// worker's end takes ([`WorkerEnd`]).
+    requests: Arc<Mutex<Option<mpsc::Sender<StorageJob>>>>,
+    /// The ends the thread works from, until one thread has them (release
+    /// review X-9).
+    ends: Arc<Mutex<Option<SessionWriterEnds>>>,
+    /// The thread, once one runs.
+    worker: Mutex<LaneWorker>,
+    /// **Whether a worker serves the queue** — written only under the queue's
+    /// lock: set by [`SessionWriter::start`] before its thread starts, cleared if
+    /// the spawn is refused and by the worker's end ([`WorkerEnd`]). A document
+    /// request is admitted only when it is set, asked under the same lock, so the
+    /// request door never starts a thread or waits on the worker's lock (C1),
+    /// and never admits a request after the worker's end (C2).
+    up: Arc<std::sync::atomic::AtomicBool>,
+    /// How the loop is woken after a document answer ([`StorageLane::wake`]).
+    wake: LaneWake,
+}
+
+/// Whether a thread serves the lane.
+enum LaneWorker {
+    /// None yet, or none any more: the lane was closed or its thread let go.
+    Waiting,
+    Running(std::thread::JoinHandle<()>),
+    /// A test serves the queue itself ([`StorageLane::held`]).
+    #[cfg(test)]
+    ByTest,
+}
+
+/// One of the lane's locks, taken whatever a panic elsewhere left in it: each
+/// holds a queue end or a handle, never an invariant a panic could break
+/// halfway.
+fn lane_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl StorageLane {
+    /// A lane and the session receipts its worker sends, with no thread yet.
+    fn fresh() -> (Self, mpsc::Receiver<SessionWriteReceipt>) {
+        let (requests, incoming) = mpsc::channel::<StorageJob>();
+        let (outgoing, receipts) = mpsc::channel::<SessionWriteReceipt>();
+        let lane = Self {
+            shared: Arc::new(LaneShared {
+                requests: Arc::new(Mutex::new(Some(requests))),
+                ends: Arc::new(Mutex::new(Some(SessionWriterEnds { incoming, outgoing }))),
+                worker: Mutex::new(LaneWorker::Waiting),
+                up: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                wake: Arc::new(wake_documents),
+            }),
+        };
+        (lane, receipts)
+    }
+
+    /// **A lane whose queue the test serves**: every job handed over arrives on
+    /// the receiver this returns, in order, and nothing else takes it.
+    #[cfg(test)]
+    fn held() -> (Self, mpsc::Receiver<StorageJob>) {
+        let (requests, incoming) = mpsc::channel::<StorageJob>();
+        let lane = Self {
+            shared: Arc::new(LaneShared {
+                requests: Arc::new(Mutex::new(Some(requests))),
+                ends: Arc::new(Mutex::new(None)),
+                worker: Mutex::new(LaneWorker::ByTest),
+                up: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                wake: Arc::new(|| {}),
+            }),
+        };
+        (lane, incoming)
+    }
+
+    /// **A lane no worker serves** — the operating system refused the thread —
+    /// with `wake` as its wake, so a test hears what the loop would.
+    #[cfg(test)]
+    pub(crate) fn without_a_worker(wake: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            shared: Arc::new(LaneShared {
+                requests: Arc::new(Mutex::new(None)),
+                ends: Arc::new(Mutex::new(None)),
+                worker: Mutex::new(LaneWorker::Waiting),
+                up: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                wake: Arc::new(wake),
+            }),
+        }
+    }
+
+    /// **A lane with a worker of its own** — for a store a test opens over a
+    /// named path.
+    #[cfg(test)]
+    pub(crate) fn of_its_own() -> Self {
+        Self::with_a_worker_and_wake(wake_documents)
+    }
+
+    /// [`Self::of_its_own`], with `wake` as its wake, so a test hears what the
+    /// loop would.
+    #[cfg(test)]
+    fn with_a_worker_and_wake(wake: impl Fn() + Send + Sync + 'static) -> Self {
+        let (mut lane, _receipts) = Self::fresh();
+        Arc::get_mut(&mut lane.shared)
+            .expect("a lane just made has one owner")
+            .wake = Arc::new(wake);
+        SessionWriter::start(&lane);
+        lane
+    }
+
+    /// Hand one job over, starting the worker if there is none. `false`: no
+    /// worker took it — the operating system would not start a thread, the
+    /// worker has ended, or the lane was closed.
+    fn submit_storage_job(&self, job: StorageJob) -> bool {
+        if !SessionWriter::start(self) {
+            return false;
+        }
+        lane_lock(&self.shared.requests)
+            .as_ref()
+            .is_some_and(|requests| requests.send(job).is_ok())
+    }
+
+    /// **Admit one document request** — only while a worker serves the queue,
+    /// and only through the queue's lock, held across the send (C1's mailbox
+    /// lock). It never starts a thread: the session store starts the worker at
+    /// open and again at its own hand-overs ([`SessionWriter::start`]). `false`:
+    /// no worker took it, and the caller completes the request as refused.
+    fn admit_document_job(&self, job: StorageJob) -> bool {
+        self.admit_document_job_between(job, || {})
+    }
+
+    /// [`Self::admit_document_job`], with `between` run under the queue's lock
+    /// after admission is decided and before the job is queued — where a
+    /// worker's end would race it, were the decision not made under the lock.
+    fn admit_document_job_between(&self, job: StorageJob, between: impl FnOnce()) -> bool {
+        let requests = lane_lock(&self.shared.requests);
+        if !self.shared.up.load(std::sync::atomic::Ordering::Acquire) {
+            return false;
+        }
+        between();
+        requests
+            .as_ref()
+            .is_some_and(|requests| requests.send(job).is_ok())
+    }
+
+    /// Hand a document's conditional write over.
+    pub(crate) fn send_document(&self, job: crate::document_request::DocumentJob) -> bool {
+        self.admit_document_job(StorageJob::Document(job))
+    }
+
+    /// Hand a document's stable read over.
+    pub(crate) fn send_read(&self, job: crate::document_request::ReadJob) -> bool {
+        self.admit_document_job(StorageJob::Read(job))
+    }
+
+    /// **Wake the loop** — after a document answer is in its channel: the
+    /// worker's, or a refusal the request door completed itself.
+    pub(crate) fn wake(&self) {
+        (self.shared.wake)();
+    }
+}
+
 /// What one wait answers: every receipt that arrived on the way, and the verdict for the
 /// generation that was waited on.
 type SessionWaitAnswer = (Vec<SessionWriteReceipt>, Result<(), SaveRefusal>);
@@ -649,19 +896,18 @@ type SessionWaitAnswer = (Vec<SessionWriteReceipt>, Result<(), SaveRefusal>);
 /// arriving after a newer request has already gone out can be recognised as stale and dropped
 /// rather than being allowed to mark the store clean over a document that has since changed.
 struct SessionWriter {
-    requests: mpsc::Sender<StorageJob>,
-    receipts: mpsc::Receiver<SessionWriteReceipt>,
-    /// **The two ends the writer thread needs, until one thread has them**
-    /// (T-QUIT-TIMEOUT-PROCEEDS, release review X-9).
+    /// **The queue, and the two ends the writer thread needs until one thread
+    /// has them** (T-QUIT-TIMEOUT-PROCEEDS, release review X-9; shared with the
+    /// document stores since T-STORAGE-WORKER-REQUEST, [`StorageLane`]).
     ///
     /// `spawn_at_priority` is `Builder::spawn` with a priority set inside the thread, so the
     /// only way it fails is that the operating system would not start a thread at all — a state
-    /// a machine is in for a moment, not for a run. Holding the ends here is what lets the next
-    /// hand-over try again ([`Self::start`]) instead of the store growing a second road to the
-    /// file; taking them under the lock, inside the thread, is what makes "a second thread"
+    /// a machine is in for a moment, not for a run. Holding the ends in the lane is what lets the
+    /// next hand-over try again ([`Self::start`]) instead of the store growing a second road to
+    /// the file; taking them under the lock, inside the thread, is what makes "a second thread"
     /// impossible rather than merely unlikely.
-    ends: Arc<Mutex<Option<SessionWriterEnds>>>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    lane: StorageLane,
+    receipts: mpsc::Receiver<SessionWriteReceipt>,
     /// The newest request handed over. A receipt older than this is stale.
     sent: u64,
     /// The newest request a receipt has come back for. `sent > landed` is "a document is still
@@ -682,51 +928,81 @@ struct SessionWriter {
 
 impl SessionWriter {
     fn open() -> Self {
-        let (requests, incoming) = mpsc::channel::<StorageJob>();
-        let (outgoing, receipts) = mpsc::channel::<SessionWriteReceipt>();
-        let mut writer = Self {
-            requests,
+        let (lane, receipts) = StorageLane::fresh();
+        let writer = Self {
+            lane,
             receipts,
-            ends: Arc::new(Mutex::new(Some(SessionWriterEnds { incoming, outgoing }))),
-            thread: None,
             sent: 0,
             landed: 0,
             answered: None,
             stalled: false,
         };
-        writer.start();
+        Self::start(&writer.lane);
         writer
     }
 
     /// **Make sure there is one writer thread, and never a second.**
     ///
-    /// Idempotent, and the only place a thread is started. The ends are taken *inside* the
-    /// thread, under the lock, so a spawn that failed leaves them where the next attempt finds
-    /// them and a spawn that succeeded leaves nothing for anybody else to take — which is what
-    /// makes "one writer, so ordering is not a question" a property of the type rather than of
-    /// the paths that call it (release review X-9).
-    fn start(&mut self) -> bool {
-        if self.thread.is_some() {
-            return true;
+    /// Idempotent, and the only place a thread is started — for the session store and for every
+    /// document store that shares its lane. The ends are taken *inside* the thread, under the
+    /// lock, so a spawn that failed leaves them where the next attempt finds them and a spawn that
+    /// succeeded leaves nothing for anybody else to take — which is what makes "one writer, so
+    /// ordering is not a question" a property of the type rather than of the paths that call it
+    /// (release review X-9).
+    fn start(lane: &StorageLane) -> bool {
+        let mut worker = lane_lock(&lane.shared.worker);
+        match &*worker {
+            LaneWorker::Running(_) => return true,
+            #[cfg(test)]
+            LaneWorker::ByTest => return true,
+            LaneWorker::Waiting => {}
         }
-        if self.ends.lock().is_ok_and(|ends| ends.is_none()) {
+        if lane_lock(&lane.shared.ends).is_none() {
             // A thread already took them and has since ended, or `close` let them go. Either way
             // there is nothing left for a new thread to work from.
             return false;
         }
-        let ends = Arc::clone(&self.ends);
+        let ends = Arc::clone(&lane.shared.ends);
+        let up = Arc::clone(&lane.shared.up);
+        let wake = Arc::clone(&lane.shared.wake);
+        let requests = Arc::downgrade(&lane.shared.requests);
+        // Up before the thread can end, so its end is the last word on it; under
+        // the queue's lock, as every write of it is.
+        {
+            let _admission = lane_lock(&lane.shared.requests);
+            lane.shared
+                .up
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         // In the workers' band (§1.4): a session write must never be the reason a frame was late,
         // and it is never the thing anybody is waiting to see.
-        self.thread = bt_platform::spawn_at_priority(
+        let started = bt_platform::spawn_at_priority(
             "session-writer",
             bt_platform::ThreadPriority::BelowNormal,
-            move |_ctx| {
+            move |ctx| {
                 let Some(ends) = ends.lock().ok().and_then(|mut held| held.take()) else {
                     return;
                 };
-                while let Ok(job) = ends.incoming.recv() {
+                let end = WorkerEnd {
+                    ends,
+                    requests,
+                    up,
+                    wake: Arc::clone(&wake),
+                };
+                while let Ok(job) = end.ends.incoming.recv() {
                     let request = match job {
                         StorageJob::Session(request) => request,
+                        // The answer is in its channel before the wake: the steward's order.
+                        StorageJob::Document(job) => {
+                            crate::document_request::serve_document(ctx, job);
+                            wake();
+                            continue;
+                        }
+                        StorageJob::Read(job) => {
+                            crate::document_request::serve_read(ctx, job);
+                            wake();
+                            continue;
+                        }
                         StorageJob::SessionBackup(request) => {
                             if let Err(error) = bt_persist::atomic_write_carrying_from(
                                 &request.path,
@@ -750,7 +1026,8 @@ impl SessionWriter {
                     };
                     let result = bt_persist::atomic_write(&request.path, &request.bytes)
                         .map_err(|error| error.to_string());
-                    if ends
+                    if end
+                        .ends
                         .outgoing
                         .send(SessionWriteReceipt {
                             generation: request.generation,
@@ -762,9 +1039,20 @@ impl SessionWriter {
                     }
                 }
             },
-        )
-        .ok();
-        self.thread.is_some()
+        );
+        match started {
+            Ok(thread) => {
+                *worker = LaneWorker::Running(thread);
+                true
+            }
+            Err(_) => {
+                let _admission = lane_lock(&lane.shared.requests);
+                lane.shared
+                    .up
+                    .store(false, std::sync::atomic::Ordering::Release);
+                false
+            }
+        }
     }
 
     /// The newest document still on its way to the disk, if one is.
@@ -781,17 +1069,17 @@ impl SessionWriter {
     /// moment gets its writer at the next quiet window rather than going the rest of the run
     /// without one.
     fn send(&mut self, path: &Path, bytes: Vec<u8>) -> Option<u64> {
-        if !self.start() {
-            return None;
-        }
         let generation = self.sent + 1;
-        self.requests
-            .send(StorageJob::Session(SessionWriteRequest {
+        if !self
+            .lane
+            .submit_storage_job(StorageJob::Session(SessionWriteRequest {
                 generation,
                 path: path.to_path_buf(),
                 bytes,
             }))
-            .ok()?;
+        {
+            return None;
+        }
         self.sent = generation;
         Some(generation)
     }
@@ -800,11 +1088,8 @@ impl SessionWriter {
     /// request is consumed even when no worker can take it: one launch gets one
     /// attempt, and a refusal is a diagnostic rather than a second write road.
     fn send_backup(&mut self, request: SessionBackupRequest) -> bool {
-        self.start()
-            && self
-                .requests
-                .send(StorageJob::SessionBackup(request))
-                .is_ok()
+        self.lane
+            .submit_storage_job(StorageJob::SessionBackup(request))
     }
 
     /// Hand an update trial's receipt to the writer thread (F-14). `None` when
@@ -814,14 +1099,10 @@ impl SessionWriter {
         &mut self,
         job: crate::update_trial::ReceiptJob,
     ) -> Option<mpsc::Receiver<ReceiptWritten>> {
-        if !self.start() {
-            return None;
-        }
         let (answer, answered) = mpsc::channel();
-        self.requests
-            .send(StorageJob::Receipt { job, answer })
-            .ok()?;
-        Some(answered)
+        self.lane
+            .submit_storage_job(StorageJob::Receipt { job, answer })
+            .then_some(answered)
     }
 
     /// Hand an update's hand-over to the writer thread (U-21): the durable
@@ -831,14 +1112,10 @@ impl SessionWriter {
         &mut self,
         job: crate::update_handoff::HandoffJob,
     ) -> Option<mpsc::Receiver<crate::update_handoff::HandedOff>> {
-        if !self.start() {
-            return None;
-        }
         let (answer, answered) = mpsc::channel();
-        self.requests
-            .send(StorageJob::Handoff { job, answer })
-            .ok()?;
-        Some(answered)
+        self.lane
+            .submit_storage_job(StorageJob::Handoff { job, answer })
+            .then_some(answered)
     }
 
     /// Every receipt that has arrived, newest-relevant last. Never waits.
@@ -910,23 +1187,38 @@ impl SessionWriter {
         }
     }
 
+    /// The writer thread's id, while one runs.
+    #[cfg(test)]
+    fn thread_id(&self) -> Option<std::thread::ThreadId> {
+        match &*lane_lock(&self.lane.shared.worker) {
+            LaneWorker::Running(thread) => Some(thread.thread().id()),
+            _ => None,
+        }
+    }
+
+    /// Let go of the writer thread's handle, as a timed-out fallback once did.
+    #[cfg(test)]
+    fn forget_thread(&mut self) {
+        *lane_lock(&self.lane.shared.worker) = LaneWorker::Waiting;
+    }
+
     /// Let the thread finish what is queued and end. Idempotent.
     ///
     /// **An owner-thread door** (`doors::SessionWriterRetire`, §5.3 row 16b): its bounded poll
     /// and its join are admitted only on the way out, minted in [`SessionStore::close`].
     fn close(&mut self, token: WaitToken<'_, doors::SessionWriterRetire>) {
         let _ = token;
-        // Dropping the sender is what ends the thread's `recv` loop. It is replaced rather than
-        // dropped outright so the struct stays whole, and the ends go with it so no later
-        // hand-over can start a writer over a channel nobody feeds.
-        let (dead, _) = mpsc::channel();
-        let live = std::mem::replace(&mut self.requests, dead);
-        drop(live);
-        if let Ok(mut ends) = self.ends.lock() {
-            *ends = None;
-        }
-        let Some(thread) = self.thread.take() else {
-            return;
+        // Dropping the sender is what ends the thread's `recv` loop — for every asker sharing the
+        // lane, whose later requests are refused where they are handed over. The ends go with it
+        // so no later hand-over can start a writer over a channel nobody feeds.
+        drop(lane_lock(&self.lane.shared.requests).take());
+        *lane_lock(&self.lane.shared.ends) = None;
+        let thread: std::thread::JoinHandle<()> = match std::mem::replace(
+            &mut *lane_lock(&self.lane.shared.worker),
+            LaneWorker::Waiting,
+        ) {
+            LaneWorker::Running(thread) => thread,
+            _ => return,
         };
         // **Bounded, and for the reason the wait above is** (T-QUIT-HAS-A-DEADLINE). Everything
         // queued is already decided and each item is one atomic write, but "one atomic write" is
@@ -1120,6 +1412,12 @@ impl SessionStore {
             store.queue_launch_backup();
         }
         store
+    }
+
+    /// **The storage worker's queue**, for the four hand-editable documents'
+    /// stores to share ([`StorageLane`]): one worker, one queue, per-file order.
+    pub(crate) fn lane(&self) -> StorageLane {
+        self.writer.lane.clone()
     }
 
     /// Take the sentence this store owes the reader, so a card about it is
@@ -1645,17 +1943,16 @@ impl SessionStore {
 /// dialog — it cannot arrive at the rate divider drags do, so there is nothing
 /// to coalesce and a quiet window would only be a window in which the choice can
 /// be lost.
+///
+/// **A press is handed to the storage worker at once, and lands by receipt**
+/// (T-STORAGE-WORKER-REQUEST): the setting is in force in memory at the press,
+/// and the file follows a few milliseconds later, written only if it still holds
+/// what Folio last read or wrote there ([`crate::document_request`]).
 pub struct SettingsStore {
-    path: PathBuf,
-    settings: SettingsV1,
-    /// What `settings.json` is known to hold ([`Revision`]).
-    revision: Revision<SettingsV1>,
-    writes: DocumentWrites,
+    /// The document, what the file holds, and the requests on the worker.
+    document: DocumentState<SettingsV1>,
     /// The sentence a startup owes about this file, if it owes one.
     fault: Option<String>,
-    /// Whether this process writes `settings.json` at all — [`SessionStore`]'s
-    /// field of this name, and review row R4-5's whole answer.
-    writer_of_record: bool,
     /// Whether there was no `settings.json` at all when this store opened.
     ///
     /// Kept rather than thrown away with the rest of the report, because it is
@@ -1673,7 +1970,7 @@ pub struct SettingsStore {
     /// through, and every one of those doors ends in [`Self::store`]. Forty rows
     /// changed by one gesture are one choice, and they reach the disk as one
     /// write — the one a single press makes — rather than forty. `None` is the
-    /// ordinary state: every store writes at once.
+    /// ordinary state: every store hands its document over at once.
     held: Option<bool>,
 }
 
@@ -1682,16 +1979,17 @@ impl SettingsStore {
     /// contract as [`SessionStore::open`], and for the same reason: a terminal
     /// that refuses to start because it could not read a preferences file would
     /// be a worse product than one that starts with the default preferences.
-    pub fn open() -> Self {
+    /// Its writes go to the storage worker on `lane`.
+    pub(crate) fn open(lane: StorageLane) -> Self {
         let dir = storage_dir();
         let path = settings_write_path(&dir, SETTINGS_FILE_NAME);
         make_data_folder(path.parent().unwrap_or(&dir));
-        Self::read_at(path, is_writer_of(&dir))
+        Self::read_at(path, is_writer_of(&dir), lane)
     }
 
     /// Read the file at `path` into a store — [`Self::open`] once the path and
     /// the writer's answer are known.
-    fn read_at(path: PathBuf, writer_of_record: bool) -> Self {
+    fn read_at(path: PathBuf, writer_of_record: bool, lane: StorageLane) -> Self {
         let (settings, report, bytes) =
             read_settings_keeping_bytes(&path, crate::update_trial::keeping());
         crate::update_trial::owe_copy(&report, &path, |path| {
@@ -1704,12 +2002,15 @@ impl SettingsStore {
             crate::i18n::settings_file_unreadable,
         );
         Self {
-            path,
-            revision: Revision::opened(settings.clone(), bytes),
-            settings,
-            writes: DocumentWrites::new(),
+            document: DocumentState::opened(
+                SETTINGS_FILE_NAME,
+                path,
+                Revision::opened(settings, bytes),
+                writer_of_record,
+                crate::update_trial::Writer::Settings,
+                lane,
+            ),
             fault,
-            writer_of_record,
             missing: report == ReadReport::NotFound,
             held: None,
         }
@@ -1746,25 +2047,34 @@ impl SettingsStore {
     /// Take the sentence this store owes the reader — [`SessionStore::take_fault`]
     /// and every other store's, one file over.
     pub fn take_fault(&mut self) -> Option<String> {
-        self.fault.take().or_else(|| self.writes.take_fault())
+        self.fault.take().or_else(|| self.document.take_fault())
     }
 
     /// The same store over a named file, for the tests that have to watch a
     /// write **fail** — [`SessionStore::at`]'s door and its reason: neither
     /// resolving `%APPDATA%` nor writing into it is a thing a test may do to the
-    /// machine it runs on.
+    /// machine it runs on. Its writes go to a worker of its own.
     #[cfg(test)]
     pub fn at(path: PathBuf) -> Self {
+        Self::at_on(path, StorageLane::of_its_own())
+    }
+
+    /// [`Self::at`], over `lane`.
+    #[cfg(test)]
+    pub(crate) fn at_on(path: PathBuf, lane: StorageLane) -> Self {
+        // [`SessionStore::at`]'s rule: asked of the directory this store
+        // writes, rather than asserted about it.
         let writer_of_record = is_writer_of_document(&path);
         Self {
-            path,
-            settings: SettingsV1::default(),
-            revision: Revision::opened(SettingsV1::default(), DocumentBytes::Absent),
-            writes: DocumentWrites::new(),
+            document: DocumentState::opened(
+                SETTINGS_FILE_NAME,
+                path,
+                Revision::opened(SettingsV1::default(), DocumentBytes::Absent),
+                writer_of_record,
+                crate::update_trial::Writer::Settings,
+                lane,
+            ),
             fault: None,
-            // [`SessionStore::at`]'s rule: asked of the directory this store
-            // writes, rather than asserted about it.
-            writer_of_record,
             missing: true,
             held: None,
         }
@@ -1772,19 +2082,25 @@ impl SettingsStore {
 
     /// The settings as they currently stand.
     pub fn loaded(&self) -> &SettingsV1 {
-        &self.settings
+        self.document.projection()
     }
 
     /// What `settings.json` is known to hold.
     #[cfg(test)]
     pub(crate) fn revision(&self) -> &Revision<SettingsV1> {
-        &self.revision
+        self.document.revision()
+    }
+
+    /// The document half, for a test to look into.
+    #[cfg(test)]
+    pub(crate) fn document(&mut self) -> &mut DocumentState<SettingsV1> {
+        &mut self.document
     }
 
     /// How many writes of this document the reader has asked for
     /// (`storage_watch::StorageWatch::advance`).
     pub(crate) fn write_generation(&self) -> u64 {
-        self.writes.generation()
+        self.document.write_generation()
     }
 
     /// Whether this machine had no `settings.json` when the process started.
@@ -1796,30 +2112,21 @@ impl SettingsStore {
         self.missing
     }
 
-    /// Record a change and put it on disk now. Returns whether anything changed,
-    /// so a caller can skip the repaint when a user picks the value already set.
+    /// Record a change and hand it to the storage worker now. Returns whether
+    /// anything changed, so a caller can skip the repaint when a user picks the
+    /// value already set.
     ///
     /// **A value that did not reach the disk is written again next time it is
-    /// chosen** (review row R4-10). The early return below used to be on
-    /// equality alone, so re-picking the row a failed save had already adopted
-    /// matched and retried nothing — and re-picking is exactly the gesture
-    /// somebody makes when a setting did not take.
+    /// chosen** (review row R4-10): re-picking the row is exactly the gesture
+    /// somebody makes when a setting did not take, and a document still owed is
+    /// handed over again whether or not the press changed anything.
     pub fn store(&mut self, settings: SettingsV1) -> bool {
-        let changed = self.settings != settings;
-        if !self.writes.wants_write(changed) {
-            return false;
+        let held = self.held.is_some();
+        let stored = self.document.store(settings, held);
+        if let Some(any) = self.held.as_mut() {
+            *any |= stored || self.document.owed();
         }
-        self.writes.requested();
-        self.settings = settings;
-        if changed {
-            self.writes.rearm();
-        }
-        if let Some(stored) = self.held.as_mut() {
-            *stored = true;
-            return changed;
-        }
-        self.write_now();
-        changed
+        stored
     }
 
     /// **Hold every write until [`Self::release_writes`]** — one gesture's worth
@@ -1828,42 +2135,30 @@ impl SettingsStore {
         self.held.get_or_insert(false);
     }
 
-    /// Let the held writes go: the document as it now stands reaches the disk
+    /// Let the held writes go: the document as it now stands is handed over
     /// once, if anything was stored while they were held.
     pub fn release_writes(&mut self) {
         if self.held.take() == Some(true) {
-            self.write_now();
+            self.document.send_owed();
         }
     }
 
-    /// **An update's trial was committed: the document as it stands reaches
-    /// the disk** — every write [`Self::write_now`] held back (`update_trial`).
+    /// **An update's trial was committed: the document as it stands is handed
+    /// over** — every write the trial held back (`update_trial`), conditional on
+    /// the revision, so a hand edit made during the trial is not written over.
     pub fn release_trial(&mut self) {
-        self.write_now();
+        self.document.send_owed();
     }
 
-    /// Put the document in force on disk, now.
-    fn write_now(&mut self) {
-        if !self.writer_of_record {
-            // The second Folio over this directory (review row R4-5): the choice
-            // is live in this window and reaches no file. Not recorded as a
-            // failure, because nothing was attempted and nothing is owed.
-            return;
-        }
-        // An update's trial writes nothing durable until it is committed
-        // (`update_trial`, F-7): the choice is live here and owed to the file.
-        if crate::update_trial::defer(crate::update_trial::Writer::Settings) {
-            return;
-        }
-        let written = crate::hang_watch::during(crate::hang_watch::Station::SettingsWrite, || {
-            write_settings_atomic(&self.path, &self.settings)
-        });
-        self.writes.record(
-            SETTINGS_FILE_NAME,
-            written
-                .map(|bytes| self.revision.landed(bytes, self.settings.clone()))
-                .map_err(|error| error.to_string()),
-        );
+    /// **Take what the storage worker has answered** (`AppEvent::DocumentsAnswered`).
+    pub(crate) fn take_answers(&mut self) {
+        let _ = self.document.take_answers();
+    }
+
+    /// Let the worker answer everything this store asked, and take it.
+    #[cfg(test)]
+    pub(crate) fn settle(&mut self) {
+        let _ = self.document.settle();
     }
 }
 
@@ -1876,37 +2171,40 @@ pub const KEYBINDINGS_FILE_NAME: &str = "keybindings.json";
 ///
 /// No debouncer, for [`SettingsStore`]'s reason and rather more sharply: a chord
 /// arrives when a human has just pressed a key and watched a dialog change, and
-/// a quiet window would be a window in which exactly that can be lost.
+/// a quiet window would be a window in which exactly that can be lost. A press
+/// is handed to the storage worker at once and lands by receipt
+/// (T-STORAGE-WORKER-REQUEST).
 ///
 /// **A damaged file is reported, never repaired.** `fault` carries the sentence
 /// a notice will say, and the read path leaves the file itself untouched — a
 /// build that silently rewrote a shortcut file it could not parse would destroy
 /// the one copy of a customisation the user could have fixed by hand. It is only
 /// replaced when the user changes something, which is them choosing.
+///
+/// **What the file says and the table does not hold is carried** (design note
+/// 2026-10-11 (b)6, (b)8): a line naming an action this build has no row for is
+/// in the document Folio writes back, in its place, because a press changes
+/// only the actions it changed.
 pub struct KeybindingsStore {
-    path: PathBuf,
-    overrides: Vec<BindingOverrideV1>,
-    /// What `keybindings.json` is known to hold ([`Revision`]).
-    revision: Revision<KeybindingsV1>,
+    /// The departures, what the file holds, and the requests on the worker.
+    document: DocumentState<KeybindingsV1>,
     /// Why the file on disk was not usable, if it was not.
     fault: Option<String>,
-    writes: DocumentWrites,
-    /// Whether this process writes this file at all — review row R4-5.
-    writer_of_record: bool,
 }
 
 impl KeybindingsStore {
     /// Read `keybindings.json`, falling back to *no overrides* on every failure.
-    pub fn open() -> Self {
+    /// Its writes go to the storage worker on `lane`.
+    pub(crate) fn open(lane: StorageLane) -> Self {
         let dir = storage_dir();
         let path = settings_write_path(&dir, KEYBINDINGS_FILE_NAME);
         make_data_folder(path.parent().unwrap_or(&dir));
-        Self::read_at(path, is_writer_of(&dir))
+        Self::read_at(path, is_writer_of(&dir), lane)
     }
 
     /// Read the file at `path` into a store — [`Self::open`] once the path and
     /// the writer's answer are known.
-    fn read_at(path: PathBuf, writer_of_record: bool) -> Self {
+    fn read_at(path: PathBuf, writer_of_record: bool, lane: StorageLane) -> Self {
         let (file, report, bytes) =
             read_keybindings_keeping_bytes(&path, crate::update_trial::keeping());
         crate::update_trial::owe_copy(&report, &path, |path| {
@@ -1920,12 +2218,15 @@ impl KeybindingsStore {
             crate::i18n::keybindings_file_unreadable,
         );
         Self {
-            path,
-            overrides: file.bindings.clone(),
-            revision: Revision::opened(file, bytes),
+            document: DocumentState::opened(
+                KEYBINDINGS_FILE_NAME,
+                path,
+                Revision::opened(file, bytes),
+                writer_of_record,
+                crate::update_trial::Writer::Keybindings,
+                lane,
+            ),
             fault,
-            writes: DocumentWrites::new(),
-            writer_of_record,
         }
     }
 
@@ -1933,89 +2234,83 @@ impl KeybindingsStore {
     /// keybindings writer without touching this machine's configuration.
     #[cfg(test)]
     fn at(path: PathBuf) -> Self {
-        Self {
-            writer_of_record: is_writer_of_document(&path),
-            path,
-            overrides: Vec::new(),
-            revision: Revision::opened(KeybindingsV1::default(), DocumentBytes::Absent),
-            fault: None,
-            writes: DocumentWrites::new(),
-        }
+        Self::at_on(path, StorageLane::of_its_own())
     }
 
-    /// The overrides as they were read.
+    /// [`Self::at`] over a file that may hold a document, on `lane`.
+    #[cfg(test)]
+    pub(crate) fn at_on(path: PathBuf, lane: StorageLane) -> Self {
+        let writer_of_record = is_writer_of_document(&path);
+        Self::read_at(path, writer_of_record, lane)
+    }
+
+    /// The overrides as they stand.
     pub fn loaded(&self) -> &[BindingOverrideV1] {
-        &self.overrides
+        &self.document.projection().bindings
     }
 
     /// What `keybindings.json` is known to hold.
     #[cfg(test)]
     pub(crate) fn revision(&self) -> &Revision<KeybindingsV1> {
-        &self.revision
+        self.document.revision()
     }
 
     /// How many writes of this document the reader has asked for
     /// (`storage_watch::StorageWatch::advance`).
     pub(crate) fn write_generation(&self) -> u64 {
-        self.writes.generation()
+        self.document.write_generation()
     }
 
     /// Take the read fault, so a notice about it is raised once and not once a
     /// frame. A write that has stopped landing is owed the same card, and is
     /// taken through the same door.
     pub fn take_fault(&mut self) -> Option<String> {
-        self.fault.take().or_else(|| self.writes.take_fault())
+        self.fault.take().or_else(|| self.document.take_fault())
     }
 
-    /// Record the new set of departures and put them on disk now.
+    /// **The departures the table put in force from the file** — what a press
+    /// is measured against. The lines the table refused stay in the document
+    /// and out of this ([`DocumentState::project`]).
+    pub(crate) fn project(&mut self, overrides: Vec<BindingOverrideV1>) {
+        self.document
+            .project(keybindings_document(overrides, keybindings_platform()));
+    }
+
+    /// Record the new set of departures and hand them to the storage worker.
     ///
     /// Returns whether anything changed, so a caller can skip the write when a
-    /// user records the chord a row already had — and writes anyway when the last
-    /// attempt did not land ([`SettingsStore::store`]'s rule, review row R4-10).
+    /// user records the chord a row already had — and hands it over anyway when
+    /// the last attempt did not land ([`SettingsStore::store`]'s rule, review
+    /// row R4-10).
     pub fn store(&mut self, overrides: Vec<BindingOverrideV1>) -> bool {
-        let changed = self.overrides != overrides;
-        if !self.writes.wants_write(changed) {
-            return false;
-        }
-        self.writes.requested();
-        self.overrides = overrides;
-        if changed {
-            self.writes.rearm();
-        }
-        self.write_now();
-        changed
+        self.store_on(overrides, keybindings_platform())
     }
 
-    /// **An update's trial was committed: the departures as they stand reach
-    /// the disk** (`update_trial`).
+    /// [`Self::store`], written in `writing_platform`'s dialect.
+    fn store_on(
+        &mut self,
+        overrides: Vec<BindingOverrideV1>,
+        writing_platform: KeybindingsPlatformV1,
+    ) -> bool {
+        self.document
+            .store(keybindings_document(overrides, writing_platform), false)
+    }
+
+    /// **An update's trial was committed: the departures as they stand are
+    /// handed over** (`update_trial`).
     pub fn release_trial(&mut self) {
-        self.write_now();
+        self.document.send_owed();
     }
 
-    /// Put the departures in force on disk, now — unless this process is not
-    /// the writer (review row R4-5) or an update's trial holds its writes back
-    /// (`update_trial`, F-7).
-    fn write_now(&mut self) {
-        self.write_now_on(keybindings_platform());
+    /// **Take what the storage worker has answered** (`AppEvent::DocumentsAnswered`).
+    pub(crate) fn take_answers(&mut self) {
+        let _ = self.document.take_answers();
     }
 
-    fn write_now_on(&mut self, writing_platform: KeybindingsPlatformV1) {
-        if !self.writer_of_record
-            || crate::update_trial::defer(crate::update_trial::Writer::Keybindings)
-        {
-            return;
-        }
-        let file = keybindings_document(self.overrides.clone(), writing_platform);
-        let written =
-            crate::hang_watch::during(crate::hang_watch::Station::KeybindingsWrite, || {
-                write_keybindings_atomic(&self.path, &file)
-            });
-        self.writes.record(
-            KEYBINDINGS_FILE_NAME,
-            written
-                .map(|bytes| self.revision.landed(bytes, file))
-                .map_err(|error| error.to_string()),
-        );
+    /// Let the worker answer everything this store asked, and take it.
+    #[cfg(test)]
+    pub(crate) fn settle(&mut self) {
+        let _ = self.document.settle();
     }
 }
 
@@ -2062,43 +2357,20 @@ pub const PROFILES_FILE_NAME: &str = "profiles.json";
 /// itself by putting an empty document in everybody's `%APPDATA%`
 /// (`schemes.rs`'s judgment, and the same one).
 pub struct ProfilesStore {
-    path: PathBuf,
-    loaded: ProfilesV1,
-    /// What `profiles.json` is known to hold ([`Revision`]) — what a re-read
-    /// compares with.
-    revision: Revision<ProfilesV1>,
+    /// The table, what the file holds — what a re-read compares with — and the
+    /// requests on the worker.
+    document: DocumentState<ProfilesV1>,
     /// Why the file on disk was not usable, if it was not.
     fault: Option<String>,
-    writes: DocumentWrites,
-    /// Whether this process writes this file at all — review row R4-5.
-    writer_of_record: bool,
-}
-
-/// What a re-read of `profiles.json` found — [`ProfilesStore::reread`]'s answer.
-///
-/// Three outcomes and not a `bool`, because the middle one is the whole reason
-/// the watcher can be trusted with a file somebody is typing into: a document
-/// that will not parse is neither "nothing happened" nor "here is the new
-/// table".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProfilesNews {
-    /// The file holds the bytes the store's revision records — this window's
-    /// own write, or a file nobody touched — or a second spelling of the
-    /// revision's document. This is the ordinary answer.
-    Unchanged,
-    /// The file has been read and is now the document in force.
-    Changed,
-    /// The file would not parse, so nothing was taken from it and the last
-    /// document that did parse is still in force.
-    Unreadable,
 }
 
 impl ProfilesStore {
     /// Read `profiles.json`, falling back to *no departures* on every failure.
-    pub fn open() -> Self {
+    /// Its writes and re-reads go to the storage worker on `lane`.
+    pub(crate) fn open(lane: StorageLane) -> Self {
         let dir = storage_dir();
         make_data_folder(&dir);
-        Self::at(dir.join(PROFILES_FILE_NAME))
+        Self::at_on(dir.join(PROFILES_FILE_NAME), lane)
     }
 
     /// The same store over a named file, which is what makes the re-read
@@ -2106,7 +2378,7 @@ impl ProfilesStore {
     /// knows which path this process's is.
     ///
     /// [`open`]: Self::open
-    fn at(path: PathBuf) -> Self {
+    pub(crate) fn at_on(path: PathBuf, lane: StorageLane) -> Self {
         let (file, report, bytes) =
             read_profiles_keeping_bytes(&path, crate::update_trial::keeping());
         crate::update_trial::owe_copy(&report, &path, keep_profiles);
@@ -2119,132 +2391,155 @@ impl ProfilesStore {
         );
         let writer_of_record = is_writer_of_document(&path);
         Self {
-            path,
-            revision: Revision::opened(file.clone(), bytes),
-            loaded: file,
+            document: DocumentState::opened(
+                PROFILES_FILE_NAME,
+                path,
+                Revision::opened(file, bytes),
+                writer_of_record,
+                crate::update_trial::Writer::Profiles,
+                lane,
+            ),
             fault,
-            writes: DocumentWrites::new(),
-            writer_of_record,
         }
     }
 
-    /// The table as it was read.
+    /// [`Self::at_on`], with a worker of its own.
+    #[cfg(test)]
+    fn at(path: PathBuf) -> Self {
+        Self::at_on(path, StorageLane::of_its_own())
+    }
+
+    /// The table as it stands.
     pub fn loaded(&self) -> &ProfilesV1 {
-        &self.loaded
+        self.document.projection()
     }
 
     /// What `profiles.json` is known to hold.
     #[cfg(test)]
     pub(crate) fn revision(&self) -> &Revision<ProfilesV1> {
-        &self.revision
-    }
-
-    /// **Whether a read found the file Folio left** — the bytes of its own last
-    /// write, or the file as it was last read. Bytes, not documents: the
-    /// question is whether this is the file Folio left, and the in-memory
-    /// document is never the comparison ([`Revision`]).
-    fn is_folios_own_write(&self, read: &DocumentBytes) -> bool {
-        self.revision.holds(read)
+        self.document.revision()
     }
 
     /// How many writes of this document the reader has asked for
     /// (`storage_watch::StorageWatch::advance`).
     pub(crate) fn write_generation(&self) -> u64 {
-        self.writes.generation()
+        self.document.write_generation()
     }
 
     /// Take the read fault, so a notice about it is raised once and not once a
     /// frame. A write that has stopped landing comes through the same door.
     pub fn take_fault(&mut self) -> Option<String> {
-        self.fault.take().or_else(|| self.writes.take_fault())
+        self.fault.take().or_else(|| self.document.take_fault())
     }
 
-    /// **Read the file again, because the storage watch heard it** (§7.1.6c-6d).
+    /// **The table the installer put in force from the file** — what a press is
+    /// measured against. The rows it refused stay in the document and out of
+    /// this ([`DocumentState::project`]).
+    pub(crate) fn project(&mut self, table: ProfilesV1) {
+        self.document.project(table);
+    }
+
+    /// **Ask for the file to be read again, because the storage watch heard it**
+    /// (§7.1.6c-6d). The read runs on the storage worker; its answer is taken by
+    /// [`Self::take_answers`].
     ///
     /// Three answers, and each of them is a rule this slice had to choose:
     ///
     /// * a file whose bytes are the revision's — compared with the revision's
-    ///   bytes, never with the document in memory — is
-    ///   [`ProfilesNews::Unchanged`] and nothing else happens. This window's own
-    ///   writes to `profiles.json` are the loudest of the file's changes, and a
-    ///   change this store holds but has not written is not undone by a read of
-    ///   the older file. A file with new bytes and the revision's document — an
-    ///   editor that re-indents — is also `Unchanged`, and its bytes become the
-    ///   revision's;
+    ///   bytes, or with the write on its way, never with the document in memory —
+    ///   is no news, and nothing else happens. This window's own writes to
+    ///   `profiles.json` are the loudest of the file's changes, and a change this
+    ///   store holds but has not written is not undone by a read of the older
+    ///   file. A file with new bytes and the revision's document — an editor that
+    ///   re-indents — is no news either, and its bytes become the revision's;
     /// * a document that parses and differs is taken, and becomes the revision,
-    ///   which is what makes the next re-read quiet;
+    ///   which is what makes the next re-read quiet — unless a change made here is
+    ///   not yet on disk, which the re-read does not undo: the file's bytes are
+    ///   kept for the merge;
     /// * a document that will not parse is **not** taken, and what was already
-    ///   in force stays in force. Falling back to the shipped table here would
-    ///   be the worst of both — the reader's list would empty *because* they
-    ///   typed a comma wrong, and they would be reading the error against a
-    ///   table that is not the one they are editing. That is `reread_schemes`'s
-    ///   own ruling for the scheme file in use, met one file over. Startup is
-    ///   different and stays different ([`Self::open`]): there is nothing yet in
-    ///   force to keep. A file refused at start is the revision's bytes, so
-    ///   reading it again unedited is the first answer, not this one.
-    ///
-    /// The line printed here is §5.3's, and the card the window raises for it is
-    /// the caller's — this type has no way to say anything to anybody.
-    pub fn reread(&mut self) -> ProfilesNews {
-        let (file, report, bytes) =
-            read_profiles_keeping_bytes(&self.path, crate::update_trial::keeping());
-        crate::update_trial::owe_copy(&report, &self.path, keep_profiles);
-        if self.is_folios_own_write(&bytes) {
-            return ProfilesNews::Unchanged;
-        }
-        if let ReadReport::FellBackToDefaults { reason, kept } = &report {
-            eprintln!("BT_PERSIST {PROFILES_FILE_NAME} would not parse: {reason:?} kept={kept:?}");
-            return ProfilesNews::Unreadable;
-        }
-        if !self.revision.adopt(file, bytes) {
-            return ProfilesNews::Unchanged;
-        }
-        self.loaded = self.revision.document.clone();
-        ProfilesNews::Changed
+    ///   in force stays in force — with no copy of it kept beside it: the file is
+    ///   the person's, under its own name, and nothing will replace it. Falling
+    ///   back to the shipped table here would be the worst of both — the reader's
+    ///   list would empty *because* they typed a comma wrong. That is
+    ///   `reread_schemes`'s own ruling for the scheme file in use, met one file
+    ///   over. Startup is different and stays different ([`Self::open`]): there
+    ///   is nothing yet in force to keep.
+    pub(crate) fn ask_reread(&mut self) {
+        self.document.ask_read();
     }
 
-    /// Record the table as it stands now and put it on disk.
+    /// Record the table as it stands now and hand it to the storage worker.
     ///
     /// Returns whether anything changed, so a caller can skip the write when a
     /// press moved nothing.
     pub fn store(&mut self, file: ProfilesV1) -> bool {
-        let changed = self.loaded != file;
-        if !self.writes.wants_write(changed) {
-            return false;
-        }
-        self.writes.requested();
-        self.loaded = file;
-        if changed {
-            self.writes.rearm();
-        }
-        self.write_now();
-        changed
+        self.document.store(file, false)
     }
 
-    /// **An update's trial was committed: the table as it stands reaches the
-    /// disk** (`update_trial`).
+    /// **An update's trial was committed: the table as it stands is handed
+    /// over** (`update_trial`).
     pub fn release_trial(&mut self) {
-        self.write_now();
+        self.document.send_owed();
     }
 
-    /// Put the table in force on disk, now — unless this process is not the
-    /// writer (review row R4-5) or an update's trial holds its writes back
-    /// (`update_trial`, F-7).
-    fn write_now(&mut self) {
-        if !self.writer_of_record
-            || crate::update_trial::defer(crate::update_trial::Writer::Profiles)
-        {
-            return;
-        }
-        let written = crate::hang_watch::during(crate::hang_watch::Station::ProfilesWrite, || {
-            write_profiles_atomic(&self.path, &self.loaded)
-        });
-        self.writes.record(
-            PROFILES_FILE_NAME,
-            written
-                .map(|bytes| self.revision.landed(bytes, self.loaded.clone()))
-                .map_err(|error| error.to_string()),
-        );
+    /// **Take what the storage worker has answered** (`AppEvent::DocumentsAnswered`):
+    /// the re-reads' news for the reader.
+    pub(crate) fn take_answers(&mut self) -> ReadNews {
+        self.document.take_answers()
+    }
+
+    /// Let the worker answer everything this store asked, and take it.
+    #[cfg(test)]
+    pub(crate) fn settle(&mut self) -> ReadNews {
+        self.document.settle()
+    }
+
+    /// Read the file again on the worker and take the answer — a pass, in a test.
+    #[cfg(test)]
+    pub(crate) fn reread(&mut self) -> crate::document_request::Heard {
+        self.ask_reread();
+        self.settle().heard()
+    }
+}
+
+/// **What the storage worker's answers came to, for the window** (`AppEvent::DocumentsAnswered`).
+#[derive(Debug, Default)]
+pub(crate) struct DocumentsHeard {
+    /// What the re-reads of `profiles.json` put in force.
+    pub(crate) profiles: ReadNews,
+    /// What the re-reads of `pins.json` put in force.
+    pub(crate) pins: ReadNews,
+    /// The sentences a write that will not land owes the reader, one per file.
+    pub(crate) faults: Vec<String>,
+}
+
+/// **Every store takes every answer, then each says what it owes** (design note
+/// 2026-10-11 (b)4, (b)7): the answers in the order the worker served them, and
+/// then each store's fault — the card a write that will not land is owed after
+/// start, which nothing raised before this ticket.
+pub(crate) fn hear_documents(
+    settings: &mut SettingsStore,
+    keybindings: &mut KeybindingsStore,
+    profiles: &mut ProfilesStore,
+    pins: &mut crate::pins::PinsStore,
+) -> DocumentsHeard {
+    settings.take_answers();
+    keybindings.take_answers();
+    let profiles_news = profiles.take_answers();
+    let pins_news = pins.take_answers();
+    let faults = [
+        settings.take_fault(),
+        keybindings.take_fault(),
+        profiles.take_fault(),
+        pins.take_fault(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    DocumentsHeard {
+        profiles: profiles_news,
+        pins: pins_news,
+        faults,
     }
 }
 
@@ -2511,13 +2806,14 @@ fn relocate(previous: &Path, current: &Path) -> Relocation {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::document_request::Heard;
     use bt_source::{Index, ItemQuery, Needle, Pattern, Scope, Search, View};
 
     /// RED (T-HARDCODE-047 round 2, SET-3) — **the ordinary keybindings
     /// writer records the dialect whose chord spelling it writes.**
     ///
     /// MUTATION: write `KeybindingsPlatformV1::Unknown` from
-    /// `KeybindingsStore::write_now_on`; the serialized platform and the
+    /// `KeybindingsStore::store_on`; the serialized platform and the
     /// opposite-platform command-modifier translation both fail.
     #[test]
     fn keybindings_store_writes_each_platform_dialect_and_it_imports_by_meaning() {
@@ -2550,11 +2846,14 @@ pub(crate) mod tests {
         ] {
             let path = root.join(format!("{dialect:?}.json"));
             let mut store = KeybindingsStore::at(path.clone());
-            store.overrides = vec![BindingOverrideV1 {
-                action: "new-tab".to_owned(),
-                chord: Some(chord.to_owned()),
-            }];
-            store.write_now_on(keybindings_platform_on(source));
+            store.store_on(
+                vec![BindingOverrideV1 {
+                    action: "new-tab".to_owned(),
+                    chord: Some(chord.to_owned()),
+                }],
+                keybindings_platform_on(source),
+            );
+            store.settle();
 
             let (written, report) = read_keybindings(&path);
             assert_eq!(report, ReadReport::Loaded, "{}", path.display());
@@ -3098,12 +3397,7 @@ pub(crate) mod tests {
         let path = root.join("session.json");
 
         let mut writer = SessionWriter::open();
-        let started = writer
-            .thread
-            .as_ref()
-            .expect("a writer thread")
-            .thread()
-            .id();
+        let started = writer.thread_id().expect("a writer thread");
 
         // Two documents, in the order they were decided, down one channel.
         let first = writer.send(&path, b"first".to_vec()).expect("queued");
@@ -3128,22 +3422,17 @@ pub(crate) mod tests {
         );
 
         // Asking again is the same thread and never a second.
-        assert!(writer.start(), "the writer is already running");
-        assert_eq!(
-            writer
-                .thread
-                .as_ref()
-                .expect("still the same thread")
-                .thread()
-                .id(),
-            started
+        assert!(
+            SessionWriter::start(&writer.lane),
+            "the writer is already running"
         );
+        assert_eq!(writer.thread_id(), Some(started), "still the same thread");
 
         // And a writer whose handle has gone — which is what a timed-out fallback used to leave
         // behind — cannot raise another beside the one that is still reading the channel.
-        writer.thread = None;
+        writer.forget_thread();
         assert!(
-            !writer.start(),
+            !SessionWriter::start(&writer.lane),
             "the ends are taken, so there is nothing to start a second writer on"
         );
 
@@ -3207,12 +3496,18 @@ pub(crate) mod tests {
             let _ = released.recv();
         });
         let writer = SessionWriter {
-            requests,
-            receipts,
             // Nothing left for `start` to hand a second thread, which is the state a writer
             // that is already running is in.
-            ends: Arc::new(Mutex::new(None)),
-            thread: Some(thread),
+            lane: StorageLane {
+                shared: Arc::new(LaneShared {
+                    requests: Arc::new(Mutex::new(Some(requests))),
+                    ends: Arc::new(Mutex::new(None)),
+                    worker: Mutex::new(LaneWorker::Running(thread)),
+                    up: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                    wake: Arc::new(|| {}),
+                }),
+            },
+            receipts,
             sent: 0,
             landed: 0,
             answered: None,
@@ -3393,6 +3688,7 @@ pub(crate) mod tests {
             ..SettingsV1::default()
         };
         assert!(store.store(chosen.clone()), "the value changed");
+        store.settle();
         assert!(!gone.exists(), "and the write could not happen");
         assert_eq!(
             store.loaded().terminal_font_size,
@@ -3407,6 +3703,7 @@ pub(crate) mod tests {
             !store.store(chosen),
             "nothing changed, so no repaint is owed"
         );
+        store.settle();
         assert!(
             gone.is_file(),
             "but the write was attempted again, and this time it landed"
@@ -3445,15 +3742,29 @@ pub(crate) mod tests {
         assert!(store.store(second.clone()));
         assert_eq!(store.loaded(), &second, "both are in force at once");
         assert!(!path.exists(), "and neither has been written yet");
+        assert_eq!(store.document().sent(), 0, "nothing was handed over");
         store.release_writes();
+        assert_eq!(store.document().sent(), 1, "one document, handed over once");
+        store.settle();
         let written = read(&path).expect("the batch is written when it is let go");
         let on_disk: SettingsV1 = serde_json::from_str(&written).unwrap();
         assert_eq!(on_disk, second, "as the document in force");
-        std::fs::remove_file(&path).unwrap();
         store.release_writes();
-        assert!(!path.exists(), "and a second release writes nothing more");
+        assert_eq!(
+            store.document().sent(),
+            1,
+            "and a second release hands nothing more over"
+        );
         assert!(store.store(SettingsV1::default()));
-        assert!(path.exists(), "once let go, a store writes at once again");
+        assert_eq!(
+            store.document().sent(),
+            2,
+            "once let go, a store writes at once again"
+        );
+        store.settle();
+        let on_disk: SettingsV1 =
+            serde_json::from_str(&read(&path).expect("the file stands")).unwrap();
+        assert_eq!(on_disk, SettingsV1::default());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3486,6 +3797,7 @@ pub(crate) mod tests {
 
         let mut free_store = SettingsStore::at(free.join(SETTINGS_FILE_NAME));
         assert!(free_store.store(chosen.clone()), "the value changed");
+        free_store.settle();
         assert!(
             free.join(SETTINGS_FILE_NAME).is_file(),
             "a store over a folder nobody holds writes it"
@@ -3496,6 +3808,7 @@ pub(crate) mod tests {
             held_store.store(chosen),
             "the choice is live in this window"
         );
+        held_store.settle();
         assert!(
             !held.join(SETTINGS_FILE_NAME).exists(),
             "and a store over a folder somebody else holds writes nothing into it"
@@ -4424,13 +4737,13 @@ pub(crate) mod tests {
 
         let mut store = ProfilesStore::at(path.clone());
         assert_eq!(store.loaded().profiles.len(), 1);
-        assert!(matches!(store.reread(), ProfilesNews::Unchanged));
+        assert!(matches!(store.reread(), Heard::Unchanged));
 
         // Written again, byte for byte — which is what an editor that saves an
         // unmodified buffer does, and what this window does on a keystroke that
         // changes nothing.
         bt_persist::write_profiles_atomic(&path, &one_profile("pwsh")).unwrap();
-        assert!(matches!(store.reread(), ProfilesNews::Unchanged));
+        assert!(matches!(store.reread(), Heard::Unchanged));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -4444,10 +4757,10 @@ pub(crate) mod tests {
         let mut store = ProfilesStore::at(path.clone());
 
         bt_persist::write_profiles_atomic(&path, &one_profile("cmd")).unwrap();
-        assert!(matches!(store.reread(), ProfilesNews::Changed));
+        assert!(matches!(store.reread(), Heard::Changed));
         assert_eq!(store.loaded().profiles[0].id, "cmd");
         assert!(
-            matches!(store.reread(), ProfilesNews::Unchanged),
+            matches!(store.reread(), Heard::Unchanged),
             "the news was taken, so reading again finds none"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -4473,7 +4786,7 @@ pub(crate) mod tests {
         let mut store = ProfilesStore::at(path.clone());
 
         std::fs::write(&path, "{ \"schema_version\": 1, \"profiles\": [ ").unwrap();
-        assert!(matches!(store.reread(), ProfilesNews::Unreadable));
+        assert!(matches!(store.reread(), Heard::Unreadable));
         assert_eq!(
             store.loaded().profiles[0].id,
             "pwsh",
@@ -4483,7 +4796,7 @@ pub(crate) mod tests {
         // And the way back is the file itself becoming readable again — no
         // relaunch, and no flag left set by the failure.
         bt_persist::write_profiles_atomic(&path, &one_profile("cmd")).unwrap();
-        assert!(matches!(store.reread(), ProfilesNews::Changed));
+        assert!(matches!(store.reread(), Heard::Changed));
         assert_eq!(store.loaded().profiles[0].id, "cmd");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4500,7 +4813,7 @@ pub(crate) mod tests {
         let mut store = ProfilesStore::at(path.clone());
 
         std::fs::remove_file(&path).unwrap();
-        assert!(matches!(store.reread(), ProfilesNews::Changed));
+        assert!(matches!(store.reread(), Heard::Changed));
         assert_eq!(
             store.loaded(),
             &ProfilesV1::default(),
@@ -4634,10 +4947,11 @@ mod revision_tests {
     use bt_persist::{BindingOverrideV1, PinKind, PinsV1, ProfileEntryV1, ProfilesV1, SettingsV1};
 
     use super::{
-        KEYBINDINGS_FILE_NAME, KeybindingsStore, PROFILES_FILE_NAME, ProfilesNews, ProfilesStore,
+        KEYBINDINGS_FILE_NAME, KeybindingsStore, PROFILES_FILE_NAME, ProfilesStore,
         SETTINGS_FILE_NAME, SettingsStore, is_writer_of_document,
     };
-    use crate::pins::{PINS_FILE_NAME, PinsNews, PinsStore};
+    use crate::document_request::Heard;
+    use crate::pins::{PINS_FILE_NAME, PinsStore};
 
     /// A private folder for one case, emptied on the way in.
     fn scratch(case: &str) -> PathBuf {
@@ -4728,13 +5042,13 @@ mod revision_tests {
             profiles_on_disk,
             "nothing was written"
         );
-        assert_eq!(profile_store.reread(), ProfilesNews::Unchanged);
+        assert_eq!(profile_store.reread(), Heard::Unchanged);
         assert_eq!(profile_store.loaded(), &held, "the held change stands");
 
         let mut pin_store = PinsStore::at(pins_path.clone());
         assert!(pin_store.toggle(PinKind::Folder, "文档/Claude 代理"));
         assert_eq!(file_bytes(&pins_path), pins_on_disk, "nothing was written");
-        assert_eq!(pin_store.reread(), PinsNews::Unchanged);
+        assert_eq!(pin_store.reread(), Heard::Unchanged);
         assert_eq!(
             pin_store.targets(PinKind::Folder),
             vec!["项目/folio 笔记".to_owned(), "文档/Claude 代理".to_owned()],
@@ -4764,23 +5078,25 @@ mod revision_tests {
         let mut profile_store = ProfilesStore::at(profiles_path.clone());
         let written = profiles("claude", "Claude 代理");
         assert!(profile_store.store(written.clone()));
+        profile_store.settle();
         assert_eq!(
             bytes_of(profile_store.revision().bytes.as_ref()),
             Some(&file_bytes(&profiles_path)[..])
         );
         assert_eq!(profile_store.revision().document, written);
-        assert_eq!(profile_store.reread(), ProfilesNews::Unchanged);
+        assert_eq!(profile_store.reread(), Heard::Unchanged);
         assert_eq!(profile_store.loaded(), &written);
 
         let pins_path = root.join(PINS_FILE_NAME);
         let mut pin_store = PinsStore::at(pins_path.clone());
         assert!(pin_store.toggle(PinKind::Folder, "项目/folio 笔记"));
+        pin_store.settle();
         assert_eq!(
             bytes_of(pin_store.revision().bytes.as_ref()),
             Some(&file_bytes(&pins_path)[..])
         );
         assert_eq!(pin_store.revision().document, pins(&["项目/folio 笔记"]));
-        assert_eq!(pin_store.reread(), PinsNews::Unchanged);
+        assert_eq!(pin_store.reread(), Heard::Unchanged);
 
         let settings_path = root.join(SETTINGS_FILE_NAME);
         let mut settings_store = SettingsStore::at(settings_path.clone());
@@ -4789,6 +5105,7 @@ mod revision_tests {
             ..SettingsV1::default()
         };
         assert!(settings_store.store(settings.clone()));
+        settings_store.settle();
         assert_eq!(
             bytes_of(settings_store.revision().bytes.as_ref()),
             Some(&file_bytes(&settings_path)[..])
@@ -4802,12 +5119,50 @@ mod revision_tests {
             chord: Some("Ctrl+Shift+Y".to_owned()),
         }];
         assert!(keybindings_store.store(overrides.clone()));
+        keybindings_store.settle();
         assert_eq!(
             bytes_of(keybindings_store.revision().bytes.as_ref()),
             Some(&file_bytes(&keybindings_path)[..])
         );
         assert_eq!(keybindings_store.revision().document.bindings, overrides);
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (§8 test 2's in-flight variant; carry-forward 4) — **Folio's own
+    /// write still on its way is not a hand edit**: a re-read that finds the
+    /// bytes of the write in flight — landed on disk, its answer not yet taken —
+    /// answers no change and keeps nothing for a merge.
+    ///
+    /// MUTATION: compare only with the revision in
+    /// `DocumentState::is_folios_own_write` — the in-flight bytes look like a
+    /// hand edit made while a change is not on disk, and are kept for the merge.
+    #[test]
+    fn folios_own_write_in_flight_is_not_a_hand_edit() {
+        let root = scratch("in-flight");
+        let path = root.join(PINS_FILE_NAME);
+        let (lane, jobs) = super::StorageLane::held();
+        let mut store = PinsStore::at_on(path.clone(), lane);
+        assert!(store.toggle(PinKind::Folder, "项目/folio 笔记"));
+        let write = match jobs.try_recv() {
+            Ok(super::StorageJob::Document(write)) => write,
+            _ => panic!("the write is on the lane"),
+        };
+
+        let in_flight = bt_persist::StableRead::Bytes(std::sync::Arc::clone(&write.bytes));
+        assert_eq!(
+            store.document().hear_read(in_flight).heard(),
+            Heard::Unchanged
+        );
+        assert!(
+            store.document().merges().is_empty(),
+            "nothing of Folio's own write waits for a merge"
+        );
+        assert_eq!(
+            store.targets(PinKind::Folder),
+            vec!["项目/folio 笔记".to_owned()]
+        );
+        drop(write);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -4836,7 +5191,7 @@ mod revision_tests {
 
         // Saved again, byte for byte.
         std::fs::write(&path, half_typed).unwrap();
-        assert_eq!(store.reread(), ProfilesNews::Unchanged);
+        assert_eq!(store.reread(), Heard::Unchanged);
 
         // Moved to other bytes and back before the pass ran.
         std::fs::write(
@@ -4845,16 +5200,16 @@ mod revision_tests {
         )
         .unwrap();
         std::fs::write(&path, half_typed).unwrap();
-        assert_eq!(store.reread(), ProfilesNews::Unchanged);
+        assert_eq!(store.reread(), Heard::Unchanged);
 
         // A finished document is a change, once; its own bytes again are not.
         let finished = profiles("项目/folio 笔记", "Claude 代理");
         bt_persist::write_profiles_atomic(&path, &finished).unwrap();
-        assert_eq!(store.reread(), ProfilesNews::Changed);
+        assert_eq!(store.reread(), Heard::Changed);
         assert_eq!(store.loaded(), &finished);
         bt_persist::write_profiles_atomic(&path, &profiles("pwsh", "PowerShell 终端")).unwrap();
         bt_persist::write_profiles_atomic(&path, &finished).unwrap();
-        assert_eq!(store.reread(), ProfilesNews::Unchanged);
+        assert_eq!(store.reread(), Heard::Unchanged);
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4877,7 +5232,7 @@ mod revision_tests {
         assert_ne!(compact, file_bytes(&path), "a second spelling");
         std::fs::write(&path, &compact).unwrap();
 
-        assert_eq!(store.reread(), PinsNews::Unchanged);
+        assert_eq!(store.reread(), Heard::Unchanged);
         assert_eq!(
             bytes_of(store.revision().bytes.as_ref()),
             Some(&compact[..]),
@@ -4907,8 +5262,11 @@ mod revision_tests {
         let settings_path = root.join(SETTINGS_FILE_NAME);
         let settings_text = "{ \"schema_version\": 9, \"terminal_font_family\": \"更纱黑体";
         std::fs::write(&settings_path, settings_text).unwrap();
-        let mut settings_store =
-            SettingsStore::read_at(settings_path.clone(), is_writer_of_document(&settings_path));
+        let mut settings_store = SettingsStore::read_at(
+            settings_path.clone(),
+            is_writer_of_document(&settings_path),
+            super::StorageLane::of_its_own(),
+        );
         assert!(settings_store.take_fault().is_some());
         assert!(a_copy_is_kept(&root, SETTINGS_FILE_NAME));
         assert_eq!(
@@ -4921,6 +5279,7 @@ mod revision_tests {
             ..SettingsV1::default()
         };
         assert!(settings_store.store(chosen.clone()));
+        settings_store.settle();
         assert_eq!(
             bytes_of(settings_store.revision().bytes.as_ref()),
             Some(&file_bytes(&settings_path)[..])
@@ -4940,16 +5299,1259 @@ mod revision_tests {
         assert_eq!(pin_store.revision().document, PinsV1::default());
         assert_eq!(
             pin_store.reread(),
-            PinsNews::Unchanged,
+            Heard::Unchanged,
             "the refused file, unedited, is no change"
         );
         assert!(pin_store.toggle(PinKind::Folder, "文档/Claude 代理"));
+        pin_store.settle();
         assert_eq!(
             bytes_of(pin_store.revision().bytes.as_ref()),
             Some(&file_bytes(&pins_path)[..])
         );
         assert_eq!(pin_store.revision().document, pins(&["文档/Claude 代理"]));
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// The storage worker's request protocol, served on a real disk in a test's own folder, with a
+/// crossing writer put exactly where the protocol says one can land
+/// (`document_request::serve_document_between`), and the store half that takes its answers
+/// (T-STORAGE-WORKER-REQUEST; design note 2026-10-11, (b)3, (b)4, (b)14, (c)1, (c)3, (d)1).
+#[cfg(test)]
+mod conditional_write_tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, mpsc};
+
+    use bt_persist::{SettingsV1, StableRead};
+    use bt_platform::admission::WorkerCtx;
+
+    use super::{
+        SETTINGS_FILE_NAME, SettingsStore, StorageJob, StorageLane, is_writer_of_document,
+    };
+    use crate::document_request::{
+        DocumentAnswer, DocumentJob, KeptFile, LinkPolicy, Mode, Outcome, Precondition, Refusal,
+        Step, precondition, retired_by, serve_document, serve_document_between, settle_exchange,
+        settle_restoring_exchange,
+    };
+
+    /// A private folder for one case, emptied on the way in.
+    pub(super) fn scratch(case: &str) -> PathBuf {
+        let root = bt_testpath::temp_path(&format!("bt-app-worker-request-{case}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a private storage folder for this test");
+        root
+    }
+
+    /// Run `body` on a worker the thread door started, and wait for its answer
+    /// within the suite's patience (`lane::PATIENCE`): a worker that never
+    /// finishes fails the test instead of hanging it. A panic in `body` is
+    /// carried back and raised here.
+    pub(super) fn on_a_worker<T: Send + 'static>(
+        body: impl FnOnce(&WorkerCtx) -> T + Send + 'static,
+    ) -> T {
+        let (sent, answer) = mpsc::channel();
+        bt_platform::spawn_at_priority(
+            "bt-worker-request-test",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |worker| {
+                let _ = sent.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                    || body(worker),
+                )));
+            },
+        )
+        .expect("the thread door starts a thread");
+        match answer.recv_timeout(crate::lane::PATIENCE) {
+            Ok(Ok(answer)) => answer,
+            Ok(Err(panic)) => std::panic::resume_unwind(panic),
+            Err(_) => panic!("the worker did not finish within the suite's patience"),
+        }
+    }
+
+    /// A settings document told apart by its font, in mixed script.
+    pub(super) fn settings(face: &str) -> SettingsV1 {
+        SettingsV1 {
+            terminal_font_family: face.to_owned(),
+            ..SettingsV1::default()
+        }
+    }
+
+    pub(super) fn bytes(document: &SettingsV1) -> Vec<u8> {
+        bt_persist::serialize_settings(document).expect("a settings document serializes")
+    }
+
+    pub(super) fn file_bytes(path: &Path) -> Vec<u8> {
+        std::fs::read(path).expect("the document is on disk")
+    }
+
+    /// The names in `root`, sorted.
+    pub(super) fn names_in(root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(root)
+            .expect("the scratch folder lists")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The next job on a held lane, which must be a document's write.
+    pub(super) fn next_write(jobs: &mpsc::Receiver<StorageJob>) -> DocumentJob {
+        match jobs.try_recv() {
+            Ok(StorageJob::Document(job)) => job,
+            Ok(_) => panic!("the next job is not a document's write"),
+            Err(error) => panic!("no job is queued: {error:?}"),
+        }
+    }
+
+    /// Serve one write on a worker, a crossing writer putting `crossing` under its name the moment
+    /// the precondition has been read, when there is one.
+    pub(super) fn serve_crossed(job: DocumentJob, crossing: Option<Vec<u8>>) {
+        let path = job.which.clone();
+        on_a_worker(move |worker| {
+            serve_document_between(worker, job, &mut |step| {
+                if step == Step::Read
+                    && let Some(crossing) = &crossing
+                {
+                    std::fs::write(&path, crossing).expect("the crossing writer writes");
+                }
+            });
+        });
+    }
+
+    /// A settings store over `path` on a held lane, writing `Merge` requests.
+    fn merging_store(path: &Path) -> (SettingsStore, mpsc::Receiver<StorageJob>) {
+        let (lane, jobs) = StorageLane::held();
+        let mut store =
+            SettingsStore::read_at(path.to_path_buf(), is_writer_of_document(path), lane);
+        store.document().sending(Mode::Merge);
+        (store, jobs)
+    }
+
+    /// A job written by hand: `bytes` under `which` if it holds `expected`.
+    fn job(
+        which: &Path,
+        expected: Option<&[u8]>,
+        bytes: &[u8],
+        mode: Mode,
+        version: u64,
+        kept: Vec<KeptFile>,
+    ) -> (DocumentJob, mpsc::Receiver<DocumentAnswer>) {
+        let (answer, answered) = mpsc::channel();
+        (
+            DocumentJob {
+                which: which.to_path_buf(),
+                generation: 1,
+                version,
+                expected: expected.map(Arc::from),
+                bytes: Arc::from(bytes),
+                mode,
+                link_policy: LinkPolicy::Refuse,
+                asker: 7,
+                kept,
+                answer,
+            },
+            answered,
+        )
+    }
+
+    /// RED ((b)14-4, as this ticket builds it: the merge is T-STORE-MERGE-SETTINGS's) — **the
+    /// displaced bytes are stored for the merge against the pre-exchange revision**, and only then
+    /// is the revision what the file holds ((b)3, (c)1).
+    ///
+    /// Folio writes its font; a hand edit lands between the precondition read and the exchange.
+    /// The exchange puts Folio's document on disk and hands the person's bytes back, kept beside
+    /// it. The merge's base must be the revision the write was conditional on: measured against
+    /// what Folio just wrote, a unit only Folio changed would look like the file's change.
+    ///
+    /// MUTATION: in `DocumentState::on_document`'s `Displaced` arm, set the revision to the bytes
+    /// written before storing the merge, and store the revision as its base — the base is Folio's
+    /// own document and the first assertion fails.
+    #[test]
+    fn displaced_merges_against_the_pre_exchange_revision() {
+        let root = scratch("displaced-base");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let base = settings("基线 Base Mono");
+        std::fs::write(&path, bytes(&base)).unwrap();
+        let (mut store, jobs) = merging_store(&path);
+
+        let ours = settings("我们的 Ours Mono");
+        assert!(store.store(ours.clone()));
+        let theirs = bytes(&SettingsV1 {
+            terminal_font_size: 19,
+            ..base.clone()
+        });
+        serve_crossed(next_write(&jobs), Some(theirs.clone()));
+        store.settle();
+
+        let merges = store.document().merges().to_vec();
+        assert_eq!(merges.len(), 1, "the crossing edit is stored for the merge");
+        assert_eq!(
+            merges[0].base.document, base,
+            "against the pre-exchange revision"
+        );
+        assert_eq!(merges[0].base.bytes.as_deref(), Some(&bytes(&base)[..]));
+        assert_eq!(merges[0].theirs.as_deref(), Some(&theirs[..]));
+        let kept = merges[0]
+            .kept
+            .clone()
+            .expect("the person's bytes are kept beside the file");
+        assert_eq!(file_bytes(&kept), theirs, "and nothing of them is lost");
+        assert_eq!(
+            file_bytes(&path),
+            bytes(&ours),
+            "Folio's document is on disk"
+        );
+        assert_eq!(
+            store.revision().document,
+            ours,
+            "and the revision is what the file holds"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED ((b)14-5) — **a stale receipt with displaced bytes is never dropped** ((b)4): a read
+    /// asked after the write makes the write's answer older than the newest request, and the
+    /// answer is processed all the same — its displaced bytes and its kept file are the person's.
+    ///
+    /// MUTATION: filter receipts by generation (in `DocumentState::on_document`, return at once
+    /// when the answer's generation is older than the store's newest request) — the displaced
+    /// bytes are dropped and nothing is stored for the merge.
+    #[test]
+    fn a_stale_receipt_with_displaced_bytes_is_never_dropped() {
+        let root = scratch("stale-receipt");
+        let path = root.join(SETTINGS_FILE_NAME);
+        std::fs::write(&path, bytes(&settings("基线 Base Mono"))).unwrap();
+        let (mut store, jobs) = merging_store(&path);
+
+        assert!(store.store(settings("我们的 Ours Mono")));
+        store.document().ask_read();
+        let write = next_write(&jobs);
+        let read = match jobs.try_recv() {
+            Ok(StorageJob::Read(read)) => read,
+            _ => panic!("the read is queued behind the write"),
+        };
+        assert!(
+            read.generation > write.generation,
+            "the write's answer is the older one"
+        );
+        serve_crossed(write, Some(bytes(&settings("他们的 Theirs Mono"))));
+        on_a_worker(move |worker| crate::document_request::serve_read(worker, read));
+        store.settle();
+
+        let merges = store.document().merges().to_vec();
+        assert_eq!(merges.len(), 1, "the stale answer was processed");
+        assert!(
+            merges[0].kept.as_ref().is_some_and(|kept| kept.is_file()),
+            "its kept file is on disk and recorded"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED ((c)3 item 1) — **`Restore` puts the displaced file back and answers a conflict.**
+    ///
+    /// A buffer with no merge — the preview, and the four stores until the merge tickets — must
+    /// never leave Folio's document over a hand edit that crossed its write: the worker exchanges
+    /// again, conditional on the file still holding what it wrote, so the person's file is back
+    /// under its name, and nothing is left beside it. The asker comes back on the answer.
+    ///
+    /// MUTATION: answer `Conflict` without the second exchange (in `settle_exchange`, return
+    /// `Outcome::Conflict { theirs, kept: Some(displaced) }` for `Restore`) — Folio's document stays
+    /// on disk and the file assertion fails.
+    #[test]
+    fn restore_puts_the_displaced_file_back_and_answers_conflict() {
+        let root = scratch("restore");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let base = bytes(&settings("基线 Base Mono"));
+        std::fs::write(&path, &base).unwrap();
+        let ours = bytes(&settings("我们的 Ours Mono"));
+        let theirs = bytes(&settings("他们的 Theirs Mono — 手改"));
+
+        let (job, answered) = job(&path, Some(&base), &ours, Mode::Restore, 1, Vec::new());
+        serve_crossed(job, Some(theirs.clone()));
+        let answer = answered
+            .try_recv()
+            .expect("the worker answered before it finished");
+
+        assert_eq!(
+            answer.outcome,
+            Outcome::Conflict {
+                theirs: Arc::from(&theirs[..]),
+                kept: None,
+            }
+        );
+        assert_eq!(answer.asker, 7, "the asker comes back on the answer");
+        assert_eq!(
+            file_bytes(&path),
+            theirs,
+            "the person's file is back under its name"
+        );
+        assert_eq!(
+            names_in(&root),
+            vec![SETTINGS_FILE_NAME.to_owned()],
+            "and nothing is left beside it"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED ((b)4) — **one document write in flight, and the pending slot keeps the newest.**
+    ///
+    /// Three presses while the first write is on the worker are one write on the lane; when its
+    /// answer has been processed, the newest document — the third press — is sent, and the second
+    /// never reaches the lane at all, so it has no receipt to lose.
+    ///
+    /// MUTATION: send every change at once (in `DocumentState::send_owed`, drop the in-flight
+    /// check) — three writes are queued at once.
+    #[test]
+    fn one_document_write_in_flight_and_the_pending_slot_keeps_the_newest() {
+        let root = scratch("pending-slot");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let (lane, jobs) = StorageLane::held();
+        let mut store = SettingsStore::at_on(path.clone(), lane);
+
+        for face in ["一 One Mono", "二 Two Mono", "三 Three Mono"] {
+            assert!(store.store(settings(face)));
+        }
+        let first = next_write(&jobs);
+        assert!(jobs.try_recv().is_err(), "one write is on the lane");
+        assert_eq!(&*first.bytes, &bytes(&settings("一 One Mono"))[..]);
+
+        serve_crossed(first, None);
+        store.settle();
+        let newest = next_write(&jobs);
+        assert_eq!(
+            &*newest.bytes,
+            &bytes(&settings("三 Three Mono"))[..],
+            "the pending slot held the newest press"
+        );
+        assert!(
+            jobs.try_recv().is_err(),
+            "and the middle one never reached the lane"
+        );
+        serve_crossed(newest, None);
+        store.settle();
+        assert_eq!(file_bytes(&path), bytes(&settings("三 Three Mono")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED ((c)3 item 5) — **per-file order holds across askers.**
+    ///
+    /// Two askers name one file — a settings store and a second one over the same path, standing
+    /// in for a preview buffer open on `settings.json`. Their requests go down one queue in the
+    /// order they were made, and the second sees the first's write as a file that moved.
+    ///
+    /// MUTATION: separate queues per store (give `SettingsStore::at_on` a lane of its own instead
+    /// of the one it is handed) — the second write never reaches this queue.
+    #[test]
+    fn per_file_order_holds_across_askers() {
+        let root = scratch("per-file-order");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let (lane, jobs) = StorageLane::held();
+        let mut first = SettingsStore::at_on(path.clone(), lane.clone());
+        let mut second = SettingsStore::at_on(path.clone(), lane);
+
+        assert!(first.store(settings("先 First Mono")));
+        assert!(second.store(settings("后 Second Mono")));
+        let a = next_write(&jobs);
+        let b = next_write(&jobs);
+        assert_eq!(
+            &*a.bytes,
+            &bytes(&settings("先 First Mono"))[..],
+            "queue order"
+        );
+        assert_eq!(&*b.bytes, &bytes(&settings("后 Second Mono"))[..]);
+
+        serve_crossed(a, None);
+        serve_crossed(b, None);
+        first.settle();
+        second.settle();
+        assert_eq!(file_bytes(&path), bytes(&settings("先 First Mono")));
+        let merges = second.document().merges().to_vec();
+        assert_eq!(
+            merges.first().and_then(|merge| merge.theirs.as_deref()),
+            Some(&bytes(&settings("先 First Mono"))[..]),
+            "the second asker saw the first one's write, and wrote nothing over it"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (carry-forward 3) — **a read that could not obtain the file's bytes never satisfies an
+    /// absent precondition.** `expected: None` means *no file*; a file whose bytes were not read is
+    /// a file, and Folio does not write over a file it has not read.
+    ///
+    /// Here the name holds something that opens and does not read (a folder). The worker answers a
+    /// refusal and leaves it alone; the name-refusing rename of a first write is a second guard
+    /// behind the decision, so the decision is also asked directly.
+    ///
+    /// MUTATION: treat `Unobtained` as absence (in `document_request::precondition`, answer
+    /// `Holds` for `(Unobtained, None)`) — the decision assertion fails.
+    #[test]
+    fn an_unobtained_read_never_satisfies_an_absent_precondition() {
+        assert_eq!(
+            precondition(StableRead::Unobtained("拒绝 refused".to_owned()), None),
+            Precondition::Unread("拒绝 refused".to_owned())
+        );
+
+        let root = scratch("unobtained");
+        let path = root.join(SETTINGS_FILE_NAME);
+        std::fs::create_dir_all(&path).unwrap();
+        let (job, answered) = job(
+            &path,
+            None,
+            &bytes(&settings("我们的 Ours Mono")),
+            Mode::Restore,
+            1,
+            Vec::new(),
+        );
+        on_a_worker(move |worker| serve_document(worker, job));
+        let answer = answered
+            .try_recv()
+            .expect("the worker answered before it finished");
+        assert!(
+            matches!(
+                answer.outcome,
+                Outcome::Refused {
+                    cause: Refusal::Unread(_)
+                }
+            ),
+            "{:?}",
+            answer.outcome
+        );
+        assert!(path.is_dir(), "what stands under the name is untouched");
+        assert_eq!(names_in(&root), vec![SETTINGS_FILE_NAME.to_owned()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (carry-forward 5) — **a landing that is not known to be durable keeps the displaced
+    /// path as an obligation**, removed by the same rule as a `Displaced` file's: a later durable
+    /// landing.
+    ///
+    /// The worker half: an exchange whose directory flush failed keeps what it displaced, even
+    /// when that is Folio's own last document, because it is the only copy known to be on the
+    /// device. The store half: the answer is a success for the revision and an obligation for the
+    /// kept file, which the next durable landing retires.
+    ///
+    /// MUTATION: remove the kept file on `NotDurable` (in `settle_exchange`, remove the displaced
+    /// file whatever `not_durable` says) — the worker's assertion fails.
+    #[test]
+    fn not_durable_keeps_the_displaced_path_as_an_obligation() {
+        let root = scratch("not-durable");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let base = bytes(&settings("基线 Base Mono"));
+        std::fs::write(&path, &base).unwrap();
+
+        // The worker half.
+        let displaced = root.join("settings.json.displaced-测试");
+        std::fs::write(&displaced, &base).unwrap();
+        let (probe, _answered) = job(
+            &path,
+            Some(&base),
+            &bytes(&settings("我们的 Ours Mono")),
+            Mode::Restore,
+            1,
+            Vec::new(),
+        );
+        let kept_path = displaced.clone();
+        let served = on_a_worker(move |worker| {
+            settle_exchange(
+                worker,
+                &probe,
+                &base,
+                &kept_path,
+                Some("the directory flush failed".to_owned()),
+                &mut |_| {},
+            )
+        });
+        assert_eq!(
+            served.outcome,
+            Outcome::Landed {
+                bytes: Arc::from(&bytes(&settings("我们的 Ours Mono"))[..]),
+                kept: Some(displaced.clone()),
+            }
+        );
+        assert!(displaced.is_file(), "the displaced copy stays");
+
+        // The store half.
+        let (lane, jobs) = StorageLane::held();
+        let mut store = SettingsStore::read_at(path.clone(), is_writer_of_document(&path), lane);
+        assert!(store.store(settings("我们的 Ours Mono")));
+        let write = next_write(&jobs);
+        std::fs::write(&path, &*write.bytes).unwrap();
+        let _ = write.answer.send(DocumentAnswer {
+            generation: write.generation,
+            version: write.version,
+            asker: write.asker,
+            outcome: Outcome::Landed {
+                bytes: Arc::clone(&write.bytes),
+                kept: Some(displaced.clone()),
+            },
+            not_durable: Some("the directory flush failed".to_owned()),
+            retired: Vec::new(),
+            left: None,
+        });
+        drop(write);
+        store.settle();
+        let next = store.document().version() + 1;
+        assert_eq!(
+            store.document().kept(),
+            &[KeptFile {
+                path: displaced.clone(),
+                version: next,
+            }][..],
+            "an obligation, retired by a later landing"
+        );
+        assert!(displaced.is_file());
+        assert!(store.store(settings("再一次 Again Mono")));
+        serve_crossed(next_write(&jobs), None);
+        store.settle();
+        assert!(!displaced.exists(), "a later durable landing removes it");
+        assert!(store.document().kept().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED ((d)1) — **kept files survive `Displaced` → `Moved` → `Displaced` until a derived
+    /// version lands**: the review's sequence, on a real disk. Both kept files stay through the
+    /// three answers, and one landing of a version at or after both merges removes both.
+    ///
+    /// The merges are this test's (T-STORE-MERGE-SETTINGS builds them): each folds the file's
+    /// size into Folio's document, which is what makes each new version derive from the kept
+    /// file's units.
+    ///
+    /// MUTATION: revision (c)'s rule — a landing retires only the kept file of its own write's
+    /// base, written here as `document_request::retired_by` matching `file.version == landed` —
+    /// `kept₁` is never removed and the last assertion fails.
+    #[test]
+    fn kept_files_survive_displaced_moved_displaced_until_a_derived_version_lands() {
+        let root = scratch("kept-sequence");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let base = settings("基线 Base Mono");
+        std::fs::write(&path, bytes(&base)).unwrap();
+        let (mut store, jobs) = merging_store(&path);
+        let sized = |face: &str, size: u8| SettingsV1 {
+            terminal_font_size: size,
+            ..settings(face)
+        };
+
+        // 1. Displaced₁.
+        assert!(store.store(settings("我们的 Ours Mono")));
+        serve_crossed(next_write(&jobs), Some(bytes(&sized("基线 Base Mono", 15))));
+        store.settle();
+        let first = store.document().take_merges();
+        let kept_1 = first[0]
+            .kept
+            .clone()
+            .expect("Displaced₁ keeps the person's bytes");
+        for merge in first {
+            let theirs = sized("基线 Base Mono", 15);
+            store
+                .document()
+                .fold(merge, sized("我们的 Ours Mono", 15), theirs);
+        }
+        let m_1 = store.document().version();
+
+        // 2. Moved: the file changes before the next write is served.
+        store.document().send_owed();
+        let second = next_write(&jobs);
+        std::fs::write(&path, bytes(&sized("手改 Hand Mono", 16))).unwrap();
+        serve_crossed(second, None);
+        store.settle();
+        for merge in store.document().take_merges() {
+            assert!(merge.kept.is_none(), "a moved file keeps nothing beside it");
+            store.document().fold(
+                merge,
+                sized("我们的 Ours Mono", 16),
+                sized("手改 Hand Mono", 16),
+            );
+        }
+        assert!(kept_1.is_file(), "Moved removes no kept file");
+
+        // 3. Displaced₂.
+        store.document().send_owed();
+        serve_crossed(
+            next_write(&jobs),
+            Some(bytes(&sized("我们的 Ours Mono", 17))),
+        );
+        store.settle();
+        let third = store.document().take_merges();
+        let kept_2 = third[0]
+            .kept
+            .clone()
+            .expect("Displaced₂ keeps the person's bytes");
+        for merge in third {
+            store.document().fold(
+                merge,
+                sized("我们的 Ours Mono — 合并", 17),
+                sized("我们的 Ours Mono", 17),
+            );
+        }
+        let m_2 = store.document().version();
+        assert!(m_2 > m_1);
+        assert!(
+            kept_1.is_file() && kept_2.is_file(),
+            "both survive three answers"
+        );
+
+        // 4. A landing of a version at or after both.
+        store.document().send_owed();
+        let last = next_write(&jobs);
+        assert!(last.version >= m_2);
+        serve_crossed(last, None);
+        store.settle();
+        assert!(!kept_2.exists(), "the newer kept file is retired");
+        assert!(
+            !kept_1.exists(),
+            "and the older one, which the landed version derives from"
+        );
+        assert!(store.document().kept().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED ((d)1) — **a landing of an older version removes only the kept files it derives
+    /// from**: with obligations at versions 3 and 5, a landing of version 4 retires the first and
+    /// leaves the second.
+    ///
+    /// MUTATION: on any `Landed`, remove every obligation (`retired_by` answers all of `kept`) —
+    /// the second file is removed too.
+    #[test]
+    fn a_landed_older_version_removes_only_the_kept_files_it_derives_from() {
+        let root = scratch("kept-older");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let base = bytes(&settings("基线 Base Mono"));
+        std::fs::write(&path, &base).unwrap();
+        let older = root.join("settings.json.displaced-旧");
+        let newer = root.join("settings.json.displaced-新");
+        std::fs::write(&older, "旧 old").unwrap();
+        std::fs::write(&newer, "新 new").unwrap();
+        let kept = vec![
+            KeptFile {
+                path: older.clone(),
+                version: 3,
+            },
+            KeptFile {
+                path: newer.clone(),
+                version: 5,
+            },
+        ];
+        assert_eq!(
+            retired_by(&kept, 4)
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>(),
+            vec![older.clone()]
+        );
+
+        let (job, answered) = job(
+            &path,
+            Some(&base),
+            &bytes(&settings("我们的 Ours Mono")),
+            Mode::Merge,
+            4,
+            kept,
+        );
+        on_a_worker(move |worker| serve_document(worker, job));
+        let answer = answered
+            .try_recv()
+            .expect("the worker answered before it finished");
+        assert!(matches!(answer.outcome, Outcome::Landed { .. }));
+        assert_eq!(answer.retired, vec![older.clone()]);
+        assert!(
+            !older.exists(),
+            "the file version 4 derives from is retired"
+        );
+        assert!(newer.is_file(), "the one merged after it stays");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED ((d)1, rule 5) — **no answer but a landing removes a kept file**: not `Moved`, not
+    /// `Displaced`, not `Refused`, each for a version past the kept file's.
+    ///
+    /// MUTATION: remove `kept` on the `Displaced` answer (in `serve_document_between`, retire on
+    /// `Outcome::Displaced` too) — the kept file is gone after the second answer.
+    #[test]
+    fn no_answer_but_landed_removes_a_kept_file() {
+        let root = scratch("kept-only-landed");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let base = bytes(&settings("基线 Base Mono"));
+        std::fs::write(&path, &base).unwrap();
+        let kept_path = root.join("settings.json.displaced-保留");
+        std::fs::write(&kept_path, "保留 kept").unwrap();
+        let kept = || {
+            vec![KeptFile {
+                path: kept_path.clone(),
+                version: 1,
+            }]
+        };
+        let ours = bytes(&settings("我们的 Ours Mono"));
+
+        // Moved: the file is not what the write expects.
+        let (moved, answered) = job(&path, Some(b"not this"), &ours, Mode::Merge, 5, kept());
+        on_a_worker(move |worker| serve_document(worker, moved));
+        assert!(matches!(
+            answered.try_recv().unwrap().outcome,
+            Outcome::Moved { .. }
+        ));
+        assert!(kept_path.is_file(), "Moved");
+
+        // Displaced: a hand edit crosses the exchange.
+        let (displaced, answered) = job(&path, Some(&base), &ours, Mode::Merge, 5, kept());
+        serve_crossed(displaced, Some(bytes(&settings("手改 Hand Mono"))));
+        let answer = answered.try_recv().unwrap();
+        assert!(matches!(answer.outcome, Outcome::Displaced { .. }));
+        assert!(kept_path.is_file(), "Displaced");
+
+        // Refused: the name holds a folder.
+        let folder = root.join("folder.json");
+        std::fs::create_dir_all(&folder).unwrap();
+        let (refused, answered) = job(&folder, None, &ours, Mode::Merge, 5, kept());
+        on_a_worker(move |worker| serve_document(worker, refused));
+        assert!(matches!(
+            answered.try_recv().unwrap().outcome,
+            Outcome::Refused { .. }
+        ));
+        assert!(kept_path.is_file(), "Refused");
+
+        // Landed.
+        let (landed, answered) = job(&path, Some(&ours), &base, Mode::Merge, 5, kept());
+        on_a_worker(move |worker| serve_document(worker, landed));
+        assert!(matches!(
+            answered.try_recv().unwrap().outcome,
+            Outcome::Landed { .. }
+        ));
+        assert!(!kept_path.exists(), "only a landing retires it");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (review round 2, blocker 1; (c)3) — **a `Restore` conflict records
+    /// the person's file as the revision and holds the owed write.** After the
+    /// crossing edit is put back, the revision is what the file holds; a later
+    /// press moves `desired` and sends nothing, so the hand edit is not written
+    /// over before the merge.
+    ///
+    /// MUTATIONS: keep the old revision on `Conflict` — the revision assertion
+    /// fails; send after the press (drop `held_for_merge` from
+    /// `DocumentState::send_owed`) — a write is queued.
+    #[test]
+    fn a_restore_conflict_records_theirs_and_holds_the_owed_write() {
+        let root = scratch("restore-held");
+        let path = root.join(SETTINGS_FILE_NAME);
+        std::fs::write(&path, bytes(&settings("基线 Base Mono"))).unwrap();
+        let (lane, jobs) = StorageLane::held();
+        let mut store = SettingsStore::read_at(path.clone(), is_writer_of_document(&path), lane);
+
+        assert!(store.store(settings("我们的 Ours Mono")));
+        let theirs = bytes(&settings("他们的 Theirs Mono — 手改"));
+        serve_crossed(next_write(&jobs), Some(theirs.clone()));
+        store.settle();
+        assert_eq!(
+            store.revision().bytes.as_deref(),
+            Some(&theirs[..]),
+            "the revision is the file the person now has"
+        );
+        assert_eq!(
+            store.revision().document,
+            settings("他们的 Theirs Mono — 手改")
+        );
+
+        assert!(store.store(settings("再按一次 Pressed Again Mono")));
+        store.release_trial();
+        assert!(
+            jobs.try_recv().is_err(),
+            "nothing is written over the hand edit"
+        );
+        assert_eq!(file_bytes(&path), theirs, "the file still holds it");
+        assert_eq!(
+            store.loaded(),
+            &settings("再按一次 Pressed Again Mono"),
+            "and the press is in force in memory"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (review round 3, finding 1) — **a re-read while held keeps the hold**:
+    /// only the merge's fold releases it. The person's file read back is nothing;
+    /// the file changed again is the new revision and the newest bytes for the
+    /// merge, against the base the hold began with; and still nothing is written.
+    ///
+    /// MUTATION: let a re-read release the hold (put `self.held_for_merge = false`
+    /// back in `DocumentState::on_read`'s taking branch and let a held read take
+    /// the file) — a write is queued after the pass.
+    #[test]
+    fn a_reread_while_held_keeps_the_hold() {
+        let root = scratch("reread-held");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let base = settings("基线 Base Mono");
+        std::fs::write(&path, bytes(&base)).unwrap();
+        let (lane, jobs) = StorageLane::held();
+        let mut store = SettingsStore::read_at(path.clone(), is_writer_of_document(&path), lane);
+        assert!(store.store(settings("我们的 Ours Mono")));
+        let theirs = bytes(&settings("他们的 Theirs Mono"));
+        serve_crossed(next_write(&jobs), Some(theirs.clone()));
+        store.settle();
+
+        // The person's file, read back: nothing.
+        let news = store
+            .document()
+            .hear_read(StableRead::Bytes(Arc::from(&theirs[..])));
+        assert!(!news.taken);
+        // A press that returns `desired` to the person's document, then the file
+        // changed again: the revision follows the file, the hold stays.
+        assert!(store.store(settings("他们的 Theirs Mono")));
+        let again = bytes(&settings("又改了 Edited Again Mono"));
+        std::fs::write(&path, &again).unwrap();
+        let news = store
+            .document()
+            .hear_read(StableRead::Bytes(Arc::from(&again[..])));
+        assert!(!news.taken, "a held document takes nothing from a re-read");
+        assert_eq!(store.revision().bytes.as_deref(), Some(&again[..]));
+        let merges = store.document().merges().to_vec();
+        assert_eq!(merges.len(), 1);
+        assert_eq!(
+            merges[0].theirs.as_deref(),
+            Some(&again[..]),
+            "the newest file"
+        );
+        assert_eq!(merges[0].base.document, base, "against the hold's own base");
+
+        assert!(store.store(settings("再按 Pressed Mono")));
+        store.release_trial();
+        assert!(
+            jobs.try_recv().is_err(),
+            "nothing is written before the merge"
+        );
+        assert_eq!(file_bytes(&path), again);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// End the storage worker — a session write whose receipt nobody hears —
+    /// and give its end the suite's patience to run to its wake; a wake heard
+    /// here is a wake that came while the request was still being admitted.
+    fn end_the_worker_and_give_it_its_chance(
+        poison: &mpsc::Sender<StorageJob>,
+        session: PathBuf,
+        wakes: &mpsc::Receiver<bool>,
+    ) {
+        poison
+            .send(StorageJob::Session(super::SessionWriteRequest {
+                generation: 1,
+                path: session,
+                bytes: b"{}".to_vec(),
+            }))
+            .expect("the worker takes it");
+        if let Ok(gone) = wakes.recv_timeout(crate::lane::PATIENCE) {
+            panic!(
+                "the worker's end woke the loop during an admission (terminal published: {gone})"
+            );
+        }
+    }
+
+    /// The next wake within the suite's patience, and whether the request's
+    /// terminal was published when it came.
+    fn next_wake(wakes: &mpsc::Receiver<bool>) -> bool {
+        wakes
+            .recv_timeout(crate::lane::PATIENCE)
+            .expect("the worker's end wakes the loop")
+    }
+
+    /// RED (review round 3, finding 2; C2) — **a request that races the worker's
+    /// end gets exactly one terminal, and the wake follows it.** The worker is
+    /// made to end at the moment between the admission's decision and the
+    /// enqueue; because admission is decided under the queue's lock and the
+    /// worker's end takes that lock to mark the lane down and drop what is
+    /// queued, the request is either refused at the door or queued and then
+    /// dropped by the end — and the end's wake comes after.
+    ///
+    /// MUTATION: decide admission before taking the queue's lock (load `up`
+    /// first, no recheck under the lock) — the end runs to its wake between the
+    /// decision and the enqueue, and the request is then refused at the door
+    /// after an admission was decided (or queued after the wake).
+    #[test]
+    fn a_request_racing_the_workers_end_gets_one_terminal_and_a_wake_after_it() {
+        let root = scratch("end-race");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let (answer, answered) = mpsc::channel::<DocumentAnswer>();
+        let answered = Arc::new(std::sync::Mutex::new(answered));
+        let (woke, wakes) = mpsc::channel::<bool>();
+        let seen = Arc::clone(&answered);
+        let lane = StorageLane::with_a_worker_and_wake(move || {
+            // At the wake: was this request's terminal already published?
+            let gone = matches!(
+                seen.lock().expect("the answer").try_recv(),
+                Err(mpsc::TryRecvError::Disconnected)
+            );
+            let _ = woke.send(gone);
+        });
+        let poison = super::lane_lock(&lane.shared.requests)
+            .clone()
+            .expect("the lane is open");
+        let (mut probe, _unused) = job(
+            &path,
+            None,
+            &bytes(&settings("我们的 Ours Mono")),
+            Mode::Restore,
+            1,
+            Vec::new(),
+        );
+        probe.answer = answer;
+        let session = root.join("session.json");
+        let admitted = lane.admit_document_job_between(StorageJob::Document(probe), || {
+            end_the_worker_and_give_it_its_chance(&poison, session, &wakes);
+        });
+        assert!(admitted, "admitted, under the lock, before the end");
+        assert!(
+            next_wake(&wakes),
+            "the wake came after the request's terminal"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    /// known to be durable keeps what it displaced**: the person's file is back
+    /// under its name, and the displaced copy — Folio's own write — stays as an
+    /// obligation, never deleted.
+    ///
+    /// MUTATION: delete the displaced copy on `NotDurable` (in
+    /// `settle_restoring_exchange`, remove it whenever it holds Folio's bytes) —
+    /// the copy is gone.
+    #[test]
+    fn restore_not_durable_keeps_the_displaced_path() {
+        let root = scratch("restore-not-durable");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let base = bytes(&settings("基线 Base Mono"));
+        let ours = bytes(&settings("我们的 Ours Mono"));
+        let theirs = bytes(&settings("他们的 Theirs Mono"));
+        std::fs::write(&path, &theirs).unwrap();
+        let back = root.join("settings.json.displaced-回来");
+        std::fs::write(&back, &ours).unwrap();
+        let (probe, _answered) = job(&path, Some(&base), &ours, Mode::Restore, 3, Vec::new());
+        let back_path = back.clone();
+        let theirs_bytes: Arc<[u8]> = Arc::from(&theirs[..]);
+        let served = on_a_worker(move |worker| {
+            settle_restoring_exchange(
+                worker,
+                &probe,
+                theirs_bytes,
+                Err(bt_platform::ExchangeRefusal::NotDurable {
+                    displaced: bt_platform::Displaced { path: back_path },
+                    error: std::io::Error::other("the directory flush failed"),
+                }),
+            )
+        });
+        assert_eq!(
+            served.outcome,
+            Outcome::Conflict {
+                theirs: Arc::from(&theirs[..]),
+                kept: Some(back.clone()),
+            }
+        );
+        assert!(
+            served.not_durable.is_some(),
+            "said as not known to be durable"
+        );
+        assert!(back.is_file(), "the displaced copy stays");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (review round 2, blocker 2; C2) — **a request no worker takes ends
+    /// in a refusal, and the loop is woken for it**, so the store hears it the
+    /// way it hears the worker, and the fifth in a row is a card.
+    ///
+    /// MUTATION: drop the wake (`self.lane.wake()` in `DocumentState::send_owed`)
+    /// — no wake is heard.
+    #[test]
+    fn a_refused_spawn_is_a_refused_terminal_and_a_wake() {
+        let root = scratch("refused-spawn");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let heard = Arc::clone(&wakes);
+        let lane = StorageLane::without_a_worker(move || {
+            heard.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let mut store = SettingsStore::at_on(path.clone(), lane);
+        // The same row chosen five times: a refusal is retried by the next press,
+        // and only a changed value starts the streak again.
+        for press in 0..5 {
+            assert_eq!(store.store(settings("选五次 Five Times Mono")), press == 0);
+            assert_eq!(
+                wakes.load(std::sync::atomic::Ordering::SeqCst),
+                press + 1,
+                "each refusal wakes the loop"
+            );
+            store.take_answers();
+        }
+        assert_eq!(
+            store.take_fault(),
+            Some(crate::i18n::persisted_file_unwritable(SETTINGS_FILE_NAME)),
+            "the fifth refusal in a row is the card's sentence"
+        );
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (review round 2, blocker 3; C5) — **a refused write is sent once
+    /// more by the next ear pass**, and only once: the pass is the trigger, not a
+    /// clock.
+    ///
+    /// MUTATION: no resend on the ear (drop `ear_retry` in
+    /// `DocumentState::after_answers`) — nothing is queued after the pass.
+    #[test]
+    fn a_refused_write_is_sent_once_more_by_the_next_ear_pass() {
+        let root = scratch("ear-retry");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let (lane, jobs) = StorageLane::held();
+        let mut store = SettingsStore::at_on(path.clone(), lane);
+
+        assert!(store.store(settings("我们的 Ours Mono")));
+        let write = next_write(&jobs);
+        let _ = write.answer.send(DocumentAnswer {
+            generation: write.generation,
+            version: write.version,
+            asker: write.asker,
+            outcome: Outcome::Refused {
+                cause: Refusal::BackupNameTaken(root.join("settings.json.displaced-占用")),
+            },
+            not_durable: None,
+            retired: Vec::new(),
+            left: None,
+        });
+        drop(write);
+        store.settle();
+        assert!(
+            jobs.try_recv().is_err(),
+            "a refusal is not retried on its own"
+        );
+
+        store.document().ask_read();
+        let read = match jobs.try_recv() {
+            Ok(StorageJob::Read(read)) => read,
+            _ => panic!("the pass's read is queued"),
+        };
+        on_a_worker(move |worker| crate::document_request::serve_read(worker, read));
+        store.settle();
+        let again = next_write(&jobs);
+        assert_eq!(&*again.bytes, &bytes(&settings("我们的 Ours Mono"))[..]);
+        assert!(jobs.try_recv().is_err(), "exactly once");
+        drop(again);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED ((c)3 item 2) — **a link is written the plain way only when the request says so.** A
+    /// file with a second name is refused for a request that refuses links — nothing is written —
+    /// and written through its name for one whose policy is `PlainWriter`, the preview's save as it
+    /// stands.
+    ///
+    /// MUTATION: honour `PlainWriter` for nothing (answer `Refusal::Link` whatever the policy) —
+    /// the second write is refused.
+    #[test]
+    fn a_link_is_written_the_plain_way_only_when_the_request_says_so() {
+        let root = scratch("link-policy");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let base = bytes(&settings("基线 Base Mono"));
+        std::fs::write(&path, &base).unwrap();
+        std::fs::hard_link(&path, root.join("点文件 dotfiles.json")).unwrap();
+        let ours = bytes(&settings("我们的 Ours Mono"));
+
+        let (refused, answered) = job(&path, Some(&base), &ours, Mode::Restore, 1, Vec::new());
+        on_a_worker(move |worker| serve_document(worker, refused));
+        assert_eq!(
+            answered.try_recv().unwrap().outcome,
+            Outcome::Refused {
+                cause: Refusal::Link
+            }
+        );
+        assert_eq!(file_bytes(&path), base, "nothing was written");
+
+        let (mut plain, answered) = job(&path, Some(&base), &ours, Mode::Restore, 1, Vec::new());
+        plain.link_policy = LinkPolicy::PlainWriter;
+        on_a_worker(move |worker| serve_document(worker, plain));
+        assert!(matches!(
+            answered.try_recv().unwrap().outcome,
+            Outcome::Landed { .. }
+        ));
+        assert_eq!(file_bytes(&path), ours, "written through its name");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// The storage worker's stable read (design note 2026-10-11, (b)9), as a store takes it.
+#[cfg(test)]
+mod stable_read_tests {
+    use bt_persist::{PinKind, StableRead};
+
+    use super::StorageLane;
+    use super::conditional_write_tests::{on_a_worker, scratch};
+    use crate::document_request::Heard;
+    use crate::pins::{PINS_FILE_NAME, PinsStore};
+
+    fn table(folders: &[&str]) -> Vec<u8> {
+        let mut table = bt_persist::PinsV1::default();
+        for folder in folders {
+            crate::pins::toggle_pin(&mut table, PinKind::Folder, folder);
+        }
+        bt_persist::serialize_pins(&table).expect("a pin table serializes")
+    }
+
+    /// A read of `path` with a writer putting `racing` there between the bytes and the second
+    /// look at the file.
+    fn raced(path: &std::path::Path, racing: Vec<u8>) -> StableRead {
+        let path = path.to_path_buf();
+        on_a_worker(move |worker| {
+            bt_persist::read_stable_between(worker, &path, || {
+                std::fs::write(&path, &racing).expect("the racing writer writes");
+            })
+        })
+    }
+
+    /// RED ((b)14-15, first half, as this ticket builds it) — **a valid intermediate document is
+    /// taken, then the final one.** An in-place writer that pauses between two valid documents is
+    /// two saves; a read that raced the second write in between takes nothing, and the next pass
+    /// takes the final document.
+    ///
+    /// MUTATION: act on a `MovedDuringRead` (in `DocumentState::on_read`, read it as no file) —
+    /// the raced pass empties the table.
+    #[test]
+    fn a_valid_intermediate_document_is_taken_then_the_final_one() {
+        let root = scratch("intermediate");
+        let path = root.join(PINS_FILE_NAME);
+        std::fs::write(&path, table(&["起点 start"])).unwrap();
+        let mut store = PinsStore::at_on(path.clone(), StorageLane::of_its_own());
+
+        std::fs::write(&path, table(&["起点 start", "中间 middle"])).unwrap();
+        assert_eq!(
+            store.reread(),
+            Heard::Changed,
+            "the valid intermediate is taken"
+        );
+        assert_eq!(
+            store.targets(PinKind::Folder),
+            vec!["起点 start".to_owned(), "中间 middle".to_owned()]
+        );
+
+        let read = raced(&path, table(&["起点 start", "中间 middle", "终点 — final"]));
+        assert_eq!(read, StableRead::MovedDuringRead);
+        assert_eq!(store.document().hear_read(read).heard(), Heard::Unchanged);
+        assert_eq!(
+            store.targets(PinKind::Folder),
+            vec!["起点 start".to_owned(), "中间 middle".to_owned()],
+            "a raced read takes nothing"
+        );
+
+        assert_eq!(
+            store.reread(),
+            Heard::Changed,
+            "and the next pass takes the final one"
+        );
+        assert_eq!(
+            store.targets(PinKind::Folder),
+            vec![
+                "起点 start".to_owned(),
+                "中间 middle".to_owned(),
+                "终点 — final".to_owned()
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED ((b)14-15, second half) — **a read that raced a writer is not merged**: the bytes in
+    /// hand are a document nobody saved last, and the read answers `MovedDuringRead`.
+    ///
+    /// MUTATION: no second `metadata` in `bt_persist::read_stable_between` — the read answers the
+    /// bytes it had, and the store takes a document the file no longer holds.
+    #[test]
+    fn a_read_that_raced_a_writer_is_not_merged() {
+        let root = scratch("raced");
+        let path = root.join(PINS_FILE_NAME);
+        std::fs::write(&path, table(&["起点 start"])).unwrap();
+        let mut store = PinsStore::at_on(path.clone(), StorageLane::of_its_own());
+
+        std::fs::write(&path, table(&["手改 hand edit"])).unwrap();
+        let read = raced(&path, table(&["手改 hand edit", "又改 — again"]));
+        assert_eq!(read, StableRead::MovedDuringRead);
+        assert_eq!(store.document().hear_read(read).heard(), Heard::Unchanged);
+        assert_eq!(
+            store.targets(PinKind::Folder),
+            vec!["起点 start".to_owned()],
+            "nothing of the raced read is in force"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// Owed edits (design note 2026-10-11 §4, (b)6): what a press puts in `desired`, and who owes.
+#[cfg(test)]
+mod owed_tests {
+    use bt_persist::{BindingOverrideV1, KeybindingsV1, StableRead};
+
+    use super::conditional_write_tests::{bytes, next_write, scratch, settings};
+    use super::{
+        KEYBINDINGS_FILE_NAME, KeybindingsStore, SETTINGS_FILE_NAME, SettingsStore, StorageLane,
+        keybindings_document, keybindings_platform,
+    };
+    use crate::document_request::Heard;
+
+    fn binding(action: &str, chord: &str) -> BindingOverrideV1 {
+        BindingOverrideV1 {
+            action: action.to_owned(),
+            chord: Some(chord.to_owned()),
+        }
+    }
+
+    /// RED ((b)14-17) — **a value a door refused is not written back.** The file names an action
+    /// this build has no row for; the table leaves it out, and a press on another row changes only
+    /// that row in the document Folio writes — the line it does not understand is carried, in its
+    /// place.
+    ///
+    /// MUTATION: derive `desired` from the projection (in `StoredDocument::apply_press` for
+    /// `KeybindingsV1`, take `after` whole) — the carried line is written out of the file.
+    #[test]
+    fn a_value_a_door_refused_is_not_written_back() {
+        let root = scratch("refused-value");
+        let path = root.join(KEYBINDINGS_FILE_NAME);
+        let unknown = binding("未知动作-no-such-action", "Ctrl+Alt+K");
+        let file = keybindings_document(
+            vec![unknown.clone(), binding("new-tab", "Ctrl+Shift+Y")],
+            keybindings_platform(),
+        );
+        std::fs::write(&path, bt_persist::serialize_keybindings(&file).unwrap()).unwrap();
+        let (lane, jobs) = StorageLane::held();
+        let mut store = KeybindingsStore::at_on(path.clone(), lane);
+        // What the table put in force: everything but the line it has no row for.
+        store.project(vec![binding("new-tab", "Ctrl+Shift+Y")]);
+
+        assert!(store.store(vec![binding("new-tab", "Ctrl+Shift+U")]));
+        let write = next_write(&jobs);
+        let written: KeybindingsV1 =
+            bt_persist::parse_keybindings(&write.bytes).expect("the written document parses");
+        assert_eq!(
+            written.bindings,
+            vec![unknown, binding("new-tab", "Ctrl+Shift+U")],
+            "the refused line is carried, and only the pressed row changed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (carry-forward 1) — **a process that is not the folder's writer queues no write, and a
+    /// re-read does not undo its choice.**
+    ///
+    /// MUTATION: drop the `writer_of_record` check in `DocumentState::send_owed` — the press
+    /// queues a write.
+    #[test]
+    fn a_non_writer_queues_no_write() {
+        let root = scratch("non-writer");
+        let path = root.join(SETTINGS_FILE_NAME);
+        std::fs::write(&path, bytes(&settings("基线 Base Mono"))).unwrap();
+        let holder = bt_platform::instance::claim_data_directory(&root)
+            .expect("nothing else on this machine has this folder");
+        let (lane, jobs) = StorageLane::held();
+        let mut store = SettingsStore::read_at(path.clone(), false, lane);
+
+        assert!(store.store(settings("这里选的 Chosen Mono")));
+        assert!(jobs.try_recv().is_err(), "no write is queued");
+
+        // Another process writes the file; this one's re-read keeps its own choice.
+        let news = store.document().hear_read(StableRead::Bytes(
+            bytes(&settings("别处写的 Elsewhere Mono")).into(),
+        ));
+        assert_eq!(news.heard(), Heard::Unchanged);
+        assert_eq!(store.loaded(), &settings("这里选的 Chosen Mono"));
+        assert!(jobs.try_recv().is_err(), "and still nothing is queued");
+        drop(holder);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

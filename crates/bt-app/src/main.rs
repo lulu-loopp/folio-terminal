@@ -56,6 +56,7 @@ mod coalesce;
 mod context_menu;
 mod diagnostics;
 mod dir_news;
+mod document_request;
 mod elevated_host;
 mod exit_diagnostics;
 mod explorer_menu;
@@ -730,6 +731,17 @@ enum AppEvent {
     /// event only wakes the loop to the folder's one clock; see
     /// `storage_watch`'s header.
     StorageChanged,
+    /// **The storage worker answered a hand-editable document's request**
+    /// (T-STORAGE-WORKER-REQUEST, `document_request`): a conditional write or a
+    /// re-read of `settings.json`, `keybindings.json`, `profiles.json` or
+    /// `pins.json`.
+    ///
+    /// Carries nothing: each answer is already in the asking store's own
+    /// channel when this is sent — the answer first, the wake after — and the
+    /// stores take them in the order the worker served them. One wake for any
+    /// number of answers, and one more when the worker ends, so a request it will
+    /// never answer is known as soon as it cannot be.
+    DocumentsAnswered,
     /// **The window's ground picture has been decoded** (§7.1.6c-4d).
     ///
     /// 4b decoded it on the event thread and said why: the two moments it runs
@@ -912,6 +924,7 @@ impl AppEvent {
             | Self::ProgramsAnswered
             | Self::SchemesChanged
             | Self::StorageChanged
+            | Self::DocumentsAnswered
             | Self::SystemPreferencesChanged
             | Self::VolumesChanged { .. }
             | Self::LocaleChanged
@@ -44309,7 +44322,16 @@ impl Runtime<'_> {
         // be the window's opening bounds rather than a correction applied after
         // the user has already seen it somewhere else.
         let mut session_store = persist::SessionStore::open();
-        let mut settings_store = persist::SettingsStore::open();
+        // **How the storage worker's document answers come back** (T-STORAGE-WORKER-REQUEST):
+        // installed before the first store opens, so the first write's answer already wakes the
+        // loop. The answer is in its channel before the wake.
+        {
+            let proxy = proxy.clone();
+            persist::install_documents_wake(move || {
+                let _ = proxy.send_event(AppEvent::DocumentsAnswered);
+            });
+        }
+        let mut settings_store = persist::SettingsStore::open(session_store.lane());
         // **The v39 upgrade, completed where the evidence is** (0.4.5 ticket 60, SW-4): while the
         // receipt says `Never`, a saved session holding a typed page record writes `Used`. Here,
         // with both documents loaded and before a restore choice can rewrite the session; a
@@ -44530,13 +44552,16 @@ impl Runtime<'_> {
         // it after any of those had been laid out would be a window drawing
         // yesterday's widths under today's words. Same door, same reason, one
         // line apart.
-        let mut profiles_store = persist::ProfilesStore::open();
+        let mut profiles_store = persist::ProfilesStore::open(session_store.lane());
         let mut profiles_fault = profiles_store.take_fault();
         for fault in profiles::install(profiles_store.loaded()) {
             let sentence = i18n::profile_entry_fault(&fault);
             eprintln!("BT_PERSIST {}: {sentence}", persist::PROFILES_FILE_NAME);
             profiles_fault.get_or_insert(sentence);
         }
+        // What a press is measured against is the table the installer put in force: a row it
+        // refused stays in the file Folio writes back, and is not taken out by the next press.
+        profiles_store.project(profiles::to_file());
         // **What this machine can start is asked here, and not answered on this thread**
         // (T-PROGRAMS-REFRESH; T-LAUNCH-PROBE's invariant). The walk runs on its own lane the
         // moment the table it walks is installed, and the panes below read whatever it has
@@ -44557,13 +44582,13 @@ impl Runtime<'_> {
         // menu's width is measured from the folder names in it, and a PINNED
         // section that arrived after the first measurement would be a menu drawn
         // to fit a list it is not showing.
-        let mut pins_store = pins::PinsStore::open();
+        let mut pins_store = pins::PinsStore::open(session_store.lane());
         let pins_fault = pins_store.take_fault();
         // Defaults, then the file, then whatever the file could not be honoured
         // for — reported rather than repaired, because the file is the user's
         // own words and a build that silently rewrote one it could not read
         // would destroy the copy they could have fixed by hand.
-        let mut keybindings_store = persist::KeybindingsStore::open();
+        let mut keybindings_store = persist::KeybindingsStore::open(session_store.lane());
         let mut shortcuts = shortcuts::Shortcuts::defaults();
         let overrides: Vec<shortcuts::Override> = keybindings_store
             .loaded()
@@ -44590,6 +44615,18 @@ impl Runtime<'_> {
                 )
             });
         }
+        // The same for the shortcut table: a line naming an action this build has no row for is
+        // carried in the file, never written out of it by a press on another row.
+        keybindings_store.project(
+            shortcuts
+                .overrides()
+                .into_iter()
+                .map(|entry| bt_persist::BindingOverrideV1 {
+                    action: entry.id,
+                    chord: entry.chord,
+                })
+                .collect(),
+        );
         let theme_mode = startup_theme_mode(settings_store.loaded(), session_store.loaded());
         shell_integration::set_powershell_integration(settings_store.loaded().shell_integration);
         // **The carry-forward's own write, and the only one it ever makes.**
@@ -48873,11 +48910,13 @@ impl Runtime<'_> {
     ///
     /// **The four documents, by stamp.** The watcher thread has already reduced
     /// the kernel's names to the documents they name and stamped each in the
-    /// ear's mailbox; when the folder's one clock is due, the pass re-reads the
-    /// stamped ones among those followed live — `profiles.json`, `pins.json` —
-    /// and each re-read compares the file's bytes with its store's revision
-    /// (`persist::Revision`), which is what absorbs this window's own writes. A stamp on `settings.json` or
-    /// `keybindings.json` is drained without a read.
+    /// ear's mailbox; when the folder's one clock is due, the pass asks the
+    /// storage worker to read the stamped ones among those followed live —
+    /// `profiles.json`, `pins.json` — and nothing is read here. Each answer comes
+    /// back with `AppEvent::DocumentsAnswered` ([`Self::take_document_answers`])
+    /// and is compared there with its store's revision (`persist::Revision`),
+    /// which is what absorbs this window's own writes. A stamp on
+    /// `settings.json` or `keybindings.json` is drained without a read.
     ///
     /// The stores' write generations go with it: the watch hears the steward
     /// before it compares them, so a write accepted in the turn a failure is
@@ -48886,27 +48925,50 @@ impl Runtime<'_> {
         let write_generations = self.app.storage_write_generations();
         let documents = self.app.storage_watch.advance(now, write_generations);
         if documents.contains(storage_watch::Document::Profiles) {
-            self.reread_profiles()?;
+            self.app.profiles_store.ask_reread();
         }
         if documents.contains(storage_watch::Document::Pins) {
-            self.reread_pins()?;
+            self.app.pins_store.ask_reread();
         }
         Ok(())
     }
 
-    /// Read `pins.json` again, and put in force whatever that changed.
+    /// **What the storage worker answered about the four documents**
+    /// (`AppEvent::DocumentsAnswered`; design note 2026-10-11 (b)4, (b)7).
     ///
-    /// [`Self::reread_profiles`]'s three answers, and what follows each is the
+    /// Every store takes every answer, in the order the worker served them
+    /// (`persist::hear_documents`). Then the faults: a write that will not land
+    /// is said on the card the start-up announcement uses — a link or a volume
+    /// that cannot exchange at once, a disk's refusal at the fifth in a row.
+    /// Then what the re-reads put in force.
+    pub(crate) fn take_document_answers(&mut self) -> Result<()> {
+        let heard = persist::hear_documents(
+            &mut self.app.settings_store,
+            &mut self.app.keybindings_store,
+            &mut self.app.profiles_store,
+            &mut self.app.pins_store,
+        );
+        for fault in heard.faults {
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                fault,
+            )?;
+        }
+        self.take_profiles_news(heard.profiles)?;
+        self.take_pins_news(heard.pins)
+    }
+
+    /// Put in force what a re-read of `pins.json` changed.
+    ///
+    /// [`Self::take_profiles_news`]'s answers, and what follows each is the
     /// same shape: the two PINNED sections are derived from the store every time
     /// a menu is built, never held, so installing a new table *is* refreshing
     /// them — what is owed is a frame.
-    fn reread_pins(&mut self) -> Result<()> {
-        match self.app.pins_store.reread() {
-            pins::PinsNews::Unchanged => {
-                self.app.pins_file_broken = false;
-                return Ok(());
-            }
-            pins::PinsNews::Unreadable => {
+    fn take_pins_news(&mut self, news: document_request::ReadNews) -> Result<()> {
+        match news.unreadable {
+            Some(true) => {
                 if !std::mem::replace(&mut self.app.pins_file_broken, true) {
                     self.toast(
                         toast::ToastKind::Error,
@@ -48915,11 +48977,11 @@ impl Runtime<'_> {
                         i18n::pins_file_kept(pins::PINS_FILE_NAME),
                     )?;
                 }
-                return Ok(());
             }
-            pins::PinsNews::Changed => self.app.pins_file_broken = false,
+            Some(false) => self.app.pins_file_broken = false,
+            None => {}
         }
-        if self.refresh_chrome() {
+        if news.taken && self.refresh_chrome() {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -65340,6 +65402,24 @@ impl FolioApp {
 
     /// **Say where the edits a stop kept are** (T-RECOVERED-FOLDER): the worker's answer, raised
     /// once on the window the keyboard is on, or on the oldest open window when none has it.
+    /// **Hand the storage worker's document answers to the stores**
+    /// (`AppEvent::DocumentsAnswered`), in the first window still standing in the
+    /// opening order — the one that turns the application's clocks, whose cards
+    /// the storage pass's are. With no window standing the answers wait in their
+    /// channels for the next wake.
+    fn take_document_answers(&mut self) -> Result<()> {
+        for index in 0..self.windows.len() {
+            let Some(mut runtime) = self.runtime_at(index) else {
+                continue;
+            };
+            if runtime.window.leaving.is_some() {
+                continue;
+            }
+            return runtime.take_document_answers();
+        }
+        Ok(())
+    }
+
     fn announce_recovered_edits(&mut self) -> Result<()> {
         let Some(announcement) = recovered::take() else {
             return Ok(());
@@ -67516,6 +67596,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // four documents were named, and when, is in `storage_watch`'s
             // mailbox, and `about_to_wait` is where the quiet window is read.
             AppEvent::StorageChanged => Ok(()),
+            // **The documents' answers, taken** (T-STORAGE-WORKER-REQUEST): every store's, in the
+            // order the worker served them, in the window that turns the application's clocks —
+            // the window the storage pass's cards belong to.
+            AppEvent::DocumentsAnswered => self.take_document_answers(),
             // The answer is already in `psreadline::probe()`; what is owed is a
             // frame that reads it. `refresh_chrome` rebuilds the row's sentence
             // from scratch — `SettingsRow::description` asks `row_state` afresh
