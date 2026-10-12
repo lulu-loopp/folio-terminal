@@ -5488,8 +5488,8 @@ mod tests {
 /// the root `pub use`s both modules of the top layer; its test reads the
 /// constant from the root.
 ///
-/// Assembled rather than spelled: forty modules written out would bury the
-/// one read.
+/// Assembled rather than spelled: sixty-one modules written out would bury
+/// the one read.
 fn planted_diamond() -> String {
     const LAYERS: usize = 30;
     let mut text = String::from(
