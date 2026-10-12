@@ -4170,11 +4170,18 @@ pub(crate) fn end_probe_children_for_process_exit() {
 }
 
 impl ProbeChildGuard {
-    /// A guard that holds nothing — the state an ended guard is in — for the
-    /// Windows tests of the arms that answer for it.
-    #[cfg(all(test, windows))]
+    /// A guard that holds nothing — the state an ended guard is in: what a
+    /// Unix probe whose group could not be registered is held by while it is
+    /// ended, and what the Windows tests of the arms that answer for it start
+    /// a probe with.
+    #[cfg(any(test, not(windows)))]
     fn uncontained() -> Self {
-        Self { job: None }
+        Self {
+            #[cfg(windows)]
+            job: None,
+            #[cfg(unix)]
+            process_group: None,
+        }
     }
 
     #[cfg(windows)]
@@ -4495,17 +4502,11 @@ fn spawn_probe_with(
     }
 
     let mut child = command.spawn()?;
-    let held = match guard(&child) {
-        Ok(held) => held,
-        Err(error) => {
-            // The child leads its own group and nothing else knows it: it is
-            // ended and reaped here, and the start refused.
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(uncontainable(&error));
-        }
+    let (held, refused) = match guard(&child) {
+        Ok(held) => (held, None),
+        Err(error) => (ProbeChildGuard::uncontained(), Some(error)),
     };
-    Ok(ProbeChild {
+    let mut probe = ProbeChild {
         stdin: child.stdin.take(),
         stdout: child
             .stdout
@@ -4518,7 +4519,14 @@ fn spawn_probe_with(
         leader: child,
         guard: held,
         settled: None,
-    })
+    };
+    if let Some(error) = refused {
+        // No guard holds the child: it is ended and reaped through the probe's
+        // own settlement, and the start refused.
+        let _ = probe.kill();
+        return Err(uncontainable(&error));
+    }
+    Ok(probe)
 }
 
 /// What a test may change about one Windows probe birth; nothing in the
