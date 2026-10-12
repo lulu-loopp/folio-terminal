@@ -5274,6 +5274,63 @@ mod tests {
         assert_eq!(tries, 1);
     }
 
+    /// RED (H2-NITS round 2) — **`terminal_declarations` is the spawn's own table**: for the same
+    /// two layers it answers exactly the declarations the command the spawn builds carries, in the
+    /// same order, less every name the profile's layer sets — which is what the Profiles page
+    /// lists. No process is started: the seam records the command.
+    ///
+    /// MUTATION: build `terminal_declarations` from a list of its own (the four identity names
+    /// followed by the folio layer, without `layered` / `resolved_environment_layers`) — the
+    /// `NO_COLOR` profile's `COLORTERM`/`TERM` come back and the assertion goes red.
+    #[test]
+    fn the_declarations_a_page_lists_are_the_ones_the_spawn_lays_down() {
+        let os = |name: &str, value: &str| (OsString::from(name), OsString::from(value));
+        let folio = [
+            os("BT_SHELL_INTEGRATION", "login"),
+            os("FORCE_HYPERLINK", "1"),
+            os("FOLIO_ATTENTION_PIPE", "管道"),
+        ];
+        for profile in [
+            vec![os("TERM", "dumb"), os("FORCE_HYPERLINK", "0")],
+            vec![os("NO_COLOR", "1"), os("LANG", "zh_CN.UTF-8")],
+            Vec::new(),
+        ] {
+            let mut spawned = Vec::new();
+            let _ = PtySession::spawn_interactive_with(
+                OsString::from("shell"),
+                &[],
+                &folio,
+                &profile,
+                None,
+                PtySize::cells(NonZeroU16::new(80).unwrap(), NonZeroU16::new(24).unwrap()),
+                Arc::new(|| {}),
+                None,
+                None,
+                |command, _, _| {
+                    spawned.push(command);
+                    Err(PtyError::Backend("refused by the test".into()))
+                },
+            );
+            let (laid, profile_laid) = spawned
+                .pop()
+                .expect("one attempt")
+                .resolved_environment_layers();
+            let theirs: Vec<(OsString, OsString)> = laid
+                .into_iter()
+                .filter(|(name, _)| {
+                    !profile_laid
+                        .iter()
+                        .any(|(mine, _)| environment_key_eq(mine, name))
+                })
+                .collect();
+            assert_eq!(
+                terminal_declarations(&folio, &profile),
+                theirs,
+                "{profile:?}"
+            );
+        }
+    }
+
     /// RED (T-TEST-SHELL-HYGIENE) — **a test's interactive PowerShell loads no history file and
     /// saves no line.**
     ///
