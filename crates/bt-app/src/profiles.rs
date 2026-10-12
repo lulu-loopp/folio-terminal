@@ -3403,6 +3403,13 @@ pub fn intern_path(path: &Path) -> &'static str {
     intern(&path.to_string_lossy())
 }
 
+/// One line of text held for the process, for a `Copy` subject the settings
+/// page reads (the environment table's ghosts).
+#[must_use]
+pub fn intern_text(text: &str) -> &'static str {
+    intern(text)
+}
+
 /// Whether one row is a profile of the reader's own — which is what decides
 /// whether it can be deleted, whether its colour is theirs, and which of the two
 /// verbs its editor's foot carries.

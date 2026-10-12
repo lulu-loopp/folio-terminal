@@ -6767,7 +6767,11 @@ impl Runtime<'_> {
         let Some(surface) = self.preview_edit_focus() else {
             return self.preview_browse_key(event);
         };
-        let command = preview_edit::command(&event.logical_key, self.window.modifiers);
+        let command = preview_edit::command(
+            &event.logical_key,
+            event.physical_key,
+            self.window.modifiers,
+        );
         // Repeats travel and type; they do not copy, paste or blur. Held Enter is
         // one continuous "again" and a held verb is not — the same line the files
         // tree draws between its travel keys and its verbs.
@@ -6911,7 +6915,7 @@ impl Runtime<'_> {
             let now = Instant::now();
             let modified = false;
             if let Some(seat) = self.window.video.get_mut(surface)
-                && seat.key_press(&event.logical_key, modified, now)
+                && seat.key_press(&event.logical_key, event.physical_key, modified, now)
             {
                 self.refresh_chrome();
                 self.present_chrome_change()?;
@@ -7011,7 +7015,7 @@ impl Runtime<'_> {
             // everything the reading claimed keeps it.
             key => {
                 if matches!(
-                    preview_edit::command(key, self.window.modifiers),
+                    preview_edit::command(key, event.physical_key, self.window.modifiers),
                     preview_edit::EditCommand::Insert(_)
                         | preview_edit::EditCommand::Newline
                         | preview_edit::EditCommand::Tab
