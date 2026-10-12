@@ -1062,7 +1062,10 @@ row's function, with the writes held the same way, and a merged `keybindings.jso
 rebuilds the one table from this build's defaults and the merged departures through
 `Shortcuts::apply_overrides`. A shortcut document has one reading rule — at launch, on
 an import and in the merge each line is read in the dialect its file records and carried
-to this one (`shortcuts::read_chord_in`), and what that refuses is refused by all three. A part the file does
+to this one (`shortcuts::read_chord_in`), and what that refuses is refused by all three;
+the last line about an action that reads is the one in force, and an earlier line about it
+is neither dealt nor reported (`settings_bundle::read_keybindings`, the one reader of all
+three). A part the file does
 not carry is left alone. Three keys are receipts about this machine and are not
 imported (`first_run_card`, `cards_gesture_hint_offer`, `web_pages_used`);
 `Focus mode` and `Shell integration` are
