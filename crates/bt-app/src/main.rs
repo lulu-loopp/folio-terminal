@@ -79673,7 +79673,7 @@ mod refused_preview_card_tests {
         // One launcher, and it is the door it has always been.
         assert!(
             method_body("Runtime", "open_path_in_default_app")
-                .contains(concat!("self.", "open_local_path(path)")),
+                .contains(concat!("open_local_path", "_ask(path)")),
             "the card's button no longer goes through this window's one door"
         );
     }
@@ -82296,10 +82296,10 @@ mod printed_path_provenance_tests {
     fn the_open_door_is_handed_the_printed_name_and_the_reveal_the_resolved_one() {
         let press = method_body("Runtime", "activate_hyperlink");
         let open = press
-            .find("self.open_local_path_verified(&path, facts);")
+            .find("self.open_local_path_verified(&path, facts)?;")
             .expect("the open door is handed the path as printed");
         let reveal = press
-            .find("self.reveal_verified(&path, facts);")
+            .find("self.reveal_verified(&path, facts)?;")
             .expect("and so is the reveal, which takes the resolved name off the target");
         assert!(open < reveal, "the file arm stands before the folder arm");
         // And the resolved name is the doors' own transform, not a second reading of it: the
