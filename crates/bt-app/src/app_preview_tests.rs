@@ -7512,3 +7512,66 @@ fn every_door_that_lands_a_source_opens_a_page_as_a_page() {
         "a rename into a page's name leaves the file on the document lane:\n{rename}"
     );
 }
+
+/// **A view without a document is impossible** (the ownership contract's §2.2
+/// invariant 2, ticket O-8).
+///
+/// A pane names a pool buffer only through a [`preview::Held`], and the pool
+/// mints one only for a buffer it holds: a source it has never opened is
+/// refused at construction, so no surface can stand on it. The view that is
+/// built answers in its pool, takes the variant its source is (a document, a
+/// page, a graph), and stays answerable while the pool grows past its cap —
+/// the eviction law never takes a buffer a surface is reading. Leaving lets
+/// go of the whole view.
+///
+/// MUTATION: let `PreviewPool::held` answer for a source it does not hold
+/// (`Some(Held(source.clone()))`) and the first assertion goes red.
+#[test]
+fn a_document_view_always_resolves_in_its_pool() {
+    let mut pool = preview::PreviewPool::default();
+    let notes = preview::PreviewSource::file(r"C:\w\笔记 notes.md");
+    let stranger = preview::PreviewSource::file(r"C:\w\从未打开 never-opened.md");
+    pool.open(notes.clone(), "笔记 notes.md".to_owned(), &[]);
+    assert!(
+        pool.held(&stranger).is_none(),
+        "a source the pool does not hold cannot be stood on"
+    );
+
+    let mut pane = PreviewPane::default();
+    pane.stand_on(
+        pool.held(&notes)
+            .expect("the pool holds the file it opened"),
+        PreviewViewState::default(),
+    );
+    assert!(matches!(
+        pane.content(),
+        pane_content::PaneContent::Document(_)
+    ));
+    assert!(
+        pool.get(pane.source().expect("the pane is on a buffer"))
+            .is_some(),
+        "the view resolves in its pool"
+    );
+
+    for n in 0..preview::PV_BUFFER_CAP * 2 {
+        let source = preview::PreviewSource::file(format!(r"C:\w\文件 {n}.txt"));
+        pool.open(source, format!("文件 {n}.txt"), &pane.reading());
+    }
+    assert!(
+        pool.get(pane.source().expect("still on it")).is_some(),
+        "and still does after the pool has evicted past its cap"
+    );
+
+    let page = preview::PreviewSource::Web("https://example.com/页面".to_owned());
+    pool.open(page.clone(), "example.com".to_owned(), &pane.reading());
+    let mut on_page = PreviewPane::default();
+    on_page.show_source(pool.held(&page).expect("the page was just opened"));
+    assert!(matches!(
+        on_page.content(),
+        pane_content::PaneContent::Page(_)
+    ));
+
+    assert_eq!(pane.leave_document().map(|(source, _)| source), Some(notes));
+    assert!(pane.source().is_none(), "leaving lets go of the buffer");
+    assert!(matches!(pane.content(), pane_content::PaneContent::Empty));
+}
