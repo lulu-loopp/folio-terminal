@@ -78,6 +78,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
+use std::time::SystemTime;
 
 use bt_persist::{
     FallbackReason, KeybindingsV1, PinsV1, ProfilesV1, SettingsV1, StableRead, Staging,
@@ -85,6 +86,7 @@ use bt_persist::{
 use bt_platform::admission::WorkerCtx;
 
 use crate::persist::{DocumentWrites, Revision, StorageLane};
+use crate::quit::{CopyStanding, Standing};
 
 /// **Which semantic policy a request asks for** ((c)3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,6 +154,29 @@ pub(crate) struct DocumentJob {
     /// `version` removes those [`retired_by`] it.
     pub(crate) kept: Vec<KeptFile>,
     pub(crate) answer: mpsc::Sender<DocumentAnswer>,
+}
+
+/// **One copy of a document into the data directory's `recovered` folder** — a
+/// quit's recovery phase (design note 2026-10-11, revision (c)2): written
+/// create-new, the file flushed and the folder flushed, exactly as a stop that
+/// cannot ask keeps a preview edit ([`crate::preview::keep_in_recovered`]), so the
+/// next start's sentence about the folder covers it unchanged.
+pub(crate) struct RecoveredJob {
+    pub(crate) folder: PathBuf,
+    /// The document's file name, which the copy's name ends in.
+    pub(crate) name: &'static str,
+    pub(crate) bytes: Vec<u8>,
+    /// The instant the copy's name is stamped with.
+    pub(crate) at: SystemTime,
+    /// Where the copy is, or why there is none.
+    pub(crate) answer: mpsc::Sender<Result<PathBuf, String>>,
+}
+
+/// **Serve one [`RecoveredJob`] on the storage worker** and answer it.
+pub(crate) fn serve_recovered(worker: &WorkerCtx, job: RecoveredJob) {
+    let _ = worker;
+    let kept = crate::preview::keep_in_recovered(&job.folder, job.name, &job.bytes, job.at);
+    let _ = job.answer.send(kept);
 }
 
 /// **One stable read of a document**: the bytes go to `answer` with the
@@ -618,6 +643,61 @@ pub(crate) trait StoredDocument: Clone + PartialEq + Default + Send + 'static {
     /// **Apply to `desired` exactly the units a press changed** between
     /// `before` and `after`, the projection on each side of it ((b)6).
     fn apply_press(desired: &mut Self, before: &Self, after: &Self);
+    /// **The units in which `desired` differs from `on_disk`**, named the way the
+    /// document names them — what `diagnostics.log` says a change that was not
+    /// saved was made of.
+    fn units(desired: &Self, on_disk: &Self) -> Vec<String>;
+}
+
+/// The top-level fields of a document's file shape that differ between `a` and
+/// `b`, by name.
+fn fields_differing<T: serde::Serialize>(a: &T, b: &T) -> Vec<String> {
+    use serde_json::Value;
+    let (Ok(Value::Object(a)), Ok(Value::Object(b))) =
+        (serde_json::to_value(a), serde_json::to_value(b))
+    else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = a
+        .iter()
+        .filter(|(name, value)| b.get(*name) != Some(*value))
+        .map(|(name, _)| name.clone())
+        .collect();
+    names.extend(b.keys().filter(|name| !a.contains_key(*name)).cloned());
+    names
+}
+
+/// The keys under which two lists of entries hold different entries, in the
+/// order the keys first appear.
+fn keys_differing<E, K>(a: &[E], b: &[E], key: impl Fn(&E) -> K) -> Vec<K>
+where
+    E: PartialEq,
+    K: PartialEq,
+{
+    let mut keys: Vec<K> = Vec::new();
+    for entry in a.iter().chain(b) {
+        let name = key(entry);
+        if keys.contains(&name) {
+            continue;
+        }
+        let under = |list: &[E]| -> Vec<usize> {
+            list.iter()
+                .enumerate()
+                .filter(|(_, entry)| key(entry) == name)
+                .map(|(index, _)| index)
+                .collect()
+        };
+        let (in_a, in_b) = (under(a), under(b));
+        let same = in_a.len() == in_b.len()
+            && in_a
+                .iter()
+                .zip(&in_b)
+                .all(|(&left, &right)| a[left] == b[right]);
+        if !same {
+            keys.push(name);
+        }
+    }
+    keys
 }
 
 impl StoredDocument for SettingsV1 {
@@ -638,6 +718,11 @@ impl StoredDocument for SettingsV1 {
         if let Some(merged) = fields_changed(desired, before, after) {
             *desired = merged;
         }
+    }
+
+    /// The unit is the field.
+    fn units(desired: &Self, on_disk: &Self) -> Vec<String> {
+        fields_differing(desired, on_disk)
     }
 }
 
@@ -798,6 +883,13 @@ impl StoredDocument for KeybindingsV1 {
             InForce::Last,
         );
     }
+
+    /// The unit is the action.
+    fn units(desired: &Self, on_disk: &Self) -> Vec<String> {
+        keys_differing(&desired.bindings, &on_disk.bindings, |binding| {
+            binding.action.clone()
+        })
+    }
 }
 
 impl StoredDocument for ProfilesV1 {
@@ -823,6 +915,11 @@ impl StoredDocument for ProfilesV1 {
             |row| row.id.clone(),
             InForce::First,
         );
+    }
+
+    /// The unit is the row, by id.
+    fn units(desired: &Self, on_disk: &Self) -> Vec<String> {
+        keys_differing(&desired.profiles, &on_disk.profiles, |row| row.id.clone())
     }
 }
 
@@ -861,6 +958,24 @@ impl StoredDocument for PinsV1 {
             |pin| (pin.kind.clone(), pin.target.clone()),
             InForce::First,
         );
+    }
+
+    /// The unit is the pin, by its category and target, and each top-level key
+    /// of the file's own.
+    fn units(desired: &Self, on_disk: &Self) -> Vec<String> {
+        let mut units: Vec<String> = keys_differing(&desired.pins, &on_disk.pins, |pin| {
+            format!("{} {}", pin.kind, pin.target)
+        });
+        units.extend(
+            desired
+                .extra
+                .keys()
+                .chain(on_disk.extra.keys())
+                .filter(|name| desired.extra.get(*name) != on_disk.extra.get(*name))
+                .cloned(),
+        );
+        units.dedup();
+        units
     }
 }
 
@@ -1039,6 +1154,18 @@ pub(crate) struct DocumentState<T> {
     writer_of_record: bool,
     deferral: crate::update_trial::Writer,
     lane: StorageLane,
+    /// **Why the last write was refused**, until the next write is sent: a
+    /// quit's documents phase reads a refusal as a terminal answer.
+    refusal: Option<String>,
+    /// **This document's copy into `recovered`** in a quit's recovery phase, once
+    /// sent: its answer on the way, or the answer.
+    recovery: Option<RecoveryCopy>,
+}
+
+/// A quit's copy of a document, on the storage worker or answered.
+enum RecoveryCopy {
+    Sent(mpsc::Receiver<Result<PathBuf, String>>),
+    Answered(Result<PathBuf, String>),
 }
 
 impl<T: StoredDocument> DocumentState<T> {
@@ -1073,6 +1200,8 @@ impl<T: StoredDocument> DocumentState<T> {
             writer_of_record,
             deferral,
             lane,
+            refusal: None,
+            recovery: None,
         }
     }
 
@@ -1207,6 +1336,7 @@ impl<T: StoredDocument> DocumentState<T> {
         };
         self.generation += 1;
         self.retry_on_ear = false;
+        self.refusal = None;
         let (answer, answered) = mpsc::channel();
         let refusal = answer.clone();
         let job = DocumentJob {
@@ -1499,6 +1629,7 @@ impl<T: StoredDocument> DocumentState<T> {
     fn refused(&mut self, cause: &Refusal) {
         self.retry_on_ear = true;
         let error = cause.described();
+        self.refusal = Some(error.clone());
         if cause.is_said_at_once() {
             self.writes.refused_for_good(self.file, error);
         } else {
@@ -1768,6 +1899,166 @@ impl<T: StoredDocument> DocumentState<T> {
     /// Take the sentence a refused write owes the reader.
     pub(crate) fn take_fault(&mut self) -> Option<String> {
         self.writes.take_fault()
+    }
+
+    /// **Whether this run owes the file a write it may make**: [`Self::owed`],
+    /// and no update's trial holding its writes back.
+    fn owed_now(&self) -> bool {
+        self.owed() && !crate::update_trial::defer(self.deferral)
+    }
+}
+
+/// **A hand-editable document as a quit's documents and recovery phases, and a
+/// stop that cannot ask, see it** (design note 2026-10-11, revisions (c)2, (d)2
+/// and (d)3). Each of the four stores answers for its own document; the quit
+/// asks them all the same questions in the same turn.
+pub(crate) trait QuitDocument {
+    /// The file's name, as the card and `diagnostics.log` say it.
+    fn file(&self) -> &'static str;
+    /// **The documents phase begins**: a quit is a trigger an owed edit is
+    /// retried on (§4.1), so the owed document is handed over once more, whatever
+    /// an earlier write was answered, and nothing of an earlier quit's copy is
+    /// kept.
+    fn quit_begin(&mut self);
+    /// **One turn of the documents phase**: what the storage worker answered is
+    /// taken, a file a merge can fold is merged (purely — no door runs, the
+    /// windows are leaving), and what is owed with nothing on the worker is sent.
+    fn quit_turn(&mut self);
+    /// Where the document stands ([`Standing`]).
+    fn standing(&self) -> Standing;
+    /// **Hand the owed document to the storage worker as a copy into `folder`**,
+    /// once per quit.
+    fn keep_copy(&mut self, folder: &Path, at: SystemTime);
+    /// Where the copy stands ([`CopyStanding`]); `Waiting` before it is sent.
+    fn copy_standing(&mut self) -> CopyStanding;
+    /// **Drop the owed change for this run** — the person chose to leave without
+    /// it — and answer the `diagnostics.log` line that names the file and its
+    /// units, or `None` when nothing was owed.
+    fn drop_owed(&mut self) -> Option<String>;
+    /// **The owed document's bytes**, for a stop that cannot ask: `None` when
+    /// nothing is owed, `Err` when the document would not serialize.
+    fn owed_bytes(&self) -> Option<Result<Vec<u8>, String>>;
+}
+
+impl<T: StoredDocument> QuitDocument for DocumentState<T> {
+    fn file(&self) -> &'static str {
+        self.file
+    }
+
+    fn quit_begin(&mut self) {
+        self.refusal = None;
+        self.recovery = None;
+        // A write already on the worker is answered first: its answer decides.
+        if self.standing() == Standing::Unsent {
+            self.send_owed();
+        }
+    }
+
+    fn quit_turn(&mut self) {
+        let _ = self.take_answers();
+        if self.standing() == Standing::Unsent {
+            self.send_owed();
+        }
+    }
+
+    fn standing(&self) -> Standing {
+        if !self.owed_now() {
+            return Standing::Settled;
+        }
+        if self
+            .outstanding
+            .iter()
+            .any(|request| matches!(request, Outstanding::Document(_)))
+        {
+            return Standing::Waiting;
+        }
+        if self.held_for_merge || !self.merges.is_empty() {
+            let unparsable = self.merges.iter().any(|merge| {
+                merge
+                    .theirs
+                    .as_deref()
+                    .is_some_and(|bytes| T::from_bytes(bytes).is_err())
+            });
+            return Standing::Terminal(if unparsable {
+                "it changed on disk, and what it holds now will not parse".to_owned()
+            } else {
+                "it changed on disk, and the change made here waits for a merge".to_owned()
+            });
+        }
+        if let Some(refusal) = &self.refusal {
+            return Standing::Terminal(format!("its write was refused: {refusal}"));
+        }
+        Standing::Unsent
+    }
+
+    fn keep_copy(&mut self, folder: &Path, at: SystemTime) {
+        if self.recovery.is_some() {
+            return;
+        }
+        let bytes = match self.desired.to_bytes() {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.recovery = Some(RecoveryCopy::Answered(Err(error)));
+                return;
+            }
+        };
+        let (answer, answered) = mpsc::channel();
+        let job = RecoveredJob {
+            folder: folder.to_path_buf(),
+            name: self.file,
+            bytes,
+            at,
+            answer,
+        };
+        self.recovery = Some(if self.lane.send_recovered(job) {
+            RecoveryCopy::Sent(answered)
+        } else {
+            RecoveryCopy::Answered(Err(crate::persist::NO_STORAGE_WORKER.to_owned()))
+        });
+    }
+
+    fn copy_standing(&mut self) -> CopyStanding {
+        if let Some(RecoveryCopy::Sent(answer)) = &self.recovery {
+            let answered = match answer.try_recv() {
+                Ok(answered) => answered,
+                Err(mpsc::TryRecvError::Empty) => return CopyStanding::Waiting,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Err(crate::persist::STORAGE_WORKER_GONE.to_owned())
+                }
+            };
+            self.recovery = Some(RecoveryCopy::Answered(answered));
+        }
+        match &self.recovery {
+            Some(RecoveryCopy::Answered(Ok(copy))) => CopyStanding::Kept(copy.clone()),
+            Some(RecoveryCopy::Answered(Err(error))) => CopyStanding::Refused(error.clone()),
+            Some(RecoveryCopy::Sent(_)) | None => CopyStanding::Waiting,
+        }
+    }
+
+    fn drop_owed(&mut self) -> Option<String> {
+        if !self.owed_now() {
+            return None;
+        }
+        let units = T::units(&self.desired, &self.revision.document);
+        self.desired = self.revision.document.clone();
+        self.version += 1;
+        self.merges.clear();
+        self.held_for_merge = false;
+        self.send_again = false;
+        let what = if units.is_empty() {
+            "the whole document".to_owned()
+        } else {
+            units.join(", ")
+        };
+        Some(format!(
+            "{} quit without a change to {} that could not be saved: {what}",
+            crate::APP_NAME,
+            self.file
+        ))
+    }
+
+    fn owed_bytes(&self) -> Option<Result<Vec<u8>, String>> {
+        self.owed_now().then(|| self.desired.to_bytes())
     }
 }
 

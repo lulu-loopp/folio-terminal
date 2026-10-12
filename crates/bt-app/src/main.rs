@@ -13445,6 +13445,13 @@ struct App {
     /// for why it is a state machine the loop advances rather than a function the
     /// chord calls.
     quit: Option<quit::Quit>,
+    /// **The person chose, on a cancelled quit's card, to leave without the changes
+    /// it names** (T-QUIT-DOCUMENTS; design note 2026-10-11, revision (d)2): the
+    /// cancellation, chosen, for the quit that choice asks for. Written by the
+    /// card's verb ([`Self::leave_without`]) and taken when that quit begins
+    /// ([`FolioApp::begin_quit_if_asked`]), which drops exactly those documents'
+    /// changes first. A quit asked any other way finds none here and drops nothing.
+    leave_without: Option<quit::Cancelled>,
     /// **Every window this process has open, as a menu can name it** (B9, user
     /// ruling 2026-08-25).
     ///
@@ -14068,6 +14075,10 @@ struct WindowRuntime {
     /// The card that said where the edits a stop kept are, and the folder a press on it opens
     /// (T-RECOVERED-FOLDER) — [`Self::checkout_undo`]'s shape, for its reason.
     recovered_card: Option<recovered::Raised>,
+    /// **The card a cancelled quit raised on this window**, and the documents its one
+    /// choice leaves without (T-QUIT-DOCUMENTS) — [`Self::recovered_card`]'s shape, for
+    /// its reason: a verb pressed on another card chooses nothing.
+    quit_card: Option<quit::Raised>,
     /// The last dark/light this window told DWM it was wearing
     /// (`bt_platform::set_window_dark_mode`), or `None` before it has said
     /// anything (§7.1.6c-4f amendment).
@@ -18846,6 +18857,269 @@ fn keep_unsaved_edits_over(
     tabs.iter_mut()
         .flat_map(|tab| tab.preview_pool.keep_dirty(recovery, at))
         .collect()
+}
+
+/// **The stores a trial's release writes through** (T-QUIT-DOCUMENTS round 3): the
+/// session's and the four hand-editable documents', borrowed for one release.
+struct TrialStores<'a> {
+    session: &'a mut persist::SessionStore,
+    settings: &'a mut persist::SettingsStore,
+    keybindings: &'a mut persist::KeybindingsStore,
+    profiles: &'a mut persist::ProfilesStore,
+    pins: &'a mut pins::PinsStore,
+}
+
+/// **One writer an update's trial held back, run now** (`update_trial`, F-7) — the
+/// whole of [`App::release_trial_writes`] for one writer.
+fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'_>) {
+    use update_trial::Writer;
+    match writer {
+        // The folder is in use; its move from the old name is the next
+        // start's, which makes it as every start does.
+        Writer::DataFolderMove => {}
+        Writer::DataFolder => {
+            let _ = std::fs::create_dir_all(persist::storage_dir());
+        }
+        Writer::RefusedCopies => update_trial::keep_owed_copies(),
+        Writer::Session => stores.session.release_trial(),
+        Writer::Settings => stores.settings.release_trial(),
+        Writer::Keybindings => stores.keybindings.release_trial(),
+        Writer::Profiles => stores.profiles.release_trial(),
+        Writer::Pins => stores.pins.release_trial(),
+        Writer::UpdateCheck => update::release_trial(),
+        Writer::ProfileMigration => shell_integration::begin_startup_migration(),
+        Writer::BashScript => {
+            let _ = shell_integration::script_path();
+        }
+        Writer::ZshScripts => {
+            let _ = shell_integration::zdotdir_path();
+        }
+        // On a worker: the window thread waits for no disk here either.
+        Writer::PowerShellScript => shell_integration::begin_powershell_script_preparation(),
+        Writer::PsReadLineUpgrade => {
+            if let Some(documents) = psreadline::documents_directory()
+                && let Some(replacement) = psreadline::upgrade_recorded(
+                    &documents,
+                    &persist::storage_dir(),
+                    stores.settings.loaded().psreadline_invite,
+                )
+            {
+                eprintln!("{}", replacement.log_line());
+            }
+        }
+        Writer::ExplorerRepair => explorer_menu::begin_probe(),
+        Writer::ToastIdentity => {
+            if let Err(error) = bt_platform::Notifier::register_identity() {
+                eprintln!("BT_UPDATE_TRIAL the toast identity was not written: {error}");
+            }
+        }
+        // On its worker, as at any start's first frame.
+        Writer::RecoveredAnnouncement => recovered::ask(&persist::storage_dir()),
+    }
+}
+
+/// **Carry out what [`quit::Quit::settle_held_release`] says of an update trial's held
+/// release** (T-QUIT-DOCUMENTS rounds 3–4) — the one place each disposition is done.
+/// Performed: the launch backup goes ahead again and every writer runs through its own
+/// arm. Proceeding to the write: the rest runs; with the session's release pending, this
+/// run's sentinel is armed (what `release_trial` does first) and the launch backup held
+/// back, so the final write goes alone. Consumed: the launch backup is skipped for the run.
+fn settle_the_held_release(quit: &mut quit::Quit, stores: &mut TrialStores<'_>) {
+    match quit.settle_held_release() {
+        quit::HeldRelease::Nothing => {}
+        quit::HeldRelease::Perform(writers) => {
+            stores.session.resume_launch_backup();
+            for writer in writers {
+                release_trial_writer(writer, stores);
+            }
+        }
+        quit::HeldRelease::Proceed {
+            rest,
+            session_pending,
+        } => {
+            if session_pending {
+                stores.session.arm_sentinel();
+                stores.session.pause_launch_backup();
+            }
+            for writer in rest {
+                release_trial_writer(writer, stores);
+            }
+        }
+        quit::HeldRelease::Consumed => stores.session.forgo_launch_backup(),
+    }
+}
+
+/// **A stop that cannot ask disposes of a quit's held trial release** (T-QUIT-DOCUMENTS
+/// round 4; [`quit::Quit::release_on_a_stop`]): with the session's half held, this run's
+/// sentinel is armed and the launch backup held back — the way out's close writes the
+/// session as it does on every stop, and `session.lock` says whether it landed. The
+/// document writers are moot (the stores' step kept their changes in `recovered`); the
+/// rest is window-thread work the process is not staying for.
+fn dispose_of_a_held_release_on_a_stop(
+    quit: Option<&mut quit::Quit>,
+    session: &mut persist::SessionStore,
+) {
+    if quit.is_some_and(quit::Quit::release_on_a_stop) {
+        session.arm_sentinel();
+        session.pause_launch_backup();
+    }
+}
+
+/// **The cancelled quit's card, raised on `toasts`** (T-QUIT-DOCUMENTS; design note
+/// 2026-10-11, revision (d)2): an Error card anchored to the window, its statement the
+/// files that could not be saved — at most three named, then how many more — and its
+/// one verb, **Leave without this change**, the cancelled quit's only way out without
+/// them. A plain statement and no advice: the full list, with why, is in
+/// `diagnostics.log`.
+fn raise_cancelled_quit_card_on(
+    toasts: &mut toast::ToastHost,
+    cancelled: &quit::Cancelled,
+    motion: Motion,
+    now: Instant,
+) -> toast::ToastId {
+    toasts.raise(
+        toast::ToastKind::Error,
+        toast::ToastAnchor::Window,
+        None,
+        cancelled.sentence(),
+        Some(i18n::Text::QuitLeaveWithoutChange.text().to_owned()),
+        motion,
+        now,
+    )
+}
+
+/// **What became of one owed hand-editable document on a stop that cannot ask**
+/// (T-QUIT-DOCUMENTS; design note 2026-10-11, revision (d)3).
+///
+/// [`preview::Kept`]'s shape, as a sibling and not that type: a preview buffer is
+/// first written back to its own file and only copied when the file refuses, so
+/// each of its answers carries the buffer's name and the file's refusal. A store's
+/// document is never written to its file on this road — the storage worker that
+/// writes it may be the thing that is stuck — so there is no refusal to carry,
+/// and the file's name is the document's name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DocumentKept {
+    /// The change is in `copy`, in the `recovered` folder: the file flushed and
+    /// the folder flushed. The next start says where.
+    Kept { file: &'static str, copy: PathBuf },
+    /// No copy could be made, and why: the change went with the process.
+    Lost { file: &'static str, error: String },
+}
+
+impl DocumentKept {
+    /// **The `diagnostics.log` line**: which file, and where its change is — the
+    /// copy, or nowhere and why.
+    fn line(&self) -> String {
+        match self {
+            Self::Kept { file, copy } => format!(
+                "{APP_NAME} stopped with a change to {file} that was not saved: it is in {}",
+                copy.display()
+            ),
+            Self::Lost { file, error } => format!(
+                "{APP_NAME} stopped with a change to {file} that was not saved, and no copy \
+                 could be made ({error}); the change is lost"
+            ),
+        }
+    }
+}
+
+/// **The disk a stop that cannot ask keeps the owed documents on**: the copy into
+/// the `recovered` folder, and the line `diagnostics.log` is asked to take. A seam,
+/// so a test can refuse both without a disk that refuses.
+trait StopDisk {
+    /// Keep `bytes` as a copy named for `name` in `folder`.
+    fn keep(
+        &mut self,
+        folder: &Path,
+        name: &str,
+        bytes: &[u8],
+        at: SystemTime,
+    ) -> Result<PathBuf, String>;
+    /// Ask `diagnostics.log` to take `line`. Not relied on: the disk that refused
+    /// the copy may refuse this too.
+    fn note(&mut self, line: &str);
+}
+
+/// The machine's own disk: [`preview::keep_in_recovered`] and
+/// [`diagnostics::note`].
+struct TheDisk;
+
+impl StopDisk for TheDisk {
+    fn keep(
+        &mut self,
+        folder: &Path,
+        name: &str,
+        bytes: &[u8],
+        at: SystemTime,
+    ) -> Result<PathBuf, String> {
+        preview::keep_in_recovered(folder, name, bytes, at)
+    }
+
+    fn note(&mut self, line: &str) {
+        diagnostics::note(line);
+    }
+}
+
+/// **The channel a stop says a lost change through**: one that needs no file, no
+/// data directory and no renderer of Folio's, so it survives the failures that
+/// silence the other two (revision (d)3).
+trait NativeSay {
+    fn say(&mut self, text: &str);
+}
+
+/// The operating system's own message box ([`bt_platform::message_box`]): on a
+/// stop the windows are being taken down and the renderer may be what failed, so,
+/// as before the first window, there is no window to put a card on.
+struct SystemBox;
+
+impl NativeSay for SystemBox {
+    fn say(&mut self, text: &str) {
+        bt_platform::message_box(APP_NAME, text);
+    }
+}
+
+/// **Keep every owed hand-editable document on a stop that cannot ask**
+/// (T-QUIT-DOCUMENTS; revisions (c)2 and (d)3): each store's owed `desired`
+/// document is written into `folder` — the data directory's `recovered` folder,
+/// beside the preview edits the same stop keeps — and answers [`DocumentKept`].
+/// Each answer's line is offered to `diagnostics.log`; then **every `Lost`, said
+/// once and together, through `say`**. A stop that lost nothing says nothing: a
+/// copy that landed is said at the next start, as the preview's are
+/// (`recovered`).
+fn keep_owed_documents_over(
+    documents: &mut [&mut dyn document_request::QuitDocument],
+    folder: &Path,
+    at: SystemTime,
+    disk: &mut impl StopDisk,
+    say: &mut impl NativeSay,
+) -> Vec<DocumentKept> {
+    let kept: Vec<DocumentKept> = documents
+        .iter()
+        .filter_map(|document| {
+            let file = document.file();
+            let bytes = document.owed_bytes()?;
+            Some(
+                match bytes.and_then(|bytes| disk.keep(folder, file, &bytes, at)) {
+                    Ok(copy) => DocumentKept::Kept { file, copy },
+                    Err(error) => DocumentKept::Lost { file, error },
+                },
+            )
+        })
+        .collect();
+    for document in &kept {
+        disk.note(&document.line());
+    }
+    let lost: Vec<&str> = kept
+        .iter()
+        .filter_map(|document| match document {
+            DocumentKept::Lost { file, .. } => Some(*file),
+            DocumentKept::Kept { .. } => None,
+        })
+        .collect();
+    if !lost.is_empty() {
+        say.say(&i18n::stopped_changes_lost(&lost));
+    }
+    kept
 }
 
 /// **What an answer to one of the two exits comes to over the asking window's
@@ -43864,6 +44138,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         checkout_from: None,
         checkout_undo: None,
         recovered_card: None,
+        quit_card: None,
         settings_scroll: 0.0,
         profile_menu: profiles::ProfileMenu::default(),
         chevron_turn: ChevronTurn::default(),
@@ -45357,6 +45632,7 @@ impl Runtime<'_> {
             update_job: the_update_job,
             update_shown: update_card::Shown::default(),
             quit_reason: quit::Reason::Asked,
+            leave_without: None,
             handoff_answer: None,
         };
         // **The rest of the file's windows, queued at the door.** A window that
@@ -54046,53 +54322,15 @@ impl App {
     /// into it, the copies of refused documents before the documents that would
     /// replace them. What is written is what this process holds now.
     fn release_trial_writes(&mut self, writers: Vec<update_trial::Writer>) {
-        use update_trial::Writer;
+        let mut stores = TrialStores {
+            session: &mut self.session_store,
+            settings: &mut self.settings_store,
+            keybindings: &mut self.keybindings_store,
+            profiles: &mut self.profiles_store,
+            pins: &mut self.pins_store,
+        };
         for writer in writers {
-            match writer {
-                // The folder is in use; its move from the old name is the next
-                // start's, which makes it as every start does.
-                Writer::DataFolderMove => {}
-                Writer::DataFolder => {
-                    let _ = std::fs::create_dir_all(persist::storage_dir());
-                }
-                Writer::RefusedCopies => update_trial::keep_owed_copies(),
-                Writer::Session => self.session_store.release_trial(),
-                Writer::Settings => self.settings_store.release_trial(),
-                Writer::Keybindings => self.keybindings_store.release_trial(),
-                Writer::Profiles => self.profiles_store.release_trial(),
-                Writer::Pins => self.pins_store.release_trial(),
-                Writer::UpdateCheck => update::release_trial(),
-                Writer::ProfileMigration => shell_integration::begin_startup_migration(),
-                Writer::BashScript => {
-                    let _ = shell_integration::script_path();
-                }
-                Writer::ZshScripts => {
-                    let _ = shell_integration::zdotdir_path();
-                }
-                // On a worker: the window thread waits for no disk here either.
-                Writer::PowerShellScript => {
-                    shell_integration::begin_powershell_script_preparation()
-                }
-                Writer::PsReadLineUpgrade => {
-                    if let Some(documents) = psreadline::documents_directory()
-                        && let Some(replacement) = psreadline::upgrade_recorded(
-                            &documents,
-                            &persist::storage_dir(),
-                            self.settings_store.loaded().psreadline_invite,
-                        )
-                    {
-                        eprintln!("{}", replacement.log_line());
-                    }
-                }
-                Writer::ExplorerRepair => explorer_menu::begin_probe(),
-                Writer::ToastIdentity => {
-                    if let Err(error) = bt_platform::Notifier::register_identity() {
-                        eprintln!("BT_UPDATE_TRIAL the toast identity was not written: {error}");
-                    }
-                }
-                // On its worker, as at any start's first frame.
-                Writer::RecoveredAnnouncement => recovered::ask(&persist::storage_dir()),
-            }
+            release_trial_writer(writer, &mut stores);
         }
     }
 
@@ -54225,6 +54463,98 @@ impl App {
     /// are three places for a fourth door to be written differently.
     fn ask_to_quit(&mut self) {
         self.quit_requested = true;
+    }
+
+    /// **Leave without this change, on a cancelled quit's card** (T-QUIT-DOCUMENTS;
+    /// revision (d)2): the quit is asked for again through the one door every quit
+    /// goes through, carrying the choice — the documents the card named are dropped
+    /// for this run when it begins, and nothing else is. A quit already asked for or
+    /// under way owns the windows, and the press does nothing.
+    fn leave_without(&mut self, cancelled: quit::Cancelled) {
+        if self.quit.is_some() || self.quit_requested {
+            return;
+        }
+        self.quit_reason = cancelled.resumed_reason();
+        self.swap_leave_without(Some(cancelled));
+        self.ask_to_quit();
+    }
+
+    /// **The one writer of [`Self::leave_without`]**: put `next` there and answer what
+    /// was. The card's choice puts its cancellation ([`Self::leave_without`]); the quit
+    /// that choice asks for takes it when it begins ([`FolioApp::begin_quit_if_asked`]).
+    fn swap_leave_without(&mut self, next: Option<quit::Cancelled>) -> Option<quit::Cancelled> {
+        std::mem::replace(&mut self.leave_without, next)
+    }
+
+    /// **The four hand-editable documents' stores, as a quit and a stop ask them**
+    /// (T-QUIT-DOCUMENTS), in their order: `settings.json`, `keybindings.json`,
+    /// `profiles.json`, `pins.json`. Answers what `ask` does with them; nothing of
+    /// them is lent out past it.
+    fn with_documents<R>(
+        &mut self,
+        ask: impl FnOnce(&mut [&mut dyn document_request::QuitDocument]) -> R,
+    ) -> R {
+        ask(&mut [
+            &mut self.settings_store,
+            &mut self.keybindings_store,
+            &mut self.profiles_store,
+            &mut self.pins_store,
+        ])
+    }
+
+    /// **Dispose of an update trial's held release as the quit's step says**
+    /// ([`settle_the_held_release`]), if a quit is under way.
+    fn settle_the_held_release(&mut self) {
+        let Some(quit) = self.quit.as_mut() else {
+            return;
+        };
+        settle_the_held_release(
+            quit,
+            &mut TrialStores {
+                session: &mut self.session_store,
+                settings: &mut self.settings_store,
+                keybindings: &mut self.keybindings_store,
+                profiles: &mut self.profiles_store,
+                pins: &mut self.pins_store,
+            },
+        );
+    }
+
+    /// **One turn of the quit's documents phase** over the four stores
+    /// ([`quit::Quit::documents_turn`]); `None` without a quit.
+    fn quit_documents_turn(&mut self, now: Instant) -> Option<quit::QuitStep> {
+        let quit = self.quit.as_mut()?;
+        Some(quit.documents_turn(
+            &mut [
+                &mut self.settings_store,
+                &mut self.keybindings_store,
+                &mut self.profiles_store,
+                &mut self.pins_store,
+            ],
+            now,
+        ))
+    }
+
+    /// **One turn of the quit's recovery phase** over the four stores, the copies
+    /// going into `folder` ([`quit::Quit::recovery_turn`]); `None` without a quit.
+    fn quit_recovery_turn(
+        &mut self,
+        folder: &Path,
+        at: SystemTime,
+        now: Instant,
+    ) -> Option<quit::QuitStep> {
+        let quit = self.quit.as_mut()?;
+        Some(quit.recovery_turn(
+            &mut [
+                &mut self.settings_store,
+                &mut self.keybindings_store,
+                &mut self.profiles_store,
+                &mut self.pins_store,
+            ],
+            folder,
+            at,
+            now,
+        ))
     }
 
     /// **Uninstall, on the Settings card** (T-UNINSTALL-UX): the ordinary quit is
@@ -61176,7 +61506,7 @@ mod quit_transaction_tests {
     fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
         let settle = method_body("FolioApp", "settle_quit");
         assert!(
-            settle.contains("app.session_store.flush_judged()"),
+            settle.contains("app.session_store.flush_for_quit(until, now)"),
             "the quit's write is the judged one"
         );
         assert!(
@@ -65517,6 +65847,17 @@ impl FolioApp {
     /// the storage pass's are. With no window standing the answers wait in their
     /// channels for the next wake.
     fn take_document_answers(&mut self) -> Result<()> {
+        // **Not while a quit holds the storage worker** (T-QUIT-DOCUMENTS): its documents and
+        // recovery phases take the answers themselves, on the turn this wake brings, and merge
+        // without the doors.
+        if self
+            .app
+            .as_ref()
+            .and_then(|app| app.quit.as_ref())
+            .is_some_and(quit::Quit::holds_the_storage_worker)
+        {
+            return Ok(());
+        }
         for index in 0..self.windows.len() {
             let Some(mut runtime) = self.runtime_at(index) else {
                 continue;
@@ -66365,6 +66706,32 @@ impl FolioApp {
                     self.for_each_window(|runtime| runtime.quit_discard())?;
                     self.report_to_quit(quit::Quit::discarded);
                 }
+                // **The hand-editable documents, before the session** (T-QUIT-DOCUMENTS; design
+                // note 2026-10-11, revision (c)2). Both phases are a clock read on the turn, never
+                // a wait: the storage worker wakes the loop with each answer
+                // (`AppEvent::DocumentsAnswered`, which leaves the answers to this arm while the
+                // quit holds the worker), and `Quit::deadline` wakes it at the phase's bound.
+                quit::QuitStep::Documents => {
+                    let now = Instant::now();
+                    let step = self
+                        .app
+                        .as_mut()
+                        .and_then(|app| app.quit_documents_turn(now));
+                    if step == Some(quit::QuitStep::Documents) {
+                        return Ok(());
+                    }
+                }
+                quit::QuitStep::Recovery => {
+                    let now = Instant::now();
+                    let folder = persist::storage_dir().join(preview::RECOVERED_FOLDER);
+                    let step = self
+                        .app
+                        .as_mut()
+                        .and_then(|app| app.quit_recovery_turn(&folder, SystemTime::now(), now));
+                    if step == Some(quit::QuitStep::Recovery) {
+                        return Ok(());
+                    }
+                }
                 // **Read-only, over every window, before anything else happens.**
                 quit::QuitStep::Photograph => {
                     // **And no launch is promised a window from here on** (0.4.6 U-21, §C.3),
@@ -66372,6 +66739,12 @@ impl FolioApp {
                     // photographs in the turn it began, and an update's quit then goes on turning
                     // while it waits for its receipt.
                     launch_wire::set_admitting(false);
+                    // **A trial release held through the two phases, settled for the write**
+                    // (T-QUIT-DOCUMENTS rounds 3–4): the rest of it released, the session's
+                    // half pending through the write's verdict (`Quit::settle_held_release`).
+                    if let Some(app) = self.app.as_mut() {
+                        app.settle_the_held_release();
+                    }
                     self.for_each_window(|runtime| runtime.photograph_for_quit())?;
                     self.report_to_quit(quit::Quit::photographed);
                 }
@@ -66399,10 +66772,20 @@ impl FolioApp {
                         landed
                     } else {
                         // The way out begins with the write (§5.3 rows 15–17 are admitted from
-                        // here); a refused write comes back at `Abandon`.
+                        // here); a refused write comes back at `Abandon`. **Inside what is left
+                        // of the quit's one budget** (T-QUIT-DOCUMENTS): the judged wait ends at
+                        // `Quit::session_write_until`, and a quit with none left hands nothing
+                        // over and leaves without a new flush.
                         bt_platform::admission::exiting();
+                        let now = Instant::now();
                         match self.app.as_mut() {
-                            Some(app) => app.session_store.flush_judged(),
+                            Some(app) => {
+                                let until = app
+                                    .quit
+                                    .as_ref()
+                                    .map_or(now, |quit| quit.session_write_until(now));
+                                app.session_store.flush_for_quit(until, now)
+                            }
                             None => return Ok(()),
                         }
                     };
@@ -66439,6 +66822,11 @@ impl FolioApp {
                     self.report_to_quit(|quit| quit.written(verdict));
                 }
                 quit::QuitStep::Retire => {
+                    // **The write left: a session release still pending is consumed**
+                    // (T-QUIT-DOCUMENTS round 4).
+                    if let Some(app) = self.app.as_mut() {
+                        app.settle_the_held_release();
+                    }
                     // **Not `for_each_window`**, and this is the one place in the
                     // loop where that matters: it stops at the first failure, and
                     // here every window has to be told whatever the one before it
@@ -66535,8 +66923,17 @@ impl FolioApp {
                     // no uninstaller after *Uninstall* on the Settings card (T-UNINSTALL-UX).
                     update_handoff::disarm();
                     uninstall::disarm();
+                    let mut cancelled = None;
                     if let Some(app) = self.app.as_mut() {
+                        cancelled = app.quit.as_mut().and_then(quit::Quit::take_cancelled);
+                        // **A trial release still held runs now** (rounds 3–4): cancelled in the
+                        // phases or its final write refused, the window stays, so the backup and
+                        // the session go as they would have.
+                        app.settle_the_held_release();
                         app.quit = None;
+                    }
+                    if let Some(cancelled) = cancelled {
+                        self.say_the_cancelled_quit(cancelled)?;
                     }
                     // **`NSTerminateCancel`** (M3-1): the reader answered the
                     // card with *Cancel*, or the session could not be written.
@@ -66578,6 +66975,15 @@ impl FolioApp {
             return Ok(());
         };
         let reason = std::mem::replace(&mut app.quit_reason, quit::Reason::Asked);
+        // **Only the card's choice leaves without a change** (revision (d)2): the documents
+        // it named are dropped for this run, each named in `diagnostics.log` before the way
+        // out; a quit asked any other way drops nothing and runs the transaction again.
+        let dropped = quit::dropped_on_begin(app.swap_leave_without(None));
+        if !dropped.is_empty() {
+            for line in app.with_documents(|documents| quit::drop_documents(documents, &dropped)) {
+                diagnostics::note(&line);
+            }
+        }
         app.quit = Some(quit::Quit::begin_for(names, reason));
         // The card, on every window — one question, and no window left taking
         // keys behind it. A quit with nothing to ask about raises none, so this
@@ -66596,6 +67002,34 @@ impl FolioApp {
             })?;
         }
         Ok(())
+    }
+
+    /// **Say a quit the documents phase cancelled** (T-QUIT-DOCUMENTS; revision (d)2):
+    /// every document it could not keep, with why, in `diagnostics.log`; one Error card on
+    /// the window the keyboard is on (or the oldest one standing) naming the files, with
+    /// its one choice, *Leave without this change*; and what the documents phase merged
+    /// without its doors, put in force now that the windows stay (the ordinary storage
+    /// pass, `Runtime::take_document_answers`).
+    fn say_the_cancelled_quit(&mut self, cancelled: quit::Cancelled) -> Result<()> {
+        for line in cancelled.lines() {
+            diagnostics::note(&line);
+        }
+        self.take_document_answers()?;
+        let oldest_standing = |app: &mut Self| {
+            (0..app.windows.len()).find_map(|index| {
+                let id = app.windows.key_at(index)?;
+                app.windows
+                    .get_mut(id)
+                    .is_some_and(|window| window.leaving.is_none())
+                    .then_some(id)
+            })
+        };
+        let Some(id) = self.frontmost_window().or_else(|| oldest_standing(self)) else {
+            return Ok(());
+        };
+        self.runtime(id).map_or(Ok(()), |mut runtime| {
+            runtime.raise_cancelled_quit_card(cancelled)
+        })
     }
 
     /// Hand the transaction one report, if there is a transaction to hand it to.
@@ -66640,6 +67074,12 @@ impl FolioApp {
         let app = self.app.as_mut()?;
         let quit = app.quit.as_mut()?;
         let Some(generation) = quit.awaited_generation() else {
+            // **Not handed over once the quit's one budget is spent** (T-QUIT-DOCUMENTS): the
+            // store gives the write up without a new flush, and the update with it.
+            let until = quit.session_write_until(now);
+            if until <= now {
+                return Some(app.session_store.flush_for_quit(until, now));
+            }
             return match app.session_store.hand_over_final(now) {
                 Ok(Some(generation)) => {
                     quit.requested(generation, now);
@@ -66939,6 +67379,22 @@ impl FolioApp {
             runtime.keep_unsaved_edits(&recovery);
             Ok(())
         })?;
+        // **And the four hand-editable documents' owed changes** (T-QUIT-DOCUMENTS;
+        // revisions (c)2 and (d)3), into the same folder — and every one that could be kept
+        // nowhere said through the system's own box, before a window closes.
+        if let Some(app) = self.app.as_mut() {
+            app.with_documents(|documents| {
+                keep_owed_documents_over(
+                    documents,
+                    &recovery,
+                    SystemTime::now(),
+                    &mut TheDisk,
+                    &mut SystemBox,
+                )
+            });
+            // **And a trial release a quit held, disposed of** (T-QUIT-DOCUMENTS round 4).
+            dispose_of_a_held_release_on_a_stop(app.quit.as_mut(), &mut app.session_store);
+        }
         self.for_each_window(|runtime| runtime.close_window(true))
     }
 
@@ -67646,7 +68102,15 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // done (U-32): the card follows the journal's final phase.
             AppEvent::TrialWritesReleased => {
                 if let Some(app) = self.app.as_mut() {
-                    app.release_trial_writes(update_trial::take_released());
+                    // **Held while a quit holds the storage worker** (T-QUIT-DOCUMENTS round 3):
+                    // the trial's receipt went ahead of the documents and their copies; its
+                    // release waits for the quit's outcome (`Quit::settle_held_release`).
+                    let released = update_trial::take_released();
+                    let now = match app.quit.as_mut() {
+                        Some(quit) => quit.trial_release(released),
+                        None => released,
+                    };
+                    app.release_trial_writes(now);
                     if app.update_job.after_commit(version::VERSION) {
                         diagnostics::note(
                             "Folio: update job — the update this launch said was incomplete is committed",
@@ -75794,6 +76258,8 @@ mod app_peek_tests;
 mod app_preview_tests;
 #[cfg(test)]
 mod app_profiles_tests;
+#[cfg(test)]
+mod app_quit_tests;
 #[cfg(test)]
 mod app_tabs_tests;
 #[cfg(test)]
