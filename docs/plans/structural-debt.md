@@ -71,12 +71,12 @@ they answer "what does this machine do" — not by debt.
 | 0.4.5 | 8 | 0 | 8 |
 | 0.4.6 | 4 | 0 | 4 |
 | 0.4.7 | 0 | 0 | 0 |
-| 0.4.8 (plan ticket on the row) | 42 | 26 | 16 |
+| 0.4.8 (plan ticket on the row) | 45 | 27 | 18 |
 | 0.5 (reason on the row; D-1, D-16 and D-33 are its preconditions) | 13 | 13 | 0 |
 | deferred (reason on the row) | 4 | 4 | 0 |
-| unassigned (no 0.4.8 plan ticket; listed for the coordinator) | 23 | 23 | 0 |
+| unassigned (no 0.4.8 plan ticket; listed for the coordinator) | 20 | 20 | 0 |
 | already repaid | 2 | 0 | 2 |
-| **total** | **96** | **66** | **30** |
+| **total** | **96** | **64** | **32** |
 
 (2026-09-25, A5: D-33 moved from 0.4.5 to 0.4.6 — the owner deferred the
 presentation lane, its second client, and revision (b) R8 of
@@ -155,6 +155,24 @@ row's *Version* and whether its *Status* reads repaid — D-14 and D-15 count as
 cells' **repaid on …** clauses. Round 2 rewords D-72, D-73 and D-85 (a refused start no longer
 faults the lane) and moves no row; the merge adds none: 0.4.8 42/26/16, unassigned 23/23/0, total
 96/66/30, unchanged.)
+
+(2026-10-12, T-LEDGER-CLOSEOUTS-1012: D-39 repaid on `f7218b36` by T-OS-SIGNALS-MAC (2026-10-11),
+whose commits left the cell open; it names that ticket and moves from unassigned to 0.4.8. Recounted from the
+rows: 0.4.8 40/26/14, unassigned 25/25/0, total 96/68/28, from 96/69/27.)
+
+(2026-10-12, T-LEDGER-CLOSEOUTS-1012: D-60 repaid — its code on `64bcebdb`, its rule sentence in
+`docs/CONVENTIONS.md` — and moved from unassigned to 0.4.8. Recounted from the rows: 0.4.8 41/26/15,
+unassigned 24/24/0, total 96/67/29, from 96/68/28.)
+
+(2026-10-12, T-LEDGER-CLOSEOUTS-1012: D-40's window-thread half is repaid on `a5cb82a4`
+(T-DIRWATCH-LIFECYCLE); its remainder, the unbounded join when a directory watch is dropped, is re-homed
+from unassigned to 0.4.8 L9 (T-DROP-DOORS) and stays open. Recounted from the rows: 0.4.8 42/27/15,
+unassigned 23/23/0, total 96/67/29 unchanged.)
+
+(2026-10-12, the merge of S-4 round 4 with T-LEDGER-CLOSEOUTS-1012: recounted from the rows, each
+row's *Version* and whether its *Status* reads repaid (D-14 and D-15 by their cells' **repaid on …**
+clauses) — S-4's D-72, D-73 and D-85 on 0.4.8, repaid, and the closeouts' D-39 and D-60 on 0.4.8,
+repaid, and D-40 on 0.4.8, open: 0.4.8 45/27/18, unassigned 20/20/0, total 96/64/32.)
 
 Parts already repaid inside open rows, by the 0.4.4 tickets: ticket 10
 (`2657e5e3`) — §5.3 row 1, the OS hand-off lane, and the first instance of the
@@ -376,8 +394,8 @@ ledger's.
 | D-36 | §5.3 row 4 — `psreadline::installed_copy`'s recursive walk | §5.3 | none yet | 0.4.8 — G6 (T-INTEGRATION-INJECT-2) retires the installed module this row walks | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
 | D-37 | §5.3 row 5 — the machine's whole font collection enumerated inline | §5.3 | 50 | 0.4.5 — the traced frozen gear | repaid (ticket 50) |
 | D-38 | §5.3 row 6 — the find box re-scans every frozen line per keystroke | §5.3 | 51 | 0.4.5 — a per-keystroke cost | repaid (ticket 51) |
-| D-39 | §5.3 row 7 — macOS locale children on the pane-birth road | §5.3 | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** touched, not narrowed: both commands now lead a contained process group (`probe_output`, T-PROBE-CHILD) but still have no deadline and stay on the pane-birth road; was 0.4.6 |
-| D-40 | §5.3 row 8 — macOS `DirWatch` start and drop wait without a bound | §5.3 | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — B7 was never cut | open — both platforms' `DirWatch::drop` are rows of the closed `Drop` inventory the source guard holds (A1e, 2026-09-27); B7 repays them; **2026-10-08 (J4):** untouched; 0.4.8 B1 (T-WINDOWS-ALL) gives every window the git watch and the document re-reads, which multiplies this row's start and drop sites unless B1 repays them; was 0.4.6; **2026-10-11 (T-DIRWATCH-LIFECYCLE):** §5.3 row 8 is done — every start and drop runs on the `watch-steward` worker, the starts take a `WorkerCtx`, and the window thread holds no watch; what stays open is the unbounded join in both `Drop`s (TD-1, TD-2), now waited on by that worker |
+| D-39 | §5.3 row 7 — macOS locale children on the pane-birth road | §5.3 | T-OS-SIGNALS-MAC | 0.4.8 — T-OS-SIGNALS-MAC (2026-10-11) | **repaid on `f7218b36` (T-OS-SIGNALS-MAC, 2026-10-11; marked 2026-10-12 by T-LEDGER-CLOSEOUTS-1012)**: the locale a new pane is told is read on the locale cell's own worker (`locale_declaration::LocaleCell::serve`), both children within one ten-second budget (`bt_platform::probe_outputs_within`), and a birth reads what the cell holds (`locale_declaration::held`); `window_waits.tsv` row 7 is `done`, held by `locale_declaration::tests::row_7_no_birth_reads_the_locale_itself`; the repaying commit left this cell open; before it: open; **2026-10-08 (J4):** touched, not narrowed: both commands now lead a contained process group (`probe_output`, T-PROBE-CHILD) but still have no deadline and stay on the pane-birth road; was 0.4.6 |
+| D-40 | §5.3 row 8 — macOS `DirWatch` start and drop wait without a bound | §5.3 | L9 (T-DROP-DOORS) | 0.4.8 — L9 (T-DROP-DOORS), the closed `Drop` inventory's ticket, with D-78…D-82 (2026-10-12) | open — **half repaid**: the window-thread half on `a5cb82a4` (T-DIRWATCH-LIFECYCLE, 2026-10-11) — every directory watch starts, changes and drops on the `watch-steward` worker, the starts take a `WorkerCtx`, the window thread holds no watch, and `window_waits.tsv` row 8 is `done`; **what remains** is the unbounded `join()` when a directory watch is dropped — both platforms' `DirWatch::drop` (thread-door TD-1, TD-2), now waited on by the steward, off the window thread — re-homed to L9 (T-DROP-DOORS) by T-LEDGER-CLOSEOUTS-1012 (2026-10-12); before it: open — both platforms' `DirWatch::drop` are rows of the closed `Drop` inventory the source guard holds (A1e, 2026-09-27); B7 repays them; **2026-10-08 (J4):** untouched; 0.4.8 B1 (T-WINDOWS-ALL) gives every window the git watch and the document re-reads, which multiplies this row's start and drop sites unless B1 repays them; was 0.4.6; **2026-10-11 (T-DIRWATCH-LIFECYCLE):** §5.3 row 8 is done — every start and drop runs on the `watch-steward` worker, the starts take a `WorkerCtx`, and the window thread holds no watch; what stays open is the unbounded join in both `Drop`s (TD-1, TD-2), now waited on by that worker |
 | D-41 | §5.3 row 9 — presentation on the window thread; the present mode has no owner | §5.3; §5.4 step 4 | none yet | deferred → unassigned — construction awaits the owner's measurement-based decision after the self-inflicted waits are fixed and measured (owner, 2026-09-24; `docs/plans/design/window-thread-budget-2026-09-25.md` §R-E, replacing §4); a release is assigned only after that ruling, and this deferral does not repay D-41 | open — since ticket 37 a presented picture is a pair (frame and metrics: `SeatSignature::metrics`, `LeafSession::presented_metrics`), and the lane must carry both; **2026-10-08 (J4):** untouched |
 | D-42 | §5.3 row 10 — device recovery blocks and sleeps on the window thread | §5.3; §5.4 step 4 | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — B9 was never cut | open; **2026-10-08 (J4):** untouched; was 0.4.6; **2026-10-11 (S-1):** tracked by `# completions` row `device recovery` (through §5.3 row 10) |
 | D-43 | §5.3 row 11 — PTY birth on the window thread | §5.3; §5.4 step 5 | none yet | deferred → 0.5 toward 0.6 — needs D-1's session owner to keep input and resize order | open — admitted where it stands through `pty_door::spawn_shell`, minted in `create_leaf_session` (A1d, 2026-09-26: its door, not its move); **2026-10-08 (J4):** **narrowed**: process birth (`CreatePseudoConsole`, `CreateProcessW`, the folder `stat`, the fresh account environment) runs on the `bt-pty-birth` worker and the window thread joins it through `PtyBirth` (T-ENV-REFRESH round 4; ARCHITECTURE §5, *A shell birth has one short-lived worker*); the join stays until the session owner (D-1) |
@@ -397,7 +415,7 @@ ledger's.
 | D-57 | §12.1 — `bt-workbench` is born | §12.1 | census-3 and census-4 | 0.5 — census-4 opens the 0.5 workbench | open — day-one contents, order, public surface and guard entry in `docs/plans/design/ownership-census-2026-09-25.md` §5 (2026-09-25); **narrowed by census-3** (2026-09-25, branch `feat/bt-workbench-born`): the crate exists holding the ledger, `attention::expiry` (`WAIT_TTL`, `WaitClock`), `is_consumed` and `Places` (private counter, compile-fail doctest), `bt-app` its only dependent, `bt-layout` its only dependency; what remains is census-4 — the reach rule and its `notify` tests move, and D-48; **2026-10-08 (J4):** untouched: `bt-workbench` changed only by U-44's dead-code sweep; was 0.4.6 |
 | D-58 | `profile_runtime`'s two tests failing `WouldBlock` on a slow CI disk | `docs/DESIGN.md`, 2026-09-23 | 34 | — | repaid on `fbfab1ff` |
 | D-59 | `bt-render`'s two atlas soaks, ignored under protest | `scripts/ci/ignored-tests.txt` | none yet | deferred → the version that gains a CI runner with a real graphics adapter; whether to provision one is decided in 0.4.6 | open — ticket 37 added a CI-runnable mixed-size stress (`mixed_size_seats_share_the_atlas_and_get_their_text_back`, WARP, texture ceiling 512) and no ignore; the soaks were not extended; **2026-10-08 (J4):** untouched |
-| D-60 | two macOS `http` tests that reach the network | `docs/plans/port/m4-7/transcript.md` | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — the code is repaired; the row waits for its rule sentence | open; **2026-10-08 (J4):** **narrowed**: both tests answer from a loopback listener (`answering`, `ask_this_machine`) since `64bcebdb` (2026-09-13, before this row was written); the rule that a transport test never reaches the network is stated in no DESIGN, RULES or ARCHITECTURE sentence, so the row is not marked repaid; was 0.4.6 |
+| D-60 | two macOS `http` tests that reach the network | `docs/plans/port/m4-7/transcript.md` | T-LEDGER-CLOSEOUTS-1012 | 0.4.8 — T-LEDGER-CLOSEOUTS-1012 (2026-10-12) | **repaid 2026-10-12 (T-LEDGER-CLOSEOUTS-1012)**: the code on `64bcebdb`, and the rule now has its sentence — `docs/CONVENTIONS.md` §三, *A test the suite runs never reaches the network*: what it needs from a socket it serves itself, on a loopback listener it opened, and a probe that must reach the network is `#[ignore]`d, run by hand, and listed with its reason and expiry in `scripts/ci/ignored-tests.txt`; before it: open; **2026-10-08 (J4):** **narrowed**: both tests answer from a loopback listener (`answering`, `ask_this_machine`) since `64bcebdb` (2026-09-13, before this row was written); the rule that a transport test never reaches the network is stated in no DESIGN, RULES or ARCHITECTURE sentence, so the row is not marked repaid; was 0.4.6 |
 | D-61 | a Mac-only red test in `webnav` | ticket 13's report | 55 | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | repaid (ticket 55) |
 | D-62 | `bt-render` fails clippy on macOS: three unused constants | ticket 13's report | 55 | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | repaid (ticket 55) |
 | D-63 | the macOS CI job tests none of `bt-app`, `bt-term`, `bt-render` and lints only `bt-platform` | `.github/workflows/ci.yml`, `core-macos` | 72 | 0.4.6 | repaid (ticket 72) — the job lints the workspace and tests `bt-render` and `bt-corpus`; the `bt-app` and `bt-term` suites are not portable yet and are D-78 |
@@ -1405,6 +1423,11 @@ lanes they name; D-51, D-54 and D-55 are 0.4.7.
   server was there before this row was written. What keeps it open is the
   rule: no sentence in DESIGN, RULES or ARCHITECTURE says a transport test
   never reaches the network.
+  **Repaid (2026-10-12, T-LEDGER-CLOSEOUTS-1012):** `docs/CONVENTIONS.md` §三 states
+  it — a test the suite runs never reaches the network; what it needs from a socket
+  it serves itself, on a loopback listener it opened. A probe that must reach the
+  network is `#[ignore]`d, run by hand, and listed with its reason and expiry in
+  `scripts/ci/ignored-tests.txt`.
 
 The other entries of `scripts/ci/ignored-tests.txt` are probes, one writer and
 two privilege-bound fixtures, each with its reason there; they are not debt.
