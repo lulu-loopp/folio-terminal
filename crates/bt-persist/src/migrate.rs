@@ -19,6 +19,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -1535,22 +1536,56 @@ where
     (value, report)
 }
 
-/// [`read_with_fallback`], also returning the exact bytes that produced a
-/// loaded document. Refused and missing documents return no bytes: callers may
-/// copy only a document this reader accepted whole.
+/// **The bytes a read of one document had in hand**, beside its [`ReadReport`]
+/// (`docs/plans/design/settings-reread-2026-10-11.md` §3.1 and revision (b)10).
+///
+/// A store's revision is the bytes Folio last read or wrote, and a document
+/// refused at start is the revision the next write replaces — so a refusal with
+/// its bytes in hand hands them back, beside the default document it stands in
+/// for. Shared ([`Arc`]) because one buffer is the revision, and later the job
+/// and its receipt, without a copy of a document that may be 16 MiB.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DocumentBytes {
+    /// No file was there ([`ReadReport::NotFound`]).
+    Absent,
+    /// A file was there and no bytes of it were obtained: it would not open, or
+    /// it was over [`MAX_DOCUMENT_BYTES`] and refused on its size alone.
+    Unobtained,
+    /// The bytes that parsed to the returned document.
+    Loaded(Arc<[u8]>),
+    /// The bytes of a document that was refused; the returned document is the
+    /// default.
+    Refused { bytes: Arc<[u8]> },
+}
+
+impl DocumentBytes {
+    /// The bytes, loaded or refused — what the file held, when that is known.
+    #[must_use]
+    pub fn into_bytes(self) -> Option<Arc<[u8]>> {
+        match self {
+            Self::Loaded(bytes) | Self::Refused { bytes } => Some(bytes),
+            Self::Absent | Self::Unobtained => None,
+        }
+    }
+}
+
+/// [`read_with_fallback`], also returning the bytes the read had in hand
+/// ([`DocumentBytes`]): those of a loaded document, and those of a refused one.
 pub(crate) fn read_with_fallback_bytes<T>(
     path: &Path,
     current_version: u32,
     migrations: &[(u32, MigrationStep)],
     keeping: Keeping,
-) -> (T, ReadReport, Option<Vec<u8>>)
+) -> (T, ReadReport, DocumentBytes)
 where
     T: DeserializeOwned + Default,
 {
     let now = keeping == Keeping::Now;
     let bytes = match read_bounded(path, MAX_DOCUMENT_BYTES) {
         Ok(bytes) => bytes,
-        Err(BoundedRead::NotFound) => return (T::default(), ReadReport::NotFound, None),
+        Err(BoundedRead::NotFound) => {
+            return (T::default(), ReadReport::NotFound, DocumentBytes::Absent);
+        }
         Err(BoundedRead::Io(message)) => {
             // Nothing was obtained, so there is nothing to keep: the file is
             // exactly as it was and this build simply could not open it.
@@ -1560,7 +1595,7 @@ where
                     reason: FallbackReason::Io(message),
                     kept: None,
                 },
-                None,
+                DocumentBytes::Unobtained,
             );
         }
         Err(BoundedRead::TooLarge { bytes }) => {
@@ -1574,7 +1609,7 @@ where
                     // Moved rather than copied — see [`keep_oversized`].
                     kept: if now { keep_oversized(path) } else { None },
                 },
-                None,
+                DocumentBytes::Unobtained,
             );
         }
     };
@@ -1583,7 +1618,11 @@ where
     // keeps them. One call rather than five sites, so a reason added later
     // cannot be the one that forgets.
     match parse_document::<T>(&bytes, current_version, migrations) {
-        Ok(value) => (value, ReadReport::Loaded, Some(bytes)),
+        Ok(value) => (
+            value,
+            ReadReport::Loaded,
+            DocumentBytes::Loaded(bytes.into()),
+        ),
         Err(reason) => (
             T::default(),
             ReadReport::FellBackToDefaults {
@@ -1594,7 +1633,9 @@ where
                 },
                 reason,
             },
-            None,
+            DocumentBytes::Refused {
+                bytes: bytes.into(),
+            },
         ),
     }
 }
