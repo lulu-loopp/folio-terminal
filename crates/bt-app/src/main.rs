@@ -97,6 +97,7 @@ mod install_channel;
 #[cfg(test)]
 #[path = "journeys_tests.rs"]
 mod journeys_tests;
+mod keybindings_merge;
 mod keyhint;
 /// **The lane contract** (D-33, `docs/ARCHITECTURE.md` §5.1; the side-effects contract, S-3): the
 /// seam a lane is built on — its `Executor`, its request `Ledger` and their hooks — and, with the
@@ -49303,8 +49304,9 @@ impl Runtime<'_> {
     /// that cannot exchange at once, a disk's refusal at the fifth in a row.
     /// Then what the re-reads put in force: a file that will not parse is said
     /// once, `settings.json`'s changes are merged and put in force through
-    /// their rows' doors (`Self::merge_documents`), and the profiles and pins
-    /// news is taken.
+    /// their rows' doors and `keybindings.json`'s through the one shortcut
+    /// table (`Self::merge_documents`), and the profiles and pins news is
+    /// taken.
     pub(crate) fn take_document_answers(&mut self) -> Result<()> {
         let heard = persist::hear_documents(
             &mut self.app.settings_store,

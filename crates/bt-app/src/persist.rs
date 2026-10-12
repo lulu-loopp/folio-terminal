@@ -2611,11 +2611,22 @@ pub const KEYBINDINGS_FILE_NAME: &str = "keybindings.json";
 /// 2026-10-11 (b)6, (b)8): a line naming an action this build has no row for is
 /// in the document Folio writes back, in its place, because a press changes
 /// only the actions it changed.
+///
+/// **A hand edit is followed live and merged** (R33, owner ruling Q3
+/// 2026-10-11; T-STORE-MERGE-KEYBINDINGS): the store sends `Merge` requests,
+/// keeps every changed file for the merge, and holds its writes while one
+/// waits; the storage pass merges it by action, then by chord
+/// ([`Self::begin_merge`], `keybindings_merge`), and the window puts the
+/// result in force.
 pub struct KeybindingsStore {
     /// The departures, what the file holds, and the requests on the worker.
     document: DocumentState<KeybindingsV1>,
     /// Why the file on disk was not usable, if it was not.
     fault: Option<String>,
+    /// **What a quit's documents phase merged without putting it in force**
+    /// ([`SettingsStore`]'s `merged_at_quit`, for its reason): the next storage
+    /// pass puts it in force and says it, should the quit be cancelled.
+    merged_at_quit: Option<crate::keybindings_merge::About>,
 }
 
 /// `keybindings.json` in a quit and on a stop: its [`DocumentState`]'s answers (T-QUIT-DOCUMENTS).
@@ -2628,8 +2639,14 @@ impl QuitDocument for KeybindingsStore {
         self.document.quit_begin();
     }
 
+    /// A `Moved` or `Displaced` answer at quit is merged as the running window
+    /// merges it, without the door ([`SettingsStore`]'s turn).
     fn quit_turn(&mut self) {
-        self.document.quit_turn();
+        let _ = self.document.take_answers();
+        self.merge_at_quit(bt_platform::host_platform());
+        if self.document.standing() == crate::quit::Standing::Unsent {
+            self.document.send_owed();
+        }
     }
 
     fn standing(&self) -> crate::quit::Standing {
@@ -2687,8 +2704,9 @@ impl KeybindingsStore {
                 crate::update_trial::Writer::Keybindings,
                 lane,
             )
-            .with_policies(Mode::Restore, Follow::Hold),
+            .with_policies(Mode::Merge, Follow::Merge),
             fault,
+            merged_at_quit: None,
         }
     }
 
@@ -2765,12 +2783,75 @@ impl KeybindingsStore {
     }
 
     /// **Ask for the file to be read again, because the storage watch heard
-    /// it** (R33, owner ruling Q3 2026-10-11). Until its merge exists
-    /// (T-STORE-MERGE-KEYBINDINGS), a file that changed is stored for it and
-    /// the store is held: the table in force stays, and nothing is written over
-    /// the file. One that will not parse is not stored, and is said.
+    /// it** (R33, owner ruling Q3 2026-10-11). The read runs on the storage
+    /// worker; a file that changed is stored for the merge
+    /// ([`Self::begin_merge`]), one that will not parse is not, and the table
+    /// in force stays.
     pub(crate) fn ask_reread(&mut self) {
         self.document.ask_read();
+    }
+
+    /// **A storage pass's merge, purely** (design note 2026-10-11 §3.4, (b)8,
+    /// (c)1): every file stored for the merge is merged by action, then by
+    /// chord, against its base ([`keybindings_merge::merge`]) and folded into
+    /// `desired`, which moves the revision to the file the merge read and
+    /// releases the hold. Nothing is put in force here: the answer is the
+    /// merged document for the window's door (`keybindings_merge::run_pass`),
+    /// with what the pass says — `None` when nothing was merged.
+    ///
+    /// [`keybindings_merge::merge`]: crate::keybindings_merge::merge
+    pub(crate) fn begin_merge(
+        &mut self,
+        platform: bt_platform::HostPlatform,
+    ) -> Option<crate::keybindings_merge::KeybindingsPass> {
+        let at_quit = self.merged_at_quit.take();
+        if !self.document.merge_waits() && at_quit.is_none() {
+            return None;
+        }
+        let merges = self.document.merge_stored(|base, ours, theirs| {
+            let merged = crate::keybindings_merge::merge(base, ours, theirs, platform);
+            (merged.document, merged.about)
+        });
+        if merges.is_empty() && at_quit.is_none() {
+            return None;
+        }
+        let mut about = at_quit.unwrap_or_default();
+        for merge in merges {
+            about.add(merge);
+        }
+        Some(crate::keybindings_merge::KeybindingsPass::new(
+            self.document.desired().clone(),
+            platform,
+            about,
+        ))
+    }
+
+    /// **A quit's merge** (revision (c)2): [`Self::begin_merge`]'s merge and
+    /// fold, and nothing put in force — no door runs, the windows are leaving.
+    /// What it merged is kept for the next storage pass, which puts it in force
+    /// should the quit be cancelled.
+    fn merge_at_quit(&mut self, platform: bt_platform::HostPlatform) {
+        if !self.document.merge_waits() {
+            return;
+        }
+        let merges = self.document.merge_stored(|base, ours, theirs| {
+            let merged = crate::keybindings_merge::merge(base, ours, theirs, platform);
+            (merged.document, merged.about)
+        });
+        if merges.is_empty() {
+            return;
+        }
+        let about = self.merged_at_quit.get_or_insert_with(Default::default);
+        for merge in merges {
+            about.add(merge);
+        }
+    }
+
+    /// **A storage pass's merge, its last step**: the door has run, and the
+    /// merged document is handed to the worker, conditional on the file the
+    /// merge read, if it differs from it.
+    pub(crate) fn end_merge(&mut self) {
+        self.document.send_owed();
     }
 
     /// **Take what the storage worker has answered** (`AppEvent::DocumentsAnswered`):
@@ -6338,15 +6419,16 @@ mod conditional_write_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// RED (carry-forward 1, (b)17 row 6) — **a keybindings change is held for its merge, not
-    /// overwritten.** `keybindings.json` joins the pass; until its merge exists
-    /// (T-STORE-MERGE-KEYBINDINGS) a re-read that finds the file changed takes nothing — the
-    /// table in force stays — and holds the store, so a press is not written over the file.
+    /// RED (T-STORE-MERGE-KEYBINDINGS; ticket 6's hold) — **a held keybindings document is
+    /// released by the first merge, and the next trigger writes conditionally.** A re-read
+    /// finds a hand edit: it is stored for the merge, nothing is taken, and the store is
+    /// held — a press sends nothing. The merge folds the file in, keeping the press, and
+    /// releases the hold: the merged document is sent conditional on the person's bytes.
     ///
-    /// MUTATION: the keybindings re-read is taken (open the store with `Follow::Take`) — the
-    /// file's line is put in force.
+    /// MUTATION: the hold stays (in `DocumentState::merge_stored`, only ever set
+    /// `held_for_merge`, never clear it) — nothing is queued after the merge.
     #[test]
-    fn keybindings_change_is_held_for_ticket_7_not_overwritten() {
+    fn a_held_keybindings_document_is_released_by_the_first_merge() {
         let root = scratch("keybindings-held");
         let path = root.join(super::KEYBINDINGS_FILE_NAME);
         let line = |action: &str, chord: &str| bt_persist::BindingOverrideV1 {
@@ -6358,12 +6440,15 @@ mod conditional_write_tests {
             bt_persist::serialize_keybindings(&super::keybindings_document(lines, platform))
                 .expect("a keybindings document serializes")
         };
-        std::fs::write(&path, document(vec![line("new-tab", "Ctrl+Shift+T")])).unwrap();
+        std::fs::write(&path, document(vec![line("new-tab", "Ctrl+j")])).unwrap();
         let (lane, jobs) = StorageLane::held();
         let mut store = super::KeybindingsStore::at_on(path.clone(), lane);
         let in_force = store.loaded().to_vec();
 
-        let hand = document(vec![line("new-tab", "Ctrl+Alt+新")]);
+        let hand = document(vec![
+            line("new-tab", "Ctrl+j"),
+            line("close-pane", "Ctrl+k"),
+        ]);
         std::fs::write(&path, &hand).unwrap();
         let news = store
             .document()
@@ -6371,11 +6456,39 @@ mod conditional_write_tests {
         assert!(!news.taken, "nothing is taken");
         assert_eq!(store.loaded(), &in_force[..], "the table in force stays");
         assert_eq!(store.document().merges().len(), 1, "stored for the merge");
+        assert!(store.store(vec![line("new-tab", "Ctrl+j"), line("quit", "Ctrl+u")]));
+        assert!(
+            jobs.try_recv().is_err(),
+            "held: nothing is written over the file"
+        );
 
-        assert!(store.store(vec![line("close-tab", "Ctrl+Shift+W")]));
-        store.release_trial();
-        assert!(jobs.try_recv().is_err(), "nothing is written over the file");
-        assert_eq!(file_bytes(&path), hand, "the person's file stands");
+        let pass = store
+            .begin_merge(bt_platform::host_platform())
+            .expect("the hand edit is merged");
+        store.end_merge();
+        assert_eq!(pass.about.account.took, 1, "the file's line");
+        assert_eq!(pass.about.account.kept, 1, "the press");
+        let sent = next_write(&jobs);
+        assert_eq!(
+            sent.expected.as_deref(),
+            Some(&hand[..]),
+            "the merged document, conditional on the person's file"
+        );
+        assert_eq!(
+            bt_persist::parse_keybindings(&sent.bytes)
+                .expect("the merged document parses")
+                .bindings,
+            vec![
+                line("new-tab", "Ctrl+j"),
+                line("close-pane", "Ctrl+k"),
+                line("quit", "Ctrl+u"),
+            ]
+        );
+        assert_eq!(
+            file_bytes(&path),
+            hand,
+            "the person's file stands until it lands"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

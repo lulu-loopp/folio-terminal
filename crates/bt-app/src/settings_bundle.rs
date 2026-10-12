@@ -509,6 +509,18 @@ pub(crate) fn plan_settings(
     SettingsPlan { apply, elsewhere }
 }
 
+/// **The keyboard dialect a shortcut document was written in**: `None` for a
+/// v1 file, whose origin was not recorded and whose chords are read as they
+/// are spelled.
+pub(crate) fn dialect_of(platform: KeybindingsPlatformV1) -> Option<bt_platform::HostPlatform> {
+    match platform {
+        KeybindingsPlatformV1::Unknown => None,
+        KeybindingsPlatformV1::Windows => Some(bt_platform::HostPlatform::Windows),
+        KeybindingsPlatformV1::MacOs => Some(bt_platform::HostPlatform::MacOs),
+        KeybindingsPlatformV1::OtherUnix => Some(bt_platform::HostPlatform::OtherUnix),
+    }
+}
+
 /// **A shortcut part, read the way `keybindings.json` is read at launch**:
 /// this build's table, then the file's lines laid over it by
 /// `Shortcuts::apply_overrides`, every refused line named by its id.
@@ -516,12 +528,7 @@ pub(crate) fn import_shortcuts(
     file: &KeybindingsV1,
     platform: bt_platform::HostPlatform,
 ) -> (Shortcuts, Vec<ImportFault>) {
-    let source = match file.writing_platform {
-        KeybindingsPlatformV1::Unknown => None,
-        KeybindingsPlatformV1::Windows => Some(bt_platform::HostPlatform::Windows),
-        KeybindingsPlatformV1::MacOs => Some(bt_platform::HostPlatform::MacOs),
-        KeybindingsPlatformV1::OtherUnix => Some(bt_platform::HostPlatform::OtherUnix),
-    };
+    let source = dialect_of(file.writing_platform);
     let mut translation_faults = Vec::new();
     let overrides: Vec<Override> = file
         .bindings

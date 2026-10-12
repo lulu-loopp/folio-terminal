@@ -60,14 +60,14 @@
 //! every one; a generation only keeps a stale answer's visible effect from
 //! landing after a newer one's ((b)4).
 //!
-//! **Two policies per store.** The request's ([`Mode`]): `settings.json` sends
-//! `Merge` requests (T-STORE-MERGE-SETTINGS); the other three still send
-//! `Restore` ((b)16 item 1) until their merges exist — a crossing hand edit is
-//! put back and kept, its bytes are stored for the merge, and the store is held
-//! against a file it will not write over. And the re-read's ([`Follow`]): a file
-//! that changed is merged (settings), held for a merge still to be built
-//! (keybindings, T-STORE-MERGE-KEYBINDINGS), or taken whole (profiles and pins,
-//! until T-STORE-MERGE-PROFILES-PINS).
+//! **Two policies per store.** The request's ([`Mode`]): `settings.json` and
+//! `keybindings.json` send `Merge` requests (T-STORE-MERGE-SETTINGS,
+//! T-STORE-MERGE-KEYBINDINGS); the other two still send `Restore` ((b)16 item 1)
+//! until their merges exist — a crossing hand edit is put back and kept, its
+//! bytes are stored for the merge, and the store is held against a file it will
+//! not write over. And the re-read's ([`Follow`]): a file that changed is merged
+//! (settings, keybindings) or taken whole (profiles and pins, until
+//! T-STORE-MERGE-PROFILES-PINS).
 //!
 //! **The merge's seam** ([`DocumentState::merge_stored`]): every file stored
 //! for the merge, in the order it was stored, is merged by the document's own
@@ -867,8 +867,9 @@ impl StoredDocument for KeybindingsV1 {
 
     /// The unit is the action, the last line about it in force (the reader's
     /// rule). A press in another platform's dialect than `desired`'s is the
-    /// whole document: its lines cannot share one `writing_platform`, and their
-    /// translation is the keybindings merge's (T-STORE-MERGE-KEYBINDINGS).
+    /// whole document: its lines cannot share one `writing_platform`. A merge
+    /// leaves `desired` in this platform's dialect (`keybindings_merge`), so a
+    /// press after one is a delta again.
     fn apply_press(desired: &mut Self, before: &Self, after: &Self) {
         if desired == before || desired.writing_platform != after.writing_platform {
             *desired = after.clone();
@@ -1076,12 +1077,8 @@ pub(crate) enum Follow {
     /// something is (`profiles.json`, `pins.json`, until their merge).
     Take,
     /// Stored for the merge, always: the document's merge puts it in force
-    /// through its doors (`settings.json`).
+    /// through its doors (`settings.json`, `keybindings.json`).
     Merge,
-    /// Stored for a merge still to be built, and the store held: nothing is
-    /// taken and nothing is written over it (`keybindings.json`, until
-    /// T-STORE-MERGE-KEYBINDINGS).
-    Hold,
 }
 
 /// **What one merge pass replaced in one file** — the data the pass's card
@@ -1715,21 +1712,6 @@ impl<T: StoredDocument> DocumentState<T> {
                     kept: None,
                     written: None,
                 });
-                return;
-            }
-            Follow::Hold => {
-                eprintln!(
-                    "BT_PERSIST {file} changed on disk; it is held until it can be merged, and \
-                     not written over"
-                );
-                self.keep_for_the_merge(PendingMerge {
-                    base: self.revision.clone(),
-                    theirs: bytes.clone(),
-                    kept: None,
-                    written: None,
-                });
-                self.revision = Revision { bytes, document };
-                self.held_for_merge = true;
                 return;
             }
         }
