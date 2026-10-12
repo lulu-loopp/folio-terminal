@@ -140,15 +140,31 @@ fn merge_row(
     } = theirs.clone();
     ProfileEntryV1 {
         id,
-        display_title: m.field(Text::ProfilesRowName.text(), |e| &e.display_title, display_title),
+        display_title: m.field(
+            Text::ProfilesRowName.text(),
+            |e| &e.display_title,
+            display_title,
+        ),
         hidden: m.field(Text::ProfilesBadgeHidden.text(), |e| &e.hidden, hidden),
         program: m.field(Text::ProfilesRowProgram.text(), |e| &e.program, program),
         args: m.field(Text::ProfilesRowArgs.text(), |e| &e.args, args),
         env: m.field(Text::ProfilesRowEnv.text(), |e| &e.env, env),
-        starting_dir: m.field(Text::ProfilesRowStartingDir.text(), |e| &e.starting_dir, starting_dir),
-        start_at: m.field(Text::ProfilesRowStartingDir.text(), |e| &e.start_at, start_at),
+        starting_dir: m.field(
+            Text::ProfilesRowStartingDir.text(),
+            |e| &e.starting_dir,
+            starting_dir,
+        ),
+        start_at: m.field(
+            Text::ProfilesRowStartingDir.text(),
+            |e| &e.start_at,
+            start_at,
+        ),
         mark: m.field(Text::ProfilesRowColour.text(), |e| &e.mark, mark),
-        integration: m.field(Text::ProfilesRowIntegration.text(), |e| &e.integration, integration),
+        integration: m.field(
+            Text::ProfilesRowIntegration.text(),
+            |e| &e.integration,
+            integration,
+        ),
         login: m.field(Text::ProfilesRowLogin.text(), |e| &e.login, login),
         // No row of the editor shows these two: named by their key in the file.
         paste_as: m.field("paste_as", |e| &e.paste_as, paste_as),
@@ -372,10 +388,7 @@ fn order(
             continue;
         };
         let position = |wanted: &Slot| placed.iter().position(|placed| placed == wanted);
-        let after_predecessor = t_sequence[..at]
-            .iter()
-            .rev()
-            .find_map(|earlier| position(earlier));
+        let after_predecessor = t_sequence[..at].iter().rev().find_map(&position);
         let after_its_row = position(&Slot::Row(id.clone()));
         let at_index = match after_predecessor.max(after_its_row) {
             Some(anchor) => anchor + 1,
