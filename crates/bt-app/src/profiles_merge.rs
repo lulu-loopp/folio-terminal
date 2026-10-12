@@ -398,9 +398,9 @@ fn order(
         if !result.contains_key(id) {
             continue;
         }
-        let last_of_its_id = placed.iter().rposition(|placed| {
-            matches!(placed, Slot::Row(named) | Slot::Carried(_, named) if named == id)
-        });
+        let last_of_its_id = placed.iter().rposition(
+            |placed| matches!(placed, Slot::Row(named) | Slot::Carried(_, named) if named == id),
+        );
         placed.insert(last_of_its_id.map_or(0, |at| at + 1), slot.clone());
     }
     placed

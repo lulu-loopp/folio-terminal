@@ -179,7 +179,12 @@ pub(crate) fn merge(base: &PinsV1, ours: &PinsV1, theirs: &PinsV1) -> Merged {
     for pin in &theirs.pins {
         match identity(pin) {
             Some(id) if seen.insert(id.clone()) => {
-                match resolve(b.get(&id).copied(), o.get(&id).copied(), Some(pin), &mut account) {
+                match resolve(
+                    b.get(&id).copied(),
+                    o.get(&id).copied(),
+                    Some(pin),
+                    &mut account,
+                ) {
                     Some(row) => pins.push(row),
                     None => {
                         gone.insert(id);
