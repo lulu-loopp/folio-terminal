@@ -63706,28 +63706,12 @@ impl FolioApp {
         let Some(app) = self.app.as_mut() else {
             return Ok(());
         };
-        // A walk that died never published its facts: one walk is asked for in its place
-        // (T-FRESH-FACTS round 2), so nothing waiting on them waits for an unrelated trigger.
-        if let Some(died) = answers.died {
-            let line = match programs_lane::request_after_death(
-                died,
-                &app.settings_store.loaded().default_profile,
-            ) {
-                Some(again) => {
-                    format!(
-                        "program walk {died} ended early; walk {again} is asked for in its place"
-                    )
-                }
-                None => format!(
-                    "program walk {died} ended early; it was itself asked for after a death, so \
-                     the next trigger walks again"
-                ),
-            };
-            diagnostics::note(&line);
-        }
+        // A walk that failed — or a worker that ended — was said once by the lane's ledger, and
+        // nothing is asked again on its own (the side-effects contract's C5, revision (b)5): the
+        // next new trigger walks again, and only a walk that ran to its end is news below.
         // A walk's end is news to a pane in birth even when no answer moved: a pane left in birth
         // to say something at its landing (`birth_here`) waits on rows that were already known.
-        let ended = answers.finished.is_some();
+        let ended = answers.finished().is_some();
         let news = adopt_program_answers(&mut app.profile_programs, answers);
         if let Some(snapshot) = program_environment {
             let proxy = app.event_proxy.clone();

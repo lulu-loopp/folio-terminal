@@ -28150,6 +28150,7 @@ mod tests {
                 first: Vec::new(),
                 trigger,
             })
+            .expect("admitted")
         };
         let offered = |programs: &ProfilePrograms| table.offered_to_start(programs).contains(&1);
 
