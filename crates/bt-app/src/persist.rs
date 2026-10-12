@@ -519,20 +519,29 @@ pub(crate) fn install_documents_wake(wake: impl Fn() + Send + Sync + 'static) {
 }
 
 /// Wake the loop: a document answer is in its channel, or the worker ended
-/// and every request it held is now answered by its absence.
+/// and every request it held is now answered by its absence. A product lane's
+/// wake ([`StorageLane::wake`]).
 fn wake_documents() {
     if let Some(wake) = DOCUMENTS_WAKE.get() {
         wake();
     }
 }
 
-/// Wakes the loop when the storage worker's thread ends, however it ends: a
-/// request it took and will never answer is then known to every store.
-struct WakeOnEnd;
+/// The lane's wake: what tells the loop a document answer is in its channel.
+type LaneWake = Arc<dyn Fn() + Send + Sync>;
+
+/// When the storage worker's thread ends, however it ends: the lane stops
+/// taking document requests, and the loop is woken, so a request the worker
+/// took and will never answer is known to every store.
+struct WakeOnEnd {
+    up: Arc<std::sync::atomic::AtomicBool>,
+    wake: LaneWake,
+}
 
 impl Drop for WakeOnEnd {
     fn drop(&mut self) {
-        wake_documents();
+        self.up.store(false, std::sync::atomic::Ordering::Release);
+        (self.wake)();
     }
 }
 
@@ -694,6 +703,13 @@ struct LaneShared {
     ends: Arc<Mutex<Option<SessionWriterEnds>>>,
     /// The thread, once one runs.
     worker: Mutex<LaneWorker>,
+    /// **Whether a worker serves the queue** — set by [`SessionWriter::start`]
+    /// when its thread is up, cleared when it ends. A document request is
+    /// admitted only while it is set, so the request door never starts a thread
+    /// or waits on the worker's lock (side-effects contract C1).
+    up: Arc<std::sync::atomic::AtomicBool>,
+    /// How the loop is woken after a document answer ([`StorageLane::wake`]).
+    wake: LaneWake,
 }
 
 /// Whether a thread serves the lane.
@@ -725,6 +741,8 @@ impl StorageLane {
                 requests: Mutex::new(Some(requests)),
                 ends: Arc::new(Mutex::new(Some(SessionWriterEnds { incoming, outgoing }))),
                 worker: Mutex::new(LaneWorker::Waiting),
+                up: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                wake: Arc::new(wake_documents),
             }),
         };
         (lane, receipts)
@@ -740,16 +758,35 @@ impl StorageLane {
                 requests: Mutex::new(Some(requests)),
                 ends: Arc::new(Mutex::new(None)),
                 worker: Mutex::new(LaneWorker::ByTest),
+                up: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                wake: Arc::new(|| {}),
             }),
         };
         (lane, incoming)
+    }
+
+    /// **A lane no worker serves** — the operating system refused the thread —
+    /// with `wake` as its wake, so a test hears what the loop would.
+    #[cfg(test)]
+    pub(crate) fn without_a_worker(wake: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            shared: Arc::new(LaneShared {
+                requests: Mutex::new(None),
+                ends: Arc::new(Mutex::new(None)),
+                worker: Mutex::new(LaneWorker::Waiting),
+                up: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                wake: Arc::new(wake),
+            }),
+        }
     }
 
     /// **A lane with a worker of its own** — for a store a test opens over a
     /// named path.
     #[cfg(test)]
     pub(crate) fn of_its_own() -> Self {
-        Self::fresh().0
+        let lane = Self::fresh().0;
+        SessionWriter::start(&lane);
+        lane
     }
 
     /// Hand one job over, starting the worker if there is none. `false`: no
@@ -764,14 +801,32 @@ impl StorageLane {
             .is_some_and(|requests| requests.send(job).is_ok())
     }
 
+    /// **Admit one document request** — only while a worker serves the queue,
+    /// and only through the queue's lock, held across the send (C1's mailbox
+    /// lock). It never starts a thread: the session store starts the worker at
+    /// open and again at its own hand-overs ([`SessionWriter::start`]). `false`:
+    /// no worker took it, and the caller completes the request as refused.
+    fn admit_document_job(&self, job: StorageJob) -> bool {
+        self.shared.up.load(std::sync::atomic::Ordering::Acquire)
+            && lane_lock(&self.shared.requests)
+                .as_ref()
+                .is_some_and(|requests| requests.send(job).is_ok())
+    }
+
     /// Hand a document's conditional write over.
     pub(crate) fn send_document(&self, job: crate::document_request::DocumentJob) -> bool {
-        self.submit_storage_job(StorageJob::Document(job))
+        self.admit_document_job(StorageJob::Document(job))
     }
 
     /// Hand a document's stable read over.
     pub(crate) fn send_read(&self, job: crate::document_request::ReadJob) -> bool {
-        self.submit_storage_job(StorageJob::Read(job))
+        self.admit_document_job(StorageJob::Read(job))
+    }
+
+    /// **Wake the loop** — after a document answer is in its channel: the
+    /// worker's, or a refusal the request door completed itself.
+    pub(crate) fn wake(&self) {
+        (self.shared.wake)();
     }
 }
 
@@ -868,6 +923,12 @@ impl SessionWriter {
             return false;
         }
         let ends = Arc::clone(&lane.shared.ends);
+        let up = Arc::clone(&lane.shared.up);
+        let wake = Arc::clone(&lane.shared.wake);
+        // Up before the thread can end, so its end is the last word on it.
+        lane.shared
+            .up
+            .store(true, std::sync::atomic::Ordering::Release);
         // In the workers' band (§1.4): a session write must never be the reason a frame was late,
         // and it is never the thing anybody is waiting to see.
         let started = bt_platform::spawn_at_priority(
@@ -877,19 +938,22 @@ impl SessionWriter {
                 let Some(ends) = ends.lock().ok().and_then(|mut held| held.take()) else {
                     return;
                 };
-                let _wake_on_end = WakeOnEnd;
+                let _wake_on_end = WakeOnEnd {
+                    up,
+                    wake: Arc::clone(&wake),
+                };
                 while let Ok(job) = ends.incoming.recv() {
                     let request = match job {
                         StorageJob::Session(request) => request,
                         // The answer is in its channel before the wake: the steward's order.
                         StorageJob::Document(job) => {
                             crate::document_request::serve_document(ctx, job);
-                            wake_documents();
+                            wake();
                             continue;
                         }
                         StorageJob::Read(job) => {
                             crate::document_request::serve_read(ctx, job);
-                            wake_documents();
+                            wake();
                             continue;
                         }
                         StorageJob::SessionBackup(request) => {
@@ -933,7 +997,12 @@ impl SessionWriter {
                 *worker = LaneWorker::Running(thread);
                 true
             }
-            Err(_) => false,
+            Err(_) => {
+                lane.shared
+                    .up
+                    .store(false, std::sync::atomic::Ordering::Release);
+                false
+            }
         }
     }
 
@@ -3385,6 +3454,8 @@ pub(crate) mod tests {
                     requests: Mutex::new(Some(requests)),
                     ends: Arc::new(Mutex::new(None)),
                     worker: Mutex::new(LaneWorker::Running(thread)),
+                    up: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                    wake: Arc::new(|| {}),
                 }),
             },
             receipts,
@@ -5212,6 +5283,7 @@ mod conditional_write_tests {
     use crate::document_request::{
         DocumentAnswer, DocumentJob, KeptFile, LinkPolicy, Mode, Outcome, Precondition, Refusal,
         Step, precondition, retired_by, serve_document, serve_document_between, settle_exchange,
+        settle_restoring_exchange,
     };
 
     /// A private folder for one case, emptied on the way in.
@@ -5222,20 +5294,28 @@ mod conditional_write_tests {
         root
     }
 
-    /// Run `body` on a worker the thread door started, and wait for it.
+    /// Run `body` on a worker the thread door started, and wait for its answer
+    /// within the suite's patience (`lane::PATIENCE`): a worker that never
+    /// finishes fails the test instead of hanging it. A panic in `body` is
+    /// carried back and raised here.
     pub(super) fn on_a_worker<T: Send + 'static>(
         body: impl FnOnce(&WorkerCtx) -> T + Send + 'static,
     ) -> T {
-        match bt_platform::spawn_at_priority(
+        let (sent, answer) = mpsc::channel();
+        bt_platform::spawn_at_priority(
             "bt-worker-request-test",
             bt_platform::ThreadPriority::BelowNormal,
-            body,
+            move |worker| {
+                let _ = sent.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                    || body(worker),
+                )));
+            },
         )
-        .expect("the thread door starts a thread")
-        .join()
-        {
-            Ok(answer) => answer,
-            Err(panic) => std::panic::resume_unwind(panic),
+        .expect("the thread door starts a thread");
+        match answer.recv_timeout(crate::lane::PATIENCE) {
+            Ok(Ok(answer)) => answer,
+            Ok(Err(panic)) => std::panic::resume_unwind(panic),
+            Err(_) => panic!("the worker did not finish within the suite's patience"),
         }
     }
 
@@ -5440,7 +5520,9 @@ mod conditional_write_tests {
 
         let (job, answered) = job(&path, Some(&base), &ours, Mode::Restore, 1, Vec::new());
         serve_crossed(job, Some(theirs.clone()));
-        let answer = answered.recv().expect("the worker answers");
+        let answer = answered
+            .try_recv()
+            .expect("the worker answered before it finished");
 
         assert_eq!(
             answer.outcome,
@@ -5573,7 +5655,9 @@ mod conditional_write_tests {
             Vec::new(),
         );
         on_a_worker(move |worker| serve_document(worker, job));
-        let answer = answered.recv().expect("the worker answers");
+        let answer = answered
+            .try_recv()
+            .expect("the worker answered before it finished");
         assert!(
             matches!(
                 answer.outcome,
@@ -5815,7 +5899,9 @@ mod conditional_write_tests {
             kept,
         );
         on_a_worker(move |worker| serve_document(worker, job));
-        let answer = answered.recv().expect("the worker answers");
+        let answer = answered
+            .try_recv()
+            .expect("the worker answered before it finished");
         assert!(matches!(answer.outcome, Outcome::Landed { .. }));
         assert_eq!(answer.retired, vec![older.clone()]);
         assert!(
@@ -5851,7 +5937,7 @@ mod conditional_write_tests {
         let (moved, answered) = job(&path, Some(b"not this"), &ours, Mode::Merge, 5, kept());
         on_a_worker(move |worker| serve_document(worker, moved));
         assert!(matches!(
-            answered.recv().unwrap().outcome,
+            answered.try_recv().unwrap().outcome,
             Outcome::Moved { .. }
         ));
         assert!(kept_path.is_file(), "Moved");
@@ -5859,7 +5945,7 @@ mod conditional_write_tests {
         // Displaced: a hand edit crosses the exchange.
         let (displaced, answered) = job(&path, Some(&base), &ours, Mode::Merge, 5, kept());
         serve_crossed(displaced, Some(bytes(&settings("手改 Hand Mono"))));
-        let answer = answered.recv().unwrap();
+        let answer = answered.try_recv().unwrap();
         assert!(matches!(answer.outcome, Outcome::Displaced { .. }));
         assert!(kept_path.is_file(), "Displaced");
 
@@ -5869,7 +5955,7 @@ mod conditional_write_tests {
         let (refused, answered) = job(&folder, None, &ours, Mode::Merge, 5, kept());
         on_a_worker(move |worker| serve_document(worker, refused));
         assert!(matches!(
-            answered.recv().unwrap().outcome,
+            answered.try_recv().unwrap().outcome,
             Outcome::Refused { .. }
         ));
         assert!(kept_path.is_file(), "Refused");
@@ -5878,10 +5964,186 @@ mod conditional_write_tests {
         let (landed, answered) = job(&path, Some(&ours), &base, Mode::Merge, 5, kept());
         on_a_worker(move |worker| serve_document(worker, landed));
         assert!(matches!(
-            answered.recv().unwrap().outcome,
+            answered.try_recv().unwrap().outcome,
             Outcome::Landed { .. }
         ));
         assert!(!kept_path.exists(), "only a landing retires it");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (review round 2, blocker 1; (c)3) — **a `Restore` conflict records
+    /// the person's file as the revision and holds the owed write.** After the
+    /// crossing edit is put back, the revision is what the file holds; a later
+    /// press moves `desired` and sends nothing, so the hand edit is not written
+    /// over before the merge.
+    ///
+    /// MUTATIONS: keep the old revision on `Conflict` — the revision assertion
+    /// fails; send after the press (drop `held_for_merge` from
+    /// `DocumentState::send_owed`) — a write is queued.
+    #[test]
+    fn a_restore_conflict_records_theirs_and_holds_the_owed_write() {
+        let root = scratch("restore-held");
+        let path = root.join(SETTINGS_FILE_NAME);
+        std::fs::write(&path, bytes(&settings("基线 Base Mono"))).unwrap();
+        let (lane, jobs) = StorageLane::held();
+        let mut store = SettingsStore::read_at(path.clone(), is_writer_of_document(&path), lane);
+
+        assert!(store.store(settings("我们的 Ours Mono")));
+        let theirs = bytes(&settings("他们的 Theirs Mono — 手改"));
+        serve_crossed(next_write(&jobs), Some(theirs.clone()));
+        store.settle();
+        assert_eq!(
+            store.revision().bytes.as_deref(),
+            Some(&theirs[..]),
+            "the revision is the file the person now has"
+        );
+        assert_eq!(
+            store.revision().document,
+            settings("他们的 Theirs Mono — 手改")
+        );
+
+        assert!(store.store(settings("再按一次 Pressed Again Mono")));
+        store.release_trial();
+        assert!(
+            jobs.try_recv().is_err(),
+            "nothing is written over the hand edit"
+        );
+        assert_eq!(file_bytes(&path), theirs, "the file still holds it");
+        assert_eq!(
+            store.loaded(),
+            &settings("再按一次 Pressed Again Mono"),
+            "and the press is in force in memory"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (review round 2, blocker 4) — **a restoring exchange that is not
+    /// known to be durable keeps what it displaced**: the person's file is back
+    /// under its name, and the displaced copy — Folio's own write — stays as an
+    /// obligation, never deleted.
+    ///
+    /// MUTATION: delete the displaced copy on `NotDurable` (in
+    /// `settle_restoring_exchange`, remove it whenever it holds Folio's bytes) —
+    /// the copy is gone.
+    #[test]
+    fn restore_not_durable_keeps_the_displaced_path() {
+        let root = scratch("restore-not-durable");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let base = bytes(&settings("基线 Base Mono"));
+        let ours = bytes(&settings("我们的 Ours Mono"));
+        let theirs = bytes(&settings("他们的 Theirs Mono"));
+        std::fs::write(&path, &theirs).unwrap();
+        let back = root.join("settings.json.displaced-回来");
+        std::fs::write(&back, &ours).unwrap();
+        let (probe, _answered) = job(&path, Some(&base), &ours, Mode::Restore, 3, Vec::new());
+        let back_path = back.clone();
+        let theirs_bytes: Arc<[u8]> = Arc::from(&theirs[..]);
+        let served = on_a_worker(move |worker| {
+            settle_restoring_exchange(
+                worker,
+                &probe,
+                theirs_bytes,
+                Err(bt_platform::ExchangeRefusal::NotDurable {
+                    displaced: bt_platform::Displaced { path: back_path },
+                    error: std::io::Error::other("the directory flush failed"),
+                }),
+            )
+        });
+        assert_eq!(
+            served.outcome,
+            Outcome::Conflict {
+                theirs: Arc::from(&theirs[..]),
+                kept: Some(back.clone()),
+            }
+        );
+        assert!(
+            served.not_durable.is_some(),
+            "said as not known to be durable"
+        );
+        assert!(back.is_file(), "the displaced copy stays");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (review round 2, blocker 2; C2) — **a request no worker takes ends
+    /// in a refusal, and the loop is woken for it**, so the store hears it the
+    /// way it hears the worker, and the fifth in a row is a card.
+    ///
+    /// MUTATION: drop the wake (`self.lane.wake()` in `DocumentState::send_owed`)
+    /// — no wake is heard.
+    #[test]
+    fn a_refused_spawn_is_a_refused_terminal_and_a_wake() {
+        let root = scratch("refused-spawn");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let heard = Arc::clone(&wakes);
+        let lane = StorageLane::without_a_worker(move || {
+            heard.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let mut store = SettingsStore::at_on(path.clone(), lane);
+        // The same row chosen five times: a refusal is retried by the next press,
+        // and only a changed value starts the streak again.
+        for press in 0..5 {
+            assert_eq!(store.store(settings("选五次 Five Times Mono")), press == 0);
+            assert_eq!(
+                wakes.load(std::sync::atomic::Ordering::SeqCst),
+                press + 1,
+                "each refusal wakes the loop"
+            );
+            store.take_answers();
+        }
+        assert_eq!(
+            store.take_fault(),
+            Some(crate::i18n::persisted_file_unwritable(SETTINGS_FILE_NAME)),
+            "the fifth refusal in a row is the card's sentence"
+        );
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (review round 2, blocker 3; C5) — **a refused write is sent once
+    /// more by the next ear pass**, and only once: the pass is the trigger, not a
+    /// clock.
+    ///
+    /// MUTATION: no resend on the ear (drop `ear_retry` in
+    /// `DocumentState::after_answers`) — nothing is queued after the pass.
+    #[test]
+    fn a_refused_write_is_sent_once_more_by_the_next_ear_pass() {
+        let root = scratch("ear-retry");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let (lane, jobs) = StorageLane::held();
+        let mut store = SettingsStore::at_on(path.clone(), lane);
+
+        assert!(store.store(settings("我们的 Ours Mono")));
+        let write = next_write(&jobs);
+        let _ = write.answer.send(DocumentAnswer {
+            generation: write.generation,
+            version: write.version,
+            asker: write.asker,
+            outcome: Outcome::Refused {
+                cause: Refusal::BackupNameTaken(root.join("settings.json.displaced-占用")),
+            },
+            not_durable: None,
+            retired: Vec::new(),
+            left: None,
+        });
+        drop(write);
+        store.settle();
+        assert!(
+            jobs.try_recv().is_err(),
+            "a refusal is not retried on its own"
+        );
+
+        store.document().ask_read();
+        let read = match jobs.try_recv() {
+            Ok(StorageJob::Read(read)) => read,
+            _ => panic!("the pass's read is queued"),
+        };
+        on_a_worker(move |worker| crate::document_request::serve_read(worker, read));
+        store.settle();
+        let again = next_write(&jobs);
+        assert_eq!(&*again.bytes, &bytes(&settings("我们的 Ours Mono"))[..]);
+        assert!(jobs.try_recv().is_err(), "exactly once");
+        drop(again);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -5904,7 +6166,7 @@ mod conditional_write_tests {
         let (refused, answered) = job(&path, Some(&base), &ours, Mode::Restore, 1, Vec::new());
         on_a_worker(move |worker| serve_document(worker, refused));
         assert_eq!(
-            answered.recv().unwrap().outcome,
+            answered.try_recv().unwrap().outcome,
             Outcome::Refused {
                 cause: Refusal::Link
             }
@@ -5915,7 +6177,7 @@ mod conditional_write_tests {
         plain.link_policy = LinkPolicy::PlainWriter;
         on_a_worker(move |worker| serve_document(worker, plain));
         assert!(matches!(
-            answered.recv().unwrap().outcome,
+            answered.try_recv().unwrap().outcome,
             Outcome::Landed { .. }
         ));
         assert_eq!(file_bytes(&path), ours, "written through its name");

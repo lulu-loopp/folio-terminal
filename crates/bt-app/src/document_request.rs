@@ -505,49 +505,93 @@ pub(crate) fn settle_exchange(
             left: None,
         };
     }
-    let outcome = match job.mode {
-        Mode::Merge => Outcome::Displaced {
-            bytes: theirs,
-            kept: displaced.to_path_buf(),
+    match job.mode {
+        Mode::Merge => Served {
+            outcome: Outcome::Displaced {
+                bytes: theirs,
+                kept: displaced.to_path_buf(),
+            },
+            not_durable,
+            left: None,
         },
-        Mode::Restore => restore(worker, job, displaced, theirs),
-    };
-    Served {
-        outcome,
-        not_durable,
-        left: None,
+        Mode::Restore => {
+            let mut restored = restore(worker, job, displaced, theirs);
+            restored.not_durable = restored.not_durable.or(not_durable);
+            restored
+        }
     }
 }
 
 /// **`Restore`'s second exchange** ((c)3): only while the file still holds what
 /// was written, the displaced file goes back under its name. What that exchange
-/// displaces in turn is Folio's own write, and goes; anything else, or a second
-/// exchange that is refused, leaves both files and names the one beside it.
-fn restore(worker: &WorkerCtx, job: &DocumentJob, displaced: &Path, theirs: Arc<[u8]>) -> Outcome {
-    let crossed = |kept: &Path| Outcome::Conflict {
-        theirs: Arc::clone(&theirs),
-        kept: Some(kept.to_path_buf()),
+/// displaces in turn is judged by [`settle_restoring_exchange`]; a file that
+/// moved again before it, or a second exchange that is refused, leaves both
+/// files and names the one beside it.
+fn restore(worker: &WorkerCtx, job: &DocumentJob, displaced: &Path, theirs: Arc<[u8]>) -> Served {
+    let crossed = |kept: &Path| {
+        Served::plainly(Outcome::Conflict {
+            theirs: Arc::clone(&theirs),
+            kept: Some(kept.to_path_buf()),
+        })
     };
     match bt_persist::read_stable(worker, &job.which) {
         StableRead::Bytes(bytes) if *bytes == *job.bytes => {}
         _ => return crossed(displaced),
     }
-    let back = match bt_platform::replace_keeping_displaced(worker, displaced, &job.which) {
-        Ok(back)
-        | Err(bt_platform::ExchangeRefusal::NotDurable {
-            displaced: back, ..
-        }) => back,
-        Err(_) => return crossed(displaced),
-    };
-    match bt_persist::read_stable(worker, &back.path) {
-        StableRead::Bytes(bytes) if *bytes == *job.bytes => {
-            let _ = std::fs::remove_file(&back.path);
-            Outcome::Conflict {
-                theirs: Arc::clone(&theirs),
-                kept: None,
-            }
+    match bt_platform::replace_keeping_displaced(worker, displaced, &job.which) {
+        Err(
+            bt_platform::ExchangeRefusal::Link
+            | bt_platform::ExchangeRefusal::ExchangeUnavailable(_)
+            | bt_platform::ExchangeRefusal::BackupNameTaken(_)
+            | bt_platform::ExchangeRefusal::Failed(_),
+        ) => crossed(displaced),
+        answer => settle_restoring_exchange(worker, job, theirs, answer),
+    }
+}
+
+/// **What the restoring exchange displaced, judged** ((c)3; review round 2).
+/// The file holds the person's bytes again. What came back is Folio's own
+/// write, and goes — unless the exchange is not known to be durable
+/// (`NotDurable`): then the restore landed and the displaced copy is kept as an
+/// obligation, never deleted, exactly as the first exchange's would be. Bytes
+/// that are not Folio's are a third writer's, and stay beside the file.
+pub(crate) fn settle_restoring_exchange(
+    worker: &WorkerCtx,
+    job: &DocumentJob,
+    theirs: Arc<[u8]>,
+    answer: Result<bt_platform::Displaced, bt_platform::ExchangeRefusal>,
+) -> Served {
+    let (back, not_durable) = match answer {
+        Ok(back) => (back, None),
+        Err(bt_platform::ExchangeRefusal::NotDurable { displaced, error }) => {
+            (displaced, Some(error.to_string()))
         }
-        _ => crossed(&back.path),
+        Err(refused) => {
+            return Served {
+                outcome: Outcome::Conflict { theirs, kept: None },
+                not_durable: None,
+                left: Some((
+                    job.which.clone(),
+                    format!("the putting back was refused: {refused:?}"),
+                )),
+            };
+        }
+    };
+    let ours = matches!(
+        bt_persist::read_stable(worker, &back.path),
+        StableRead::Bytes(bytes) if *bytes == *job.bytes
+    );
+    if ours && not_durable.is_none() {
+        let _ = std::fs::remove_file(&back.path);
+        return Served::plainly(Outcome::Conflict { theirs, kept: None });
+    }
+    Served {
+        outcome: Outcome::Conflict {
+            theirs,
+            kept: Some(back.path),
+        },
+        not_durable,
+        left: None,
     }
 }
 
@@ -822,6 +866,8 @@ impl StoredDocument for PinsV1 {
 /// **What a stable read came to, parsed on the worker.**
 #[derive(Debug)]
 pub(crate) enum ReadAnswer<T> {
+    /// No worker took the read; the request door completed it itself.
+    NotServed(String),
     Absent,
     Unobtained(String),
     MovedDuringRead,
@@ -938,6 +984,14 @@ pub(crate) struct DocumentState<T> {
     /// A press arrived while a write was in flight: the document is sent when
     /// that write's answer has been processed, whatever it was.
     send_again: bool,
+    /// The last write was refused: the next ear pass that reads this document
+    /// sends it once more (C5's "next ear event"; presses send it anyway).
+    retry_on_ear: bool,
+    /// **Held for the merge** (review round 2; (c)3): a hand edit crossed a
+    /// write and was put back, so the revision is the person's file, and
+    /// nothing is written over it — not by a press, an ear pass or a quit —
+    /// until the merge folds it in. `desired` keeps taking presses meanwhile.
+    held_for_merge: bool,
     merges: Vec<PendingMerge<T>>,
     kept: Vec<KeptFile>,
     writes: DocumentWrites,
@@ -969,6 +1023,8 @@ impl<T: StoredDocument> DocumentState<T> {
             outstanding: VecDeque::new(),
             read_again: false,
             send_again: false,
+            retry_on_ear: false,
+            held_for_merge: false,
             merges: Vec::new(),
             kept: Vec::new(),
             writes: DocumentWrites::new(),
@@ -1065,9 +1121,14 @@ impl<T: StoredDocument> DocumentState<T> {
     /// Nothing when this process does not write the file (§6), while an update's
     /// trial holds its writes, or when nothing is owed. One write in flight: a
     /// call while one is marks the document to be sent when that answer has been
-    /// processed. A worker that cannot take the request is a refusal, said now.
+    /// processed. Nothing while the document is held for the merge. A request no
+    /// worker takes is completed here as refused, and the loop is woken for it
+    /// (C2): the answer reaches the store the way the worker's would.
     pub(crate) fn send_owed(&mut self) {
-        if !self.writer_of_record || crate::update_trial::defer(self.deferral) {
+        if !self.writer_of_record
+            || self.held_for_merge
+            || crate::update_trial::defer(self.deferral)
+        {
             return;
         }
         if self
@@ -1090,7 +1151,9 @@ impl<T: StoredDocument> DocumentState<T> {
             }
         };
         self.generation += 1;
+        self.retry_on_ear = false;
         let (answer, answered) = mpsc::channel();
+        let refusal = answer.clone();
         let job = DocumentJob {
             which: self.path.clone(),
             generation: self.generation,
@@ -1104,10 +1167,18 @@ impl<T: StoredDocument> DocumentState<T> {
             answer,
         };
         if !self.lane.send_document(job) {
-            self.refused(&Refusal::NoWorker(
-                crate::persist::NO_STORAGE_WORKER.to_owned(),
-            ));
-            return;
+            let _ = refusal.send(DocumentAnswer {
+                generation: self.generation,
+                version: self.version,
+                asker: 0,
+                outcome: Outcome::Refused {
+                    cause: Refusal::NoWorker(crate::persist::NO_STORAGE_WORKER.to_owned()),
+                },
+                not_durable: None,
+                retired: Vec::new(),
+                left: None,
+            });
+            self.lane.wake();
         }
         self.outstanding.push_back(Outstanding::Document(InFlight {
             generation: self.generation,
@@ -1133,6 +1204,7 @@ impl<T: StoredDocument> DocumentState<T> {
         self.read_again = false;
         self.generation += 1;
         let (answer, answered) = mpsc::channel();
+        let refusal = answer.clone();
         let job = ReadJob {
             which: self.path.clone(),
             generation: self.generation,
@@ -1141,12 +1213,11 @@ impl<T: StoredDocument> DocumentState<T> {
             }),
         };
         if !self.lane.send_read(job) {
-            eprintln!(
-                "BT_PERSIST {} was not read again: {}",
-                self.file,
-                crate::persist::NO_STORAGE_WORKER
-            );
-            return;
+            let _ = refusal.send((
+                self.generation,
+                ReadAnswer::NotServed(crate::persist::NO_STORAGE_WORKER.to_owned()),
+            ));
+            self.lane.wake();
         }
         self.outstanding
             .push_back(Outstanding::Read { answer: answered });
@@ -1157,6 +1228,7 @@ impl<T: StoredDocument> DocumentState<T> {
     pub(crate) fn take_answers(&mut self) -> ReadNews {
         let mut news = ReadNews::default();
         let mut landed = false;
+        let mut heard = false;
         while let Some(request) = self.outstanding.front() {
             let answered = match request {
                 Outstanding::Document(flight) => match flight.answer.try_recv() {
@@ -1167,6 +1239,7 @@ impl<T: StoredDocument> DocumentState<T> {
                 Outstanding::Read { answer } => match answer.try_recv() {
                     Ok((generation, read)) => {
                         self.outstanding.pop_front();
+                        heard = true;
                         self.on_read(generation, read, &mut news);
                         continue;
                     }
@@ -1190,7 +1263,7 @@ impl<T: StoredDocument> DocumentState<T> {
             };
             landed |= self.on_document(flight, answered);
         }
-        self.after_answers(landed);
+        self.after_answers(landed, heard);
         news
     }
 
@@ -1201,21 +1274,23 @@ impl<T: StoredDocument> DocumentState<T> {
     pub(crate) fn settle(&mut self) -> ReadNews {
         let mut news = ReadNews::default();
         let mut landed = false;
+        let mut heard = false;
         for _ in 0..self.outstanding.len() {
             match self.outstanding.pop_front() {
                 Some(Outstanding::Document(flight)) => {
-                    let answer = flight.answer.recv().map_err(|_| ());
+                    let answer = within_patience(&flight.answer, self.file);
                     landed |= self.on_document(flight, answer);
                 }
                 Some(Outstanding::Read { answer }) => {
-                    if let Ok((generation, read)) = answer.recv() {
+                    if let Ok((generation, read)) = within_patience(&answer, self.file) {
+                        heard = true;
                         self.on_read(generation, read, &mut news);
                     }
                 }
                 None => break,
             }
         }
-        self.after_answers(landed);
+        self.after_answers(landed, heard);
         news
     }
 
@@ -1232,7 +1307,9 @@ impl<T: StoredDocument> DocumentState<T> {
     /// What follows a batch of answers: one more read if one was asked for
     /// meanwhile; the document again if a press arrived while it was in flight,
     /// or a landing left `desired` ahead of the file (a press during the write).
-    fn after_answers(&mut self, landed: bool) {
+    ///
+    /// And once after an ear pass's read when the last write was refused (C5).
+    fn after_answers(&mut self, landed: bool, heard: bool) {
         let reading = self
             .outstanding
             .iter()
@@ -1244,7 +1321,8 @@ impl<T: StoredDocument> DocumentState<T> {
             .outstanding
             .iter()
             .any(|request| matches!(request, Outstanding::Document(_)));
-        if !writing && (self.send_again || (landed && self.owed())) {
+        let ear_retry = heard && self.retry_on_ear && self.owed();
+        if !writing && (self.send_again || (landed && self.owed()) || ear_retry) {
             self.send_owed();
         }
     }
@@ -1319,18 +1397,38 @@ impl<T: StoredDocument> DocumentState<T> {
                 return true;
             }
             Outcome::Conflict { theirs, kept } => {
-                eprintln!(
-                    "BT_PERSIST {file} was edited while it was written; the edit was put back{}",
-                    kept.as_ref().map_or_else(String::new, |kept| format!(
-                        " and {} is left beside it",
-                        kept.display()
-                    ))
-                );
                 self.keep_for_the_merge(PendingMerge {
                     base: flight.base,
-                    theirs: Some(theirs),
+                    theirs: Some(Arc::clone(&theirs)),
                     kept: None,
                 });
+                // (c)3: the revision is the file the person now has — a file
+                // that will not parse is its bytes beside the default document,
+                // as at start — and the owed write is held until the merge.
+                self.revision = Revision {
+                    document: T::from_bytes(&theirs).unwrap_or_default(),
+                    bytes: Some(theirs),
+                };
+                if !std::mem::replace(&mut self.held_for_merge, true) {
+                    eprintln!(
+                        "BT_PERSIST {file} changed on disk while Folio had unsaved changes; held until merged"
+                    );
+                }
+                match (kept, &answer.not_durable) {
+                    (Some(path), Some(error)) => {
+                        eprintln!(
+                            "BT_PERSIST {file} was put back and is not known to be durable: {error}"
+                        );
+                        self.kept.push(KeptFile {
+                            path,
+                            version: answer.version + 1,
+                        });
+                    }
+                    (Some(path), None) => {
+                        eprintln!("BT_PERSIST {file}: {} is left beside it", path.display());
+                    }
+                    (None, _) => {}
+                }
             }
             Outcome::Refused { cause } => self.refused(&cause),
         }
@@ -1339,6 +1437,7 @@ impl<T: StoredDocument> DocumentState<T> {
 
     /// A refused write: the streak, or at once ((b)7).
     fn refused(&mut self, cause: &Refusal) {
+        self.retry_on_ear = true;
         let error = cause.described();
         if cause.is_said_at_once() {
             self.writes.refused_for_good(self.file, error);
@@ -1365,9 +1464,13 @@ impl<T: StoredDocument> DocumentState<T> {
         let file = self.file;
         let (bytes, document) = match read {
             // The file was being written; the ear has a stamp for the write.
+            ReadAnswer::NotServed(why) => {
+                eprintln!("BT_PERSIST {file} was not read again: {why}");
+                return;
+            }
             ReadAnswer::MovedDuringRead => {
                 eprintln!(
-                    "BT_PERSIST {file} changed while it was read (generation {generation}); the                      next pass reads it again"
+                    "BT_PERSIST {file} changed while it was read (generation {generation}); the next pass reads it again"
                 );
                 return;
             }
@@ -1418,6 +1521,7 @@ impl<T: StoredDocument> DocumentState<T> {
             self.desired = document;
             self.version += 1;
             self.merges.clear();
+            self.held_for_merge = false;
             news.taken = true;
         }
     }
@@ -1468,6 +1572,10 @@ impl<T: StoredDocument> DocumentState<T> {
     pub(crate) fn fold(&mut self, merge: PendingMerge<T>, merged: T, theirs: T) {
         self.desired = merged;
         self.version += 1;
+        if self.merges.is_empty() {
+            // Nothing is left for the merge: what was held is resolved.
+            self.held_for_merge = false;
+        }
         match merge.kept {
             Some(path) => self.kept.push(KeptFile {
                 path,
@@ -1486,5 +1594,20 @@ impl<T: StoredDocument> DocumentState<T> {
     /// Take the sentence a refused write owes the reader.
     pub(crate) fn take_fault(&mut self) -> Option<String> {
         self.writes.take_fault()
+    }
+}
+
+/// **One answer, within the suite's patience** (`lane::PATIENCE`): a lost
+/// completion fails the test that awaited it, naming the file, instead of
+/// hanging the suite. The wait ends on the answer, so a quick machine pays
+/// nothing. `Err` is the worker gone with the request unanswered.
+#[cfg(test)]
+fn within_patience<A>(answer: &mpsc::Receiver<A>, file: &str) -> Result<A, ()> {
+    match answer.recv_timeout(crate::lane::PATIENCE) {
+        Ok(answer) => Ok(answer),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(()),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("no answer about {file} within the suite's patience")
+        }
     }
 }
