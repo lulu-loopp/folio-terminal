@@ -59,6 +59,56 @@ use crate::admission::WorkerCtx;
 /// that" apart from "Windows could not".
 pub const PROGRAM_REFUSED: &str = "the files tree does not run programs";
 
+/// **Why a door did not hand its target over**, as the kind of refusal it is
+/// (T-HANDOFF-DOOR-REASON).
+///
+/// The smallest set that is true on both machines. Windows reads it off `ShellExecuteW`'s return
+/// value (`windows_handoff::answer_of_shell_execute` holds the table); macOS reads it off the
+/// disk and LaunchServices before anything opens (`macos_handoff::hand_over_through`): a `file:`
+/// URL whose path is not there is [`Self::NotFound`], and a URL no application claims
+/// (`URLForApplicationToOpenURL:` answering nil) is [`Self::NoHandler`]. Every refusal a door
+/// makes of its own — [`PROGRAM_REFUSED`], a path of the wrong shape, a platform with no shell —
+/// and every system failure that is none of the first three is [`Self::Other`], in the door's or
+/// the system's own words.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HandOffRefusal {
+    /// The system has no program registered to open the target.
+    NoHandler,
+    /// The target is not there.
+    NotFound,
+    /// The system refused access to the target.
+    AccessDenied,
+    /// Any other refusal, in the door's or the system's words.
+    Other(String),
+}
+
+impl HandOffRefusal {
+    /// The refusal's words for a log line: the fixed sentence of each kind, or the words
+    /// [`Self::Other`] carries.
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::NoHandler => "no application is registered to open it",
+            Self::NotFound => "the target does not exist",
+            Self::AccessDenied => "access to the target is denied",
+            Self::Other(words) => words,
+        }
+    }
+}
+
+impl std::fmt::Display for HandOffRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.reason())
+    }
+}
+
+/// A door's own refusal in words — a path gate's, a resolver's — is [`HandOffRefusal::Other`].
+impl From<String> for HandOffRefusal {
+    fn from(words: String) -> Self {
+        Self::Other(words)
+    }
+}
+
 /// **What a worker already established about a path** — the two facts a reveal needs, carried
 /// instead of fetched (closure re-review B-1').
 ///
@@ -230,8 +280,8 @@ impl ShellThread {
     /// **Hand one request to the door it names**, with `window` — the window
     /// that asked — as that door's window argument.
     ///
-    /// The answer is the door's own, byte for byte: `Ok` when the system took
-    /// it, the door's refusal otherwise.
+    /// The answer is the door's own: `Ok` when the system took it, otherwise the
+    /// [`HandOffRefusal`] that says which kind of refusal it was.
     ///
     /// # Errors
     ///
@@ -332,7 +382,7 @@ impl ShellThread {
     ///     },
     /// );
     /// ```
-    pub fn hand_over(&self, window: NativeWindow, request: &Handoff) -> Result<(), String> {
+    pub fn hand_over(&self, window: NativeWindow, request: &Handoff) -> Result<(), HandOffRefusal> {
         #[cfg(target_os = "macos")]
         {
             objc2::rc::autoreleasepool(|_| Self::door(window, request))
@@ -343,7 +393,7 @@ impl ShellThread {
         }
     }
 
-    fn door(window: NativeWindow, request: &Handoff) -> Result<(), String> {
+    fn door(window: NativeWindow, request: &Handoff) -> Result<(), HandOffRefusal> {
         match request {
             Handoff::Open(path) => open_local_path(window, path),
             Handoff::OpenVerified(path, target) => {
@@ -778,12 +828,14 @@ mod portable_handoff {
     use std::path::{Path, PathBuf};
 
     #[cfg(not(target_os = "macos"))]
+    use super::HandOffRefusal;
+    #[cfg(not(target_os = "macos"))]
     use crate::NativeWindow;
 
-    /// The sentence all five say.
+    /// The sentence all five say — a refusal of no kind the system named.
     #[cfg(not(target_os = "macos"))]
-    fn not_here(what: &str) -> String {
-        format!("{what} is not on this platform yet")
+    fn not_here(what: &str) -> HandOffRefusal {
+        HandOffRefusal::Other(format!("{what} is not on this platform yet"))
     }
 
     /// **Where a bare program name resolves on `PATH`, and off Windows nowhere**
@@ -810,21 +862,21 @@ mod portable_handoff {
 
     /// Open one already-policy-checked address with the system's handler.
     #[cfg(not(target_os = "macos"))]
-    pub fn shell_execute(window: NativeWindow, target: &str) -> Result<(), String> {
+    pub fn shell_execute(window: NativeWindow, target: &str) -> Result<(), HandOffRefusal> {
         let _ = (window, target);
         Err(not_here("opening an address"))
     }
 
     /// Open one worker-validated local image with its default handler.
     #[cfg(not(target_os = "macos"))]
-    pub fn open_local_file(window: NativeWindow, path: &Path) -> Result<(), String> {
+    pub fn open_local_file(window: NativeWindow, path: &Path) -> Result<(), HandOffRefusal> {
         let _ = (window, path);
         Err(not_here("opening a file"))
     }
 
     /// Open one file a person picked out of a directory listing.
     #[cfg(not(target_os = "macos"))]
-    pub fn open_local_path(window: NativeWindow, path: &Path) -> Result<(), String> {
+    pub fn open_local_path(window: NativeWindow, path: &Path) -> Result<(), HandOffRefusal> {
         let _ = (window, path);
         Err(not_here("opening a file"))
     }
@@ -835,14 +887,14 @@ mod portable_handoff {
         window: NativeWindow,
         path: &Path,
         target: super::VerifiedTarget,
-    ) -> Result<(), String> {
+    ) -> Result<(), HandOffRefusal> {
         let _ = (window, path, target);
         Err(not_here("opening a file"))
     }
 
     /// Show a file in the file manager.
     #[cfg(not(target_os = "macos"))]
-    pub fn reveal_in_explorer(window: NativeWindow, path: &Path) -> Result<(), String> {
+    pub fn reveal_in_explorer(window: NativeWindow, path: &Path) -> Result<(), HandOffRefusal> {
         let _ = (window, path);
         Err(not_here("showing a file in the file manager"))
     }
@@ -853,14 +905,14 @@ mod portable_handoff {
         window: NativeWindow,
         path: &Path,
         target: super::VerifiedTarget,
-    ) -> Result<(), String> {
+    ) -> Result<(), HandOffRefusal> {
         let _ = (window, path, target);
         Err(not_here("showing a file in the file manager"))
     }
 
     /// Open the system's font page — Font Book, or the fonts folder.
     #[cfg(not(target_os = "macos"))]
-    pub fn open_system_fonts_page(window: NativeWindow) -> Result<(), String> {
+    pub fn open_system_fonts_page(window: NativeWindow) -> Result<(), HandOffRefusal> {
         let _ = window;
         Err(not_here("the system font settings"))
     }
@@ -995,7 +1047,7 @@ mod macos_handoff {
     };
     use objc2_foundation::{NSArray, NSError, NSString, NSURL, ns_string};
 
-    use super::PROGRAM_REFUSED;
+    use super::{HandOffRefusal, PROGRAM_REFUSED};
     use crate::NativeWindow;
     use crate::macos_files::file_url;
 
@@ -1080,19 +1132,75 @@ mod macos_handoff {
         metadata.permissions().mode() & 0o111 != 0
     }
 
-    /// Hand one URL to LaunchServices, and say so when it will not take it.
-    ///
-    /// `openURL:` answers `NO` for a URL with no registered handler, a scheme
-    /// this machine has nothing for, and a file that is not there. It does not
-    /// say *which*, so neither does this: what the caller puts in front of a
-    /// reader is the target it asked for and the fact the machine declined it,
-    /// which is the same shape the Windows arm's `ShellExecuteW` failure has.
-    fn hand_over(url: &NSURL, what: &str) -> Result<(), String> {
+    /// **What the disk said about a path a door asked it about**, as the refusal it is: a path
+    /// that is not there is [`HandOffRefusal::NotFound`], one the system will not let this
+    /// process read is [`HandOffRefusal::AccessDenied`], and anything else is the operating
+    /// system's own words after the path.
+    fn refusal_of_the_disk(path: &Path, error: &std::io::Error) -> HandOffRefusal {
+        match error.kind() {
+            std::io::ErrorKind::NotFound => HandOffRefusal::NotFound,
+            std::io::ErrorKind::PermissionDenied => HandOffRefusal::AccessDenied,
+            _ => HandOffRefusal::Other(format!("{path:?}: {error}")),
+        }
+    }
+
+    /// Hand one URL to LaunchServices, and say which kind of refusal it was when it will not
+    /// take it — [`hand_over_through`] over this machine's own workspace.
+    fn hand_over(url: &NSURL, what: &str) -> Result<(), HandOffRefusal> {
         let workspace = NSWorkspace::sharedWorkspace();
-        if workspace.openURL(url) {
+        hand_over_through(
+            url,
+            what,
+            &|url| workspace.URLForApplicationToOpenURL(url).is_some(),
+            &|url| workspace.openURL(url),
+        )
+    }
+
+    /// **Ask first, then open** (T-HANDOFF-DOOR-REASON) — the synchronous
+    /// `URLForApplicationToOpenURL:` + `openURL:` pair, on the hand-off lane's thread.
+    ///
+    /// `openURL:` answers `NO` for a URL with no registered handler, a scheme this machine has
+    /// nothing for, and a file that is not there, and does not say which. So the two questions
+    /// that have a true answer are asked before anything opens: a `file:` URL's path is asked of
+    /// the disk ([`HandOffRefusal::NotFound`], [`HandOffRefusal::AccessDenied`]), and
+    /// LaunchServices is asked which application would open the URL — `claimed`, the product's
+    /// `URLForApplicationToOpenURL:`, whose nil is [`HandOffRefusal::NoHandler`]. Only then is
+    /// the URL handed over (`open`, the product's `openURL:`), and a `NO` after both answers is
+    /// [`HandOffRefusal::Other`]. No completion handler is involved and nothing waits on another
+    /// thread.
+    ///
+    /// The path is read off the URL's escapes rather than `-[NSURL path]`, for
+    /// [`crate::path_from_file_url`]'s reason: a name is bytes, not necessarily text.
+    fn hand_over_through(
+        url: &NSURL,
+        what: &str,
+        claimed: &dyn Fn(&NSURL) -> bool,
+        open: &dyn Fn(&NSURL) -> bool,
+    ) -> Result<(), HandOffRefusal> {
+        let file = url
+            .absoluteString()
+            .and_then(|spelling| crate::path_from_file_url(&spelling.to_string()).ok());
+        if let Some(file) = file {
+            match file.try_exists() {
+                Ok(true) => {}
+                Ok(false) => return Err(HandOffRefusal::NotFound),
+                Err(error) => return Err(refusal_of_the_disk(&file, &error)),
+            }
+        }
+        if !claimed(url) {
+            return Err(HandOffRefusal::NoHandler);
+        }
+        launched(open(url), what)
+    }
+
+    /// `openURL:`'s answer as a door's: `YES` is `Ok`, `NO` the system's refusal of `what`.
+    fn launched(opened: bool, what: &str) -> Result<(), HandOffRefusal> {
+        if opened {
             Ok(())
         } else {
-            Err(format!("the system has nothing registered to open {what}"))
+            Err(HandOffRefusal::Other(format!(
+                "the system did not open {what}"
+            )))
         }
     }
 
@@ -1105,10 +1213,10 @@ mod macos_handoff {
     /// and this bridge supplies the parse. `URLWithString:` is that parse, and its
     /// refusal is the honest one: a string that is not a URL never reaches
     /// LaunchServices, so there is nothing here for a target to be reparsed as.
-    pub fn shell_execute(window: NativeWindow, target: &str) -> Result<(), String> {
+    pub fn shell_execute(window: NativeWindow, target: &str) -> Result<(), HandOffRefusal> {
         let _ = window;
         if target.contains('\0') {
-            return Err("address contains an embedded NUL".to_owned());
+            return Err("address contains an embedded NUL".to_owned().into());
         }
         let text = NSString::from_str(target);
         let url = NSURL::URLWithString(&text)
@@ -1123,7 +1231,7 @@ mod macos_handoff {
     /// never directly from terminal text; this bridge independently enforces
     /// the slice's syntax policy over the path it is handed, exactly as the
     /// Windows arm does, with this platform's spelling of "absolute".
-    pub fn open_local_file(window: NativeWindow, path: &Path) -> Result<(), String> {
+    pub fn open_local_file(window: NativeWindow, path: &Path) -> Result<(), HandOffRefusal> {
         let _ = window;
         openable_local_image(path)?;
         let url = file_url(path, false)?;
@@ -1147,22 +1255,23 @@ mod macos_handoff {
     /// 2. `canonicalize` next, which is the one question the rest is asked of.
     ///    It follows every link and settles every `..`, so it answers with the
     ///    file `openURL:` would reach — and a link pointing at nothing fails
-    ///    here with the operating system's own words, in the same
-    ///    `"{path:?}: {error}"` shape the plain missing file has always had, so
-    ///    a reader is told the true fact (there is nothing there) rather than a
-    ///    false one about programs.
+    ///    here as [`HandOffRefusal::NotFound`], the refusal the plain missing
+    ///    file has, so a reader is told the true fact (there is nothing there)
+    ///    rather than a false one about programs.
     /// 3. [`opening_it_would_run_it`] last, asked of that resolved path and of
     ///    the metadata of that same path.
     ///
     /// [`PROGRAM_REFUSED`] is the sentence `bt-app` turns into *the tree does
     /// not run programs*, and every other refusal here is a fact about the
     /// machine that the same caller shows as a toast.
-    fn openable_target(path: &Path) -> Result<(std::path::PathBuf, bool), String> {
+    fn openable_target(path: &Path) -> Result<(std::path::PathBuf, bool), HandOffRefusal> {
         openable_unix_path(path)?;
-        let real = std::fs::canonicalize(path).map_err(|error| format!("{path:?}: {error}"))?;
-        let metadata = std::fs::metadata(&real).map_err(|error| format!("{real:?}: {error}"))?;
+        let real =
+            std::fs::canonicalize(path).map_err(|error| refusal_of_the_disk(path, &error))?;
+        let metadata =
+            std::fs::metadata(&real).map_err(|error| refusal_of_the_disk(&real, &error))?;
         if opening_it_would_run_it(&real, &metadata) {
-            return Err(PROGRAM_REFUSED.to_owned());
+            return Err(HandOffRefusal::Other(PROGRAM_REFUSED.to_owned()));
         }
         Ok((real, metadata.is_dir()))
     }
@@ -1175,7 +1284,7 @@ mod macos_handoff {
     /// carried. Those have to be the same file: handing `openURL:` a link while
     /// having classified its target leaves the two able to disagree, which is
     /// exactly how a bundle once got past the refusal (RA-4).
-    pub fn open_local_path(window: NativeWindow, path: &Path) -> Result<(), String> {
+    pub fn open_local_path(window: NativeWindow, path: &Path) -> Result<(), HandOffRefusal> {
         let _ = window;
         let (real, directory) = openable_target(path)?;
         let url = file_url(&real, directory)?;
@@ -1196,14 +1305,14 @@ mod macos_handoff {
         window: NativeWindow,
         path: &Path,
         target: super::VerifiedTarget,
-    ) -> Result<(), String> {
+    ) -> Result<(), HandOffRefusal> {
         let _ = window;
         openable_unix_path(path)?;
         if !target.exists {
-            return Err(format!("{path:?}: not there"));
+            return Err(HandOffRefusal::NotFound);
         }
         if target.executable {
-            return Err(PROGRAM_REFUSED.to_owned());
+            return Err(HandOffRefusal::Other(PROGRAM_REFUSED.to_owned()));
         }
         // `openable_target`'s own answer: the URL is built from the target that gate judged, not
         // from the name the reference carried (RA-4). That target is [`resolved_for_a_door`]'s.
@@ -1237,12 +1346,13 @@ mod macos_handoff {
     /// a `.app` sitting selected in a folder window, which is what somebody
     /// asking "where is this" wants to see — the same reasoning the Windows arm
     /// gives for having no extension gate on its reveal.
-    pub fn reveal_in_explorer(window: NativeWindow, path: &Path) -> Result<(), String> {
+    pub fn reveal_in_explorer(window: NativeWindow, path: &Path) -> Result<(), HandOffRefusal> {
         let _ = window;
         openable_unix_path(path)?;
-        let real = std::fs::canonicalize(path).map_err(|error| format!("{path:?}: {error}"))?;
+        let real =
+            std::fs::canonicalize(path).map_err(|error| refusal_of_the_disk(path, &error))?;
         let directory = std::fs::metadata(&real)
-            .map_err(|error| format!("{real:?}: {error}"))?
+            .map_err(|error| refusal_of_the_disk(&real, &error))?
             .is_dir();
         show(real, directory)
     }
@@ -1260,10 +1370,10 @@ mod macos_handoff {
         window: NativeWindow,
         path: &Path,
         target: super::VerifiedTarget,
-    ) -> Result<(), String> {
+    ) -> Result<(), HandOffRefusal> {
         let _ = window;
         if !target.exists {
-            return Err(format!("{path:?}: not there"));
+            return Err(HandOffRefusal::NotFound);
         }
         openable_unix_path(path)?;
         show(
@@ -1276,7 +1386,7 @@ mod macos_handoff {
     }
 
     /// The half both reveals end on: a folder is opened, a file is selected in its own.
-    fn show(real: std::path::PathBuf, directory: bool) -> Result<(), String> {
+    fn show(real: std::path::PathBuf, directory: bool) -> Result<(), HandOffRefusal> {
         let url = file_url(&real, directory)?;
         let workspace = NSWorkspace::sharedWorkspace();
         if directory {
@@ -1322,7 +1432,7 @@ mod macos_handoff {
     /// handed over; `NSRunningApplication` is documented thread-safe, which is
     /// the same paragraph of Apple's *Thread Safety Summary* §13.18 quotes for
     /// `NSWorkspace`.
-    fn open_folder_in_finder(url: Retained<NSURL>, what: &str) -> Result<(), String> {
+    fn open_folder_in_finder(url: Retained<NSURL>, what: &str) -> Result<(), HandOffRefusal> {
         let workspace = NSWorkspace::sharedWorkspace();
         let finder = workspace
             .URLForApplicationWithBundleIdentifier(ns_string!("com.apple.finder"))
@@ -1373,13 +1483,18 @@ mod macos_handoff {
     /// **This product installs and deletes nothing**, which is the Windows
     /// arm's closing paragraph and is not a platform fact: a font is a
     /// machine-wide resource and the door is the whole feature.
-    pub fn open_system_fonts_page(window: NativeWindow) -> Result<(), String> {
+    ///
+    /// **The lookup is this road's ask** (T-HANDOFF-DOOR-REASON): Font Book *is* the program
+    /// that opens the page, so a machine without one has no program to open it —
+    /// [`HandOffRefusal::NoHandler`] — and the application's own URL is launched without asking
+    /// which application would open an application.
+    pub fn open_system_fonts_page(window: NativeWindow) -> Result<(), HandOffRefusal> {
         let _ = window;
         let workspace = NSWorkspace::sharedWorkspace();
         let url = workspace
             .URLForApplicationWithBundleIdentifier(ns_string!("com.apple.FontBook"))
-            .ok_or_else(|| "this machine has no Font Book".to_owned())?;
-        hand_over(&url, "the system font settings")
+            .ok_or(HandOffRefusal::NoHandler)?;
+        launched(workspace.openURL(&url), "the system font settings")
     }
 
     /// **These run on a Mac and only on a Mac**, which is the point of them:
@@ -1465,7 +1580,7 @@ mod macos_handoff {
             for program in [&bundle, &script] {
                 assert_eq!(
                     open_local_path(window, program),
-                    Err(PROGRAM_REFUSED.to_owned()),
+                    Err(HandOffRefusal::Other(PROGRAM_REFUSED.to_owned())),
                     "{program:?} is a program and this door does not run one"
                 );
             }
@@ -1520,7 +1635,7 @@ mod macos_handoff {
             let missing = root.join("never-was");
             let dangling = link(&missing, "gone");
 
-            let refused = Err(PROGRAM_REFUSED.to_owned());
+            let refused = Err(HandOffRefusal::Other(PROGRAM_REFUSED.to_owned()));
             let window = crate::NativeWindow::stand_in(0);
 
             // ① The finding: a directory target with no `.app` in the *link's*
@@ -1532,7 +1647,7 @@ mod macos_handoff {
             );
             assert_eq!(
                 open_local_path(window, &to_bundle),
-                Err(PROGRAM_REFUSED.to_owned())
+                Err(HandOffRefusal::Other(PROGRAM_REFUSED.to_owned()))
             );
             // ② An executable behind a link, and the `.txt` on the link's name
             //    is the lie the mode sees through.
@@ -1574,28 +1689,19 @@ mod macos_handoff {
                     false
                 ))
             );
-            // ⑥ A link to nothing is refused in the words the operating system
-            //    uses for a file that is not there — the same refusal a plain
-            //    missing path has always had, and never the product's sentence.
-            let words = |reason: &str, path: &std::path::Path| {
-                reason
-                    .strip_prefix(&format!("{path:?}: "))
-                    .map(str::to_owned)
-            };
+            // ⑥ A link to nothing is refused as a file that is not there — the
+            //    same refusal a plain missing path has, and never the product's
+            //    sentence.
             let broken = openable_target(&dangling).expect_err("a link to nothing opens nothing");
             let gone = openable_target(&missing).expect_err("a path that is not there");
-            assert!(
-                !broken.contains(PROGRAM_REFUSED),
+            assert_eq!(
+                broken,
+                HandOffRefusal::NotFound,
                 "a link to nothing is not a program: {broken:?}"
             );
-            assert!(
-                words(&broken, &dangling).is_some(),
-                "the refusal names the path the reader gave: {broken:?}"
-            );
             assert_eq!(
-                words(&broken, &dangling),
-                words(&gone, &missing),
-                "a link to nothing is refused in the same words a missing file is"
+                broken, gone,
+                "a link to nothing is refused as a missing file is"
             );
 
             let _ = std::fs::remove_dir_all(&root);
@@ -1628,7 +1734,8 @@ mod macos_handoff {
                 shell_execute(window, "https://example.invalid/\0"),
             ];
             for refusal in refusals {
-                let reason = refusal.expect_err("each of these is refused");
+                let refusal = refusal.expect_err("each of these is refused");
+                let reason = refusal.reason();
                 assert!(!reason.is_empty(), "a refusal says something");
                 assert!(
                     !reason.contains(PROGRAM_REFUSED),
@@ -1636,6 +1743,71 @@ mod macos_handoff {
                 );
             }
             let _ = std::fs::remove_dir_all(&directory);
+        }
+
+        /// RED (T-HANDOFF-DOOR-REASON) — **a URL no application claims is "no handler", said
+        /// before anything is opened.**
+        ///
+        /// `openURL:` answers only `NO`, so the door asks LaunchServices first. Through the seam
+        /// [`hand_over_through`] — the ask and the open are stand-ins here, so nothing reaches
+        /// LaunchServices — an unclaimed scheme is [`HandOffRefusal::NoHandler`] and the open is
+        /// never called; a claimed one the system then declines is [`HandOffRefusal::Other`]; a
+        /// `file:` URL whose path is not there is [`HandOffRefusal::NotFound`] before either is
+        /// asked; and a claimed URL the system takes is `Ok`.
+        ///
+        /// MUTATION: skip the ask (drop the `claimed` test in `hand_over_through`) and the
+        /// unclaimed URL is opened and refused as `Other`.
+        #[test]
+        fn an_unclaimed_url_is_no_handler_before_anything_opens() {
+            let address =
+                |text: &str| NSURL::URLWithString(&NSString::from_str(text)).expect("an address");
+            let opened = std::cell::Cell::new(0_u32);
+            let open = |answer: bool| {
+                let opened = &opened;
+                move |_: &NSURL| {
+                    opened.set(opened.get() + 1);
+                    answer
+                }
+            };
+            let unclaimed = address("folio-unclaimed-test:%E6%96%87%E6%A1%A3");
+            assert_eq!(
+                hand_over_through(&unclaimed, "an address", &|_| false, &open(false)),
+                Err(HandOffRefusal::NoHandler),
+                "nothing claims it, so nothing can open it"
+            );
+            assert_eq!(opened.get(), 0, "and it was never handed over");
+
+            assert_eq!(
+                hand_over_through(&unclaimed, "an address", &|_| true, &open(false)),
+                Err(HandOffRefusal::Other(
+                    "the system did not open an address".to_owned()
+                )),
+                "a claimed URL the system declines is its own refusal"
+            );
+            assert_eq!(opened.get(), 1);
+
+            let root = scratch("unclaimed");
+            let missing = root.join("不在 here.txt");
+            let url = file_url(&missing, false).expect("a file URL");
+            assert_eq!(
+                hand_over_through(
+                    &url,
+                    "a file",
+                    &|_| panic!("a file that is not there is not asked about"),
+                    &open(true),
+                ),
+                Err(HandOffRefusal::NotFound),
+                "a path that is not there is said as one"
+            );
+            let present = root.join("文档.txt");
+            std::fs::write(&present, b"x").expect("a document");
+            let url = file_url(&present, false).expect("a file URL");
+            assert_eq!(
+                hand_over_through(&url, "a file", &|_| true, &open(true)),
+                Ok(())
+            );
+            assert_eq!(opened.get(), 2, "only the last two were handed over");
+            let _ = std::fs::remove_dir_all(&root);
         }
 
         /// RED — **a reveal asks the disk before it asks Finder**, because
@@ -1856,9 +2028,9 @@ mod windows_handoff {
     use windows::core::PCWSTR;
 
     use super::{
-        DEFAULT_PATHEXT, PROGRAM_REFUSED, VerifiedTarget, names_a_program, normalised_target,
-        program_in_directories, reveal_argument_form, reveal_arguments, validate_local_image_path,
-        validate_openable_path,
+        DEFAULT_PATHEXT, HandOffRefusal, PROGRAM_REFUSED, VerifiedTarget, names_a_program,
+        normalised_target, program_in_directories, reveal_argument_form, reveal_arguments,
+        validate_local_image_path, validate_openable_path,
     };
     // `the_system_calls_it_dangerous` stood here from audit 3 C-4 (2026-09-20) until the closure
     // re-review of 2026-09-21. It put `AssocIsDangerous` and `SHGetFileInfo(SHGFI_EXETYPE)` in
@@ -1941,7 +2113,7 @@ mod windows_handoff {
         program: &str,
         arguments: Option<&std::ffi::OsStr>,
         directory: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<(), HandOffRefusal> {
         let _ = window;
         let_the_receiver_take_the_front();
         shell_execute_w(program, arguments, directory)
@@ -1954,7 +2126,7 @@ mod windows_handoff {
         program: &str,
         arguments: Option<&std::ffi::OsStr>,
         directory: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<(), HandOffRefusal> {
         let mut operation = wide("open");
         let mut program = wide(program);
         let mut arguments = arguments.map(wide_os);
@@ -1974,11 +2146,41 @@ mod windows_handoff {
                 SW_SHOWNORMAL,
             )
         };
-        let code = result.0 as isize;
-        if code <= 32 {
-            Err(format!("ShellExecuteW failed with code {code}"))
-        } else {
-            Ok(())
+        answer_of_shell_execute(result.0 as isize)
+    }
+
+    /// **What `ShellExecuteW`'s return value says**, as the refusal it is (T-HANDOFF-DOOR-REASON).
+    ///
+    /// Above 32 the call succeeded. At or below it the value is one of the documented failure
+    /// codes, and four of them are a kind both platforms can name: `SE_ERR_NOASSOC` (31) — no
+    /// program is associated with the target — is [`HandOffRefusal::NoHandler`];
+    /// `ERROR_FILE_NOT_FOUND` / `SE_ERR_FNF` (2) and `ERROR_PATH_NOT_FOUND` / `SE_ERR_PNF` (3) are
+    /// [`HandOffRefusal::NotFound`]; `SE_ERR_ACCESSDENIED` (5) is [`HandOffRefusal::AccessDenied`].
+    /// Every other code — out of memory (0, 8), a bad image (11), a sharing violation (26), an
+    /// incomplete association (27: a program is registered and its entry is broken), the DDE
+    /// failures (28–30), a missing library (32) — is [`HandOffRefusal::Other`] with the code and
+    /// its documented name.
+    fn answer_of_shell_execute(code: isize) -> Result<(), HandOffRefusal> {
+        let named = |name: &str| {
+            Err(HandOffRefusal::Other(format!(
+                "ShellExecuteW failed with code {code} ({name})"
+            )))
+        };
+        match code {
+            33.. => Ok(()),
+            31 => Err(HandOffRefusal::NoHandler),
+            2 | 3 => Err(HandOffRefusal::NotFound),
+            5 => Err(HandOffRefusal::AccessDenied),
+            0 => named("out of memory or resources"),
+            8 => named("SE_ERR_OOM"),
+            11 => named("ERROR_BAD_FORMAT"),
+            26 => named("SE_ERR_SHARE"),
+            27 => named("SE_ERR_ASSOCINCOMPLETE"),
+            28 => named("SE_ERR_DDETIMEOUT"),
+            29 => named("SE_ERR_DDEFAIL"),
+            30 => named("SE_ERR_DDEBUSY"),
+            32 => named("SE_ERR_DLLNOTFOUND"),
+            _ => named("undocumented"),
         }
     }
 
@@ -1988,13 +2190,15 @@ mod windows_handoff {
     /// What it can hold is the *order* of the two calls and the exact program
     /// and argument handed over — the real producer's output — and what it
     /// cannot hold is what Explorer then does with them, which is the owner's
-    /// machine's question and not a unit test's.
+    /// machine's question and not a unit test's. Its return value is the one
+    /// the test scripted on this thread (`recorded::answer_with`), read
+    /// through the same [`answer_of_shell_execute`] the real call's is.
     #[cfg(test)]
     fn shell_execute_w(
         program: &str,
         arguments: Option<&std::ffi::OsStr>,
         directory: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<(), HandOffRefusal> {
         recorded::note(format!(
             "ShellExecuteW {program} {} in {}",
             arguments.map_or_else(String::new, |arguments| arguments
@@ -2002,7 +2206,7 @@ mod windows_handoff {
                 .into_owned()),
             directory.display()
         ));
-        Ok(())
+        answer_of_shell_execute(recorded::scripted_code())
     }
 
     /// **Let whichever process receives this hand-off come to the front**
@@ -2128,9 +2332,11 @@ mod windows_handoff {
     /// this bridge supplies the audited UTF-16 boundary and the working
     /// directory. No parameters are supplied, so the address is never reparsed
     /// as a command line.
-    pub fn shell_execute(window: NativeWindow, target: &str) -> Result<(), String> {
+    pub fn shell_execute(window: NativeWindow, target: &str) -> Result<(), HandOffRefusal> {
         if target.contains('\0') {
-            return Err("ShellExecuteW target contains an embedded NUL".to_owned());
+            return Err("ShellExecuteW target contains an embedded NUL"
+                .to_owned()
+                .into());
         }
         hand_over(window, target, None, &system_directory())
     }
@@ -2144,7 +2350,7 @@ mod windows_handoff {
     /// no embedded NUL, no verbatim spelling) over the name **Windows will
     /// resolve**, and supplies no parameters, preventing command-line
     /// reinterpretation. It performs no event-thread file I/O.
-    pub fn open_local_file(window: NativeWindow, path: &Path) -> Result<(), String> {
+    pub fn open_local_file(window: NativeWindow, path: &Path) -> Result<(), HandOffRefusal> {
         let path = normalised_target(path).ok_or_else(|| "path has no name".to_owned())?;
         validate_local_image_path(&path)?;
         hand_over(window, &path.to_string_lossy(), None, &folder_of(&path))
@@ -2172,7 +2378,7 @@ mod windows_handoff {
     /// normalised first and everything below — the extension check and the
     /// hand-off — uses that one value, so there is no spelling in which the two
     /// can be talking about different files.
-    pub fn open_local_path(window: NativeWindow, path: &Path) -> Result<(), String> {
+    pub fn open_local_path(window: NativeWindow, path: &Path) -> Result<(), HandOffRefusal> {
         let path = normalised_target(path).ok_or_else(|| "path has no name".to_owned())?;
         validate_openable_path(&path)?;
         // **The list, and only the list** (closure re-review, 2026-09-21). The three surfaces
@@ -2180,7 +2386,7 @@ mod windows_handoff {
         // references cannot reach this door at all — see the note above for the floor that was
         // tried here and taken out again.
         if names_a_program(&path, std::env::var("PATHEXT").unwrap_or_default().as_str()) {
-            return Err(PROGRAM_REFUSED.to_owned());
+            return Err(HandOffRefusal::Other(PROGRAM_REFUSED.to_owned()));
         }
         hand_over(window, &path.to_string_lossy(), None, &folder_of(&path))
     }
@@ -2201,9 +2407,9 @@ mod windows_handoff {
         window: NativeWindow,
         path: &Path,
         target: VerifiedTarget,
-    ) -> Result<(), String> {
+    ) -> Result<(), HandOffRefusal> {
         if !target.exists {
-            return Err(format!("{path:?}: not there"));
+            return Err(HandOffRefusal::NotFound);
         }
         open_local_path(window, path)
     }
@@ -2227,7 +2433,7 @@ mod windows_handoff {
     /// The one program this can ever launch is Explorer, and it is named
     /// absolutely so that a `explorer.exe` in some working directory cannot be
     /// the one that starts.
-    pub fn reveal_in_explorer(window: NativeWindow, path: &Path) -> Result<(), String> {
+    pub fn reveal_in_explorer(window: NativeWindow, path: &Path) -> Result<(), HandOffRefusal> {
         let arguments =
             reveal_arguments(path).ok_or_else(|| "path is not one to reveal".to_owned())?;
         hand_explorer_the_argument(window, arguments)
@@ -2251,9 +2457,9 @@ mod windows_handoff {
         window: NativeWindow,
         path: &Path,
         target: VerifiedTarget,
-    ) -> Result<(), String> {
+    ) -> Result<(), HandOffRefusal> {
         if !target.exists {
-            return Err("path is not one to reveal".to_owned());
+            return Err(HandOffRefusal::NotFound);
         }
         // `reveal_arguments`' own order, with its two disk calls already made: it validated the
         // *printed* spelling, then built the argument from the **resolved** one. A `None` there
@@ -2274,7 +2480,7 @@ mod windows_handoff {
     fn hand_explorer_the_argument(
         window: NativeWindow,
         arguments: std::ffi::OsString,
-    ) -> Result<(), String> {
+    ) -> Result<(), HandOffRefusal> {
         let explorer = windows_directory().join("explorer.exe");
         hand_over(
             window,
@@ -2308,7 +2514,7 @@ mod windows_handoff {
     /// one a program is drawing with is a decision that was never a terminal's
     /// to take. So there is no in-app font management behind this door and
     /// there will not be — the door is the whole feature.
-    pub fn open_system_fonts_page(window: NativeWindow) -> Result<(), String> {
+    pub fn open_system_fonts_page(window: NativeWindow) -> Result<(), HandOffRefusal> {
         let system = system_directory();
         if hand_over(window, crate::FONT_SETTINGS_URI, None, &system).is_ok() {
             return Ok(());
@@ -2345,6 +2551,22 @@ mod windows_handoff {
         /// Everything noted on this thread since the last take, oldest first.
         pub(in super::super) fn take() -> Vec<String> {
             CALLS.with(|calls| std::mem::take(&mut *calls.borrow_mut()))
+        }
+
+        thread_local! {
+            /// What the written-down call returns on this thread: 42 — above 32, the call
+            /// succeeded — until a test scripts another.
+            static CODE: std::cell::Cell<isize> = const { std::cell::Cell::new(42) };
+        }
+
+        /// Script the value every later written-down call on this thread returns.
+        pub(in super::super) fn answer_with(code: isize) {
+            CODE.with(|scripted| scripted.set(code));
+        }
+
+        /// The value scripted on this thread.
+        pub(super) fn scripted_code() -> isize {
+            CODE.with(std::cell::Cell::get)
         }
     }
 }
@@ -2629,7 +2851,7 @@ mod tests {
         let refusal = reveal_in_explorer(window, Path::new("/Users/a/a\"b .txt"))
             .expect_err("the file manager has not been asked yet on this platform");
         assert!(
-            !refusal.is_empty() && refusal != PROGRAM_REFUSED,
+            !refusal.reason().is_empty() && refusal.reason() != PROGRAM_REFUSED,
             "a refusal carries its own reason: {refusal:?}"
         );
         assert_eq!(
@@ -2876,9 +3098,88 @@ mod tests {
                 let program = scratch.join("payload.exe");
                 assert_eq!(
                     shell.hand_over(window, &Handoff::Open(program)),
-                    Err(PROGRAM_REFUSED.to_owned())
+                    Err(HandOffRefusal::Other(PROGRAM_REFUSED.to_owned()))
                 );
                 assert!(windows_handoff::recorded::take().is_empty());
+            },
+        )
+        .expect("the door starts a thread");
+        if let Err(panic) = lane.join() {
+            std::panic::resume_unwind(panic);
+        }
+
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&scratch);
+    }
+
+    /// RED (T-HANDOFF-DOOR-REASON) — **`ShellExecuteW`'s refusal is read by its code**: no
+    /// association is "no handler", a missing file or path is "not found", access denied is
+    /// itself, and every other documented code is a refusal of no named kind that keeps the code.
+    ///
+    /// Through the door, on a thread the thread door started: an address and a picked file,
+    /// each handed over with the written-down call scripted to return one documented value
+    /// (`recorded::answer_with`), so no real `ShellExecuteW` is made and what is held is the
+    /// door's own reading of the value.
+    ///
+    /// MUTATION: answer every code at or below 32 with `HandOffRefusal::Other` in
+    /// `answer_of_shell_execute`, and the four named rows go red.
+    #[cfg(windows)]
+    #[test]
+    fn a_shell_execute_no_association_is_no_handler_and_other_codes_are_what_they_are() {
+        let scratch = bt_testpath::temp_path("folio-handoff-codes");
+        std::fs::create_dir_all(&scratch).expect("a scratch directory");
+        let file = scratch.join("说明 notes.md");
+        std::fs::write(&file, "文档").expect("a scratch file");
+        let window = crate::NativeWindow::stand_in(0);
+        let requests = [
+            Handoff::Address("vscode://文档/例子".to_owned()),
+            Handoff::Open(file.clone()),
+        ];
+        let lane = crate::spawn_at_priority(
+            "bt-test-handoff-codes",
+            crate::ThreadPriority::BelowNormal,
+            move |ctx| {
+                let shell = ShellThread::enter(ctx);
+                let named = |code: isize, name: &str| {
+                    Err(HandOffRefusal::Other(format!(
+                        "ShellExecuteW failed with code {code} ({name})"
+                    )))
+                };
+                let table: [(isize, Result<(), HandOffRefusal>); 14] = [
+                    (31, Err(HandOffRefusal::NoHandler)),
+                    (2, Err(HandOffRefusal::NotFound)),
+                    (3, Err(HandOffRefusal::NotFound)),
+                    (5, Err(HandOffRefusal::AccessDenied)),
+                    (0, named(0, "out of memory or resources")),
+                    (8, named(8, "SE_ERR_OOM")),
+                    (11, named(11, "ERROR_BAD_FORMAT")),
+                    (26, named(26, "SE_ERR_SHARE")),
+                    (27, named(27, "SE_ERR_ASSOCINCOMPLETE")),
+                    (28, named(28, "SE_ERR_DDETIMEOUT")),
+                    (29, named(29, "SE_ERR_DDEFAIL")),
+                    (30, named(30, "SE_ERR_DDEBUSY")),
+                    (32, named(32, "SE_ERR_DLLNOTFOUND")),
+                    (33, Ok(())),
+                ];
+                for (code, expected) in table {
+                    windows_handoff::recorded::answer_with(code);
+                    for request in &requests {
+                        assert_eq!(
+                            shell.hand_over(window, request),
+                            expected,
+                            "code {code} for {request:?}"
+                        );
+                    }
+                }
+                let calls = windows_handoff::recorded::take();
+                assert_eq!(
+                    calls
+                        .iter()
+                        .filter(|call| call.starts_with("ShellExecuteW "))
+                        .count(),
+                    14 * requests.len(),
+                    "every row was a hand-off the door made: {calls:?}"
+                );
             },
         )
         .expect("the door starts a thread");
@@ -2905,8 +3206,8 @@ mod tests {
     /// the verb, and the refusal assertion goes red.
     #[test]
     fn a_boxed_closure_and_a_function_pointer_reach_the_hand_off_only_with_the_capability() {
-        type HandOver = dyn Fn(&WorkerCtx) -> Result<(), String>;
-        fn through_a_pointer(ctx: &WorkerCtx) -> Result<(), String> {
+        type HandOver = dyn Fn(&WorkerCtx) -> Result<(), HandOffRefusal>;
+        fn through_a_pointer(ctx: &WorkerCtx) -> Result<(), HandOffRefusal> {
             ShellThread::enter(ctx).hand_over(
                 crate::NativeWindow::stand_in(0),
                 &Handoff::Open(PathBuf::from("relative-name.md")),
@@ -2922,7 +3223,7 @@ mod tests {
                         &Handoff::Open(PathBuf::from("relative-name.md")),
                     )
                 });
-                let pointer: fn(&WorkerCtx) -> Result<(), String> = through_a_pointer;
+                let pointer: fn(&WorkerCtx) -> Result<(), HandOffRefusal> = through_a_pointer;
                 (crate::admission::role(), boxed(ctx), pointer(ctx))
             },
         )
@@ -2933,7 +3234,7 @@ mod tests {
             crate::admission::Role::Worker("bt-test-indirect-handoff")
         );
         let refusal = boxed.expect_err("a relative name is refused by every platform's door");
-        assert!(!refusal.is_empty(), "the door says why");
+        assert!(!refusal.reason().is_empty(), "the door says why");
         assert_eq!(pointer, Err(refusal), "both roads reach the same door");
     }
 }

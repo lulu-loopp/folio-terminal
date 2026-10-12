@@ -19031,8 +19031,8 @@ mod argument_split_tests {
 /// `handoff`, and [`ShellThread::hand_over`] — on a thread the door started,
 /// which alone can enter a [`ShellThread`] — is the only road to them.
 pub use handoff::{
-    Handoff, PROGRAM_REFUSED, ShellThread, VerifiedTarget, program_in_directories, program_on_path,
-    resolved_for_a_door, reveal_arguments,
+    HandOffRefusal, Handoff, PROGRAM_REFUSED, ShellThread, VerifiedTarget, program_in_directories,
+    program_on_path, resolved_for_a_door, reveal_arguments,
 };
 
 /// The two thread-band calls, off Windows.

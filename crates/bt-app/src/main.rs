@@ -24393,8 +24393,15 @@ enum LinkRefusal {
     /// The text is not an address: its host does not parse, it has no host, it holds a control
     /// character — or, for a reference, it names nothing this machine can name.
     Invalid,
-    /// The system took the hand-off and had nothing to open it with.
+    /// The system has no program to open it ([`bt_platform::HandOffRefusal::NoHandler`]).
     NoProgram,
+    /// The hand-off's target is not there ([`bt_platform::HandOffRefusal::NotFound`]).
+    NotFound,
+    /// The system refused access to the target ([`bt_platform::HandOffRefusal::AccessDenied`]).
+    AccessDenied,
+    /// The door or the system refused it for a reason of no named kind
+    /// ([`bt_platform::HandOffRefusal::Other`]); its words are the stderr line's.
+    NotOpened,
     /// An address the door will not go to: a scheme, userinfo, a page asking for a window.
     Door,
     /// The hand-off failed on the OS hand-off lane: nothing declined it (S-5).
@@ -24419,11 +24426,24 @@ impl LinkRefusal {
         }
     }
 
+    /// The refusal a hand-off door's answer is, by its kind (T-HANDOFF-DOOR-REASON).
+    fn of_door(refusal: &bt_platform::HandOffRefusal) -> Self {
+        match refusal {
+            bt_platform::HandOffRefusal::NoHandler => Self::NoProgram,
+            bt_platform::HandOffRefusal::NotFound => Self::NotFound,
+            bt_platform::HandOffRefusal::AccessDenied => Self::AccessDenied,
+            bt_platform::HandOffRefusal::Other(_) => Self::NotOpened,
+        }
+    }
+
     /// The suffix, separator included.
     fn suffix(self, lang: i18n::Lang) -> &'static str {
         match self {
             Self::Invalid => i18n::Text::HyperlinkInvalidSuffix.in_lang(lang),
             Self::NoProgram => i18n::Text::HyperlinkNoProgramSuffix.in_lang(lang),
+            Self::NotFound => i18n::Text::HandoffNotFoundSuffix.in_lang(lang),
+            Self::AccessDenied => i18n::Text::HandoffAccessDeniedSuffix.in_lang(lang),
+            Self::NotOpened => i18n::Text::HandoffNotOpenedSuffix.in_lang(lang),
             Self::Door => i18n::Text::HyperlinkBlockedSuffix.in_lang(lang),
             Self::CouldNotRun => i18n::Text::HandoffCouldNotRunSuffix.in_lang(lang),
             Self::WorkerStopped => i18n::Text::HandoffsStoppedSuffix.in_lang(lang),
@@ -24436,6 +24456,9 @@ impl LinkRefusal {
         match self {
             Self::Invalid => i18n::Text::HyperlinkInvalid.in_lang(lang),
             Self::NoProgram => i18n::Text::HyperlinkNoProgram.in_lang(lang),
+            Self::NotFound => i18n::Text::HandoffNotFound.in_lang(lang),
+            Self::AccessDenied => i18n::Text::HandoffAccessDenied.in_lang(lang),
+            Self::NotOpened => i18n::Text::HandoffNotOpened.in_lang(lang),
             Self::Door => i18n::Text::HyperlinkBlocked.in_lang(lang),
             Self::CouldNotRun => i18n::Text::HandoffCouldNotRun.in_lang(lang),
             Self::WorkerStopped => i18n::Text::HandoffsStopped.in_lang(lang),
@@ -48962,13 +48985,18 @@ impl Runtime<'_> {
     /// all is indistinguishable from a page that opened behind us.
     ///
     /// **Handed to the OS hand-off lane** (2026-09-22), so the card arrives when the lane answers
-    /// rather than while the press is still being handled — with the door's words, as before.
+    /// rather than while the press is still being handled — in the words of the refusal's kind
+    /// (T-HANDOFF-DOOR-REASON: "no program to open it" only when there is none).
     fn open_font_settings(&mut self) -> Result<()> {
         self.hand_off(
             handoff_lane::Ask::new(
                 bt_platform::Handoff::FontsPage,
                 handoff_lane::Refusal {
-                    stderr: None,
+                    // The card says the refusal's kind; its own words are this line's.
+                    stderr: Some((
+                        "recoverable font settings hand-off failure",
+                        "open the system font settings",
+                    )),
                     program_notice: false,
                 },
             )
