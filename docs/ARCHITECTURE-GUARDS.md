@@ -38,9 +38,10 @@ The rule: the asking/telling fields of `Runtime`, `App`, `WindowState`, and
 proved multi-writer facts are explicit annotations. Unknowns may shrink but not
 grow. The owner's rulings are dated 2026-09-25. Since 2026-10-11 (O-7) the
 census also holds the document and its view, `PreviewBuffer` and
-`PreviewPane`, whose multi-writer facts are findings to fix by routing the
-write through the type's own door, not annotations (the ownership contract's
-§2.2 invariant 1).
+`PreviewPane`, and since O-8 the two contents that hold the view's state,
+`DocumentView` and `PictureView`; their multi-writer facts are findings to fix
+by routing the write through the type's own door, not annotations (the
+ownership contract's §2.2 invariant 1).
 
 Where and what to do: `crates/bt-source/tests/census.rs` compares against
 `docs/plans/design/ownership-census-{annotations,unknowns}.tsv` (the dated `ownership-census-2026-09-25.tsv` is a record, not an enforcement input), and

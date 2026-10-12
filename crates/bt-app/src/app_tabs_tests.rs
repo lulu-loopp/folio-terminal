@@ -2945,7 +2945,7 @@ fn a_preview_torn_into_a_tab_of_its_own_carries_the_document_and_the_history() {
     origin
         .preview_panes
         .entry(seat_of(TabId(1), preview_seat))
-        .scroll = [0.0, 640.0];
+        .scroll_to([0.0, 640.0]);
 
     let torn = tear_pane_into_tab(
         &mut origin,
@@ -2968,7 +2968,7 @@ fn a_preview_torn_into_a_tab_of_its_own_carries_the_document_and_the_history() {
         torn.preview_panes
             .get(torn.preview_here(seat))
             .expect("the torn pane")
-            .scroll,
+            .scroll(),
         [0.0, 640.0],
         "and the reader is where the reader was"
     );

@@ -33,14 +33,18 @@ const FIXTURE_STRUCTS: [&str; 4] = ["App", "WindowRuntime", "TabState", "LeafSes
 /// The structs whose fields the census holds over `bt-app`: the note's four,
 /// and the document and its view (ticket O-7; the ownership contract's §2.2
 /// invariant 1), so a write into a document is a row of its own and not only
-/// a lend of `TabState.preview_pool`.
-const STRUCTS: [&str; 6] = [
+/// a lend of `TabState.preview_pool` — the view being `PreviewPane` and the two
+/// contents that hold its state, a view of a pool buffer and a picture (ticket
+/// O-8, invariant 2).
+const STRUCTS: [&str; 8] = [
     "App",
     "WindowRuntime",
     "TabState",
     "LeafSession",
     "PreviewBuffer",
     "PreviewPane",
+    "DocumentView",
+    "PictureView",
 ];
 
 fn workspace_root() -> PathBuf {

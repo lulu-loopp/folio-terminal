@@ -1029,7 +1029,7 @@ impl Runtime<'_> {
     ) {
         let previous = self
             .preview_pane(surface)
-            .and_then(|p| p.doc_key.as_ref())
+            .and_then(|p| p.doc_key())
             .map_or(PictureReach::from_the_top(), |k| k.art.picture_reach);
         let doc = self.preview_pane_mut(surface).take_document();
         let PreviewDocument::Markdown {
@@ -1101,8 +1101,10 @@ impl Runtime<'_> {
         body: [f32; 4],
         scale: f32,
     ) {
-        let old_key = self.preview_pane(surface).and_then(|p| p.doc_key.clone());
-        let old_scroll = self.preview_pane(surface).map_or(0.0, |p| p.scroll[1]);
+        let old_key = self
+            .preview_pane(surface)
+            .and_then(|p| p.doc_key().cloned());
+        let old_scroll = self.preview_pane(surface).map_or(0.0, |p| p.scroll()[1]);
         self.rebuild_preview_document(surface, body, scale);
         // **The caret's own block**, which is one of the source blocks and not
         // necessarily the first of them (2026-09-23).
@@ -1113,7 +1115,7 @@ impl Runtime<'_> {
                 layout,
                 wrap,
                 ..
-            } = &pane.doc
+            } = pane.doc()
             else {
                 return None;
             };
@@ -1122,8 +1124,8 @@ impl Runtime<'_> {
             let padding = seats::preview_markdown_metrics(scale).padding_y;
             let top = padding + placed.top;
             (!wrap.viewport.records.get(index)?.exact
-                || top + placed.height <= pane.scroll[1]
-                || top >= pane.scroll[1] + body[3] - body[1])
+                || top + placed.height <= pane.scroll()[1]
+                || top >= pane.scroll()[1] + body[3] - body[1])
                 .then_some(top)
         });
         if let Some(top) = target {
@@ -1131,7 +1133,7 @@ impl Runtime<'_> {
             self.ensure_markdown_viewport(surface, body, scale);
         }
         let changed = self.preview_pane(surface).is_some_and(|p| {
-            p.doc_key != old_key || p.scroll[1] != old_scroll || p.md_prose.is_none()
+            p.doc_key() != old_key.as_ref() || p.scroll()[1] != old_scroll || p.md_prose().is_none()
         });
         if changed {
             let blocks = self.preview_prose_geometry(surface, scale, None);
@@ -1159,7 +1161,7 @@ impl Runtime<'_> {
         let (left, right) = preview::markdown_measure_box(body, metrics);
         let frame =
             preview_wrap::Frame::new(right - left, scale, self.app.gpu.font_environment_epoch());
-        let scroll = self.preview_pane(surface).map_or(0.0, |p| p.scroll[1]);
+        let scroll = self.preview_pane(surface).map_or(0.0, |p| p.scroll()[1]);
         let mut view = View {
             scroll,
             height: body[3] - body[1],
@@ -1262,15 +1264,15 @@ impl Runtime<'_> {
             let Some(pane) = self.preview_pane(surface) else {
                 return;
             };
-            let PreviewDocument::Markdown { layout, wrap, .. } = &pane.doc else {
+            let PreviewDocument::Markdown { layout, wrap, .. } = pane.doc() else {
                 return;
             };
             let view = View {
-                scroll: pane.scroll[1],
+                scroll: pane.scroll()[1],
                 height: body[3] - body[1],
                 padding: metrics.padding_y,
-                end: pane.scroll[1] > 0.0
-                    && pane.scroll[1]
+                end: pane.scroll()[1] > 0.0
+                    && pane.scroll()[1]
                         >= layout.extent() + 2.0 * metrics.padding_y - (body[3] - body[1]) - 0.5,
             };
             (view, wrap.viewport.pending(layout, view))

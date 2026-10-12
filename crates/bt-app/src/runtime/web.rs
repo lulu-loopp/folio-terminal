@@ -838,8 +838,8 @@ impl Runtime<'_> {
                             tab.seats.preview_seats().contains(&leaf.seat),
                             tab.preview_panes.get(surface).is_some_and(|pane| {
                                 a_page_was_replaced(
-                                    pane.image.as_ref().map(|image| image.path.as_path()),
-                                    pane.buffer.as_ref(),
+                                    pane.image().map(|image| image.path.as_path()),
+                                    pane.source(),
                                 )
                             }),
                         )
@@ -1120,8 +1120,9 @@ impl Runtime<'_> {
         let showing_a_page = self.window.tabs[index]
             .preview_panes
             .get(surface)
-            .and_then(|pane| pane.buffer.as_ref())
-            .is_some_and(|source| source.web_url().is_some());
+            .is_some_and(|pane| {
+                matches!(pane.content(), crate::pane_content::PaneContent::Page(_))
+            });
         if !showing_a_page {
             self.leave_preview_buffer_in(index, surface);
         }
@@ -1597,7 +1598,7 @@ impl Runtime<'_> {
                     return None;
                 };
                 debug_assert_eq!(leaf.tab, id, "a tab's panes are filed under its own leaves");
-                let (url, minted) = revived_page_of(pane.buffer.as_ref()?)?;
+                let (url, minted) = revived_page_of(pane.source()?)?;
                 Some((leaf, url, minted))
             })
             .collect();
@@ -1661,10 +1662,10 @@ impl Runtime<'_> {
             || webnav::site_label(&key),
             |buffer| buffer.name().to_owned(),
         );
-        tab.preview_pool.open(source.clone(), name, &shown);
+        let (held, _) = tab.preview_pool.open_held(source, name, &shown);
         // No caret and no scroll to file or restore: a page's view is the
         // engine's, and this window has never held one.
-        tab.preview_panes.entry(surface).show_source(source);
+        tab.preview_panes.entry(surface).show_source(held);
         self.mark_session_dirty(Instant::now());
         self.refresh_preview_for_layout();
         self.refresh_chrome();

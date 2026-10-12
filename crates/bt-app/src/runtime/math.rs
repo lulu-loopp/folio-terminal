@@ -715,8 +715,8 @@ impl Runtime<'_> {
             return (!text.is_empty()).then(|| text.to_owned());
         }
         let pane = self.preview_pane(surface)?;
-        let selection = pane.md_select?;
-        let PreviewDocument::Markdown { blocks, .. } = &pane.doc else {
+        let selection = pane.md_select().copied()?;
+        let PreviewDocument::Markdown { blocks, .. } = pane.doc() else {
             return None;
         };
         let pieces = preview_select::pieces(blocks);
@@ -733,7 +733,7 @@ impl Runtime<'_> {
         event: &KeyEvent,
     ) -> Result<bool> {
         if !matches!(
-            self.preview_pane(surface).map(|pane| &pane.doc),
+            self.preview_pane(surface).map(|pane| pane.doc()),
             Some(PreviewDocument::Markdown { .. })
         ) {
             return Ok(false);
@@ -746,7 +746,7 @@ impl Runtime<'_> {
                 self.copy_preview_text_selection(surface);
             }
             PreviewTextCommand::SelectAll => {
-                let selection = match &self.preview_pane(surface).map(|pane| &pane.doc) {
+                let selection = match &self.preview_pane(surface).map(|pane| pane.doc()) {
                     Some(PreviewDocument::Markdown { blocks, .. }) => {
                         preview_select::select_all(&preview_select::pieces(blocks))
                     }
@@ -763,7 +763,7 @@ impl Runtime<'_> {
             PreviewTextCommand::Clear => {
                 if self
                     .preview_pane(surface)
-                    .is_none_or(|pane| pane.md_select.is_none())
+                    .is_none_or(|pane| pane.md_select().is_none())
                 {
                     // Nothing to let go of — `Esc` falls through to whatever
                     // else on this surface wants it.
@@ -899,7 +899,7 @@ impl Runtime<'_> {
             columns,
             advance,
             self.preview_pane(surface)
-                .map_or([0.0, 0.0], |pane| pane.scroll),
+                .map_or([0.0, 0.0], |pane| pane.scroll()),
         )
     }
 

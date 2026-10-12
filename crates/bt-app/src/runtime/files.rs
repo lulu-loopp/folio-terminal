@@ -1166,7 +1166,7 @@ impl Runtime<'_> {
         let path = match host {
             files::FilesHost::Preview(surface) => self
                 .preview_pane(surface)
-                .and_then(|pane| pane.neighbours.as_ref())
+                .and_then(crate::PreviewPane::neighbours)
                 .filter(|held| held.path == Path::new(key))
                 .map(|held| held.path.clone()),
             files::FilesHost::Docked(leaf) => self
@@ -1346,12 +1346,11 @@ impl Runtime<'_> {
             let Some(pane) = self.preview_pane(surface) else {
                 continue;
             };
-            let Some(folder) = pane.image.as_ref().and_then(|image| image.path.parent()) else {
+            let Some(folder) = pane.image().and_then(|image| image.path.parent()) else {
                 continue;
             };
             let Some(held) = pane
-                .neighbours
-                .as_ref()
+                .neighbours()
                 .filter(|held| held.path == folder && held.listing.is_some())
             else {
                 continue;
@@ -1374,7 +1373,7 @@ impl Runtime<'_> {
         match host {
             files::FilesHost::Preview(surface) => self
                 .preview_pane(surface)
-                .and_then(|pane| pane.neighbours.as_ref())
+                .and_then(crate::PreviewPane::neighbours)
                 .is_some_and(|held| held.path == Path::new(key) && held.listing.is_some()),
             files::FilesHost::Docked(leaf) => self
                 .window
