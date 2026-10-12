@@ -5,11 +5,18 @@
 # one tree, bt-source's `census` test holds the code to it: the code's unknowns
 # must be a subset of the list. This is the other half, across commits, as
 # `check-migration-debt.ps1` is for MIGRATION-DEBT.tsv (the census note's
-# revision (b)2 section 5): **the rows of unknown sites may only disappear
-# against the merge base.** Rows are compared whole and with multiplicity, so a
-# moved or replaced unknown is an added row even when another row disappeared
-# and the total stayed level. A row added by hand to let a new unknown past the
-# test is refused.
+# revision (b)2 section 5): **the unknown list is keyed by identity, and
+# measurements may only shrink, against the merge base.** An unknown's identity
+# is its first four columns, `site`, `module`, `function` and `reason` — the key
+# bt_source::FieldCensus renders one row per and judges by; `sites`, the number
+# of sites behind that key, is its measurement. A key the merge base does not
+# carry is an added unknown, and a key whose `sites` is larger than the merge
+# base's is a grown one: both are refused, by key, whatever else shrank or
+# disappeared beside them, so a moved or replaced unknown is refused even when
+# the row count and the summed `sites` stay level. A key that disappeared or
+# whose `sites` went down is the list shrinking, which is what regenerating it
+# with `scripts/generate-ownership-census.ps1` after a fix writes. A key is
+# never added or grown by hand to let a new unknown past the test.
 #
 # The baseline is the list committed at `git merge-base HEAD origin/main`. When
 # the merge base has no list (the branch that introduces it), the baseline is
@@ -28,8 +35,9 @@
 # It reads only the committed TSVs, through git and the working tree.
 # `.github/workflows/ci.yml` runs it in `logic`, and `gates-can-fail` plants a
 # hand-added unknown row (it must go red), including when an old row is removed
-# in the same change and the number of rows and sites stays level, and an added
-# annotation row that says "proposed".
+# in the same change and the number of rows and sites stays level, a row whose
+# `sites` grew by one (red, naming the key), and an added annotation row that
+# says "proposed".
 
 $ErrorActionPreference = "Stop"
 
@@ -49,9 +57,12 @@ $annotations = Join-Path $repo $annotationsRelative
 # The commit that seeded the list (census-1).
 $seed = "7a53d4294eab7726813ca000119a496c27883708"
 
-# A row is a data line: not blank, not a comment, not the column header.
-function Read-CensusRows([string[]]$lines, [string]$where) {
-    $rows = @()
+# A row is a data line: not blank, not a comment, not the column header. Each
+# row is one unknown: its key (the first four columns, tab-joined) and its
+# `sites`. The list carries a key once — FieldCensus renders one row per key —
+# and a second row with the same key is refused rather than read as either.
+function Read-CensusUnknowns([string[]]$lines, [string]$where) {
+    $unknowns = [ordered]@{}
     $header = $false
     foreach ($line in $lines) {
         if ($line.Length -eq 0 -or $line.StartsWith("#")) { continue }
@@ -68,10 +79,20 @@ function Read-CensusRows([string[]]$lines, [string]$where) {
         if (-not [int]::TryParse($columns[4], [ref]$sites) -or $sites -lt 1) {
             throw "$where has a row whose sites column is not a positive integer: $line"
         }
-        $rows += $line
+        $key = $columns[0..3] -join "`t"
+        if ($unknowns.Contains($key)) {
+            throw "$where carries the unknown $(Format-UnknownKey $key) on two rows; each key has one row"
+        }
+        $unknowns[$key] = $sites
     }
     if (-not $header) { throw "$where has no column header" }
-    return , $rows
+    return $unknowns
+}
+
+# A key as the census's own message spells it: `?.files in crate::seats::rail_chrome (reason)`.
+function Format-UnknownKey([string]$key) {
+    $columns = $key.Split("`t")
+    return "$($columns[0]) in $($columns[1])::$($columns[2]) ($($columns[3]))"
 }
 
 # An annotation row: fact, part, class, owner, note.
@@ -94,7 +115,8 @@ function Read-AnnotationRows([string[]]$lines, [string]$where) {
     return , $rows
 }
 
-# The rows of $now that are not in $before, whole rows with multiplicity.
+# The annotation rows of $now that are not in $before, whole rows with
+# multiplicity: an annotation has no measurement, so a rewritten row is added.
 function Get-AddedRows([string[]]$before, [string[]]$now) {
     $allowed = @{}
     foreach ($row in $before) {
@@ -117,7 +139,7 @@ if (-not (Test-Path -LiteralPath $list)) {
 
 Push-Location $repo
 try {
-    $now = Read-CensusRows ([IO.File]::ReadAllLines($list)) "$relative (working tree)"
+    $now = Read-CensusUnknowns ([IO.File]::ReadAllLines($list)) "$relative (working tree)"
 
     $base = $null
     & git rev-parse --verify --quiet refs/remotes/origin/main *> $null
@@ -127,7 +149,7 @@ try {
         if ($status -eq 0) { $base = @($found)[0] }
     }
     if (-not $base) {
-        Write-Host "no merge base with origin/main in this clone - $relative has $($now.Count) rows and nothing to compare them against."
+        Write-Host "no merge base with origin/main in this clone - $relative has $($now.Count) unknowns and nothing to compare them against."
         Write-Host "This is not a pass: the comparison did not happen. Run 'git fetch origin main' and try again."
         exit 2
     }
@@ -146,7 +168,7 @@ try {
         $from = "the seed $($seed.Substring(0, 12))"
         $baseline = $seed
     }
-    $before = Read-CensusRows ($text -split "`r?`n") "$relative at $from"
+    $before = Read-CensusUnknowns ($text -split "`r?`n") "$relative at $from"
 
     $annotationText = (& git show "${baseline}:${annotationsRelative}" 2>$null) | Out-String
     if ($LASTEXITCODE -ne 0) {
@@ -159,21 +181,41 @@ try {
     Pop-Location
 }
 
-$added = Get-AddedRows $before $now
-$removed = $before.Count - ($now.Count - $added.Count)
-Write-Host "$relative against ${from}: $($before.Count) rows -> $($now.Count), $($added.Count) added, $removed removed."
+$added = @()
+$grown = @()
+$shrunk = 0
+foreach ($key in $now.Keys) {
+    if (-not $before.Contains($key)) {
+        $added += "    $(Format-UnknownKey $key): $($now[$key]) site(s), not at $from"
+    } elseif ($now[$key] -gt $before[$key]) {
+        $grown += "    $(Format-UnknownKey $key): $($now[$key]) site(s), $($before[$key]) at $from"
+    } elseif ($now[$key] -lt $before[$key]) {
+        $shrunk += 1
+    }
+}
+$removed = @($before.Keys | Where-Object { -not $now.Contains($_) }).Count
+Write-Host ("$relative against ${from}: $($before.Count) unknowns -> $($now.Count), " +
+    "$($added.Count) added, $($grown.Count) grown, $shrunk shrunk, $removed removed.")
 
-if ($added.Count -gt 0) {
-    $details = ($added | ForEach-Object { "    $_" }) -join [Environment]::NewLine
+if ($added.Count + $grown.Count -gt 0) {
+    $details = @()
+    if ($added.Count -gt 0) {
+        $details += "$($added.Count) unknown(s) added:"
+        $details += $added
+    }
+    if ($grown.Count -gt 0) {
+        $details += "$($grown.Count) unknown(s) whose sites grew:"
+        $details += $grown
+    }
     throw (
-        "$($added.Count) row(s) were added to the census's unknown list against ${from}, and this list only shrinks:" +
-        [Environment]::NewLine + $details + [Environment]::NewLine +
+        "the census's unknown list grew against ${from}, and it is keyed by identity with measurements that only shrink:" +
+        [Environment]::NewLine + ($details -join [Environment]::NewLine) + [Environment]::NewLine +
         "Resolve the new site in the code (the rules are bt_source::FieldCensus's), or restructure it so " +
-        "the census can read it; a row is never added to $relative to let a new unknown past the census test."
+        "the census can read it; an unknown is never added or grown in $relative to let a new site past the census test."
     )
 }
 
-Write-Host "ownership-census unknown rows only shrank. PASS"
+Write-Host "ownership-census unknowns are keyed by identity and only shrank. PASS"
 
 $addedAnnotations = Get-AddedRows $annotationsBefore $annotationsNow
 $undecided = @($addedAnnotations | Where-Object {
