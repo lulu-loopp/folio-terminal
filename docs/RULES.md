@@ -1700,7 +1700,8 @@ revisions (c)2, (d)2): each owed one is sent and every answer processed until ea
 has landed or has a terminal answer, by `quit::QUIT_DOCUMENTS_BY`; each with a
 terminal answer is copied into the data directory's `recovered` folder by
 `quit::QUIT_RECOVERY_BY` — both inside the one `SESSION_SAVE_BUDGET`, and the
-session write only behind them. A document unanswered in time, or a copy refused
+session write only behind them and only with what is left of that budget (none
+left: it is given up as a timed-out write, with no new flush on the way out). A document unanswered in time, or a copy refused
 or unanswered in time, cancels the quit: the windows stay and one card names the
 files with one choice, *Leave without this change*, which alone leaves without
 them; a quit asked again runs the transaction again. **The spare web controller shares the run's one

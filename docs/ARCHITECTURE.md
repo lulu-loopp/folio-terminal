@@ -1987,7 +1987,15 @@ folder (create-new, the file and the folder flushed) by `quit::QUIT_RECOVERY_BY`
 Both bounds are measured from the start of the documents phase and derived
 from the one `persist::SESSION_SAVE_BUDGET`; each is a clock read on the turn,
 never a wait, and while the quit holds the worker nothing else of the run's is
-queued on it, so the session write goes behind the documents and their copies.
+queued behind the documents and their copies — except an update trial's receipt,
+which goes ahead of them (`StorageLane::submit_ahead`: a small create-new write the
+trial is rolled back without) — so the session write goes behind them. **The session
+write spends only what is left of that one budget**: its wait, the ordinary quit's
+judged flush and an update's receipt alike, ends at `Quit::session_write_until`
+(the documents phase's start plus `SESSION_SAVE_BUDGET`), and a quit that reaches
+it with nothing left hands nothing over and leaves without a new flush
+(`SessionStore::flush_for_quit`: the write given up as a timed-out one, the way
+out's close not flushing again, `session.lock` left standing).
 A document still unanswered at the first bound, or a copy refused or unanswered
 at the second, **cancels the quit**: the windows stay, `diagnostics.log` names
 every such file with why, and one Error card on the window names the files (at

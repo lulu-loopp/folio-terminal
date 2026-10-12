@@ -298,7 +298,7 @@ the launch's session backup	SessionStore::queue_launch_backup	session-writer	det
 quit's session write wait	SessionWriter::wait_for	window (row 16)	return	a timeout lets the quit go on; a stopped writer stops it	the one generation it waits for	—	owner-thread
 the session writer's close	SessionWriter::close	window (row 16b)	return	past the budget the writer is let go	—	—	owner-thread
 an update quit's session receipt	SessionStore::hand_over_final	session-writer	polled	a refused write stops the quit; overdue past `UPDATE_RECEIPT_DEADLINE`	the one generation it waits for	—	D-88
-the trial's receipt	SessionStore::write_receipt	session-writer	polled	a failed write is written again on a doubling backoff; a dead writer reads as pending	one per process	—	D-88, D-89
+the trial's receipt	SessionStore::write_receipt	session-writer	polled	a failed write is written again on a doubling backoff; a dead writer reads as pending	one per process, admitted ahead of the queue (served before every job still queued, a quit's documents and copies among them)	—	D-88, D-89
 the update hand-off at quit	FolioApp::hand_the_update_over	session-writer	polled	overdue past `HANDOFF_DEADLINE`, one line	one per quit	dropped when the quit ends	D-88
 a document's save	Runtime::save_preview_on	window (row 20)	return	`SaveOutcome::{Conflict, Failed}` to the pane	—	—	row 20
 a preview file's rename	Runtime::rename_preview_file	window (row 20)	return	a toast	—	—	row 20
