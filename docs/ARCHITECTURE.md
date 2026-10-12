@@ -49,8 +49,8 @@ drop the test items; a number that moves edits this table and the pictures.
 
 | what | count | pattern |
 |---|---|---|
-| thread-spawn sites | **56** — `bt-app` 38, `bt-platform` 14, `bt-pty` 4 (T-PROGRAMS-REFRESH adds `program-walk`, T-RECOVERED-FOLDER `bt-recovered`, T-DIRWATCH-LIFECYCLE `watch-steward`, T-OS-SIGNALS-MAC `locale-reading`) — plus **one** rayon pool, `bt-term::inline_image::resample_pool` (`bt-image-resample-{index}`) | `spawn_at_priority(_with_stack)?\(`, `thread::spawn\(`, `thread::Builder::new\(\)`, `ThreadPoolBuilder::new\(\)` |
-| through the thread door | **52** — `bt-app` 38, `bt-platform` 14; each is a `Worker` by its name and its body is lent a `WorkerCtx` (A1b, A1c; T-PROBE-CHILD adds the probe-output reader site; T-ENV-REFRESH round 4 removes the launch-snapshot worker; T-DIRWATCH-LIFECYCLE adds `watch-steward`; T-OS-SIGNALS-MAC adds `locale-reading`). A source guard holds both crates to it, and holds `bt-effects`, the vocabulary the door lends from, to starting none (the assertion `every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` of `hang_watch::window_waits_tests::every_door_is_where_the_registry_says`, since A1e) | `spawn_at_priority` |
+| thread-spawn sites | **57** — `bt-app` 39, `bt-platform` 14, `bt-pty` 4 (T-PROGRAMS-REFRESH adds `program-walk`, T-RECOVERED-FOLDER `bt-recovered`, T-DIRWATCH-LIFECYCLE `watch-steward`, T-OS-SIGNALS-MAC `locale-reading`, S-3 the seam's `lane::Executor::start_worker`, whose thread the lane that calls it names) — plus **one** rayon pool, `bt-term::inline_image::resample_pool` (`bt-image-resample-{index}`) | `spawn_at_priority(_with_stack)?\(`, `thread::spawn\(`, `thread::Builder::new\(\)`, `ThreadPoolBuilder::new\(\)` |
+| through the thread door | **53** — `bt-app` 39, `bt-platform` 14; each is a `Worker` by its name and its body is lent a `WorkerCtx` (A1b, A1c; T-PROBE-CHILD adds the probe-output reader site; T-ENV-REFRESH round 4 removes the launch-snapshot worker; T-DIRWATCH-LIFECYCLE adds `watch-steward`; T-OS-SIGNALS-MAC adds `locale-reading`; S-3 adds `lane::Executor::start_worker`). A source guard holds both crates to it, and holds `bt-effects`, the vocabulary the door lends from, to starting none (the assertion `every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` of `hang_watch::window_waits_tests::every_door_is_where_the_registry_says`, since A1e) | `spawn_at_priority` |
 | bare spawns | **4**, all in `bt-pty` and `Unset` by design: the reader, the writer, the dump publisher (unnamed) and `pty-retirement` | `thread::spawn\(`, `thread::Builder::new\(\)` |
 | of those through the door, in a door process rather than the window process | **4**: `folio-attention-stdin` (`attention_wire::payload_on_stdin`), `folio-explorer-removal` (`explorer_menu::remove_from_explorer_menu`), `folio-explorer-cleanup` (`explorer_menu::cleanup_registrations`), and `folio-remover-ready` (`deferred_removal::schedule`'s readiness pipe); each process's main thread waits as a worker, entered once through `enter_standalone_main`. The uninstaller and copied-remover doors enter once for their whole runs, so their process waits and retry backoff through `wait::sleep_within` are workers' waits too | `enter_standalone_main\(` |
 | named sites / distinct names | **53 / 49**, besides the pool (T-OS-SIGNALS-MAC adds `locale-reading`) | the first argument, or `.name(…)` |
@@ -1159,7 +1159,22 @@ for its partial contract: it passes six claims and is declared to fail two
 (D-70, D-71); the font and taskbar lanes fail per-request outcomes and worker
 death (D-72, D-73); the computation lane fails bounds, identity and death
 (D-74…D-76). Path verification, the ten probes (D-3) and the files, preview,
-index and git workers have no adapter yet. **The return rule:** a lane whose
+index and git workers have no adapter yet. **The completion seam** (S-3,
+2026-10-11; the side-effects contract, revision (b)7) is `bt-app::lane`'s
+product half: a lane takes its worker from an `Executor` and keeps its requests
+in a `Ledger<Id, Owed>`, which mints each identity or refuses it at the door and
+ends each in exactly one terminal (`Done`, `Failed`, `Cancelled`,
+`Superseded { by }`, `Joined { with }`, `WorkerGone`), delivered to its
+requester once or to the sink it is owed; the worker ends identities through
+`publish`, the executor reports the thread's end through `worker_ended`, and a
+panic inside one request's task fails that request while the worker goes on.
+Four claims hold it: **(9)** a superseded request says so; **(10)** a joined
+request carries its twin's outcome; **(11)** a failure is said once (or once per
+declared streak); **(12)** an orphaned answer reaches its sink. No lane is
+built on the seam yet; the rows the new claims add name D-70, D-72, D-73, D-75,
+D-76 and D-85, and S-4, S-5, S-6a and S-7 move the lanes onto it
+(`docs/ARCHITECTURE-GUARDS.md`, *Lane contract and the completion seam*).
+**The return rule:** a lane whose
 answer is the latest value of one fact publishes into a slot the window reads
 (3) and wakes the loop through (1) or (2); a lane whose every request is owed
 its own answer publishes through a channel the loop drains after the wake (1)
