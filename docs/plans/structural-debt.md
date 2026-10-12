@@ -71,12 +71,12 @@ they answer "what does this machine do" — not by debt.
 | 0.4.5 | 8 | 0 | 8 |
 | 0.4.6 | 4 | 0 | 4 |
 | 0.4.7 | 0 | 0 | 0 |
-| 0.4.8 (plan ticket on the row) | 28 | 28 | 0 |
+| 0.4.8 (plan ticket on the row) | 37 | 27 | 10 |
 | 0.5 (reason on the row; D-1, D-16 and D-33 are its preconditions) | 13 | 13 | 0 |
 | deferred (reason on the row) | 4 | 4 | 0 |
-| unassigned (no 0.4.8 plan ticket; listed for the coordinator) | 37 | 37 | 0 |
+| unassigned (no 0.4.8 plan ticket; listed for the coordinator) | 28 | 28 | 0 |
 | already repaid | 2 | 0 | 2 |
-| **total** | **96** | **82** | **14** |
+| **total** | **96** | **72** | **24** |
 
 (2026-09-25, A5: D-33 moved from 0.4.5 to 0.4.6 — the owner deferred the
 presentation lane, its second client, and revision (b) R8 of
@@ -120,8 +120,12 @@ unassigned to 0.4.8; D-93 and D-94 are owner questions and stay unassigned.)
 (2026-10-11, the merge of S-1 with T-ATTENTION-WINDOW-EXPIRY: D-95, added on 0.4.8 with O-4,
 is counted — 0.4.8 27 rows, total 95/81/14.)
 
-(2026-10-12, H2-NITS round 5: D-96 added on 0.4.8 with T-PANIC-ROWS-HONEST — 0.4.8 28 rows,
-total 96/82/14.)
+(2026-10-12, H2-NITS round 5: D-96 added on 0.4.8 with T-PANIC-ROWS-HONEST.)
+
+(2026-10-12, H2-NITS: the table recounted from the rows' own version and status cells. The
+lines before it counted every 0.4.8 row as open and carried an unassigned count of 37 against
+28 rows. 0.4.8 holds 37 rows, ten of them repaid — D-7, D-14, D-15, D-20, D-21, D-22, D-23,
+D-25, D-26, D-28 — and D-4 and D-19 are narrowed and open; unassigned holds 28; total 96/72/24.)
 
 Parts already repaid inside open rows, by the 0.4.4 tickets: ticket 10
 (`2657e5e3`) — §5.3 row 1, the OS hand-off lane, and the first instance of the
