@@ -3927,6 +3927,9 @@ mod birth_death_tests {
     /// drop the record from `BirthFallback::spawn` and the landing writes no banner and keeps the
     /// asked-for program; drop `|| leaf.birth_death_kept` from the reaper's liveness rule, or let
     /// the birth-death arm fall through to the retirement road, and the wiring pin fails.
+    /// MUTATION (T-WINDOWS-SHELL-NAMESPACES, observed RED): drop `finish_leaf_birth`'s reset of the
+    /// program kind on `bt-pty`'s fallback and the PowerShell that landed keeps the Cygwin kind
+    /// and spelling of the program that died.
     #[test]
     fn a_silent_birth_death_falls_back_in_place_and_keeps_every_restored_tab() {
         test_support::on_the_window_thread();
@@ -3944,6 +3947,8 @@ mod birth_death_tests {
         assert!(banner.contains("failed to start"), "{banner:?}");
         let mut leaf = test_support::leaf_saying("");
         leaf.program = Some(PathBuf::from("preferred-shell"));
+        // The program that died was a Cygwin bash; the one that lands is Windows PowerShell.
+        leaf.program_kind = profiles::ShellProgram::Cygwin;
         let born_grid = leaf.conpty_grid;
         let (wake, heard) = waking();
         let worker_wake = Arc::clone(&wake);
@@ -4016,6 +4021,15 @@ mod birth_death_tests {
             leaf.program.as_deref(),
             Some(Path::new(bt_pty::LAST_RESORT_SHELL))
         );
+        // And the spelling it reads is the one the shell that landed prints.
+        assert_eq!(leaf.program_kind, profiles::ShellProgram::Native);
+        let landed_spelling = profiles::printed_path_namespace(
+            profiles::index_of_id(profiles::fallback_profile_id()),
+            &profiles::ShellProgram::Native,
+            &bt_pty::SystemShellEnvironment,
+        );
+        assert_eq!(leaf.session.printed_path_namespace(), landed_spelling);
+        assert_eq!(leaf.paste_recipient.namespace, landed_spelling);
         let squeeze = |text: &str| -> String {
             text.chars()
                 .filter(|character| !character.is_whitespace())
