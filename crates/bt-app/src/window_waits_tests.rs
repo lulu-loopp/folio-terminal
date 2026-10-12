@@ -2508,7 +2508,8 @@ impl<'w> Body<'w> {
 
     /// **The traits a call's receiver is stated to be known by** ([`stated_traits`]), by their
     /// identities; `None` when the source states none. The receiver is read where the source
-    /// writes its type: a parameter no other binding in the body shadows ([`binding_count`]), a
+    /// writes its type: a parameter no other binding in scope at the call shadows
+    /// ([`shadowed_at`]), a
     /// local of [`annotated_lets`] bound before the call, `self.field` by every declaration of the
     /// field (all of them must state a trait), and `self` in a trait's default method, which is
     /// the trait. A path call's qualifier states its traits when it is a generic parameter, `Self`
@@ -2522,7 +2523,11 @@ impl<'w> Body<'w> {
             Form::Method(Some(chain)) => match chain.as_slice() {
                 ["self"] => generics.get("Self").cloned(),
                 [name] => match self.params.get(name) {
-                    Some(written) => (binding_count(s, &self.toks, &self.params, name) == 1)
+                    Some(written) => self
+                        .toks
+                        .iter()
+                        .position(|tok| tok.start == site.at)
+                        .is_some_and(|call| !shadowed_at(s, &self.toks, name, call))
                         .then(|| stated_traits(s, written, generics, &resolve))
                         .flatten(),
                     None => self
@@ -2885,6 +2890,128 @@ fn closure_parameters(src: &Src, toks: &[Tok], at: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// The index of the `}` closing the innermost `{` that holds `toks[at]`; the end of `toks` when
+/// none does.
+fn enclosing_block_end(src: &Src, toks: &[Tok], at: usize) -> usize {
+    let mut depth = 0usize;
+    for before in (0..at).rev() {
+        match src.text(toks[before]) {
+            "}" if toks[before].kind == Kind::Punct => depth += 1,
+            "{" if toks[before].kind == Kind::Punct => {
+                if depth == 0 {
+                    return closing(src, toks, before).unwrap_or(toks.len());
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    toks.len()
+}
+
+/// The `[from, to)` token range a block opened by the first `{` at bracket depth zero at or after
+/// `from` covers, braces included; `None` when there is no such block.
+fn block_from(src: &Src, toks: &[Tok], from: usize) -> Option<(usize, usize)> {
+    let open = depth_zero(src, toks, from, &["{"]);
+    if !src.is(toks.get(open), "{") {
+        return None;
+    }
+    Some((open, closing(src, toks, open)? + 1))
+}
+
+/// **Whether a binding of `name` other than the parameter is in scope at the call whose name
+/// token is `toks[call]`** — the parameter's declared type then says nothing of the receiver. A
+/// binding shadows only where its scope holds the call and it began before it: a `let` from the
+/// end of its statement to the end of its enclosing block (an `if let` or `while let` over its
+/// body); a `for` pattern over the loop's body; a match arm's pattern over the arm; a closure's
+/// parameters over the closure's body. A binding in a sibling or an already-closed block, or one
+/// that begins after the call, does not shadow.
+fn shadowed_at(src: &Src, toks: &[Tok], name: &str, call: usize) -> bool {
+    let holds = |from: usize, to: usize| from <= call && call < to;
+    for (at, tok) in toks.iter().enumerate() {
+        if at >= call {
+            break;
+        }
+        if src.is(Some(tok), "let") {
+            let end = let_end(src, toks, at + 1);
+            let statement = &toks[at + 1..end];
+            let pattern_end = top_level_token(src, statement, "=").unwrap_or(statement.len());
+            if !receiver_pattern_names(src, &statement[..pattern_end]).contains(name) {
+                continue;
+            }
+            let conditional = at.checked_sub(1).is_some_and(|before| {
+                src.is(toks.get(before), "if") || src.is(toks.get(before), "while")
+            });
+            let scope = if conditional {
+                block_from(src, toks, at + 1 + pattern_end)
+            } else {
+                Some((end, enclosing_block_end(src, toks, at)))
+            };
+            if scope.is_some_and(|(from, to)| holds(from, to)) {
+                return true;
+            }
+        }
+        if src.is(Some(tok), "for") {
+            let rest = &toks[at + 1..];
+            if let Some(end) = top_level_token(src, rest, "in")
+                && receiver_pattern_names(src, &rest[..end]).contains(name)
+                && block_from(src, toks, at + 1 + end).is_some_and(|(from, to)| holds(from, to))
+            {
+                return true;
+            }
+        }
+        if src.is(Some(tok), "match") {
+            let open = depth_zero(src, toks, at + 1, &["{"]);
+            let Some(close) = (open < toks.len())
+                .then(|| closing(src, toks, open))
+                .flatten()
+            else {
+                continue;
+            };
+            let mut arm = open + 1;
+            while arm < close {
+                let arrow = depth_zero(src, toks, arm, &["=>"]);
+                if arrow >= close {
+                    break;
+                }
+                let guard = toks[arm..arrow]
+                    .iter()
+                    .position(|tok| src.is(Some(tok), "if"))
+                    .map_or(arrow, |guard| arm + guard);
+                let body = arrow + 1;
+                let arm_end = if src.is(toks.get(body), "{") {
+                    closing(src, toks, body).map_or(close, |end| end + 1)
+                } else {
+                    depth_zero(src, toks, body, &[","]).min(close)
+                };
+                if receiver_pattern_names(src, &toks[arm..guard]).contains(name)
+                    && holds(guard, arm_end)
+                {
+                    return true;
+                }
+                arm = if src.is(toks.get(arm_end), ",") {
+                    arm_end + 1
+                } else {
+                    arm_end
+                };
+            }
+        }
+        if let Some(bar) = closure_parameters(src, toks, at)
+            && receiver_pattern_names(src, &toks[at + 1..bar]).contains(name)
+        {
+            let end = if src.is(toks.get(bar + 1), "{") {
+                closing(src, toks, bar + 1).map_or(toks.len(), |end| end + 1)
+            } else {
+                depth_zero(src, toks, bar + 1, &[",", ";"])
+            };
+            if holds(bar + 1, end) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn assigned(src: &Src, toks: &[Tok], name: &str, after: usize) -> bool {
@@ -8638,8 +8765,9 @@ fn builder_thread_names(world: &World) -> BTreeSet<String> {
 /// question the reach answers (*is this body reached?*) without naming anything dispatch cannot
 /// run. A trait with no first-party implementation adds nothing. A call whose stated traits are
 /// all standard or third-party, or whose method no first-party trait among them declares (a
-/// foreign supertrait's), is read as an untyped one is; so is a parameter another binding in the
-/// body really shadows ([`binding_count`]). Not followed, here as before: a stored closure, a
+/// foreign supertrait's), is read as an untyped one is; so is a parameter another binding of its
+/// name shadows in scope at the call ([`shadowed_at`]). Not followed, here as before: a stored
+/// closure, a
 /// function pointer, `<X as Trait>::m`, a type written through an alias, and an untyped receiver
 /// whose method name is shared — S-2a's call graph is what follows those.
 fn named_callees(body: &Body<'_>, site: &Site) -> Vec<(usize, &'static ItemRecord)> {
@@ -9022,6 +9150,20 @@ mod trait_dispatch_source_shapes {
         let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
     }
 
+    fn trait_shape_closed_shadow(driver: &dyn Driver, other: &crate::preview_wrap::Cache) {
+        {
+            let driver = other;
+            let _ = driver;
+        }
+        let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
+    }
+
+    fn trait_shape_later_shadow(driver: &dyn Driver, other: &crate::preview_wrap::Cache) {
+        let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
+        let driver = other;
+        let _ = driver;
+    }
+
     fn trait_shape_windows_point(point: &dyn PreparePoint) {
         let _ = point.prepare(unreachable!(), unreachable!(), unreachable!());
     }
@@ -9356,19 +9498,23 @@ fn a_trait_is_its_identity_and_a_default_runs_only_where_it_is_not_overridden() 
     );
 }
 
-/// RED (T-DOOR-REACH-TRAIT-OBJECTS round 2) — **a match's or-pattern binds nothing, and a
-/// parameter a later `let` really shadows is not typed by its declaration.**
+/// RED (T-DOOR-REACH-TRAIT-OBJECTS rounds 2 and 3) — **a match's or-pattern binds nothing, and a
+/// parameter is typed by its declaration unless a binding in scope at the call shadows it.**
 ///
 /// `trait_shape_or_pattern` writes `Some(0) | None` in a match arm and `Some(1) | Some(2)` in a
 /// `matches!` after it, with `driver.prepare(…)` between the two bars: the bars are patterns'
 /// (each follows an operand), not a closure's, so `driver` is bound once and the call names the
-/// `Driver` implementations. `trait_shape_shadowed` writes `let driver = other;` before its call:
-/// the parameter's `&dyn Driver` says nothing of the local, the call is read as an untyped one
-/// (a name many methods share: nobody).
+/// `Driver` implementations. `trait_shape_shadowed` writes `let driver = other;` before its call in
+/// the same block: the parameter's `&dyn Driver` says nothing of the local, the call is read as an
+/// untyped one (a name many methods share: nobody). `trait_shape_closed_shadow` shadows `driver`
+/// only inside a block closed before the call, and `trait_shape_later_shadow` only after the call:
+/// neither binding is in scope at the call, which names the `Driver` implementations.
 ///
 /// MUTATIONS: in [`closure_parameters`], pair every `|` with the next one (round 1's pairing) — the
-/// or-pattern call names nobody; type a parameter whatever its binding count — the shadowed call
-/// names the `Driver` implementations.
+/// or-pattern call names nobody; type a parameter whatever binds its name — the shadowed call
+/// names the `Driver` implementations; refuse a parameter's type whenever another binding of its
+/// name stands anywhere in the body (round 2's count, [`binding_count`] `!= 1`) — the closed-block
+/// and the later shadow name nobody.
 #[test]
 fn a_match_or_pattern_binds_nothing_and_a_real_shadow_is_not_typed() {
     let world = World::new();
@@ -9397,6 +9543,13 @@ fn a_match_or_pattern_binds_nothing_and_a_real_shadow_is_not_typed() {
         named_in_shape(&world, "trait_shape_shadowed", "prepare").is_disjoint(&implementations),
         "the shadowed call names no `Driver` implementation"
     );
+    for shape in ["trait_shape_closed_shadow", "trait_shape_later_shadow"] {
+        assert_eq!(
+            named_in_shape(&world, shape, "prepare"),
+            implementations,
+            "`{shape}`: a binding out of scope at the call does not shadow `driver`"
+        );
+    }
 }
 
 /// RED (T-DOOR-REACH-TRAIT-OBJECTS) — **a trait the product does not declare adds nothing to the
