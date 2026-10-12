@@ -8344,10 +8344,8 @@ pub fn choose_locale_declaration<'a>(
 ///
 /// Menlo is macOS's Consolas here for `bt-render`'s own stated reason: it has
 /// shipped in `/System/Library/Fonts` since 10.6, it is what Terminal opens
-/// with, and it cannot be removed. SF Mono is the better-looking face and is
-/// deliberately not this constant — the renderer offers it first through a
-/// preference list that asks the database whether it is really there, because
-/// SF Mono's family name and its file have both moved between releases.
+/// with, and it cannot be removed — and the renderer opens the grid in it at
+/// startup too (owner ruling 2026-10-11, H2 Q8).
 #[cfg(windows)]
 pub const DEFAULT_MONOSPACE_FAMILY: &str = "Consolas";
 #[cfg(target_os = "macos")]

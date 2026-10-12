@@ -1854,8 +1854,16 @@ pub fn unbound_cap() -> &'static str {
     Text::ShortcutUnbound.text()
 }
 
-/// Why the audit listed the `Alt`+arrow families and never took them.
-const NOTE_RESERVED_ALT_ARROW: Text = Text::ShortcutReservedAltArrow;
+/// **Why the audit listed the `Alt`+arrow families and never took them**, in
+/// `lang`, with the key named the way [`modifier_caps_on`] names it on
+/// `platform` — the word the declined rows' own caps carry (`Option` on a Mac,
+/// `Alt` on Windows).
+fn reserved_arrow_note_on(platform: bt_platform::HostPlatform, lang: Lang) -> String {
+    crate::i18n::shortcut_reserved_arrow_note_in(
+        lang,
+        &modifier_caps_on(ModifiersState::ALT, platform).join("+"),
+    )
+}
 
 /// The two refusals a row earns on its own, in the words the recorder shows.
 #[must_use]
@@ -2446,7 +2454,10 @@ impl Shortcuts {
         out.extend(RESERVED_ROWS.iter().map(|row| ShortcutRow {
             ids: Vec::new(),
             title: row.title.text(),
-            note: Some(Cow::Borrowed(NOTE_RESERVED_ALT_ARROW.text())),
+            note: Some(Cow::Owned(reserved_arrow_note_on(
+                self.dialect,
+                crate::i18n::current(),
+            ))),
             caps: {
                 let mut caps = modifier_caps_on(row.held, self.dialect);
                 caps.push(row.keys.to_owned());
@@ -5507,7 +5518,10 @@ mod tests {
         for line in &reserved {
             assert!(line.ids.is_empty(), "a declined row binds nothing");
             assert!(!line.recordable, "and cannot be recorded either");
-            assert_eq!(line.note.as_deref(), Some(NOTE_RESERVED_ALT_ARROW.text()));
+            assert_eq!(
+                line.note.as_deref(),
+                Some(reserved_arrow_note_on(table.dialect, crate::i18n::current()).as_str())
+            );
         }
         assert!(
             lines[lines.len() - reserved.len()..]
@@ -5544,6 +5558,39 @@ mod tests {
                 ],
                 "{platform:?}"
             );
+        }
+    }
+
+    /// RED (H2-NITS, owner ruling 2026-10-11 on H2 Q10) — **the line under the
+    /// declined rows names the key the way the rows' own caps do**: `Option` on
+    /// a Mac, `Alt` on Windows, in both languages, and the rows of each table
+    /// carry their own platform's sentence.
+    ///
+    /// MUTATION: spell the note's modifier as the literal `"Alt"` instead of
+    /// [`modifier_caps_on`]'s word — the Mac rows go red.
+    #[test]
+    fn the_declined_rows_note_names_the_modifier_this_keyboard_has() {
+        use bt_platform::HostPlatform;
+        for (platform, word, other) in [
+            (HostPlatform::MacOs, "Option+", "Alt+"),
+            (HostPlatform::Windows, "Alt+", "Option+"),
+        ] {
+            for lang in [Lang::English, Lang::Chinese] {
+                let note = reserved_arrow_note_on(platform, lang);
+                assert!(note.contains(word), "{platform:?} {lang:?}: {note:?}");
+                assert!(!note.contains(other), "{platform:?} {lang:?}: {note:?}");
+                assert!(!note.contains('{'), "the template is filled: {note:?}");
+            }
+            let lines = Shortcuts::defaults_for(platform).editor_rows();
+            let notes: Vec<&str> = lines
+                .iter()
+                .filter(|line| line.reserved)
+                .filter_map(|line| line.note.as_deref())
+                .collect();
+            assert_eq!(notes.len(), RESERVED_ROWS.len());
+            for note in notes {
+                assert!(note.contains(word), "{platform:?}: {note:?}");
+            }
         }
     }
 

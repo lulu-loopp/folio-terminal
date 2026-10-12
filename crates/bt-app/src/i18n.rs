@@ -1340,6 +1340,9 @@ text_entries! {
     ProfilesEnvAdd,
     ProfilesEnvName,
     ProfilesEnvValue,
+    /// A ghost row's value when it is each pane's own (the attention wire's
+    /// address and capability), which a profile cannot show (H2-NITS).
+    ProfilesEnvPerPane,
     /// `Auto`, `On`, `Off` — the hyperlink answer's three, where `Auto` is the
     /// terminal's own declaration and the other two are this profile overruling
     /// it.
@@ -1573,6 +1576,9 @@ text_entries! {
     /// The two rows the audit listed and declined, and the line under them.
     ShortcutReservedMoveFocus,
     ShortcutReservedResizePane,
+    /// A template: `{modifier}` is the word the declined rows' own caps spell
+    /// the `Alt` key in on this keyboard (filled by
+    /// [`shortcut_reserved_arrow_note_in`]).
     ShortcutReservedAltArrow,
     /// The recorder's standing refusal. The chord in it is key caps and stays as
     /// it is; what is translated is the reason.
@@ -4168,6 +4174,11 @@ impl Text {
             Self::ProfilesEnvAdd => pick(lang, "Add", "添加"),
             Self::ProfilesEnvName => pick(lang, "Name", "名称"),
             Self::ProfilesEnvValue => pick(lang, "Value", "值"),
+            Self::ProfilesEnvPerPane => pick(
+                lang,
+                "Set per pane",
+                "Set per pane", // zh: pending H2-NITS
+            ),
             Self::ProfilesAuto => pick(lang, "Auto", "自动"),
             Self::ProfilesOn => pick(lang, "On", "开"),
             Self::ProfilesOff => pick(lang, "Off", "关"),
@@ -4328,10 +4339,12 @@ impl Text {
                 pick(lang, "Move the focus between panes", "在窗格之间移动焦点")
             }
             Self::ShortcutReservedResizePane => pick(lang, "Resize a pane", "调整窗格大小"),
+            // zh: pending H2-NITS — the existing translation with `{modifier}` where
+            // it said `Alt`; the writer checks the word order.
             Self::ShortcutReservedAltArrow => pick(
                 lang,
-                "Reserved: readline reads Alt+arrow as word movement",
-                "保留：readline 将 Alt+方向键用于按词移动",
+                "Reserved: readline reads {modifier}+arrow as word movement",
+                "保留：readline 将 {modifier}+方向键用于按词移动",
             ),
             Self::ShortcutHintAltGrZone => pick(
                 lang,
@@ -6298,6 +6311,10 @@ impl Text {
         (Self::SeatOverflowOne, HostPlatform::MacOs),
         (Self::SeatOverflowMany, HostPlatform::Windows),
         (Self::SeatOverflowMany, HostPlatform::MacOs),
+        // zh: pending H2-NITS — a Profiles ghost row's value that each pane has
+        // its own of.
+        (Self::ProfilesEnvPerPane, HostPlatform::Windows),
+        (Self::ProfilesEnvPerPane, HostPlatform::MacOs),
         // zh: pending T-QUIT-DOCUMENTS — the cancelled quit's card and its choice, the
         // stopped process's native message, and the lists they name files in.
         (Self::QuitDocumentsNotSaved, HostPlatform::Windows),
@@ -7395,6 +7412,15 @@ pub fn seat_overflow_notice_in(lang: Lang, count: usize) -> String {
     template
         .in_lang(lang)
         .replace("{count}", &count.to_string())
+}
+
+/// **The line under the shortcut page's declined rows**, with `modifier` — the
+/// word the rows' own caps spell that key in on this keyboard — in the sentence.
+#[must_use]
+pub fn shortcut_reserved_arrow_note_in(lang: Lang, modifier: &str) -> String {
+    Text::ShortcutReservedAltArrow
+        .in_lang(lang)
+        .replace("{modifier}", modifier)
 }
 
 #[must_use]

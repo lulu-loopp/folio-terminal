@@ -740,6 +740,64 @@ pub(crate) const fn paste_seat(focus: ClipboardFocus) -> ClipboardSeat {
     }
 }
 
+/// **The five doors an Edit-menu clipboard verb ends at** — each one the door the
+/// keystroke already uses (`Runtime`'s, in `runtime::floats`), so the menu has no
+/// second answer to what a copy or a paste does.
+pub(crate) trait ClipboardDoors {
+    /// The terminal's selection onto the clipboard (`Runtime::copy_selection`).
+    fn copy_terminal_selection(&mut self) -> anyhow::Result<()>;
+    /// The clipboard into the focused shell (`Runtime::paste_from_clipboard`).
+    fn paste_into_terminal(&mut self) -> anyhow::Result<()>;
+    /// The quick edit's selection onto the clipboard.
+    fn copy_document_selection(&mut self);
+    /// The clipboard into the quick edit.
+    fn paste_into_document(&mut self) -> anyhow::Result<()>;
+    /// The clipboard into the one-line field that holds the keyboard.
+    fn paste_into_field(&mut self, field: crate::TextFieldSeat) -> anyhow::Result<()>;
+}
+
+/// **Edit ▸ Copy (`copying`) or Edit ▸ Paste, decided and done**: the seat
+/// [`clipboard_seat`] or [`paste_seat`] names for `focus`, then that seat's door.
+/// `Runtime::run_an_application_menu_verb` is this with the window's own focus
+/// and doors; it is a function of its arguments so the road can be driven
+/// without a window.
+pub(crate) fn run_clipboard_verb(
+    copying: bool,
+    focus: ClipboardFocus,
+    doors: &mut impl ClipboardDoors,
+) -> anyhow::Result<()> {
+    let seat = if copying {
+        clipboard_seat(focus)
+    } else {
+        paste_seat(focus)
+    };
+    match seat {
+        // A surface of this window's is holding the keyboard and answers its
+        // own keys; see `ClipboardSeat::Nobody` for why doing nothing is the
+        // answer rather than the absence of one.
+        ClipboardSeat::Nobody => Ok(()),
+        // Only `paste_seat` answers a field, so this is always a paste: the
+        // pasteboard's text into the field, through the door the field's own
+        // paste chord goes through.
+        ClipboardSeat::Field(field) => doors.paste_into_field(field),
+        ClipboardSeat::PreviewDocument => {
+            if copying {
+                doors.copy_document_selection();
+                Ok(())
+            } else {
+                doors.paste_into_document()
+            }
+        }
+        ClipboardSeat::Terminal => {
+            if copying {
+                doors.copy_terminal_selection()
+            } else {
+                doors.paste_into_terminal()
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

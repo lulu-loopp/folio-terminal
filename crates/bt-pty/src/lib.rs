@@ -1036,6 +1036,24 @@ impl PtyCommand {
         self
     }
 
+    /// Lay this terminal's declarations (`folio_environment`) and then the
+    /// profile's final layer (`profile_environment`) onto the command — the one
+    /// step the spawn and [`terminal_declarations`] both take.
+    fn layered(
+        self,
+        folio_environment: &[(OsString, OsString)],
+        profile_environment: &[(OsString, OsString)],
+    ) -> Self {
+        let command = folio_environment
+            .iter()
+            .fold(self, |command, (key, value)| command.env(key, value));
+        profile_environment
+            .iter()
+            .fold(command, |command, (key, value)| {
+                command.profile_env(key, value)
+            })
+    }
+
     fn refresh_environment(mut self, refresh: EnvironmentRefresh) -> Self {
         self.environment_refresh = Some(refresh);
         self
@@ -1139,6 +1157,41 @@ impl PtyCommand {
     fn strips_inherited_no_color(&self) -> bool {
         self.declare_color_support && !self.command_has_no_color()
     }
+}
+
+/// **What this terminal itself gives an interactive shell** started with these
+/// two layers: its identity declarations (`TERM_PROGRAM`,
+/// `TERM_PROGRAM_VERSION`, and `COLORTERM`/`TERM` unless a layer names
+/// `NO_COLOR`), then `folio_environment`, in the order the spawn lays them
+/// down — each less every name `profile_environment` sets, because the
+/// profile's layer is written last and its row is what the child receives.
+///
+/// The same composition the spawn makes ([`PtyCommand::resolved_environment_layers`]
+/// over the same layering), so a page that lists it cannot disagree with it.
+#[must_use]
+pub fn terminal_declarations(
+    folio_environment: &[(OsString, OsString)],
+    profile_environment: &[(OsString, OsString)],
+) -> Vec<(OsString, OsString)> {
+    let (folio, profile) = PtyCommand::interactive_shell(OsString::new())
+        .layered(folio_environment, profile_environment)
+        .resolved_environment_layers();
+    folio
+        .into_iter()
+        .filter(|(name, _)| {
+            !profile
+                .iter()
+                .any(|(mine, _)| environment_key_eq(mine, name))
+        })
+        .collect()
+}
+
+/// Whether two environment names are one variable to a child on this platform:
+/// case-insensitively on Windows, byte for byte elsewhere — the rule the spawn
+/// layers its environment by.
+#[must_use]
+pub fn same_environment_name(left: &OsStr, right: &OsStr) -> bool {
+    environment_key_eq(left, right)
 }
 
 /// The two process-level inputs captured by the app's spawn worker.
@@ -2280,15 +2333,9 @@ impl PtySession {
             Some(line) => command.interpreter_line(line),
             None => command,
         };
-        let command = folio_environment
-            .iter()
-            .fold(command, |command, (key, value)| command.env(key, value))
+        let command = command
+            .layered(folio_environment, profile_environment)
             .working_directory(working_directory.clone());
-        let command = profile_environment
-            .iter()
-            .fold(command, |command, (key, value)| {
-                command.profile_env(key, value)
-            });
         let command = match environment_refresh.clone() {
             Some(refresh) => command.refresh_environment(refresh),
             None => command,
@@ -5225,6 +5272,63 @@ mod tests {
         );
         assert!(refused.is_err());
         assert_eq!(tries, 1);
+    }
+
+    /// RED (H2-NITS round 2) — **`terminal_declarations` is the spawn's own table**: for the same
+    /// two layers it answers exactly the declarations the command the spawn builds carries, in the
+    /// same order, less every name the profile's layer sets — which is what the Profiles page
+    /// lists. No process is started: the seam records the command.
+    ///
+    /// MUTATION: build `terminal_declarations` from a list of its own (the four identity names
+    /// followed by the folio layer, without `layered` / `resolved_environment_layers`) — the
+    /// `NO_COLOR` profile's `COLORTERM`/`TERM` come back and the assertion goes red.
+    #[test]
+    fn the_declarations_a_page_lists_are_the_ones_the_spawn_lays_down() {
+        let os = |name: &str, value: &str| (OsString::from(name), OsString::from(value));
+        let folio = [
+            os("BT_SHELL_INTEGRATION", "login"),
+            os("FORCE_HYPERLINK", "1"),
+            os("FOLIO_ATTENTION_PIPE", "管道"),
+        ];
+        for profile in [
+            vec![os("TERM", "dumb"), os("FORCE_HYPERLINK", "0")],
+            vec![os("NO_COLOR", "1"), os("LANG", "zh_CN.UTF-8")],
+            Vec::new(),
+        ] {
+            let mut spawned = Vec::new();
+            let _ = PtySession::spawn_interactive_with(
+                OsString::from("shell"),
+                &[],
+                &folio,
+                &profile,
+                None,
+                PtySize::cells(NonZeroU16::new(80).unwrap(), NonZeroU16::new(24).unwrap()),
+                Arc::new(|| {}),
+                None,
+                None,
+                |command, _, _| {
+                    spawned.push(command);
+                    Err(PtyError::Backend("refused by the test".into()))
+                },
+            );
+            let (laid, profile_laid) = spawned
+                .pop()
+                .expect("one attempt")
+                .resolved_environment_layers();
+            let theirs: Vec<(OsString, OsString)> = laid
+                .into_iter()
+                .filter(|(name, _)| {
+                    !profile_laid
+                        .iter()
+                        .any(|(mine, _)| environment_key_eq(mine, name))
+                })
+                .collect();
+            assert_eq!(
+                terminal_declarations(&folio, &profile),
+                theirs,
+                "{profile:?}"
+            );
+        }
     }
 
     /// RED (T-TEST-SHELL-HYGIENE) — **a test's interactive PowerShell loads no history file and

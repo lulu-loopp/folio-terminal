@@ -924,19 +924,29 @@ impl VideoSeat {
     /// A modified key is never one of these: `Ctrl`, `Alt` and `Win` chords are
     /// the window's, and a player that swallowed `Ctrl+←` would be eating one of
     /// them.
-    pub fn key_press(&mut self, key: &winit::keyboard::Key, modified: bool, now: Instant) -> bool {
-        use winit::keyboard::{Key, NamedKey};
+    ///
+    /// `physical` is the key's place on the keyboard, which the mute's letter
+    /// falls back to on a layout that prints another script ([`player_key`]).
+    pub fn key_press(
+        &mut self,
+        key: &winit::keyboard::Key,
+        physical: winit::keyboard::PhysicalKey,
+        modified: bool,
+        now: Instant,
+    ) -> bool {
         if modified {
             return false;
         }
-        match key {
-            Key::Named(NamedKey::Space) => self.toggle(now),
-            Key::Named(NamedKey::ArrowLeft) => self.step(-VIDEO_STEP_SECONDS, now),
-            Key::Named(NamedKey::ArrowRight) => self.step(VIDEO_STEP_SECONDS, now),
-            Key::Named(NamedKey::ArrowUp) => self.nudge_volume(VIDEO_GAIN_STEP, now),
-            Key::Named(NamedKey::ArrowDown) => self.nudge_volume(-VIDEO_GAIN_STEP, now),
-            Key::Character(text) if text.eq_ignore_ascii_case("m") => self.toggle_mute(now),
-            _ => return false,
+        let Some(verb) = player_key(key, physical) else {
+            return false;
+        };
+        match verb {
+            PlayerKey::Toggle => self.toggle(now),
+            PlayerKey::Back => self.step(-VIDEO_STEP_SECONDS, now),
+            PlayerKey::Forward => self.step(VIDEO_STEP_SECONDS, now),
+            PlayerKey::Louder => self.nudge_volume(VIDEO_GAIN_STEP, now),
+            PlayerKey::Quieter => self.nudge_volume(-VIDEO_GAIN_STEP, now),
+            PlayerKey::Mute => self.toggle_mute(now),
         }
         true
     }
@@ -1543,6 +1553,39 @@ impl Drop for VideoSeats {
     }
 }
 
+/// **The player's five keys**, as [`VideoSeat::key_press`] answers them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PlayerKey {
+    Toggle,
+    Back,
+    Forward,
+    Louder,
+    Quieter,
+    Mute,
+}
+
+/// Which of the player's keys one unmodified press is: Space, the four arrows,
+/// and `M` — the mute's letter read by [`crate::input::verb_letter`], so on a
+/// layout that prints another script it is the key at `M` (owner ruling
+/// 2026-10-11 on H2 Q6).
+pub(crate) fn player_key(
+    key: &winit::keyboard::Key,
+    physical: winit::keyboard::PhysicalKey,
+) -> Option<PlayerKey> {
+    use winit::keyboard::{Key, NamedKey};
+    match key {
+        Key::Named(NamedKey::Space) => Some(PlayerKey::Toggle),
+        Key::Named(NamedKey::ArrowLeft) => Some(PlayerKey::Back),
+        Key::Named(NamedKey::ArrowRight) => Some(PlayerKey::Forward),
+        Key::Named(NamedKey::ArrowUp) => Some(PlayerKey::Louder),
+        Key::Named(NamedKey::ArrowDown) => Some(PlayerKey::Quieter),
+        Key::Character(_) => {
+            (crate::input::verb_letter(key, physical) == Some('m')).then_some(PlayerKey::Mute)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1577,6 +1620,36 @@ mod tests {
             .filter(|(actual, expected, _)| actual != expected)
             .collect();
         assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    /// RED (H2-NITS, owner ruling 2026-10-11 on H2 Q6; AUDIT-hardcode PRV-6) —
+    /// **the player's mute is the key at `M` on a layout that prints another
+    /// script there**, and a Latin layout's own `m` wherever it stands.
+    ///
+    /// MUTATIONS: (1) drop the physical fallback from `input::verb_letter` —
+    /// the Russian `ь` goes red; (2) apply it to every letter — AZERTY's `,` on
+    /// the physical `M` becomes the mute and goes red.
+    #[test]
+    fn the_mute_is_the_key_at_m_on_a_non_latin_layout() {
+        use winit::keyboard::{Key, KeyCode, PhysicalKey};
+        let at =
+            |text: &str, code| player_key(&Key::Character(text.into()), PhysicalKey::Code(code));
+        for (layout, m) in [("Russian", "ь"), ("Greek", "μ"), ("Hebrew", "צ")] {
+            assert_eq!(at(m, KeyCode::KeyM), Some(PlayerKey::Mute), "{layout}");
+            assert_eq!(
+                at(&m.to_uppercase(), KeyCode::KeyM),
+                Some(PlayerKey::Mute),
+                "{layout} shifted"
+            );
+            assert_eq!(at(m, KeyCode::KeyN), None, "{layout} on another key");
+        }
+        assert_eq!(at("m", KeyCode::KeyM), Some(PlayerKey::Mute));
+        assert_eq!(at("M", KeyCode::KeyM), Some(PlayerKey::Mute));
+        // AZERTY prints `m` on the key a US keyboard calls `;`, and `,` at `M`.
+        assert_eq!(at("m", KeyCode::Semicolon), Some(PlayerKey::Mute));
+        assert_eq!(at(",", KeyCode::KeyM), None);
+        // A US keyboard's other letters are not the mute.
+        assert_eq!(at("n", KeyCode::KeyM), None);
     }
 
     fn a_body() -> [f32; 4] {

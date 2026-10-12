@@ -41,6 +41,73 @@ pub(crate) fn is_command_chord_on(modifiers: ModifiersState, platform: HostPlatf
     }
 }
 
+/// **The Latin letter a letter-keyed verb reads off one press** — the quick
+/// edit's copy, cut, paste and select-all and the player's mute (owner ruling
+/// 2026-10-11 on H2 Q6; AUDIT-hardcode PRV-6).
+///
+/// The layout's own character when it is a Latin letter, so AZERTY's `A` is
+/// `a` wherever that key stands and every Latin layout is read as it prints.
+/// When the layout puts a letter of another script on the key — `с` on a
+/// Russian keyboard's `C`, `ψ` on a Greek one's — the verb falls back to the
+/// key's physical letter, its place on a US keyboard. Anything else names no
+/// letter: a digit, punctuation, a named key, a Latin letter outside ASCII, or
+/// a key whose place is not identified.
+#[must_use]
+pub(crate) fn verb_letter(logical: &Key, physical: PhysicalKey) -> Option<char> {
+    use unicode_script::{Script, UnicodeScript};
+    let Key::Character(text) = logical else {
+        return None;
+    };
+    let mut chars = text.chars();
+    let (Some(character), None) = (chars.next(), chars.next()) else {
+        return None;
+    };
+    if character.is_ascii_alphabetic() {
+        return Some(character.to_ascii_lowercase());
+    }
+    if !character.is_alphabetic() || character.script() == Script::Latin {
+        return None;
+    }
+    physical_letter(physical)
+}
+
+/// The letter printed at `physical`'s place on a US keyboard, for the
+/// twenty-six letter keys.
+fn physical_letter(physical: PhysicalKey) -> Option<char> {
+    let PhysicalKey::Code(code) = physical else {
+        return None;
+    };
+    Some(match code {
+        KeyCode::KeyA => 'a',
+        KeyCode::KeyB => 'b',
+        KeyCode::KeyC => 'c',
+        KeyCode::KeyD => 'd',
+        KeyCode::KeyE => 'e',
+        KeyCode::KeyF => 'f',
+        KeyCode::KeyG => 'g',
+        KeyCode::KeyH => 'h',
+        KeyCode::KeyI => 'i',
+        KeyCode::KeyJ => 'j',
+        KeyCode::KeyK => 'k',
+        KeyCode::KeyL => 'l',
+        KeyCode::KeyM => 'm',
+        KeyCode::KeyN => 'n',
+        KeyCode::KeyO => 'o',
+        KeyCode::KeyP => 'p',
+        KeyCode::KeyQ => 'q',
+        KeyCode::KeyR => 'r',
+        KeyCode::KeyS => 's',
+        KeyCode::KeyT => 't',
+        KeyCode::KeyU => 'u',
+        KeyCode::KeyV => 'v',
+        KeyCode::KeyW => 'w',
+        KeyCode::KeyX => 'x',
+        KeyCode::KeyY => 'y',
+        KeyCode::KeyZ => 'z',
+        _ => return None,
+    })
+}
+
 /// **Whether this press wears the modifier that belongs to the child** — the
 /// other one, and the exact complement of [`is_command_chord`].
 ///
