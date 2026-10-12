@@ -12,10 +12,12 @@
 //!   the field, through the settings merge's table ([`unit`]); every field but
 //!   `id` is optional and absent is "the shipped value", so a field the file
 //!   removed is a change to absent.
-//! - **Added and deleted rows**: a row added on either side is kept; a row
-//!   deleted on one side and unchanged on the other is deleted; a row deleted
-//!   on one side and changed on the other is a conflict, and the file's side
-//!   stands, whichever side that was.
+//! - **Added and deleted rows**: a row added on one side is kept; a row added
+//!   on both sides with one id is the file's row whole — two different rows
+//!   under one id are a conflict the file wins, named once, never a mix of the
+//!   two; a row deleted on one side and unchanged on the other is deleted; a
+//!   row deleted on one side and changed on the other is a conflict, and the
+//!   file's side stands, whichever side that was.
 //! - **The order is total** ((b)8): the rows all three hold keep `T`'s
 //!   relative order if `T` reordered them against `B`, else `O`'s if `O` did,
 //!   else `B`'s — the table of [`unit`] over the order itself; every other row
@@ -24,6 +26,12 @@
 //!   holds by the file's sequence and a row only Folio holds by Folio's; two
 //!   rows anchored to the same predecessor stand `T`'s before `O`'s, each side's
 //!   in its own order.
+//! - **A carried row never stands before its id's row.** It is placed last,
+//!   immediately after whichever stands later in the result of its nearest
+//!   predecessor in the file's sequence and the row of its own id — so the
+//!   installer's first-wins reading puts in force the row the merge kept, and
+//!   a carried row stays the shadowed one it was in the file (an unusable first
+//!   row and the later one the installer then takes keep their order too).
 //! - **Shipped ids the file never names** are appended by the installer as
 //!   always; they are not units here.
 //!
@@ -33,6 +41,7 @@ use std::collections::{HashMap, HashSet};
 
 use bt_persist::{PROFILES_SCHEMA_VERSION, ProfileEntryV1, ProfilesV1};
 
+use crate::i18n::{self, Text};
 use crate::settings_merge::{Account, Unit, unit};
 
 /// **One merge of `profiles.json`.**
@@ -44,11 +53,11 @@ pub(crate) struct Merged {
 }
 
 /// A place in the result: a row by its id, or a carried entry of `T` by its
-/// index in the file.
+/// index in the file and the id it names.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Slot {
     Row(String),
-    Carried(usize),
+    Carried(usize, String),
 }
 
 /// One side's rows in force, first-wins by id, in the side's order.
@@ -76,28 +85,6 @@ fn push_ids<'a>(ids: &mut Vec<&'a str>, rows: &[&'a ProfileEntryV1]) {
     }
 }
 
-/// Count one unit's row of the table into `account`, under `name`.
-fn count(account: &mut Account, row: Unit, name: impl FnOnce() -> String) {
-    match row {
-        Unit::Base => {}
-        Unit::Ours => account.kept += 1,
-        Unit::Theirs => {
-            account.took += 1;
-            push_once(&mut account.taken, name());
-        }
-        Unit::Conflict => {
-            account.conflicted += 1;
-            push_once(&mut account.conflicts, name());
-        }
-    }
-}
-
-pub(crate) fn push_once(names: &mut Vec<String>, name: String) {
-    if !names.contains(&name) {
-        names.push(name);
-    }
-}
-
 /// One row's fields, each through [`unit`].
 struct RowMerging<'a> {
     base: &'a ProfileEntryV1,
@@ -109,12 +96,13 @@ struct RowMerging<'a> {
 impl RowMerging<'_> {
     fn field<V: Clone + PartialEq>(
         &mut self,
-        key: &'static str,
+        label: &'static str,
         at: impl Fn(&ProfileEntryV1) -> &V,
         theirs: V,
     ) -> V {
         let (value, row) = unit(at(self.base).clone(), at(self.ours).clone(), theirs);
-        count(self.account, row, || format!("{}: {key}", self.title));
+        self.account
+            .count(row, || i18n::merged_profile_value(self.title, label));
         value
     }
 }
@@ -152,16 +140,17 @@ fn merge_row(
     } = theirs.clone();
     ProfileEntryV1 {
         id,
-        display_title: m.field("display_title", |e| &e.display_title, display_title),
-        hidden: m.field("hidden", |e| &e.hidden, hidden),
-        program: m.field("program", |e| &e.program, program),
-        args: m.field("args", |e| &e.args, args),
-        env: m.field("env", |e| &e.env, env),
-        starting_dir: m.field("starting_dir", |e| &e.starting_dir, starting_dir),
-        start_at: m.field("start_at", |e| &e.start_at, start_at),
-        mark: m.field("mark", |e| &e.mark, mark),
-        integration: m.field("integration", |e| &e.integration, integration),
-        login: m.field("login", |e| &e.login, login),
+        display_title: m.field(Text::ProfilesRowName.text(), |e| &e.display_title, display_title),
+        hidden: m.field(Text::ProfilesBadgeHidden.text(), |e| &e.hidden, hidden),
+        program: m.field(Text::ProfilesRowProgram.text(), |e| &e.program, program),
+        args: m.field(Text::ProfilesRowArgs.text(), |e| &e.args, args),
+        env: m.field(Text::ProfilesRowEnv.text(), |e| &e.env, env),
+        starting_dir: m.field(Text::ProfilesRowStartingDir.text(), |e| &e.starting_dir, starting_dir),
+        start_at: m.field(Text::ProfilesRowStartingDir.text(), |e| &e.start_at, start_at),
+        mark: m.field(Text::ProfilesRowColour.text(), |e| &e.mark, mark),
+        integration: m.field(Text::ProfilesRowIntegration.text(), |e| &e.integration, integration),
+        login: m.field(Text::ProfilesRowLogin.text(), |e| &e.login, login),
+        // No row of the editor shows these two: named by their key in the file.
         paste_as: m.field("paste_as", |e| &e.paste_as, paste_as),
         paste_paths_as: m.field("paste_paths_as", |e| &e.paste_paths_as, paste_paths_as),
     }
@@ -188,7 +177,7 @@ pub(crate) fn merge(
             if seen.insert(entry.id.as_str()) {
                 Slot::Row(entry.id.clone())
             } else {
-                Slot::Carried(index)
+                Slot::Carried(index, entry.id.clone())
             }
         })
         .collect();
@@ -223,39 +212,42 @@ pub(crate) fn merge(
                 } else {
                     Unit::Conflict
                 };
-                count(&mut account, row, name);
+                account.count(row, name);
                 None
             }
             // Deleted here: unchanged in the file, deleted; changed in the
             // file, a conflict the file's side wins — kept as the file has it.
             (Some(base), None, Some(theirs)) => {
                 if theirs == base {
-                    count(&mut account, Unit::Ours, name);
+                    account.count(Unit::Ours, name);
                     None
                 } else {
-                    count(&mut account, Unit::Conflict, name);
+                    account.count(Unit::Conflict, name);
                     Some((*theirs).clone())
                 }
             }
             (Some(_), None, None) => {
-                count(&mut account, Unit::Theirs, name);
+                account.count(Unit::Theirs, name);
                 None
             }
             (None, Some(ours), None) => {
-                count(&mut account, Unit::Ours, name);
+                account.count(Unit::Ours, name);
                 Some((*ours).clone())
             }
             (None, None, Some(theirs)) => {
-                count(&mut account, Unit::Theirs, name);
+                account.count(Unit::Theirs, name);
                 Some((*theirs).clone())
             }
-            // Added on both sides: field by field, against the shipped value.
+            // Added on both sides: one row, or two rows under one id — a
+            // conflict the file's row wins whole.
             (None, Some(ours), Some(theirs)) => {
-                let shipped = ProfileEntryV1 {
-                    id: id.to_owned(),
-                    ..ProfileEntryV1::default()
+                let row = if ours == theirs {
+                    Unit::Theirs
+                } else {
+                    Unit::Conflict
                 };
-                Some(merge_row(&shipped, ours, theirs, &name(), &mut account))
+                account.count(row, name);
+                Some((*theirs).clone())
             }
             (None, None, None) => None,
         };
@@ -275,7 +267,7 @@ pub(crate) fn merge(
     .into_iter()
     .map(|slot| match slot {
         Slot::Row(id) => result[&id].clone(),
-        Slot::Carried(index) => theirs.profiles[index].clone(),
+        Slot::Carried(index, _) => theirs.profiles[index].clone(),
     })
     .collect();
     Merged {
@@ -314,28 +306,25 @@ fn order(
         common_order(o_rows),
         common_order(t_rows),
     );
-    count(account, row, || "order".to_owned());
+    account.count(row, || Text::MergedProfilesOrder.text().to_owned());
 
     // Step 2: every other row, anchored to its nearest predecessor in its own
     // side's sequence that is in the result. Step 3: `T`'s anchored rows before
     // `O`'s, each side's in its own order — the order they are pushed in.
-    let in_result = |slot: &Slot| match slot {
-        Slot::Row(id) => result.contains_key(id),
-        Slot::Carried(_) => true,
-    };
+    // The carried rows are placed last, so a row anchors to rows only.
+    let a_row_in_result = |slot: &Slot| matches!(slot, Slot::Row(id) if result.contains_key(id));
     let mut anchored: HashMap<Option<Slot>, Vec<Slot>> = HashMap::new();
     for (at, slot) in t_sequence.iter().enumerate() {
-        let placed_here = match slot {
-            Slot::Row(id) => result.contains_key(id) && !common(id),
-            Slot::Carried(_) => true,
+        let Slot::Row(id) = slot else {
+            continue;
         };
-        if !placed_here {
+        if !result.contains_key(id) || common(id) {
             continue;
         }
         let anchor = t_sequence[..at]
             .iter()
             .rev()
-            .find(|earlier| in_result(earlier))
+            .find(|earlier| a_row_in_result(earlier))
             .cloned();
         anchored.entry(anchor).or_default().push(slot.clone());
     }
@@ -373,6 +362,26 @@ fn order(
     for id in spine {
         pending.push(Slot::Row(id));
         place(&mut pending, &mut placed);
+    }
+
+    // The carried rows, in the file's order: each right after whichever
+    // stands later of its nearest predecessor in the file's sequence and the
+    // row of its own id, so it never stands before that row.
+    for (at, slot) in t_sequence.iter().enumerate() {
+        let Slot::Carried(_, id) = slot else {
+            continue;
+        };
+        let position = |wanted: &Slot| placed.iter().position(|placed| placed == wanted);
+        let after_predecessor = t_sequence[..at]
+            .iter()
+            .rev()
+            .find_map(|earlier| position(earlier));
+        let after_its_row = position(&Slot::Row(id.clone()));
+        let at_index = match after_predecessor.max(after_its_row) {
+            Some(anchor) => anchor + 1,
+            None => 0,
+        };
+        placed.insert(at_index, slot.clone());
     }
     placed
 }
@@ -479,6 +488,15 @@ mod tests {
             merged.document.profiles,
             vec![a_here, duplicate, b],
             "the first `a` merged (Folio's arguments), the second carried in its place"
+        );
+        let (installed, _) = crate::profiles::table_from(&merged.document);
+        let in_force = installed
+            .get(installed.position_of_id("a").expect("`a` is a row"))
+            .expect("and in the table");
+        assert_eq!(
+            (in_force.display_title.as_str(), in_force.args.as_slice()),
+            ("甲 A", &["-NoLogo".to_owned(), "参数".to_owned()][..]),
+            "read back first-wins: the merged row is the one in force, not the carried one"
         );
     }
 
@@ -597,7 +615,10 @@ mod tests {
         );
         assert_eq!(
             merged.account.conflicts,
-            vec!["PowerShell 七: program".to_owned()],
+            vec![i18n::merged_profile_value(
+                "PowerShell 七",
+                Text::ProfilesRowProgram.text()
+            )],
             "named by the shipped title and the field"
         );
         assert_eq!(merged.account.kept, 1);
@@ -620,5 +641,111 @@ mod tests {
         let clean = merge(&base, &base, &theirs, &no_titles);
         assert_eq!(clean.document, theirs, "a clean hand edit is the file");
         assert_eq!(clean.account.conflicted, 0);
+    }
+
+    /// The row the installer puts in force for `id` from `document`, and the
+    /// entries it refused — the merged document read back first-wins.
+    fn in_force(
+        document: &ProfilesV1,
+        id: &str,
+    ) -> (Option<String>, Vec<crate::profiles::ProfileFault>) {
+        let (installed, faults) = crate::profiles::table_from(document);
+        let title = installed
+            .position_of_id(id)
+            .and_then(|index| installed.get(index))
+            .map(|profile| profile.display_title.clone());
+        (title, faults)
+    }
+
+    /// RED (review round 2, the blocker) — **a carried row never stands before
+    /// its id's row**, so the installer's first-wins reading puts in force the
+    /// row the merge kept.
+    ///
+    /// The base and the file hold `a`, `b`, then `a′` (a later row naming `a`);
+    /// the file also renamed `b`. Folio moved `b` up, which keeps `a′` after `a`
+    /// in its document. The spine is Folio's order, `b a`; `a′` follows `a`, not
+    /// `b`. Read back, the row in force for `a` is `a`, and the installer
+    /// refuses the same duplicate it refuses in the file — no new card.
+    /// The mirror: the first `a` cannot start (no program), so the installer
+    /// takes `a′` from the file; it takes `a′` from the merged document too.
+    ///
+    /// MUTATION: anchor a carried row to its predecessor in the file only (in
+    /// `order`, `after_predecessor` alone, revision one's rule) — `a′` stands
+    /// after `b`, ahead of `a`, and is put in force.
+    #[test]
+    fn a_carried_row_never_stands_before_its_ids_row() {
+        let shadow = |first: ProfileEntryV1| {
+            let b = own("b", "乙 B");
+            let later = own("a", "后来的 a′ later");
+            let base = table(&[first.clone(), b.clone(), later.clone()]);
+            let mut b_there = b.clone();
+            b_there.display_title = Some("乙 改名 renamed".to_owned());
+            let theirs = table(&[first.clone(), b_there.clone(), later.clone()]);
+            let ours = table(&[b.clone(), first.clone(), later.clone()]);
+            let merged = merge(&base, &ours, &theirs, &no_titles);
+            assert_eq!(
+                ids(&merged.document),
+                vec!["b", "a", "a"],
+                "Folio's order of the rows, the carried row after its id's row"
+            );
+            assert_eq!(
+                in_force(&merged.document, "a"),
+                in_force(&theirs, "a"),
+                "read back first-wins: the same row in force, the same refusals"
+            );
+            in_force(&merged.document, "a").0
+        };
+        assert_eq!(
+            shadow(own("a", "甲 A")),
+            Some("甲 A".to_owned()),
+            "the first row is the one in force"
+        );
+        let unusable = ProfileEntryV1 {
+            program: None,
+            ..own("a", "不能启动 cannot start")
+        };
+        assert_eq!(
+            shadow(unusable),
+            Some("后来的 a′ later".to_owned()),
+            "an unusable first row leaves the later one in force, as in the file"
+        );
+    }
+
+    /// RED (review round 2, coordinator's ruling) — **a row added on both
+    /// sides under one id is the file's row whole**: two rows Folio and the
+    /// file made apart are a conflict the file wins, named once — never a mix
+    /// of the two. One row added the same on both sides is no conflict.
+    ///
+    /// MUTATION: merge the two field by field against the shipped value
+    /// (round one's rule) — the result carries Folio's arguments on the file's
+    /// row.
+    #[test]
+    fn a_row_added_on_both_sides_under_one_id_is_the_files_row_whole() {
+        let a = own("a", "甲 A");
+        let base = table(std::slice::from_ref(&a));
+        let mut mine = own("新", "我的 Mine");
+        mine.args = Some(vec!["--我的".to_owned()]);
+        let mut theirs_row = own("新", "他的 Theirs");
+        theirs_row.env = Some(std::collections::BTreeMap::from([(
+            "语言".to_owned(),
+            "中文".to_owned(),
+        )]));
+        let merged = merge(
+            &base,
+            &table(&[a.clone(), mine.clone()]),
+            &table(&[a.clone(), theirs_row.clone()]),
+            &no_titles,
+        );
+        assert_eq!(merged.document.profiles, vec![a.clone(), theirs_row]);
+        assert_eq!(merged.account.conflicts, vec!["他的 Theirs".to_owned()]);
+
+        let same = merge(
+            &base,
+            &table(&[a.clone(), mine.clone()]),
+            &table(&[a.clone(), mine.clone()]),
+            &no_titles,
+        );
+        assert_eq!(same.document.profiles, vec![a, mine]);
+        assert_eq!(same.account.conflicted, 0);
     }
 }

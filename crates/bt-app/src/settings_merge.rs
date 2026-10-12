@@ -553,6 +553,23 @@ impl Account {
             push_once(&mut self.conflicts, name);
         }
     }
+
+    /// **Count one unit by the table row that chose it**, named by `name`
+    /// when the file gave it — what each document's merge says about a unit.
+    pub(crate) fn count(&mut self, row: Unit, name: impl FnOnce() -> String) {
+        match row {
+            Unit::Base => {}
+            Unit::Ours => self.kept += 1,
+            Unit::Theirs => {
+                self.took += 1;
+                push_once(&mut self.taken, name());
+            }
+            Unit::Conflict => {
+                self.conflicted += 1;
+                push_once(&mut self.conflicts, name());
+            }
+        }
+    }
 }
 
 /// **The doors a merge walks** ((b)8): every value of `merged` that differs

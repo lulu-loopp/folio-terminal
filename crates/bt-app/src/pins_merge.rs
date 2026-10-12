@@ -35,7 +35,6 @@ use std::collections::{HashMap, HashSet};
 use bt_persist::{PINS_SCHEMA_VERSION, PinEntryV1, PinKind, PinsV1};
 use serde_json::{Map, Value};
 
-use crate::profiles_merge::push_once;
 use crate::settings_merge::{Account, Unit, unit};
 
 /// **One merge of `pins.json`.**
@@ -65,22 +64,6 @@ fn first_wins(document: &PinsV1) -> Vec<(Identity, &PinEntryV1)> {
         .collect()
 }
 
-/// Count one unit's row of the table into `account`, under `name`.
-fn count(account: &mut Account, row: Unit, name: impl FnOnce() -> String) {
-    match row {
-        Unit::Base => {}
-        Unit::Ours => account.kept += 1,
-        Unit::Theirs => {
-            account.took += 1;
-            push_once(&mut account.taken, name());
-        }
-        Unit::Conflict => {
-            account.conflicted += 1;
-            push_once(&mut account.conflicts, name());
-        }
-    }
-}
-
 /// **A map of opaque keys merged key by key** through [`unit`]: the file's
 /// keys in the file's order, then Folio's, each named by `name`.
 fn merge_keys(
@@ -99,7 +82,7 @@ fn merge_keys(
     }
     for key in keys {
         let (value, row) = unit(base.get(key), ours.get(key), theirs.get(key));
-        count(account, row, || name(key));
+        account.count(row, || name(key));
         if let Some(value) = value {
             merged.insert(key.clone(), value.clone());
         }
@@ -129,7 +112,7 @@ fn resolve(
         }),
         // Pinned on both sides: they agree on the presence; `extra` against none.
         (None, Some(ours), Some(theirs)) => {
-            count(account, Unit::Theirs, || target.clone());
+            account.count(Unit::Theirs, || target.clone());
             Some(PinEntryV1 {
                 extra: merge_keys(&empty, &ours.extra, &theirs.extra, &name, account),
                 ..theirs.clone()
@@ -139,10 +122,10 @@ fn resolve(
         // file changed is a conflict the file wins — kept, as the file has it.
         (Some(base), None, Some(theirs)) => {
             if theirs.extra == base.extra {
-                count(account, Unit::Ours, || target.clone());
+                account.count(Unit::Ours, || target.clone());
                 None
             } else {
-                count(account, Unit::Conflict, || target.clone());
+                account.count(Unit::Conflict, || target.clone());
                 Some(theirs.clone())
             }
         }
@@ -153,19 +136,19 @@ fn resolve(
             } else {
                 Unit::Conflict
             };
-            count(account, row, || target.clone());
+            account.count(row, || target.clone());
             None
         }
         (Some(_), None, None) => {
-            count(account, Unit::Theirs, || target.clone());
+            account.count(Unit::Theirs, || target.clone());
             None
         }
         (None, Some(ours), None) => {
-            count(account, Unit::Ours, || target.clone());
+            account.count(Unit::Ours, || target.clone());
             Some(ours.clone())
         }
         (None, None, Some(theirs)) => {
-            count(account, Unit::Theirs, || target.clone());
+            account.count(Unit::Theirs, || target.clone());
             Some(theirs.clone())
         }
         (None, None, None) => None,
@@ -176,6 +159,10 @@ fn resolve(
 pub(crate) fn merge(base: &PinsV1, ours: &PinsV1, theirs: &PinsV1) -> Merged {
     let mut account = Account::default();
     let b: HashMap<Identity, &PinEntryV1> = first_wins(base).into_iter().collect();
+    // Folio's document is read first-wins too. A later duplicate or a row of a
+    // kind this build cannot name in it came from an earlier file (no press
+    // makes one) and is no unit of Folio's: it is not merged, and what stands
+    // of it is what the file still carries, in the file's place.
     let o_rows = first_wins(ours);
     let o: HashMap<Identity, &PinEntryV1> = o_rows.iter().cloned().collect();
     let t: HashMap<Identity, &PinEntryV1> = first_wins(theirs).into_iter().collect();
