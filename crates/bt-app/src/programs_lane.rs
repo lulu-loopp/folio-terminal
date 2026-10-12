@@ -724,15 +724,16 @@ fn run_program_walk(ctx: &WorkerCtx, lane: &ProgramsLane) {
         });
         let elapsed = started.elapsed();
         // Every request takes the lane lock across admission. Under that same lock, count the
-        // requests still represented by the waiting table separately from those a newer table
-        // displaced while this walk was out.
-        let (joined, superseded) = {
+        // requests the waiting run stands for — the next walk answers them, its operation `Done`
+        // and the rest `Joined` to it — separately from those a newer table displaced while this
+        // walk was out.
+        let (waiting, superseded) = {
             let mut asks = lane.lock();
             let superseded = asks.out.take().map_or(0, |(_, _, superseded)| superseded);
-            let joined = lane
+            let waiting = lane
                 .requests
                 .waiting(|waiting| waiting.map_or(0, |waiting| waiting.requests));
-            (joined, superseded)
+            (waiting, superseded)
         };
         let terminal = match walked {
             Ok((path_entries, file_questions)) => {
@@ -740,7 +741,7 @@ fn run_program_walk(ctx: &WorkerCtx, lane: &ProgramsLane) {
                     crate::trace_sink::stderr_line(format!(
                         "BT_PERF_TRACE program_walk_us={} generation={generation} trigger={:?} \
                          rows={} path_entries={path_entries} file_questions={file_questions} \
-                         joined={joined} superseded={superseded} band={:?}",
+                         waiting={waiting} superseded={superseded} band={:?}",
                         elapsed.as_micros(),
                         request.trigger.name(),
                         request.rows.len(),
@@ -751,12 +752,12 @@ fn run_program_walk(ctx: &WorkerCtx, lane: &ProgramsLane) {
             }
             Err(failure) => Terminal::Failed(failure),
         };
-        if joined + superseded > 0 {
-            (lane.note)(&joined_line(
+        if waiting + superseded > 0 {
+            (lane.note)(&arrivals_line(
                 generation,
                 request.trigger,
                 elapsed,
-                joined,
+                waiting,
                 superseded,
             ));
         }
@@ -767,19 +768,19 @@ fn run_program_walk(ctx: &WorkerCtx, lane: &ProgramsLane) {
     }
 }
 
-/// **The line for requests made while a walk was out** — those still represented by the waiting
-/// table are joined into its walk; those displaced by a different table ended `Superseded` and
-/// are not described as answered by that later walk.
-fn joined_line(
+/// **The line for requests made while a walk was out** — those the waiting run stands for wait
+/// for the next walk, which answers them (its operation `Done`, the rest `Joined` to it); those
+/// displaced by a different table ended `Superseded` and are not described as answered by it.
+fn arrivals_line(
     generation: u64,
     trigger: Trigger,
     elapsed: Duration,
-    joined: usize,
+    waiting: usize,
     superseded: usize,
 ) -> String {
     format!(
         "program walk {generation} ({}) took {} ms; of the requests made while it was out, \
-         {joined} joined this walk, {superseded} superseded by a newer table",
+         {waiting} wait for the next walk, {superseded} superseded by a newer table",
         trigger.name(),
         elapsed.as_millis()
     )
@@ -1216,7 +1217,7 @@ pub(crate) mod tests {
     /// RED — **requests made while a walk is out are answered by one later walk, and that is
     /// said once in diagnostics** (the skipped-probe line).
     ///
-    /// MUTATION (observed red): `run_program_walk` never saying the line (`if joined + superseded
+    /// MUTATION (observed red): `run_program_walk` never saying the line (`if waiting + superseded
     /// > 0` made never true) — no line arrives.
     #[test]
     fn requests_made_while_a_walk_is_out_are_said_once_and_answered_by_the_next_walk() {
@@ -1257,7 +1258,7 @@ pub(crate) mod tests {
             "{line}"
         );
         assert!(
-            line.contains("3 joined this walk, 0 superseded by a newer table"),
+            line.contains("3 wait for the next walk, 0 superseded by a newer table"),
             "{line}"
         );
         assert!(notes.try_recv().is_err(), "said once, not per request");
@@ -1558,7 +1559,7 @@ pub(crate) mod tests {
             "{said:?}"
         );
         assert!(
-            said[0].contains("1 joined this walk, 2 superseded by a newer table"),
+            said[0].contains("1 wait for the next walk, 2 superseded by a newer table"),
             "{said:?}"
         );
     }
