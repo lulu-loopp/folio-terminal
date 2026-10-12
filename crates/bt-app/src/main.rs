@@ -159,6 +159,7 @@ mod seed;
 mod session_end;
 mod settings;
 mod settings_bundle;
+mod settings_merge;
 mod settling;
 mod shell_integration;
 mod shell_literal;
@@ -13265,6 +13266,13 @@ struct App {
     /// Whether the last re-read of `pins.json` found a file that would not
     /// parse, so that it is said once — [`Self::profiles_file_broken`]'s rule.
     pins_file_broken: bool,
+    /// Whether the last re-read of `settings.json` found a file that would not
+    /// parse, so that it is said once — [`Self::profiles_file_broken`]'s rule.
+    settings_file_broken: bool,
+    /// Whether the last re-read of `keybindings.json` found a file that would
+    /// not parse, so that it is said once — [`Self::profiles_file_broken`]'s
+    /// rule.
+    keybindings_file_broken: bool,
     /// **What the two documents this window is made of owe the reader** (review
     /// rows R4-3, R4-5, R4-9 and R4-10).
     ///
@@ -45274,6 +45282,8 @@ impl Runtime<'_> {
             settings_fault: settings_fault.take(),
             session_fault: session_fault.take(),
             pins_file_broken: false,
+            settings_file_broken: false,
+            keybindings_file_broken: false,
             recent,
             recent_folders,
             // **The document is assembled from these, and the first window's
@@ -48938,12 +48948,12 @@ impl Runtime<'_> {
     /// **The four documents, by stamp.** The watcher thread has already reduced
     /// the kernel's names to the documents they name and stamped each in the
     /// ear's mailbox; when the folder's one clock is due, the pass asks the
-    /// storage worker to read the stamped ones among those followed live —
-    /// `profiles.json`, `pins.json` — and nothing is read here. Each answer comes
-    /// back with `AppEvent::DocumentsAnswered` ([`Self::take_document_answers`])
-    /// and is compared there with its store's revision (`persist::Revision`),
-    /// which is what absorbs this window's own writes. A stamp on
-    /// `settings.json` or `keybindings.json` is drained without a read.
+    /// storage worker to read the stamped ones — all four are followed live
+    /// (R33, owner ruling Q3 2026-10-11) — and nothing is read here. Each answer
+    /// comes back with `AppEvent::DocumentsAnswered`
+    /// ([`Self::take_document_answers`]) and is compared there with its store's
+    /// revision (`persist::Revision`), which is what absorbs this window's own
+    /// writes.
     ///
     /// The stores' write generations go with it: the watch hears the steward
     /// before it compares them, so a write accepted in the turn a failure is
@@ -48951,6 +48961,12 @@ impl Runtime<'_> {
     fn advance_storage_watch(&mut self, now: Instant) -> Result<()> {
         let write_generations = self.app.storage_write_generations();
         let documents = self.app.storage_watch.advance(now, write_generations);
+        if documents.contains(storage_watch::Document::Settings) {
+            self.app.settings_store.ask_reread();
+        }
+        if documents.contains(storage_watch::Document::Keybindings) {
+            self.app.keybindings_store.ask_reread();
+        }
         if documents.contains(storage_watch::Document::Profiles) {
             self.app.profiles_store.ask_reread();
         }
@@ -48967,7 +48983,10 @@ impl Runtime<'_> {
     /// (`persist::hear_documents`). Then the faults: a write that will not land
     /// is said on the card the start-up announcement uses — a link or a volume
     /// that cannot exchange at once, a disk's refusal at the fifth in a row.
-    /// Then what the re-reads put in force.
+    /// Then what the re-reads put in force: a file that will not parse is said
+    /// once, `settings.json`'s changes are merged and put in force through
+    /// their rows' doors (`Self::merge_documents`), and the profiles and pins
+    /// news is taken.
     pub(crate) fn take_document_answers(&mut self) -> Result<()> {
         let heard = persist::hear_documents(
             &mut self.app.settings_store,
@@ -48983,6 +49002,11 @@ impl Runtime<'_> {
                 fault,
             )?;
         }
+        self.take_kept_news(heard.settings, heard.keybindings)?;
+        // The data of the pass's one card, made whatever the presentation after
+        // the merge answers; T-STORE-NOTICE raises it.
+        let (_replaced, presented) = self.merge_documents();
+        presented?;
         self.take_profiles_news(heard.profiles)?;
         self.take_pins_news(heard.pins)
     }
@@ -59135,8 +59159,14 @@ mod focus_mode_door_tests {
     /// one thing a reader who blinked through a four-second card cannot fix for
     /// themselves.
     ///
+    /// A third writer since T-STORE-MERGE-SETTINGS, and named: the storage
+    /// pass's merge, when the person on this machine edits the key in
+    /// `settings.json` by hand (design note 2026-10-11 §3.4: a hand edit here is
+    /// a statement about this machine). It is not an opinion about when the
+    /// reader has been told; it is the reader saying so.
+    ///
     /// The product-item filter excludes this test module, so the needle and the
-    /// two expected lines are written as the code spells them.
+    /// expected lines are written as the code spells them.
     ///
     /// MUTATION: spend the offer anywhere else — on the frame the bubble comes
     /// *down*, say — and this names the extra line, and a window closed four
@@ -59153,8 +59183,12 @@ mod focus_mode_door_tests {
                 format!("{needle} false;"),
                 // And given back by `Reset to defaults` on the page Cards is on.
                 needle.to_owned(),
+                // And, third, taken from a hand edit of this machine's own
+                // `settings.json` by the storage pass's merge (T-STORE-MERGE-SETTINGS):
+                // a receipt about this machine, written by a person on it.
+                format!("{needle} merged.cards_gesture_hint_offer;"),
             ],
-            "the offer has one spender and one restorer",
+            "the offer has one spender, one restorer, and the merge of a hand edit",
         );
 
         // The restore is on the Appearance page and no other: a reset of the

@@ -26,7 +26,9 @@
 //!   build, refused whole from a newer one), then [`plan_settings`]: every value
 //!   that differs becomes one [`SettingChange`], and `Runtime` puts each through
 //!   the function a Settings press on that row calls. **Never by writing
-//!   `settings.json` and waiting** — nothing re-reads that file during a run.
+//!   `settings.json` and waiting for the re-read**: an import uses the doors
+//!   directly. A hand edit of that file enters by the same doors, through the
+//!   storage pass's merge (`settings_merge`).
 //!
 //! # What an import leaves alone
 //!

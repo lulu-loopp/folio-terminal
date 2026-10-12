@@ -14,6 +14,10 @@ All notable changes to Folio are recorded here. The format follows
 - A Folio installed with Homebrew now updates itself in place from About, like a copy you dragged to Applications; Homebrew keeps managing and uninstalling it. <!-- zh: 用 Homebrew 安装的 Folio 现在也能在关于页中就地更新，和拖进应用程序文件夹的副本一样；Homebrew 仍负责管理和卸载。 -->
 - After a graphics failure, Folio tells you at its next start where it kept your unsaved edit, with a button that opens the folder. <!-- zh: pending T-RECOVERED-FOLDER -->
 
+### Changed
+
+- Changes to settings.json saved in another editor while Folio runs take effect without a restart, and a setting changed in Folio at the same time is kept beside them; when both change the same setting, the file wins. <!-- zh: pending T-STORE-MERGE-SETTINGS -->
+
 ### Fixed
 
 - A change to settings, shortcuts, profiles or pins that cannot be saved is now reported while Folio runs, not only at startup. <!-- zh: pending T-STORAGE-WORKER-REQUEST -->
