@@ -34,9 +34,15 @@ a committed path, or a **call** of `read_to_string`, `fs::read` or `File::open`
 (through bt-source's call pattern; a bare mention is no call) whose own
 argument reduces to a committed document — judged one call at a time, from a
 literal, a `Path`/`.join` chain, `env!`/`concat!`, a binding before the call, a
-same-file constant, or a same-file helper rooted at `CARGO_MANIFEST_DIR`. A
-call whose path is under `target/` or a temporary directory is not a read of a
-document, and does not make another call in the same function one.
+same-file constant, or a same-file helper rooted at `CARGO_MANIFEST_DIR`; or
+**any other call or method handed such a path** — a wrapper of the same crate
+(`read_session(&fixture_path(…))`), a function of another crate, a method
+called on the path — which is a reader named by its callee in the `mechanism`
+column. A macro is not a call (`assert_eq!(path, …)` compares), nor are the
+calls that only build or describe a path (`Path::new`, `PathBuf::from`,
+`.join`, `.display()` and the rest of the test's `PATH_BUILDING`). A path under
+`target/` or a temporary directory is not a document, and does not make another
+call in the same function a reader.
 The subject set is what `git ls-files` names minus `.rs` files; generated files
 under `target/` and bytes the shipped program embeds are not subjects.
 
@@ -54,8 +60,9 @@ reading text is migrated to a `bt-source` query instead, and a debt row is never
 added. A rooted call whose path this reading cannot reduce to a literal (a
 loop variable, a `format!`, another crate's constant) is counted and listed by
 the test as a diagnostic, not refused. Not covered, and said in the test's
-header: a path handed in as a parameter, a root reached through a method, a
-closure or another file's function, other read calls, a read call renamed by
+header: a path handed in as a parameter (the function that hands it on is not
+the reader; its caller that names the file is), a root reached through a
+method, a closure or another file's function, a read call renamed by
 `use … as …` (bt-source does not resolve aliases), and stale rows (a row whose
 item no longer reads is not refused).
 
