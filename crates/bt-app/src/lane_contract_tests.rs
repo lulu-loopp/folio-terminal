@@ -21,7 +21,7 @@ use crate::lane::{
     Delivery, EXPECTED_FAILURES, Executor, ExpectedFailure, Failure, FailureKind, Gate, HANDOFF,
     LaneName, LaneUnderTest, Ledger, Order, Outcome, Owed, PLANTED_PANIC, Refused, Replacement,
     Request, Saying, TaskFailure, Terminal, Verdict, WakeProbe, WorkerEnd, check, judge, receive,
-    run_suite,
+    run_suite, task,
 };
 
 /// Every lane's adapter. A lane missing here is a lane [`judge`] reports as skipped.
@@ -551,6 +551,9 @@ enum Step {
     Race(usize),
     /// The requester drops its `Request`.
     Drop(usize),
+    /// A terminal is published for a joined identity itself, which the ledger must refuse: a join
+    /// ends only with the request it joined.
+    Stray(usize),
     /// The executor reports the worker's end.
     WorkerEnded,
 }
@@ -604,7 +607,8 @@ fn steps_of(case: &Case) -> Vec<Step> {
         match fate {
             Fate::Done | Fate::Failed | Fate::Superseded => steps.push(Step::End(at)),
             Fate::Cancelled => steps.extend([Step::End(at), Step::Race(at)]),
-            Fate::Joined | Fate::WorkerGone => {}
+            Fate::Joined => steps.push(Step::Stray(at)),
+            Fate::WorkerGone => {}
         }
         if case.drops[at] {
             steps.push(Step::Drop(at));
@@ -700,10 +704,21 @@ fn expected(case: &Case, order: &[Step], ids: [u64; 3]) -> [Option<Terminal<u64,
         match *step {
             Step::End(at) => end(&mut ended, at, published(case, at, ids)),
             Step::Race(at) => end(&mut ended, at, Terminal::Done(at as u64)),
-            Step::Drop(_) => {}
+            Step::Drop(_) | Step::Stray(_) => {}
             Step::WorkerEnded => {
-                for slot in ended.iter_mut().filter(|slot| slot.is_none()) {
-                    *slot = Some(Terminal::WorkerGone);
+                // The operations still owed end `WorkerGone`, and each identity joined to one ends
+                // `Joined` carrying it (revision (b)4).
+                for (at, slot) in ended.iter_mut().enumerate() {
+                    if slot.is_none() {
+                        *slot = Some(if case.fates[at] == Fate::Joined {
+                            Terminal::Joined {
+                                with: ids[root(at)],
+                                outcome: Box::new(Terminal::WorkerGone),
+                            }
+                        } else {
+                            Terminal::WorkerGone
+                        });
+                    }
                 }
             }
         }
@@ -715,11 +730,20 @@ fn expected(case: &Case, order: &[Step], ids: [u64; 3]) -> [Option<Terminal<u64,
 fn play(case: &Case, order: &[Step]) -> Option<String> {
     let said = Arc::new(AtomicUsize::new(0));
     let counting = Arc::clone(&said);
+    let woke = Arc::new(AtomicUsize::new(0));
+    let waking = Arc::clone(&woke);
     let sunk = Arc::new(Mutex::new(Vec::new()));
-    let ledger: Arc<Ledger<u64, ProofSink>> =
-        Ledger::new("proof", None, Saying::PerRequest, move |_line: &str| {
+    let ledger: Arc<Ledger<u64, ProofSink>> = Ledger::new(
+        "proof",
+        None,
+        Saying::PerRequest,
+        move |_line: &str| {
             counting.fetch_add(1, Ordering::SeqCst);
-        });
+        },
+        move || {
+            waking.fetch_add(1, Ordering::SeqCst);
+        },
+    );
     let mut requests: Vec<Option<Request<u64, ProofSink>>> = Vec::new();
     for at in 0..3 {
         let owed = ProofSink(Arc::clone(&sunk));
@@ -742,6 +766,9 @@ fn play(case: &Case, order: &[Step]) -> Option<String> {
                 accepted[at] += usize::from(ledger.publish(ids[at], Terminal::Done(at as u64)));
             }
             Step::Drop(at) => drop(requests[at].take()),
+            Step::Stray(at) => {
+                accepted[at] += usize::from(ledger.publish(ids[at], Terminal::Done(100)));
+            }
             Step::WorkerEnded => ledger.worker_ended(WorkerEnd::Panicked("the proof".to_owned())),
         }
     }
@@ -763,6 +790,11 @@ fn play(case: &Case, order: &[Step]) -> Option<String> {
             .map(|(_, terminal)| terminal)
             .collect();
         let deliveries = taken[at].len() + in_sink.len();
+        if case.fates[at] == Fate::Joined && accepted[at] > 0 {
+            return Some(format!(
+                "identity {at} is joined, and a terminal published for it was accepted"
+            ));
+        }
         if accepted[at] > 1 || deliveries > 1 {
             return Some(format!(
                 "{:?}: identity {at} published {} time(s), delivered {deliveries} time(s)",
@@ -796,9 +828,27 @@ fn play(case: &Case, order: &[Step]) -> Option<String> {
     }
     let failed = want
         .iter()
-        .filter(|terminal| matches!(terminal, Some(Terminal::Failed(_))))
+        .filter(|terminal| match terminal {
+            Some(Terminal::Failed(_)) => true,
+            Some(Terminal::Joined { outcome, .. }) => {
+                matches!(outcome.as_ref(), Terminal::Failed(_))
+            }
+            _ => false,
+        })
         .count();
     let lines = failed + usize::from(case.worker_ends);
+    if woke.load(Ordering::SeqCst) != usize::from(case.worker_ends) {
+        return Some(format!(
+            "{:?}: the worker {} and the consumer was woken {} time(s)",
+            Failure::DeathUnannounced,
+            if case.worker_ends {
+                "ended"
+            } else {
+                "did not end"
+            },
+            woke.load(Ordering::SeqCst)
+        ));
+    }
     if said.load(Ordering::SeqCst) != lines {
         return Some(format!(
             "{:?}",
@@ -827,27 +877,36 @@ fn play(case: &Case, order: &[Step]) -> Option<String> {
 }
 
 /// How many interleavings [`the_ledger_ends_every_identity_exactly_once_in_every_interleaving`]
-/// plays: 2 240 cases, each every order of its steps with a racing answer after its cancel.
-const INTERLEAVINGS: usize = 3_302_423;
+/// plays: 2 240 cases, each every order of its steps with a racing answer after its cancel, and a
+/// terminal published for each joined identity itself.
+const INTERLEAVINGS: usize = 4_103_588;
 
 /// RED (S-3) — **The ledger ends every identity exactly once, in every interleaving.**
 ///
 /// The exhaustive proof over [`Ledger`] alone (revision (b)7), the product code every lane will
 /// keep its requests in. Three identities; each ends `Done`, `Failed`, `Cancelled` (with the
 /// worker's answer racing the cancel), `Superseded { by }` the next, `Joined { with }` the one
-/// before, or `WorkerGone`; each requester stays or drops its `Request`; the worker ends or does
-/// not. Every order of those events is played on a fresh ledger, and each identity must be
-/// delivered exactly once — to its requester, or to its sink when the requester has gone — with
-/// the terminal the contract's reference ([`expected`]) reads off the order; taking twice gives
-/// one; each failed identity is said once and the worker's end once; the lane is in fault, and
-/// refuses at the door, exactly when the worker ended. No clock and no thread is in the proof:
+/// before (and a terminal published for it directly, which must be refused), or `WorkerGone`;
+/// each requester stays or drops its `Request`; the worker ends or does not. Every order of those
+/// events is played on a fresh ledger, and each identity must be delivered exactly once — to its
+/// requester, or to its sink when the requester has gone — with the terminal the contract's
+/// reference ([`expected`]) reads off the order; taking twice gives one; each failed identity — a
+/// joined one carrying a failure included — is said once and the worker's end once; a joined
+/// identity ends `Joined` carrying its original's terminal, the
+/// worker's end included; the consumer is woken once when the worker ends; the lane is in fault,
+/// and refuses at the door, exactly when the worker ended. No clock and no thread is in the proof:
 /// the order is the script. The cases are shared among scoped threads only to finish sooner; the
 /// count and the verdict do not depend on how.
 ///
 /// MUTATIONS, each red here: in `Ledger::publish`, return `true` without recording a
 /// `Superseded` terminal (`NoTerminal`); in `Ledger::publish`, accept a terminal for an identity
 /// that already has one (`Some(_) => {}`) — the answer racing a cancel is delivered too
-/// (`Twice`); in `Ledger::worker_ended`, skip ending the owed identities (`NoTerminal`).
+/// (`Twice`); in `Ledger::worker_ended`, skip ending the owed identities (`NoTerminal`); in
+/// `Ledger::worker_ended`, end every owed identity plain `WorkerGone`, joins included (a join
+/// ends `WorkerGone`, not `Joined`); in `Ledger::publish`, drop the `twin.is_none()` condition (a
+/// join is published on its own); in `Ledger::delivered`, read only a top-level `Failed` (a failed
+/// join is not said, `SaidOtherThanOnce`); in `Ledger::worker_ended`, do not wake
+/// (`DeathUnannounced`).
 #[test]
 fn the_ledger_ends_every_identity_exactly_once_in_every_interleaving() {
     let cases = cases();
@@ -897,7 +956,7 @@ fn the_ledger_refuses_at_the_door_synchronously() {
     let sunk = Arc::new(Mutex::new(Vec::new()));
     let owed = || ProofSink(Arc::clone(&sunk));
     let ledger: Arc<Ledger<u64, ProofSink>> =
-        Ledger::new("refusals", Some(2), Saying::PerRequest, |_: &str| {});
+        Ledger::new("refusals", Some(2), Saying::PerRequest, |_: &str| {}, || {});
     let mut first = ledger.admit(owed()).expect("the first is admitted");
     let second = ledger.admit(owed()).expect("the second is admitted");
     assert_eq!(
@@ -926,41 +985,69 @@ fn the_ledger_refuses_at_the_door_synchronously() {
         Some(Refused::Faulted(WorkerEnd::Returned)),
         "after the worker's end"
     );
+    let original = second.id();
     drop((second, joined));
     assert_eq!(
         locked(&sunk)
             .iter()
             .map(|(_, terminal)| terminal.clone())
             .collect::<Vec<_>>(),
-        vec![Terminal::WorkerGone, Terminal::WorkerGone],
-        "the two owed when the worker ended went to their sink when their requesters went"
+        vec![
+            Terminal::WorkerGone,
+            Terminal::Joined {
+                with: original,
+                outcome: Box::new(Terminal::WorkerGone),
+            },
+        ],
+        "the two owed when the worker ended went to their sink when their requesters went: the \n         request, and the one joined to it, carrying its outcome"
     );
 }
 
-/// PIN (S-3) — **A streak of the same failure is said once** where the lane declares streaks; an
-/// answer delivered between two failures ends the streak, and a lane that does not declare
-/// streaks says every failure.
+/// PIN (S-3) — **A failure is said once per request, joined requests included, and a streak of
+/// the same failure once** where the lane declares streaks. A failed request and the request
+/// joined to it are two failed requests (C3, revision (b)4); an answer delivered between two
+/// failures ends the streak, also when the only answer delivered is a joined request's.
 ///
-/// MUTATION: compare nothing in `Ledger::delivered` (say every failure) — the streak lane says
-/// three, not two.
+/// MUTATIONS: compare nothing in `Ledger::delivered` (say every failure) — the streak lane says
+/// three, not two; read only a top-level `Failed` there (ignore what a `Joined` carries) — the
+/// lane that says every failure says two, not three, and the streak lane one, not two.
 #[test]
-fn a_streak_of_the_same_failure_is_said_once() {
+fn a_failure_is_said_once_per_request_joins_included_and_once_per_streak() {
     for (saying, lines) in [(Saying::PerStreak, 2), (Saying::PerRequest, 3)] {
         let said = Arc::new(AtomicUsize::new(0));
         let counting = Arc::clone(&said);
-        let ledger: Arc<Ledger<u64, ProofSink>> =
-            Ledger::new("streaks", None, saying, move |_: &str| {
+        let ledger: Arc<Ledger<u64, ProofSink>> = Ledger::new(
+            "streaks",
+            None,
+            saying,
+            move |_: &str| {
                 counting.fetch_add(1, Ordering::SeqCst);
-            });
+            },
+            || {},
+        );
         let sunk = Arc::new(Mutex::new(Vec::new()));
+        let owed = || ProofSink(Arc::clone(&sunk));
         let failure = || Terminal::Failed(TaskFailure::Error("the disk refused".to_owned()));
-        for terminal in [failure(), failure(), Terminal::Done(0), failure()] {
-            let mut request = ledger
-                .admit(ProofSink(Arc::clone(&sunk)))
-                .expect("admitted");
-            assert!(ledger.publish(request.id(), terminal));
-            assert!(request.take().is_some());
-        }
+        // A failure, and the request joined to it.
+        let mut failed = ledger.admit(owed()).expect("admitted");
+        let mut joined = ledger
+            .admit_joined(failed.id(), owed())
+            .expect("joined to an owed request");
+        assert!(ledger.publish(failed.id(), failure()));
+        assert!(failed.take().is_some());
+        assert!(matches!(joined.take(), Some(Terminal::Joined { .. })));
+        // An answer whose join is delivered first: the joined answer ends the streak.
+        let mut answered = ledger.admit(owed()).expect("admitted");
+        let mut twin = ledger
+            .admit_joined(answered.id(), owed())
+            .expect("joined to an owed request");
+        assert!(ledger.publish(answered.id(), Terminal::Done(0)));
+        assert!(matches!(twin.take(), Some(Terminal::Joined { .. })));
+        // The same failure again.
+        let mut again = ledger.admit(owed()).expect("admitted");
+        assert!(ledger.publish(again.id(), failure()));
+        assert!(again.take().is_some());
+        assert!(answered.take().is_some());
         assert_eq!(said.load(Ordering::SeqCst), lines, "{saying:?}");
     }
 }
@@ -1021,6 +1108,8 @@ enum Planted {
     SinkDrops,
     /// The worker hands every answer to the sink as well as publishing it.
     AlsoSinks,
+    /// The ledger is built with no wake: the worker's end is recorded and announced to nobody.
+    DeathUnwoken,
 }
 
 /// How many identities the FIFO scripted lane's ledger owes at most.
@@ -1110,7 +1199,7 @@ struct Asked {
 }
 
 /// **A lane built on the seam**: a real [`Ledger`], a worker started by [`Executor::scripted`] whose
-/// tasks run in [`Worker::task`], and a body the suite writes — take a job, run its task (which
+/// tasks run in [`task`], and a body the suite writes — take a job, run its task (which
 /// answers its question, or panics where the suite planted a panic), publish, wake.
 struct ScriptedLane {
     contract: &'static Contract,
@@ -1129,12 +1218,23 @@ fn scripted_lane(contract: &'static Contract, policy: Policy, planted: Planted) 
     let kept = Arc::new(Kept::default());
     let counting = Arc::clone(&kept);
     let bound = (policy == Policy::Fifo).then_some(SCRIPTED_BOUND);
-    let ledger = Ledger::new("scripted", bound, contract.saying, move |_line: &str| {
-        counting.said.fetch_add(1, Ordering::SeqCst);
-    });
+    let probe = Arc::new(WakeProbe::default());
+    let heard = Arc::clone(&probe);
+    let ledger = Ledger::new(
+        "scripted",
+        bound,
+        contract.saying,
+        move |_line: &str| {
+            counting.said.fetch_add(1, Ordering::SeqCst);
+        },
+        move || {
+            if planted != Planted::DeathUnwoken {
+                heard.woke();
+            }
+        },
+    );
     let queue = Arc::new(Queue::default());
     let gate = Arc::new(Gate::default());
-    let probe = Arc::new(WakeProbe::default());
     let (jobs, publish, door, wake, retries) = (
         Arc::clone(&queue),
         Arc::clone(&ledger),
@@ -1143,45 +1243,41 @@ fn scripted_lane(contract: &'static Contract, policy: Policy, planted: Planted) 
         Arc::clone(&kept),
     );
     Executor::scripted(Arc::clone(&gate))
-        .start_worker(
-            "lane-contract-scripted",
-            Arc::clone(&ledger),
-            move |_ctx, worker| {
-                while let Some((id, question)) = jobs.next() {
-                    let task = || {
-                        worker.task(|_ctx| {
-                            door.execute(question);
-                            Ok::<u64, String>(question)
-                        })
-                    };
-                    let mut result = task();
-                    if planted == Planted::SaysEveryRetry {
-                        for _ in 0..2 {
-                            if result.is_ok() {
-                                break;
-                            }
-                            // The retry's own line, as `diagnostics::note` would hear it.
-                            retries.said.fetch_add(1, Ordering::SeqCst);
-                            result = task();
+        .start_worker("lane-contract-scripted", Arc::clone(&ledger), move |ctx| {
+            while let Some((id, question)) = jobs.next() {
+                let attempt = || {
+                    task(ctx, |_ctx| {
+                        door.execute(question);
+                        Ok::<u64, String>(question)
+                    })
+                };
+                let mut result = attempt();
+                if planted == Planted::SaysEveryRetry {
+                    for _ in 0..2 {
+                        if result.is_ok() {
+                            break;
                         }
+                        // The retry's own line, as `diagnostics::note` would hear it.
+                        retries.said.fetch_add(1, Ordering::SeqCst);
+                        result = attempt();
                     }
-                    let terminal = match result {
-                        Ok(answer) => Terminal::Done(answer),
-                        Err(failure) => Terminal::Failed(failure),
-                    };
-                    if planted == Planted::AlsoSinks {
-                        locked(&retries.sunk).push(Delivered {
-                            target: None,
-                            ticket: Some(id),
-                            question: Some(question),
-                            outcome: outcome(terminal.clone()),
-                        });
-                    }
-                    publish.publish(id, terminal);
-                    wake.woke();
                 }
-            },
-        )
+                let terminal = match result {
+                    Ok(answer) => Terminal::Done(answer),
+                    Err(failure) => Terminal::Failed(failure),
+                };
+                if planted == Planted::AlsoSinks {
+                    locked(&retries.sunk).push(Delivered {
+                        target: None,
+                        ticket: Some(id),
+                        question: Some(question),
+                        outcome: outcome(terminal.clone()),
+                    });
+                }
+                publish.publish(id, terminal);
+                wake.woke();
+            }
+        })
         .expect("the scripted worker starts");
     ScriptedLane {
         contract,
@@ -1359,12 +1455,12 @@ fn on_scripted(
 /// PIN (S-3) — **A lane built on the seam keeps every claim of the contract.**
 ///
 /// The FIFO scripted lane — a real [`Ledger`] bounded at five, its worker started by the scripted
-/// [`Executor`], its tasks run in [`Worker::task`], the same question asked while one is owed
+/// [`Executor`], its tasks run in [`task`], the same question asked while one is owed
 /// joined to it — passes all twelve claims through the same [`check`] the five product lanes are
 /// run with; so does the lane that declares streaks on the claim that reads them, and the
 /// latest-value scripted lane on the claims a displaced request bears on.
 ///
-/// MUTATION: in `Worker::task`, re-raise a caught panic (`Err(panic) =>
+/// MUTATION: in `lane::task`, re-raise a caught panic (`Err(panic) =>
 /// std::panic::resume_unwind(panic)`) — the task panic ends the worker, and `AFailureIsSaidOnce`
 /// fails with `NoFailedTerminal`.
 #[test]
@@ -1484,7 +1580,7 @@ fn a_failure_is_said_once_and_a_worker_saying_every_retry_is_red() {
         retries,
         Err(Failure::SaidOtherThanOnce {
             expected: 3,
-            said: 9
+            said: 7
         })
     );
 }
@@ -1556,17 +1652,25 @@ impl Owed<u64> for SentOn {
 /// `WorkerGone`, leaves the lane in fault, and refuses the next request at the door. The order is
 /// the script's: each step waits on the one before through a channel.
 ///
-/// MUTATION: in `Worker::task`, re-raise a caught panic — the first request ends `WorkerGone`, not
+/// MUTATION: in `lane::task`, re-raise a caught panic — the first request ends `WorkerGone`, not
 /// `Failed`. Or in `Executor::start_worker`, do not report the end — the third is never sent on.
 #[test]
 fn a_task_panic_fails_its_request_and_a_worker_s_end_leaves_the_owed_ones_worker_gone() {
     let (sent, sunk) = mpsc::channel();
     let said = Arc::new(AtomicUsize::new(0));
     let counting = Arc::clone(&said);
-    let ledger: Arc<Ledger<u64, SentOn>> =
-        Ledger::new("thread-door", None, Saying::PerRequest, move |_: &str| {
+    let (wake, woken) = mpsc::channel();
+    let ledger: Arc<Ledger<u64, SentOn>> = Ledger::new(
+        "thread-door",
+        None,
+        Saying::PerRequest,
+        move |_: &str| {
             counting.fetch_add(1, Ordering::SeqCst);
-        });
+        },
+        move || {
+            let _ = wake.send(());
+        },
+    );
     let (go, jobs) = mpsc::channel::<u64>();
     let (name, named) = mpsc::channel();
     let publish = Arc::clone(&ledger);
@@ -1574,13 +1678,13 @@ fn a_task_panic_fails_its_request_and_a_worker_s_end_leaves_the_owed_ones_worker
         .start_worker(
             "lane-contract-thread-door",
             Arc::clone(&ledger),
-            move |ctx, worker| {
+            move |ctx| {
                 name.send(ctx.name()).expect("the test is listening");
                 for id in jobs.iter() {
                     if id == 3 {
                         panic!("the worker's body itself fails");
                     }
-                    let result = worker.task(|_ctx| {
+                    let result = task(ctx, |_ctx| {
                         if id == 1 {
                             panic!("{PLANTED_PANIC}");
                         }
@@ -1613,6 +1717,7 @@ fn a_task_panic_fails_its_request_and_a_worker_s_end_leaves_the_owed_ones_worker
             Terminal::WorkerGone,
         ]
     );
+    receive(&woken, "the wake announcing the worker's end");
     assert_eq!(
         ledger.fault(),
         Some(WorkerEnd::Panicked(
@@ -1671,4 +1776,34 @@ fn the_expected_failures_are_this_list() {
         }))
         .collect();
     assert_eq!(list_section("rows"), rows, "the rows");
+}
+
+/// RED (S-3) — **A dead worker is announced**: the FIFO lane on the seam, its worker ended in the
+/// executor's gate, wakes its consumer through the ledger's wake once every owed request has its
+/// terminal (C2: a completion the consumer drains is announced by a wake); the same lane whose
+/// ledger was built with no wake records the death and announces it to nobody, and is red.
+///
+/// MUTATION: in `Ledger::worker_ended`, drop the wake — the first run fails with
+/// `DeathUnannounced`.
+#[test]
+fn a_dead_worker_is_announced_and_an_unannounced_death_is_red() {
+    assert_eq!(
+        on_scripted(
+            &SCRIPTED_FIFO,
+            Policy::Fifo,
+            Planted::Nothing,
+            Claim::ADeadWorkerIsObservable
+        ),
+        Ok(())
+    );
+    let unwoken = on_scripted(
+        &SCRIPTED_FIFO,
+        Policy::Fifo,
+        Planted::DeathUnwoken,
+        Claim::ADeadWorkerIsObservable,
+    );
+    assert_eq!(
+        unwoken.map_err(|failure| failure.kind()),
+        Err(FailureKind::DeathUnannounced)
+    );
 }

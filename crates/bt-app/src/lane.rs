@@ -11,22 +11,26 @@
 //! - an [`Executor`], the worker factory: the lane hands it a body and never calls the thread door
 //!   itself. The one the product uses starts the body through `bt_platform::spawn_at_priority`; the
 //!   suite's runs the same body under a scripted gate. A task — one request's work — runs inside
-//!   [`Worker::task`], which turns a panic into that request's `Failed(Panicked)` and lets the
-//!   worker go on; the worker's own end (its body returning, or a panic outside a task) is reported
-//!   by the executor through [`Ends::worker_ended`];
+//!   [`task`] (`lane::task(ctx, …)`), which turns a panic into that request's `Failed(Panicked)`
+//!   and lets the worker go on; the worker's own end (its body returning, or a panic outside a
+//!   task) is reported by the executor through [`Ends::worker_ended`];
 //! - a [`Ledger`], which mints each request's identity or refuses it at the door (C1's admission),
 //!   records what each identity is owed — the sink its terminal goes to when its requester has
 //!   gone (C6) — and turns every identity into exactly one [`Terminal`]: `Done`, `Failed`,
 //!   `Cancelled`, `Superseded { by }`, `Joined { with }` or `WorkerGone` (C2, C4). The requester
 //!   holds a [`Request`] and takes its terminal once, as `pty_door::ShellBirth::take` does;
-//! - the hooks: [`Ledger::publish`], which ends one identity, and [`Ledger::worker_ended`], which
-//!   ends every identity still owed as `WorkerGone` and leaves the lane in a fault the consumer can
-//!   read ([`Ledger::fault`]) and every later admission is refused with.
+//! - the hooks: [`Ledger::publish`], which ends one identity (never a joined one: a join ends only
+//!   with the request it joined, carrying its terminal), and [`Ledger::worker_ended`], which ends
+//!   every request still owed as `WorkerGone` (its joins as `Joined` carrying it), leaves the lane
+//!   in a fault the consumer can read ([`Ledger::fault`]) and every later admission is refused
+//!   with, and then wakes the consumer through the wake the ledger was built with. A lane wakes
+//!   its consumer itself after it publishes.
 //!
 //! A failure reaches `diagnostics.log` once, said by the ledger as its terminal is delivered —
-//! once per failed request, or once per streak of the same failure where the lane declares
-//! [`Saying::PerStreak`] (C3). The line goes through the `say` the ledger is built with, which is
-//! `diagnostics::note` in the product and a counter in the suite.
+//! once per failed request, a joined request carrying a failure included, or once per streak of
+//! the same failure where the lane declares [`Saying::PerStreak`] (C3). The line goes through the
+//! `say` the ledger is built with, which is `diagnostics::note` in the product and a counter in
+//! the suite.
 //!
 //! **The suite** (compiled with the tests) states each lane's policy as data (`Contract`, one
 //! constant per lane) and checks it against the lane's real behaviour through an adapter
@@ -185,6 +189,10 @@ pub(crate) struct Ledger<Id, O: Owed<Id>> {
     bound: Option<usize>,
     saying: Saying,
     say: Box<dyn Fn(&str) + Send + Sync>,
+    /// The lane's wake: what tells its consumer to drain. The worker's end is announced through it
+    /// (C2: a completion read by a drain is announced by a wake); a publication is announced by the
+    /// lane, which wakes after it publishes.
+    wake: Box<dyn Fn() + Send + Sync>,
     book: Mutex<Book<Id, O>>,
 }
 
@@ -227,18 +235,21 @@ where
     O: Owed<Id>,
 {
     /// A ledger for the lane named `lane`, owing at most `bound` identities at once (`None`: no
-    /// bound), saying its failures through `say` — `diagnostics::note` in the product.
+    /// bound), saying its failures through `say` — `diagnostics::note` in the product — and waking
+    /// its consumer through `wake`, the lane's own wake (an `AppEvent` sent, in the product).
     pub(crate) fn new(
         lane: &'static str,
         bound: Option<usize>,
         saying: Saying,
         say: impl Fn(&str) + Send + Sync + 'static,
+        wake: impl Fn() + Send + Sync + 'static,
     ) -> Arc<Self> {
         Arc::new(Self {
             lane,
             bound,
             saying,
             say: Box::new(say),
+            wake: Box::new(wake),
             book: Mutex::new(Book {
                 minted: 0,
                 entries: BTreeMap::new(),
@@ -302,60 +313,82 @@ where
 
     /// **The worker's hook: end `id` with `terminal`.** Answers whether it was this identity's
     /// terminal: an identity ends once, and a later terminal for it — an answer that raced a cancel,
-    /// a second publication — is dropped. Every identity joined to `id` ends with it.
+    /// a second publication — is dropped. Every identity joined to `id` ends with it, as
+    /// `Joined { with: id, outcome }`. A joined identity is never published itself: it is the same
+    /// operation as the one it joined, and ends only with it (revision (b)4), so a terminal
+    /// published for it is refused.
     pub(crate) fn publish(&self, id: Id, terminal: TerminalOf<Id, O>) -> bool {
         let mut out = Out::new();
         {
             let mut book = lock(&self.book);
             match book.entries.get(&id) {
-                Some(entry) if entry.terminal.is_none() => {}
+                Some(entry) if entry.terminal.is_none() && entry.twin.is_none() => {}
                 _ => return false,
             }
-            let twins: Vec<Id> = book
-                .entries
-                .iter()
-                .filter(|(_, entry)| entry.twin == Some(id) && entry.terminal.is_none())
-                .map(|(twin, _)| *twin)
-                .collect();
-            for twin in twins {
-                let joined = Terminal::Joined {
-                    with: id,
-                    outcome: Box::new(terminal.clone()),
-                };
-                self.end(&mut book, twin, joined, &mut out);
-            }
-            self.end(&mut book, id, terminal, &mut out);
+            self.end_with_twins(&mut book, id, terminal, &mut out);
         }
         self.release(out);
         true
     }
 
-    /// **The executor's hook: the worker has ended.** Every identity still owed ends as
-    /// `WorkerGone`; the lane is in fault from now on ([`Self::fault`]), and every later admission
-    /// is refused with it. Said once, unless the body returned owing nothing.
+    /// **The executor's hook: the worker has ended.** Every operation still owed ends as
+    /// `WorkerGone`, and every identity joined to one as `Joined { with, outcome: WorkerGone }`;
+    /// the lane is in fault from now on ([`Self::fault`]), and every later admission is refused
+    /// with it. Said once, unless the body returned owing nothing; and the consumer is woken after
+    /// the terminals are recorded, since no publication of the lane's will announce them.
     pub(crate) fn worker_ended(&self, cause: WorkerEnd) {
         let mut out = Out::new();
         {
             let mut book = lock(&self.book);
-            let owed: Vec<Id> = book
+            let owed = book
                 .entries
-                .iter()
-                .filter(|(_, entry)| entry.terminal.is_none())
-                .map(|(id, _)| *id)
-                .collect();
-            if cause != WorkerEnd::Returned || !owed.is_empty() {
+                .values()
+                .filter(|entry| entry.terminal.is_none())
+                .count();
+            if cause != WorkerEnd::Returned || owed > 0 {
                 out.lines.push(format!(
-                    "{}: the worker ended ({cause}); {} request(s) owed end as WorkerGone",
+                    "{}: the worker ended ({cause}); {owed} request(s) owed end as WorkerGone",
                     self.lane,
-                    owed.len()
                 ));
             }
-            for id in owed {
-                self.end(&mut book, id, Terminal::WorkerGone, &mut out);
+            let operations: Vec<Id> = book
+                .entries
+                .iter()
+                .filter(|(_, entry)| entry.terminal.is_none() && entry.twin.is_none())
+                .map(|(id, _)| *id)
+                .collect();
+            for id in operations {
+                self.end_with_twins(&mut book, id, Terminal::WorkerGone, &mut out);
             }
             book.fault.get_or_insert(cause);
         }
         self.release(out);
+        (self.wake)();
+    }
+
+    /// End the operation `id` with `terminal`, and every identity joined to it with
+    /// `Joined { with: id, outcome: terminal }`.
+    fn end_with_twins(
+        &self,
+        book: &mut Book<Id, O>,
+        id: Id,
+        terminal: TerminalOf<Id, O>,
+        out: &mut Out<Id, O>,
+    ) {
+        let twins: Vec<Id> = book
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.twin == Some(id) && entry.terminal.is_none())
+            .map(|(twin, _)| *twin)
+            .collect();
+        for twin in twins {
+            let joined = Terminal::Joined {
+                with: id,
+                outcome: Box::new(terminal.clone()),
+            };
+            self.end(book, twin, joined, out);
+        }
+        self.end(book, id, terminal, out);
     }
 
     /// The fault the lane is in: how its worker ended, once it has.
@@ -394,13 +427,24 @@ where
         terminal: &TerminalOf<Id, O>,
         out: &mut Out<Id, O>,
     ) {
-        match terminal {
+        // A joined request is a request of its own: it fails, or is answered, with the outcome it
+        // carries, and is said (or ends a streak) like any other (C3, once per request).
+        let (outcome, joined) = match terminal {
+            Terminal::Joined { with, outcome } => (outcome.as_ref(), Some(*with)),
+            _ => (terminal, None),
+        };
+        match outcome {
             Terminal::Failed(failure) => {
                 let said = failure.to_string();
                 let again = book.streak.as_deref() == Some(said.as_str());
                 if self.saying == Saying::PerRequest || !again {
-                    out.lines
-                        .push(format!("{}: request {id:?} failed: {said}", self.lane));
+                    out.lines.push(match joined {
+                        Some(with) => format!(
+                            "{}: request {id:?} (joined to {with:?}) failed: {said}",
+                            self.lane
+                        ),
+                        None => format!("{}: request {id:?} failed: {said}", self.lane),
+                    });
                 }
                 book.streak = Some(said);
             }
@@ -534,24 +578,21 @@ impl Executor {
     /// **Start a lane's worker**, `name` its thread's name. When the thread ends — the body
     /// returns, or a panic outside a task unwinds it — `ends` is told how. A thread the door
     /// refuses is reported to `ends` too, and the refusal is answered here. The body is lent the
-    /// thread's `WorkerCtx`, as every body the thread door starts is, and the [`Worker`] that runs
-    /// its tasks.
+    /// thread's `WorkerCtx`, as every body the thread door starts is, and runs each request's work
+    /// through [`task`].
     pub(crate) fn start_worker(
         &self,
         name: &'static str,
         ends: Arc<impl Ends + 'static>,
-        body: impl FnOnce(&WorkerCtx, &Worker<'_>) + Send + 'static,
+        body: impl FnOnce(&WorkerCtx) + Send + 'static,
     ) -> Result<(), WorkerEnd> {
         #[cfg(test)]
         let script = self.script.clone();
         let ended = Arc::clone(&ends);
         let started = bt_platform::spawn_at_priority(name, self.band, move |ctx| {
-            let worker = Worker {
-                ctx,
-                #[cfg(test)]
-                script,
-            };
-            let cause = match catch_unwind(AssertUnwindSafe(|| body(ctx, &worker))) {
+            #[cfg(test)]
+            SCRIPT.with(|held| *held.borrow_mut() = script);
+            let cause = match catch_unwind(AssertUnwindSafe(|| body(ctx))) {
                 Ok(()) => WorkerEnd::Returned,
                 Err(panic) => {
                     WorkerEnd::Panicked(crate::pty_door::panic_message(panic.as_ref()).to_owned())
@@ -570,37 +611,35 @@ impl Executor {
     }
 }
 
-/// **A running worker**, as its body sees it.
-pub(crate) struct Worker<'a> {
-    ctx: &'a WorkerCtx,
-    #[cfg(test)]
-    script: Option<Arc<Gate>>,
+/// **Run one request's task on a lane's worker** (`ctx`, the capability the thread door lent its
+/// body). A panic inside it is that request's failure, `TaskFailure::Panicked`, and the worker
+/// goes on (C3; `pty_door`'s birth does the same).
+pub(crate) fn task<T, E>(
+    ctx: &WorkerCtx,
+    run: impl FnOnce(&WorkerCtx) -> Result<T, E>,
+) -> Result<T, TaskFailure<E>> {
+    arrive();
+    match catch_unwind(AssertUnwindSafe(|| run(ctx))) {
+        Ok(result) => result.map_err(TaskFailure::Error),
+        Err(panic) => Err(TaskFailure::Panicked(
+            crate::pty_door::panic_message(panic.as_ref()).to_owned(),
+        )),
+    }
 }
 
-impl Worker<'_> {
-    /// **Run one request's task.** A panic inside it is that request's failure,
-    /// `TaskFailure::Panicked`, and the worker goes on (C3; `pty_door`'s birth does the same).
-    pub(crate) fn task<T, E>(
-        &self,
-        run: impl FnOnce(&WorkerCtx) -> Result<T, E>,
-    ) -> Result<T, TaskFailure<E>> {
-        self.arrive();
-        match catch_unwind(AssertUnwindSafe(|| run(self.ctx))) {
-            Ok(result) => result.map_err(TaskFailure::Error),
-            Err(panic) => Err(TaskFailure::Panicked(
-                crate::pty_door::panic_message(panic.as_ref()).to_owned(),
-            )),
-        }
+/// Where a task begins, outside its panic catch: the suite's gate holds it here, or ends the
+/// worker here, on a worker the suite's executor started.
+fn arrive() {
+    #[cfg(test)]
+    if let Some(gate) = SCRIPT.with(|held| held.borrow().clone()) {
+        gate.arrive();
     }
+}
 
-    /// Where a task begins, outside its panic catch: the suite's gate holds it here, or ends the
-    /// worker here.
-    fn arrive(&self) {
-        #[cfg(test)]
-        if let Some(gate) = &self.script {
-            gate.arrive();
-        }
-    }
+#[cfg(test)]
+thread_local! {
+    /// The gate of the suite's executor, on a worker it started.
+    static SCRIPT: std::cell::RefCell<Option<Arc<Gate>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -847,7 +886,7 @@ pub(crate) enum Claim {
     /// Answers published while the consumer does not drain are bounded as declared.
     AnswersHeldAreBounded,
     /// A worker that dies leaves every admitted request a terminal outcome, or the lane a fault the
-    /// consumer can see.
+    /// consumer can see, and wakes the consumer to see it (C2).
     ADeadWorkerIsObservable,
     /// A request a newer, different one displaced ends with `Superseded { by }`, and `by` names a
     /// request admitted after it that has itself ended (C4).
@@ -943,6 +982,9 @@ pub(crate) enum Failure {
     AnswersUnbounded { held: usize },
     /// The worker died and neither its admitted requests nor the lane showed it.
     DeathUnobservable { unanswered: usize },
+    /// The worker died and its terminals or fault were recorded, and no wake announced them: a
+    /// consumer that drains only when woken never learns of the death.
+    DeathUnannounced,
     /// A request was delivered a terminal after it had one — to its requester and its sink, or to
     /// its sink twice: a second delivery.
     Twice { key: u64, deliveries: usize },
@@ -992,6 +1034,7 @@ pub(crate) enum FailureKind {
     AnswerLostWithTheWake,
     AnswersUnbounded,
     DeathUnobservable,
+    DeathUnannounced,
     Twice,
     SupersededInSilence,
     SupersededByNoAnswer,
@@ -1027,6 +1070,7 @@ impl Failure {
             Self::AnswerLostWithTheWake => FailureKind::AnswerLostWithTheWake,
             Self::AnswersUnbounded { .. } => FailureKind::AnswersUnbounded,
             Self::DeathUnobservable { .. } => FailureKind::DeathUnobservable,
+            Self::DeathUnannounced => FailureKind::DeathUnannounced,
             Self::Twice { .. } => FailureKind::Twice,
             Self::SupersededInSilence { .. } => FailureKind::SupersededInSilence,
             Self::SupersededByNoAnswer { .. } => FailureKind::SupersededByNoAnswer,
@@ -1447,7 +1491,7 @@ impl Gate {
     }
 
     /// **Called by the seam's scripted worker where a task begins**, outside the task's panic
-    /// catch ([`Worker::task`]): counted, held, and the worker ended here when the suite asks.
+    /// catch ([`task`]): counted, held, and the worker ended here when the suite asks.
     pub(crate) fn arrive(&self) {
         self.arrive_with(None);
     }
@@ -2138,25 +2182,33 @@ fn a_dead_worker_is_observable(run: &mut Run<'_>) -> Result<(), Failure> {
     for question in 1..=2 {
         admissions.push(run.submit(0, question).0);
     }
+    let before = run.lane.probe().wakes();
     run.lane.gate().kill();
     run.lane.gate().release();
     if !run.lane.gate().wait_killed() {
         return Err(Failure::NeverStarted);
     }
+    // The death is announced by a wake (C2), and the drain it brings finds every terminal; a lane
+    // that does not wake is still watched, to tell an unannounced death from an unobservable one.
+    let announced = run.lane.probe().wait_wakes_past(before);
     let mut found = Vec::new();
-    run.watch(&mut found);
-    if found
-        .iter()
-        .any(|delivered| matches!(delivered.outcome, Outcome::Fault(_)))
-    {
-        return Ok(());
+    if announced {
+        found.extend(run.lane.drain());
+    } else {
+        run.watch(&mut found);
     }
+    let faulted = found
+        .iter()
+        .any(|delivered| matches!(delivered.outcome, Outcome::Fault(_)));
     let unanswered = admissions
         .iter()
         .filter(|admission| admission.refused.is_none() && !has_key(&found, admission.key()))
         .count();
-    if unanswered > 0 {
+    if !faulted && unanswered > 0 {
         return Err(Failure::DeathUnobservable { unanswered });
+    }
+    if !announced {
+        return Err(Failure::DeathUnannounced);
     }
     Ok(())
 }
@@ -2185,6 +2237,10 @@ fn a_superseded_request_says_so(run: &mut Run<'_>) -> Result<(), Failure> {
     if !run.settle(&mut found, |found| has_key(found, newest)) {
         return Err(Failure::NoAnswer);
     }
+    // A drain takes one request after another, so an older request looked at a moment before its
+    // terminal landed can sit beside a newer one found: one drain more, now that the newest has
+    // ended, finds whatever ended before it.
+    found.extend(run.lane.drain());
     let order: Vec<u64> = admissions.iter().map(Admission::key).collect();
     let mut silent = 0;
     for (at, admission) in admissions.iter().enumerate() {
@@ -2261,31 +2317,68 @@ fn a_joined_request_carries_its_twin(run: &mut Run<'_>) -> Result<(), Failure> {
     Ok(())
 }
 
-/// The requests [`a_failure_is_said_once`] asks, one at a time, and whether each one's task
-/// panics: two failures in a row (one streak), an answer, and one failure more.
+/// The rounds [`a_failure_is_said_once`] asks, one after another: in each the first request is
+/// held on the executor while the rest are asked behind it, so the same question asked twice
+/// is a join on a lane that joins. Each request is its question and whether its task panics: a
+/// failed request and its twin (one streak), an answered one and its twin, and one failure more.
 #[cfg(test)]
-const FAILURE_SCRIPT: [(u64, bool); 4] = [(1, true), (2, true), (3, false), (4, true)];
+const FAILURE_ROUNDS: [&[(u64, bool)]; 3] = [
+    &[(1, true), (1, true)],
+    &[(3, false), (3, false)],
+    &[(4, true)],
+];
+
+/// The failure's words a delivered outcome carries, its own or its twin's.
+#[cfg(test)]
+fn failed_words(outcome: &Outcome) -> Option<&str> {
+    match outcome {
+        Outcome::Failed(words) => Some(words),
+        Outcome::Joined { carried, .. } => failed_words(carried),
+        _ => None,
+    }
+}
 
 #[cfg(test)]
 fn a_failure_is_said_once(run: &mut Run<'_>) -> Result<(), Failure> {
-    for (question, fails) in FAILURE_SCRIPT {
-        if fails {
-            run.lane.gate().plant_panic(question);
+    for (question, fails) in FAILURE_ROUNDS.iter().copied().flatten() {
+        if *fails {
+            run.lane.gate().plant_panic(*question);
         }
     }
     let mut found = Vec::new();
-    // What each request ended with, in order: the failure's words, or `None` for an answer.
+    // What each request ended with, in the order asked: the failure's words, or `None`.
     let mut ended: Vec<Option<String>> = Vec::new();
-    for (question, fails) in FAILURE_SCRIPT {
-        let (admission, _) = run.submit(0, question);
-        let key = admission.key();
-        let delivered =
-            admission.refused.is_none() && run.settle(&mut found, |found| has_key(found, key));
-        match (delivered.then(|| outcome_of(&found, key)).flatten(), fails) {
-            (Some(Outcome::Failed(words)), _) => ended.push(Some(words.clone())),
-            (_, true) => return Err(Failure::NoFailedTerminal { key }),
-            (None, false) => return Err(Failure::NoAnswer),
-            (Some(_), false) => ended.push(None),
+    for round in FAILURE_ROUNDS {
+        let entered = run.lane.gate().entered();
+        run.lane.gate().hold();
+        let mut asked = Vec::new();
+        for (at, (question, fails)) in round.iter().enumerate() {
+            asked.push((run.submit(0, *question).0, *fails));
+            if at == 0 && !run.lane.gate().wait_entered(entered + 1) {
+                run.lane.gate().release();
+                return Err(Failure::NeverStarted);
+            }
+        }
+        run.lane.gate().release();
+        let keys: Vec<u64> = asked.iter().map(|(admission, _)| admission.key()).collect();
+        let settled = asked
+            .iter()
+            .all(|(admission, _)| admission.refused.is_none())
+            && run.settle(&mut found, |found| {
+                keys.iter().all(|key| has_key(found, *key))
+            });
+        for (admission, fails) in &asked {
+            let key = admission.key();
+            let words = settled
+                .then(|| outcome_of(&found, key))
+                .flatten()
+                .map(failed_words);
+            match (words, fails) {
+                (Some(Some(words)), _) => ended.push(Some(words.to_owned())),
+                (_, true) => return Err(Failure::NoFailedTerminal { key }),
+                (None, false) => return Err(Failure::NoAnswer),
+                (Some(None), false) => ended.push(None),
+            }
         }
     }
     let failed = ended.iter().flatten().count();
