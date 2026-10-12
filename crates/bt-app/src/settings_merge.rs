@@ -470,7 +470,8 @@ pub(crate) trait MergeWindow {
 /// **What one pass came to**: its line, its card's data, and whether the
 /// presentation after it went through.
 pub(crate) struct PassOutcome {
-    /// The line written to `diagnostics.log`; `None` when nothing was merged.
+    /// The pass's line for `diagnostics.log`, which its caller writes whatever
+    /// the presentation answered; `None` when nothing was merged.
     pub(crate) line: Option<String>,
     pub(crate) replaced: Option<ReplacedInFile>,
     pub(crate) presented: anyhow::Result<()>,
@@ -529,7 +530,6 @@ pub(crate) fn run_pass(window: &mut impl MergeWindow) -> PassOutcome {
     }
     window.merge_end();
     let line = pass.diagnostics();
-    eprintln!("{line}");
     let replaced = pass.replaced();
     let presented = if pass.doors.apply.is_empty() && pass.doors.elsewhere.is_empty() {
         Ok(())
