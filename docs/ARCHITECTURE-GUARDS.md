@@ -111,8 +111,11 @@ Windows `PreparePoint`) are never followed together. What is followed: the metho
 product `impl` of the trait, on every platform arm; the trait's default body, only for an
 impl that does not override it (or when there is no impl); and the trait's first-party
 supertraits, whose impls count only for types implementing the stated trait. The answer is the
-trait's implementations alone — never united with the by-name answer — and a parameter another
-binding in the body really shadows is not typed by its declaration. What is not followed: a
+trait's implementations alone — never united with the by-name answer — and a call on a
+parameter is not typed by the parameter's declaration when another binding of its name is in
+scope at the call: one begun before the call whose scope holds it (a `let` to the end of its
+block, a `for`, match-arm or closure binding over its body); a binding in a closed block or
+after the call does not shadow. What is not followed: a
 stored closure, a function pointer, `<X as Trait>::m`, a type written through an alias, a
 standard or third-party trait object (and a foreign supertrait's methods, even on a
 first-party implementing type), and an untyped receiver whose method name is shared; those are
