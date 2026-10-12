@@ -48866,8 +48866,8 @@ impl Runtime<'_> {
     /// the kernel's names to the documents they name and stamped each in the
     /// ear's mailbox; when the folder's one clock is due, the pass re-reads the
     /// stamped ones among those followed live — `profiles.json`, `pins.json` —
-    /// and each re-read compares with the document in force, which is what
-    /// absorbs this window's own writes. A stamp on `settings.json` or
+    /// and each re-read compares the file's bytes with its store's revision
+    /// (`persist::Revision`), which is what absorbs this window's own writes. A stamp on `settings.json` or
     /// `keybindings.json` is drained without a read.
     ///
     /// The stores' write generations go with it: the watch hears the steward

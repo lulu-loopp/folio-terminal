@@ -74,9 +74,9 @@ pub use layout::{
     RATIO_PPM_MAX, SplitDirV1, SplitNodeV1, TermLeafV1,
 };
 pub use migrate::{
-    FallbackReason, KEYBINDINGS_MIGRATIONS, Keeping, MAX_DOCUMENT_BYTES, MigrationStep,
-    PINS_MIGRATIONS, PROFILES_MIGRATIONS, ReadReport, SESSION_MIGRATIONS, SETTINGS_MIGRATIONS,
-    UPDATE_CHECK_MIGRATIONS,
+    DocumentBytes, FallbackReason, KEYBINDINGS_MIGRATIONS, Keeping, MAX_DOCUMENT_BYTES,
+    MigrationStep, PINS_MIGRATIONS, PROFILES_MIGRATIONS, ReadReport, SESSION_MIGRATIONS,
+    SETTINGS_MIGRATIONS, UPDATE_CHECK_MIGRATIONS,
 };
 pub use pins::{PINS_SCHEMA_VERSION, PinEntryV1, PinKind, PinsV1};
 pub use profiles::{
@@ -108,6 +108,7 @@ pub use update::{UPDATE_CHECK_SCHEMA_VERSION, UpdateCheckV1};
 pub use write_tracker::{WriteAlertAction, WriteFailureTracker};
 
 use std::path::Path;
+use std::sync::Arc;
 
 /// Reads `settings.json` from `path`, applying the full §5.4 fallback chain.
 /// Never panics and never returns an `Err` — a failure to load is
@@ -121,6 +122,15 @@ pub fn read_settings(path: &Path) -> (SettingsV1, ReadReport) {
 /// choose ([`Keeping`]).
 pub fn read_settings_keeping(path: &Path, keeping: Keeping) -> (SettingsV1, ReadReport) {
     migrate::read_with_fallback(path, SETTINGS_SCHEMA_VERSION, SETTINGS_MIGRATIONS, keeping)
+}
+
+/// [`read_settings_keeping`], also returning the bytes the read had in hand
+/// ([`DocumentBytes`]) — what a store's revision is made of.
+pub fn read_settings_keeping_bytes(
+    path: &Path,
+    keeping: Keeping,
+) -> (SettingsV1, ReadReport, DocumentBytes) {
+    migrate::read_with_fallback_bytes(path, SETTINGS_SCHEMA_VERSION, SETTINGS_MIGRATIONS, keeping)
 }
 
 /// Reads `session.json` from `path`, applying the §5.4 fallback chain and
@@ -140,17 +150,18 @@ pub fn read_session_keeping(
     path: &Path,
     keeping: Keeping,
 ) -> (SessionV1, ReadReport, DegradationReport) {
-    let (session, report, degradation, _loaded_bytes) = read_session_keeping_bytes(path, keeping);
+    let (session, report, degradation, _bytes) = read_session_keeping_bytes(path, keeping);
     (session, report, degradation)
 }
 
-/// [`read_session_keeping`], also returning the exact source bytes when the
-/// document loaded. The bytes precede migration and degradation, so a sibling
-/// copy can preserve fields and leaves this build does not understand.
+/// [`read_session_keeping`], also returning the bytes the read had in hand
+/// ([`DocumentBytes`]). A loaded document's bytes precede migration and
+/// degradation, so a sibling copy can preserve fields and leaves this build
+/// does not understand.
 pub fn read_session_keeping_bytes(
     path: &Path,
     keeping: Keeping,
-) -> (SessionV1, ReadReport, DegradationReport, Option<Vec<u8>>) {
+) -> (SessionV1, ReadReport, DegradationReport, DocumentBytes) {
     let (mut session, report, loaded_bytes) = migrate::read_with_fallback_bytes::<SessionV1>(
         path,
         SESSION_SCHEMA_VERSION,
@@ -161,15 +172,17 @@ pub fn read_session_keeping_bytes(
     (session, report, degradation, loaded_bytes)
 }
 
-/// Serializes `settings` and writes it to `path` via [`atomic_write`].
+/// Serializes `settings` and writes it to `path` via [`atomic_write`], and
+/// answers the bytes that landed — what a store's revision becomes.
 /// Pretty-printed (§1.1: "人可读可 diff" is one of the reasons `settings.json`
 /// is JSON at all).
-pub fn write_settings_atomic(path: &Path, settings: &SettingsV1) -> Result<(), WriteError> {
+pub fn write_settings_atomic(path: &Path, settings: &SettingsV1) -> Result<Arc<[u8]>, WriteError> {
     let bytes = serde_json::to_vec_pretty(settings).map_err(|source| WriteError::Serialize {
         what: "SettingsV1",
         source,
     })?;
-    atomic_write(path, &bytes)
+    atomic_write(path, &bytes)?;
+    Ok(bytes.into())
 }
 
 /// Reads `keybindings.json` from `path`, applying the same §5.4 fallback chain
@@ -193,18 +206,33 @@ pub fn read_keybindings_keeping(path: &Path, keeping: Keeping) -> (KeybindingsV1
     )
 }
 
-/// Serializes `keybindings` and writes it to `path` via [`atomic_write`].
-/// Pretty-printed for [`write_settings_atomic`]'s reason, and rather more so:
+/// [`read_keybindings_keeping`], also returning the bytes the read had in hand
+/// ([`DocumentBytes`]).
+pub fn read_keybindings_keeping_bytes(
+    path: &Path,
+    keeping: Keeping,
+) -> (KeybindingsV1, ReadReport, DocumentBytes) {
+    migrate::read_with_fallback_bytes(
+        path,
+        KEYBINDINGS_SCHEMA_VERSION,
+        KEYBINDINGS_MIGRATIONS,
+        keeping,
+    )
+}
+
+/// Serializes `keybindings` and writes it to `path` via [`atomic_write`], and
+/// answers the bytes that landed. Pretty-printed for [`write_settings_atomic`]'s reason, and rather more so:
 /// this is the one file of the three a user is actively invited to hand-edit.
 pub fn write_keybindings_atomic(
     path: &Path,
     keybindings: &KeybindingsV1,
-) -> Result<(), WriteError> {
+) -> Result<Arc<[u8]>, WriteError> {
     let bytes = serde_json::to_vec_pretty(keybindings).map_err(|source| WriteError::Serialize {
         what: "KeybindingsV1",
         source,
     })?;
-    atomic_write(path, &bytes)
+    atomic_write(path, &bytes)?;
+    Ok(bytes.into())
 }
 
 /// Reads `profiles.json` from `path`, applying the same §5.4 fallback chain the
@@ -223,16 +251,26 @@ pub fn read_profiles_keeping(path: &Path, keeping: Keeping) -> (ProfilesV1, Read
     migrate::read_with_fallback(path, PROFILES_SCHEMA_VERSION, PROFILES_MIGRATIONS, keeping)
 }
 
-/// Serializes `profiles` and writes it to `path` via [`atomic_write`].
-/// Pretty-printed for [`write_settings_atomic`]'s reason, and as much as
+/// [`read_profiles_keeping`], also returning the bytes the read had in hand
+/// ([`DocumentBytes`]).
+pub fn read_profiles_keeping_bytes(
+    path: &Path,
+    keeping: Keeping,
+) -> (ProfilesV1, ReadReport, DocumentBytes) {
+    migrate::read_with_fallback_bytes(path, PROFILES_SCHEMA_VERSION, PROFILES_MIGRATIONS, keeping)
+}
+
+/// Serializes `profiles` and writes it to `path` via [`atomic_write`], and
+/// answers the bytes that landed. Pretty-printed for [`write_settings_atomic`]'s reason, and as much as
 /// [`write_keybindings_atomic`] is: this is the other file a user is invited to
 /// open and read top to bottom.
-pub fn write_profiles_atomic(path: &Path, profiles: &ProfilesV1) -> Result<(), WriteError> {
+pub fn write_profiles_atomic(path: &Path, profiles: &ProfilesV1) -> Result<Arc<[u8]>, WriteError> {
     let bytes = serde_json::to_vec_pretty(profiles).map_err(|source| WriteError::Serialize {
         what: "ProfilesV1",
         source,
     })?;
-    atomic_write(path, &bytes)
+    atomic_write(path, &bytes)?;
+    Ok(bytes.into())
 }
 
 /// Reads `pins.json` from `path`, applying the same §5.4 fallback chain the
@@ -251,15 +289,25 @@ pub fn read_pins_keeping(path: &Path, keeping: Keeping) -> (PinsV1, ReadReport) 
     migrate::read_with_fallback(path, PINS_SCHEMA_VERSION, PINS_MIGRATIONS, keeping)
 }
 
-/// Serializes `pins` and writes it to `path` via [`atomic_write`].
-/// Pretty-printed for [`write_settings_atomic`]'s reason: this is a short file
+/// [`read_pins_keeping`], also returning the bytes the read had in hand
+/// ([`DocumentBytes`]).
+pub fn read_pins_keeping_bytes(
+    path: &Path,
+    keeping: Keeping,
+) -> (PinsV1, ReadReport, DocumentBytes) {
+    migrate::read_with_fallback_bytes(path, PINS_SCHEMA_VERSION, PINS_MIGRATIONS, keeping)
+}
+
+/// Serializes `pins` and writes it to `path` via [`atomic_write`], and answers
+/// the bytes that landed. Pretty-printed for [`write_settings_atomic`]'s reason: this is a short file
 /// of paths, and the shortest one there is any point opening by hand.
-pub fn write_pins_atomic(path: &Path, pins: &PinsV1) -> Result<(), WriteError> {
+pub fn write_pins_atomic(path: &Path, pins: &PinsV1) -> Result<Arc<[u8]>, WriteError> {
     let bytes = serde_json::to_vec_pretty(pins).map_err(|source| WriteError::Serialize {
         what: "PinsV1",
         source,
     })?;
-    atomic_write(path, &bytes)
+    atomic_write(path, &bytes)?;
+    Ok(bytes.into())
 }
 
 /// Reads `update-check.json` from `path`, on the same §5.4 fallback chain as the
