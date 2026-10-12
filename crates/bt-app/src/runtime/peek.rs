@@ -204,11 +204,11 @@ impl Runtime<'_> {
         // otherwise.
         let preview_title = |id: SeatId| {
             let pane = tab.preview_panes.get(tab.preview_here(id))?;
-            match pane.image.as_ref() {
+            match pane.image() {
                 Some(image) => Some(image.title()),
                 None => tab
                     .preview_pool
-                    .get(pane.buffer.as_ref()?)
+                    .get(pane.source()?)
                     .map(|buffer| buffer.name().to_owned()),
             }
         };
@@ -834,12 +834,10 @@ impl Runtime<'_> {
         // every frame that draws it: [`PreviewSurface::Peek`]'s pane is what
         // holds the parsed document, and re-aiming it per frame would be a
         // document key that changed per frame and a markdown file re-parsed at
-        // sixty hertz.
-        self.window.peek_pane = PreviewPane {
-            buffer: Some(source.clone()),
-            ..PreviewPane::default()
-        };
-        if let Some(pooled) = self.preview_pool.get_mut(&source) {
+        // sixty hertz. It stands on the buffer it reads, which is the tab's
+        // when the tab's pool has one and the glance's own otherwise.
+        self.window.peek_pane = PreviewPane::default();
+        if let Some((held, pooled)) = self.preview_pool.held_mut(&source) {
             // A restored pool remembers names, never text (P151) — so "in the
             // pool" is not "has something to show". A buffer that still wants
             // its head read gets the same request a stranger would; the answer
@@ -848,7 +846,8 @@ impl Runtime<'_> {
             // 2026-08-14: hovering a restored, never-opened pool entry showed
             // an empty card forever.)
             let wants_read = pooled.claim_head_read();
-            self.window.peek_buffer = None;
+            self.window.peek_pane.show_source(held);
+            self.window.peek_buffer.clear();
             if let Some(want) = wants_read {
                 let tab = self.id;
                 if !self.app.preview_worker.request(preview::PreviewRequest {
@@ -869,7 +868,8 @@ impl Runtime<'_> {
         // this window ever shows.
         let mut buffer = preview::PreviewBuffer::glancing(source.clone(), name);
         let wants_read = buffer.claim_head_read();
-        self.window.peek_buffer = Some(buffer);
+        let held = self.window.peek_buffer.put(buffer);
+        self.window.peek_pane.show_source(held);
         // **A composed document waits for git and never for a disk.** A glance
         // over a commit's file is a `GitShow`, and `wants_head_read` answers
         // `false` for it by construction — so without this the card would sit
@@ -938,7 +938,7 @@ impl Runtime<'_> {
         // open a window over a file nobody is pointing at any more.
         self.drop_file_peek_press();
         self.drop_glance_thumb();
-        self.window.peek_buffer = None;
+        self.window.peek_buffer.clear();
         // And the parsed document with it: a card that is down is holding a
         // markdown layout for a file nobody is looking at.
         self.window.peek_pane = PreviewPane::default();
@@ -1243,7 +1243,7 @@ impl Runtime<'_> {
         // extent at once — which is `file_peek_layer`'s own rule about a
         // document, applied to the body that has no document.
         let column = file_peek::peek_page_column_max_scroll(pages.unwrap_or(1), scale);
-        let top = self.window.peek_pane.scroll[1].clamp(0.0, column);
+        let top = self.window.peek_pane.scroll()[1].clamp(0.0, column);
         self.window.peek_pane.scroll_top_to(top);
         // **The pages are asked for after the count and with it.** The count is what says how long
         // the column is, and until it lands the column is one slot — so a request run filed before
@@ -1251,7 +1251,7 @@ impl Runtime<'_> {
         // set of pages already asked about does not shrink.
         self.file_peek_pages(path, scale, pages.unwrap_or(1));
         file_peek::PeekBody::Facts {
-            scroll: self.window.peek_pane.scroll[1],
+            scroll: self.window.peek_pane.scroll()[1],
             pages,
         }
     }
@@ -1297,7 +1297,7 @@ impl Runtime<'_> {
         if !self.app.math_worker_running {
             return;
         }
-        let scroll = self.window.peek_pane.scroll[1];
+        let scroll = self.window.peek_pane.scroll()[1];
         let leaf = self.focused_shell_address();
         for index in file_peek::peek_pages_in_view(count, scroll, scale) {
             let slot = self
@@ -1898,7 +1898,7 @@ impl Runtime<'_> {
             PreviewSurface::Peek,
             layout.body,
             scale,
-            self.window.peek_pane.scroll,
+            self.window.peek_pane.scroll(),
         );
         self.window.peek_pane.scroll_to(scroll);
         // The same channel a preview float's document rides, for the same
@@ -2200,7 +2200,7 @@ impl Runtime<'_> {
         // place that has to be right about which way this one runs.
         let along = bar.along([position.x as f32, position.y as f32]);
         let wanted = preview::scroll_dragged_to(&bar, along, grab);
-        if (wanted - self.window.peek_pane.scroll[1]).abs() < f32::EPSILON {
+        if (wanted - self.window.peek_pane.scroll()[1]).abs() < f32::EPSILON {
             return Ok(true);
         }
         self.window.peek_pane.scroll_top_to(wanted);

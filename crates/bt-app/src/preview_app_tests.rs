@@ -2901,10 +2901,13 @@ fn a_preview_pane_changing_tabs_arrives_holding_the_edit_it_left_with() {
     let (mut source, seat) = tab_with_a_preview(1, vec![edited]);
     {
         let pane = source.preview_panes.entry(source.preview_here(seat));
-        pane.scroll = [0.0, 96.0];
-        pane.caret.anchor = 6;
-        pane.caret.caret = 6;
-        pane.md_source = true;
+        pane.scroll_to([0.0, 96.0]);
+        pane.place_caret(preview_edit::EditCaret {
+            anchor: 6,
+            caret: 6,
+            ..pane.caret()
+        });
+        pane.show_face(true);
     }
     let arrived = arriving_as(&source, 90);
     let landed = arrived
@@ -2921,13 +2924,16 @@ fn a_preview_pane_changing_tabs_arrives_holding_the_edit_it_left_with() {
         .get(target.preview_here(landed))
         .expect("the view arrived under the id the pane now answers to");
     assert_eq!(
-        pane.buffer.as_ref(),
+        pane.source(),
         Some(&path),
         "the pane still knows which file it was on"
     );
-    assert_eq!(pane.scroll, [0.0, 96.0], "and how far down it was in it");
-    assert_eq!(pane.caret.caret, 6, "and where the caret was");
-    assert!(pane.md_source, "and which face of the file it was reading");
+    assert_eq!(pane.scroll(), [0.0, 96.0], "and how far down it was in it");
+    assert_eq!(pane.caret().caret, 6, "and where the caret was");
+    assert!(
+        pane.md_source(),
+        "and which face of the file it was reading"
+    );
 
     let buffer = target
         .preview_pool
@@ -3015,7 +3021,7 @@ fn merging_two_tabs_leaves_one_buffer_per_file_and_the_dirty_one_wins() {
         target
             .preview_panes
             .get(target.preview_here(host))
-            .and_then(|pane| pane.buffer.clone()),
+            .and_then(|pane| pane.source().cloned()),
         Some(notes.clone()),
         "the host's own pane was on the loser and now reads the winner — a \
              surface names its buffer by source, so one buffer per file *is* the \

@@ -283,6 +283,15 @@ pub(crate) fn a_local_folder() -> bt_term::PathVerdict {
 /// stopped compiling on the day a seat number stopped being a name. A test
 /// that does not care which tab says `TAB_ONE` and means it — and the two
 /// that do care say two different tabs, which is the whole point.
+/// **A test shortcut, and nothing a product path does**: the name a view
+/// stands on, minted by a pool that is dropped as soon as it has answered — for
+/// a test whose subject is the panes and not the pool. The view it builds
+/// names a buffer nobody keeps, which is exactly what the product's two
+/// keepers ([`preview::PreviewPool`], [`preview::GlanceSlot`]) never hand out.
+pub(crate) fn test_shortcut_held(source: preview::PreviewSource) -> preview::Held {
+    preview::PreviewPool::default().insert(preview::PreviewBuffer::new(source, String::new()))
+}
+
 pub(crate) fn seat_of(tab: TabId, seat: SeatId) -> PreviewSurface {
     PreviewSurface::Seat(LeafId { tab, seat })
 }
@@ -2130,12 +2139,16 @@ pub(crate) fn tab_with_a_preview(
         .expect("the preview seat lands");
     let focused = seats.identity();
     let mut pool = preview::PreviewPool::default();
-    let showing = buffers.first().map(|buffer| buffer.source().clone());
+    let mut showing = None;
     for buffer in buffers {
-        pool.insert(buffer);
+        let held = pool.insert(buffer);
+        showing.get_or_insert(held);
     }
     let mut panes = PreviewPanes::default();
-    panes.entry(seat_of(TabId(id), preview_seat)).buffer = showing;
+    let pane = panes.entry(seat_of(TabId(id), preview_seat));
+    if let Some(held) = showing {
+        pane.show_source(held);
+    }
     let (layout, overflow) = cross_solve(&seats);
     let tab = assemble_tab_state(
         TabId(id),
@@ -2636,7 +2649,7 @@ pub(crate) fn edited_buffer(
 /// tab can find is a pane that draws the empty state.
 pub(crate) fn document_on(tab: &TabState, seat: SeatId) -> Option<&str> {
     let pane = tab.preview_panes.get(tab.preview_here(seat))?;
-    let source = pane.buffer.as_ref()?;
+    let source = pane.source()?;
     tab.preview_pool.get(source)?.text()
 }
 
@@ -2652,8 +2665,9 @@ pub(crate) fn tab_with_a_picture(id: u64, path: &str) -> (TabState, SeatId) {
         .expect("the preview seat lands");
     let focused = seats.identity();
     let mut panes = PreviewPanes::default();
-    panes.entry(seat_of(TabId(id), preview_seat)).image =
-        Some(PreviewImageState::new(PathBuf::from(path)));
+    panes
+        .entry(seat_of(TabId(id), preview_seat))
+        .show_picture(PathBuf::from(path));
     let (layout, overflow) = cross_solve(&seats);
     let tab = assemble_tab_state(
         TabId(id),
@@ -2679,16 +2693,7 @@ pub(crate) const SHOT_PATH: &str = r"D:\shots\B1-rest.png";
 pub(crate) fn pictures_drawn(tab: &TabState) -> Vec<&Path> {
     tab.seat_pictures()
         .into_iter()
-        .filter_map(|surface| {
-            Some(
-                tab.preview_panes
-                    .get(surface)?
-                    .image
-                    .as_ref()?
-                    .path
-                    .as_path(),
-            )
-        })
+        .filter_map(|surface| Some(tab.preview_panes.get(surface)?.image()?.path.as_path()))
         .collect()
 }
 

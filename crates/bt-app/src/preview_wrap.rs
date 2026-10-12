@@ -900,13 +900,17 @@ mod tests {
         let mut h = Harness::default();
         step(&mut h, "**hello** world", Some(0));
         let old = h.keys();
-        let mut pane = PreviewPane {
-            doc: h.doc.clone(),
-            ..PreviewPane::default()
-        };
-        pane.caret.anchor = 2;
-        pane.caret.caret = 5;
-        let PreviewDocument::Markdown { source, .. } = &pane.doc else {
+        let mut pane = PreviewPane::default();
+        pane.show_source(crate::test_support::test_shortcut_held(
+            crate::preview::PreviewSource::file("notes.md"),
+        ));
+        pane.reflow_document(h.doc.clone());
+        pane.place_caret(crate::preview_edit::EditCaret {
+            anchor: 2,
+            caret: 5,
+            ..pane.caret()
+        });
+        let PreviewDocument::Markdown { source, .. } = pane.doc() else {
             panic!()
         };
         let Some(MarkdownCaretBlock::Prose(prose)) = source.iter().next() else {
@@ -923,7 +927,7 @@ mod tests {
             &bt_render::chrome_palette(),
         );
         assert!(paint.iter().any(|run| run.text == preedit.text));
-        assert_eq!(standing(&pane.doc).into_keys().collect::<Vec<_>>(), old);
+        assert_eq!(standing(pane.doc()).into_keys().collect::<Vec<_>>(), old);
         let before = h.calls;
         step(&mut h, "**hello** world", Some(5));
         assert_eq!(h.calls, before);
@@ -936,19 +940,20 @@ mod tests {
         let table = "a | b\n--- | ---\nx | y";
         let mut h = Harness::default();
         step(&mut h, &format!("{table}\n\n{table}"), None);
-        let mut pane = PreviewPane {
-            doc: h.doc.clone(),
-            md_block_scroll: vec![0.0, 87.0],
-            ..PreviewPane::default()
-        };
+        let mut pane = PreviewPane::default();
+        pane.show_source(crate::test_support::test_shortcut_held(
+            crate::preview::PreviewSource::file("notes.md"),
+        ));
         pane.reflow_document(h.doc.clone());
-        assert_eq!(pane.md_block_scroll, vec![0.0, 87.0]);
+        pane.scroll_block(1, 87.0);
+        pane.reflow_document(h.doc.clone());
+        assert_eq!(pane.md_block_scroll(), vec![0.0, 87.0]);
         step(&mut h, &format!("inserted\n\n{table}\n\n{table}"), None);
         pane.show_document(h.doc.clone(), Reparse::Ours);
-        assert!(pane.md_block_scroll.is_empty());
-        pane.md_block_scroll = vec![87.0];
+        assert!(pane.md_block_scroll().is_empty());
+        pane.scroll_block(0, 87.0);
         pane.show_document(h.doc, Reparse::Elsewhere);
-        assert!(pane.md_block_scroll.is_empty());
+        assert!(pane.md_block_scroll().is_empty());
     }
 
     /// Mutation: let LRU evictions remove the only copy of current geometry;

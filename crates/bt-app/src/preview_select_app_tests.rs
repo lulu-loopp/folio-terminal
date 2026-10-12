@@ -140,23 +140,27 @@ fn a_band_is_cropped_to_the_window_its_own_block_is_seen_through() {
 /// that is gone.
 #[test]
 fn a_freshly_parsed_document_leaves_no_selection_standing() {
-    let marked = || PreviewPane {
-        md_select: Some(preview_select::Selection::collapsed(
+    let marked = || {
+        let mut pane = PreviewPane::default();
+        pane.show_source(crate::test_support::test_shortcut_held(
+            preview::PreviewSource::file("notes.md"),
+        ));
+        pane.select(Some(preview_select::Selection::collapsed(
             preview_select::Place::new(3, 1, 4),
             preview_select::Grain::Character,
-        )),
-        md_text: vec![text_box(
+        )));
+        pane.keep_text_boxes(vec![text_box(
             preview_select::Place::new(3, 1, 0),
             9,
             "somewhere",
-        )],
-        caret: preview_edit::EditCaret {
+        )]);
+        pane.place_caret(preview_edit::EditCaret {
             anchor: 12,
             caret: 20,
             desired_column: None,
             desired_x: None,
-        },
-        ..PreviewPane::default()
+        });
+        pane
     };
     // "new\n\nlines\n" — two paragraphs and the blank line between them,
     // which belongs to neither of them (§7.1.3o).
@@ -177,13 +181,17 @@ fn a_freshly_parsed_document_leaves_no_selection_standing() {
 
     let mut disk = marked();
     disk.show_document(parsed(), Reparse::Elsewhere);
-    assert_eq!(disk.md_select, None, "the selection went with the document");
+    assert_eq!(
+        disk.md_select(),
+        None,
+        "the selection went with the document"
+    );
     assert!(
-        disk.md_text.is_empty(),
+        disk.md_text().is_empty(),
         "and so did the boxes it was drawn in"
     );
     assert_eq!(
-        (disk.caret.anchor, disk.caret.caret),
+        (disk.caret().anchor, disk.caret().caret),
         (20, 20),
         "and what the caret had dragged over went with it — but not the \
              caret, which is a byte offset the buffer's own doors heal and a \
@@ -193,17 +201,17 @@ fn a_freshly_parsed_document_leaves_no_selection_standing() {
     let mut ours = marked();
     ours.show_document(parsed(), Reparse::Ours);
     assert!(
-        ours.md_select.is_some(),
+        ours.md_select().is_some(),
         "a keystroke is not a stranger's save: what was marked is still \
              about the words it was about",
     );
     assert_eq!(
-        (ours.caret.anchor, ours.caret.caret),
+        (ours.caret().anchor, ours.caret().caret),
         (12, 20),
         "and the caret keeps both its ends",
     );
     assert!(
-        ours.md_text.is_empty(),
+        ours.md_text().is_empty(),
         "the boxes go whatever happened: they are where the *last* document \
              was drawn and nothing has drawn this one",
     );

@@ -38,13 +38,21 @@ The rule: the asking/telling fields of `Runtime`, `App`, `WindowState`, and
 proved multi-writer facts are explicit annotations. Unknowns may shrink but not
 grow. The owner's rulings are dated 2026-09-25. Since 2026-10-11 (O-7) the
 census also holds the document and its view, `PreviewBuffer` and
-`PreviewPane`, whose multi-writer facts are findings to fix by routing the
-write through the type's own door, not annotations (the ownership contract's
-§2.2 invariant 1).
+`PreviewPane`, and since O-8 the two contents that hold the view's state,
+`DocumentView` and `PictureView`; their multi-writer facts are findings to fix
+by routing the write through the type's own door, not annotations (the
+ownership contract's §2.2 invariant 1).
 
 Where and what to do: `crates/bt-source/tests/census.rs` compares against
 `docs/plans/design/ownership-census-{annotations,unknowns}.tsv` (the dated `ownership-census-2026-09-25.tsv` is a record, not an enforcement input), and
-`scripts/ci/check-census-unknowns.ps1` enforces the shrink direction. When red,
+`scripts/ci/check-census-unknowns.ps1` enforces the shrink direction against the
+merge base: the unknown list is keyed by identity (`site`, `module`,
+`function`, `reason`) and measurements may only shrink — a key the merge base
+does not carry, or a key whose `sites` count is larger, is refused by key; a key
+that disappears or whose `sites` count drops is the list shrinking. Keys compare
+case-sensitively, as `FieldCensus` keys them. It is a shrink-only tripwire over
+aggregated counts; a same-key swap (one site resolved and another added under
+the same site, module, function and reason) is invisible to it, by design. When red,
 fix the routing or regenerate with `scripts/generate-ownership-census.ps1` and
 justify each real multi-writer or unknown row; do not edit generated census rows
 as a substitute for changing the code.

@@ -118,6 +118,7 @@ mod owner_door;
 mod pace;
 mod palette;
 mod palette_index;
+mod pane_content;
 mod pdf;
 mod peek_strip;
 mod persist;
@@ -4734,142 +4735,40 @@ fn preview_tab_index_among(tabs: &[TabState], tab: TabId) -> Option<usize> {
 /// holds the caret" and "what is hovered" are singletons that name a surface
 /// rather than fields each surface owns a copy of. A per-surface `is_focused`
 /// would be three booleans that can all say yes.
+///
+/// # A view without a document is impossible
+///
+/// The content is one [`pane_content::PaneContent`]: nothing, a picture, or a
+/// view of one pool buffer (a document, a page, a commit graph). A view of a
+/// pool buffer is built only from a [`preview::Held`], which only the two
+/// keepers of a buffer mint — the tab's pool and the hover card's
+/// [`preview::GlanceSlot`] — and only for a buffer they hold at that moment,
+/// never from a buffer in hand: **constructing a view requires a held
+/// buffer**. The pool's eviction law never evicts a buffer a surface is
+/// reading ([`Self::reading`]).
+///
+/// **What the type does not prevent today:** [`preview::PreviewPool::clear`],
+/// `discard_dirty` and `take` can still remove a buffer a surface stands on.
+/// Their callers keep the two together by order (closing drops the views with
+/// the pool; a migration or a rename puts the buffer back and moves the panes
+/// in the same step); making the removal impossible is the document
+/// registry's (`docs/plans/structural-debt.md` D-17).
+///
+/// Everything a view of a buffer holds — the parse, the caret, both selection
+/// models, the scrolls, the boxes measured this frame, the notice, a pending
+/// line — lives in that view and goes with it, and a picture's zoom and decode
+/// state live with the picture. Every write is one of the doors below or the
+/// view's own, and **no `&mut` to a field of either view leaves it**: the
+/// ownership census counts a `&mut` lend as an access, not a write, so that
+/// rule is held by review and not by the census.
 #[derive(Default)]
 struct PreviewPane {
+    /// What this surface is showing.
+    content: pane_content::PaneContent,
+    /// The folder listing a picture on this surface steps through with the
+    /// arrow keys, held per folder; kept across what the surface shows, so a
+    /// surface that comes back to a folder it was in has its listing.
     neighbours: Option<preview_neighbours::Folder>,
-    /// The picture on this surface, if it is showing one. Mutually exclusive
-    /// with [`Self::buffer`] — the two doors clear each other on the way in.
-    image: Option<PreviewImageState>,
-    /// Which buffer this surface is showing, by [`preview::PreviewSource`].
-    ///
-    /// An identity rather than an index or a reference: the pool is a `Vec`
-    /// whose order is its history, and an index into a list that evicts is an
-    /// index that goes stale between the frame that took it and the frame that
-    /// reads it.
-    buffer: Option<preview::PreviewSource>,
-    /// The parsed body, and what it was parsed from.
-    doc: PreviewDocument,
-    doc_key: Option<PreviewDocumentKey>,
-    /// How wide one monospace cell is at the body's type size, measured when the
-    /// document was parsed. It is what the horizontal extent is derived from.
-    mono_advance: f32,
-    /// How far this surface's body is scrolled, in physical pixels.
-    ///
-    /// `[x, y]`: `white-space: pre` means a line that does not fit runs off the
-    /// edge, and a body that can only be scrolled downward would leave the end
-    /// of every long line permanently out of reach.
-    scroll: [f32; 2],
-    /// How this surface is looking at the **picture** it is showing, if it is
-    /// showing one (ticket #60) — [`Self::scroll`]'s opposite number, and here
-    /// for the same reason it is: a document's scroll and a picture's zoom are
-    /// the two answers to "where in this content are you", and both belong to
-    /// the surface rather than to the thing being looked at.
-    ///
-    /// Not persisted and not on the buffer. It is also not cleared when a
-    /// picture is replaced by another — [`Runtime::open_preview_image_on`] resets
-    /// it explicitly, because a new file arriving at 250% because the last one
-    /// was left there is the surface remembering something about a picture it
-    /// has never seen.
-    zoom: ImageZoom,
-    /// How far each markdown block that is wider than the page has been scrolled
-    /// inside itself (user ruling, 2026-08-13). One entry per block, by index.
-    md_block_scroll: Vec<f32>,
-    /// Every markdown link on screen, boxed where it was drawn — a paint
-    /// artifact rather than state, rebuilt with the body.
-    links: Vec<PreviewLink>,
-    /// **What is selected on this surface's rendered page**, in the document's
-    /// own terms (user report 2026-08-28).
-    ///
-    /// [`Self::caret`]'s opposite number, and the split is the same one
-    /// [`Self::md_source`] draws: that is the *source* face's caret, indexing
-    /// one flat string, and this is the *rendered* face's selection, addressing
-    /// blocks and pieces. A surface shows one face at a time and the other's
-    /// state stands by; both are the surface's rather than the buffer's, for
-    /// ruling 8⑧'s reason — the file is shared, the way you are looking at it is
-    /// not.
-    ///
-    /// It survives a scroll because a [`preview_select::Place`] names the
-    /// document rather than the glass, and it does **not** survive a re-parse:
-    /// see [`Self::show_document`].
-    md_select: Option<preview_select::Selection>,
-    /// **Whether the caret is standing on this surface's *rendered* face**
-    /// (T5, §7.1.3t) — which is the whole of "this page is being edited".
-    ///
-    /// The one piece of state entering and leaving are made of. A press in the
-    /// body sets it, `Esc` clears it, and while it is set the block the caret is
-    /// in is drawn as the file's own bytes ([`preview_live`]) and every key is
-    /// the editor's.
-    ///
-    /// **It is not the keyboard focus**, and the gap between the two is
-    /// deliberate. [`Runtime::preview_edit_focus`] is dropped by a press
-    /// anywhere else in the window — into the terminal beside this pane, onto
-    /// another tab — and a page that re-flowed itself every time a hand left it
-    /// would be a page that moves while nobody is looking at it (§7.1.3q). So
-    /// losing the keyboard puts the *caret* out ([`MarkdownCaretPaint::lit`])
-    /// and leaves the source block standing; only leaving on purpose renders it
-    /// again. What survives either way is the caret's own byte offset, which is
-    /// [`Self::caret`] and is shared with the source face.
-    md_caret: bool,
-    /// **A press that asked to edit and has not been able to yet** (T5 ①) — the
-    /// file byte it named, waiting for the body it names to arrive.
-    ///
-    /// [`Self::goto_line`]'s shape and its reason exactly. A press inside a page
-    /// whose glance only bought the file's head buys the rest of it (T2 ③), and
-    /// the read is a read: the bytes are on the worker for as long as a disk
-    /// takes. Without this the press would be spent — the reader would click,
-    /// watch nothing happen, and click again — so the offset waits here until
-    /// [`Runtime::settle_preview_caret`] has a body to put it in.
-    ///
-    /// A file offset and not the point pressed, because the head is a prefix of
-    /// the whole file: the byte the pointer named in the head is the same byte
-    /// of the same file when the rest of it lands, whatever the page does to
-    /// re-flow around it.
-    md_caret_wanted: Option<usize>,
-    /// Every piece of the rendered page on screen, boxed where it was drawn — a
-    /// paint artifact rather than state, rebuilt with the body exactly as
-    /// [`Self::links`] is, and read by the pointer that arrives between two
-    /// frames.
-    md_text: Vec<PreviewTextBox>,
-    /// **The caret's prose block, as the shaper that drew it laid it out**
-    /// (§7.1.3w) — [`Self::md_text`]'s sibling, and a paint artifact for the
-    /// same reason it is one: it is what the last body build asked the shaper,
-    /// and the next thing to ask about it is a pointer or a keystroke that
-    /// arrives between two frames.
-    ///
-    /// `None` on every page whose caret is in no block, and on every page whose
-    /// caret's block is drawn in the monospace face — that one is a grid and
-    /// answers out of its own arithmetic ([`markdown_source_cell`]).
-    ///
-    /// **Five readers, one value**: the caret's own bar, the band under a
-    /// selection, the candidate box an IME hangs, the byte a press names, and
-    /// the rows Up and Down walk. §7.1.3u is the account of what a second
-    /// derivation of any one of those costs.
-    md_prose: Option<preview_live::ProseRows>,
-    /// **Every prose source block on the glass, as the shaper laid it out**
-    /// (2026-09-23) — [`Self::md_prose`] for each block a selection has drawn as
-    /// source and not only the caret's, which is always one of them.
-    ///
-    /// Two readers: the band a selection draws over each of those blocks, and
-    /// the byte a press inside one of them names. The caret, the composition
-    /// and the arrow keys stand in exactly one block and go on reading
-    /// [`Self::md_prose`].
-    md_prose_blocks: Vec<preview_live::ProseRows>,
-    /// Where the caret is in this surface's buffer, and what it has selected.
-    caret: preview_edit::EditCaret,
-    /// The sentence this surface's body owes about its last save, and when it
-    /// was said.
-    notice: Option<(String, Instant)>,
-    /// A line this surface was opened at and has not been able to reach yet
-    /// (§7.1.5j, `path:line[:col]`).
-    ///
-    /// It is an **intent rather than a scroll** because the body is read off a
-    /// worker: the frame that opens the file knows its name and nothing about its
-    /// lines, so a number written straight into [`Self::scroll`] would be clamped
-    /// against an empty document and healed back to zero. It waits here — on the
-    /// pane, so it travels with the pane into a torn-off window exactly as the
-    /// rescale ledger does — until [`Runtime::settle_preview_goto`] has something
-    /// to measure, and is cleared the moment it is spent.
-    goto_line: Option<u32>,
     /// Whether this surface is showing a markdown buffer's **source** rather
     /// than its render (P28).
     ///
@@ -4885,6 +4784,9 @@ struct PreviewPane {
     /// What stays on the buffer is everything that is genuinely the file's — its
     /// body, its dirty bit, its revision — so an edit made through the source
     /// face is still one edit, seen by both surfaces at once.
+    ///
+    /// The surface's and not one content's: the face a surface was turned to is
+    /// the face the next file it opens is shown in.
     md_source: bool,
     /// **Which page's file this surface is reading the source of** (user ruling
     /// 2026-08-26; DESIGN §7.7 ⑭) — `None` is the page itself.
@@ -4903,12 +4805,13 @@ struct PreviewPane {
     /// page's own face with nothing having been notified, come back and the
     /// source is there again.
     ///
-    /// **`pane.buffer` is untouched by the flip**, which is what keeps the
-    /// browser alive across it: [`a_page_was_replaced`] reads that field, sees
-    /// the page's own `PreviewSource::Web`, and the seat keeps its engine. What
-    /// changes is one boolean handed to [`a_page_is_off_the_glass`] — the page
-    /// goes invisible, it is not navigated and it is not closed, so flipping
-    /// back costs a `SetIsVisible(true)` and no load at all.
+    /// **The page the surface is on is untouched by the flip**, which is what
+    /// keeps the browser alive across it: [`a_page_was_replaced`] reads
+    /// [`Self::source`], sees the page's own `PreviewSource::Web`, and the seat
+    /// keeps its engine. What changes is one boolean handed to
+    /// [`a_page_is_off_the_glass`] — the page goes invisible, it is not
+    /// navigated and it is not closed, so flipping back costs a
+    /// `SetIsVisible(true)` and no load at all.
     page_source: Option<PathBuf>,
 }
 
@@ -4937,212 +4840,424 @@ enum Reparse {
     Elsewhere,
 }
 
+/// [`PreviewPane::doc`]'s answer for a surface on no pool buffer.
+const NO_DOCUMENT: &PreviewDocument = &PreviewDocument::Empty;
+
 impl PreviewPane {
+    // ── what is read ────────────────────────────────────────────────────────
+
+    /// What this surface is showing.
+    fn content(&self) -> &pane_content::PaneContent {
+        &self.content
+    }
+
+    /// The view of the pool buffer this surface is on, when it is on one.
+    fn document(&self) -> Option<&pane_content::DocumentView> {
+        self.content.document()
+    }
+
+    /// **Which buffer this surface is on** — what a session stores, what keeps
+    /// a page's browser alive — or nothing when it is on none.
+    fn source(&self) -> Option<&preview::PreviewSource> {
+        self.document().map(pane_content::DocumentView::source)
+    }
+
+    /// The picture on this surface, if it is showing one.
+    fn image(&self) -> Option<&PreviewImageState> {
+        self.content.picture().map(pane_content::PictureView::image)
+    }
+
+    /// How this surface is looking at its picture; fit when it shows none.
+    fn zoom(&self) -> ImageZoom {
+        self.content
+            .picture()
+            .map_or_else(ImageZoom::default, pane_content::PictureView::zoom)
+    }
+
+    /// The parsed body; the empty one on a surface on no pool buffer.
+    fn doc(&self) -> &PreviewDocument {
+        self.document()
+            .map_or(NO_DOCUMENT, pane_content::DocumentView::doc)
+    }
+
+    fn doc_key(&self) -> Option<&PreviewDocumentKey> {
+        self.document()
+            .and_then(pane_content::DocumentView::doc_key)
+    }
+
+    fn mono_advance(&self) -> f32 {
+        self.document()
+            .map_or(0.0, pane_content::DocumentView::mono_advance)
+    }
+
+    fn scroll(&self) -> [f32; 2] {
+        self.document()
+            .map_or([0.0, 0.0], pane_content::DocumentView::scroll)
+    }
+
+    fn md_block_scroll(&self) -> &[f32] {
+        self.document()
+            .map_or(&[], pane_content::DocumentView::md_block_scroll)
+    }
+
+    fn links(&self) -> &[PreviewLink] {
+        self.document()
+            .map_or(&[], pane_content::DocumentView::links)
+    }
+
+    fn md_select(&self) -> Option<&preview_select::Selection> {
+        self.document()
+            .and_then(pane_content::DocumentView::md_select)
+    }
+
+    fn md_caret(&self) -> bool {
+        self.document()
+            .is_some_and(pane_content::DocumentView::md_caret)
+    }
+
+    fn md_caret_wanted(&self) -> Option<usize> {
+        self.document()
+            .and_then(pane_content::DocumentView::md_caret_wanted)
+    }
+
+    fn md_text(&self) -> &[PreviewTextBox] {
+        self.document()
+            .map_or(&[], pane_content::DocumentView::md_text)
+    }
+
+    fn md_prose(&self) -> Option<&preview_live::ProseRows> {
+        self.document()
+            .and_then(pane_content::DocumentView::md_prose)
+    }
+
+    fn md_prose_blocks(&self) -> &[preview_live::ProseRows] {
+        self.document()
+            .map_or(&[], pane_content::DocumentView::md_prose_blocks)
+    }
+
+    fn caret(&self) -> preview_edit::EditCaret {
+        self.document()
+            .map(pane_content::DocumentView::caret)
+            .unwrap_or_default()
+    }
+
+    fn notice(&self) -> Option<&(String, Instant)> {
+        self.document().and_then(pane_content::DocumentView::notice)
+    }
+
+    fn goto_line(&self) -> Option<u32> {
+        self.document()
+            .and_then(pane_content::DocumentView::goto_line)
+    }
+
+    fn md_source(&self) -> bool {
+        self.md_source
+    }
+
+    fn page_source(&self) -> Option<&Path> {
+        self.page_source.as_deref()
+    }
+
+    fn neighbours(&self) -> Option<&preview_neighbours::Folder> {
+        self.neighbours.as_ref()
+    }
+
+    // ── the doors ───────────────────────────────────────────────────────────
+
     /// **Put a freshly parsed document on this surface**, and let go of
-    /// anything selected in the last one.
-    ///
-    /// One door rather than an assignment, because the two writes must not be
-    /// able to come apart: a [`preview_select::Place`] is an offset into a piece
-    /// of a *particular* parse, and the commonest reason a parse is replaced is
-    /// that the file changed under it — a save from another editor, or this
-    /// surface's own source face. A selection left standing over that is a
-    /// highlight drawn on somebody else's sentence, and a `Copy` that took it
-    /// would put those bytes on the clipboard.
-    ///
-    /// The boxes go with it for a plainer reason: they are where the *last*
-    /// document was drawn, and nothing has drawn this one yet.
-    ///
-    /// **Except when the parse is our own** (§7.1.3q, research open question 15
-    /// — "the single most dangerous line in T4"). The rule above was written
-    /// when the only thing that could replace a parse was the file changing
-    /// underneath it. A document that re-parses on every keystroke re-parses for
-    /// a second reason now, and it is the opposite reason: the bytes are the
-    /// reader's own, typed a moment ago, and everything they had marked still
-    /// names the words they marked. Dropping it there would mean a selection
-    /// that could not survive being typed next to, which is the one thing an
-    /// editor may not do. See [`Reparse`] for how the two are told apart.
+    /// anything selected in the last one — see
+    /// [`pane_content::DocumentView::show_document`].
     fn show_document(&mut self, doc: PreviewDocument, reparse: Reparse) {
-        self.md_block_scroll = match &doc {
-            PreviewDocument::Markdown { wrap, .. } => wrap.viewport.offsets(&self.md_block_scroll),
-            _ => Vec::new(),
-        };
-        self.doc = doc;
-        // **The boxes go whatever happened.** They are where the *last* document
-        // was drawn — a geometry, not a mark — and this one has not been drawn
-        // yet.
-        self.md_text = Vec::new();
-        if reparse == Reparse::Ours {
-            return;
+        if let Some(view) = self.content.document_mut() {
+            view.show_document(doc, reparse);
         }
-        self.md_select = None;
-        // **The caret is not thrown away; what it had dragged over is.** A
-        // caret is a byte offset into the buffer's own body and every door that
-        // moves that body already puts it back inside it
-        // (`preview_edit::EditCaret::heal`, at the arrival of a disk copy and at
-        // the head of every edit and every motion), while a *session* restores
-        // one from [`PreviewViewState`] before the file it belongs to has even
-        // landed — so a re-parse that zeroed it would throw away the place a
-        // reader was last at every time a buffer was re-read. What cannot
-        // survive is the mark: a selection is a claim about two ends of somebody
-        // else's text, and both selection models on this surface drop it here.
-        self.caret.anchor = self.caret.caret;
     }
 
-    /// **The same document, laid out again** — a pane that changed width, or a
-    /// formula whose picture has landed.
-    ///
-    /// [`Self::show_document`]'s other half, and a door of its own precisely so
-    /// that the difference between them is stated rather than implied: the parse
-    /// has not changed, so every place a selection names still names the same
-    /// words, and dropping it would mean a reader lost their highlight to a
-    /// window drag or to a picture arriving while they read.
+    /// **The same document, laid out again** — see
+    /// [`pane_content::DocumentView::reflow_document`].
     fn reflow_document(&mut self, doc: PreviewDocument) {
-        self.doc = doc;
+        if let Some(view) = self.content.document_mut() {
+            view.reflow_document(doc);
+        }
     }
 
-    /// **Stand on `source`, where this surface was last left on it**: the
-    /// buffer it shows, and the caret and scroll filed for that buffer.
-    fn stand_on(&mut self, source: preview::PreviewSource, view: PreviewViewState) {
-        self.buffer = Some(source);
-        self.caret = view.caret;
-        self.scroll = view.scroll;
+    /// **Stand on the buffer `held` names, where this surface was last left on
+    /// it**: the buffer it shows, and the caret and scroll filed for that
+    /// buffer.
+    fn stand_on(&mut self, held: preview::Held, view: PreviewViewState) {
+        self.show_source(held);
+        if let Some(document) = self.content.document_mut() {
+            document.stand(view);
+        }
     }
 
-    /// **Show `source`, with no view of it to bring back** — a page, whose view
-    /// is the engine's; a seat a session restores; the same file under its new
-    /// name.
-    fn show_source(&mut self, source: preview::PreviewSource) {
-        self.buffer = Some(source);
+    /// **Show the buffer `held` names, with no view of it to bring back** — a
+    /// page, whose view is the engine's; a seat a session restores; the same
+    /// file under its new name.
+    fn show_source(&mut self, held: preview::Held) {
+        self.content = std::mem::take(&mut self.content).showing(held);
     }
 
-    /// **Let go of the document this surface is showing**, and hand back what
-    /// it was on and where, for the caller to file against that buffer: the
-    /// caret and the scroll go with it, and so do the parse and the block
-    /// offsets it was scrolled by, which mean nothing to the next one.
+    /// **Turn this surface to the buffer `held` names**, standing where it was
+    /// last left on it (`view`), and hand back what it leaves for the caller
+    /// to file. A surface turned to the buffer it is already on keeps its view
+    /// whole — caret, scroll, parse, marks, and a line it still owes that
+    /// buffer — and leaves nothing; only a different buffer replaces it.
+    fn turn_to(
+        &mut self,
+        held: preview::Held,
+        view: PreviewViewState,
+    ) -> Option<(preview::PreviewSource, PreviewViewState)> {
+        if self.source() == Some(held.source()) {
+            return None;
+        }
+        let left = self.leave_document();
+        self.stand_on(held, view);
+        left
+    }
+
+    /// **Let go of the buffer this surface is showing**, and hand back what it
+    /// was on and where, for the caller to file against that buffer: the caret
+    /// and the scroll go with it, and so does everything else the view held —
+    /// the parse, the marks, the boxes, the notice — which mean nothing to the
+    /// next one. A picture, and a surface showing nothing, have no buffer to
+    /// let go of and are left as they are.
     fn leave_document(&mut self) -> Option<(preview::PreviewSource, PreviewViewState)> {
-        let left = self.buffer.take();
-        let view = PreviewViewState {
-            caret: self.caret,
-            scroll: self.scroll,
-        };
-        self.caret = preview_edit::EditCaret::default();
-        self.scroll = [0.0, 0.0];
-        // The surface is being emptied, not re-parsed: there is nothing left
-        // for a mark to be about, so this is the arm that clears.
-        self.show_document(PreviewDocument::Empty, Reparse::Elsewhere);
-        self.md_block_scroll.clear();
-        left.map(|source| (source, view))
+        let left = self
+            .document()
+            .map(|view| (view.source().clone(), view.view_state()))?;
+        self.content = pane_content::PaneContent::Empty;
+        Some(left)
     }
 
     /// The parse, taken off this surface for a rebuild that hands it back
     /// through [`Self::show_document`] or [`Self::reflow_document`].
     fn take_document(&mut self) -> PreviewDocument {
-        std::mem::take(&mut self.doc)
+        self.content
+            .document_mut()
+            .map(pane_content::DocumentView::take_document)
+            .unwrap_or_default()
     }
 
     /// **The page's viewport is this tall now**, and nothing else about the
     /// layout has moved.
     fn fit_viewport_height(&mut self, height: f32) {
-        if let PreviewDocument::Markdown { wrap, .. } = &mut self.doc {
-            Arc::make_mut(wrap).viewport.fit_height(height);
+        if let Some(view) = self.content.document_mut() {
+            view.fit_viewport_height(height);
         }
     }
 
     /// **The file whose path key is `key` changed under this surface**: drop
     /// the answers it holds about that file's pixels — a page's
     /// [`DocumentPictures`] that name it, a picture pane's decoded raster of it
-    /// — so the next frame asks again. The pane's own `path` stays: which file
-    /// the surface shows has not changed, only what is in it.
+    /// — so the next frame asks again. Which file the surface shows has not
+    /// changed, only what is in it.
     fn forget_standing_answers(&mut self, key: &str) {
-        if let PreviewDocument::Markdown { pictures, .. } = &mut self.doc
-            && pictures
-                .files
-                .iter()
-                .any(|file| bt_term::normalized_local_image_path_key(file) == key)
-        {
-            *pictures = DocumentPictures::default();
-        }
-        if let Some(picture) = self.image.as_mut()
-            && bt_term::normalized_local_image_path_key(&picture.path) == key
-        {
-            picture.forget_its_pixels();
+        match &mut self.content {
+            pane_content::PaneContent::Document(view)
+            | pane_content::PaneContent::Page(view)
+            | pane_content::PaneContent::GitGraph(view) => view.forget_pictures_of(key),
+            pane_content::PaneContent::Picture(picture) => picture.forget_pixels_of(key),
+            pane_content::PaneContent::Empty => {}
         }
     }
 
     /// Show the picture at `path` on this surface.
     fn show_picture(&mut self, path: PathBuf) {
-        self.image = Some(PreviewImageState::new(path));
+        self.show_picture_state(PreviewImageState::new(path));
+    }
+
+    /// Show this picture, in the state it is in.
+    fn show_picture_state(&mut self, image: PreviewImageState) {
+        self.content = std::mem::take(&mut self.content).picturing(image);
     }
 
     /// Take this surface's picture down.
     fn take_picture_down(&mut self) {
-        self.image = None;
+        if self.content.picture().is_some() {
+            self.content = pane_content::PaneContent::Empty;
+        }
     }
 
     /// **The picture at `path` is `bytes` long**, if it is the one on this
     /// surface. Answers whether it was.
     fn hear_picture_size(&mut self, path: &Path, bytes: Option<u64>) -> bool {
-        match self.image.as_mut().filter(|image| image.path == path) {
-            Some(image) => {
-                image.bytes = bytes;
-                true
-            }
-            None => false,
+        self.content
+            .picture_mut()
+            .is_some_and(|picture| picture.hear_size(path, bytes))
+    }
+
+    /// Why there is no picture here, or nothing to say.
+    fn refuse_picture(&mut self, why: Option<PictureRefusal>) {
+        if let Some(picture) = self.content.picture_mut() {
+            picture.refuse(why);
+        }
+    }
+
+    /// Why there is no picture here — unless a reason is already standing.
+    fn refuse_picture_unless_said(&mut self, why: PictureRefusal) {
+        if let Some(picture) = self.content.picture_mut() {
+            picture.refuse_unless_said(why);
+        }
+    }
+
+    /// A resample of this surface's picture at this size has been asked for.
+    fn ask_picture_scale(&mut self, target: PeekThumbnailTarget) {
+        if let Some(picture) = self.content.picture_mut() {
+            picture.ask_scale(target);
+        }
+    }
+
+    /// A resample has landed; answers whether this surface's picture took it.
+    fn accept_scaled_picture(&mut self, scaled: bt_term::ScaledInlineImage) -> bool {
+        self.content
+            .picture_mut()
+            .is_some_and(|picture| picture.accept_scaled(scaled))
+    }
+
+    /// A gesture moved the boundary this surface's picture settles towards.
+    fn defer_picture_settle(&mut self, observed_at: Instant) {
+        if let Some(picture) = self.content.picture_mut() {
+            picture.defer_scale_settle(observed_at);
+        }
+    }
+
+    /// Whether this surface's picture has gone quiet, settling it if it has.
+    fn finish_picture_settle_if_quiet(&mut self, now: Instant) -> bool {
+        self.content
+            .picture_mut()
+            .is_some_and(|picture| picture.finish_scale_settle_if_quiet(now))
+    }
+
+    /// Where this surface's picture was drawn this frame, or that it was not.
+    fn place_picture_drawn(&mut self, drawn: Option<[f32; 4]>) {
+        if let Some(picture) = self.content.picture_mut() {
+            picture.place_drawn(drawn);
+        }
+    }
+
+    /// The decode's native size, and the size the file states.
+    fn hear_picture_native(&mut self, native: (u32, u32), stated: Option<(u32, u32)>) {
+        if let Some(picture) = self.content.picture_mut() {
+            picture.hear_native(native, stated);
+        }
+    }
+
+    /// Look at this surface's picture at this zoom.
+    fn zoom_to(&mut self, zoom: ImageZoom) {
+        if let Some(picture) = self.content.picture_mut() {
+            picture.zoom_to(zoom);
+        }
+    }
+
+    /// Which parse this surface's document is, as its key says.
+    fn key_document(&mut self, key: Option<PreviewDocumentKey>) {
+        if let Some(view) = self.content.document_mut() {
+            view.key_document(key);
+        }
+    }
+
+    /// Which source blocks the parse in hand drew as source, written into its
+    /// key.
+    fn key_parsed_source(&mut self, parsed: Option<preview_live::SourceSpan>) {
+        if let Some(view) = self.content.document_mut() {
+            view.key_parsed_source(parsed);
+        }
+    }
+
+    /// How wide one monospace cell is at the body's type size.
+    fn measure_advance(&mut self, advance: f32) {
+        if let Some(view) = self.content.document_mut() {
+            view.measure_advance(advance);
         }
     }
 
     /// Put the caret here.
     fn place_caret(&mut self, caret: preview_edit::EditCaret) {
-        self.caret = caret;
+        if let Some(view) = self.content.document_mut() {
+            view.place_caret(caret);
+        }
     }
 
     /// Pull the caret back inside `content`, the body that has just arrived
     /// under it.
     fn heal_caret(&mut self, content: &str) {
-        self.caret.heal(content);
+        if let Some(view) = self.content.document_mut() {
+            view.heal_caret(content);
+        }
     }
 
     /// Select this on the rendered page, or nothing.
     fn select(&mut self, selection: Option<preview_select::Selection>) {
-        self.md_select = selection;
+        if let Some(view) = self.content.document_mut() {
+            view.select(selection);
+        }
     }
 
     /// **Let go of what is marked on both faces**: the caret's anchor comes to
     /// the caret, and the rendered page's selection goes.
     fn drop_selection(&mut self) {
-        self.caret.anchor = self.caret.caret;
-        self.md_select = None;
+        if let Some(view) = self.content.document_mut() {
+            view.drop_selection();
+        }
+    }
+
+    /// **The caret stands on the rendered page now**, and the press that was
+    /// waiting for a body is spent.
+    fn enter_page(&mut self) {
+        if let Some(view) = self.content.document_mut() {
+            view.enter_page();
+        }
+    }
+
+    /// **The caret leaves the rendered page**, and no press is waiting.
+    fn leave_page(&mut self) {
+        if let Some(view) = self.content.document_mut() {
+            view.leave_page();
+        }
+    }
+
+    /// A press asked to edit at this file byte, or no press is waiting.
+    fn want_caret_at(&mut self, offset: Option<usize>) {
+        if let Some(view) = self.content.document_mut() {
+            view.want_caret_at(offset);
+        }
     }
 
     /// Scroll the body to `[x, y]`, in physical pixels.
     fn scroll_to(&mut self, scroll: [f32; 2]) {
-        self.scroll = scroll;
+        if let Some(view) = self.content.document_mut() {
+            view.scroll_to(scroll);
+        }
     }
 
     /// Scroll the body down to `top`, leaving the sideways offset alone.
     fn scroll_top_to(&mut self, top: f32) {
-        self.scroll[1] = top;
+        if let Some(view) = self.content.document_mut() {
+            view.scroll_top_to(top);
+        }
     }
 
     /// **Scroll the wide block at `index` sideways to `offset`.** Answers
     /// whether it moved.
     fn scroll_block(&mut self, index: usize, offset: f32) -> bool {
-        // Grown here rather than at the rebuild, because a document is parsed
-        // far more often than a block is scrolled and a vector of zeros per
-        // parse is a cost paid for a case that usually does not arise.
-        if self.md_block_scroll.len() <= index {
-            self.md_block_scroll.resize(index + 1, 0.0);
+        self.content
+            .document_mut()
+            .is_some_and(|view| view.scroll_block(index, offset))
+    }
+
+    /// Keep the boxes the body build drew the links in.
+    fn keep_links(&mut self, links: Vec<PreviewLink>) {
+        if let Some(view) = self.content.document_mut() {
+            view.keep_links(links);
         }
-        if self.md_block_scroll[index] == offset {
-            return false;
-        }
-        self.md_block_scroll[index] = offset;
-        true
     }
 
     /// Keep the boxes the body build drew the rendered page's pieces in.
     fn keep_text_boxes(&mut self, boxes: Vec<PreviewTextBox>) {
-        self.md_text = boxes;
+        if let Some(view) = self.content.document_mut() {
+            view.keep_text_boxes(boxes);
+        }
     }
 
     /// Keep the prose rows the shaper laid out: the caret's block, and every
@@ -5152,14 +5267,51 @@ impl PreviewPane {
         prose: Option<preview_live::ProseRows>,
         blocks: Vec<preview_live::ProseRows>,
     ) {
-        self.md_prose = prose;
-        self.md_prose_blocks = blocks;
+        if let Some(view) = self.content.document_mut() {
+            view.keep_prose(prose, blocks);
+        }
+    }
+
+    /// The sentence the body owes about its last save, or none.
+    fn say(&mut self, notice: Option<(String, Instant)>) {
+        if let Some(view) = self.content.document_mut() {
+            view.say(notice);
+        }
+    }
+
+    /// Open at this line once the body has rows, or the intent is spent.
+    fn aim_at_line(&mut self, line: Option<u32>) {
+        if let Some(view) = self.content.document_mut() {
+            view.aim_at_line(line);
+        }
+    }
+
+    /// Show the markdown buffer's source face, or its render.
+    fn show_face(&mut self, source: bool) {
+        self.md_source = source;
+    }
+
+    /// Read this page's file as source, or the page itself.
+    fn turn_page_to(&mut self, source: Option<PathBuf>) {
+        self.page_source = source;
+    }
+
+    /// Hold this folder's listing, or the question asked for it.
+    fn hold_neighbours(&mut self, folder: preview_neighbours::Folder) {
+        self.neighbours = Some(folder);
+    }
+
+    /// The listing asked for the folder held here has come back.
+    fn hear_neighbours(&mut self, listing: files::DirListing) {
+        if let Some(held) = self.neighbours.as_mut() {
+            held.listing = Some(listing);
+        }
     }
 
     /// **Every buffer this pane is reading**, which is one and is sometimes two
     /// (user ruling 2026-08-26; DESIGN §7.7 ⑭).
     ///
-    /// [`Self::buffer`] is what the pane is *on* — its identity, what a session
+    /// [`Self::source`] is what the pane is *on* — its identity, what a session
     /// stores, what keeps a page's browser alive — and for every surface in this
     /// window but one it is also the only thing being read. The exception is a
     /// page turned to its source: the seat is still on the page and the bytes on
@@ -5174,7 +5326,7 @@ impl PreviewPane {
     /// only ever names a file the reader asked for by hand, so the extra name is
     /// never a stranger's.
     fn reading(&self) -> Vec<preview::PreviewSource> {
-        let mut sources: Vec<preview::PreviewSource> = self.buffer.iter().cloned().collect();
+        let mut sources: Vec<preview::PreviewSource> = self.source().into_iter().cloned().collect();
         if let Some(path) = self.page_source.clone() {
             let source = preview::PreviewSource::file(path);
             if !sources.contains(&source) {
@@ -5188,7 +5340,7 @@ impl PreviewPane {
     /// other way round, so a caller with one source in hand does not build a
     /// list to look in.
     fn is_reading(&self, source: &preview::PreviewSource) -> bool {
-        self.buffer.as_ref() == Some(source)
+        self.source() == Some(source)
             || self
                 .page_source
                 .as_deref()
@@ -5272,10 +5424,11 @@ mod card_answer_route_tests {
     }
 
     fn on(path: &str) -> PreviewPane {
-        PreviewPane {
-            buffer: Some(preview::PreviewSource::file(path)),
-            ..PreviewPane::default()
-        }
+        let mut pane = PreviewPane::default();
+        pane.show_source(crate::test_support::test_shortcut_held(
+            preview::PreviewSource::file(path),
+        ));
+        pane
     }
 
     fn a_seat() -> PreviewSurface {
@@ -5472,8 +5625,7 @@ impl PreviewPanes {
         self.panes
             .iter()
             .find(|(_, pane)| {
-                pane.image
-                    .as_ref()
+                pane.image()
                     .is_some_and(|picture| picture.pending.as_ref() == Some(target))
             })
             .map(|(surface, _)| *surface)
@@ -15120,10 +15272,10 @@ struct WindowRuntime {
     /// slot that the next glance overwrites, and the read that fills it goes
     /// down the same worker lane a real open uses.
     ///
-    /// `None` whenever the pool answers instead, which is P145's "shows the
+    /// Empty whenever the pool answers instead, which is P145's "shows the
     /// tab's POOL buffer when the file is already open, so the glance never lies
     /// about unsaved edits".
-    peek_buffer: Option<preview::PreviewBuffer>,
+    peek_buffer: preview::GlanceSlot,
     /// The glance card's own view of whatever it is reading —
     /// [`PreviewSurface::Peek`]'s pane.
     ///
@@ -18449,12 +18601,15 @@ impl TabState {
     /// pool buffer and a reader that only knew about the pool would write a pane
     /// full of picture back to disk as an empty one.
     fn preview_showing(&self, seat: SeatId) -> Option<preview::PreviewSource> {
-        let pane = self.preview_panes.get(self.preview_here(seat))?;
-        pane.buffer.clone().or_else(|| {
-            pane.image
-                .as_ref()
-                .map(|image| preview::PreviewSource::file(image.path.clone()))
-        })
+        match self.preview_panes.get(self.preview_here(seat))?.content() {
+            pane_content::PaneContent::Document(view)
+            | pane_content::PaneContent::Page(view)
+            | pane_content::PaneContent::GitGraph(view) => Some(view.source().clone()),
+            pane_content::PaneContent::Picture(picture) => {
+                Some(preview::PreviewSource::file(picture.image().path.clone()))
+            }
+            pane_content::PaneContent::Empty => None,
+        }
     }
 
     /// **The tab's content section** — `bt_persist::TabV1::preview`.
@@ -18803,7 +18958,7 @@ impl TabState {
             .filter(|surface| {
                 self.preview_panes
                     .get(*surface)
-                    .is_some_and(|pane| pane.image.is_some())
+                    .is_some_and(|pane| pane.image().is_some())
             })
             .collect()
     }
@@ -19058,11 +19213,11 @@ impl TabState {
     /// does.
     fn preview_head_name(&self, seat: SeatId) -> Option<String> {
         let pane = self.preview_panes.get(self.preview_here(seat))?;
-        match pane.image.as_ref() {
+        match pane.image() {
             Some(image) => Some(image.title()),
             None => self
                 .preview_pool
-                .get(pane.buffer.as_ref()?)
+                .get(pane.source()?)
                 .map(|buffer| buffer.name().to_owned()),
         }
     }
@@ -19122,10 +19277,10 @@ impl TabState {
     /// is the same gate the ordinary doors ask.
     fn unread_card_document(&self, seat: SeatId) -> Option<preview::PreviewSource> {
         let pane = self.preview_panes.get(self.preview_here(seat))?;
-        if pane.image.is_some() {
+        if pane.image().is_some() {
             return None;
         }
-        let source = pane.buffer.as_ref()?;
+        let source = pane.source()?;
         self.preview_pool
             .get(source)
             .filter(|buffer| buffer.wants_head_read())
@@ -19148,8 +19303,7 @@ impl TabState {
         Some(
             self.preview_panes
                 .get(self.preview_here(seat))?
-                .image
-                .as_ref()?
+                .image()?
                 .path
                 .as_path(),
         )
@@ -19207,7 +19361,7 @@ impl TabState {
         }
         // **Before the buffer and before the face**, because a pane holding a
         // picture is holding no buffer at all: `PreviewPane::image` and
-        // `PreviewPane::buffer` are the two things a preview surface can be
+        // `PreviewPane::source` are the two things a preview surface can be
         // about, and the picture is the one this window has pixels for.
         if let Some(picture) = picture {
             return Some(focus_thumb::SeatSource::Picture(picture));
@@ -19234,7 +19388,7 @@ impl TabState {
             SeatKind::Preview => {
                 let pane = self.preview_panes.get(self.preview_here(seat));
                 let buffer = pane
-                    .and_then(|pane| pane.buffer.as_ref())
+                    .and_then(|pane| pane.source())
                     .and_then(|buffer| self.preview_pool.get(buffer));
                 // **A document with a body in memory is quoted; everything else
                 // is a face** (user ruling, 2026-08-20 — see
@@ -19244,7 +19398,7 @@ impl TabState {
                 if let Some(buffer) = buffer
                     && buffer.content().is_some()
                     && let Some(mono) = Self::mini_document_face(
-                        buffer.view(pane.is_some_and(|pane| pane.md_source)),
+                        buffer.view(pane.is_some_and(PreviewPane::md_source)),
                     )
                 {
                     return Some(focus_thumb::SeatSource::Document { buffer, mono });
@@ -24896,18 +25050,21 @@ fn surface_subject_of(pane: Option<&PreviewPane>, stands_on_a_page: bool) -> Sur
     let Some(pane) = pane else {
         return SurfaceSubject::Unfilled;
     };
-    if let Some(image) = pane.image.as_ref() {
-        return SurfaceSubject::File(image.path.clone());
-    }
-    match pane.buffer.as_ref() {
+    match pane.content() {
+        pane_content::PaneContent::Picture(picture) => {
+            SurfaceSubject::File(picture.image().path.clone())
+        }
         // A buffer with no path is a commit graph or a diff range: content, and
         // not this file's.
-        Some(source) => source
+        pane_content::PaneContent::Document(view)
+        | pane_content::PaneContent::Page(view)
+        | pane_content::PaneContent::GitGraph(view) => view
+            .source()
             .file_path()
             .map_or(SurfaceSubject::Elsewhere, |path| {
                 SurfaceSubject::File(path.to_path_buf())
             }),
-        None => SurfaceSubject::Unfilled,
+        pane_content::PaneContent::Empty => SurfaceSubject::Unfilled,
     }
 }
 
@@ -41424,20 +41581,21 @@ fn create_tab_state(
                 .show_picture(path.to_path_buf());
             continue;
         }
-        if preview_pool.get(source).is_none() {
-            // A file is named by its last segment and a page by its site: the
-            // vault and a hand-edited content section both carry a `cur` with no
-            // pool row behind it, and a page has no title to read until it has
-            // committed once.
-            let name = match source.file_path() {
-                Some(path) => files_row_display_name(path),
-                None => source.web_url().map(webnav::site_label).unwrap_or_default(),
-            };
-            preview_pool.insert(preview::PreviewBuffer::new(source.clone(), name));
-        }
-        preview_panes
-            .entry(surface_of(seat))
-            .show_source(source.clone());
+        let held = match preview_pool.held(source) {
+            Some(held) => held,
+            None => {
+                // A file is named by its last segment and a page by its site:
+                // the vault and a hand-edited content section both carry a
+                // `cur` with no pool row behind it, and a page has no title to
+                // read until it has committed once.
+                let name = match source.file_path() {
+                    Some(path) => files_row_display_name(path),
+                    None => source.web_url().map(webnav::site_label).unwrap_or_default(),
+                };
+                preview_pool.insert(preview::PreviewBuffer::new(source.clone(), name))
+            }
+        };
+        preview_panes.entry(surface_of(seat)).show_source(held);
     }
     // **The filter comes back even though the graph does not** (T2/T3, v2 (3)) —
     // see [`PreviewRestore::filters`]. The view is seeded with a root of its own
@@ -41719,7 +41877,7 @@ fn pane_into_new_tab(
         // entries for buffers that are long gone, and two tabs each remembering
         // where you were in a file is the state `absorb` already describes as
         // ordinary.
-        if let Some(source) = pane.buffer.as_ref() {
+        if let Some(source) = pane.source() {
             preview_views.remember(source, from.preview_views.restore(source));
             if let Some(buffer) = from.preview_pool.take(source) {
                 preview_pool.insert(buffer);
@@ -41980,7 +42138,7 @@ fn move_seat_content(
     // it; this is the memory a *future* opening of that file in either tab
     // reads.
     if let Some(pane) = source.preview_panes.remove(left) {
-        if let Some(showing) = pane.buffer.as_ref() {
+        if let Some(showing) = pane.source() {
             let view = source.preview_views.restore(showing);
             target.preview_views.remember(showing, view);
             if let Some(buffer) = source.preview_pool.take(showing) {
@@ -42031,7 +42189,7 @@ fn forget_work_in_flight_for_seat(tab: &mut TabState, seat: SeatId) {
     if let Some(source) = tab
         .preview_panes
         .get(tab.preview_here(seat))
-        .and_then(|pane| pane.buffer.clone())
+        .and_then(|pane| pane.source().cloned())
         && let Some(buffer) = tab.preview_pool.get_mut(&source)
     {
         buffer.forget_head_read();
@@ -43665,7 +43823,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         flight_chrome: seats::ChromeGroup::default(),
         last_drawn_rail: None,
         file_peek: None,
-        peek_buffer: None,
+        peek_buffer: preview::GlanceSlot::default(),
         peek_pane: PreviewPane::default(),
         peek_picture: None,
         peek_card_pending: None,
@@ -43800,13 +43958,13 @@ fn files_a_tab_stands_on(tab: &TabState) -> BTreeSet<PathBuf> {
         }
     }
     for (_, pane) in tab.preview_panes.iter() {
-        if let PreviewDocument::Markdown { pictures, .. } = &pane.doc {
+        if let PreviewDocument::Markdown { pictures, .. } = pane.doc() {
             wanted.extend(pictures.files.iter().cloned());
         }
-        if let Some(picture) = pane.image.as_ref() {
+        if let Some(picture) = pane.image() {
             wanted.insert(picture.path.clone());
         }
-        let Some(source) = pane.buffer.as_ref() else {
+        let Some(source) = pane.source() else {
             continue;
         };
         if let Some(named) = source.web_url().and_then(webnav::LocalFileUrl::parse) {
@@ -43884,7 +44042,7 @@ fn documents_held_mut_in<'a>(
 fn documents_pictures<'a>(
     holders: impl Iterator<Item = &'a PreviewPane>,
 ) -> impl Iterator<Item = &'a DocumentPictures> {
-    holders.filter_map(|pane| match &pane.doc {
+    holders.filter_map(|pane| match pane.doc() {
         PreviewDocument::Markdown { pictures, .. } => Some(pictures),
         _ => None,
     })
@@ -49242,7 +49400,7 @@ impl Runtime<'_> {
         // Cheapest question first and on purpose: every surface in this window
         // asks this on the way to its buffer, and all but a flipped page leave
         // here without touching the web map or parsing a URL.
-        let reading = self.preview_pane(surface)?.page_source.as_deref()?;
+        let reading = self.preview_pane(surface)?.page_source()?;
         let page = self.preview_page_source_file(surface)?;
         (page == reading).then_some(reading)
     }
@@ -49354,7 +49512,7 @@ impl Runtime<'_> {
     /// fifth reason — a `SetIsVisible(false)` and a hole not punched. The page
     /// keeps its history, its scroll, its form fields and its process, because
     /// none of them was asked a question. That is the whole of why this is not
-    /// "close the page and open the file", which is what a `pane.buffer` swap
+    /// "close the page and open the file", which is what a `pane.source()` swap
     /// would have been.
     ///
     /// **The source is read the way the glance reads it** — through the pool's
@@ -49365,7 +49523,7 @@ impl Runtime<'_> {
     /// been written.
     fn flip_page_source_on(&mut self, surface: PreviewSurface, path: PathBuf) -> Result<()> {
         if self.page_source_shown_on(surface).is_some() {
-            self.preview_pane_mut(surface).page_source = None;
+            self.preview_pane_mut(surface).turn_page_to(None);
         } else {
             self.land_page_source_on(surface, path);
         }
@@ -49381,7 +49539,7 @@ impl Runtime<'_> {
     /// half of [`Self::flip_page_source_on`] that turns *to* the source.
     ///
     /// [`Self::land_preview_source_on`] with the two things a page must not do
-    /// taken out: it does not touch `pane.buffer` (the seat is still on its
+    /// taken out: it does not touch `pane.source()` (the seat is still on its
     /// page) and it does not file a view (the caret and the scroll it would
     /// restore belong to a document this surface is not on). What is left is the
     /// pool's own door, the promotion, and one question for the worker — asked
@@ -49396,7 +49554,7 @@ impl Runtime<'_> {
         let buffer = self.preview_pool.open(source.clone(), name, &shown);
         buffer.read_a_pages_bytes_as_text();
         let wants_read = buffer.claim_head_read();
-        self.preview_pane_mut(surface).page_source = Some(path);
+        self.preview_pane_mut(surface).turn_page_to(Some(path));
         if let Some(want) = wants_read
             && !self.app.preview_worker.request(preview::PreviewRequest {
                 window,
@@ -49731,7 +49889,7 @@ impl Runtime<'_> {
         offset: usize,
     ) -> Option<std::ops::Range<usize>> {
         let content = self.preview_buffer_on(surface)?.text()?;
-        let PreviewDocument::Markdown { ranges, .. } = &self.preview_pane(surface)?.doc else {
+        let PreviewDocument::Markdown { ranges, .. } = self.preview_pane(surface)?.doc() else {
             return None;
         };
         let index = preview_live::caret_seat(content, ranges, offset).block()?;
@@ -49861,18 +50019,11 @@ impl Runtime<'_> {
             ranges,
             maps,
             ..
-        } = &pane.doc
+        } = pane.doc()
         else {
             return None;
         };
-        preview_live::selection_span(
-            content,
-            blocks,
-            ranges,
-            maps,
-            &caret,
-            pane.md_select.as_ref(),
-        )
+        preview_live::selection_span(content, blocks, ranges, maps, &caret, pane.md_select())
     }
 }
 
@@ -71048,14 +71199,14 @@ mod floated_page_tests {
     ///
     /// The question two very different laws ask of a pane: *a head read landing*
     /// asks it to decide whose frame is owed, and *the pool's eviction law* asks
-    /// it to decide what may not be thrown away. Both compared `pane.buffer`,
+    /// it to decide what may not be thrown away. Both compared `pane.source()`,
     /// which is what the pane is **on**; the flip made "what the pane is
     /// reading" a different question, and the machine reported the difference as
     /// silence — `BT_PREVIEW_TRACE` showed `bytes=0 owed=1` at the flip and then
     /// no build line at all, because the source arrived, `showing` came back
     /// empty, `changed` stayed false, and nothing ever drew it.
     ///
-    /// RED GATE ①: compare `pane.buffer` alone in
+    /// RED GATE ①: compare `pane.source()` alone in
     /// [`PreviewPane::is_reading`] and the first block fails — which on screen
     /// is a source face that stays blank for ever. RED GATE ②: make
     /// [`PreviewPane::reading`] answer the page-source *instead of* the buffer
@@ -71072,10 +71223,8 @@ mod floated_page_tests {
         let page = PreviewSource::Web(url.to_owned());
         let other = PreviewSource::file(PathBuf::from(r"D:\site\other.html"));
 
-        let plain = PreviewPane {
-            buffer: Some(file.clone()),
-            ..PreviewPane::default()
-        };
+        let mut plain = PreviewPane::default();
+        plain.show_source(crate::test_support::test_shortcut_held(file.clone()));
         assert!(
             plain.is_reading(&file),
             "an ordinary pane reads what it is on"
@@ -71083,11 +71232,9 @@ mod floated_page_tests {
         assert!(!plain.is_reading(&page));
         assert_eq!(plain.reading(), vec![file.clone()]);
 
-        let flipped = PreviewPane {
-            buffer: Some(page.clone()),
-            page_source: Some(PathBuf::from(r"D:\site\index.html")),
-            ..PreviewPane::default()
-        };
+        let mut flipped = PreviewPane::default();
+        flipped.show_source(crate::test_support::test_shortcut_held(page.clone()));
+        flipped.turn_page_to(Some(PathBuf::from(r"D:\site\index.html")));
         assert!(
             flipped.is_reading(&file),
             "a page turned to its source is reading that file, and owes it a frame"
@@ -71224,7 +71371,7 @@ mod floated_page_tests {
     ///
     /// The two predicates that decide a page's fate each frame, asked about the
     /// one gesture, because the whole cost of the feature is which of them
-    /// answers. [`a_page_was_replaced`] reads `pane.buffer`, the flip does not
+    /// answers. [`a_page_was_replaced`] reads `pane.source()`, the flip does not
     /// touch it, and so the seat keeps its engine, its history and its scroll;
     /// [`a_page_is_off_the_glass`] reads the flip, and so the engine is told
     /// `SetIsVisible(false)` and no hole is punched over the markup.
@@ -71232,7 +71379,7 @@ mod floated_page_tests {
     /// RED GATE ①: drop `|| sourced` and a flipped page is drawn *over* its own
     /// source — the first assertion fails and the screen shows a browser on top
     /// of the text it was made from. RED GATE ②: land the flip by writing the
-    /// file onto `pane.buffer` instead of onto
+    /// file onto `pane.source()` instead of onto
     /// [`PreviewPane::page_source`] — the last block fails, `advance_web_page`
     /// retires the browser, and turning back pays a whole navigation.
     #[test]
@@ -78860,8 +79007,7 @@ mod live_markdown_edit_tests {
         for promise in [
             "caret.place(&content, offset, extend)",
             "pane.select(None)",
-            "pane.md_caret = true",
-            "pane.md_caret_wanted = None",
+            "pane.enter_page()",
             "self.preview_edit_focus = Some(surface)",
         ] {
             assert!(
@@ -78871,7 +79017,7 @@ mod live_markdown_edit_tests {
         }
         assert_eq!(
             in_product_items(&found(
-                needle!(Pattern::text("pane.md_caret = true")),
+                needle!(Pattern::text("pane.enter_page()")),
                 View::Raw
             )),
             1,
@@ -78891,10 +79037,10 @@ mod live_markdown_edit_tests {
     /// away looking at one paragraph still wearing its markup.
     ///
     /// **Counted rather than described**, for the entrance's own reason: one
-    /// door means `md_caret = false` is written in
-    /// [`Runtime::leave_preview_page`] and in the door that hands a pane a
-    /// different file, and nowhere else. A fourth spelling of it is a ruling and
-    /// not an edit.
+    /// door means `md_caret = false` is written once, in the view's own door
+    /// that [`Runtime::leave_preview_page`] reaches; the door that hands a pane
+    /// a different file takes the whole view with the document. A second
+    /// spelling of it is a ruling and not an edit.
     ///
     /// **The ground's gesture is now spent at the release** (owner's ruling
     /// 2026-09-21), which moves *when* it reaches this door and not which door
@@ -78929,16 +79075,16 @@ mod live_markdown_edit_tests {
              `caret_at`, because a press on a link names one and is the link's",
         );
         assert!(
-            method_body("Runtime", "leave_preview_buffer_in").contains("pane.md_caret = false"),
-            "and handing this surface a different file still leaves the page",
+            method_body("Runtime", "leave_preview_buffer_in").contains(".leave_document()"),
+            "and handing this surface a different file still leaves the page:              the view, and whether its caret stands on the page, go with the              document",
         );
         assert_eq!(
             in_product_items(&found(
                 needle!(Pattern::text("md_caret = false")),
                 View::Raw
             )),
-            2,
-            "one door and the file swap, counted here on purpose",
+            1,
+            "one door, counted here on purpose; the file swap takes the whole              view with the document",
         );
         assert!(
             !method_body("Runtime", "leave_preview_page").contains("pane.caret ="),
@@ -79039,7 +79185,7 @@ mod live_markdown_edit_tests {
             (
                 "preview_selected_text",
                 "self.preview_live_caret(surface)",
-                "pane.md_select?",
+                "pane.md_select().copied()?",
             ),
             (
                 "preview_caret_selection_places",
@@ -79096,7 +79242,7 @@ mod live_markdown_edit_tests {
             "self.seat_preview_caret(",
             "self.widen_preview_caret(",
             "self.leave_preview_page(",
-            "md_caret_wanted = Some(",
+            "want_caret_at(Some(",
         ] {
             assert!(
                 !press.contains(wrote),
@@ -79195,13 +79341,13 @@ mod live_markdown_edit_tests {
              for, so a double click takes a character",
         );
         assert!(
-            spend.contains("md_caret_wanted = Some(offset)"),
+            spend.contains("want_caret_at(Some(offset))"),
             "a press on a page still waiting for its file no longer keeps the \
              caret it asked for",
         );
         assert_eq!(
             in_product_items(&found(
-                needle!(Pattern::text("md_caret_wanted = Some(")),
+                needle!(Pattern::text("want_caret_at(Some(")),
                 View::Raw
             )),
             1,

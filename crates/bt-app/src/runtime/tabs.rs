@@ -3750,7 +3750,7 @@ impl Runtime<'_> {
         let landing = self.seats.landing_preview();
         let was_showing = landing.and_then(|seat| {
             self.preview_pane(self.preview_here(seat))
-                .and_then(|pane| pane.buffer.clone())
+                .and_then(|pane| pane.source().cloned())
         });
         let back = blank_page_return(landing.is_some(), was_showing);
         self.open_minted_page(webnav::Mint::Blank)?;

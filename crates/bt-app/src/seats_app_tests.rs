@@ -183,8 +183,10 @@ fn two_preview_panes_come_back_on_the_files_the_section_named() {
         pool.insert(preview::PreviewBuffer::new(source.clone(), name.clone()));
     }
     let mut panes = PreviewPanes::default();
-    panes.entry(seat_of(TAB_ONE, pinned)).buffer =
-        Some(preview::PreviewSource::file(readme.clone()));
+    panes.entry(seat_of(TAB_ONE, pinned)).show_source(
+        pool.held(&preview::PreviewSource::file(readme.clone()))
+            .expect("the restored pool holds the file the pane is on"),
+    );
     let (layout, overflow) = cross_solve(&seats);
     let tab = assemble_tab_state(
         TabId(1),
@@ -1052,7 +1054,9 @@ fn an_engine_page_alone_in_a_tab_reaches_the_glass_through_the_retained_present(
     let mut pool = preview::PreviewPool::default();
     pool.insert(document);
     let mut panes = PreviewPanes::default();
-    panes.entry(seat_of(TabId(9), seat)).buffer = Some(source);
+    panes
+        .entry(seat_of(TabId(9), seat))
+        .show_source(pool.held(&source).expect("the pool holds the page"));
     let (layout, overflow) = cross_solve(&seats);
     let tab = assemble_tab_state(
         TabId(9),
@@ -2771,10 +2775,10 @@ fn every_picture_is_placed_against_the_pane_that_holds_it() {
     let mut panes = PreviewPanes::default();
     panes
         .entry(PreviewSurface::Seat(LeafId { tab, seat: first }))
-        .image = Some(PreviewImageState::new(PathBuf::from(r"D:\Demo\figure.png")));
+        .show_picture(PathBuf::from(r"D:\Demo\figure.png"));
     panes
         .entry(PreviewSurface::Seat(LeafId { tab, seat: second }))
-        .image = Some(PreviewImageState::new(PathBuf::from(r"D:\Demo\clip.mp4")));
+        .show_picture(PathBuf::from(r"D:\Demo\clip.mp4"));
     let focused = seats.identity();
     let state = assemble_tab_state(
         tab,
@@ -3618,8 +3622,8 @@ fn tab_with_two_previews(
     let mut pool = preview::PreviewPool::default();
     let mut panes = PreviewPanes::default();
     for (seat, buffer) in [first, second].into_iter().zip(buffers) {
-        panes.entry(seat_of(TabId(id), seat)).buffer = Some(buffer.source().clone());
-        pool.insert(buffer);
+        let held = pool.insert(buffer);
+        panes.entry(seat_of(TabId(id), seat)).show_source(held);
     }
     let (layout, overflow) = cross_solve(&seats);
     let tab = assemble_tab_state(
@@ -3660,7 +3664,7 @@ fn a_preview_pane_dropped_on_another_tab_arrives_showing_the_same_document() {
     );
     from.preview_panes
         .entry(seat_of(TabId(1), preview_seat))
-        .scroll = [0.0, 640.0];
+        .scroll_to([0.0, 640.0]);
     let mut into = cross_tab(2, &["GAMMA"]);
 
     let moved = cross_move(
@@ -3682,7 +3686,7 @@ fn a_preview_pane_dropped_on_another_tab_arrives_showing_the_same_document() {
         into.preview_panes
             .get(into.preview_here(moved.landed))
             .expect("the arrived pane")
-            .scroll,
+            .scroll(),
         [0.0, 640.0],
         "and as far down it as the reader had scrolled"
     );
@@ -4630,19 +4634,23 @@ fn a_pinned_preview_keeps_its_own_buffer_and_scroll_when_the_next_file_opens() {
     let open = |seats: &mut seats::Seats, panes: &mut PreviewPanes, path: &str| {
         let seat = seats.add_preview(&metrics).expect("a preview lands");
         let surface = seat_of(TAB_ONE, seat);
-        panes.entry(surface).buffer = Some(preview::PreviewSource::file(path));
+        panes
+            .entry(surface)
+            .show_source(crate::test_support::test_shortcut_held(
+                preview::PreviewSource::file(path),
+            ));
         surface
     };
 
     let first = open(&mut seats, &mut panes, "a.md");
-    panes.entry(first).scroll = [0.0, 120.0];
+    panes.entry(first).scroll_to([0.0, 120.0]);
     assert_eq!(
         open(&mut seats, &mut panes, "b.md"),
         first,
         "un-pinned, the next file reuses the pane — the singleton still holds"
     );
     assert_eq!(
-        panes.get(first).expect("a view").buffer.as_ref(),
+        panes.get(first).expect("a view").source(),
         Some(&preview::PreviewSource::file("b.md")),
         "and replaces what it was showing"
     );
@@ -4656,20 +4664,20 @@ fn a_pinned_preview_keeps_its_own_buffer_and_scroll_when_the_next_file_opens() {
     assert_ne!(second, first, "a locked pane is not the reuse target");
 
     assert_eq!(
-        panes.get(first).expect("a view").buffer.as_ref(),
+        panes.get(first).expect("a view").source(),
         Some(&preview::PreviewSource::file("b.md")),
         "the pinned pane is untouched — that is what the pin buys"
     );
     assert_eq!(
-        panes.get(first).expect("a view").scroll,
+        panes.get(first).expect("a view").scroll(),
         [0.0, 120.0],
         "including how far down it was"
     );
 
     // And the two scroll apart without touching one another.
-    panes.entry(second).scroll = [0.0, 40.0];
-    assert_eq!(panes.get(first).expect("a view").scroll, [0.0, 120.0]);
-    assert_eq!(panes.get(second).expect("a view").scroll, [0.0, 40.0]);
+    panes.entry(second).scroll_to([0.0, 40.0]);
+    assert_eq!(panes.get(first).expect("a view").scroll(), [0.0, 120.0]);
+    assert_eq!(panes.get(second).expect("a view").scroll(), [0.0, 40.0]);
     assert_eq!(
         panes.showing(),
         vec![
@@ -4683,7 +4691,7 @@ fn a_pinned_preview_keeps_its_own_buffer_and_scroll_when_the_next_file_opens() {
     assert!(panes.remove(second).is_some());
     assert!(panes.get(second).is_none());
     assert_eq!(
-        panes.get(first).expect("a view").buffer.as_ref(),
+        panes.get(first).expect("a view").source(),
         Some(&preview::PreviewSource::file("b.md"))
     );
 }
