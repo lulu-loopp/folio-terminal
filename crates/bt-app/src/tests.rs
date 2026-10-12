@@ -231,12 +231,12 @@ fn a_share_handed_over_meets_the_same_program_list() {
         (),
     );
     let answer = loop {
-        if let Some((_, answer, ())) = pending.answered().pop() {
+        if let Some((_, answer, ())) = pending.answered(lane.earliest_owed()).pop() {
             break answer;
         }
         crate::lane::wait_for_a_wake(&wakes, "the share's answer");
     };
-    let handoff_lane::Answer::Refused(reason) = answer else {
+    let handoff_lane::Answer::Refused(handoff_lane::Declined::System(reason)) = answer else {
         panic!("a program on a share is refused: {answer:?}");
     };
     assert_eq!(reason, bt_platform::PROGRAM_REFUSED, "the door's own words");

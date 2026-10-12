@@ -1029,6 +1029,11 @@ text_entries! {
     HandoffsStoppedSuffix,
     /// Its words alone, a substring of the long form; also the fonts card's refusal text.
     HandoffsStopped,
+    /// The suffix for a target pressed while the OS hand-off lane already had as many hand-offs
+    /// as it takes (S-5).
+    HandoffsTooManySuffix,
+    /// Its words alone, a substring of the long form; also the fonts card's refusal text.
+    HandoffsTooMany,
 
     // ── a drag's landing caption ───────────────────────────────────────────
     DragSwapPanes,
@@ -3946,6 +3951,16 @@ impl Text {
                 "hand-offs have stopped",
                 "hand-offs have stopped", // zh: pending S-5
             ),
+            Self::HandoffsTooManySuffix => pick(
+                lang,
+                " · too many hand-offs at once",
+                " · too many hand-offs at once", // zh: pending S-5
+            ),
+            Self::HandoffsTooMany => pick(
+                lang,
+                "too many hand-offs at once",
+                "too many hand-offs at once", // zh: pending S-5
+            ),
 
             // ── a drag's landing caption ───────────────────────────────────
             Self::DragSwapPanes => pick(lang, "Swap panes", "交换窗格"),
@@ -6298,6 +6313,10 @@ impl Text {
         (Self::HandoffsStoppedSuffix, HostPlatform::MacOs),
         (Self::HandoffsStopped, HostPlatform::Windows),
         (Self::HandoffsStopped, HostPlatform::MacOs),
+        (Self::HandoffsTooManySuffix, HostPlatform::Windows),
+        (Self::HandoffsTooManySuffix, HostPlatform::MacOs),
+        (Self::HandoffsTooMany, HostPlatform::Windows),
+        (Self::HandoffsTooMany, HostPlatform::MacOs),
         // zh: pending H2-NITS — a Profiles ghost row's value that each pane has
         // its own of.
         (Self::ProfilesEnvPerPane, HostPlatform::Windows),
@@ -10340,6 +10359,7 @@ mod tests {
                 (Text::HyperlinkNoProgramSuffix, Text::HyperlinkNoProgram),
                 (Text::HandoffCouldNotRunSuffix, Text::HandoffCouldNotRun),
                 (Text::HandoffsStoppedSuffix, Text::HandoffsStopped),
+                (Text::HandoffsTooManySuffix, Text::HandoffsTooMany),
             ] {
                 let long = long.in_lang(lang);
                 let short = short.in_lang(lang);

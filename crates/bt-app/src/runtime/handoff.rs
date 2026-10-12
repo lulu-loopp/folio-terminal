@@ -15,7 +15,7 @@ use std::time::Instant;
 use anyhow::Result;
 
 use crate::handoff_lane::{
-    Answer, Ask, Duty, FollowUp, HandoffId, OnAccepted, RefusalWords, Reply,
+    Answer, Ask, Declined, Duty, FollowUp, HandoffId, OnAccepted, RefusalWords, Reply,
 };
 use crate::{RevealedFoot, Runtime, i18n, native_window, toast};
 
@@ -25,17 +25,13 @@ impl Runtime<'_> {
     ///
     /// The window is named here, on the window thread, because that is where the handle lives. A
     /// press the lane refuses at its door — full, or its worker gone — or whose window cannot be
-    /// named has its terminal now, and is answered now, in the same words and with the same duty
-    /// as a refusal the lane brings back (the side-effects contract, revision (b)3).
+    /// named has its terminal now, and is answered now, with the same duty as a refusal the lane
+    /// brings back, in the words of who refused (the side-effects contract, revision (b)3).
     pub(crate) fn hand_off(&mut self, ask: Ask) -> Result<()> {
         let Ask { handoff, duty } = ask;
         let admitted = match native_window(&self.window.window) {
-            Ok(native) => self
-                .app
-                .handoff_lane
-                .submit(native, handoff)
-                .map_err(str::to_owned),
-            Err(error) => Err(format!("{error:#}")),
+            Ok(native) => self.app.handoff_lane.submit(native, handoff),
+            Err(error) => Err(Declined::NoWindow(format!("{error:#}"))),
         };
         match admitted {
             Ok(request) => {
@@ -46,11 +42,15 @@ impl Runtime<'_> {
         }
     }
 
-    /// **Take every answer this window's hand-offs hold**, without answering them — the
+    /// **Take every answer this window's hand-offs hold below `owed`** (the lane's earliest
+    /// request still owed, read once for the whole drain), without answering them — the
     /// application answers every window's in press order across the windows
     /// (`handoff_lane::in_press_order`).
-    pub(crate) fn take_handoff_answers(&mut self) -> Vec<(HandoffId, Answer, Duty)> {
-        self.window.handoffs.answered()
+    pub(crate) fn take_handoff_answers(
+        &mut self,
+        owed: Option<HandoffId>,
+    ) -> Vec<(HandoffId, Answer, Duty)> {
+        self.window.handoffs.answered(owed)
     }
 
     /// **Answer one hand-off** of this window's, as [`Duty::reply`] says.

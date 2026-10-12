@@ -24125,8 +24125,10 @@ enum LinkRefusal {
     Door,
     /// The hand-off failed on the OS hand-off lane: nothing declined it (S-5).
     CouldNotRun,
-    /// The OS hand-off lane's worker stopped with the hand-off owed (S-5).
+    /// The OS hand-off lane's worker stopped with the hand-off owed, or before it (S-5).
     WorkerStopped,
+    /// The OS hand-off lane already had as many hand-offs as it takes (S-5).
+    TooMany,
 }
 
 impl LinkRefusal {
@@ -24151,6 +24153,7 @@ impl LinkRefusal {
             Self::Door => i18n::Text::HyperlinkBlockedSuffix.in_lang(lang),
             Self::CouldNotRun => i18n::Text::HandoffCouldNotRunSuffix.in_lang(lang),
             Self::WorkerStopped => i18n::Text::HandoffsStoppedSuffix.in_lang(lang),
+            Self::TooMany => i18n::Text::HandoffsTooManySuffix.in_lang(lang),
         }
     }
 
@@ -24162,6 +24165,7 @@ impl LinkRefusal {
             Self::Door => i18n::Text::HyperlinkBlocked.in_lang(lang),
             Self::CouldNotRun => i18n::Text::HandoffCouldNotRun.in_lang(lang),
             Self::WorkerStopped => i18n::Text::HandoffsStopped.in_lang(lang),
+            Self::TooMany => i18n::Text::HandoffsTooMany.in_lang(lang),
         }
     }
 }
@@ -63911,12 +63915,19 @@ impl FolioApp {
     /// first and then answered in press order across the windows
     /// (`handoff_lane::in_press_order`), as the one worker ran them.
     fn answer_handoffs(&mut self) -> Result<()> {
+        let Some(owed) = self
+            .app
+            .as_ref()
+            .map(|app| app.handoff_lane.earliest_owed())
+        else {
+            return Ok(());
+        };
         let mut held = Vec::new();
         for index in 0..self.windows.len() {
             if let Some(mut runtime) = self.runtime_at(index)
                 && runtime.window.leaving.is_none()
             {
-                held.push((index, runtime.take_handoff_answers()));
+                held.push((index, runtime.take_handoff_answers(owed)));
             }
         }
         for (index, _, answer, duty) in handoff_lane::in_press_order(held) {

@@ -369,8 +369,8 @@ fn the_handoff_lane_behaves_exactly_as_before_behind_the_contract() {
 /// press is not queued for a thread that will never take it, and no window waits on it — it is
 /// refused at once, in `LANE_GONE`'s words.
 ///
-/// MUTATION: answer `Refused::Faulted` with `LANE_FULL` in `HandoffLane::submit`, and the words
-/// differ.
+/// MUTATION: answer `Refused::Faulted` with `Declined::LaneFull` in `HandoffLane::submit`, and
+/// the words differ.
 #[test]
 fn a_hand_off_pressed_after_the_worker_ended_is_refused_at_the_door() {
     let [handoff, ..] = adapters();

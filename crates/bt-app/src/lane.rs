@@ -393,6 +393,19 @@ where
         self.end(book, id, terminal, out);
     }
 
+    /// **The earliest identity still owed a terminal**, or `None` when every identity minted and
+    /// not yet delivered has one. On a lane that ends its identities in the order it minted them
+    /// (one worker, first in first out, its end ending the rest), every identity below this one
+    /// has ended, so a consumer that takes only those takes a prefix, and the next prefix it
+    /// takes follows it.
+    pub(crate) fn earliest_owed(&self) -> Option<Id> {
+        lock(&self.book)
+            .entries
+            .iter()
+            .find(|(_, entry)| entry.terminal.is_none())
+            .map(|(id, _)| *id)
+    }
+
     /// The fault the lane is in: how its worker ended, once it has.
     pub(crate) fn fault(&self) -> Option<WorkerEnd> {
         lock(&self.book).fault.clone()
