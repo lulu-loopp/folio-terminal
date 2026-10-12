@@ -4,7 +4,7 @@
 use crate::{
     FilesFocusArrival, LeafSession, MachineNews, Popup, ProgramNews, Runtime, ShownProgramRows,
     cli, i18n, launch_wire, persist, profile_menu_anchor, profiles, programs_lane, seats, settings,
-    shell_integration, text_field, toast,
+    shell_integration, table_merge, text_field, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -716,9 +716,16 @@ impl Runtime<'_> {
         if !news.taken {
             return Ok(());
         }
-        // One card per refused entry, `report_skipped_schemes`' shape: a file
-        // with two bad rows is two things to fix. They are the same sentences
-        // startup prints, because it is the same reader reading the same file.
+        self.put_profile_table_in_force()
+    }
+
+    /// **The table the store's readers read, installed** — and one card per
+    /// entry the installer refused, `report_skipped_schemes`' shape: a file
+    /// with two bad rows is two things to fix. They are the same sentences
+    /// startup prints, because it is the same reader reading the same file. The
+    /// door of a re-read that took the file and of a storage pass's merge
+    /// (`table_merge`).
+    fn put_profile_table_in_force(&mut self) -> Result<()> {
         for fault in self.take_profile_table()? {
             let sentence = i18n::profile_entry_fault(&fault);
             eprintln!("BT_PERSIST {}: {sentence}", persist::PROFILES_FILE_NAME);
@@ -889,5 +896,60 @@ impl Runtime<'_> {
             self.present_chrome_change()?;
         }
         Ok(true)
+    }
+}
+
+impl Runtime<'_> {
+    /// **The storage pass's merges of `profiles.json` and `pins.json`**, each
+    /// through `table_merge::run_pass` with this window as its seam: the card
+    /// data of each goes on `notice`, made whatever its door answered, and the
+    /// first door's failure is answered after both have run.
+    pub(crate) fn merge_tables(
+        &mut self,
+        notice: &mut crate::document_request::MergeNotice,
+    ) -> Result<()> {
+        let mut presented = Ok(());
+        for table in [table_merge::Table::Profiles, table_merge::Table::Pins] {
+            let outcome = table_merge::run_pass(self, table);
+            notice.files.extend(outcome.replaced);
+            presented = presented.and(outcome.presented);
+        }
+        presented
+    }
+}
+
+/// **This window is the two tables' merge** (`table_merge::run_pass`): each
+/// store's merge steps, and each table's door — the installer, which follows
+/// the editor by its id and re-points no pane; the chrome the PINNED sections
+/// are drawn in.
+impl table_merge::TableMergeWindow for Runtime<'_> {
+    fn table_merge_begin(&mut self, table: table_merge::Table) -> Option<table_merge::MergePass> {
+        match table {
+            table_merge::Table::Profiles => self.app.profiles_store.begin_merge(),
+            table_merge::Table::Pins => self.app.pins_store.begin_merge(),
+        }
+    }
+
+    fn table_door(&mut self, table: table_merge::Table) -> Result<()> {
+        match table {
+            table_merge::Table::Profiles => self.put_profile_table_in_force(),
+            table_merge::Table::Pins => {
+                if self.refresh_chrome() {
+                    self.present_chrome_change()?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn table_merge_end(&mut self, table: table_merge::Table) {
+        match table {
+            table_merge::Table::Profiles => self.app.profiles_store.end_merge(),
+            table_merge::Table::Pins => self.app.pins_store.end_merge(),
+        }
+    }
+
+    fn table_merge_say(&mut self, line: &str) {
+        eprintln!("{line}");
     }
 }

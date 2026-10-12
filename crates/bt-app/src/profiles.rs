@@ -2543,6 +2543,14 @@ fn merge(shipped: Vec<Profile>, file: &ProfilesV1) -> (Vec<Profile>, Vec<Profile
     merge_on(shipped, file, SeedPlatform::of_this_build())
 }
 
+/// **The table [`install`] would put in force from `file`**, and what it
+/// refused — for a test's window, which has no process-wide table of its own.
+#[cfg(test)]
+pub(crate) fn table_from(file: &ProfilesV1) -> (ProfileTable, Vec<ProfileFault>) {
+    let (profiles, faults) = merge(shipped(), file);
+    (ProfileTable { profiles }, faults)
+}
+
 fn merge_on(
     shipped: Vec<Profile>,
     file: &ProfilesV1,

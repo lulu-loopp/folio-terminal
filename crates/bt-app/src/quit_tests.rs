@@ -876,6 +876,128 @@ fn a_held_document_is_copied_not_sent_at_quit() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// RED (T-STORE-MERGE-PROFILES-PINS; revision (c)2, ticket 5's seam) — **a `Moved` answer for
+/// `profiles.json` or `pins.json` at quit is merged purely, sent again conditional on the file
+/// the merge read, and landed before the session.**
+///
+/// Folio gave a profile arguments and pinned a folder; the disk answers each write `Moved` —
+/// the file reordered the profiles and renamed one, and pinned another folder. Each store folds
+/// the file in without a door, and the merged document carries both sides.
+///
+/// MUTATION: send a held document outright (in `ProfilesStore::merge_at_quit` and
+/// `PinsStore::merge_at_quit`, merge by taking Folio's document whole) — the documents that
+/// land lack the file's changes.
+#[test]
+fn a_moved_profiles_or_pins_answer_at_quit_is_merged_purely_and_landed_before_the_session() {
+    use bt_persist::{PinEntryV1, PinsV1, ProfileEntryV1, ProfilesV1, ProgramV1};
+
+    let root = scratch("tables-merged");
+    let folder = root.join(preview::RECOVERED_FOLDER);
+    let own = |id: &str, title: &str| ProfileEntryV1 {
+        id: id.to_owned(),
+        display_title: Some(title.to_owned()),
+        program: Some(ProgramV1::Path(format!(r"C:\工具\{id}.exe"))),
+        ..ProfileEntryV1::default()
+    };
+    let (a, b) = (own("a", "甲 A"), own("b", "乙 B"));
+    let table = |rows: Vec<ProfileEntryV1>| ProfilesV1 {
+        profiles: rows,
+        ..ProfilesV1::default()
+    };
+    std::fs::write(
+        root.join(persist::PROFILES_FILE_NAME),
+        bt_persist::serialize_profiles(&table(vec![a.clone(), b.clone()])).unwrap(),
+    )
+    .unwrap();
+    let start = PinsV1 {
+        pins: vec![PinEntryV1::new(PinKind::Folder, r"C:\甲")],
+        ..PinsV1::default()
+    };
+    std::fs::write(
+        root.join(crate::pins::PINS_FILE_NAME),
+        bt_persist::serialize_pins(&start).unwrap(),
+    )
+    .unwrap();
+    let (lane, jobs) = StorageLane::scripted();
+    let mut disk = Disk::new(jobs);
+    let mut profiles =
+        persist::ProfilesStore::at_on(root.join(persist::PROFILES_FILE_NAME), lane.clone());
+    let mut pins = PinsStore::at_on(root.join(crate::pins::PINS_FILE_NAME), lane.clone());
+    let mut session =
+        SessionStore::at_on(root.join("session.json"), root.join("session.lock"), lane);
+
+    let mut b_here = b.clone();
+    b_here.args = Some(vec!["--登录".to_owned()]);
+    assert!(profiles.store(table(vec![a.clone(), b_here.clone()])));
+    assert!(pins.toggle(PinKind::Folder, r"D:\我的"));
+    let mut a_there = a.clone();
+    a_there.display_title = Some("甲 改名 renamed".to_owned());
+    let profiles_there: Arc<[u8]> =
+        bt_persist::serialize_profiles(&table(vec![b.clone(), a_there.clone()]))
+            .unwrap()
+            .into();
+    let mut pins_there = start.clone();
+    pins_there
+        .pins
+        .push(PinEntryV1::new(PinKind::Folder, r"E:\他的"));
+    let pins_there_bytes: Arc<[u8]> = bt_persist::serialize_pins(&pins_there).unwrap().into();
+
+    let now = Instant::now();
+    let mut quit = Quit::begin(Vec::new());
+    let mut documents: [&mut dyn QuitDocument; 2] = [&mut profiles, &mut pins];
+    assert_eq!(
+        drive(&mut quit, &mut documents, &mut session, &mut disk, &folder, now),
+        QuitStep::Documents
+    );
+    disk.answer_write(|_| Outcome::Moved {
+        bytes: Some(Arc::clone(&profiles_there)),
+    });
+    disk.answer_write(|_| Outcome::Moved {
+        bytes: Some(Arc::clone(&pins_there_bytes)),
+    });
+    assert_eq!(
+        drive(&mut quit, &mut documents, &mut session, &mut disk, &folder, now),
+        QuitStep::Documents,
+        "the merged documents are sent again"
+    );
+    assert_eq!(
+        disk.writes
+            .iter()
+            .map(|write| write.expected.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some(&profiles_there[..]), Some(&pins_there_bytes[..])],
+        "each conditional on the file its merge read"
+    );
+    assert_eq!(disk.sessions(), 0, "and the session waits behind them");
+    disk.answer_write(landed);
+    disk.answer_write(landed);
+    assert_eq!(
+        drive(&mut quit, &mut documents, &mut session, &mut disk, &folder, now),
+        QuitStep::Exit
+    );
+    assert!(disk.copies.is_empty(), "nothing went to `recovered`");
+    assert_eq!(
+        profiles.revision().document.profiles,
+        vec![b_here, a_there],
+        "the file's order and title, Folio's arguments"
+    );
+    assert_eq!(
+        pins.targets(PinKind::Folder),
+        vec![r"C:\甲".to_owned(), r"D:\我的".to_owned()],
+        "nothing is put in force at quit: the menus still read what they read"
+    );
+    assert_eq!(
+        pins.revision().document.pins,
+        vec![
+            PinEntryV1::new(PinKind::Folder, r"C:\甲"),
+            PinEntryV1::new(PinKind::Folder, r"E:\他的"),
+            PinEntryV1::new(PinKind::Folder, r"D:\我的"),
+        ],
+        "the file's pins, then Folio's"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Walk a quit whose `settings.json` write is refused to the copy on the worker, the copy
 /// unanswered: the documents phase at `start`, its end at `phase_two`.
 fn to_a_copy_on_the_worker(

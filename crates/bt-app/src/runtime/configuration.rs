@@ -354,7 +354,8 @@ impl Runtime<'_> {
 
     /// **The storage pass's merges, put in force** (design note 2026-10-11
     /// §3.3, §3.6): `settings.json`'s, through `settings_merge::run_pass` with
-    /// this window as its doors. Answers what the files' merges replaced and
+    /// this window as its doors; then `profiles.json`'s and `pins.json`'s
+    /// ([`Self::merge_tables`]). Answers what the files' merges replaced and
     /// could not apply, for the pass's one card (T-STORE-NOTICE raises it) —
     /// nothing for a clean hand edit — and, beside it, whether the presentation
     /// after the merge went through: the data is made first and a failed
@@ -363,7 +364,8 @@ impl Runtime<'_> {
         let outcome = settings_merge::run_pass(self);
         let mut notice = document_request::MergeNotice::default();
         notice.files.extend(outcome.replaced);
-        (notice, outcome.presented)
+        let tables = self.merge_tables(&mut notice);
+        (notice, outcome.presented.and(tables))
     }
 
     /// **A re-read that found `settings.json` or `keybindings.json` would not

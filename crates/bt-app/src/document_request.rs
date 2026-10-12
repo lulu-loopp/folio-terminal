@@ -60,14 +60,14 @@
 //! every one; a generation only keeps a stale answer's visible effect from
 //! landing after a newer one's ((b)4).
 //!
-//! **Two policies per store.** The request's ([`Mode`]): `settings.json` sends
-//! `Merge` requests (T-STORE-MERGE-SETTINGS); the other three still send
-//! `Restore` ((b)16 item 1) until their merges exist — a crossing hand edit is
-//! put back and kept, its bytes are stored for the merge, and the store is held
-//! against a file it will not write over. And the re-read's ([`Follow`]): a file
-//! that changed is merged (settings), held for a merge still to be built
-//! (keybindings, T-STORE-MERGE-KEYBINDINGS), or taken whole (profiles and pins,
-//! until T-STORE-MERGE-PROFILES-PINS).
+//! **Two policies per store.** The request's ([`Mode`]): `settings.json`
+//! sends `Merge` requests (T-STORE-MERGE-SETTINGS), and so do `profiles.json`
+//! and `pins.json` (T-STORE-MERGE-PROFILES-PINS); `keybindings.json` still
+//! sends `Restore` ((b)16 item 1) until its merge exists — a crossing hand edit
+//! is put back and kept, its bytes are stored for the merge, and the store is
+//! held against a file it will not write over. And the re-read's ([`Follow`]):
+//! a file that changed is merged (settings, profiles, pins) or held for a merge
+//! still to be built (keybindings, T-STORE-MERGE-KEYBINDINGS).
 //!
 //! **The merge's seam** ([`DocumentState::merge_stored`]): every file stored
 //! for the merge, in the order it was stored, is merged by the document's own
@@ -1073,10 +1073,11 @@ pub(crate) struct PendingMerge<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Follow {
     /// Taken whole when nothing of Folio's is owed; stored for the merge when
-    /// something is (`profiles.json`, `pins.json`, until their merge).
+    /// something is. What a store opens with until it names its policies; no
+    /// product store follows this way.
     Take,
     /// Stored for the merge, always: the document's merge puts it in force
-    /// through its doors (`settings.json`).
+    /// through its doors (`settings.json`, `profiles.json`, `pins.json`).
     Merge,
     /// Stored for a merge still to be built, and the store held: nothing is
     /// taken and nothing is written over it (`keybindings.json`, until
