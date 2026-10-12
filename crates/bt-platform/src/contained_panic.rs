@@ -11,8 +11,10 @@
 //! `# completions` row names (C2, C3). A panic outside every `contain` ends the process.
 //!
 //! **What may be contained**: work that holds no state another thread reads half-written, whose
-//! caller has a value to give for its failure. The workspace has no other `catch_unwind` in its
-//! product code (`crates/bt-source/tests/contained_panic.rs`).
+//! caller has a value to give for its failure. No other worker or product catch exists outside
+//! this boundary but `bt-math`'s render boundary, which the hook honours separately through
+//! `render_panic_is_contained` (`crates/bt-source/tests/contained_panic.rs` holds `bt-app`,
+//! `bt-platform` and `bt-pty` to it, by a call edge to this item).
 
 use std::cell::Cell;
 
