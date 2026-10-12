@@ -50,7 +50,8 @@ reading code names is one Rust let it name (a `pub use` of a `pub(crate)` item
 is E0364; a glob re-exports only what it may; a type or trait the code names is
 visible to it): visibility only tells same-named candidates apart — where two
 globs bring in two constants of one name, the one visible to the module the
-path is written in (carried through every re-export) is the constant, several
+path is written in (carried through every re-export; visible when every `use`
+on its way admits that module and so does the constant) is the constant, several
 visible or none is the diagnostic, and a lone candidate is the constant even
 when invisible to the reader, as the code could not have compiled otherwise.
 An associated constant written `<Type as Trait>::NAME` is the impl of the trait

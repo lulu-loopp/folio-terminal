@@ -145,7 +145,8 @@
 //!        names is visible to it. Visibility therefore does one thing here:
 //!        where two ways of bringing a name in (two globs) lead to two
 //!        constants, the one visible to the module the path is written in —
-//!        carried through every re-export — is the constant; several visible,
+//!        carried through every re-export; visible when every `use` on its
+//!        way admits that module and so does the constant — is the constant; several visible,
 //!        or none, is unreduced. A lone candidate is the constant even when it
 //!        is invisible to the reader: code that named it otherwise could not
 //!        have compiled. That is the rule, not a hole. Another crate's item or a primitive's (`u32::MAX`, a
@@ -1452,6 +1453,7 @@ impl DocumentScan<'_> {
                         position: call.offset,
                         parameters: BTreeMap::new(),
                         visiting: Vec::new(),
+                        admitted: true,
                     }
                     .of(expression)
                 };
@@ -2278,10 +2280,11 @@ struct FileSyntax {
     /// the trait is written in, its name and theirs.
     defaults: BTreeMap<(Vec<String>, String, String), Rc<Constant>>,
     /// Each `use` binding of a name, by the inline modules it is written in:
-    /// the path it names.
-    uses: BTreeMap<(Vec<String>, String), Vec<String>>,
-    /// Each `use …::*`, by the inline modules it is written in.
-    globs: BTreeMap<Vec<String>, Vec<Vec<String>>>,
+    /// the path it names, and who the `use` item admits.
+    uses: BTreeMap<(Vec<String>, String), (Vec<String>, Visibility)>,
+    /// Each `use …::*`, by the inline modules it is written in, and who the
+    /// `use` item admits.
+    globs: BTreeMap<Vec<String>, Vec<(Vec<String>, Visibility)>>,
     /// The statics `thread_local!` declares: keys to a thread's own value,
     /// never a path.
     locals: BTreeSet<(Vec<String>, String)>,
@@ -2636,14 +2639,17 @@ impl<'ast> syn::visit::Visit<'ast> for Collector {
         let mut names = Vec::new();
         let mut globs = Vec::new();
         use_bindings(&item.tree, &mut Vec::new(), &mut names, &mut globs);
+        let visibility = Visibility::of(&item.vis);
         for (name, path) in names {
-            self.syntax.uses.insert((self.modules.clone(), name), path);
+            self.syntax
+                .uses
+                .insert((self.modules.clone(), name), (path, visibility.clone()));
         }
         self.syntax
             .globs
             .entry(self.modules.clone())
             .or_default()
-            .extend(globs);
+            .extend(globs.into_iter().map(|glob| (glob, visibility.clone())));
     }
 
     fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
@@ -3016,6 +3022,23 @@ impl<'a> World<'a> {
     }
 }
 
+/// What a `use` leads to, each constant's scope marked as reached through
+/// a `use` that does, or does not, admit the reader.
+fn through(resolved: Resolved<'_>, admits: bool) -> Resolved<'_> {
+    match resolved {
+        Resolved::Found(found) => Resolved::Found(
+            found
+                .into_iter()
+                .map(|(mut scope, constant)| {
+                    scope.admitted &= admits;
+                    (scope, constant)
+                })
+                .collect(),
+        ),
+        missing => missing,
+    }
+}
+
 /// A constant's name: SCREAMING_SNAKE_CASE. `non_upper_case_globals` warns on
 /// any other, and CI runs clippy with `-D warnings` over the whole workspace
 /// (the workspace's `Cargo.toml` does not list it: it is rustc's default
@@ -3058,6 +3081,10 @@ struct Evaluation<'a> {
     /// The constants and helpers on the current resolution path. A chain is
     /// followed as far as it goes; one that comes back to itself is a cycle.
     visiting: Vec<String>,
+    /// Whether every `use` the resolution went through to reach this
+    /// constant's scope admits the module the path is written in: only
+    /// [`Evaluation::disambiguated`] asks.
+    admitted: bool,
 }
 
 impl<'a> Evaluation<'a> {
@@ -3085,6 +3112,7 @@ impl<'a> Evaluation<'a> {
             position,
             parameters,
             visiting,
+            admitted: true,
         })
     }
 
@@ -3099,6 +3127,7 @@ impl<'a> Evaluation<'a> {
             position,
             parameters: self.parameters.clone(),
             visiting: self.visiting.clone(),
+            admitted: self.admitted,
         }
     }
 
@@ -3902,7 +3931,7 @@ impl<'a> Evaluation<'a> {
                     .syntax(*file)
                     .uses
                     .get(&(inline.clone(), name.to_owned()))
-                    .cloned()
+                    .map(|(path, _)| path.clone())
             })
     }
 
@@ -3942,10 +3971,10 @@ impl<'a> Evaluation<'a> {
                     name.to_owned(),
                 )));
             }
-            if let Some(path) = syntax.uses.get(&here) {
+            if let Some((path, _)) = syntax.uses.get(&here) {
                 return Some(self.trait_identity(Some(key), path, seen));
             }
-            for glob in syntax.globs.get(&inline).into_iter().flatten() {
+            for (glob, _) in syntax.globs.get(&inline).into_iter().flatten() {
                 match self.world.walk(Some(key), glob) {
                     Walk::Module(next) => {
                         if let Some(held) = self.trait_held_in(&next, name, seen) {
@@ -4028,20 +4057,26 @@ impl<'a> Evaluation<'a> {
         if syntax.locals.contains(&here) {
             return Resolved::Missing(Value::Opaque);
         }
-        if let Some(path) = syntax.uses.get(&here) {
+        if let Some((path, visibility)) = syntax.uses.get(&here) {
             let Some((last, modules)) = path.split_last() else {
                 return Resolved::Missing(Value::Unreduced(Why::elsewhere()));
             };
-            return self.locate(Some(key.clone()), modules, last, seen, viewer);
+            return through(
+                self.locate(Some(key.clone()), modules, last, seen, viewer),
+                visibility.admits(key, viewer),
+            );
         }
         // Every glob that brings the name in is a candidate; the viewer
         // tells them apart.
         let mut beyond = false;
         let mut candidates = Vec::new();
         let mut missing = None;
-        for glob in syntax.globs.get(inline).into_iter().flatten() {
+        for (glob, visibility) in syntax.globs.get(inline).into_iter().flatten() {
             match self.world.walk(Some(key), glob) {
-                Walk::Module(next) => match self.constant_in(next, name, seen, viewer) {
+                Walk::Module(next) => match through(
+                    self.constant_in(next, name, seen, viewer),
+                    visibility.admits(key, viewer),
+                ) {
                     Resolved::Missing(Value::Unreduced(Why::Elsewhere(_))) => {}
                     Resolved::Found(found) => candidates.push(found),
                     Resolved::Missing(value) => missing = missing.or(Some(value)),
@@ -4068,7 +4103,8 @@ impl<'a> Evaluation<'a> {
     /// Several candidates for one name, each what one way of bringing it in
     /// leads to: the one candidate, if there is one (an item invisible to
     /// the viewer is still it — the tree compiles, so the code could not
-    /// name it otherwise); else the one visible to the viewer; several
+    /// name it otherwise); else the one visible to the viewer — every `use`
+    /// on its way admits the viewer, and so does the constant; several
     /// visible, or none, is ambiguous: unreduced. Ways that lead to the
     /// same constants are one candidate.
     fn disambiguated(
@@ -4096,10 +4132,11 @@ impl<'a> Evaluation<'a> {
             .into_iter()
             .filter(|candidate| {
                 candidate.iter().any(|(scope, constant)| {
-                    scope
-                        .module
-                        .as_ref()
-                        .is_none_or(|owner| constant.visibility.admits(owner, viewer))
+                    scope.admitted
+                        && scope
+                            .module
+                            .as_ref()
+                            .is_none_or(|owner| constant.visibility.admits(owner, viewer))
                 })
             })
             .collect();
@@ -4795,9 +4832,15 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
 /// its private constant; another crate reads a `pub` one and a `pub use` of
 /// one in a private module.
 ///
+/// Two `pub` constants of one name behind `pub(crate) use left::*` and
+/// `pub use right::*` are, to another crate, `right`'s alone: a candidate is
+/// visible only when every `use` on its way admits the reader too.
+///
 /// MUTATION: let `Evaluation::disambiguated` take the first candidate and
 /// `tests::reads_one_of_two_glob_constants` reads `structural-debt.md`; let
-/// it take every candidate and it reads both.
+/// it take every candidate and it reads both; let it ignore the `use`s'
+/// visibility (`scope.admitted`) and `tests::reads_through_the_public_glob`
+/// is a false ambiguity in the diagnostic.
 #[test]
 fn a_name_two_globs_bring_in_is_the_constant_visible_to_the_reader() {
     let plot = temporary_directory("planted-crates");
@@ -4867,6 +4910,11 @@ fn a_name_two_globs_bring_in_is_the_constant_visible_to_the_reader() {
                 "crates/planted_user/src/lib.rs",
                 "tests::reads_one_of_two_glob_constants",
                 "docs/plans/SOURCE-READERS.tsv",
+            ),
+            (
+                "crates/planted_user/src/lib.rs",
+                "tests::reads_through_the_public_glob",
+                "docs/RULES.md",
             ),
         ]
         .map(|(file, owner, subject)| (
@@ -5179,6 +5227,17 @@ pub mod shared {
 pub use hidden::*;
 pub use shared::*;
 
+mod left {
+    pub const PAIRED_DOC: &str = "docs/DESIGN.md";
+}
+
+mod right {
+    pub const PAIRED_DOC: &str = "docs/RULES.md";
+}
+
+pub(crate) use left::*;
+pub use right::*;
+
 #[cfg(test)]
 mod tests {
     fn root() -> std::path::PathBuf {
@@ -5201,6 +5260,11 @@ fn planted_user() -> String {
 mod tests {
     fn root() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+    }
+
+    #[test]
+    fn reads_through_the_public_glob() {
+        let _ = std::fs::read_to_string(root().join(planted_lib::PAIRED_DOC));
     }
 
     #[test]
