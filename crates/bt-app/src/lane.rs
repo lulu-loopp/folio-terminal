@@ -710,11 +710,16 @@ pub(crate) struct Waiting<Id, Op> {
     pub(crate) operation: Id,
     pub(crate) newest: Id,
     pub(crate) op: Op,
+    /// How many requests this run represents: the operation and every request joined to it.
+    pub(crate) requests: usize,
 }
 
-/// What [`Coalescing::ask`] admitted: the request's identity.
+/// What [`Coalescing::ask`] admitted: the request's identity, and how many requests it displaced
+/// — the run that was waiting and every request joined to it, each now ended `Superseded { by }`
+/// this one (`0` when it displaced none).
 pub(crate) struct Admitted<Id> {
     pub(crate) id: Id,
+    pub(crate) displaced: usize,
 }
 
 /// **A latest-value lane on the seam** (the side-effects contract's C2 and C4, revision (b)4):
@@ -827,16 +832,17 @@ where
             }
             book.started = true;
         }
-        let (request, waiting) = match book.waiting.take() {
+        let (request, waiting, displaced) = match book.waiting.take() {
             Some(waiting) if same(&waiting.op, &op) => {
                 match self.ledger.admit_joined(waiting.operation, owed) {
                     Ok(request) => {
                         let waiting = Waiting {
                             newest: request.id(),
                             op: fold(waiting.op, op),
+                            requests: waiting.requests + 1,
                             ..waiting
                         };
-                        (request, waiting)
+                        (request, waiting, 0)
                     }
                     Err(refused) => {
                         book.waiting = Some(waiting);
@@ -849,12 +855,14 @@ where
                     let by = request.id();
                     self.ledger
                         .publish(waiting.operation, Terminal::Superseded { by });
+                    let displaced = waiting.requests;
                     let waiting = Waiting {
                         operation: by,
                         newest: by,
                         op: fold(waiting.op, op),
+                        requests: 1,
                     };
-                    (request, waiting)
+                    (request, waiting, displaced)
                 }
                 Err(refused) => {
                     book.waiting = Some(waiting);
@@ -868,8 +876,9 @@ where
                     operation: id,
                     newest: id,
                     op,
+                    requests: 1,
                 };
-                (request, waiting)
+                (request, waiting, 0)
             }
         };
         let id = request.id();
@@ -877,7 +886,7 @@ where
         book.held.insert(id, request);
         drop(book);
         self.asked.notify_one();
-        Ok(Admitted { id })
+        Ok(Admitted { id, displaced })
     }
 
     /// **The worker's: the next run**, waiting on the lane's condition variable until a request

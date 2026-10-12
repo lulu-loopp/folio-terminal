@@ -436,8 +436,9 @@ fn ordered<'a>(rows: &'a [Profile], first: &[String]) -> Vec<&'a Profile> {
 /// What the lane counts beside its requests: the panes waiting on a walk, and the walk out.
 #[derive(Default)]
 struct Asks {
-    /// The walk out now: its number, why, and how many requests were made while it was out.
-    out: Option<(u64, Trigger, u64)>,
+    /// The walk out now: its number, why, and how many requests made while it was out a request
+    /// for a newer table has superseded.
+    out: Option<(u64, Trigger, usize)>,
     /// How many panes are in birth, each waiting on a walk's answer ([`PaneWaits`]).
     panes_waiting: usize,
 }
@@ -595,8 +596,8 @@ impl ProgramsLane {
                     .start_worker("program-walk", ran, move |ctx| run_program_walk(ctx, self))
             },
         )?;
-        if let Some((_, _, joined)) = asks.out.as_mut() {
-            *joined += 1;
+        if let Some((_, _, superseded)) = asks.out.as_mut() {
+            *superseded += admitted.displaced;
         }
         Ok(admitted.id.0)
     }
@@ -722,14 +723,24 @@ fn run_program_walk(ctx: &WorkerCtx, lane: &ProgramsLane) {
             ))
         });
         let elapsed = started.elapsed();
-        let joined = lane.lock().out.take().map_or(0, |(_, _, joined)| joined);
+        // Every request takes the lane lock across admission. Under that same lock, count the
+        // requests still represented by the waiting table separately from those a newer table
+        // displaced while this walk was out.
+        let (joined, superseded) = {
+            let mut asks = lane.lock();
+            let superseded = asks.out.take().map_or(0, |(_, _, superseded)| superseded);
+            let joined = lane
+                .requests
+                .waiting(|waiting| waiting.map_or(0, |waiting| waiting.requests));
+            (joined, superseded)
+        };
         let terminal = match walked {
             Ok((path_entries, file_questions)) => {
                 if std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty()) {
                     crate::trace_sink::stderr_line(format!(
                         "BT_PERF_TRACE program_walk_us={} generation={generation} trigger={:?} \
                          rows={} path_entries={path_entries} file_questions={file_questions} \
-                         joined={joined} band={:?}",
+                         joined={joined} superseded={superseded} band={:?}",
                         elapsed.as_micros(),
                         request.trigger.name(),
                         request.rows.len(),
@@ -740,8 +751,14 @@ fn run_program_walk(ctx: &WorkerCtx, lane: &ProgramsLane) {
             }
             Err(failure) => Terminal::Failed(failure),
         };
-        if joined > 0 {
-            (lane.note)(&joined_line(generation, request.trigger, elapsed, joined));
+        if joined + superseded > 0 {
+            (lane.note)(&joined_line(
+                generation,
+                request.trigger,
+                elapsed,
+                joined,
+                superseded,
+            ));
         }
         lane.requests.ledger().publish(operation, terminal);
         // After the terminal is published and never before: a wake that raced it would send the
@@ -750,12 +767,19 @@ fn run_program_walk(ctx: &WorkerCtx, lane: &ProgramsLane) {
     }
 }
 
-/// **The line for requests that were not walked on their own** — made while a walk was out,
-/// they are answered by the next walk, which serves the newest of them.
-fn joined_line(generation: u64, trigger: Trigger, elapsed: Duration, joined: u64) -> String {
+/// **The line for requests made while a walk was out** — those still represented by the waiting
+/// table are joined into its walk; those displaced by a different table ended `Superseded` and
+/// are not described as answered by that later walk.
+fn joined_line(
+    generation: u64,
+    trigger: Trigger,
+    elapsed: Duration,
+    joined: usize,
+    superseded: usize,
+) -> String {
     format!(
-        "program walk {generation} ({}) took {} ms; {joined} request(s) made while it was out \
-         were not walked on their own and are answered by the next walk",
+        "program walk {generation} ({}) took {} ms; of the requests made while it was out, \
+         {joined} joined this walk, {superseded} superseded by a newer table",
         trigger.name(),
         elapsed.as_millis()
     )
@@ -1192,8 +1216,8 @@ pub(crate) mod tests {
     /// RED — **requests made while a walk is out are answered by one later walk, and that is
     /// said once in diagnostics** (the skipped-probe line).
     ///
-    /// MUTATION (observed red): `serve` never saying the line (`if joined > 0` made never true) —
-    /// no line arrives.
+    /// MUTATION (observed red): `run_program_walk` never saying the line (`if joined + superseded
+    /// > 0` made never true) — no line arrives.
     #[test]
     fn requests_made_while_a_walk_is_out_are_said_once_and_answered_by_the_next_walk() {
         let machine = FakeMachine::with_path(&[bin_dir()]);
@@ -1233,7 +1257,7 @@ pub(crate) mod tests {
             "{line}"
         );
         assert!(
-            line.contains("3 request(s) made while it was out were not walked on their own"),
+            line.contains("3 joined this walk, 0 superseded by a newer table"),
             "{line}"
         );
         assert!(notes.try_recv().is_err(), "said once, not per request");
@@ -1472,10 +1496,16 @@ pub(crate) mod tests {
     /// MUTATION: the old silence — `Coalescing::ask` displacing the waiting request without
     /// publishing its `Superseded` — the first two requests behind the walk never end, and the
     /// drain finds only the walk out's terminal and the third's.
+    ///
+    /// **And the walk out's line distinguishes their fates** (S-4 round 2): one request remains
+    /// represented by the newer table's pending walk, while the two requests for the older table
+    /// were superseded — never described as answered by the next walk.
+    /// MUTATION: the old undifferentiated count (`request` adding one to `superseded` for every
+    /// arrival while the walk is out) — the line says 3 were superseded.
     #[test]
     fn requests_made_during_a_walk_end_superseded_or_joined_and_the_served_one_done() {
         let gate = Arc::new(Gate::default());
-        let (lane, wakes, _) = scripted_lane(&gate, FakeMachine::with_path(&[bin_dir()]));
+        let (lane, wakes, notes) = scripted_lane(&gate, FakeMachine::with_path(&[bin_dir()]));
         let one = [row("rg", "rg.exe")];
         let two = [row("rg", "rg.exe"), row("fd", "fd.exe")];
         gate.hold();
@@ -1517,6 +1547,20 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(gate.entered(), 2, "two walks for four requests");
+        let said: Vec<String> = notes.try_iter().collect();
+        assert_eq!(
+            said.len(),
+            1,
+            "the walk out's line, and nothing else: {said:?}"
+        );
+        assert!(
+            said[0].starts_with(&format!("program walk {out} (launch) took ")),
+            "{said:?}"
+        );
+        assert!(
+            said[0].contains("1 joined this walk, 2 superseded by a newer table"),
+            "{said:?}"
+        );
     }
 
     /// RED (S-4 round 2) — **A start the thread door refuses refuses that request at the door,
