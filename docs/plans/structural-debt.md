@@ -71,12 +71,12 @@ they answer "what does this machine do" — not by debt.
 | 0.4.5 | 8 | 0 | 8 |
 | 0.4.6 | 4 | 0 | 4 |
 | 0.4.7 | 0 | 0 | 0 |
-| 0.4.8 (plan ticket on the row) | 37 | 26 | 11 |
+| 0.4.8 (plan ticket on the row) | 39 | 26 | 13 |
 | 0.5 (reason on the row; D-1, D-16 and D-33 are its preconditions) | 13 | 13 | 0 |
 | deferred (reason on the row) | 4 | 4 | 0 |
-| unassigned (no 0.4.8 plan ticket; listed for the coordinator) | 28 | 28 | 0 |
+| unassigned (no 0.4.8 plan ticket; listed for the coordinator) | 26 | 26 | 0 |
 | already repaid | 2 | 0 | 2 |
-| **total** | **96** | **71** | **25** |
+| **total** | **96** | **69** | **27** |
 
 (2026-09-25, A5: D-33 moved from 0.4.5 to 0.4.6 — the owner deferred the
 presentation lane, its second client, and revision (b) R8 of
@@ -130,6 +130,19 @@ D-25, D-26, D-28 — and D-4 and D-19 are narrowed and open; unassigned holds 28
 (2026-10-12, T-PANIC-ROWS-HONEST: D-96 repaid. Recounted from the rows' own version and status
 cells: 0.4.8 holds 37 rows, eleven repaid (the ten above and D-96); total 96/71/25, from
 96/72/24.)
+
+(2026-10-12, S-5: D-70 and D-71 named S-5, moved from unassigned to 0.4.8 and repaid. The table
+is recounted from the rows below — each row's *Version* and whether its *Status* reads repaid:
+the lines before this one read 0.4.8 27/27/0 and unassigned 37/37/0, which counted neither the
+rows the 0.4.8 plan tickets have repaid since (D-7, D-14, D-15, D-20…D-23, D-25, D-26, D-28) nor
+the unassigned rows those tickets and S-1 round 2 moved to 0.4.8.)
+
+(2026-10-12, the merge of S-5 with H2-NITS: both recounts, from the rows — H2-NITS's D-96 on 0.4.8,
+open, and S-5's D-70 and D-71 moved to 0.4.8 and repaid: 0.4.8 39/27/12, unassigned 26/26/0, total
+96/70/26.)
+
+(2026-10-12, the merge of T-PANIC-ROWS-HONEST with S-5: recounted from the rows — S-5's D-70 and
+D-71 on 0.4.8, repaid, and D-96 on 0.4.8, repaid: 0.4.8 39/26/13, unassigned 26/26/0, total 96/69/27.)
 
 Parts already repaid inside open rows, by the 0.4.4 tickets: ticket 10
 (`2657e5e3`) — §5.3 row 1, the OS hand-off lane, and the first instance of the
@@ -382,8 +395,8 @@ ledger's.
 | D-67 | `bt-app` fails clippy on macOS: nine app-build and five test-build unused items and ignored results | ticket 55's report | 72 | 0.4.6 — beside D-63, since widening the Mac CI job hits it | repaid (ticket 72) |
 | D-68 | the taskbar's auto-hide state asked of Explorer on the window thread: `SHAppBarMessage(ABM_GETSTATE)` inside `sample_window_place`, at every turn's head and again for a delivery between turns | the owner's next93 stall report, 2026-09-25; ticket 62 | 62 | 0.4.5 — a wait on another process inside the typing turn | repaid (ticket 62) |
 | D-69 | §5.3 row 22 — `Window::set_ime_cursor_area` called at every offer of a caret: twice in one turn (15 + 85 ms) and once for 3,138 ms under load on the owner's next93 | the owner's next93 stall reports, 2026-09-25; ticket 63 | 63 | 0.4.5 — typing stability | repaid (ticket 63) |
-| D-70 | the hand-off lane: a worker that dies leaves the requests it had accepted with no terminal outcome — `answers()` reads a disconnected channel as empty, `LANE_GONE` answers only a later submission, and the ids stay owed in each window's `Pending` | A5 (`lane::EXPECTED_FAILURES`: Handoff × a dead worker is observable) | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6; **2026-10-11 (S-1):** tracked by `# completions` row `OS hand-off`; **2026-10-11 (S-3):** also declared under two of the side-effects claims, Handoff × `AFailureIsSaidOnce` (no panic is caught around a hand-off) and × `AnOrphanedAnswerReachesItsSink` (a closed window's answer is dropped); S-5 moves the lane onto the S-3 seam |
-| D-71 | the hand-off lane: the answers held for an undrained consumer are unbounded — the answer channel is an unbounded `mpsc::channel` and `turned_away` a `Vec` | A5 (Handoff × answers held are bounded) | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6; **2026-10-11 (S-1):** tracked by `# completions` row `OS hand-off` |
+| D-70 | the hand-off lane: a worker that dies leaves the requests it had accepted with no terminal outcome — `answers()` reads a disconnected channel as empty, `LANE_GONE` answers only a later submission, and the ids stay owed in each window's `Pending` | A5 (`lane::EXPECTED_FAILURES`: Handoff × a dead worker is observable) | S-5 (T-HANDOFF-DEATH) | 0.4.8 — S-5 (2026-10-12) | **repaid 2026-10-12 (S-5)**: the hand-off lane is built on the S-3 seam, whose task and worker body run inside `contained_panic::contain` (S-5 round 3), so under the resident fatal panic hook a panic still reaches the seam — its worker started by `lane::Executor::start_worker("bt-os-handoff", …)`, every identity minted by a `lane::Ledger`, each hand-off run inside `lane::task`; the worker's end leaves every owed request `WorkerGone` (and wakes the loop) and the lane faulted, and a later press is refused at the door with `LANE_GONE`; a panic in one hand-off is that request's `Failed`, said once, and the worker goes on; a closed window's requests end in the lane's sink for the abandoned (C6), which says a refusal no window is left to hear. The four Handoff rows of `lane::EXPECTED_FAILURES` are gone; before it: open; **2026-10-08 (J4):** untouched; was 0.4.6; **2026-10-11 (S-1):** tracked by `# completions` row `OS hand-off`; **2026-10-11 (S-3):** also declared under two of the side-effects claims, Handoff × `AFailureIsSaidOnce` (no panic is caught around a hand-off) and × `AnOrphanedAnswerReachesItsSink` (a closed window's answer is dropped); S-5 moves the lane onto the S-3 seam |
+| D-71 | the hand-off lane: the answers held for an undrained consumer are unbounded — the answer channel is an unbounded `mpsc::channel` and `turned_away` a `Vec` | A5 (Handoff × answers held are bounded) | S-5 (T-HANDOFF-DEATH) | 0.4.8 — S-5 (2026-10-12) | **repaid 2026-10-12 (S-5)**: no unbounded container is left — the answer channel and `turned_away` are gone; each request's terminal is held in the lane's ledger until its window takes it (or handed to the sink), and the ledger owes at most `handoff_lane::BOUND` (33: the one running and 32 waiting, an answer not yet taken holding its place); a press past it is refused at the door, synchronously, with `LANE_FULL` as its terminal, and the window answers it at once (revision (b)3); before it: open; **2026-10-08 (J4):** untouched; was 0.4.6; **2026-10-11 (S-1):** tracked by `# completions` row `OS hand-off` |
 | D-72 | the font lane: a coalesced or superseded request gets no outcome of its own, and a walk that dies leaves `ScanState::running` set for ever — no fault, no later walk; the wake has no failure road | A5 (Font × every request ends exactly once; a dead worker is observable) | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6; **2026-10-11 (S-1):** tracked by `# completions` row `font list`; **2026-10-11 (S-3):** also declared under three of the side-effects claims, Font × `ASupersededRequestSaysSo`, × `AJoinedRequestCarriesItsTwin` (`SupersededInSilence`, `JoinedInSilence`) and × `AFailureIsSaidOnce` (a walk has no failure form); S-4 moves the lane onto the S-3 seam |
 | D-73 | the taskbar lane: the requests between two served ones get no outcome, and a worker that dies leaves `Asks::worker` set — requests are counted and never served, and nothing says so | A5 (Taskbar × every request ends exactly once; a dead worker is observable) | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6; **2026-10-11 (S-1):** tracked by `# completions` row `taskbar auto-hide`; **2026-10-11 (S-3):** also declared under three of the side-effects claims, Taskbar × `ASupersededRequestSaysSo`, × `AJoinedRequestCarriesItsTwin` and × `AFailureIsSaidOnce`; S-4 moves the lane onto the S-3 seam |
 | D-74 | the computation lane (`MathWorker`): admission and answers are unbounded `mpsc::channel`s, each way | A5 (Computation × a full lane answers without waiting; answers held are bounded) | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6; **2026-10-11 (S-1):** tracked by `# completions` rows `formula, decode and video glance`, `image scale` and `path verification` |
@@ -1572,10 +1585,17 @@ drains; neither lane states a bound, and the contract asks for one.
   window's `Pending` with no outcome. Owed: a terminal outcome for every
   accepted id when the worker ends (a lane-level fault the drain reports once,
   which each window turns into its surfaces' refusals).
+  **Repaid 2026-10-12 (S-5)**: on the S-3 seam the worker's end gives every
+  owed id `WorkerGone`, announced by the loop's wake, and faults the lane; a
+  hand-off's own panic is that request's `Failed`; a closed window's ids end in
+  the lane's sink.
 - **D-71 · hand-off, answers held.** `start` builds the answer side as an
   unbounded `mpsc::channel`, and `turn_away` pushes to an unbounded `Vec`; a
   consumer that does not drain holds every answer (40 of 40 in the suite).
   Owed: a declared bound on answers held, and what a full mailbox does.
+  **Repaid 2026-10-12 (S-5)**: the ledger holds each terminal until its window
+  takes it, at most `BOUND` (33) at once, and refuses the press past it at the
+  door, synchronously.
 - **D-72 · font.** `claim_scan` folds every request made during a walk into
   one `again` round; the requests between are answered by nothing of their own.
   A walk that ends without `finish_scan` leaves `running` set, so every later

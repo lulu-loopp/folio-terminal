@@ -2716,7 +2716,7 @@ impl Runtime<'_> {
                 profiles::GitMenuRow::RevealInExplorer,
                 profiles::GitMenuTarget::Change { path, .. },
             ) => {
-                self.reveal_in_explorer(&git_full_path(&root, path));
+                self.reveal_in_explorer(&git_full_path(&root, path))?;
                 Ok(())
             }
             // ── the readings ──

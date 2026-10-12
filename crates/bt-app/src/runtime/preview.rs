@@ -4377,12 +4377,9 @@ impl Runtime<'_> {
         // something rather than to open it, so the foot can finally name what
         // it prints: in a folder of two hundred rows, "the directory it is in"
         // is not an answer to "where is this file".
-        let handed = self.reveal_in_explorer(&path);
-        self.when_handed_over(
-            handed,
+        self.hand_off(crate::reveal_ask(&path).when_handed_over(
             crate::handoff_lane::OnAccepted::Revealed(RevealedFoot::Preview(seat)),
-        );
-        Ok(())
+        ))
     }
 
     /// Hand the page on this seat to the machine's own browser — the head's `↗`
@@ -4413,17 +4410,19 @@ impl Runtime<'_> {
         };
         match hand_off {
             PageHandOff::File(path) => {
-                self.open_local_path(&path);
+                self.open_local_path(&path)?;
             }
             PageHandOff::Share(path) => {
-                self.open_unverified_reference(&path);
+                self.open_unverified_reference(&path)?;
             }
             // **Any other page leaves by its address** (ticket 39), on the lane, the way a
             // Markdown link to the web already leaves this window.
             PageHandOff::Address(address) => {
                 let (request, refused) = page_address_hand_off(surface, &address);
-                let handed = self.hand_off(request, PAGE_ADDRESS_REFUSAL);
-                self.if_refused(handed, refused);
+                self.hand_off(
+                    crate::handoff_lane::Ask::new(request, PAGE_ADDRESS_REFUSAL)
+                        .if_refused(refused),
+                )?;
             }
         }
         Ok(())
@@ -5476,7 +5475,7 @@ impl Runtime<'_> {
                 }
             }
             HyperlinkActivation::Browser(url) => {
-                self.hand_off(
+                self.hand_off(crate::handoff_lane::Ask::new(
                     bt_platform::Handoff::Address(url),
                     crate::handoff_lane::Refusal {
                         stderr: Some((
@@ -5485,30 +5484,28 @@ impl Runtime<'_> {
                         )),
                         program_notice: false,
                     },
-                );
+                ))?;
             }
             // **`Ctrl` hands the named file, or a share, to the system** (ticket 14, owner
             // ruling 2026-09-23: "click stays in the window, Ctrl+click hands over"). A document's
             // targets are never asked about, so both leave by the door that needs no ledger, on
             // the OS hand-off lane, and meet the program list a printed file meets.
             HyperlinkActivation::External(path) | HyperlinkActivation::Share(path) => {
-                self.open_unverified_reference(&path);
+                self.open_unverified_reference(&path)?;
             }
             // **Any other scheme, to whatever the machine has registered for it** (ticket 14).
             // A refusal from the machine is said on this surface, in the words a refused address
             // already has here.
             HyperlinkActivation::Scheme(uri) => {
-                let handed = self.hand_uri_to_the_system(&uri);
-                self.if_refused(
-                    handed,
-                    crate::handoff_lane::OnRefused::PreviewAddressRefused(surface, uri),
-                );
+                let refused =
+                    crate::handoff_lane::OnRefused::PreviewAddressRefused(surface, uri.clone());
+                self.hand_uri_to_the_system(&uri, refused)?;
             }
             // The table's two folder answers, spent the way the terminal spends them. A
             // document's own file row does not produce them — it never asks the disk whether a
             // target is a folder — and the match says what each would do rather than nothing.
             HyperlinkActivation::Reveal(path) => {
-                self.reveal_in_explorer(&path);
+                self.reveal_in_explorer(&path)?;
             }
             HyperlinkActivation::FilesColumn(path) => {
                 self.locate_folder_in_files_column(&path, None)?
@@ -13568,8 +13565,11 @@ impl Runtime<'_> {
         self.present_chrome_change()
     }
 
-    pub(in crate::runtime) fn activate_local_image_path(&mut self, path: &std::path::Path) {
-        self.hand_off(
+    pub(in crate::runtime) fn activate_local_image_path(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<()> {
+        self.hand_off(crate::handoff_lane::Ask::new(
             bt_platform::Handoff::LocalImage(path.to_path_buf()),
             crate::handoff_lane::Refusal {
                 stderr: Some((
@@ -13578,7 +13578,7 @@ impl Runtime<'_> {
                 )),
                 program_notice: false,
             },
-        );
+        ))
     }
 
     /// [`Self::terminal_link_grasp`] on the other surface links are drawn on

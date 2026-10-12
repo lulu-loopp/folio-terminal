@@ -636,12 +636,11 @@ impl Runtime<'_> {
             // Two refusals and one sentence: the address door's, answered here, and the
             // system's, answered when the OS hand-off lane does (2026-09-22) — both under the
             // cells the address is printed in, as they always were.
-            HyperlinkActivation::Browser(url) => match self.hand_url_to_the_browser(&url)? {
-                Some(handed) => {
-                    self.if_refused(
-                        handed,
-                        crate::handoff_lane::OnRefused::HyperlinkRefused(hyperlink),
-                    );
+            HyperlinkActivation::Browser(url) => match crate::runtime::web::browser_ask(&url) {
+                Some(ask) => {
+                    self.hand_off(
+                        ask.if_refused(crate::handoff_lane::OnRefused::HyperlinkRefused(hyperlink)),
+                    )?;
                 }
                 None => {
                     self.window
@@ -702,7 +701,7 @@ impl Runtime<'_> {
                 // resolved name rides on the target, which is where the macOS door — the one that
                 // *did* resolve — takes it from.
                 let facts = self.verified_target(seat, &path);
-                self.open_local_path_verified(&path, facts);
+                self.open_local_path_verified(&path, facts)?;
             }
             HyperlinkActivation::Preview(path, at) => self.open_preview_at(path, at)?,
             // **A share on another machine, handed to the system** (ticket 14, owner ruling
@@ -711,17 +710,16 @@ impl Runtime<'_> {
             // cold `\\server` holds that lane and not this window. The door refuses a program by
             // the list a local file meets, and says so in the files notice.
             HyperlinkActivation::Share(path) => {
-                self.open_unverified_reference(&path);
+                self.open_unverified_reference(&path)?;
             }
             // **Any other scheme, handed to whatever this machine has registered for it** (ticket
             // 14, owner ruling 2026-09-21). A machine with no handler refuses it, and the refusal
             // is said where the web arm's is: under the cells the address is printed in.
             HyperlinkActivation::Scheme(uri) => {
-                let handed = self.hand_uri_to_the_system(&uri);
-                self.if_refused(
-                    handed,
+                self.hand_uri_to_the_system(
+                    &uri,
                     crate::handoff_lane::OnRefused::HyperlinkRefused(hyperlink),
-                );
+                )?;
             }
             // **Shown where it lives, whatever it is** (audit 3 C-4). A folder took this arm from
             // the beginning; a file takes it since the day `ShellExecuteW`'s `open` verb turned
@@ -737,7 +735,7 @@ impl Runtime<'_> {
                 // folder or it is not — and a `Ctrl`+click on a path under a junction into a dead
                 // share must not stall the window inside a call this branch exists to remove.
                 let facts = self.verified_target(seat, &path);
-                self.reveal_verified(&path, facts);
+                self.reveal_verified(&path, facts)?;
             }
             // The folder's own road, and the one that stays in this window: the
             // column this tab already has is pointed at it, and a tab without one

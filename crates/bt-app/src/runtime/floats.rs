@@ -2382,7 +2382,7 @@ impl Runtime<'_> {
                 // this list — `bt_platform`'s own refusal for the executable
                 // list included, because the rule belongs to the door.
                 RowActivation::DefaultApp(path) => {
-                    self.open_local_path(&path);
+                    self.open_local_path(&path)?;
                 }
                 RowActivation::Nowhere => {}
             },
@@ -2400,7 +2400,7 @@ impl Runtime<'_> {
             // next to it that runs programs is the terminal" enforced at the
             // bridge rather than at each call site.
             profiles::FileMenuRow::OpenWith => {
-                self.open_local_path(&path);
+                self.open_local_path(&path)?;
             }
             // Only a tree row has a fold, and only a tree row carries the host
             // and key a fold needs. A breadcrumb's menu has neither and does not
@@ -2458,7 +2458,7 @@ impl Runtime<'_> {
             // reveal_arguments` and not by this call site knowing which kind of
             // row raised the menu.
             profiles::FileMenuRow::Reveal => {
-                self.reveal_in_explorer(&path);
+                self.reveal_in_explorer(&path)?;
             }
             // Answered above, before the single-path gate, because a row of this
             // face is about its own folder and not about the menu's path. The
@@ -2830,12 +2830,9 @@ impl Runtime<'_> {
         // spawning `explorer.exe` itself as this once did: one verb printed on
         // three strips is one verb, and a bridge that only one of the three
         // goes around is a bridge with a hole in it.
-        let handed = self.reveal_in_explorer(Path::new(&root));
-        self.when_handed_over(
-            handed,
+        self.hand_off(crate::reveal_ask(Path::new(&root)).when_handed_over(
             crate::handoff_lane::OnAccepted::Revealed(RevealedFoot::Float(id)),
-        );
-        Ok(())
+        ))
     }
 
     /// Show the **file** a preview float is holding in the OS file manager.
@@ -2860,12 +2857,9 @@ impl Runtime<'_> {
         else {
             return Ok(());
         };
-        let handed = self.reveal_in_explorer(&path);
-        self.when_handed_over(
-            handed,
+        self.hand_off(crate::reveal_ask(&path).when_handed_over(
             crate::handoff_lane::OnAccepted::Revealed(RevealedFoot::Float(id)),
-        );
-        Ok(())
+        ))
     }
 
     /// Put the float back inside a viewport that has just changed shape.
