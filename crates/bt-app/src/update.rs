@@ -725,11 +725,11 @@ pub struct CheckView {
 /// `docs/ARCHITECTURE.md` §4.2, structural debt D-53).
 ///
 /// The only reader and writer of `update-check.json` and of this process's copy
-/// of it, and the holder of the claim file beside it. The file's four fields —
-/// `checked_at_ms`, `latest_tag`, `seen_tag`, `skipped_tag` — change only through
-/// [`Self::transact`], which holds [`Self::file`] across the **whole**
-/// read-modify-write: read the file, change it, write it, publish the result to
-/// [`Self::known`].
+/// of it, and the holder of the claim file beside it. The file's seven fields —
+/// `checked_at_ms`, `attempted_at_ms`, `latest_tag`, `seen_tag`, `skipped_tag`,
+/// `local_stamp`, `local_tag` — change only through [`Self::transact`], which
+/// holds [`Self::file`] across the **whole** read-modify-write: read the file,
+/// change it, write it, publish the result to [`Self::known`].
 ///
 /// # Why one lock, and not re-reading before writing
 ///
@@ -748,7 +748,7 @@ pub struct CheckView {
 /// check writes it from its own thread, and the window thread writes it on the
 /// frame the reader acknowledges the mark, as `settings.json` is written on a
 /// press. Routing it through a worker would add a channel and a wake for a file of
-/// four fields; a lock over one read and one atomic write of a few hundred bytes
+/// seven fields; a lock over one read and one atomic write of a few hundred bytes
 /// serialises the same writers with nothing new. The lock is **never** held
 /// across the network request: what the request did — an answer with its stamp,
 /// or a refusal's attempt — lands after it.

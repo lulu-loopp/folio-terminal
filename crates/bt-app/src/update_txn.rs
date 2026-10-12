@@ -47,16 +47,11 @@
 //! older rescue build would misread raises the release manifest's
 //! `min_updater` to its first version.
 //!
-//! **Nothing in this file is called from the product yet, and that is the
-//! ticket boundary**: U-11 gives it its door, U-12 its startup caller and
-//! U-20…U-29 its drivers.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the protocol lands before its drivers: U-11, U-12 and U-20…U-29 call it ((b).5)"
-    )
-)]
+//! **Its product callers** are the drivers: the ordinary start
+//! (`update_startup`), the trial (`update_trial`), the recovery
+//! (`update_recover`), the Prepares (`update_prepare_windows`,
+//! `update_prepare_macos`), the hand-off (`update_handoff`) and the lock
+//! holders (`update_apply`, `update_apply_windows`, `update_apply_macos`).
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -465,6 +460,7 @@ impl Header {
     }
 
     /// The header alone, as v1 bytes.
+    #[cfg(test)]
     pub(crate) fn encode(&self) -> Vec<u8> {
         serde_json::to_vec(&self.wire()).expect("a header always serialises")
     }
@@ -604,6 +600,7 @@ pub(crate) struct Move {
 impl Inventories {
     /// Present names the running build did not ship: pre-existing files at
     /// names the new set will occupy.
+    #[cfg(test)]
     pub(crate) fn collisions(&self) -> impl Iterator<Item = &Member> {
         self.old_present
             .iter()
@@ -828,6 +825,7 @@ pub(crate) enum PhaseKind {
 }
 
 impl PhaseKind {
+    #[cfg(test)]
     pub(crate) const ALL: [PhaseKind; 13] = [
         PhaseKind::Allocated,
         PhaseKind::Prepared,
@@ -1778,6 +1776,7 @@ pub(crate) enum EventKind {
 }
 
 impl EventKind {
+    #[cfg(test)]
     pub(crate) const ALL: [EventKind; 22] = [
         EventKind::Prepared,
         EventKind::PrepareFailed,
@@ -1886,6 +1885,7 @@ pub(crate) enum Refusal {
 
 /// **Every transition**, as `(from, event, to)`. [`next`] realises exactly
 /// these; any other pair is [`Refusal::Illegal`] or one of [`NAMED_REFUSALS`].
+#[cfg(test)]
 pub(crate) const TRANSITIONS: &[(PhaseKind, EventKind, PhaseKind)] = &[
     (
         PhaseKind::Allocated,
@@ -2020,6 +2020,7 @@ pub(crate) const TRANSITIONS: &[(PhaseKind, EventKind, PhaseKind)] = &[
 /// The refusals that are not merely [`Refusal::Illegal`], by `(from, event)`.
 /// A mismatched receipt in `Trial` or in a `Stuck` with a retrial, and any
 /// receipt in a `Stuck` without one, are refused by value and are not listed.
+#[cfg(test)]
 pub(crate) const NAMED_REFUSALS: &[(PhaseKind, EventKind, Refusal)] = &[(
     PhaseKind::RollbackIntent,
     EventKind::ReceiptAccepted,
@@ -2766,6 +2767,7 @@ pub(crate) enum Restore {
 
 impl Action {
     /// **The effects this action performs**, for [`EFFECT_RIGHTS`].
+    #[cfg(test)]
     pub(crate) fn effects(&self) -> Vec<Effect> {
         match self {
             Action::Leave
@@ -2812,6 +2814,7 @@ impl Action {
     }
 }
 
+#[cfg(test)]
 fn entrance_removal(remove: bool) -> impl Iterator<Item = Effect> {
     remove.then_some(Effect::RemoveEntrance).into_iter()
 }
@@ -3404,16 +3407,9 @@ pub(crate) fn trial_sight(journal: Option<&[u8]>, txn: &TxnId) -> TrialSight {
 
 // ───────────────────────────── the ordinary start ─────────────────────────────
 
-/// What an ordinary start found at `H\journal.json`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum JournalRead {
-    Absent,
-    Unreadable(ParseRefusal),
-    Read(Header),
-}
-
 /// **A description of what an ordinary start sees**, built by the caller:
-/// the header, whether the transaction lock was free, the digest of its own
+/// the header it read (a start that reads none, or reads nothing of the
+/// journal, acts on [`Sight`] before it asks this rule), whether the transaction lock was free, the digest of its own
 /// image and of the rescue build the header names, the transaction its own
 /// `--update-trial` names, if it was started as a trial, and whether it
 /// carries `--update-failed`.
@@ -3422,7 +3418,7 @@ pub(crate) enum JournalRead {
 /// it then cannot tell a replaced install from its own, and replaces nothing.
 #[derive(Clone, Debug)]
 pub(crate) struct StartView {
-    pub(crate) journal: JournalRead,
+    pub(crate) header: Header,
     pub(crate) lock_free: bool,
     pub(crate) own_image: Option<Digest>,
     pub(crate) rescue_image: Option<Digest>,
@@ -3479,6 +3475,7 @@ pub(crate) enum Removal {
 
 impl Clearing {
     /// The effect of [`EFFECT_RIGHTS`] this step is.
+    #[cfg(test)]
     pub(crate) const fn effect(self) -> Effect {
         match self {
             Clearing::DetachMount => Effect::DetachMount,
@@ -3529,6 +3526,7 @@ impl StartAction {
 
     /// The effects this action performs, for [`EFFECT_RIGHTS`]: its
     /// [`steps`](Self::steps), each as its effect.
+    #[cfg(test)]
     pub(crate) fn effects(self) -> Vec<Effect> {
         let steps = self.steps();
         steps
@@ -3540,13 +3538,9 @@ impl StartAction {
     }
 }
 
-/// **The ordinary start's rule, from the header alone** ((b).2). A journal
-/// this build cannot read is left exactly as it is: nothing is deleted on the
-/// strength of bytes nobody understood.
+/// **The ordinary start's rule, from the header alone** ((b).2).
 pub(crate) fn at_start(view: &StartView) -> StartAction {
-    let JournalRead::Read(header) = &view.journal else {
-        return StartAction::Continue;
-    };
+    let header = &view.header;
     match header.class {
         Class::Terminal if view.lock_free => StartAction::Retire,
         Class::Terminal => StartAction::Continue,
@@ -4239,9 +4233,9 @@ mod tests {
         Located::Bundle { live, stage }
     }
 
-    fn start(journal: JournalRead, lock_free: bool) -> StartView {
+    fn start(header: Header, lock_free: bool) -> StartView {
         StartView {
-            journal,
+            header,
             lock_free,
             own_image: Some(digest(0x01)),
             rescue_image: Some(digest(0x01)),
@@ -4251,10 +4245,7 @@ mod tests {
     }
 
     fn start_on(phase: Phase) -> StartView {
-        start(
-            JournalRead::Read(journal(phase, members_layout()).header()),
-            true,
-        )
+        start(journal(phase, members_layout()).header(), true)
     }
 
     /// **The rescue build driving a Windows rollback to its end**, the way
@@ -5031,7 +5022,7 @@ mod tests {
                         let view = StartView {
                             rescue_image,
                             trial_of,
-                            ..start(JournalRead::Read(journal.header()), lock_free)
+                            ..start(journal.header(), lock_free)
                         };
                         for effect in at_start(&view).effects() {
                             assert!(
@@ -5196,7 +5187,7 @@ mod tests {
                     assert!(!forbidden.contains(&effect), "{action:?} in Stuck");
                 }
             }
-            let view = start(JournalRead::Read(journal.header()), true);
+            let view = start(journal.header(), true);
             assert_eq!(at_start(&view), StartAction::HandToRescue);
         }
         let stuck = journal(
@@ -5249,7 +5240,7 @@ mod tests {
                     disk.asker
                 );
             }
-            let view = start(JournalRead::Read(journal.header()), true);
+            let view = start(journal.header(), true);
             assert_eq!(at_start(&view), StartAction::HandToRescue);
         }
     }
@@ -6024,7 +6015,7 @@ mod tests {
             }
         );
         assert_eq!(at_start(&start_on(Phase::Abandoned)), StartAction::Retire);
-        let held = start(JournalRead::Read(journal.header()), false);
+        let held = start(journal.header(), false);
         assert_eq!(at_start(&held), StartAction::Continue);
     }
 
@@ -6410,7 +6401,7 @@ mod tests {
             decide(&holder(&journal, swapped)),
             Action::RollBack(Restore::SwapBack)
         );
-        let view = start(JournalRead::Read(journal.header()), true);
+        let view = start(journal.header(), true);
         assert_eq!(at_start(&view), StartAction::HandToRescue);
     }
 
@@ -6465,7 +6456,7 @@ mod tests {
             ..holder(&living, swapped)
         };
         assert_eq!(decide(&alive), Action::StopTrial(TRIAL));
-        let view = start(JournalRead::Read(journal.header()), true);
+        let view = start(journal.header(), true);
         assert_eq!(at_start(&view), StartAction::HandToRescue);
     }
 
@@ -6602,7 +6593,7 @@ mod tests {
     #[test]
     fn a_destructive_journal_hands_every_start_but_its_trial_to_the_rescue() {
         let header = journal(trial_phase(), members_layout()).header();
-        let mut view = start(JournalRead::Read(header), false);
+        let mut view = start(header, false);
         assert_eq!(at_start(&view), StartAction::HandToRescue);
         view.trial_of = Some(TxnId::new([0x01; 16]));
         assert_eq!(at_start(&view), StartAction::HandToRescue);
@@ -6610,17 +6601,12 @@ mod tests {
         assert_eq!(at_start(&view), StartAction::RunAsTrial);
     }
 
-    /// RED (U-10) — **a journal a start cannot read is left exactly as it is**,
-    /// and so is a terminal one whose lock another process holds.
+    /// RED (U-10) — **a terminal journal whose lock another process holds is
+    /// left alone.** (A journal a start cannot read whole never reaches this
+    /// rule: the start acts on its [`Sight`], held by
+    /// `update_startup::tests::on_disk::the_start_acts_on_the_header_of_what_it_cannot_read_whole`.)
     #[test]
-    fn an_unreadable_or_locked_journal_is_left_alone() {
-        for read in [
-            JournalRead::Absent,
-            JournalRead::Unreadable(ParseRefusal::Truncated),
-            JournalRead::Unreadable(ParseRefusal::UnknownVersion(2)),
-        ] {
-            assert_eq!(at_start(&start(read, true)), StartAction::Continue);
-        }
+    fn a_terminal_journal_whose_lock_is_held_is_left_alone() {
         let header = journal(
             Phase::Retired {
                 outcome: Outcome::Committed,
@@ -6629,10 +6615,7 @@ mod tests {
             members_layout(),
         )
         .header();
-        assert_eq!(
-            at_start(&start(JournalRead::Read(header), false)),
-            StartAction::Continue
-        );
+        assert_eq!(at_start(&start(header, false)), StartAction::Continue);
     }
 
     /// RED (U-10) — **a start whose own image is not the rescue copy of O,
