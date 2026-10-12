@@ -759,7 +759,9 @@ impl Machinery {
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             // Every handle has gone without saying so — a panic between the
-            // `Engine` being made and being dropped. Same ending.
+            // `Engine` being made and being dropped, which under the resident
+            // panic hook ends the process first: this arm runs only where no
+            // fatal hook is installed. Same ending.
             Err(mpsc::RecvTimeoutError::Disconnected) => return false,
         }
         self.take_frame(shared);
