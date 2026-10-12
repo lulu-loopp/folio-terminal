@@ -32,7 +32,8 @@
 //! # What a stamp is worth
 //!
 //! A stamp says a document *may* have changed. Whether it did is answered by
-//! re-reading it and comparing its bytes with the store's revision — the bytes
+//! re-reading it — on the storage worker, never here (`document_request`) — and
+//! comparing its bytes with the store's revision — the bytes
 //! Folio last read from it or wrote to it ([`persist::Revision`]) — because
 //! this window's own writes name the same documents and the comparison is what
 //! tells them from a hand edit. The document in memory is never the

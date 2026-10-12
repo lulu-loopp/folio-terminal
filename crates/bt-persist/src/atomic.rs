@@ -35,6 +35,43 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), WriteError> {
     commit_rename(&tmp_path, path)
 }
 
+/// **How a staged document is born**: as a new file under Folio's own
+/// configuration directory, or as the replacement of a file somebody may have
+/// given a mode of their own ([`stage_beside`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Staging {
+    /// The name holds no file yet: born the way [`atomic_write`] bears its
+    /// files.
+    New,
+    /// The file will take the place of one that exists: born unreadable to
+    /// anybody but this user until the exchange carries the replaced file's
+    /// metadata onto it.
+    Replacing,
+}
+
+/// **Step 1 of [`atomic_write`] alone**: `contents` written under a fresh
+/// staging name beside `path` and `fsync`ed, and the name answered.
+///
+/// For a writer that puts the staged file under its name some other way — the
+/// storage worker's conditional write, which exchanges it with the file it
+/// read, or makes it the first file under a name that holds none
+/// (`bt_platform::replace_keeping_displaced`,
+/// `bt_platform::rename_without_replacing_durably`). A failure removes the
+/// staged file; `path` is never touched here.
+///
+/// # Errors
+/// The staging name could not be made, or the file could not be written or
+/// flushed.
+pub fn stage_beside(path: &Path, contents: &[u8], staging: Staging) -> io::Result<PathBuf> {
+    let tmp_path = temp_sibling_path(path)?;
+    let birth = match staging {
+        Staging::New => TempBirth::Umask,
+        Staging::Replacing => TempBirth::OwnerOnly,
+    };
+    write_temp(&tmp_path, contents, birth)?;
+    Ok(tmp_path)
+}
+
 /// Write a new sibling document atomically, carrying the permissions and other
 /// metadata the source document can lend to a rename.
 ///

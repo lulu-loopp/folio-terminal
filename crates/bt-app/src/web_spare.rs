@@ -1696,14 +1696,17 @@ mod receipt_tests {
         std::fs::create_dir_all(&path).expect("a folder where the file would go");
         let mut store = SettingsStore::at(path.clone());
         note_a_web_page_committed(&mut store);
+        store.settle();
         assert_eq!(store.loaded().web_pages_used, WebPagesUsedV1::Used);
         assert!(!path.is_file(), "the first write did not land");
         std::fs::remove_dir_all(&path).expect("the folder goes");
         note_a_web_page_committed(&mut store);
+        store.settle();
         assert_eq!(on_disk(&path), WebPagesUsedV1::Used, "the retry landed");
         let written = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         std::thread::sleep(std::time::Duration::from_millis(20));
         note_a_web_page_committed(&mut store);
+        store.settle();
         assert_eq!(
             std::fs::metadata(&path).and_then(|m| m.modified()).ok(),
             written,
@@ -1835,11 +1838,14 @@ mod receipt_tests {
         let path = dir.join("settings.json");
         let mut store = SettingsStore::at(path.clone());
         reconcile_web_pages_used(&mut store, &no_evidence[1]);
+        store.settle();
         assert_eq!(store.loaded().web_pages_used, WebPagesUsedV1::Never);
         assert!(!path.exists(), "no evidence, no write");
         reconcile_web_pages_used(&mut store, &evidence[3]);
+        store.settle();
         assert_eq!(on_disk(&path), WebPagesUsedV1::Used);
         reconcile_web_pages_used(&mut store, &SessionV1::default());
+        store.settle();
         assert_eq!(on_disk(&path), WebPagesUsedV1::Used, "never written back");
         // A corrupt session and one from a newer build are read as the empty document.
         let corrupt = dir.join("corrupt.json");
