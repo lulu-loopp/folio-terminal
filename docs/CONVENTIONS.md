@@ -284,11 +284,12 @@ whose name holds `KEY`, `TOKEN`, `SECRET` or `PASS`); a give-up message may quot
 variable it depends on (`PATH`, `ComSpec`, `PSModulePath`, `WSLENV`, `HOME`), and a test that compares
 environments names the differing keys only, a secret-shaped key as `<redacted>`.
 
-### A test never reaches the network (D-60)
+### A test the suite runs never reaches the network (D-60)
 
-A test never reaches the network: what it needs from a socket it serves itself, on a loopback
-listener it opened (`macos_http`'s tests ask `ask_this_machine` of the listener `answering` starts,
-since `64bcebdb`), and a test that cannot is not written.
+A test the suite runs never reaches the network: what it needs from a socket it serves itself, on
+a loopback listener it opened (`macos_http`'s tests ask `ask_this_machine` of the listener
+`answering` starts, since `64bcebdb`). A probe that must reach the network is `#[ignore]`d, run by
+hand, and listed with its reason and expiry in `scripts/ci/ignored-tests.txt`.
 
 ### Where a test lives (K1)
 
