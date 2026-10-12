@@ -14981,19 +14981,20 @@ mod windows_impl {
     ///
     /// # What a failure looks like
     ///
-    /// A `Vec` and never a `Result`, because there is nothing a caller could do
-    /// with the error that this function has not already done: a machine whose
-    /// DirectWrite refuses still gets [`DEFAULT_MONOSPACE_FAMILY`] in the list,
-    /// which is the face the renderer is already drawing. The picker degrades to
-    /// one row rather than to an empty list or a dialog.
+    /// A family DirectWrite cannot describe is left out, and the walk still
+    /// answers with the rest: that shorter list is the machine's answer. A
+    /// factory or system collection DirectWrite refuses is the walk's `Err`, in
+    /// DirectWrite's words — the caller, `bt-app`'s font lane, ends its request
+    /// `Failed`, says it once, and keeps the list it already shows (S-4).
     ///
     /// A family whose faces are all in a *custom* loader — a font streamed by an
     /// application rather than installed as a file — is skipped, because
     /// `IDWriteLocalFontFileLoader` is the only loader that can name a path and
     /// a family with no path is a row that cannot be honoured if it is chosen.
-    #[must_use]
-    pub fn monospace_font_families() -> Vec<super::MonospaceFamily> {
-        super::order_monospace_families(collect_monospace_families().unwrap_or_default())
+    pub fn monospace_font_families() -> Result<Vec<super::MonospaceFamily>, String> {
+        collect_monospace_families()
+            .map(super::order_monospace_families)
+            .map_err(|error| error.to_string())
     }
 
     /// **One family, looked up by its name** — where its outlines live, and
@@ -15040,10 +15041,13 @@ mod windows_impl {
     /// **Asked of the machine on every call** (ticket 65). It was enumerated
     /// once per process, so a family installed after the first walk never
     /// reached the Chinese-font list until Folio restarted. Its one product
-    /// caller is the font lane, which runs when the dialog opens.
-    #[must_use]
-    pub fn cjk_font_families() -> Vec<super::CjkFamily> {
-        super::order_cjk_families(collect_cjk_families().unwrap_or_default())
+    /// caller is the font lane, which runs when the dialog opens. A failure is
+    /// [`monospace_font_families`]'s: a family left out shortens the list, a
+    /// collection refused is the `Err`.
+    pub fn cjk_font_families() -> Result<Vec<super::CjkFamily>, String> {
+        collect_cjk_families()
+            .map(super::order_cjk_families)
+            .map_err(|error| error.to_string())
     }
 
     /// **The system collection a walk of every family reads: asked to check
@@ -23642,7 +23646,7 @@ mod monospace_enumeration_tests {
         let looked_up = monospace_family_named(DEFAULT_MONOSPACE_FAMILY);
         let lookup_us = started.elapsed().as_micros();
         let started = std::time::Instant::now();
-        let walked = monospace_font_families();
+        let walked = monospace_font_families().expect("DirectWrite answers");
         let walk_us = started.elapsed().as_micros();
         println!(
             "BT_PERF_TRACE monospace_enumeration_us={walk_us} families={} \
@@ -23685,7 +23689,7 @@ mod monospace_enumeration_tests {
     /// any of those is a picker row that silently does nothing when chosen.
     #[test]
     fn the_machines_own_monospaced_families_are_named_and_locatable() {
-        let families = monospace_font_families();
+        let families = monospace_font_families().expect("DirectWrite answers");
         assert!(
             families
                 .iter()
@@ -23765,8 +23769,8 @@ mod monospace_enumeration_tests {
     fn every_cjk_walk_asks_the_machine_again() {
         use super::windows_impl::take_collection_update_checks;
         let _ = take_collection_update_checks();
-        let first = cjk_font_families();
-        let second = cjk_font_families();
+        let first = cjk_font_families().expect("DirectWrite answers");
+        let second = cjk_font_families().expect("DirectWrite answers");
         assert_eq!(
             take_collection_update_checks(),
             [true, true],
@@ -23778,7 +23782,7 @@ mod monospace_enumeration_tests {
     #[test]
     fn the_machines_cjk_families_are_named_and_locatable() {
         let started = std::time::Instant::now();
-        let families = cjk_font_families();
+        let families = cjk_font_families().expect("DirectWrite answers");
         eprintln!(
             "BT_PERF_TRACE cjk_enumeration_us={} families={}",
             started.elapsed().as_micros(),

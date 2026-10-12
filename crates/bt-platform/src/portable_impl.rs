@@ -1342,17 +1342,17 @@ pub fn recycle(path: &Path) -> Result<bool, String> {
 /// **The monospaced families this machine has**, on a platform with no font
 /// enumeration written (M2-4).
 ///
-/// A `Vec` and not a refusal, because the type has no empty answer and the
-/// caller is a picker that has to draw something: what comes back is
-/// [`crate::order_monospace_families`]'s guarantee and nothing else — one row,
-/// the family the renderer is already drawing. That is exactly what
+/// Always an answer and never a refusal, because nothing is asked of a machine
+/// here and the caller is a picker that has to draw something: what comes back
+/// is [`crate::order_monospace_families`]'s guarantee and nothing else — one
+/// row, the family the renderer is already drawing. That is exactly what
 /// `bt-app`'s settings page did behind its own `#[cfg(not(windows))]` until
-/// M2-4; the arm moved here so that the application names one function on every
-/// platform and asks no question about the machine it is on.
+/// M2-4; the arm moved here so that the application names one function, with
+/// one signature, on every platform and asks no question about the machine it
+/// is on.
 #[cfg(not(target_os = "macos"))]
-#[must_use]
-pub fn monospace_font_families() -> Vec<crate::MonospaceFamily> {
-    crate::order_monospace_families(Vec::new())
+pub fn monospace_font_families() -> Result<Vec<crate::MonospaceFamily>, String> {
+    Ok(crate::order_monospace_families(Vec::new()))
 }
 
 /// **One family by name**, on a platform with no font system written (ticket
@@ -1369,11 +1369,11 @@ pub fn monospace_family_named(
     None
 }
 
-/// No portable font-database enumeration is available on this target.
+/// No portable font-database enumeration is available on this target: the
+/// answer is no CJK family, never a refusal.
 #[cfg(not(target_os = "macos"))]
-#[must_use]
-pub fn cjk_font_families() -> Vec<crate::CjkFamily> {
-    Vec::new()
+pub fn cjk_font_families() -> Result<Vec<crate::CjkFamily>, String> {
+    Ok(Vec::new())
 }
 
 /// **Whether this volume treats two spellings of one name as one file.**

@@ -70,15 +70,15 @@ use crate::MonospaceFamily;
 /// **Every monospaced family installed on this machine, in the order the picker
 /// draws them.**
 ///
-/// A `Vec` and never a `Result`, for the Windows arm's reason: there is nothing
-/// a caller could do with the error that this has not already done. A machine
-/// whose CoreText answers nothing still gets [`crate::DEFAULT_MONOSPACE_FAMILY`]
-/// in the list — inserted by [`crate::order_monospace_families`] — which is the
-/// face the renderer is already drawing, so the picker degrades to one row
-/// rather than to an empty list or a dialog.
-#[must_use]
-pub fn monospace_font_families() -> Vec<MonospaceFamily> {
-    crate::order_monospace_families(collect_monospace_families())
+/// Always an answer and never a refusal: CoreText has no error form for this
+/// question — a font database that answers nothing answers no descriptors — so
+/// a machine whose CoreText answers nothing still gets
+/// [`crate::DEFAULT_MONOSPACE_FAMILY`] in the list, inserted by
+/// [`crate::order_monospace_families`], which is the face the renderer is
+/// already drawing. The `Result` is the Windows arm's signature, whose
+/// DirectWrite can refuse the collection.
+pub fn monospace_font_families() -> Result<Vec<MonospaceFamily>, String> {
+    Ok(crate::order_monospace_families(collect_monospace_families()))
 }
 
 /// **One family, looked up by its name** — the CoreText twin of the Windows
@@ -120,10 +120,10 @@ pub fn monospace_family_named(
 /// **Asked of CoreText on every call** (ticket 65), for the Windows arm's
 /// reason: it was read once per process, so a family installed after the
 /// first open of Settings never reached the list. `from_available_fonts` is
-/// the live font database; no flag asks it to look again.
-#[must_use]
-pub fn cjk_font_families() -> Vec<crate::CjkFamily> {
-    crate::order_cjk_families(collect_cjk_families())
+/// the live font database; no flag asks it to look again. Never a refusal, for
+/// [`monospace_font_families`]'s reason.
+pub fn cjk_font_families() -> Result<Vec<crate::CjkFamily>, String> {
+    Ok(crate::order_cjk_families(collect_cjk_families()))
 }
 
 fn collect_cjk_families() -> Vec<crate::CjkFamily> {
@@ -396,7 +396,7 @@ mod tests {
     /// MUTATION (observed red on the Mac): `face_file` answering `None` — every row is empty.
     #[test]
     fn the_machines_rows_name_their_files() {
-        let families = monospace_font_families();
+        let families = monospace_font_families().expect("CoreText answers");
         let named: Vec<_> = families
             .iter()
             .filter(|family| !family.files.is_empty())
@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn monospace_families_are_real_and_sorted() {
-        let families = monospace_font_families();
+        let families = monospace_font_families().expect("CoreText answers");
         // **The list itself, for a reader running `-- --nocapture`.** Everything
         // below is a property rather than a name, on purpose — but the one
         // question somebody porting this actually asks is *what did the machine

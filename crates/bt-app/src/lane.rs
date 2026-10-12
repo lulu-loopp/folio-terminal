@@ -646,6 +646,225 @@ pub(crate) fn task<T, E>(
     }
 }
 
+/// **What a request is owed on a lane whose requester is the application** (C6): the application
+/// asks, holds every request it made ([`Coalescing`]) for the life of the process, and does not
+/// go, so it is both the requester and the sink. A request reaches this sink only when the lane
+/// itself is dropped with the request untaken, at the process's end; its terminal is let go there
+/// — a success with nobody left to tell, a failure said already by the ledger as it was delivered.
+pub(crate) struct ToTheApplication<A, E>(std::marker::PhantomData<fn() -> (A, E)>);
+
+impl<A, E> ToTheApplication<A, E> {
+    pub(crate) const fn owed() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl<Id, A, E> Owed<Id> for ToTheApplication<A, E>
+where
+    A: Clone + Send + 'static,
+    E: Clone + fmt::Display + Send + 'static,
+{
+    type Answer = A;
+    type Error = E;
+
+    fn sink(self, _id: Id, _terminal: Terminal<Id, A, E>) {}
+}
+
+/// **The run a latest-value lane's worker does next**: the operation it ends (`Done` or `Failed`,
+/// and with it every request joined to it), the newest request that run answers — the operation
+/// or the last request joined to it — and what the run is asked to do.
+pub(crate) struct Waiting<Id, Op> {
+    pub(crate) operation: Id,
+    pub(crate) newest: Id,
+    pub(crate) op: Op,
+}
+
+/// **A latest-value lane on the seam** (the side-effects contract's C2 and C4, revision (b)4):
+/// coalescing kept as the policy — one run out, at most one waiting, and a newer answer serves
+/// every request standing — with every request its own terminal.
+///
+/// - A request asked while one is waiting and **the same operation** as it (`same`) joins it
+///   ([`Ledger::admit_joined`]): it ends `Joined { with }` carrying the waiting request's own
+///   terminal, and one run answers both.
+/// - A request asked while one is waiting and **a different operation** displaces it: the
+///   waiting one ends `Superseded { by }` the new one (its joins carrying that), and the new one
+///   waits in its place.
+/// - A request asked while a run is out and none is waiting waits for the next run, because the
+///   run out may have read the world before the change the request is about.
+///
+/// `fold` makes the waiting operation from the one it joins or replaces and the newer: what the
+/// newer asks, plus whatever of the older's the lane keeps (the program walk's rows asked first
+/// and its urgency).
+///
+/// The application holds every request it made here and takes their terminals in the order the
+/// ledger minted them ([`Self::ended`]) — below the earliest request still owed, so a request a
+/// supersession ended early is taken after the run that was out before it.
+pub(crate) struct Coalescing<Id, O, Op>
+where
+    Id: Copy + Ord + fmt::Debug + From<u64> + Send + 'static,
+    O: Owed<Id>,
+{
+    ledger: Arc<Ledger<Id, O>>,
+    book: Mutex<Standing<Id, O, Op>>,
+    asked: std::sync::Condvar,
+}
+
+struct Standing<Id, O, Op>
+where
+    Id: Copy + Ord + fmt::Debug + From<u64> + Send + 'static,
+    O: Owed<Id>,
+{
+    waiting: Option<Waiting<Id, Op>>,
+    /// Every request the application made and has not taken the terminal of, by identity.
+    held: BTreeMap<Id, Request<Id, O>>,
+    /// Whether the lane's worker has been started — by the first request.
+    started: bool,
+}
+
+/// What [`Coalescing::ask`] admitted: the request's identity, and whether this request is the one
+/// that has to start the lane's worker.
+pub(crate) struct Asked<Id> {
+    pub(crate) id: Id,
+    pub(crate) start: bool,
+}
+
+impl<Id, O, Op> Coalescing<Id, O, Op>
+where
+    Id: Copy + Ord + fmt::Debug + From<u64> + Send + 'static,
+    O: Owed<Id>,
+{
+    pub(crate) fn new(ledger: Arc<Ledger<Id, O>>) -> Self {
+        Self {
+            ledger,
+            book: Mutex::new(Standing {
+                waiting: None,
+                held: BTreeMap::new(),
+                started: false,
+            }),
+            asked: std::sync::Condvar::new(),
+        }
+    }
+
+    /// The lane's ledger: what its worker publishes through and the executor reports the
+    /// worker's end to.
+    pub(crate) fn ledger(&self) -> &Arc<Ledger<Id, O>> {
+        &self.ledger
+    }
+
+    /// **Admit one request (C1): mint its identity, join it to the waiting run or displace that
+    /// run, and hold it for the application** — or refuse it at once, minting nothing, with the
+    /// ledger's refusal (revision (b)3). Never waits for the worker.
+    pub(crate) fn ask(
+        &self,
+        op: Op,
+        owed: O,
+        same: impl Fn(&Op, &Op) -> bool,
+        fold: impl FnOnce(Op, Op) -> Op,
+    ) -> Result<Asked<Id>, Refused> {
+        let mut book = lock(&self.book);
+        let (request, waiting) = match book.waiting.take() {
+            Some(waiting) if same(&waiting.op, &op) => {
+                match self.ledger.admit_joined(waiting.operation, owed) {
+                    Ok(request) => {
+                        let waiting = Waiting {
+                            newest: request.id(),
+                            op: fold(waiting.op, op),
+                            ..waiting
+                        };
+                        (request, waiting)
+                    }
+                    Err(refused) => {
+                        book.waiting = Some(waiting);
+                        return Err(refused);
+                    }
+                }
+            }
+            Some(waiting) => match self.ledger.admit(owed) {
+                Ok(request) => {
+                    let by = request.id();
+                    self.ledger
+                        .publish(waiting.operation, Terminal::Superseded { by });
+                    let waiting = Waiting {
+                        operation: by,
+                        newest: by,
+                        op: fold(waiting.op, op),
+                    };
+                    (request, waiting)
+                }
+                Err(refused) => {
+                    book.waiting = Some(waiting);
+                    return Err(refused);
+                }
+            },
+            None => {
+                let request = self.ledger.admit(owed)?;
+                let id = request.id();
+                let waiting = Waiting {
+                    operation: id,
+                    newest: id,
+                    op,
+                };
+                (request, waiting)
+            }
+        };
+        let id = request.id();
+        book.waiting = Some(waiting);
+        book.held.insert(id, request);
+        let start = !std::mem::replace(&mut book.started, true);
+        drop(book);
+        self.asked.notify_one();
+        Ok(Asked { id, start })
+    }
+
+    /// **The worker's: the next run**, waiting on the lane's condition variable until a request
+    /// stands. The run is taken out, so a request asked from here on waits for the run after it.
+    /// Called only on the lane's worker (`ctx`, the capability the thread door lent its body).
+    pub(crate) fn next(&self, ctx: &WorkerCtx) -> Waiting<Id, Op> {
+        let _ = ctx;
+        let mut book = lock(&self.book);
+        loop {
+            if let Some(waiting) = book.waiting.take() {
+                return waiting;
+            }
+            book = self
+                .asked
+                .wait(book)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// **The application takes every terminal it is owed below the earliest request still owed**
+    /// ([`Ledger::earliest_owed`], read once, before the requests are looked at), in the order the
+    /// ledger minted them, each once. A request at or past the mark waits for the next take even
+    /// when it has ended since. One lock; never waits for the worker.
+    pub(crate) fn ended(&self) -> Vec<(Id, TerminalOf<Id, O>)> {
+        let owed = self.ledger.earliest_owed();
+        let mut book = lock(&self.book);
+        let ended: Vec<(Id, TerminalOf<Id, O>)> = book
+            .held
+            .iter_mut()
+            .take_while(|(id, _)| owed.is_none_or(|owed| **id < owed))
+            .filter_map(|(id, request)| Some((*id, request.take()?)))
+            .collect();
+        for (id, _) in &ended {
+            book.held.remove(id);
+        }
+        ended
+    }
+}
+
+/// The answer a terminal carries, its own or — for a request that joined another — its twin's.
+pub(crate) fn answer_of<Id, T, E>(terminal: Terminal<Id, T, E>) -> Option<T> {
+    match terminal {
+        Terminal::Done(answer) => Some(answer),
+        Terminal::Joined { outcome, .. } => answer_of(*outcome),
+        Terminal::Failed(_)
+        | Terminal::Cancelled
+        | Terminal::Superseded { .. }
+        | Terminal::WorkerGone => None,
+    }
+}
+
 /// Where a task begins, outside its panic catch: the suite's gate holds it here, or ends the
 /// worker here, on a worker the suite's executor started.
 fn arrive() {
@@ -806,9 +1025,12 @@ pub(crate) const HANDOFF: Contract = Contract {
     saying: Saying::PerRequest,
 };
 
-/// `settings::FontLane`: numbered requests (`ScanState::requested`); one walk out and one `again`
-/// round; the answer offered in a one-answer mailbox and adopted only if not older than the adopted
-/// generation; the target is the application-wide slot.
+/// `settings::FontLane`, on the seam (S-4): one `font-families` worker; ids minted by the lane's
+/// `Ledger`; one walk out and one waiting, every request asked while one waits joined to it (the
+/// same question: the machine's families now); the application holds every request and takes
+/// their terminals in mint order (`adopt_scanned_families`), adopting a walk's lists only when
+/// not older than the list on screen; the ledger owes 16 at once — a terminal not yet taken
+/// holding its place — and refuses the rest at the door; a failed walk is said once per streak.
 #[cfg(test)]
 pub(crate) const FONT: Contract = Contract {
     lane: Some(LaneName::Font),
@@ -818,10 +1040,12 @@ pub(crate) const FONT: Contract = Contract {
     bounds: Bounds {
         waiting: Bound::At(1),
         executing: 1,
-        answers_held: Bound::At(1),
+        // `settings::FONT_BOUND`, written out rather than read, so that a change to either the
+        // declaration or the lane is a disagreement the suite reports.
+        answers_held: Bound::At(16),
     },
     cancellation: Cancellation::Never,
-    saying: Saying::PerRequest,
+    saying: Saying::PerStreak,
 };
 
 /// `taskbar_lane`: numbered requests (`Asks::requested`); one worker that serves the newest
@@ -1123,20 +1347,6 @@ pub(crate) struct ExpectedFailure {
 #[cfg(test)]
 pub(crate) const EXPECTED_FAILURES: &[ExpectedFailure] = &[
     ExpectedFailure {
-        lane: LaneName::Font,
-        claim: Claim::EveryRequestEndsExactlyOnce,
-        failure: FailureKind::NoTerminal,
-        repair: "D-72",
-        why: "a request coalesced into the again round, or superseded, gets no outcome of its own",
-    },
-    ExpectedFailure {
-        lane: LaneName::Font,
-        claim: Claim::ADeadWorkerIsObservable,
-        failure: FailureKind::DeathUnobservable,
-        repair: "D-72",
-        why: "a walk that dies leaves ScanState running for ever: no fault, and no later walk",
-    },
-    ExpectedFailure {
         lane: LaneName::Taskbar,
         claim: Claim::EveryRequestEndsExactlyOnce,
         failure: FailureKind::NoTerminal,
@@ -1189,28 +1399,6 @@ pub(crate) const EXPECTED_FAILURES: &[ExpectedFailure] = &[
     },
     // S-3 (2026-10-11): the four claims of the side-effects contract, run on lanes not yet built
     // on the seam. Each lane's repair ticket (S-4) moves it onto the seam and removes its rows.
-    ExpectedFailure {
-        lane: LaneName::Font,
-        claim: Claim::ASupersededRequestSaysSo,
-        failure: FailureKind::SupersededInSilence,
-        repair: "D-72",
-        why: "the requests folded into the again round get no outcome of their own",
-    },
-    ExpectedFailure {
-        lane: LaneName::Font,
-        claim: Claim::AJoinedRequestCarriesItsTwin,
-        failure: FailureKind::JoinedInSilence,
-        repair: "D-72",
-        why: "a second ask for the walk is folded into the round that answers the newest, and \
-              gets no outcome of its own",
-    },
-    ExpectedFailure {
-        lane: LaneName::Font,
-        claim: Claim::AFailureIsSaidOnce,
-        failure: FailureKind::NoFailedTerminal,
-        repair: "D-72",
-        why: "a walk has no failure form, and a panic in one ends the walk with no answer",
-    },
     ExpectedFailure {
         lane: LaneName::Taskbar,
         claim: Claim::ASupersededRequestSaysSo,
@@ -1533,11 +1721,11 @@ impl Gate {
     }
 
     /// The next request to pass (or the one held now) ends the worker.
-    fn kill(&self) {
+    pub(crate) fn kill(&self) {
         lock(&self.state).kill = true;
     }
 
-    fn entered(&self) -> usize {
+    pub(crate) fn entered(&self) -> usize {
         lock(&self.state).entered
     }
 
@@ -1925,12 +2113,15 @@ fn order_is_as_declared(run: &mut Run<'_>) -> Result<(), Failure> {
                     actual: delivered,
                 });
             }
+            // The gate records the question each run executes, as it does on every lane: the
+            // last run executes the newest question asked.
+            let newest_question = admissions.last().map_or(0, |admission| admission.question);
             let executed = run.lane.gate().executed();
             let newest_last = executed.windows(2).all(|pair| pair[0] < pair[1])
-                && executed.last().is_none_or(|last| *last == newest);
+                && executed.last().is_none_or(|last| *last == newest_question);
             if contract.execution != Order::NewestRequested || !newest_last {
                 return Err(Failure::OrderBroken {
-                    expected: vec![newest],
+                    expected: vec![newest_question],
                     actual: executed,
                 });
             }
