@@ -1607,6 +1607,10 @@ fn every_reader_of_a_committed_document_is_on_a_list() {
 /// The plant is a crate of its own under the machine's temporary directory,
 /// with the real repository's committed paths as the subject set; written
 /// whole, it would be two readers in this file.
+///
+/// MUTATION: drop `"include_str"` from [`INCLUDE_MACROS`] and `tests::LIST` is
+/// not found; search for `read_to_string_` instead of `read_to_string` and
+/// `tests::reads_the_ledger` is not.
 #[test]
 fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
     let plot = temporary_directory("planted-documents");
