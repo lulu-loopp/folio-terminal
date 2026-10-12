@@ -8,10 +8,34 @@
 //! 99 ms and 92 ms inside one 535 ms hold while Explorer was busy. The answer changes when somebody
 //! changes one setting, so there is no reason for the window thread to wait for it.
 //!
+//! **Built on the completion seam** (`crate::lane`; the side-effects contract's C1–C7, S-4): the
+//! one `taskbar-state` worker is started by a [`crate::lane::Executor`] (the thread door's in the
+//! product, the suite's scripted one under test) when the first request is made, every request's
+//! identity is minted by the lane's [`crate::lane::Ledger`], each ask of the shell runs inside
+//! [`crate::lane::task`], and every request ends through the ledger's hooks:
+//!
+//! * **Coalescing**, kept: one ask out, at most one waiting. Every request is the same question —
+//!   does the bar hide itself now — so one made while another waits **joins** it
+//!   (`Joined { with }`, carrying its answer; revision (b)4), and one ask answers both; nothing is
+//!   `Superseded`. A request made while an ask is out waits for the next ask, because the setting
+//!   may have moved after the shell answered the one out.
+//! * **Completion**: the shell's answer is the request's `Done`. The question has no error form —
+//!   a shell that does not answer reads as a visible bar (`bt_platform::taskbar_is_auto_hidden`)
+//!   — so `Failed` is a panic in the ask, said once per streak by the ledger, and the worker goes
+//!   on; the worker's end ends every request still owed `WorkerGone`, faults the lane (every later
+//!   request refused at the door) and wakes the loop.
+//! * **Bound**: the ledger owes at most [`BOUND`] requests at once — the ask out, the one waiting
+//!   with every request joined to it, and every answer the window thread has not taken; a request
+//!   past it is refused at the door, and the ask already standing answers what it would have
+//!   asked.
+//! * **Wake**: after every terminal the worker publishes, and after the worker's end
+//!   (`AppEvent::TaskbarAnswered`).
+//!
 //! **One owner, one writer.** The answer lives in a [`bt_platform::TaskbarState`], numbered by the
-//! request it answers; the lane's worker is the only writer, and the slot takes an answer only if
-//! it is newer than the one held. The window thread reads the latest answer with one atomic load
-//! ([`observe`]) and never waits.
+//! request it answers, and its one writer is the window thread's reading ([`TaskbarLane::reading`]),
+//! which takes every terminal the lane has ended, in the order the requests were made, and offers
+//! each answer to the slot — which takes it only if it is newer than the one held. The reading
+//! never waits for the worker: one lock of the requests, then one atomic load.
 //!
 //! **When it is asked**:
 //! * **at launch** — [`request`] beside the other probes' wakes in `FolioApp`'s start;
@@ -31,73 +55,133 @@
 //! says the bar hides (`TaskbarFlash`, in `main.rs`); the other direction would put a message on
 //! the desktop, which cannot be unsent.
 
-use std::sync::{Condvar, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::convert::Infallible;
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
+use bt_platform::admission::WorkerCtx;
 use bt_platform::{TaskbarReading, TaskbarState};
+
+use crate::lane::{self, Coalescing, Executor, Ledger, Refused, Saying, Terminal, Waiting};
 
 /// **How old a request may get while a window is on a screen** before the next reading of where
 /// the window is asks again. "Every few seconds" (ticket 62): the setting it watches is changed by
 /// hand, and the `WM_SETTINGCHANGE` road usually brings the change sooner than this.
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
-/// The lane: the slot, the numbered requests, and the one worker that serves them.
-///
-/// A type rather than three statics so a test can run a lane of its own beside the product's —
-/// with the real shell probe, or with one it holds back — without the two sharing a number.
-pub struct TaskbarLane {
-    slot: TaskbarState,
-    asks: Mutex<Asks>,
-    asked: Condvar,
-    /// The question. The product's is [`ask_the_shell`].
-    ask: Box<dyn Fn() -> bool + Send + Sync>,
-    /// How the worker brings the event loop round: after a first answer, and after an answer that
-    /// differs from the one held. The same shape as `settings::install_font_scan_wake`.
-    wake: OnceLock<Box<dyn Fn() + Send + Sync>>,
+/// **How many requests the lane's ledger owes at once**: the ask out, the one waiting and every
+/// request joined to it, and every answer the window thread has not taken yet. The requests come
+/// at most one per [`REFRESH_INTERVAL`] and one per system-setting broadcast, and every reading of
+/// where a window is takes the answers; the bound makes a shell that never answers an
+/// accounted-for set of requests, not an unbounded one.
+pub(crate) const BOUND: usize = 16;
+
+/// The lane's name in the lines its ledger says.
+const LANE_NAME: &str = "the taskbar lane";
+
+/// **One request about the taskbar**, its identity minted by the lane's ledger and rising with
+/// every request — the number the slot's readings carry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct TaskbarId(u64);
+
+impl From<u64> for TaskbarId {
+    fn from(minted: u64) -> Self {
+        Self(minted)
+    }
 }
 
-/// The requests, and whether a worker is out to serve them.
-#[derive(Debug, Default)]
-struct Asks {
-    /// The number of the newest request. Requests are counted from `1`, so `0` is "none yet" —
-    /// the same number [`bt_platform::TaskbarReading::generation`] holds before the first answer.
-    requested: u64,
-    /// The number of the newest request the worker has answered.
-    served: u64,
-    /// A worker thread is running. It is started by the first request and then waits on
-    /// [`TaskbarLane::asked`] for the next one; it is started again only if starting it failed.
-    worker: bool,
+/// What a request about the taskbar is owed: the application asked it and holds it.
+type TaskbarOwed = lane::ToTheApplication<bool, Infallible>;
+
+/// How one request about the taskbar ended.
+pub(crate) type TaskbarTerminal = Terminal<TaskbarId, bool, Infallible>;
+
+/// The question, for the newest request an ask answers. The product's is [`ask_the_shell`].
+type Question = dyn Fn(u64) -> bool + Send + Sync;
+
+/// The lane: the slot, the clock of the last request, the question, the worker's executor, the
+/// wake, and the requests.
+///
+/// A type rather than statics so a test can run a lane of its own beside the product's — with the
+/// real shell probe, or with one it holds back — without the two sharing a number.
+pub struct TaskbarLane {
+    slot: TaskbarState,
     /// When the newest request was made — the clock [`TaskbarLane::refresh_if_due`] reads.
-    last_request: Option<Instant>,
+    last_request: Mutex<Option<Instant>>,
+    /// The question. The product's is [`ask_the_shell`].
+    ask: Box<Question>,
+    executor: Executor,
+    /// How the lane brings the event loop round — after every terminal it publishes, and after its
+    /// worker's end — once [`Self::install_wake`] has taught it; shared with the ledger.
+    wake: Arc<OnceLock<Box<dyn Fn() + Send + Sync>>>,
+    requests: Coalescing<TaskbarId, TaskbarOwed, ()>,
 }
 
 impl TaskbarLane {
-    /// A lane that asks `ask`, with nothing asked yet and no worker running.
+    /// A lane that asks `ask`, with nothing asked yet and no worker running: its worker is started
+    /// through the thread door by the first request, and its ledger says its lines in
+    /// `diagnostics.log`.
     pub fn new(ask: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        Self::start_with(
+            Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
+            move |_| ask(),
+            crate::diagnostics::note,
+        )
+    }
+
+    /// A lane whose worker `executor` starts, asking `ask` for the newest request each ask answers
+    /// and saying its ledger's lines through `say`.
+    fn start_with(
+        executor: Executor,
+        ask: impl Fn(u64) -> bool + Send + Sync + 'static,
+        say: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Self {
+        let wake: Arc<OnceLock<Box<dyn Fn() + Send + Sync>>> = Arc::new(OnceLock::new());
+        let installed = Arc::clone(&wake);
+        let ledger = Ledger::new(LANE_NAME, Some(BOUND), Saying::PerStreak, say, move || {
+            if let Some(wake) = installed.get() {
+                wake();
+            }
+        });
         Self {
             slot: TaskbarState::new(),
-            asks: Mutex::new(Asks::default()),
-            asked: Condvar::new(),
+            last_request: Mutex::new(None),
             ask: Box::new(ask),
-            wake: OnceLock::new(),
+            executor,
+            wake,
+            requests: Coalescing::new(ledger),
         }
     }
 
-    /// Teach the worker how to bring the event loop round. Once; a second call is ignored.
+    /// Teach the lane how to bring the event loop round. Once; a second call is ignored.
     pub fn install_wake(&self, wake: impl Fn() + Send + Sync + 'static) {
         let _ = self.wake.set(Box::new(wake));
     }
 
-    /// The latest answer. One atomic load; never waits for the worker.
+    /// **The latest answer** — the window thread's acceptance: every terminal the lane has ended
+    /// is taken, in the order the requests were made, and each answer offered to the slot, which
+    /// keeps the newest; then one atomic load. Never waits for the worker.
     pub fn reading(&self) -> TaskbarReading {
+        for (id, terminal) in self.requests.ended() {
+            self.take(id, terminal);
+        }
         self.slot.latest()
+    }
+
+    /// **One terminal, taken**: its answer — its own, or the ask's it joined — offered to the
+    /// slot. A request that failed, or was owed when the worker ended, leaves the reading as it
+    /// was (the ledger has said it).
+    fn take(&self, id: TaskbarId, terminal: TaskbarTerminal) {
+        if let Some(auto_hidden) = lane::answer_of(terminal) {
+            self.slot.offer(id.0, auto_hidden);
+        }
     }
 
     /// **The whole of what a window's reading of where it is does about the taskbar**: ask for a
     /// fresh answer when the clock says and the window is on a screen, and read the latest one.
     ///
-    /// Never asks the shell. A request is a lock and a condition-variable signal — or, the first
-    /// time, starting the worker — and the answer comes back on a later reading.
+    /// Never asks the shell. A request is a lock, a ledger entry and a condition-variable signal —
+    /// or, the first time, starting the worker — and the answer comes back on a later reading.
     pub fn observe(&'static self, now: Instant, on_screen: bool) -> TaskbarReading {
         if on_screen {
             self.refresh_if_due(now);
@@ -107,84 +191,85 @@ impl TaskbarLane {
 
     /// Ask again if no request has been made for [`REFRESH_INTERVAL`].
     pub fn refresh_if_due(&'static self, now: Instant) {
-        let asks = self.lock();
-        let due = asks
-            .last_request
+        let due = self
+            .last_request()
             .is_none_or(|last| now.saturating_duration_since(last) >= REFRESH_INTERVAL);
         if due {
-            self.ask_locked(asks, now);
+            self.request(now);
         }
     }
 
-    /// **Number a request and see that the worker serves it.**
+    /// **Make a request and see that the worker serves it.** A request the lane refuses at its
+    /// door — its ledger already owes [`BOUND`], or its worker has ended — has that refusal as its
+    /// outcome and is waited on by nobody: the ask already standing answers what it would have
+    /// asked, and the worker's end was said once, by the ledger.
     pub fn request(&'static self, now: Instant) {
-        let asks = self.lock();
-        self.ask_locked(asks, now);
+        let _ = self.ask(now);
     }
 
-    fn ask_locked(&'static self, mut asks: MutexGuard<'_, Asks>, now: Instant) {
-        asks.requested += 1;
-        asks.last_request = Some(now);
-        if asks.worker {
-            self.asked.notify_one();
-            return;
+    /// **The lane's one admission**: the request's identity minted by the ledger — joined to the
+    /// waiting ask, or waiting for the next — or the ledger's refusal, at once. The first request
+    /// starts the worker; a thread the door refuses is the worker's end, which the executor
+    /// reports to the ledger.
+    fn ask(&'static self, now: Instant) -> Result<TaskbarId, Refused> {
+        *self
+            .last_request
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(now);
+        let asked = self
+            .requests
+            .ask((), TaskbarOwed::owed(), |(), ()| true, |(), ()| ())?;
+        if asked.start {
+            let _ = self.executor.start_worker(
+                "taskbar-state",
+                Arc::clone(self.requests.ledger()),
+                move |ctx| run_taskbar_lane(ctx, self),
+            );
         }
-        asks.worker = true;
-        drop(asks);
-        let started = bt_platform::spawn_at_priority(
-            "taskbar-state",
-            bt_platform::ThreadPriority::BelowNormal,
-            move |_ctx| self.serve(),
-        );
-        if started.is_err() {
-            // A machine that will not give this process a thread keeps the answer it has, and the
-            // next request tries again. Nothing on the window thread waits for an answer.
-            self.lock().worker = false;
-        }
+        Ok(asked.id)
     }
 
-    /// **The worker's whole body**: wait for a request newer than the last one served, ask, hold
-    /// the answer out, and wake the loop when the answer is news.
-    fn serve(&self) {
-        loop {
-            // The number is read before the question is put, so a request made while the shell is
-            // being asked has a larger one and is served by the next round.
-            let generation = {
-                let mut asks = self.lock();
-                while asks.served == asks.requested {
-                    asks = self
-                        .asked
-                        .wait(asks)
-                        .unwrap_or_else(PoisonError::into_inner);
-                }
-                asks.requested
-            };
-            let start = Instant::now();
-            let auto_hidden = (self.ask)();
-            if std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty()) {
-                crate::trace_sink::stderr_line(format!(
-                    "BT_PERF_TRACE taskbar_state_us={} auto_hidden={} generation={generation}",
-                    start.elapsed().as_micros(),
-                    u8::from(auto_hidden)
-                ));
-            }
-            let before = self.slot.latest();
-            let taken = self.slot.offer(generation, auto_hidden);
-            self.lock().served = generation;
-            // After the answer is in the slot and never before: a wake that raced the offer would
-            // send the loop to read the old answer.
-            let news = !before.answered() || before.auto_hidden != auto_hidden;
-            if taken
-                && news
-                && let Some(wake) = self.wake.get()
-            {
-                wake();
-            }
-        }
+    fn last_request(&self) -> Option<Instant> {
+        *self
+            .last_request
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn lock(&self) -> MutexGuard<'_, Asks> {
-        self.asks.lock().unwrap_or_else(PoisonError::into_inner)
+    fn wake(&self) {
+        if let Some(wake) = self.wake.get() {
+            wake();
+        }
+    }
+}
+
+/// **The lane's worker body**: the next ask standing, put to the shell inside its task for the
+/// newest request it answers, its terminal published, then the wake — and round again, for the
+/// life of the lane.
+fn run_taskbar_lane(ctx: &WorkerCtx, lane: &TaskbarLane) {
+    loop {
+        let Waiting {
+            operation, newest, ..
+        } = lane.requests.next(ctx);
+        let start = Instant::now();
+        let terminal = match lane::task(ctx, |_| Ok::<_, Infallible>((lane.ask)(newest.0))) {
+            Ok(auto_hidden) => Terminal::Done(auto_hidden),
+            Err(failure) => Terminal::Failed(failure),
+        };
+        if std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty())
+            && let Terminal::Done(auto_hidden) = terminal
+        {
+            crate::trace_sink::stderr_line(format!(
+                "BT_PERF_TRACE taskbar_state_us={} auto_hidden={} generation={}",
+                start.elapsed().as_micros(),
+                u8::from(auto_hidden),
+                newest.0
+            ));
+        }
+        lane.requests.ledger().publish(operation, terminal);
+        // After the terminal is published and never before: a wake that raced the publication
+        // would send the loop to read the old answer.
+        lane.wake();
     }
 }
 
@@ -239,12 +324,15 @@ pub fn shell_asks() -> u64 {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{REFRESH_INTERVAL, TaskbarLane};
+    use super::{REFRESH_INTERVAL, TaskbarId, TaskbarLane, TaskbarTerminal};
+    use crate::lane::{Executor, Gate, Terminal, wait_for_a_wake, wake_channel};
+    use bt_platform::TaskbarReading;
     use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     /// A lane of the test's own, leaked for the `'static` its worker needs, with a wake that
-    /// reports every answer the worker calls news. `pub(crate)` for the flat module's pins.
+    /// reports every answer the worker publishes. `pub(crate)` for the flat module's pins.
     pub(crate) fn lane(
         ask: impl Fn() -> bool + Send + Sync + 'static,
     ) -> (&'static TaskbarLane, mpsc::Receiver<()>) {
@@ -311,47 +399,245 @@ pub(crate) mod tests {
             "an older answer never overwrites a newer one"
         );
     }
+
+    /// What a lane of a test's own has said, line by line, through its ledger's `say`.
+    type Said = Arc<Mutex<Vec<String>>>;
+
+    /// **A lane of the test's own on the suite's executor** over `gate`, asking `ask`, its wake
+    /// heard on a channel and its ledger's lines kept. Leaked, for the `'static` its worker needs.
+    fn scripted_lane(
+        gate: &Arc<Gate>,
+        ask: impl Fn(u64) -> bool + Send + Sync + 'static,
+    ) -> (&'static TaskbarLane, mpsc::Receiver<()>, Said) {
+        let said: Said = Arc::default();
+        let kept = Arc::clone(&said);
+        let lane: &'static TaskbarLane = Box::leak(Box::new(TaskbarLane::start_with(
+            Executor::scripted(Arc::clone(gate)),
+            ask,
+            move |line: &str| kept.lock().unwrap().push(line.to_owned()),
+        )));
+        let (wake, wakes) = wake_channel();
+        lane.install_wake(wake);
+        (lane, wakes, said)
+    }
+
+    /// Every terminal the lane ends, taken through the reading's own take, until `last` has
+    /// ended — each wake waited for within the lane suite's patience.
+    fn terminals_through(
+        lane: &TaskbarLane,
+        wakes: &mpsc::Receiver<()>,
+        last: TaskbarId,
+    ) -> Vec<(TaskbarId, TaskbarTerminal)> {
+        let mut ended = Vec::new();
+        loop {
+            ended.extend(lane.requests.ended());
+            if ended.iter().any(|(id, _)| *id == last) {
+                return ended;
+            }
+            wait_for_a_wake(wakes, &format!("taskbar request {last:?}'s terminal"));
+        }
+    }
+
+    /// RED (S-4; D-73) — **The requests made while an ask is out end `Joined` to the one the next
+    /// ask serves, which ends `Done`** (revision (b)4: every request is the same question — does
+    /// the bar hide itself now — so the requests standing for the next ask are one operation, and
+    /// nothing is `Superseded`).
+    ///
+    /// An ask is held out; three requests are made behind it. The ask out ends `Done`; the first
+    /// request behind it is the next ask's operation and ends `Done` with that ask's answer — put
+    /// for the newest request standing when it started; the two after it end
+    /// `Joined { with: that request }`, carrying exactly its answer.
+    ///
+    /// MUTATION: the old silence — `Coalescing::ask` answering a request made while one waits
+    /// with the waiting request's identity and minting none — the third and fourth requests have
+    /// no identity, and no terminal, of their own.
+    #[test]
+    fn requests_made_during_a_walk_end_superseded_or_joined_and_the_served_one_done() {
+        let gate = Arc::new(Gate::default());
+        // The answer says which request the ask was put for: auto-hidden for an even one.
+        let (lane, wakes, _) = scripted_lane(&gate, |generation| generation.is_multiple_of(2));
+        let start = Instant::now();
+        gate.hold();
+        let out = lane.ask(start).expect("admitted");
+        assert!(gate.wait_entered(1), "the ask is out");
+        let asked: Vec<TaskbarId> = (1..=3)
+            .map(|turn| {
+                lane.ask(start + REFRESH_INTERVAL * turn)
+                    .expect("admitted behind the ask out")
+            })
+            .collect();
+        gate.release();
+        let ended = terminals_through(lane, &wakes, asked[2]);
+        assert_eq!(
+            ended[..2],
+            [
+                (out, Terminal::Done(out.0.is_multiple_of(2))),
+                (asked[0], Terminal::Done(asked[2].0.is_multiple_of(2))),
+            ],
+            "the ask out is answered, and the next ask is put for the newest request standing"
+        );
+        assert_eq!(
+            ended[2..],
+            [
+                (
+                    asked[1],
+                    Terminal::Joined {
+                        with: asked[0],
+                        outcome: Box::new(Terminal::Done(asked[2].0.is_multiple_of(2))),
+                    }
+                ),
+                (
+                    asked[2],
+                    Terminal::Joined {
+                        with: asked[0],
+                        outcome: Box::new(Terminal::Done(asked[2].0.is_multiple_of(2))),
+                    }
+                ),
+            ],
+            "a request made while one waited joined it and carries its answer"
+        );
+        assert_eq!(gate.entered(), 2, "two asks of the shell for four requests");
+    }
+
+    /// RED (S-4; D-73) — **A worker that dies ends every request it owes `WorkerGone`, wakes the
+    /// loop, says so once, and the next request is refused at the door.**
+    ///
+    /// Until S-4 a worker that died left `Asks::worker` set: every later request was counted and
+    /// never served, with no fault and no outcome. The suite's gate ends the worker while it holds
+    /// one ask out and two requests stand behind it.
+    ///
+    /// MUTATION: leave `Asks::worker` set — `Ledger::worker_ended` returning at once (the death
+    /// leaves the lane as it was) — no wake comes, and the wait for it runs out of patience.
+    #[test]
+    fn a_dead_walk_ends_every_owed_request_worker_gone_and_the_next_request_is_refused() {
+        let gate = Arc::new(Gate::default());
+        let (lane, wakes, said) = scripted_lane(&gate, |_| false);
+        let start = Instant::now();
+        gate.hold();
+        let out = lane.ask(start).expect("admitted");
+        assert!(gate.wait_entered(1), "the ask is out");
+        let waiting = lane.ask(start).expect("admitted behind it");
+        let joined = lane.ask(start).expect("and joined to that");
+        gate.kill();
+        gate.release();
+        wait_for_a_wake(&wakes, "the worker's end");
+        assert_eq!(
+            lane.requests.ended(),
+            [
+                (out, Terminal::WorkerGone),
+                (waiting, Terminal::WorkerGone),
+                (
+                    joined,
+                    Terminal::Joined {
+                        with: waiting,
+                        outcome: Box::new(Terminal::WorkerGone),
+                    }
+                ),
+            ]
+        );
+        assert!(
+            matches!(
+                lane.ask(start),
+                Err(crate::lane::Refused::Faulted(
+                    crate::lane::WorkerEnd::Panicked(_)
+                ))
+            ),
+            "a request after the worker's end is refused at the door, minting nothing"
+        );
+        assert_eq!(
+            lane.reading(),
+            TaskbarReading::default(),
+            "and the reading is the one held before any answer"
+        );
+        let said = said.lock().unwrap().clone();
+        assert_eq!(said.len(), 1, "the end is said once: {said:?}");
+        assert!(
+            said[0].contains("3 request(s) owed end as WorkerGone"),
+            "{said:?}"
+        );
+    }
 }
 
 /// **The lane contract's adapter** (`crate::lane`, `lane_contract_tests`): a [`TaskbarLane`] of its
-/// own — the real numbered requests, worker, slot and wake — asking a question the suite's
-/// [`crate::lane::Gate`] can hold, whose answer changes every time so that every answer is news.
+/// own — the real admission, worker body, ledger and reading — its worker started by the suite's
+/// executor, its question executing the suite's question for the newest request it answers so the
+/// suite's [`crate::lane::Gate`] can hold it, count it and plant a panic in it, and its ledger's
+/// lines counted.
 #[cfg(test)]
 pub(crate) mod contract_adapter {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, PoisonError};
     use std::time::Instant;
 
-    use super::TaskbarLane;
+    use super::{TaskbarId, TaskbarLane, TaskbarTerminal};
     use crate::lane::{
-        Admission, Contract, Delivered, Gate, LaneUnderTest, Outcome, TASKBAR, WakeProbe,
+        Admission, Contract, Delivered, Executor, Gate, LaneUnderTest, Outcome, TASKBAR, Terminal,
+        WakeProbe,
     };
 
     struct TaskbarAdapter {
         lane: &'static TaskbarLane,
         gate: Arc<Gate>,
         probe: Arc<WakeProbe>,
-        /// The generation the consumer last read — what `attention.rs` compares a reading with.
-        seen: u64,
+        /// The suite's own record of which question each identity carried, read by the ask.
+        questions: Arc<Mutex<HashMap<u64, u64>>>,
+        /// The lines the ledger said, counted through its `say`.
+        said: Arc<AtomicUsize>,
+        /// A late answer the slot took, raised at the next drain.
+        raised: Vec<Delivered>,
+    }
+
+    fn outcome(terminal: TaskbarTerminal) -> Outcome {
+        match terminal {
+            Terminal::Done(_) => Outcome::Answered,
+            Terminal::Failed(failure) => Outcome::Failed(failure.to_string()),
+            Terminal::Cancelled => Outcome::Cancelled,
+            Terminal::Superseded { by } => Outcome::Superseded { by: by.0 },
+            Terminal::Joined {
+                with,
+                outcome: carried,
+            } => Outcome::Joined {
+                with: with.0,
+                carried: Box::new(self::outcome(*carried)),
+            },
+            Terminal::WorkerGone => Outcome::WorkerGone,
+        }
     }
 
     /// A fresh lane, leaked for the `'static` its worker needs.
     pub(crate) fn make() -> Box<dyn LaneUnderTest> {
         let gate = Arc::new(Gate::default());
         let probe = Arc::new(WakeProbe::default());
-        let door = Arc::clone(&gate);
-        let asked = AtomicU64::new(0);
-        let lane: &'static TaskbarLane = Box::leak(Box::new(TaskbarLane::new(move || {
-            door.pass(None);
-            asked.fetch_add(1, Ordering::Relaxed).is_multiple_of(2)
-        })));
+        let questions: Arc<Mutex<HashMap<u64, u64>>> = Arc::default();
+        let said = Arc::new(AtomicUsize::new(0));
+        let (door, asked, counted) = (Arc::clone(&gate), Arc::clone(&questions), Arc::clone(&said));
+        let lane: &'static TaskbarLane = Box::leak(Box::new(TaskbarLane::start_with(
+            Executor::scripted(Arc::clone(&gate)),
+            move |generation| {
+                let question = asked
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&generation)
+                    .copied();
+                if let Some(question) = question {
+                    door.execute(question);
+                }
+                generation.is_multiple_of(2)
+            },
+            move |_line: &str| {
+                counted.fetch_add(1, Ordering::SeqCst);
+            },
+        )));
         let wake = Arc::clone(&probe);
         lane.install_wake(move || wake.woke());
         Box::new(TaskbarAdapter {
             lane,
             gate,
             probe,
-            seen: 0,
+            questions,
+            said,
+            raised: Vec::new(),
         })
     }
 
@@ -368,12 +654,38 @@ pub(crate) mod contract_adapter {
             &self.probe
         }
 
+        /// `taskbar_lane::request`, on this lane: the lane's own admission, or its refusal at the
+        /// door as the request's terminal.
         fn submit(&mut self, _target: u32, question: u64) -> Admission {
-            self.lane.request(Instant::now());
-            Admission {
-                ticket: Some(self.lane.lock().requested),
-                question,
-                refused: None,
+            // The question is recorded under the identity the next admission mints, before the
+            // worker can read it: the lane mints identities in order, one per admission.
+            let mut questions = self
+                .questions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let next = questions.keys().max().map_or(1, |last| last + 1);
+            questions.insert(next, question);
+            drop(questions);
+            match self.lane.ask(Instant::now()) {
+                Ok(id) => {
+                    assert_eq!(id.0, next, "the taskbar lane mints its identities in order");
+                    Admission {
+                        ticket: Some(id.0),
+                        question,
+                        refused: None,
+                    }
+                }
+                Err(refused) => {
+                    self.questions
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&next);
+                    Admission {
+                        ticket: None,
+                        question,
+                        refused: Some(format!("{refused:?}")),
+                    }
+                }
             }
         }
 
@@ -381,25 +693,46 @@ pub(crate) mod contract_adapter {
             unreachable!("the taskbar lane's target is the application, which does not close");
         }
 
-        /// The window's reading: one load of the slot. A generation other than the one last read
-        /// is an answer raised.
+        /// The window's reading: the terminals taken in the order they were minted, each a
+        /// delivery, and each answer offered to the slot as the product's reading offers it.
         fn drain(&mut self) -> Vec<Delivered> {
-            let reading = self.lane.reading();
-            if reading.generation == self.seen {
-                return Vec::new();
+            let mut delivered = std::mem::take(&mut self.raised);
+            let questions = self
+                .questions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            for (id, terminal) in self.lane.requests.ended() {
+                self.lane.take(id, terminal.clone());
+                delivered.push(Delivered {
+                    target: Some(0),
+                    ticket: Some(id.0),
+                    question: questions.get(&id.0).copied(),
+                    outcome: outcome(terminal),
+                });
             }
-            self.seen = reading.generation;
-            vec![Delivered {
-                target: Some(0),
-                ticket: Some(reading.generation),
-                question: None,
-                outcome: Outcome::Answered,
-            }]
+            delivered
         }
 
-        /// A second asker's late answer, through the slot's own `offer`.
+        /// A second asker's late answer, through the lane's own publication — which refuses a
+        /// second terminal — and through the slot's own `offer`, which refuses an answer older
+        /// than the one held. Either taking it is an answer raised.
         fn offer_stale(&mut self, ticket: u64) {
-            let _ = self.lane.slot.offer(ticket, true);
+            self.lane
+                .requests
+                .ledger()
+                .publish(TaskbarId(ticket), Terminal::Done(true));
+            if self.lane.slot.offer(ticket, true) {
+                self.raised.push(Delivered {
+                    target: Some(0),
+                    ticket: Some(ticket),
+                    question: None,
+                    outcome: Outcome::Answered,
+                });
+            }
+        }
+
+        fn said(&self) -> Option<usize> {
+            Some(self.said.load(Ordering::SeqCst))
         }
     }
 }

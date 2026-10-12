@@ -1048,9 +1048,13 @@ pub(crate) const FONT: Contract = Contract {
     saying: Saying::PerStreak,
 };
 
-/// `taskbar_lane`: numbered requests (`Asks::requested`); one worker that serves the newest
-/// request standing; the answer in a `bt_platform::TaskbarState` slot that takes only newer
-/// numbers; the target is the application.
+/// `taskbar_lane`, on the seam (S-4): one `taskbar-state` worker; ids minted by the lane's
+/// `Ledger`; one ask out and one waiting, every request made while one waits joined to it (the
+/// same question: does the bar hide itself now); the application holds every request, and the
+/// window's reading takes their terminals in mint order and offers each answer to a
+/// `bt_platform::TaskbarState` slot that takes only newer numbers; the ledger owes 16 at once — a
+/// terminal not yet taken holding its place — and refuses the rest at the door; a failure (a
+/// panic in the ask: the question has no error form) is said once per streak.
 #[cfg(test)]
 pub(crate) const TASKBAR: Contract = Contract {
     lane: Some(LaneName::Taskbar),
@@ -1060,10 +1064,11 @@ pub(crate) const TASKBAR: Contract = Contract {
     bounds: Bounds {
         waiting: Bound::At(1),
         executing: 1,
-        answers_held: Bound::At(1),
+        // `taskbar_lane::BOUND`, written out rather than read.
+        answers_held: Bound::At(16),
     },
     cancellation: Cancellation::Never,
-    saying: Saying::PerRequest,
+    saying: Saying::PerStreak,
 };
 
 /// `MathWorker`'s decoration thread (`bt-math-worker`): one question, one answer, keyed by the
@@ -1347,20 +1352,6 @@ pub(crate) struct ExpectedFailure {
 #[cfg(test)]
 pub(crate) const EXPECTED_FAILURES: &[ExpectedFailure] = &[
     ExpectedFailure {
-        lane: LaneName::Taskbar,
-        claim: Claim::EveryRequestEndsExactlyOnce,
-        failure: FailureKind::NoTerminal,
-        repair: "D-73",
-        why: "the worker serves the newest request standing; the ones between get no outcome",
-    },
-    ExpectedFailure {
-        lane: LaneName::Taskbar,
-        claim: Claim::ADeadWorkerIsObservable,
-        failure: FailureKind::DeathUnobservable,
-        repair: "D-73",
-        why: "a worker that dies leaves Asks::worker set: requests are counted and never served",
-    },
-    ExpectedFailure {
         lane: LaneName::Programs,
         claim: Claim::EveryRequestEndsExactlyOnce,
         failure: FailureKind::NoTerminal,
@@ -1399,28 +1390,6 @@ pub(crate) const EXPECTED_FAILURES: &[ExpectedFailure] = &[
     },
     // S-3 (2026-10-11): the four claims of the side-effects contract, run on lanes not yet built
     // on the seam. Each lane's repair ticket (S-4) moves it onto the seam and removes its rows.
-    ExpectedFailure {
-        lane: LaneName::Taskbar,
-        claim: Claim::ASupersededRequestSaysSo,
-        failure: FailureKind::SupersededInSilence,
-        repair: "D-73",
-        why: "the worker serves the newest request standing; the ones between get no outcome",
-    },
-    ExpectedFailure {
-        lane: LaneName::Taskbar,
-        claim: Claim::AJoinedRequestCarriesItsTwin,
-        failure: FailureKind::JoinedInSilence,
-        repair: "D-73",
-        why: "the same question asked again is served only as the newest number; the older ask \
-              gets no outcome",
-    },
-    ExpectedFailure {
-        lane: LaneName::Taskbar,
-        claim: Claim::AFailureIsSaidOnce,
-        failure: FailureKind::NoFailedTerminal,
-        repair: "D-73",
-        why: "the question has no failure form, and a panic in the worker ends it with no answer",
-    },
     ExpectedFailure {
         lane: LaneName::Programs,
         claim: Claim::ASupersededRequestSaysSo,

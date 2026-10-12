@@ -24,16 +24,11 @@ AnOrphanedAnswerReachesItsSink
 
 # rows
 lane	claim	failure	repair
-Taskbar	EveryRequestEndsExactlyOnce	NoTerminal	D-73
-Taskbar	ADeadWorkerIsObservable	DeathUnobservable	D-73
 Programs	EveryRequestEndsExactlyOnce	NoTerminal	D-85
 Computation	FullLaneAnswersWithoutWaiting	AdmissionUnbounded	D-74
 Computation	AnswersHeldAreBounded	AnswersUnbounded	D-74
 Computation	EveryRequestHasItsOwnIdentity	IdentityAmbiguous	D-75
 Computation	ADeadWorkerIsObservable	DeathUnobservable	D-76
-Taskbar	ASupersededRequestSaysSo	SupersededInSilence	D-73
-Taskbar	AJoinedRequestCarriesItsTwin	JoinedInSilence	D-73
-Taskbar	AFailureIsSaidOnce	NoFailedTerminal	D-73
 Programs	ASupersededRequestSaysSo	SupersededInSilence	D-85
 Programs	AJoinedRequestCarriesItsTwin	JoinedInSilence	D-85
 Programs	AFailureIsSaidOnce	NoFailedTerminal	D-85
