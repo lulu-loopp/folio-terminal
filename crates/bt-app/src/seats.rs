@@ -31,7 +31,7 @@ use bt_persist::{LayoutNodeV1, LeafNodeV1, SplitDirV1, SplitNodeV1, TermLeafV1};
 /// **What the platform already draws in this window's title bar** (M3-3) — the
 /// one fact this module takes from the backend, and the reason none of it asks
 /// which host it is on. See [`caption_targets`] and [`tab_strip_geometry`].
-use bt_platform::PlatformChrome;
+use bt_platform::{PlatformChrome, TitleBarBoxRole};
 
 /// **The window whose whole title bar is Folio's** — every Windows window, and
 /// every test in this crate whose subject is the tabs rather than the chrome
@@ -6570,6 +6570,11 @@ pub fn hit_window_chrome(
 /// edge is the reserve — the band that keeps this window a handle however many
 /// tabs are open. It is the same crop [`hit_tab_chrome`] applies before it
 /// answers, said once more where the complement is taken.
+///
+/// **Each box says what it is to the window** ([`title_bar_box_role`],
+/// T-SNAP-LAYOUTS-MAXBUTTON): the maximize box is the window's maximize button
+/// to the system, so Windows can open Snap Layouts over it; every other box is
+/// Folio's own.
 #[must_use]
 pub fn title_bar_folio_boxes(
     width: f32,
@@ -6579,11 +6584,12 @@ pub fn title_bar_folio_boxes(
     scroll: f32,
     rail: RailState,
     summoned: bool,
-) -> Vec<[f32; 4]> {
-    let mut boxes: Vec<[f32; 4]> = window_chrome_boxes(width, scale, chrome, rail, summoned)
-        .into_iter()
-        .map(|(_, rect)| rect)
-        .collect();
+) -> Vec<(TitleBarBoxRole, [f32; 4])> {
+    let mut boxes: Vec<(TitleBarBoxRole, [f32; 4])> =
+        window_chrome_boxes(width, scale, chrome, rail, summoned)
+            .into_iter()
+            .map(|(target, rect)| (title_bar_box_role(target), rect))
+            .collect();
     // **Asked of the strip that is on the glass and not of the preference**
     // (§7.1.6b′): focus mode draws its card column in either tab layout and no
     // strip at all, and the vertical layouts put the tab list down the side. A
@@ -6603,13 +6609,41 @@ pub fn title_bar_folio_boxes(
         let right = rect[2].min(strip.viewport[1]);
         (right > left).then_some([left, rect[1], right, rect[3]])
     };
-    boxes.extend(strip.tabs.iter().filter_map(|tab| cropped(tab.body)));
+    let own = |rect| (TitleBarBoxRole::Own, rect);
+    boxes.extend(
+        strip
+            .tabs
+            .iter()
+            .filter_map(|tab| cropped(tab.body))
+            .map(own),
+    );
     boxes.extend(
         [strip.new_tab, strip.new_tab_menu]
             .into_iter()
-            .filter_map(cropped),
+            .filter_map(cropped)
+            .map(own),
     );
     boxes
+}
+
+/// **What one of the boxes Folio draws in the header is to the window**
+/// (T-SNAP-LAYOUTS-MAXBUTTON). The maximize box is the window's maximize
+/// button: Windows 11 opens its Snap Layouts flyout over that button, and
+/// stands the Win+Z picker on it, only where the frame tells it the button is.
+///
+/// **Minimise and close stay Folio's own.** Telling the system about them buys
+/// no feature — the flyout is the maximize button's alone — and every pointer
+/// message over a button the system knows turns non-client, where the default
+/// window procedure keeps hover and tip machinery of its own for its caption
+/// buttons. The frame lets the system see the maximize button's hover because
+/// that hover is the flyout; for the other two the same exposure would buy
+/// nothing, and each already wears Folio's own tooltip.
+#[must_use]
+pub fn title_bar_box_role(target: ChromeTarget) -> TitleBarBoxRole {
+    match target {
+        ChromeTarget::Maximize => TitleBarBoxRole::MaximizeButton,
+        _ => TitleBarBoxRole::Own,
+    }
 }
 
 /// **The part of the title bar that is not one of Folio's boxes — the window's
@@ -6674,7 +6708,7 @@ pub fn title_bar_drag_point(
     }
     !title_bar_folio_boxes(width, scale, chrome, tab_count, scroll, rail, summoned)
         .iter()
-        .any(|rect| contains(*rect, x, y))
+        .any(|(_, rect)| contains(*rect, x, y))
 }
 
 /// The boxes of the caption run, in the order they stand: the gear, then
@@ -27775,8 +27809,12 @@ mod tests {
         };
         let horizontal = RailState::default();
         let (width, scale) = (960.0_f32, 1.0_f32);
-        let boxes =
-            |tabs, rail| title_bar_folio_boxes(width, scale, FOLIO_BAR, tabs, 0.0, rail, false);
+        let boxes = |tabs, rail| {
+            title_bar_folio_boxes(width, scale, FOLIO_BAR, tabs, 0.0, rail, false)
+                .into_iter()
+                .map(|(_, rect)| rect)
+                .collect::<Vec<_>>()
+        };
         let drags = |tabs, rail, x: f32, y: f32| {
             title_bar_drag_point(
                 width,
@@ -27896,15 +27934,18 @@ mod tests {
         for tabs in [12_usize, 16, 30] {
             let geometry = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(tabs), 0, 0.0);
             let run_right = geometry.viewport[1].ceil() as i32;
-            let app_boxes: Vec<[i32; 4]> =
+            let app_boxes: Vec<bt_platform::TitleBarBox> =
                 title_bar_folio_boxes(width, scale, FOLIO_BAR, tabs, 0.0, rail, false)
                     .into_iter()
-                    .map(|rect| rect.map(|edge| edge.ceil() as i32))
+                    .map(|(role, rect)| bt_platform::TitleBarBox {
+                        rect: rect.map(|edge| edge.ceil() as i32),
+                        role,
+                    })
                     .collect();
             assert!(
                 app_boxes
                     .iter()
-                    .all(|rect| rect[2] <= run_right || rect[0] >= gear_left as i32),
+                    .all(|held| held.rect[2] <= run_right || held.rect[0] >= gear_left as i32),
                 "every box the strip puts in the bar is cropped to its own \
                  viewport with {tabs} tabs — only the caption run stands past it"
             );
@@ -29672,10 +29713,13 @@ mod tests {
                         // built from the very list `refresh_chrome` hands its
                         // frame — the boxes this window draws up there, on whole
                         // pixels. Two implementations, one rule, one list.
-                        let app_boxes: Vec<[i32; 4]> =
+                        let app_boxes: Vec<bt_platform::TitleBarBox> =
                             title_bar_folio_boxes(width, scale, chrome, tabs, 0.0, rail, false)
                                 .into_iter()
-                                .map(|rect| rect.map(|edge| edge.ceil() as i32))
+                                .map(|(role, rect)| bt_platform::TitleBarBox {
+                                    rect: rect.map(|edge| edge.ceil() as i32),
+                                    role,
+                                })
                                 .collect();
                         let frame = CustomFrameMetrics {
                             width: width as i32,
@@ -30008,16 +30052,19 @@ mod tests {
         let rail = RailState::default();
         let trailers = resting(tabs);
         let chevron = tab_strip_geometry(width, scale, FOLIO_BAR, &trailers, 0, 0.0).new_tab_menu;
-        let app_boxes: Vec<[i32; 4]> =
+        let app_boxes: Vec<bt_platform::TitleBarBox> =
             title_bar_folio_boxes(width, scale, FOLIO_BAR, tabs, 0.0, rail, false)
                 .into_iter()
-                .map(|rect| rect.map(|edge| edge.ceil() as i32))
+                .map(|(role, rect)| bt_platform::TitleBarBox {
+                    rect: rect.map(|edge| edge.ceil() as i32),
+                    role,
+                })
                 .collect();
         let run_right = chevron[2].ceil() as i32;
         assert!(
             app_boxes
                 .iter()
-                .all(|rect| rect[2] <= run_right || rect[0] >= 1920 - 4 * 46),
+                .all(|held| held.rect[2] <= run_right || held.rect[0] >= 1920 - 4 * 46),
             "the `⌄` is the last thing the app puts in this bar before the \
              caption run, which is what leaves the band between them empty"
         );
@@ -30248,7 +30295,7 @@ mod tests {
             // edge is where the app's own run ends — the number this window used
             // to publish to its frame, now read off the list it publishes.
             let menu = |tabs| {
-                *title_bar_folio_boxes(
+                title_bar_folio_boxes(
                     width,
                     scale,
                     FOLIO_BAR,
@@ -30259,6 +30306,7 @@ mod tests {
                 )
                 .last()
                 .expect("a bar with a strip in it has a `˅`")
+                .1
             };
             let one = menu(1);
             let two = menu(2);
@@ -33022,7 +33070,7 @@ mod tests {
         let last_edge = |tabs| {
             strip_boxes(tabs)
                 .iter()
-                .map(|rect| rect[2])
+                .map(|(_, rect)| rect[2])
                 .filter(|edge| *edge <= caption_run_left(width, scale, FOLIO_BAR, false))
                 .fold(0.0_f32, f32::max)
         };

@@ -398,7 +398,7 @@ impl CustomWindowFrame {
     /// test. There is no native hit-test message here to answer: the application
     /// decides inside the press and says so through [`Self::press_title_bar`],
     /// off the very same list (§13.11 ⑥).
-    pub fn set_title_bar_boxes(&self, boxes: &[[i32; 4]]) {
+    pub fn set_title_bar_boxes(&self, boxes: &[crate::TitleBarBox]) {
         let _ = boxes;
     }
 

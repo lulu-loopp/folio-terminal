@@ -290,15 +290,16 @@ pub struct CustomFrameMetrics<'a> {
     pub width: i32,
     pub height: i32,
     pub title_bar_height: i32,
-    /// **Every box the application itself draws in the title bar**, as
-    /// `[left, top, right, bottom]` in the same physical pixels as the fields
-    /// above, half-open on the far edges. The caption buttons are among them —
-    /// on this host they are the application's own drawing like everything else
-    /// in that bar.
+    /// **Every box the application itself draws in the title bar**, each with
+    /// what it is to the window ([`TitleBarBox`]). The caption buttons are
+    /// among them — on this host they are the application's own drawing like
+    /// everything else in that bar, and the one of them the system has a use
+    /// for says which it is.
     ///
-    /// Order is not read and overlaps are allowed: the only question asked of
-    /// this list is whether a point is in any of them.
-    pub app_boxes: &'a [[i32; 4]],
+    /// Order is not read and overlaps are allowed: the questions asked of this
+    /// list are whether a point is in any of them and, if it is, whether one of
+    /// those is a window button.
+    pub app_boxes: &'a [TitleBarBox],
     pub resize_border: i32,
     pub resizable: bool,
 }
@@ -396,11 +397,42 @@ impl PlatformChrome {
     };
 }
 
+/// **One box the application draws in the title bar, and what it is to the
+/// window** (T-SNAP-LAYOUTS-MAXBUTTON, `docs/DESIGN.md` §13.11 ⑥).
+///
+/// `rect` is `[left, top, right, bottom]` in the physical pixels of
+/// [`CustomFrameMetrics`], half-open on the far edges.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TitleBarBox {
+    pub rect: [i32; 4],
+    pub role: TitleBarBoxRole,
+}
+
+/// **What a title-bar box is to the system.** The application draws and
+/// answers every one of them; the role only says whether the system is told
+/// which window button one of them is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TitleBarBoxRole {
+    /// The application's own control and nothing the system has a word for:
+    /// the point answers `Client`.
+    Own,
+    /// The window's maximize/restore button. The point answers
+    /// [`CustomFrameHit::MaximizeButton`], which is what Windows 11 reads to
+    /// open its Snap Layouts flyout on a hover and to stand the Win+Z picker
+    /// over the button. The drawing, the hover wash, the tooltip and the press
+    /// stay the application's: the frame hands the pointer messages this
+    /// answer turns into non-client ones back to it as the client messages
+    /// they were.
+    MaximizeButton,
+}
+
 /// Win32 non-client regions expressed without Win32 constants so their mapping
 /// can be pinned on every host used by the workspace tests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CustomFrameHit {
     Client,
+    /// A [`TitleBarBoxRole::MaximizeButton`] box: `HTMAXBUTTON`.
+    MaximizeButton,
     Caption,
     Left,
     Right,
@@ -414,8 +446,10 @@ pub enum CustomFrameHit {
 
 /// Map one client-coordinate point to the native non-client region it represents.
 /// Resize edges win over the title bar, and every box the application draws in
-/// that bar — the caption run included — stays `Client` so the application can
-/// paint and handle it.
+/// that bar — the caption run included — stays the application's to paint and
+/// handle: `Client`, or, for the box that is the window's maximize button,
+/// [`CustomFrameHit::MaximizeButton`] — the system is told which button it is
+/// and the frame hands its pointer messages back to the application.
 ///
 /// **The bar is the complement of those boxes and nothing narrower** (owner
 /// ruling 2026-09-13, §13.11 ⑥): on the title bar, every pixel that is not one
@@ -450,14 +484,20 @@ pub fn custom_frame_hit_test(metrics: CustomFrameMetrics<'_>, x: i32, y: i32) ->
     if x < 0 || x >= metrics.width {
         return CustomFrameHit::Client;
     }
-    if metrics
-        .app_boxes
-        .iter()
-        .any(|rect| x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3])
-    {
-        return CustomFrameHit::Client;
+    // **A box that names a window button names it wherever it stands**: where
+    // an own box overlaps it, the point is still that button, because order is
+    // not read and the system's answer must not depend on it.
+    let mut hit = CustomFrameHit::Caption;
+    for held in metrics.app_boxes.iter().filter(|held| {
+        let rect = held.rect;
+        x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3]
+    }) {
+        match held.role {
+            TitleBarBoxRole::MaximizeButton => return CustomFrameHit::MaximizeButton,
+            TitleBarBoxRole::Own => hit = CustomFrameHit::Client,
+        }
     }
-    CustomFrameHit::Caption
+    hit
 }
 
 /// A pending move/size, as `WM_WINDOWPOSCHANGING` states one.
@@ -8944,9 +8984,9 @@ mod windows_impl {
                 DestroyMenu, FLASHW_STOP, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx,
                 GA_ROOT, GCLP_HBRBACKGROUND, GF_BEGIN, GF_END, GetAncestor, GetClientRect,
                 GetCursorPos, GetSystemMetrics, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT,
-                HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
-                HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsZoomed, MB_ICONINFORMATION, MB_OK,
-                MB_SETFOREGROUND, MF_STRING, MINMAXINFO, NCCALCSIZE_PARAMS, PostMessageW,
+                HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTMAXBUTTON, HTRIGHT, HTTOP, HTTOPLEFT,
+                HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsZoomed, MB_ICONINFORMATION,
+                MB_OK, MB_SETFOREGROUND, MF_STRING, MINMAXINFO, NCCALCSIZE_PARAMS, PostMessageW,
                 RegisterWindowMessageW, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXVIRTUALSCREEN,
                 SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
                 SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES, SWP_FRAMECHANGED,
@@ -8964,9 +9004,9 @@ mod windows_impl {
     use super::{
         CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, GroundBand,
         INSERT_ABOVE_REFERENCE, NativeWindow, PageVisual, PanStep, PanTrack, PendingWindowPos,
-        PlatformChrome, TaskbarProgress, TaskbarProgressState, ThreadPriority, VisualLayer,
-        WheelScrollAmount, WindowRect, composition_visual_offset, custom_frame_hit_test,
-        hold_pending_pos_to, logical_px_for_dpi, window_skirt,
+        PlatformChrome, TaskbarProgress, TaskbarProgressState, ThreadPriority, TitleBarBox,
+        VisualLayer, WheelScrollAmount, WindowRect, composition_visual_offset,
+        custom_frame_hit_test, hold_pending_pos_to, logical_px_for_dpi, window_skirt,
     };
     use crate::admission::{WaitToken, doors};
 
@@ -10309,7 +10349,7 @@ mod windows_impl {
         /// loop, and the subclass procedure runs on the thread that owns the
         /// `HWND`, which is that same event loop. Nothing between the borrow and
         /// its end sends a message, so the callback cannot re-enter it.
-        title_bar_boxes: RefCell<Vec<[i32; 4]>>,
+        title_bar_boxes: RefCell<Vec<TitleBarBox>>,
         /// Smallest client size the window may be dragged to, in logical pixels,
         /// or `(0, 0)` for "no minimum". Logical rather than physical so the
         /// constraint survives a DPI change without anyone recomputing it.
@@ -10517,13 +10557,15 @@ mod windows_impl {
         }
 
         /// **State the boxes the application draws in this window's title bar**
-        /// (§13.11 ⑥), in physical pixels. Everything in the bar that is not one
-        /// of them answers `HTCAPTION`, so the window is picked up by it.
+        /// (§13.11 ⑥), in physical pixels, each with its role. Everything in the
+        /// bar that is not one of them answers `HTCAPTION`, so the window is
+        /// picked up by it; the box whose role is the maximize button answers
+        /// `HTMAXBUTTON`, so Windows knows where that button is.
         ///
         /// Said again on every rebuild of the bar rather than settled at
         /// install: a tab is one of these boxes, and tabs open, close, scroll
         /// and change width.
-        pub fn set_title_bar_boxes(&self, boxes: &[[i32; 4]]) {
+        pub fn set_title_bar_boxes(&self, boxes: &[TitleBarBox]) {
             let mut held = self.state.title_bar_boxes.borrow_mut();
             held.clear();
             held.extend_from_slice(boxes);
@@ -10737,10 +10779,6 @@ mod windows_impl {
                 result
             }
             WM_NCHITTEST => {
-                let mut client = RECT::default();
-                if unsafe { GetClientRect(hwnd, &mut client) }.is_err() {
-                    return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
-                }
                 let mut point = POINT {
                     x: low_word_signed(lparam.0),
                     y: high_word_signed(lparam.0),
@@ -10750,48 +10788,73 @@ mod windows_impl {
                 {
                     return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
                 }
-                let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
-                let resize_border = if unsafe { IsZoomed(hwnd) }.as_bool() {
-                    0
-                } else {
-                    native_resize_border(dpi)
-                };
                 // SAFETY: `CustomWindowFrame` owns this allocation and removes the subclass
                 // before dropping it, so the reference-data pointer is live for every callback.
                 let state = unsafe { &*(reference_data as *const CustomFrameState) };
-                // Borrowed for the length of the answer and no longer. The
-                // setter runs on this same thread and nothing below it sends a
-                // message, so this borrow meets no other.
-                let app_boxes = state.title_bar_boxes.borrow();
-                let hit = custom_frame_hit_test(
-                    CustomFrameMetrics {
-                        width: client.right.saturating_sub(client.left),
-                        height: client.bottom.saturating_sub(client.top),
-                        title_bar_height: logical_px_for_dpi(
-                            state.geometry.title_bar_logical_px,
-                            dpi,
-                        ),
-                        app_boxes: app_boxes.as_slice(),
-                        resize_border,
-                        resizable: resize_border > 0,
-                    },
-                    point.x,
-                    point.y,
-                );
-                LRESULT(match hit {
-                    CustomFrameHit::Client => HTCLIENT,
-                    CustomFrameHit::Caption => HTCAPTION,
-                    CustomFrameHit::Left => HTLEFT,
-                    CustomFrameHit::Right => HTRIGHT,
-                    CustomFrameHit::Top => HTTOP,
-                    CustomFrameHit::Bottom => HTBOTTOM,
-                    CustomFrameHit::TopLeft => HTTOPLEFT,
-                    CustomFrameHit::TopRight => HTTOPRIGHT,
-                    CustomFrameHit::BottomLeft => HTBOTTOMLEFT,
-                    CustomFrameHit::BottomRight => HTBOTTOMRIGHT,
-                } as isize)
+                match unsafe { frame_hit_at(hwnd, state, point) } {
+                    Some(hit) => LRESULT(hit_test_code(hit) as isize),
+                    None => unsafe { DefSubclassProc(hwnd, message, wparam, lparam) },
+                }
             }
             _ => unsafe { DefSubclassProc(hwnd, message, wparam, lparam) },
+        }
+    }
+
+    /// **The custom frame's answer for one client point**, or `None` when the
+    /// window cannot be measured — the one place the live window's numbers are
+    /// put to [`custom_frame_hit_test`], so `WM_NCHITTEST` and the question "is
+    /// this client point still the maximize button" are one rule.
+    ///
+    /// # Safety
+    ///
+    /// `hwnd` is the window `state` is installed on, and this runs on its
+    /// thread.
+    unsafe fn frame_hit_at(
+        hwnd: HWND,
+        state: &CustomFrameState,
+        point: POINT,
+    ) -> Option<CustomFrameHit> {
+        let mut client = RECT::default();
+        unsafe { GetClientRect(hwnd, &mut client) }.ok()?;
+        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+        let resize_border = if unsafe { IsZoomed(hwnd) }.as_bool() {
+            0
+        } else {
+            native_resize_border(dpi)
+        };
+        // Borrowed for the length of the answer and no longer. The setter runs
+        // on this same thread and nothing below it sends a message, so this
+        // borrow meets no other.
+        let app_boxes = state.title_bar_boxes.borrow();
+        Some(custom_frame_hit_test(
+            CustomFrameMetrics {
+                width: client.right.saturating_sub(client.left),
+                height: client.bottom.saturating_sub(client.top),
+                title_bar_height: logical_px_for_dpi(state.geometry.title_bar_logical_px, dpi),
+                app_boxes: app_boxes.as_slice(),
+                resize_border,
+                resizable: resize_border > 0,
+            },
+            point.x,
+            point.y,
+        ))
+    }
+
+    /// **The `WM_NCHITTEST` code for one region** — the mapping half of the
+    /// bridge, pure so a test can hold it.
+    pub(super) fn hit_test_code(hit: CustomFrameHit) -> u32 {
+        match hit {
+            CustomFrameHit::Client => HTCLIENT,
+            CustomFrameHit::MaximizeButton => HTMAXBUTTON,
+            CustomFrameHit::Caption => HTCAPTION,
+            CustomFrameHit::Left => HTLEFT,
+            CustomFrameHit::Right => HTRIGHT,
+            CustomFrameHit::Top => HTTOP,
+            CustomFrameHit::Bottom => HTBOTTOM,
+            CustomFrameHit::TopLeft => HTTOPLEFT,
+            CustomFrameHit::TopRight => HTTOPRIGHT,
+            CustomFrameHit::BottomLeft => HTBOTTOMLEFT,
+            CustomFrameHit::BottomRight => HTBOTTOMRIGHT,
         }
     }
 
@@ -25065,22 +25128,33 @@ mod custom_frame_tests {
 
     /// **The boxes the application draws in the bar these tests describe**
     /// (§13.11 ⑥): a tab strip whose run ends at 240 logical pixels, and a
-    /// caption run of four 46-wide buttons ending on the window's own edge.
-    /// Everything else on the bar is the window's to be dragged by, which is
-    /// what the cases below strike.
-    fn app_boxes(dpi: u32) -> Vec<[i32; 4]> {
+    /// caption run of four 46-wide buttons ending on the window's own edge —
+    /// the gear, minimize, maximize and close, the third of them stated as the
+    /// maximize button. Everything else on the bar is the window's to be
+    /// dragged by, which is what the cases below strike.
+    fn app_boxes(dpi: u32) -> Vec<TitleBarBox> {
         let title = logical_px_for_dpi(40, dpi);
         let width = logical_px_for_dpi(960, dpi);
         let button = logical_px_for_dpi(46, dpi);
-        let mut boxes = vec![[0, 0, logical_px_for_dpi(240, dpi), title]];
+        let mut boxes = vec![TitleBarBox {
+            rect: [0, 0, logical_px_for_dpi(240, dpi), title],
+            role: TitleBarBoxRole::Own,
+        }];
         boxes.extend((0..4).map(|index| {
             let left = width - (4 - index) * button;
-            [left, 0, left + button, title]
+            TitleBarBox {
+                rect: [left, 0, left + button, title],
+                role: if index == 2 {
+                    TitleBarBoxRole::MaximizeButton
+                } else {
+                    TitleBarBoxRole::Own
+                },
+            }
         }));
         boxes
     }
 
-    fn metrics(dpi: u32, app_boxes: &[[i32; 4]]) -> CustomFrameMetrics<'_> {
+    fn metrics(dpi: u32, app_boxes: &[TitleBarBox]) -> CustomFrameMetrics<'_> {
         CustomFrameMetrics {
             width: logical_px_for_dpi(960, dpi),
             height: logical_px_for_dpi(600, dpi),
@@ -25163,6 +25237,113 @@ mod custom_frame_tests {
             custom_frame_hit_test(m, m.width - 1, 1),
             CustomFrameHit::Client
         );
+    }
+
+    /// RED (T-SNAP-LAYOUTS-MAXBUTTON) — **the box stated as the maximize button
+    /// answers as the maximize button, and every other box as the
+    /// application's.** Windows opens Snap Layouts over a custom title bar's
+    /// maximize button only where the frame says `HTMAXBUTTON`, and a frame
+    /// that called every box `Client` never said it.
+    ///
+    /// MUTATION: answer `CustomFrameHit::Client` for a point in any box, role
+    /// or no role (the code before this ticket), and the maximize cases go red.
+    #[test]
+    fn custom_frame_hit_test_knows_the_caption_buttons_roles() {
+        let boxes = app_boxes(96);
+        let m = metrics(96, &boxes);
+        let maximize = boxes[3].rect;
+        // Its middle and its four inside corners.
+        for (x, y) in [
+            ((maximize[0] + maximize[2]) / 2, 20),
+            (maximize[0], maximize[1] + 8),
+            (maximize[2] - 1, maximize[1] + 8),
+            (maximize[0], maximize[3] - 1),
+            (maximize[2] - 1, maximize[3] - 1),
+        ] {
+            assert_eq!(
+                custom_frame_hit_test(m, x, y),
+                CustomFrameHit::MaximizeButton,
+                "({x}, {y}) is in the maximize button's box"
+            );
+        }
+        // Its neighbours are the application's own, and the tab strip is.
+        assert_eq!(
+            custom_frame_hit_test(m, maximize[0] - 1, 20),
+            CustomFrameHit::Client,
+            "minimize, left of it"
+        );
+        assert_eq!(
+            custom_frame_hit_test(m, maximize[2], 20),
+            CustomFrameHit::Client,
+            "close, right of it"
+        );
+        assert_eq!(custom_frame_hit_test(m, 100, 20), CustomFrameHit::Client);
+        // The resize edge still outranks the bar above the button.
+        assert_eq!(
+            custom_frame_hit_test(m, (maximize[0] + maximize[2]) / 2, 0),
+            CustomFrameHit::Top,
+            "the top resize edge runs across the caption run"
+        );
+        // An own box laid over it does not take it away: order is not read.
+        let mut overlaid = boxes.clone();
+        overlaid.push(TitleBarBox {
+            rect: maximize,
+            role: TitleBarBoxRole::Own,
+        });
+        overlaid.rotate_right(1);
+        assert_eq!(
+            custom_frame_hit_test(metrics(96, &overlaid), (maximize[0] + maximize[2]) / 2, 20),
+            CustomFrameHit::MaximizeButton
+        );
+        // A maximized window has no resize band, and the button is still the
+        // button — up to the screen's top edge, where the hand meets it.
+        let mut zoomed = m;
+        zoomed.resizable = false;
+        zoomed.resize_border = 0;
+        assert_eq!(
+            custom_frame_hit_test(zoomed, (maximize[0] + maximize[2]) / 2, 0),
+            CustomFrameHit::MaximizeButton
+        );
+        assert_eq!(
+            custom_frame_hit_test(zoomed, (maximize[0] + maximize[2]) / 2, 20),
+            CustomFrameHit::MaximizeButton
+        );
+    }
+}
+
+/// **How the custom frame tells Windows which box is the maximize button**
+/// (T-SNAP-LAYOUTS-MAXBUTTON): the `WM_NCHITTEST` code.
+#[cfg(all(test, windows))]
+mod window_button_message_tests {
+    use super::CustomFrameHit;
+    use super::windows_impl::hit_test_code;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTMAXBUTTON, HTRIGHT,
+        HTTOP, HTTOPLEFT, HTTOPRIGHT,
+    };
+
+    /// RED (T-SNAP-LAYOUTS-MAXBUTTON) — **the maximize button's region is
+    /// `HTMAXBUTTON` to Windows**, and every other region keeps its code.
+    ///
+    /// MUTATION: map `CustomFrameHit::MaximizeButton` to `HTCLIENT` and this
+    /// goes red on its first line.
+    #[test]
+    fn the_frame_answers_htmaxbutton_for_the_maximize_button() {
+        assert_eq!(hit_test_code(CustomFrameHit::MaximizeButton), HTMAXBUTTON);
+        for (hit, code) in [
+            (CustomFrameHit::Client, HTCLIENT),
+            (CustomFrameHit::Caption, HTCAPTION),
+            (CustomFrameHit::Left, HTLEFT),
+            (CustomFrameHit::Right, HTRIGHT),
+            (CustomFrameHit::Top, HTTOP),
+            (CustomFrameHit::Bottom, HTBOTTOM),
+            (CustomFrameHit::TopLeft, HTTOPLEFT),
+            (CustomFrameHit::TopRight, HTTOPRIGHT),
+            (CustomFrameHit::BottomLeft, HTBOTTOMLEFT),
+            (CustomFrameHit::BottomRight, HTBOTTOMRIGHT),
+        ] {
+            assert_eq!(hit_test_code(hit), code, "{hit:?}");
+        }
     }
 }
 

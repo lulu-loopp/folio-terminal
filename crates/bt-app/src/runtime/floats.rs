@@ -69,7 +69,11 @@ impl Runtime<'_> {
         // for an integer `x`, `x >= left && x < right` on the solved rectangle is
         // `x >= left.ceil() && x < right.ceil()` exactly, so the boxes the frame
         // holds claim precisely the pixel columns the boxes here do.
-        let folio_boxes: Vec<[i32; 4]> = seats::title_bar_folio_boxes(
+        //
+        // **Each with what it is to the window** (T-SNAP-LAYOUTS-MAXBUTTON): the
+        // maximize box is stated as the maximize button, which is what lets
+        // Windows open Snap Layouts over it.
+        let folio_boxes: Vec<bt_platform::TitleBarBox> = seats::title_bar_folio_boxes(
             width as f32,
             scale,
             self.platform_chrome(),
@@ -79,7 +83,10 @@ impl Runtime<'_> {
             self.is_quake_window(),
         )
         .into_iter()
-        .map(|rect| rect.map(|edge| edge.ceil() as i32))
+        .map(|(role, rect)| bt_platform::TitleBarBox {
+            rect: rect.map(|edge| edge.ceil() as i32),
+            role,
+        })
         .collect();
         self.window
             .custom_window_frame
