@@ -251,7 +251,8 @@ fn read_installation(registry: &dyn Registry) -> WslFacts {
 static INSTALLATION: Mutex<Option<WslFacts>> = Mutex::new(None);
 
 /// **Read what Windows knows** — the program walk's WSL question, asked on its
-/// worker (`crate::programs_lane`) once the walk has found `wsl.exe`.
+/// worker (`crate::programs_lane`) at most once a walk: once the walk has found `wsl.exe`, or for
+/// the first row whose program is among the Store aliases (`profiles::shell_program_of`).
 ///
 /// Three registry reads and no processes (§7.40 ②): a machine that merely has
 /// WSL installed boots no virtual machine for Folio.

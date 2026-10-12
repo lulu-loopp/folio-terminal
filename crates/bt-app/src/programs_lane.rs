@@ -346,6 +346,10 @@ enum Published {
 
 /// **The walk itself**: every row in the request's order, then WSL and git. Answers how many
 /// `PATH` entries it read and how many file questions it asked.
+///
+/// The WSL facts it publishes are the installation it read: after the rows once `wsl.exe` was
+/// found, or the one it read earlier for a row's Store alias even when `wsl.exe` was not found
+/// (a reading is a fact about this machine either way); the empty installation when it read none.
 fn walk(
     machine: &dyn Machine,
     ctx: &WorkerCtx,
