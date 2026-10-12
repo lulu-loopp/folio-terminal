@@ -649,7 +649,9 @@ Owner `bt-app::quit::Quit`, unchanged; `quit::Reason` is `Asked` (the chord,
 the menu bar's Quit, the system's quit) or `UpdateRestart { txn }`, written by
 `App::restart_for_update` through the one door `App::ask_to_quit` and spent in
 `FolioApp::begin_quit_if_asked` (`Quit::begin_for`). Every cancelable step runs
-unchanged. What the reason changes: the write is a named generation the loop
+unchanged, the documents phase among them (T-QUIT-DOCUMENTS: a quit it cancels
+gives the update up, `update_job::Abandon::DocumentsUnsaved`, and the quit the
+card's choice asks for is a person's). What the reason changes: the write is a named generation the loop
 waits for across turns (`SessionStore::hand_over_final` / `landing_of`, bounded
 by `quit::UPDATE_RECEIPT_DEADLINE` as a clock on the turn, never a wait); a
 Cancel, an incomplete save or a refused write gives the update up with the
@@ -1498,6 +1500,7 @@ script and the same test.
 | a files row's rename | `Runtime::rename_files_row` | window (row 20) | return | a toast | — | — | row 20 |
 | a hand-editable document's write | `DocumentState::send_owed` | session-writer | DocumentsAnswered | `Refused { cause }`: a link or a volume that cannot exchange is a card at once, a disk's refusal a card at the fifth in a row; the door admits a request only while the worker is up, decided under the queue's lock (it starts no thread), and completes one no worker takes as refused and wakes the loop; the worker's end takes the same lock to mark the lane down and drop what is queued, each such request answered as refused, and wakes the loop after; a refused write is sent once more by the next press or ear pass, never on a clock | one write in flight per document; a press meanwhile moves `desired`, the pending slot, sent after the answer; every answer is processed in worker order, a generation gating only visible effects; a `Conflict` — and, for a document sent `Merge`, any file stored for its merge — holds the document, and no write is sent until the merge folds it in (`settings.json`'s on the same `DocumentsAnswered` turn, `Runtime::merge_documents`); a re-read while held moves the revision and the merge's file bytes and never releases the hold | the store, which the application holds for the process's life | conforms |
 | a hand-editable document's re-read | `DocumentState::ask_read` | session-writer | DocumentsAnswered | an unreadable or unparseable file is an answer that keeps the document in force; a read no worker takes is completed as not served and wakes the loop, one line, and the next pass asks again | one read on the worker per document; an ask while one is out is served by one more read after it | the store, which the application holds for the process's life | conforms |
+| a hand-editable document's copy at quit | `StorageLane::send_recovered` | session-writer | DocumentsAnswered | the copy's own `Result`: a refused copy, or one with no receipt by `quit::QUIT_RECOVERY_BY` (a clock read on the quit's turn), cancels the quit and names the file on its card; a copy no worker takes is answered as refused where it is handed over | one copy per document per quit, sent once; the next quit's documents phase begins afresh | the store, which the application holds for the process's life | conforms |
 | a diagnostics line | `diagnostics::note` | window (row 20) | return | the append's failure is discarded | — | — | row 20 |
 | Claude's agent hooks | `Runtime::apply_claude_hooks` | window (row 2) | return | `Outcome::Refused` to a toast | — | — | row 2 |
 | Codex's notify hook | `Runtime::apply_codex_notify` | window (row 2) | return | `Outcome::Refused` to a toast | — | — | row 2 |
@@ -1963,12 +1966,36 @@ they do not share a call stack.
 
 **Normal quit** is a four-phase transaction: `FolioApp::settle_quit` advances
 `bt-app::quit::QuitStep` through the dirty gate, the read-only photograph, the
-judged atomic write (`Runtime::quit_save`; a refused disk means do not leave)
-and retirement. It has two triggers (`quit::Reason`, U-21): a person asking,
+judged atomic write (`Runtime::quit_save`; a refused disk means do not leave,
+unless the person chooses to leave without the change the refusal names, on the
+card that names it) and retirement. It has two triggers (`quit::Reason`, U-21): a person asking,
 and the update's Restart, whose write is a named generation judged by its own
 receipt under a deadline and whose way out hands the transaction to its
 applier. `bt-app::restore::DirtyGate` / `GateRequest` is reachable from
 quit, close-tab, close-pane and git-discard.
+
+Between the gate and the photograph the quit puts the four hand-editable
+documents on the disk (T-QUIT-DOCUMENTS; design note
+`docs/plans/design/settings-reread-2026-10-11.md`, revisions (c)2, (d)2):
+`QuitStep::Documents` sends each owed document to the storage worker and turns
+the loop, merging a `Moved` or `Displaced` answer without its doors, until each
+has landed or has a terminal answer (refused, a file no merge can fold, or
+held for its merge) — by `quit::QUIT_DOCUMENTS_BY`; `QuitStep::Recovery` copies
+each document with a terminal answer into the data directory's `recovered`
+folder (create-new, the file and the folder flushed) by `quit::QUIT_RECOVERY_BY`.
+Both bounds are measured from the start of the documents phase and derived
+from the one `persist::SESSION_SAVE_BUDGET`; each is a clock read on the turn,
+never a wait, and while the quit holds the worker nothing else of the run's is
+queued on it, so the session write goes behind the documents and their copies.
+A document still unanswered at the first bound, or a copy refused or unanswered
+at the second, **cancels the quit**: the windows stay, `diagnostics.log` names
+every such file with why, and one Error card on the window names the files (at
+most three, then how many more) with one choice, *Leave without this change*.
+Only that choice leaves without them: the quit it asks for drops exactly those
+documents' owed changes for the run, each written to `diagnostics.log` with its
+units before the way out. A quit asked again by the menu, the shortcut or a
+window's close runs the transaction again from the documents phase; dismissing
+the card leaves Folio open and the changes owed.
 
 **Controlled failure** is `FolioApp::fail` — twelve call sites — and a loop
 stopped by something that is not a window closing (`exiting`). It attempts
@@ -1979,7 +2006,14 @@ preview buffer written back through `PreviewBuffer::save`, the quit's judged
 write with its conflict check, and where the file refuses or has changed on disk,
 copied into the data directory's `recovered` folder, never over the file — with
 one `diagnostics.log` line each saying where the edit is (and, at the next start,
-one toast whose verb opens the folder: `recovered`, T-RECOVERED-FOLDER); then every window is
+one toast whose verb opens the folder: `recovered`, T-RECOVERED-FOLDER); then the
+four hand-editable documents' owed changes are copied into the same folder
+(`keep_owed_documents_over`, T-QUIT-DOCUMENTS), each answering `Kept` or `Lost`,
+each offered to `diagnostics.log`, and every `Lost` said once, together, through
+the system's own message box (`bt_platform::message_box`, behind the `NativeSay`
+seam) before a window closes — the surviving native path, which needs no file,
+no data directory and no renderer of Folio's; a stop that lost nothing raises no
+box; then every window is
 closed with `ending` (`Runtime::close_window(true)` finishes a pending rename and
 marks the session dirty), the windows cleared and the application finished. The
 writes are made on the window thread and are done when the call returns, as the
