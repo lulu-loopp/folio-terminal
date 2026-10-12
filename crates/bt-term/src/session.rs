@@ -301,6 +301,18 @@ const PATH_VERDICT_LEDGER_CAP: usize = 4096;
 /// How many unanswered printed paths one pane will hold for its worker.
 const PATH_VERIFY_QUEUE_CAP: usize = 512;
 const LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP: usize = 64;
+/// **How much formula and decode work one session can hold for its host's worker at once**: its
+/// frozen and live formula queues ([`WORKER_QUEUE_CAP`] each), its pasted pictures and its printed
+/// picture paths. A host that hands a session's whole queues out in one pass hands out at most
+/// this much of that work.
+pub const DECORATION_TASKS_HELD: usize =
+    2 * crate::WORKER_QUEUE_CAP + INLINE_IMAGE_WORKER_QUEUE_CAP + LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP;
+/// **How many pictures one session can hold for decoding at once** — pasted and printed — and so
+/// how many decoded pictures one hand-out can ask to have resampled.
+pub const DECODE_TASKS_HELD: usize =
+    INLINE_IMAGE_WORKER_QUEUE_CAP + LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP;
+/// **How many printed paths one session can hold for its host's verification worker at once.**
+pub const PATH_TASKS_HELD: usize = PATH_VERIFY_QUEUE_CAP;
 /// Two trailing blank rows add at most 36 px at the baseline metrics: enough for common display
 /// math while preventing a single formula from consuming an arbitrarily large blank separator.
 const LIVE_MATH_MAX_BORROWED_BLANK_ROWS: u32 = 2;
@@ -9241,6 +9253,34 @@ impl DualPlaneSession {
             self.decoration_work_out.insert(out);
         }
         task
+    }
+
+    /// **A task the host could not hand to its worker, given back** — the host's lane refused it
+    /// at its door (its worker gone, its bound reached, or its thread not started). The task goes
+    /// back to the head of the queue it was taken from and is no longer counted as handed out, so
+    /// the next [`Self::take_decoration_worker_task`] hands it out again: nothing is lost, and
+    /// nothing is asked again until the host's next hand-out.
+    pub fn give_back_decoration_worker_task(&mut self, task: SessionDecorationTask) {
+        if let Some(out) = DecorationWorkOut::of(&task) {
+            self.decoration_work_out.remove(&out);
+        }
+        match task {
+            SessionDecorationTask::Math(task) => match *task {
+                SessionMathTask::Frozen(task) => self.scheduler.give_back(task),
+                SessionMathTask::Live(task) => self.live_tasks.push_front(task),
+            },
+            SessionDecorationTask::InlineImage(task) => match task.source {
+                InlineImageSource::LocalPath(_) => self.local_image_path_tasks.push_front(task),
+                InlineImageSource::Osc1337(_) => self.inline_image_tasks.push_front(task),
+            },
+            SessionDecorationTask::ScaleInlineImage(task) => {
+                self.inline_image_scale_tasks.push_front(task);
+            }
+            SessionDecorationTask::VerifyPath(path) => {
+                self.path_verify_in_flight.remove(&path);
+                self.path_verify_tasks.push_front(path);
+            }
+        }
     }
 
     /// **How much decoration work this session is still owed an answer for**: every task queued
@@ -25798,6 +25838,57 @@ mod tests {
             assert!(record.failed);
             assert_eq!(record.declined_by_host, declined, "{record:?}");
         }
+    }
+
+    /// RED (S-8) — **a task the host's lane refused is given back, and the next hand-out hands it
+    /// out again**: nothing is lost, nothing is counted as out while it waits, and no question is
+    /// asked twice. A printed path (a name in Chinese and Latin) and a pasted picture, each taken,
+    /// given back, and taken again unchanged.
+    ///
+    /// MUTATION: make `give_back_decoration_worker_task` only clear the task's work-out entry (drop
+    /// the task) — the next hand-out finds nothing.
+    #[test]
+    fn a_task_given_back_is_handed_out_again_and_nothing_is_lost() {
+        let path = bt_testpath::temp_path("bt-term-given-back").join("\u{7b14}\u{8bb0}-notes.md");
+        let printed = format!("{}\r\n", path.to_string_lossy());
+        let mut session = DualPlaneSession::new(nz(120), nz(6));
+        enable_path_detection(&mut session);
+        session.feed(printed.as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        let Some(task @ SessionDecorationTask::VerifyPath(_)) =
+            session.take_decoration_worker_task()
+        else {
+            panic!("the printed name is asked about");
+        };
+        assert_eq!(session.outstanding_decoration_work(), 1, "in flight");
+        session.give_back_decoration_worker_task(task);
+        assert_eq!(session.outstanding_decoration_work(), 1, "queued, not out");
+        let Some(SessionDecorationTask::VerifyPath(again)) = session.take_decoration_worker_task()
+        else {
+            panic!("the name given back is handed out again");
+        };
+        assert_eq!(again, path);
+        assert!(session.take_decoration_worker_task().is_none(), "and once");
+
+        let mut session = DualPlaneSession::new(nz(20), nz(6));
+        session
+            .feed("\u{56fe} \x1b]1337;File=inline=1:AAAA\x07".as_bytes())
+            .unwrap();
+        let Some(SessionDecorationTask::InlineImage(task)) = session.take_decoration_worker_task()
+        else {
+            panic!("OSC 1337 files a decode");
+        };
+        let occurrence = task.occurrence_id;
+        session.give_back_decoration_worker_task(SessionDecorationTask::InlineImage(task));
+        assert_eq!(session.outstanding_decoration_work(), 1);
+        let Some(SessionDecorationTask::InlineImage(again)) = session.take_decoration_worker_task()
+        else {
+            panic!("the picture given back is handed out again");
+        };
+        assert_eq!(again.occurrence_id, occurrence);
+        assert_eq!(session.outstanding_decoration_work(), 1, "out once");
     }
 
     /// RED — **a path the host declined to verify is out of flight, has no verdict, and is never
