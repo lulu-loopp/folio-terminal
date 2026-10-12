@@ -44,21 +44,42 @@
 //! `contain` ends the process before its joiner returns, so a join's `Err` is real only for a
 //! thread whose body is contained. [`no_product_join_makes_a_value_of_an_uncontained_panic`] reads
 //! every product occurrence of the identifier `join` in the seven product packages
-//! ([`JOIN_PACKAGES`]) that is a call `h.join()` or `JoinHandle::join(h)`, and judges what its
-//! result is made into: thrown away (`let _ =`, a statement, `drop`) or carried on as a panic
-//! (`unwrap`, `expect`) is not judged; anything else makes a value of the `Err` and is allowed
-//! only when the handle follows to a thread start whose closure is a **call edge** to the
-//! boundary — the closure's whole body one call that [`FunctionPaths::functions_named`] follows to
-//! exactly [`BOUNDARY`]. A handle is followed through `let` bindings, the values given to a `self`
-//! field anywhere in its package (struct literals and assignments), the tail of a free function
-//! the path names, and the receiver of a method; a thread start is `std`'s `thread::spawn` (by its
-//! path: `std` is not indexed), a `spawn` method (`Builder`, a scope), or the thread door
-//! ([`DOORS`], by identity). A call that names no free function of the workspace and starts no
-//! thread is not a thread's handle (WinRT's `IAsyncOperation::join` is one). A parameter, a match
-//! arm's or a tuple's part, a field of anything but `self` is not followed and is refused.
+//! ([`JOIN_PACKAGES`]), and **every occurrence is one of the shapes below or is refused** — an
+//! unsupported shape is a diagnostic, never a silent pass:
 //!
-//! What it does not see: a handle kept in a collection and taken out again reads as the
-//! collection's value, which no thread start is behind; and a join written in a macro's tokens.
+//! * `h.join()` (any zero-argument method `join`) and `JoinHandle::join(h)`: **a thread's join**.
+//!   Taken by its name and arity alone, which is sound only because of what follows: every such
+//!   join is traced to a thread start or refused, so a `join()` that is not a thread's is refused
+//!   too. Its result thrown away (`let _ =`, a statement, `drop`) or carried on as a panic
+//!   (`unwrap`, `expect`) is not judged further. Anything else makes a value of the `Err`, and is
+//!   allowed only when the handle follows to a thread start whose closure is a **call edge** to
+//!   the boundary — the closure's whole body one call that [`FunctionPaths::functions_named`]
+//!   follows to exactly [`BOUNDARY`].
+//! * A `join` that takes arguments other than one handle (`Path::join`, a slice's `join`):
+//!   `JoinHandle::join` takes none, so no thread's. A function named `join`, where it is
+//!   declared, is no join either.
+//! * `T::join(x)` through a type path that is not `JoinHandle`'s: a foreign crate's operation only
+//!   when the path is written **in full from that crate's root** — its first segment is no
+//!   keyword root, no `std`/`core`/`alloc`, no workspace crate, no name a `use` brings into scope
+//!   there (and no glob `use` is in scope there), no item or module of the package; the tree compiling,
+//!   that leaves a crate of the extern prelude. Any other path-called `join` is refused.
+//!   (`bt-platform`'s WinRT deployment waits are written so:
+//!   `windows_future::IAsyncOperationWithProgress::join(&operation)`.)
+//! * A `join` in a macro's tokens, which no parser reads: with a non-empty argument group, no
+//!   thread's; any other is refused.
+//! * Any other occurrence — `JoinHandle::join` handed on as a value, a binding named `join` — is
+//!   refused.
+//!
+//! A handle is followed through `let` bindings (whose pattern is the whole value, `Some(x)` or
+//! `Ok(x)`), the values given to a `self` field anywhere in its package (struct literals and
+//! assignments), the tail of a free function the path names, and the value-keeping adapters of
+//! `Option` and `Result` (`unwrap`, `expect`, `take`, `map_err`, `?`). A thread start is `std`'s
+//! `thread::spawn` written by that path (`std` is not indexed), a `spawn` method on a
+//! `thread::Builder::new()`, or the thread door ([`DOORS`], by identity). Everything else is
+//! **unfollowed and refused, naming the site**: a parameter, a match arm's or a tuple's part, a
+//! field of anything but `self`, any other method's value (a collection's `pop`), a call that
+//! follows to no workspace free function and starts no thread (an associated function, a renamed
+//! `use` of `spawn`, a foreign crate's call).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
@@ -412,6 +433,24 @@ struct Join {
     used: JoinUse,
 }
 
+/// What an occurrence of the identifier `join` is when it is not a thread's join to judge.
+#[derive(Clone, Debug)]
+enum Shape {
+    /// A `join` called with arguments other than one handle (`Path::join`, a slice's `join`):
+    /// `JoinHandle::join` takes none, so no thread's.
+    Arguments,
+    /// A function named `join`, where it is declared.
+    Definition,
+    /// A name that is not called: a binding, a field, a local's value (`let (join, run) = …`,
+    /// `layout.join`).
+    Name,
+    /// A `join` called through a type path (`T::join(x)`) that is not `JoinHandle`'s: a foreign
+    /// crate's only when the path is written in full from that crate's root (judged by the reader).
+    PathCall(Vec<String>),
+    /// A shape the reading refuses, with why.
+    Refused(String),
+}
+
 /// What one file holds for the join guard, at the file's own byte offsets.
 #[derive(Default)]
 struct FileJoins {
@@ -419,6 +458,36 @@ struct FileJoins {
     fields: Vec<FieldValue>,
     /// By the offset of the `join` identifier.
     joins: BTreeMap<usize, Join>,
+    /// Every other parsed occurrence of the identifier `join`, by its offset.
+    shapes: BTreeMap<usize, Shape>,
+    /// Every `use` item's names (an alias by its new name, `*` for a glob): the bytes of the
+    /// module or block it is written in, and the start of the module that holds it.
+    uses: Vec<(Range<usize>, usize, String)>,
+    /// The bytes of every inline module of the file.
+    modules: Vec<Range<usize>>,
+}
+
+impl FileJoins {
+    /// The start of the innermost module around byte `at` (the file's: 0).
+    fn module_at(&self, at: usize) -> usize {
+        self.modules
+            .iter()
+            .filter(|module| module.contains(&at))
+            .min_by_key(|module| module.len())
+            .map_or(0, |module| module.start)
+    }
+
+    /// The names `use` items bring into scope at byte `at`: those written in the innermost module
+    /// around it, or in a block of that module around it — a parent module's `use` is not in
+    /// scope in a child module.
+    fn names_in_scope(&self, at: usize) -> BTreeSet<&str> {
+        let module = self.module_at(at);
+        self.uses
+            .iter()
+            .filter(|(scope, held_by, _)| scope.contains(&at) && *held_by == module)
+            .map(|(_, _, name)| name.as_str())
+            .collect()
+    }
 }
 
 impl FileJoins {
@@ -440,6 +509,10 @@ struct JoinVisitor {
     impl_types: Vec<String>,
     functions: Vec<usize>,
     blocks: Vec<Range<usize>>,
+    /// The scopes a `use` can be written in, innermost last: the file, inline modules, blocks.
+    scopes: Vec<Range<usize>>,
+    /// The starts of the modules being visited, innermost last (the file's: 0).
+    module_starts: Vec<usize>,
 }
 
 /// A path's last segment.
@@ -530,7 +603,54 @@ fn bound_names(pattern: &syn::Pat, out: &mut Vec<(String, usize, bool)>, whole: 
     }
 }
 
+/// Every `join` in a macro's tokens, which no parser reads: one followed by a non-empty
+/// parenthesised group takes arguments and is no thread's; any other — `.join()` above all — is
+/// refused, since the reading cannot judge what its result is made into.
+fn macro_joins(tokens: proc_macro2::TokenStream, shapes: &mut BTreeMap<usize, Shape>) {
+    let trees: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
+    for (at, tree) in trees.iter().enumerate() {
+        match tree {
+            proc_macro2::TokenTree::Group(group) => macro_joins(group.stream(), shapes),
+            proc_macro2::TokenTree::Ident(ident) if ident == "join" => {
+                let arguments = match trees.get(at + 1) {
+                    Some(proc_macro2::TokenTree::Group(group))
+                        if group.delimiter() == proc_macro2::Delimiter::Parenthesis =>
+                    {
+                        Some(!group.stream().is_empty())
+                    }
+                    _ => None,
+                };
+                let after_a_path = at >= 2
+                    && matches!((&trees[at - 2], &trees[at - 1]),
+                        (proc_macro2::TokenTree::Punct(a), proc_macro2::TokenTree::Punct(b))
+                            if a.as_char() == ':' && b.as_char() == ':');
+                let shape = if arguments == Some(true) {
+                    Shape::Arguments
+                } else if arguments.is_none() && !after_a_path {
+                    Shape::Name
+                } else {
+                    Shape::Refused(
+                        "a `join` in a macro's tokens, which the reading does not parse".to_owned(),
+                    )
+                };
+                shapes.insert(ident.span().byte_range().start, shape);
+            }
+            _ => {}
+        }
+    }
+}
+
 impl JoinVisitor {
+    /// `ident`, when it is `join`, as a name that is not called — unless a call already took it.
+    fn name(&mut self, ident: &syn::Ident) {
+        if ident == "join" {
+            self.found
+                .shapes
+                .entry(ident.span().byte_range().start)
+                .or_insert(Shape::Name);
+        }
+    }
+
     fn bind(&mut self, pattern: &syn::Pat, scope: &Range<usize>, origin: Option<&syn::Expr>) {
         let Some(&function) = self.functions.last() else {
             return;
@@ -598,6 +718,81 @@ impl<'ast> syn::visit::Visit<'ast> for JoinVisitor {
         self.impl_types.pop();
     }
 
+    fn visit_signature(&mut self, signature: &'ast syn::Signature) {
+        if signature.ident == "join" {
+            self.found
+                .shapes
+                .insert(signature.ident.span().byte_range().start, Shape::Definition);
+        }
+        syn::visit::visit_signature(self, signature);
+    }
+
+    fn visit_file(&mut self, file: &'ast syn::File) {
+        self.scopes.push(0..usize::MAX);
+        self.module_starts.push(0);
+        syn::visit::visit_file(self, file);
+        self.module_starts.pop();
+        self.scopes.pop();
+    }
+
+    fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+        let range = module.span().byte_range();
+        self.found.modules.push(range.clone());
+        self.module_starts.push(range.start);
+        self.scopes.push(range);
+        syn::visit::visit_item_mod(self, module);
+        self.scopes.pop();
+        self.module_starts.pop();
+    }
+
+    fn visit_use_tree(&mut self, tree: &'ast syn::UseTree) {
+        let scope = self.scopes.last().cloned().unwrap_or(0..usize::MAX);
+        let module = self.module_starts.last().copied().unwrap_or(0);
+        let name = match tree {
+            syn::UseTree::Name(name) => Some(name.ident.to_string()),
+            syn::UseTree::Rename(rename) => Some(rename.rename.to_string()),
+            syn::UseTree::Glob(_) => Some("*".to_owned()),
+            syn::UseTree::Path(_) | syn::UseTree::Group(_) => None,
+        };
+        if let Some(name) = name {
+            self.found.uses.push((scope, module, name));
+        }
+        syn::visit::visit_use_tree(self, tree);
+    }
+
+    fn visit_pat_ident(&mut self, ident: &'ast syn::PatIdent) {
+        self.name(&ident.ident);
+        syn::visit::visit_pat_ident(self, ident);
+    }
+
+    fn visit_field(&mut self, field: &'ast syn::Field) {
+        if let Some(ident) = &field.ident {
+            self.name(ident);
+        }
+        syn::visit::visit_field(self, field);
+    }
+
+    fn visit_member(&mut self, member: &'ast syn::Member) {
+        if let syn::Member::Named(ident) = member {
+            self.name(ident);
+        }
+        syn::visit::visit_member(self, member);
+    }
+
+    fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+        if path.qself.is_none()
+            && let Some(ident) = path.path.get_ident()
+        {
+            self.name(ident);
+        }
+        syn::visit::visit_expr_path(self, path);
+    }
+
+    fn visit_macro(&mut self, invocation: &'ast syn::Macro) {
+        macro_joins(invocation.tokens.clone(), &mut self.found.shapes);
+        syn::visit::visit_macro(self, invocation);
+    }
+
     fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
         let name = (
             item.sig.ident.to_string(),
@@ -637,7 +832,9 @@ impl<'ast> syn::visit::Visit<'ast> for JoinVisitor {
 
     fn visit_block(&mut self, block: &'ast syn::Block) {
         self.blocks.push(block.span().byte_range());
+        self.scopes.push(block.span().byte_range());
         syn::visit::visit_block(self, block);
+        self.scopes.pop();
         self.blocks.pop();
     }
 
@@ -735,14 +932,19 @@ impl<'ast> syn::visit::Visit<'ast> for JoinVisitor {
         {
             self.uses.insert(at, JoinUse::CarriedOn);
         }
-        if call.method == "join" && call.args.is_empty() {
-            self.found.joins.insert(
-                call.method.span().byte_range().start,
-                Join {
-                    receiver: (*call.receiver).clone(),
-                    used: JoinUse::Value,
-                },
-            );
+        if call.method == "join" {
+            let at = call.method.span().byte_range().start;
+            if call.args.is_empty() {
+                self.found.joins.insert(
+                    at,
+                    Join {
+                        receiver: (*call.receiver).clone(),
+                        used: JoinUse::Value,
+                    },
+                );
+            } else {
+                self.found.shapes.insert(at, Shape::Arguments);
+            }
         }
         syn::visit::visit_expr_method_call(self, call);
     }
@@ -754,19 +956,32 @@ impl<'ast> syn::visit::Visit<'ast> for JoinVisitor {
         {
             self.uses.insert(at, JoinUse::Discarded);
         }
-        if call.args.len() == 1
-            && let syn::Expr::Path(path) = &*call.func
-            && let [.., owner, join] = path.path.segments.iter().collect::<Vec<_>>().as_slice()
-            && owner.ident == "JoinHandle"
+        if let syn::Expr::Path(path) = &*call.func
+            && path.qself.is_none()
+            && let Some(join) = path.path.segments.last()
             && join.ident == "join"
         {
-            self.found.joins.insert(
-                join.ident.span().byte_range().start,
-                Join {
-                    receiver: call.args[0].clone(),
-                    used: JoinUse::Value,
-                },
-            );
+            let at = join.ident.span().byte_range().start;
+            let segments: Vec<String> = path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect();
+            if call.args.len() == 1
+                && segments.len() >= 2
+                && segments[segments.len() - 2] == "JoinHandle"
+            {
+                self.found.joins.insert(
+                    at,
+                    Join {
+                        receiver: call.args[0].clone(),
+                        used: JoinUse::Value,
+                    },
+                );
+            } else {
+                self.found.shapes.insert(at, Shape::PathCall(segments));
+            }
         }
         syn::visit::visit_expr_call(self, call);
     }
@@ -780,9 +995,6 @@ enum Origin {
     Contained,
     /// A thread whose closure is not: its panic ends the process under the resident hook.
     Bare(String),
-    /// A value no thread start is behind — an associated function's or a foreign API's (WinRT's
-    /// `IAsyncOperation::join` is such a `join`).
-    NotAThread,
     /// A handle the reading cannot follow to where it was made.
     Unfollowed(String),
 }
@@ -791,6 +1003,8 @@ enum Origin {
 struct JoinReader<'a> {
     indexes: Vec<&'a Index>,
     paths: &'a FunctionPaths,
+    /// The workspace's own crates, by the name a path writes (`bt_platform`).
+    crates: BTreeSet<String>,
     files: std::cell::RefCell<BTreeMap<(usize, usize), std::rc::Rc<FileJoins>>>,
 }
 
@@ -802,11 +1016,53 @@ struct Place {
 }
 
 impl<'a> JoinReader<'a> {
-    fn new(indexes: Vec<&'a Index>, paths: &'a FunctionPaths) -> Self {
+    fn new(indexes: Vec<&'a Index>, paths: &'a FunctionPaths, workspace: &Workspace) -> Self {
         Self {
             indexes,
             paths,
+            crates: workspace
+                .packages()
+                .iter()
+                .map(|package| package.name().replace('-', "_"))
+                .collect(),
             files: std::cell::RefCell::default(),
+        }
+    }
+
+    /// Whether `path`, a `join` called through a type path in the file at `place`, is written in
+    /// full from a foreign crate's root: its first segment is none of `crate`, `self`, `super`,
+    /// `Self`, `std`, `core`, `alloc`, a workspace crate, a name a `use` brings into scope there (and
+    /// no glob `use` is in scope there), or an item or module of the package — which, the tree
+    /// compiling, leaves only a crate of the extern prelude: a dependency's type, named.
+    fn is_foreign_path(&self, place: Place, at: usize, path: &[String]) -> bool {
+        let [first, _, .., _] = path else {
+            return false;
+        };
+        let reading = self.file(place);
+        let index = self.indexes[place.index];
+        let in_scope = reading.names_in_scope(at);
+        !["crate", "self", "super", "Self", "std", "core", "alloc"].contains(&first.as_str())
+            && !self.crates.contains(first)
+            && !in_scope.contains("*")
+            && !in_scope.contains(first.as_str())
+            && !index.items().iter().any(|item| item.name() == first)
+            && !index.modules().iter().any(|module| {
+                module
+                    .module_paths()
+                    .iter()
+                    .any(|path| path.rsplit("::").next() == Some(first.as_str()))
+            })
+    }
+
+    /// Whether `expression` — the receiver of a `spawn` method — is a `std::thread::Builder`:
+    /// a `thread::Builder::new()` call, through the builder's own setters.
+    fn is_a_thread_builder(expression: &syn::Expr) -> bool {
+        match unparenthesised(expression) {
+            syn::Expr::MethodCall(call) => Self::is_a_thread_builder(&call.receiver),
+            syn::Expr::Call(call) => call_path(call).is_some_and(|path| {
+                path.ends_with(&["thread".to_owned(), "Builder".to_owned(), "new".to_owned()])
+            }),
+            _ => false,
         }
     }
 
@@ -944,9 +1200,22 @@ impl<'a> JoinReader<'a> {
                 _ => unfollowed("a block with no value"),
             },
             syn::Expr::MethodCall(call) if call.method == "spawn" => {
-                vec![self.judge_body(place, offset, call.args.last(), root)]
+                if Self::is_a_thread_builder(&call.receiver) {
+                    vec![self.judge_body(place, offset, call.args.last(), root)]
+                } else {
+                    unfollowed("a `spawn` method not of a `std::thread::Builder`")
+                }
             }
-            syn::Expr::MethodCall(call) => self.origins(place, &call.receiver, steps, root),
+            // The value-keeping adapters of `Option` and `Result`; any other method's value is
+            // one the reading cannot tie to its receiver.
+            syn::Expr::MethodCall(call)
+                if ["unwrap", "expect", "take", "map_err"]
+                    .iter()
+                    .any(|name| call.method == name) =>
+            {
+                self.origins(place, &call.receiver, steps, root)
+            }
+            syn::Expr::MethodCall(_) => unfollowed("a method's value"),
             syn::Expr::Call(call) => {
                 let Some(path) = call_path(call) else {
                     return unfollowed("a call of an expression");
@@ -980,7 +1249,9 @@ impl<'a> JoinReader<'a> {
                 if (path == ["Some"] || path == ["Ok"]) && call.args.len() == 1 {
                     return self.origins(place, &call.args[0], steps, root);
                 }
-                vec![Origin::NotAThread]
+                unfollowed(
+                    "a call that follows to no free function of the workspace and starts no thread",
+                )
             }
             syn::Expr::Path(path) if path.path.segments.len() == 1 => {
                 let name = path.path.segments[0].ident.to_string();
@@ -1046,9 +1317,13 @@ struct JoinReading {
     not_values: usize,
     /// Joins whose `Err` is a value, of a contained thread.
     contained: usize,
-    /// Joins of something that is not a thread.
-    not_threads: usize,
-    /// Every other join whose `Err` is a value: its site, and why.
+    /// Occurrences of `join` that are no thread's join by their shape: one that takes arguments,
+    /// a function's declaration.
+    not_joins: usize,
+    /// Joins of a foreign crate's type, by the full path written.
+    foreign: Vec<String>,
+    /// Every other join whose `Err` is a value, and every shape the reading refuses: its site,
+    /// and why.
     refused: Vec<(String, String)>,
 }
 
@@ -1072,6 +1347,26 @@ fn read_joins(reader: &JoinReader<'_>, at: usize, root: &Path) -> JoinReading {
         };
         let joins = reader.file(place);
         let Some(join) = joins.joins.get(&(start - place.base)) else {
+            match joins.shapes.get(&(start - place.base)) {
+                Some(Shape::Arguments | Shape::Definition | Shape::Name) => reading.not_joins += 1,
+                Some(Shape::PathCall(path)) if reader.is_foreign_path(place, start - place.base, path) => {
+                    reading.foreign.push(path.join("::"));
+                }
+                Some(Shape::PathCall(path)) => reading.refused.push((
+                    reader.site(at, start, root),
+                    format!(
+                        "`{}`: a `join` called through a path the reading cannot tie to `JoinHandle` or to a foreign crate's type written in full",
+                        path.join("::")
+                    ),
+                )),
+                Some(Shape::Refused(why)) => {
+                    reading.refused.push((reader.site(at, start, root), why.clone()));
+                }
+                None => reading.refused.push((
+                    reader.site(at, start, root),
+                    "an occurrence of `join` in a shape the reading does not parse".to_owned(),
+                )),
+            }
             continue;
         };
         if join.used != JoinUse::Value {
@@ -1083,17 +1378,15 @@ fn read_joins(reader: &JoinReader<'_>, at: usize, root: &Path) -> JoinReading {
             .iter()
             .filter_map(|origin| match origin {
                 Origin::Bare(why) | Origin::Unfollowed(why) => Some(why.clone()),
-                Origin::Contained | Origin::NotAThread => None,
+                Origin::Contained => None,
             })
             .collect();
-        if !refusals.is_empty() {
+        if refusals.is_empty() {
+            reading.contained += 1;
+        } else {
             reading
                 .refused
                 .push((reader.site(at, start, root), refusals.join("; ")));
-        } else if origins.contains(&Origin::Contained) {
-            reading.contained += 1;
-        } else {
-            reading.not_threads += 1;
         }
     }
     reading.refused.sort();
@@ -1108,9 +1401,9 @@ fn read_joins(reader: &JoinReader<'_>, at: usize, root: &Path) -> JoinReading {
 /// `contained_panic::contain`; any other join whose `Err` is made into a value — a variant, an
 /// error, a default — names a behaviour Folio does not have. Such a join may throw its result
 /// away or carry the panic on (`unwrap`, `expect`); one that makes a value of it is refused unless
-/// its handle follows — through `let`s, values given to a `self` field in its package, free
-/// functions' tails and method receivers — to a thread start (`std`'s `thread::spawn`, a
-/// `spawn` method, the thread door by its identity) whose closure is a call edge to the boundary.
+/// its handle follows to a thread start whose closure is a call edge to the boundary, and every
+/// occurrence of `join` the reading cannot place in a supported shape is refused (the module
+/// doc's list).
 ///
 /// MUTATION: give `bt-pty`'s bounded join its value arm back (`match reader.join() { …,
 /// Err(_) => ReaderExit::Panicked }` in `join_within`) and this names that join: its handle is a
@@ -1124,20 +1417,22 @@ fn no_product_join_makes_a_value_of_an_uncontained_panic() {
         .map(|package| Index::of_package(package))
         .collect();
     let paths = FunctionPaths::read(&indexes);
-    let reader = JoinReader::new(indexes, &paths);
+    let reader = JoinReader::new(indexes, &paths, &workspace);
     let mut refused = Vec::new();
     let mut read = 0;
     for (at, package) in JOIN_PACKAGES.iter().enumerate() {
         let reading = read_joins(&reader, at, workspace.root());
         println!(
             "joined-panic guard: {package}: {} join(s) thrown away or carried on, {} of a \
-             contained thread, {} of no thread, {} refused",
+             contained thread, {} foreign {:?}, {} no join by shape, {} refused",
             reading.not_values,
             reading.contained,
-            reading.not_threads,
+            reading.foreign.len(),
+            reading.foreign,
+            reading.not_joins,
             reading.refused.len()
         );
-        read += reading.not_values + reading.contained + reading.not_threads;
+        read += reading.not_values + reading.contained;
         refused.extend(
             reading
                 .refused
@@ -1187,35 +1482,51 @@ fn join_fixture() -> Index {
     Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
 }
 
-/// The fixture's refused joins, by the site of their `join`.
-const FIXTURE_REFUSED: [&str; 5] = [
-    "lib.rs:23:18",
-    "lib.rs:45:12",
-    "lib.rs:74:14",
-    "lib.rs:79:12",
-    "lib.rs:90:12",
+/// The fixture's refused joins and shapes, by the site of their `join`.
+const FIXTURE_REFUSED: [&str; 11] = [
+    "lib.rs:118:15",
+    "lib.rs:125:12",
+    "lib.rs:132:47",
+    "lib.rs:138:27",
+    "lib.rs:143:41",
+    "lib.rs:154:15",
+    "lib.rs:24:18",
+    "lib.rs:46:12",
+    "lib.rs:75:14",
+    "lib.rs:80:12",
+    "lib.rs:91:12",
 ];
 
-/// RED (T-JOINED-PANIC-VALUES) — **a join's `Err` is a value by a call edge from its thread's
-/// closure to the real boundary, the handle followed to its thread by item, never by a name.**
-/// The fixture, read beside `bt-platform`, makes values of seven joins' errors. The guard allows
-/// two — a thread started through the thread door whose body is handed to the boundary by an
-/// alias, and a contained handle given to a `self` field and joined by a method — and refuses
-/// five: a bare thread joined with an `Err → Panicked` arm, a thread whose body is the lookalike
-/// `contained_panic::contain`, a free function's bare handle made a default, a handle handed in
-/// as a parameter, and a body that calls a helper that calls the boundary. A foreign operation's
-/// `join` is no thread's; two joins of bare threads are not judged, one thrown away and one
-/// carried on; a test's join is not read.
+/// RED (T-JOINED-PANIC-VALUES, rounds 1 and 2) — **a join's `Err` is a value by a call edge from
+/// its thread's closure to the real boundary, the handle followed to its thread by item, never by
+/// a name; and what the reading cannot follow is refused, never passed.** The fixture, read beside
+/// `bt-platform`, allows two joins — a thread started through the thread door whose body is
+/// handed to the boundary by an alias, and a contained handle given to a `self` field and joined
+/// by a method — and refuses eleven: a bare thread joined with an `Err → Panicked` arm, a thread
+/// whose body is the lookalike `contained_panic::contain`, a free function's bare handle made a
+/// default, a handle handed in as a parameter, a body that calls a helper that calls the boundary,
+/// a handle an associated function returns, a contained body started through a renamed `use` of
+/// `spawn`, a handle taken out of a collection, a `join()` in a macro's tokens and
+/// `JoinHandle::join` handed on as a value, and a foreign type's `join` called through an imported
+/// name. A foreign crate's `join` named by its full type path is no thread's; two joins of bare
+/// threads are not judged (one thrown away, one carried on); five occurrences are no join by their
+/// shape (a declaration, a binding and its value, two `join`s with arguments); a test's join is
+/// not read.
 ///
 /// MUTATIONS: ① judge the thread's closure by its spelling (a call path ending
 /// `contained_panic::contain`) — the lookalike's thread is allowed; ② follow no `self` field —
-/// the drain's join is refused.
+/// the drain's join is refused; ③ allow a call that follows to nothing (round 1's "not a
+/// thread") — the associated function's and the renamed spawn's joins pass; ④ skip an occurrence
+/// the reading did not parse (round 1's `continue`) — the macro's join and the join handed on
+/// pass.
 #[test]
 fn a_join_is_a_value_by_a_call_edge_from_its_thread_to_the_boundary() {
     let index = join_fixture();
     let platform = Index::of_package(BOUNDARY.0);
     let paths = FunctionPaths::read(&[&index, platform]);
-    let reader = JoinReader::new(vec![&index, platform], &paths);
+    let workspace =
+        Workspace::read(&workspace_root()).unwrap_or_else(|rejection| panic!("{rejection}"));
+    let reader = JoinReader::new(vec![&index, platform], &paths, &workspace);
     let reading = read_joins(&reader, 0, &join_fixture_directory());
     let sites: Vec<&str> = reading
         .refused
@@ -1224,7 +1535,7 @@ fn a_join_is_a_value_by_a_call_edge_from_its_thread_to_the_boundary() {
         .collect();
     assert_eq!(
         sites, FIXTURE_REFUSED,
-        "the bare thread's panic arm, the lookalike's thread, the free function's bare handle, \
+        "the associated function's handle, the renamed spawn, the collection, the macro's join, the join handed on as a value, the foreign type's join through an imported name, the bare thread's panic arm, the lookalike's thread, the free function's bare handle, \
          the parameter and the helper's thread: {:#?}",
         reading.refused
     );
@@ -1236,5 +1547,13 @@ fn a_join_is_a_value_by_a_call_edge_from_its_thread_to_the_boundary() {
         reading.not_values, 2,
         "one join thrown away, one carried on"
     );
-    assert_eq!(reading.not_threads, 1, "the foreign operation's join");
+    assert_eq!(
+        reading.foreign,
+        ["windows_future::IAsyncOperation::join"],
+        "the foreign operation's join, named in full"
+    );
+    assert_eq!(
+        reading.not_joins, 5,
+        "`Operation::join`'s declaration, a binding named `join` and its value, `Path::join` and the macro's slice `join`"
+    );
 }

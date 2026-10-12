@@ -1,9 +1,10 @@
 //! The joined-panic guard's fixture (`tests/contained_panic.rs`), read beside `bt-platform`: two
-//! joins whose errors are real values, five the guard refuses, one that is no thread's and two it
-//! does not judge.
+//! joins whose errors are real values, the joins and shapes the guard refuses, a foreign crate's
+//! `join` named in full, and the joins and occurrences it does not judge.
 
 use bt_platform::contained_panic::contain as keep;
 use std::thread::JoinHandle;
+use std::thread::spawn as start;
 
 pub enum Exit {
     Ended,
@@ -98,7 +99,7 @@ pub fn thrown_away_and_carried_on() {
     second.join().expect("the panic is carried on");
 }
 
-/// A foreign operation with a `join` of its own: not a thread's.
+/// An operation of this crate with a `join` of its own (a declaration: no join).
 pub struct Operation;
 
 impl Operation {
@@ -111,10 +112,58 @@ impl Operation {
     }
 }
 
-/// Its error made a value: not judged as a thread's.
-pub fn not_a_thread() -> Result<u8, String> {
+/// A handle an associated function returns: refused, not followed.
+pub fn from_an_associated_function() -> Result<u8, String> {
     let operation = Operation::begin();
     operation.join().map_err(|error| error.to_uppercase())
+}
+
+/// A contained body started through a renamed `use` of `std::thread::spawn`: refused, not
+/// followed (the reading knows `std`'s start only by its path).
+pub fn through_a_renamed_spawn() -> bool {
+    let thread = start(|| bt_platform::contained_panic::contain(|| 6));
+    thread.join().is_err()
+}
+
+/// A handle kept in a collection: refused, not followed.
+pub fn from_a_collection() -> bool {
+    let mut threads = Vec::new();
+    threads.push(std::thread::spawn(|| bt_platform::contained_panic::contain(|| 7)));
+    threads.pop().is_some_and(|thread| thread.join().is_err())
+}
+
+/// A zero-argument `join` in a macro's tokens: refused.
+pub fn in_a_macro() {
+    let thread = std::thread::spawn(|| {});
+    println!("{}", thread.join().is_ok());
+}
+
+/// `JoinHandle::join` handed on as a value: refused.
+pub fn as_a_value(threads: Vec<JoinHandle<()>>) -> usize {
+    threads.into_iter().map(JoinHandle::join).count()
+}
+
+/// A foreign crate's operation, its `join` named by its type's full path: no thread's.
+pub fn a_foreign_operation(operation: &u8) -> Result<u8, String> {
+    windows_future::IAsyncOperation::join(operation).map_err(|error| error.message())
+}
+
+/// A foreign operation's `join` through an imported name, not the full path: refused.
+pub fn a_foreign_operation_imported(operation: &u8) -> Result<u8, String> {
+    use windows_future::IAsyncOperation as Operated;
+    Operated::join(operation).map_err(|error| error.message())
+}
+
+/// A binding named `join` and its value: names, no join.
+pub fn a_binding_named_join() -> u8 {
+    let (join, run) = (1, 2);
+    join + run
+}
+
+/// A `join` with arguments, in code and in a macro: no thread's.
+pub fn with_arguments() -> String {
+    let folder = std::path::Path::new("一个").join("folder");
+    format!("{}", ["a", "b"].join(&folder.display().to_string()))
 }
 
 #[cfg(test)]
