@@ -227,6 +227,19 @@ struct Receipt {
     until: Instant,
 }
 
+/// **What a held trial release comes to** ([`Quit::settle_held_release`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum HeldRelease {
+    /// Nothing is held, or the phases still run.
+    Nothing,
+    /// The quit was cancelled: perform these, as `App::release_trial_writes` does.
+    Perform(Vec<crate::update_trial::Writer>),
+    /// The quit goes on to its way out: the session's release is moot and the launch
+    /// backup is skipped (`persist::SessionStore::forgo_launch_backup`); these, the rest,
+    /// are released.
+    Proceed(Vec<crate::update_trial::Writer>),
+}
+
 /// **Why a document the documents phase sent had no answer by
 /// [`QUIT_DOCUMENTS_BY`]**, as `diagnostics.log` says it.
 const NO_ANSWER_IN_TIME: &str = "its write had no answer within the quit's time";
@@ -549,6 +562,10 @@ pub struct Quit {
     unsaved: Vec<Unsaved>,
     /// The cancellation this quit ended in, until the driver takes it.
     cancelled: Option<Cancelled>,
+    /// **An update trial's write release that arrived while this quit held the storage
+    /// worker** (round 3): held, not performed, until the quit's outcome settles it
+    /// ([`Self::settle_held_release`]).
+    held_release: Vec<crate::update_trial::Writer>,
     /// The update this quit is running for, if it is one (U-21).
     update: Option<Update>,
     /// What the card names, collected once when the question was put.
@@ -626,6 +643,7 @@ impl Quit {
             documents_from: None,
             unsaved: Vec::new(),
             cancelled: None,
+            held_release: Vec::new(),
             update,
             names,
             hover: None,
@@ -1006,6 +1024,47 @@ impl Quit {
             chosen: false,
         });
         self.phase = Phase::Abandoned;
+    }
+
+    /// **An update trial's write release, while this quit may hold the storage worker**
+    /// (T-QUIT-DOCUMENTS round 3): answers what is to be released now. While the
+    /// documents or recovery phase holds the worker, nothing is — the release is held,
+    /// owed, and queues nothing among the documents, their copies and the session write
+    /// (the trial's receipt went ahead of them; its release waits for the quit's outcome).
+    /// At any other step it is released as it arrives.
+    pub(crate) fn trial_release(
+        &mut self,
+        writers: Vec<crate::update_trial::Writer>,
+    ) -> Vec<crate::update_trial::Writer> {
+        if self.holds_the_storage_worker() {
+            self.held_release.extend(writers);
+            return Vec::new();
+        }
+        writers
+    }
+
+    /// **What becomes of a held release, once the quit's outcome is known** (round 3):
+    /// cancelled — the window stays, and the release is performed as it would have been;
+    /// past the two phases toward the way out — its session half is moot, because the
+    /// quit's own final session write is the session document of record and the launch
+    /// backup is skipped for this run, and the rest of it (a document a commit in the
+    /// recovery phase made owed, the toast identity, …) is released then, behind the
+    /// copies and before the session write. Nothing while the phases run, or with
+    /// nothing held.
+    pub(crate) fn settle_held_release(&mut self) -> HeldRelease {
+        if self.held_release.is_empty() || self.holds_the_storage_worker() {
+            return HeldRelease::Nothing;
+        }
+        let held = std::mem::take(&mut self.held_release);
+        if self.phase == Phase::Abandoned {
+            HeldRelease::Perform(held)
+        } else {
+            HeldRelease::Proceed(
+                held.into_iter()
+                    .filter(|writer| *writer != crate::update_trial::Writer::Session)
+                    .collect(),
+            )
+        }
     }
 
     /// **The cancellation this quit ended in**, taken once, for its card and its

@@ -18859,6 +18859,65 @@ fn keep_unsaved_edits_over(
         .collect()
 }
 
+/// **The stores a trial's release writes through** (T-QUIT-DOCUMENTS round 3): the
+/// session's and the four hand-editable documents', borrowed for one release.
+struct TrialStores<'a> {
+    session: &'a mut persist::SessionStore,
+    settings: &'a mut persist::SettingsStore,
+    keybindings: &'a mut persist::KeybindingsStore,
+    profiles: &'a mut persist::ProfilesStore,
+    pins: &'a mut pins::PinsStore,
+}
+
+/// **One writer an update's trial held back, run now** (`update_trial`, F-7) — the
+/// whole of [`App::release_trial_writes`] for one writer.
+fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'_>) {
+    use update_trial::Writer;
+    match writer {
+        // The folder is in use; its move from the old name is the next
+        // start's, which makes it as every start does.
+        Writer::DataFolderMove => {}
+        Writer::DataFolder => {
+            let _ = std::fs::create_dir_all(persist::storage_dir());
+        }
+        Writer::RefusedCopies => update_trial::keep_owed_copies(),
+        Writer::Session => stores.session.release_trial(),
+        Writer::Settings => stores.settings.release_trial(),
+        Writer::Keybindings => stores.keybindings.release_trial(),
+        Writer::Profiles => stores.profiles.release_trial(),
+        Writer::Pins => stores.pins.release_trial(),
+        Writer::UpdateCheck => update::release_trial(),
+        Writer::ProfileMigration => shell_integration::begin_startup_migration(),
+        Writer::BashScript => {
+            let _ = shell_integration::script_path();
+        }
+        Writer::ZshScripts => {
+            let _ = shell_integration::zdotdir_path();
+        }
+        // On a worker: the window thread waits for no disk here either.
+        Writer::PowerShellScript => shell_integration::begin_powershell_script_preparation(),
+        Writer::PsReadLineUpgrade => {
+            if let Some(documents) = psreadline::documents_directory()
+                && let Some(replacement) = psreadline::upgrade_recorded(
+                    &documents,
+                    &persist::storage_dir(),
+                    stores.settings.loaded().psreadline_invite,
+                )
+            {
+                eprintln!("{}", replacement.log_line());
+            }
+        }
+        Writer::ExplorerRepair => explorer_menu::begin_probe(),
+        Writer::ToastIdentity => {
+            if let Err(error) = bt_platform::Notifier::register_identity() {
+                eprintln!("BT_UPDATE_TRIAL the toast identity was not written: {error}");
+            }
+        }
+        // On its worker, as at any start's first frame.
+        Writer::RecoveredAnnouncement => recovered::ask(&persist::storage_dir()),
+    }
+}
+
 /// **The cancelled quit's card, raised on `toasts`** (T-QUIT-DOCUMENTS; design note
 /// 2026-10-11, revision (d)2): an Error card anchored to the window, its statement the
 /// files that could not be saved — at most three named, then how many more — and its
@@ -54214,53 +54273,15 @@ impl App {
     /// into it, the copies of refused documents before the documents that would
     /// replace them. What is written is what this process holds now.
     fn release_trial_writes(&mut self, writers: Vec<update_trial::Writer>) {
-        use update_trial::Writer;
+        let mut stores = TrialStores {
+            session: &mut self.session_store,
+            settings: &mut self.settings_store,
+            keybindings: &mut self.keybindings_store,
+            profiles: &mut self.profiles_store,
+            pins: &mut self.pins_store,
+        };
         for writer in writers {
-            match writer {
-                // The folder is in use; its move from the old name is the next
-                // start's, which makes it as every start does.
-                Writer::DataFolderMove => {}
-                Writer::DataFolder => {
-                    let _ = std::fs::create_dir_all(persist::storage_dir());
-                }
-                Writer::RefusedCopies => update_trial::keep_owed_copies(),
-                Writer::Session => self.session_store.release_trial(),
-                Writer::Settings => self.settings_store.release_trial(),
-                Writer::Keybindings => self.keybindings_store.release_trial(),
-                Writer::Profiles => self.profiles_store.release_trial(),
-                Writer::Pins => self.pins_store.release_trial(),
-                Writer::UpdateCheck => update::release_trial(),
-                Writer::ProfileMigration => shell_integration::begin_startup_migration(),
-                Writer::BashScript => {
-                    let _ = shell_integration::script_path();
-                }
-                Writer::ZshScripts => {
-                    let _ = shell_integration::zdotdir_path();
-                }
-                // On a worker: the window thread waits for no disk here either.
-                Writer::PowerShellScript => {
-                    shell_integration::begin_powershell_script_preparation()
-                }
-                Writer::PsReadLineUpgrade => {
-                    if let Some(documents) = psreadline::documents_directory()
-                        && let Some(replacement) = psreadline::upgrade_recorded(
-                            &documents,
-                            &persist::storage_dir(),
-                            self.settings_store.loaded().psreadline_invite,
-                        )
-                    {
-                        eprintln!("{}", replacement.log_line());
-                    }
-                }
-                Writer::ExplorerRepair => explorer_menu::begin_probe(),
-                Writer::ToastIdentity => {
-                    if let Err(error) = bt_platform::Notifier::register_identity() {
-                        eprintln!("BT_UPDATE_TRIAL the toast identity was not written: {error}");
-                    }
-                }
-                // On its worker, as at any start's first frame.
-                Writer::RecoveredAnnouncement => recovered::ask(&persist::storage_dir()),
-            }
+            release_trial_writer(writer, &mut stores);
         }
     }
 
@@ -66651,6 +66672,17 @@ impl FolioApp {
                     // photographs in the turn it began, and an update's quit then goes on turning
                     // while it waits for its receipt.
                     launch_wire::set_admitting(false);
+                    // **A trial release held through the two phases is settled now**
+                    // (T-QUIT-DOCUMENTS round 3): its session half is moot — this quit's own
+                    // final session write is the document of record, with no launch backup
+                    // ahead of it — and the rest of it is released.
+                    if let Some(app) = self.app.as_mut()
+                        && let Some(quit::HeldRelease::Proceed(rest)) =
+                            app.quit.as_mut().map(quit::Quit::settle_held_release)
+                    {
+                        app.session_store.forgo_launch_backup();
+                        app.release_trial_writes(rest);
+                    }
                     self.for_each_window(|runtime| runtime.photograph_for_quit())?;
                     self.report_to_quit(quit::Quit::photographed);
                 }
@@ -66827,7 +66859,13 @@ impl FolioApp {
                     let mut cancelled = None;
                     if let Some(app) = self.app.as_mut() {
                         cancelled = app.quit.as_mut().and_then(quit::Quit::take_cancelled);
+                        // **A trial release held through the phases runs now** (round 3): the
+                        // window stays, so the backup and the session go as they would have.
+                        let held = app.quit.as_mut().map(quit::Quit::settle_held_release);
                         app.quit = None;
+                        if let Some(quit::HeldRelease::Perform(writers)) = held {
+                            app.release_trial_writes(writers);
+                        }
                     }
                     if let Some(cancelled) = cancelled {
                         self.say_the_cancelled_quit(cancelled)?;
@@ -67997,7 +68035,15 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // done (U-32): the card follows the journal's final phase.
             AppEvent::TrialWritesReleased => {
                 if let Some(app) = self.app.as_mut() {
-                    app.release_trial_writes(update_trial::take_released());
+                    // **Held while a quit holds the storage worker** (T-QUIT-DOCUMENTS round 3):
+                    // the trial's receipt went ahead of the documents and their copies; its
+                    // release waits for the quit's outcome (`Quit::settle_held_release`).
+                    let released = update_trial::take_released();
+                    let now = match app.quit.as_mut() {
+                        Some(quit) => quit.trial_release(released),
+                        None => released,
+                    };
+                    app.release_trial_writes(now);
                     if app.update_job.after_commit(version::VERSION) {
                         diagnostics::note(
                             "Folio: update job — the update this launch said was incomplete is committed",

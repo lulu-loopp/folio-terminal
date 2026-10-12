@@ -1909,6 +1909,28 @@ impl SessionStore {
         Err(SaveRefusal::TimedOut(said))
     }
 
+    /// **Skip this run's launch backup** (T-QUIT-DOCUMENTS round 3): a quit that goes on
+    /// to its way out with an update trial's write release still held makes its own final
+    /// session write the session document of record, and nothing goes ahead of it. Said once.
+    pub(crate) fn forgo_launch_backup(&mut self) {
+        if self.launch_backup.take().is_some() {
+            crate::diagnostics::note(&format!(
+                "BT_PERSIST {PREVIOUS_SESSION_FILE_NAME} backup skipped: the quit's own session \
+                 write is this run's document of record"
+            ));
+        }
+    }
+
+    /// A launch backup owed from `source`, as an update trial holds one — for a test.
+    #[cfg(test)]
+    pub(crate) fn owing_a_launch_backup(&mut self, source: PathBuf, bytes: &[u8]) {
+        self.launch_backup = Some(SessionBackupRequest {
+            path: source.with_file_name(PREVIOUS_SESSION_FILE_NAME),
+            source,
+            bytes: Arc::from(bytes),
+        });
+    }
+
     /// **Hand the final document over as a named generation, and do not wait for it** — an
     /// update's quit (0.4.6 U-21, `docs/plans/design/self-update-2026-09-16.md` §C.3).
     ///
@@ -2114,6 +2136,8 @@ pub(crate) enum ScriptedJob {
     Read,
     /// A session document.
     Session,
+    /// The launch's session backup.
+    Backup,
     /// An update trial's receipt.
     Receipt,
     /// Anything else the worker takes.
@@ -2141,9 +2165,8 @@ impl ScriptedJobs {
             StorageJob::Read(_) => ScriptedJob::Read,
             StorageJob::Session(_) => ScriptedJob::Session,
             StorageJob::Receipt { .. } => ScriptedJob::Receipt,
-            StorageJob::SessionBackup(_) | StorageJob::Handoff { .. } | StorageJob::Ahead => {
-                ScriptedJob::Other
-            }
+            StorageJob::SessionBackup(_) => ScriptedJob::Backup,
+            StorageJob::Handoff { .. } | StorageJob::Ahead => ScriptedJob::Other,
         })
     }
 }
