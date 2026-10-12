@@ -963,14 +963,11 @@ fn math_selection_wash_slabs(
 /// [`primary_font_family`] — because a comparison against a constant would
 /// answer "no" for the face actually on screen.
 ///
-/// One per platform, because the constant is a statement about a *file list*
-/// and each platform has its own. Menlo is macOS's Consolas here: it has
-/// shipped in `/System/Library/Fonts` since 10.6, it is what Terminal.app
-/// itself opens with, and it is not removable. SF Mono is the better-looking
-/// answer and is deliberately not this constant — it is offered first by
-/// [`terminal_font_system`]'s preference list, which asks the database whether
-/// a family is really there, because SF Mono's family name and its file have
-/// both moved between releases and a constant cannot check itself.
+/// One per platform, read off [`PLATFORM_FACES`]. Menlo is macOS's Consolas:
+/// it has shipped in `/System/Library/Fonts` since 10.6, it is what
+/// Terminal.app itself opens with, and it is not removable — and it is the
+/// face the grid opens in at startup *and* the face an empty choice returns
+/// to (owner ruling 2026-10-11, H2 Q8), so the two roads name one family.
 /// **`pub` since M2-4, and for one reader only.** `bt_platform`'s
 /// `DEFAULT_MONOSPACE_FAMILY` is the family the settings page's picker promises
 /// to have a row for, and that promise is only true if it names *this* — the
@@ -980,12 +977,43 @@ fn math_selection_wash_slabs(
 /// `the_default_family_is_the_one_the_renderer_draws`, in `bt-app`. Reading it
 /// is the whole of what this visibility is for; nothing else in the workspace
 /// may branch on it.
+pub const DEFAULT_PRIMARY_FONT_FAMILY: &str = PLATFORM_FACES.terminal;
+
+/// **The three faces this renderer draws with when nothing has chosen one**
+/// (owner ruling 2026-10-11 on H2 Q8; AUDIT-hardcode RND-1, RND-3): the grid's,
+/// the monochrome symbol face a text-presentation symbol is routed to, and the
+/// system's colour emoji face, tried before the embedded Noto Color Emoji.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PlatformFaces {
+    terminal: &'static str,
+    text_symbol: &'static str,
+    color_emoji: &'static str,
+}
+
+/// Windows: Consolas, Segoe UI Symbol, Segoe UI Emoji — the three files the
+/// Windows startup list loads (`consola*.ttf`, `seguisym.ttf`, `seguiemj.ttf`).
 #[cfg(target_os = "windows")]
-pub const DEFAULT_PRIMARY_FONT_FAMILY: &str = "Consolas";
+const PLATFORM_FACES: PlatformFaces = PlatformFaces {
+    terminal: "Consolas",
+    text_symbol: "Segoe UI Symbol",
+    color_emoji: "Segoe UI Emoji",
+};
+/// macOS: Menlo, Apple Symbols, Apple Color Emoji — each in
+/// `/System/Library/Fonts` on every release this build runs on.
 #[cfg(target_os = "macos")]
-pub const DEFAULT_PRIMARY_FONT_FAMILY: &str = "Menlo";
+const PLATFORM_FACES: PlatformFaces = PlatformFaces {
+    terminal: "Menlo",
+    text_symbol: "Apple Symbols",
+    color_emoji: "Apple Color Emoji",
+};
+/// Another Unix (not a shipped target): fontconfig's generic monospace word,
+/// Noto's symbol face, and the embedded Noto Color Emoji as the colour face.
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-pub const DEFAULT_PRIMARY_FONT_FAMILY: &str = "monospace";
+const PLATFORM_FACES: PlatformFaces = PlatformFaces {
+    terminal: "monospace",
+    text_symbol: "Noto Sans Symbols 2",
+    color_emoji: COLOR_EMOJI_FONT_FAMILY,
+};
 
 /// The family `Family::Monospace` resolves to right now.
 ///
@@ -997,8 +1025,8 @@ fn primary_font_family(font_system: &FontSystem) -> &str {
     font_system.db().family_name(&Family::Monospace)
 }
 const COLOR_EMOJI_FONT_FAMILY: &str = "Noto Color Emoji";
-const SEGOE_COLOR_EMOJI_FONT_FAMILY: &str = "Segoe UI Emoji";
-const TEXT_SYMBOL_FONT_FAMILY: &str = "Segoe UI Symbol";
+const SYSTEM_COLOR_EMOJI_FONT_FAMILY: &str = PLATFORM_FACES.color_emoji;
+const TEXT_SYMBOL_FONT_FAMILY: &str = PLATFORM_FACES.text_symbol;
 const NARROW_FALLBACK_SIDE_BEARING_EM: f32 = 0.05;
 const DOTTED_UNDERLINE_SEGMENT_LOGICAL_PX: f32 = 2.0;
 const NOTO_COLOR_EMOJI_BYTES: &[u8] = include_bytes!(concat!(
@@ -13299,8 +13327,8 @@ fn mono_cluster_family<'a>(
         PresentationRoute::TerminalText => terminal_grid_family(cluster, terminal_cjk_families),
         PresentationRoute::TextSymbol => Family::Name(TEXT_SYMBOL_FONT_FAMILY),
         PresentationRoute::ColorEmoji => {
-            if font_family_available(font_system, SEGOE_COLOR_EMOJI_FONT_FAMILY) {
-                Family::Name(SEGOE_COLOR_EMOJI_FONT_FAMILY)
+            if font_family_available(font_system, SYSTEM_COLOR_EMOJI_FONT_FAMILY) {
+                Family::Name(SYSTEM_COLOR_EMOJI_FONT_FAMILY)
             } else {
                 Family::Name(COLOR_EMOJI_FONT_FAMILY)
             }
@@ -15989,19 +16017,6 @@ fn terminal_cjk_family_chain(chosen: &str) -> impl Iterator<Item = &str> {
     )
 }
 
-/// The grid's face, most wanted first. Asked of the database rather than
-/// asserted, because only one of these is guaranteed.
-///
-/// `SF Mono` is the face a macOS terminal should be drawn in and the one Apple
-/// draws its own tools in. It is also the one that cannot be named with
-/// confidence: it has lived at `SFMono.ttf`, at `SFNSMono.ttf`, and inside
-/// Terminal.app's own bundle across releases. So it is asked for and not
-/// assumed. `Menlo` behind it is [`DEFAULT_PRIMARY_FONT_FAMILY`] and is always
-/// there; `Monaco` behind that is the pre-10.6 face, kept because it costs one
-/// line and answers a machine whose font book somebody has been editing.
-#[cfg(target_os = "macos")]
-const MACOS_MONOSPACE_FAMILIES: [&str; 3] = ["SF Mono", "Menlo", "Monaco"];
-
 /// The window chrome's UI face, most wanted first — the macOS reading of
 /// [`CHROME_SANS_FONT_FILES`], written as families rather than as files for the
 /// reason stated on [`terminal_font_system`].
@@ -16041,8 +16056,8 @@ impl Fallback for FolioMacFallback {
         &[
             ".AppleSystemUIFont",
             "Helvetica Neue",
-            "Apple Color Emoji",
-            "Apple Symbols",
+            SYSTEM_COLOR_EMOJI_FONT_FAMILY,
+            TEXT_SYMBOL_FONT_FAMILY,
         ]
     }
 
@@ -16133,10 +16148,10 @@ fn terminal_font_system() -> FontSystem {
     // chose — see [`drop_faces_with_no_scalable_em`], which is the whole of M2-5's font
     // half.
     drop_faces_with_no_scalable_em(&mut db);
-    db.set_monospace_family(
-        first_installed_family(&db, &MACOS_MONOSPACE_FAMILIES)
-            .unwrap_or(DEFAULT_PRIMARY_FONT_FAMILY),
-    );
+    // The face `set_terminal_font` returns to when nothing is chosen, so a
+    // window that has not read its settings yet and one whose settings name no
+    // family draw in one face (owner ruling 2026-10-11, H2 Q8).
+    db.set_monospace_family(DEFAULT_PRIMARY_FONT_FAMILY);
     // Without this the chrome's `Family::SansSerif` lands wherever the
     // database's first entry happens to be, which for this one is the embedded
     // emoji face — the failure `load_chrome_sans_family` exists to prevent on
@@ -16249,10 +16264,10 @@ fn shape_narrow_buffer_for_key<'a>(
             // [`color_emoji_box_px`], applied to the measured ink below. Keeping the two apart is
             // what lets the size rule change without moving a single cluster between faces.
             let trial_em_px = metrics.cell_height_px;
-            let segoe_family = Family::Name(SEGOE_COLOR_EMOJI_FONT_FAMILY);
+            let segoe_family = Family::Name(SYSTEM_COLOR_EMOJI_FONT_FAMILY);
             let mut family = Family::Name(COLOR_EMOJI_FONT_FAMILY);
             let mut trial = None;
-            if font_family_available(font_system, SEGOE_COLOR_EMOJI_FONT_FAMILY) {
+            if font_family_available(font_system, SYSTEM_COLOR_EMOJI_FONT_FAMILY) {
                 #[cfg(test)]
                 {
                     *color_emoji_trial_shapes = color_emoji_trial_shapes.saturating_add(1);
@@ -16268,7 +16283,7 @@ fn shape_narrow_buffer_for_key<'a>(
                     &segoe,
                     font_system,
                     swash_cache,
-                    SEGOE_COLOR_EMOJI_FONT_FAMILY,
+                    SYSTEM_COLOR_EMOJI_FONT_FAMILY,
                     trial_em_px,
                     trial_em_px,
                 ) {
@@ -16740,12 +16755,12 @@ fn shape_wide_buffer_for_key(
             // has always been asked at, and the fit below answers how large.
             let mut family = Family::Name(COLOR_EMOJI_FONT_FAMILY);
             let mut trial = None;
-            if font_family_available(font_system, SEGOE_COLOR_EMOJI_FONT_FAMILY) {
+            if font_family_available(font_system, SYSTEM_COLOR_EMOJI_FONT_FAMILY) {
                 #[cfg(test)]
                 {
                     *color_emoji_trial_shapes = color_emoji_trial_shapes.saturating_add(1);
                 }
-                let segoe_family = Family::Name(SEGOE_COLOR_EMOJI_FONT_FAMILY);
+                let segoe_family = Family::Name(SYSTEM_COLOR_EMOJI_FONT_FAMILY);
                 let segoe = shape_wide_buffer(
                     key,
                     font_system,
@@ -16757,7 +16772,7 @@ fn shape_wide_buffer_for_key(
                     &segoe,
                     font_system,
                     swash_cache,
-                    SEGOE_COLOR_EMOJI_FONT_FAMILY,
+                    SYSTEM_COLOR_EMOJI_FONT_FAMILY,
                     2.0 * metrics.cell_width_px,
                     metrics.cell_height_px,
                 ) {
@@ -20335,7 +20350,7 @@ mod tests {
     fn color_emoji_uses_segoe_for_supported_clusters_and_noto_for_missing_clusters() {
         let mut font_system = terminal_font_system();
         let metrics = CellMetrics::measure(&mut font_system, 1.5).unwrap();
-        let segoe_available = font_family_available(&font_system, SEGOE_COLOR_EMOJI_FONT_FAMILY);
+        let segoe_available = font_family_available(&font_system, SYSTEM_COLOR_EMOJI_FONT_FAMILY);
         for (text, uses_segoe_when_available) in
             [("👍🏽", true), ("☂️", true), ("🇺🇸", false), ("👨‍👩‍👧‍👦", true)]
         {
@@ -20349,12 +20364,12 @@ mod tests {
                 .flat_map(|run| run.glyphs.iter())
                 .collect::<Vec<_>>();
             let expected_family = if segoe_available && uses_segoe_when_available {
-                SEGOE_COLOR_EMOJI_FONT_FAMILY
+                SYSTEM_COLOR_EMOJI_FONT_FAMILY
             } else {
                 COLOR_EMOJI_FONT_FAMILY
             };
             let expected_glyph_count = if text == "👨‍👩‍👧‍👦"
-                && expected_family == SEGOE_COLOR_EMOJI_FONT_FAMILY
+                && expected_family == SYSTEM_COLOR_EMOJI_FONT_FAMILY
             {
                 4
             } else {
@@ -20407,7 +20422,7 @@ mod tests {
             assert_eq!(glyphs.len(), 1, "⚠ must shape as one glyph");
             assert_ne!(glyphs[0].glyph_id, 0, "⚠ must not be .notdef");
             assert!(
-                [SEGOE_COLOR_EMOJI_FONT_FAMILY, COLOR_EMOJI_FONT_FAMILY]
+                [SYSTEM_COLOR_EMOJI_FONT_FAMILY, COLOR_EMOJI_FONT_FAMILY]
                     .contains(&glyph_family(&font_system, glyphs[0]).as_str()),
                 "⚠ must bypass monochrome primary-font coverage"
             );
@@ -20531,7 +20546,7 @@ mod tests {
             .filter(|face| {
                 face.families
                     .iter()
-                    .any(|(family, _)| family == SEGOE_COLOR_EMOJI_FONT_FAMILY)
+                    .any(|(family, _)| family == SYSTEM_COLOR_EMOJI_FONT_FAMILY)
             })
             .map(|face| face.id)
             .collect::<Vec<_>>();
@@ -20540,7 +20555,7 @@ mod tests {
         }
         assert!(!font_family_available(
             &font_system,
-            SEGOE_COLOR_EMOJI_FONT_FAMILY
+            SYSTEM_COLOR_EMOJI_FONT_FAMILY
         ));
 
         let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
@@ -20582,7 +20597,7 @@ mod tests {
             trials_after_miss,
             u64::from(font_family_available(
                 &font_system,
-                SEGOE_COLOR_EMOJI_FONT_FAMILY
+                SYSTEM_COLOR_EMOJI_FONT_FAMILY
             ))
         );
 
@@ -28326,6 +28341,46 @@ mod tests {
             tabular_numerals: false,
             clip: None,
         }
+    }
+
+    /// The faces the owner ruled for this platform (2026-10-11, H2 Q8): the
+    /// grid, the symbol face, the colour emoji face.
+    #[cfg(target_os = "windows")]
+    const RULED_FACES: [&str; 3] = ["Consolas", "Segoe UI Symbol", "Segoe UI Emoji"];
+    #[cfg(target_os = "macos")]
+    const RULED_FACES: [&str; 3] = ["Menlo", "Apple Symbols", "Apple Color Emoji"];
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    const RULED_FACES: [&str; 3] = ["monospace", "Noto Sans Symbols 2", "Noto Color Emoji"];
+
+    /// RED (H2-NITS, owner ruling 2026-10-11 on H2 Q8; AUDIT-hardcode RND-1,
+    /// RND-3) — **this platform's default faces are the ruled ones, and the grid
+    /// opens in the face an empty choice returns to.**
+    ///
+    /// Menlo on a Mac at startup and after `set_terminal_font("")` alike (the
+    /// startup used to prefer SF Mono); Apple Symbols and Apple Color Emoji on a
+    /// Mac and Segoe UI Symbol and Segoe UI Emoji on Windows for the two routes
+    /// a symbol and a colour emoji take (both used to be Segoe everywhere).
+    ///
+    /// MUTATION: swap a default in this platform's `PLATFORM_FACES` row (Windows:
+    /// `text_symbol: "Segoe UI Emoji"`) — the table assertion goes red.
+    #[test]
+    fn the_default_faces_are_the_ones_ruled_for_this_platform() {
+        assert_eq!(
+            [
+                DEFAULT_PRIMARY_FONT_FAMILY,
+                TEXT_SYMBOL_FONT_FAMILY,
+                SYSTEM_COLOR_EMOJI_FONT_FAMILY
+            ],
+            RULED_FACES
+        );
+        // Another Unix leaves the grid's face to fontconfig's own `monospace`
+        // answer, which names a real family rather than the generic word.
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        assert_eq!(
+            primary_font_family(&terminal_font_system()),
+            DEFAULT_PRIMARY_FONT_FAMILY,
+            "the grid opens in the face an empty choice returns to"
+        );
     }
 
     /// RED (T-CARD-GRID-SYMBOL-CLIP, owner's report 2026-09-14; §7.1.6b′ ⑤) —
