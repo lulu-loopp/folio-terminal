@@ -160,3 +160,218 @@ fn a_write_fault_after_start_reaches_a_card() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The disk a stop keeps the owed documents on, as a test scripts it: the copy lands in
+/// the folder (the machine's own `preview::keep_in_recovered`) or is refused, and every
+/// line offered to `diagnostics.log` is recorded — and, refused, lost.
+struct ScriptedStopDisk {
+    refuse: bool,
+    offered: Vec<String>,
+    kept_lines: Vec<String>,
+}
+
+impl ScriptedStopDisk {
+    fn new(refuse: bool) -> Self {
+        Self {
+            refuse,
+            offered: Vec::new(),
+            kept_lines: Vec::new(),
+        }
+    }
+}
+
+impl StopDisk for ScriptedStopDisk {
+    fn keep(
+        &mut self,
+        folder: &Path,
+        name: &str,
+        bytes: &[u8],
+        at: SystemTime,
+    ) -> Result<PathBuf, String> {
+        if self.refuse {
+            return Err("拒绝 the volume refused the copy".to_owned());
+        }
+        preview::keep_in_recovered(folder, name, bytes, at)
+    }
+
+    fn note(&mut self, line: &str) {
+        self.offered.push(line.to_owned());
+        if !self.refuse {
+            self.kept_lines.push(line.to_owned());
+        }
+    }
+}
+
+/// The native channel, as a test hears it: every text it was asked to say. No box opens.
+#[derive(Default)]
+struct HeardNatively(Vec<String>);
+
+impl NativeSay for HeardNatively {
+    fn say(&mut self, text: &str) {
+        self.0.push(text.to_owned());
+    }
+}
+
+/// A folder for one test, and a settings store in it owing a change of the terminal face
+/// whose write is on a worker that never answers — the stop comes before it does.
+fn a_stop_with_an_owed_settings_change(
+    case: &str,
+) -> (PathBuf, persist::SettingsStore, persist::UnservedJobs) {
+    let root = bt_testpath::temp_path(&format!("bt-app-forced-stop-{case}"));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a private storage folder for this test");
+    let (lane, jobs) = persist::StorageLane::unserved();
+    let mut settings = persist::SettingsStore::at_on(root.join(persist::SETTINGS_FILE_NAME), lane);
+    assert!(settings.store(bt_persist::SettingsV1 {
+        terminal_font_family: "停止 Stopped Mono".to_owned(),
+        ..bt_persist::SettingsV1::default()
+    }));
+    (root, settings, jobs)
+}
+
+/// RED (T-QUIT-DOCUMENTS, revision (c)2) — **a forced stop keeps an owed `settings.json`
+/// change in `recovered`**, beside the preview edits the same stop keeps: the copy holds
+/// the change, landed create-new under the folder the next start announces, and
+/// `diagnostics.log` is offered where it is.
+///
+/// MUTATION: skip the stores in the forced stop's recovery step (in
+/// `keep_owed_documents_over`, keep no document) — nothing is in the folder.
+#[test]
+fn a_forced_stop_keeps_an_owed_settings_change_in_recovered() {
+    let (root, mut settings, _jobs) = a_stop_with_an_owed_settings_change("kept");
+    let folder = root.join(preview::RECOVERED_FOLDER);
+    let owed = document_request::QuitDocument::owed_bytes(&settings)
+        .expect("the change is owed")
+        .expect("and serializes");
+    let mut disk = ScriptedStopDisk::new(false);
+    let mut heard = HeardNatively::default();
+    let kept = keep_owed_documents_over(
+        &mut [&mut settings],
+        &folder,
+        SystemTime::UNIX_EPOCH,
+        &mut disk,
+        &mut heard,
+    );
+    let [DocumentKept::Kept { file, copy }] = kept.as_slice() else {
+        panic!("one store, kept: {kept:?}");
+    };
+    assert_eq!(*file, persist::SETTINGS_FILE_NAME);
+    assert_eq!(
+        copy.parent(),
+        Some(folder.as_path()),
+        "in the recovered folder"
+    );
+    assert_eq!(std::fs::read(copy).expect("the copy is on disk"), owed);
+    assert!(
+        disk.kept_lines.iter().any(
+            |line| line.contains("settings.json") && line.contains(&copy.display().to_string())
+        ),
+        "diagnostics.log names the file and the copy: {:?}",
+        disk.kept_lines
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// RED (T-QUIT-DOCUMENTS, revision (d)3) — **a copy the disk refused is `Lost`, and said
+/// through the native channel**: the disk refuses the copy and the line in
+/// `diagnostics.log` alike, and the system's own box is asked once, naming the file.
+///
+/// MUTATION: report `Lost` to `diagnostics.log` only (the preview's behaviour today: drop
+/// the `say` in `keep_owed_documents_over`) — the loss is said nowhere that survives.
+#[test]
+fn a_refused_recovery_copy_is_lost_and_said_natively() {
+    let (root, mut settings, _jobs) = a_stop_with_an_owed_settings_change("lost");
+    let mut disk = ScriptedStopDisk::new(true);
+    let mut heard = HeardNatively::default();
+    let kept = keep_owed_documents_over(
+        &mut [&mut settings],
+        &root.join(preview::RECOVERED_FOLDER),
+        SystemTime::UNIX_EPOCH,
+        &mut disk,
+        &mut heard,
+    );
+    assert!(
+        matches!(kept.as_slice(), [DocumentKept::Lost { file, .. }] if *file == persist::SETTINGS_FILE_NAME),
+        "the store answers Lost: {kept:?}"
+    );
+    assert_eq!(
+        disk.offered.len(),
+        1,
+        "diagnostics.log was still offered the line"
+    );
+    assert!(disk.kept_lines.is_empty(), "and refused it");
+    assert_eq!(
+        heard.0,
+        vec![i18n::stopped_changes_lost(&[persist::SETTINGS_FILE_NAME])],
+        "asked once, naming settings.json"
+    );
+    assert_eq!(
+        i18n::stopped_changes_lost_in(i18n::Lang::English, &[persist::SETTINGS_FILE_NAME]),
+        "Folio stopped. A change to settings.json could not be kept."
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// RED (T-QUIT-DOCUMENTS, revision (d)3) — **several lost stores are one native message**,
+/// naming every file.
+///
+/// MUTATION: one box per store (in `keep_owed_documents_over`, `say` each `Lost` as it is
+/// answered) — two boxes.
+#[test]
+fn several_lost_stores_are_one_native_message() {
+    let (root, mut settings, _jobs) = a_stop_with_an_owed_settings_change("several");
+    let (lane, _pins_jobs) = persist::StorageLane::unserved();
+    let mut pins = pins::PinsStore::at_on(root.join(pins::PINS_FILE_NAME), lane);
+    assert!(pins.toggle(bt_persist::PinKind::Folder, "项目/folio 笔记"));
+    let mut disk = ScriptedStopDisk::new(true);
+    let mut heard = HeardNatively::default();
+    let kept = keep_owed_documents_over(
+        &mut [&mut settings, &mut pins],
+        &root.join(preview::RECOVERED_FOLDER),
+        SystemTime::UNIX_EPOCH,
+        &mut disk,
+        &mut heard,
+    );
+    assert_eq!(kept.len(), 2, "both lost: {kept:?}");
+    assert_eq!(
+        heard.0,
+        vec![i18n::stopped_changes_lost(&[
+            persist::SETTINGS_FILE_NAME,
+            pins::PINS_FILE_NAME
+        ])],
+        "one message for both"
+    );
+    assert_eq!(
+        i18n::stopped_changes_lost_in(
+            i18n::Lang::English,
+            &[persist::SETTINGS_FILE_NAME, pins::PINS_FILE_NAME]
+        ),
+        "Folio stopped. Changes to settings.json and pins.json could not be kept."
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// RED (T-QUIT-DOCUMENTS, revision (d)3) — **a copy that landed raises no native message**:
+/// the next start says where it is, as it says the preview's.
+///
+/// MUTATION: say every outcome natively (in `keep_owed_documents_over`, `say` whenever any
+/// store was kept or lost) — a box for a change that is safe.
+#[test]
+fn a_landed_recovery_copy_raises_no_native_message() {
+    let (root, mut settings, _jobs) = a_stop_with_an_owed_settings_change("landed");
+    let mut disk = ScriptedStopDisk::new(false);
+    let mut heard = HeardNatively::default();
+    let kept = keep_owed_documents_over(
+        &mut [&mut settings],
+        &root.join(preview::RECOVERED_FOLDER),
+        SystemTime::UNIX_EPOCH,
+        &mut disk,
+        &mut heard,
+    );
+    assert!(
+        matches!(kept.as_slice(), [DocumentKept::Kept { .. }]),
+        "{kept:?}"
+    );
+    assert!(heard.0.is_empty(), "no box: {:?}", heard.0);
+    let _ = std::fs::remove_dir_all(&root);
+}

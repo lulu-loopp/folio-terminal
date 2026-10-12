@@ -18882,6 +18882,140 @@ fn raise_cancelled_quit_card_on(
     )
 }
 
+/// **What became of one owed hand-editable document on a stop that cannot ask**
+/// (T-QUIT-DOCUMENTS; design note 2026-10-11, revision (d)3).
+///
+/// [`preview::Kept`]'s shape, as a sibling and not that type: a preview buffer is
+/// first written back to its own file and only copied when the file refuses, so
+/// each of its answers carries the buffer's name and the file's refusal. A store's
+/// document is never written to its file on this road — the storage worker that
+/// writes it may be the thing that is stuck — so there is no refusal to carry,
+/// and the file's name is the document's name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DocumentKept {
+    /// The change is in `copy`, in the `recovered` folder: the file flushed and
+    /// the folder flushed. The next start says where.
+    Kept { file: &'static str, copy: PathBuf },
+    /// No copy could be made, and why: the change went with the process.
+    Lost { file: &'static str, error: String },
+}
+
+impl DocumentKept {
+    /// **The `diagnostics.log` line**: which file, and where its change is — the
+    /// copy, or nowhere and why.
+    fn line(&self) -> String {
+        match self {
+            Self::Kept { file, copy } => format!(
+                "{APP_NAME} stopped with a change to {file} that was not saved: it is in {}",
+                copy.display()
+            ),
+            Self::Lost { file, error } => format!(
+                "{APP_NAME} stopped with a change to {file} that was not saved, and no copy \
+                 could be made ({error}); the change is lost"
+            ),
+        }
+    }
+}
+
+/// **The disk a stop that cannot ask keeps the owed documents on**: the copy into
+/// the `recovered` folder, and the line `diagnostics.log` is asked to take. A seam,
+/// so a test can refuse both without a disk that refuses.
+trait StopDisk {
+    /// Keep `bytes` as a copy named for `name` in `folder`.
+    fn keep(
+        &mut self,
+        folder: &Path,
+        name: &str,
+        bytes: &[u8],
+        at: SystemTime,
+    ) -> Result<PathBuf, String>;
+    /// Ask `diagnostics.log` to take `line`. Not relied on: the disk that refused
+    /// the copy may refuse this too.
+    fn note(&mut self, line: &str);
+}
+
+/// The machine's own disk: [`preview::keep_in_recovered`] and
+/// [`diagnostics::note`].
+struct TheDisk;
+
+impl StopDisk for TheDisk {
+    fn keep(
+        &mut self,
+        folder: &Path,
+        name: &str,
+        bytes: &[u8],
+        at: SystemTime,
+    ) -> Result<PathBuf, String> {
+        preview::keep_in_recovered(folder, name, bytes, at)
+    }
+
+    fn note(&mut self, line: &str) {
+        diagnostics::note(line);
+    }
+}
+
+/// **The channel a stop says a lost change through**: one that needs no file, no
+/// data directory and no renderer of Folio's, so it survives the failures that
+/// silence the other two (revision (d)3).
+trait NativeSay {
+    fn say(&mut self, text: &str);
+}
+
+/// The operating system's own message box ([`bt_platform::message_box`]): on a
+/// stop the windows are being taken down and the renderer may be what failed, so,
+/// as before the first window, there is no window to put a card on.
+struct SystemBox;
+
+impl NativeSay for SystemBox {
+    fn say(&mut self, text: &str) {
+        bt_platform::message_box(APP_NAME, text);
+    }
+}
+
+/// **Keep every owed hand-editable document on a stop that cannot ask**
+/// (T-QUIT-DOCUMENTS; revisions (c)2 and (d)3): each store's owed `desired`
+/// document is written into `folder` — the data directory's `recovered` folder,
+/// beside the preview edits the same stop keeps — and answers [`DocumentKept`].
+/// Each answer's line is offered to `diagnostics.log`; then **every `Lost`, said
+/// once and together, through `say`**. A stop that lost nothing says nothing: a
+/// copy that landed is said at the next start, as the preview's are
+/// (`recovered`).
+fn keep_owed_documents_over(
+    documents: &mut [&mut dyn document_request::QuitDocument],
+    folder: &Path,
+    at: SystemTime,
+    disk: &mut impl StopDisk,
+    say: &mut impl NativeSay,
+) -> Vec<DocumentKept> {
+    let kept: Vec<DocumentKept> = documents
+        .iter()
+        .filter_map(|document| {
+            let file = document.file();
+            let bytes = document.owed_bytes()?;
+            Some(
+                match bytes.and_then(|bytes| disk.keep(folder, file, &bytes, at)) {
+                    Ok(copy) => DocumentKept::Kept { file, copy },
+                    Err(error) => DocumentKept::Lost { file, error },
+                },
+            )
+        })
+        .collect();
+    for document in &kept {
+        disk.note(&document.line());
+    }
+    let lost: Vec<&str> = kept
+        .iter()
+        .filter_map(|document| match document {
+            DocumentKept::Lost { file, .. } => Some(*file),
+            DocumentKept::Kept { .. } => None,
+        })
+        .collect();
+    if !lost.is_empty() {
+        say.say(&i18n::stopped_changes_lost(&lost));
+    }
+    kept
+}
+
 /// **What an answer to one of the two exits comes to over the asking window's
 /// tabs** (B1; T-SUMMON-DIRTY-PREVIEW): the window whose close the loop is asked
 /// to re-run — `closes`, the window itself for a shut and the run's last ordinary
@@ -67037,6 +67171,20 @@ impl FolioApp {
             runtime.keep_unsaved_edits(&recovery);
             Ok(())
         })?;
+        // **And the four hand-editable documents' owed changes** (T-QUIT-DOCUMENTS;
+        // revisions (c)2 and (d)3), into the same folder — and every one that could be kept
+        // nowhere said through the system's own box, before a window closes.
+        if let Some(app) = self.app.as_mut() {
+            app.with_documents(|documents| {
+                keep_owed_documents_over(
+                    documents,
+                    &recovery,
+                    SystemTime::now(),
+                    &mut TheDisk,
+                    &mut SystemBox,
+                )
+            });
+        }
         self.for_each_window(|runtime| runtime.close_window(true))
     }
 

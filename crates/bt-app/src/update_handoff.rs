@@ -986,6 +986,41 @@ mod tests {
                  {application_boxes:?}"
             );
         }
+        // **Every caller of the application's box, each with why it may raise one** — the box
+        // is the product's one modal, allowed only where there is no window to put a card on.
+        let allowed = [
+            (
+                "crate::announce_panic",
+                "the panic hook, when the resident run has no console to write to",
+            ),
+            (
+                "crate::say_at_the_front_door",
+                "a launch that is about to exit and has no console to write to",
+            ),
+            (
+                "crate::SystemBox::say",
+                "a controlled stop, before its windows close, saying the configuration changes \
+                 it could keep neither in their files nor in `recovered` (T-QUIT-DOCUMENTS, \
+                 design note 2026-10-11 revision (d)3)",
+            ),
+        ];
+        let mut every_box: Vec<String> = search(needle!("bt_platform::message_box("))
+            .in_the_product(index)
+            .owners(index)
+            .into_keys()
+            .map(|identity| match identity.type_owner {
+                Some(owner) => format!("{}::{owner}::{}", identity.module_path, identity.name),
+                None => format!("{}::{}", identity.module_path, identity.name),
+            })
+            .collect();
+        every_box.sort();
+        every_box.dedup();
+        let mut allowed: Vec<String> = allowed.map(|(caller, _why)| caller.to_owned()).to_vec();
+        allowed.sort();
+        assert_eq!(
+            every_box, allowed,
+            "the application's box is raised only where the table above says why"
+        );
         assert_eq!(
             callers(search(needle!("bt_platform::standalone_alert("))),
             ["leave_armed", "show_here"],
