@@ -1335,6 +1335,9 @@ text_entries! {
     ProfilesEnvAdd,
     ProfilesEnvName,
     ProfilesEnvValue,
+    /// A ghost row's value when it is each pane's own (the attention wire's
+    /// address and capability), which a profile cannot show (H2-NITS).
+    ProfilesEnvPerPane,
     /// `Auto`, `On`, `Off` — the hyperlink answer's three, where `Auto` is the
     /// terminal's own declaration and the other two are this profile overruling
     /// it.
@@ -4137,6 +4140,11 @@ impl Text {
             Self::ProfilesEnvAdd => pick(lang, "Add", "添加"),
             Self::ProfilesEnvName => pick(lang, "Name", "名称"),
             Self::ProfilesEnvValue => pick(lang, "Value", "值"),
+            Self::ProfilesEnvPerPane => pick(
+                lang,
+                "Set per pane",
+                "Set per pane", // zh: pending H2-NITS
+            ),
             Self::ProfilesAuto => pick(lang, "Auto", "自动"),
             Self::ProfilesOn => pick(lang, "On", "开"),
             Self::ProfilesOff => pick(lang, "Off", "关"),
@@ -6230,6 +6238,10 @@ impl Text {
         (Self::SeatOverflowOne, HostPlatform::MacOs),
         (Self::SeatOverflowMany, HostPlatform::Windows),
         (Self::SeatOverflowMany, HostPlatform::MacOs),
+        // zh: pending H2-NITS — a Profiles ghost row's value that each pane has
+        // its own of.
+        (Self::ProfilesEnvPerPane, HostPlatform::Windows),
+        (Self::ProfilesEnvPerPane, HostPlatform::MacOs),
     ];
 }
 

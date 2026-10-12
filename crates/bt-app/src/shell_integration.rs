@@ -1979,11 +1979,8 @@ const LOCALE_VARIABLES: [&str; 3] = ["LC_ALL", "LC_CTYPE", "LANG"];
 /// that exports `LANG` is read by the shell this declaration starts, so the
 /// person who set one keeps it.
 ///
-/// **The Profiles page's ghost rows do not list this yet** — see
-/// [`declared_environment`], which answers from an integration alone and has no
-/// machine to ask. That page is drawn by a settings surface whose own port is a
-/// later ticket, and a ghost row that claimed a locale variable for a window
-/// that had inherited one would be the page saying something the spawn does not.
+/// The Profiles page lists what this declares through [`declared_environment`],
+/// which composes the same command for the same environment.
 fn locale_declaration(
     system: Option<&LocaleDeclaration>,
     environment: &dyn ShellEnvironment,
@@ -2060,29 +2057,65 @@ pub fn declares_hyperlinks(profile: &Profile) -> bool {
         .is_none_or(|(_, value)| value == bt_pty::TERM_PROGRAM)
 }
 
-/// The rows the editor's environment table draws on the reader's behalf —
-/// **what this terminal itself will say to a session of this profile** (plan
-/// §1.7, user ruling 2026-08-17 Q7).
+/// One value the Profiles page shows for a variable this terminal sets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeclaredValue {
+    /// The value every session of the profile is given.
+    Said(String),
+    /// A value of each pane's own — its address on the attention wire and its
+    /// capability — which a profile, having no pane, cannot show.
+    PerPane,
+}
+
+/// **Every variable this terminal sets for a session of `profile`, as the
+/// spawn sets it** (owner ruling 2026-10-11 on H2 Q4; AUDIT-hardcode SHL-S1,
+/// SET-26) — the rows the editor's environment table draws on the reader's
+/// behalf (plan §1.7, user ruling 2026-08-17 Q7), above the profile's own.
 ///
-/// Derived rather than a constant list, because a constant list was already
-/// wrong in one place: `FORCE_HYPERLINK` is the one declaration this module does
-/// *not* make for a PowerShell — its own script is the half that says it, and
-/// saying it from both ends would be two places to change with one silently
-/// redundant. A ghost drawn there would be this page pretending, which is what
-/// this page exists to stop.
+/// Read off the launch's own composition rather than kept as a list: the
+/// command [`shell_command`] makes for the profile, the attention wire's
+/// variables ([`crate::attention_wire::pane_environment`]), and
+/// [`bt_pty::terminal_declarations`], which adds the identity declarations
+/// (`TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, and `COLORTERM`/`TERM` unless a
+/// layer names `NO_COLOR`) and takes away every name the profile's own layer
+/// sets. That is the layer rule (`profiles::Profile::env`): the profile's rows
+/// are written last and win, so a name the reader has a row for is not a
+/// declaration of this terminal's.
 ///
-/// The reader's own rows are not filtered out here: the caller knows which names
-/// it holds, and a ghost is dropped by the surface that can see both lists
-/// (`settings::EditorSubject`).
+/// `environment` is this process's own; a pane's birth re-derives the
+/// declarations that depend on it from the account's current environment
+/// ([`derive_environment_for_birth`]) with the same functions, so a value the
+/// account changed since this process started shows the launch-time answer.
 #[must_use]
-pub fn declared_environment(integration: Integration) -> Vec<(&'static str, &'static str)> {
-    let mut declared = vec![
-        ("TERM_PROGRAM", bt_pty::TERM_PROGRAM),
-        ("COLORTERM", "truecolor"),
-    ];
-    if integration != Integration::PowerShellOptIn {
-        declared.push((FORCE_HYPERLINK, "1"));
-    }
+pub fn declared_environment(
+    profile: &Profile,
+    scripts: Scripts<'_>,
+    environment: &dyn ShellEnvironment,
+    endpoint: Option<&'static str>,
+) -> Vec<(String, DeclaredValue)> {
+    let command = shell_command(profile, &[], scripts, environment);
+    let said = |value: &OsStr| DeclaredValue::Said(value.to_string_lossy().into_owned());
+    let mut declared: Vec<(String, DeclaredValue)> =
+        bt_pty::terminal_declarations(&command.environment, &command.profile_environment)
+            .into_iter()
+            .map(|(name, value)| (name.to_string_lossy().into_owned(), said(&value)))
+            .collect();
+    declared.extend(
+        crate::attention_wire::pane_environment(
+            endpoint,
+            DeclaredValue::PerPane,
+            DeclaredValue::PerPane,
+            |name| said(OsStr::new(name)),
+        )
+        .into_iter()
+        .filter(|(name, _)| {
+            !command
+                .profile_environment
+                .iter()
+                .any(|(mine, _)| bt_pty::same_environment_name(mine, OsStr::new(name)))
+        })
+        .map(|(name, value)| (name.to_owned(), value)),
+    );
     declared
 }
 
@@ -9692,31 +9725,118 @@ mod tests {
         )));
     }
 
-    /// PIN - **the editor's ghosts are what this terminal will actually say.**
+    /// RED (H2-NITS, owner ruling 2026-10-11 on H2 Q4; AUDIT-hardcode SHL-S1,
+    /// SET-26) - **the editor's ghosts are every variable the launch gives a
+    /// session of the profile, in the order it lays them down, and none the
+    /// profile says itself.**
     ///
-    /// A constant list of three was already wrong in one place: PowerShell is
-    /// the one door this module does not declare `FORCE_HYPERLINK` through, so a
-    /// third ghost drawn on that page would be the page pretending - which is
-    /// the thing the page exists to stop.
+    /// The page used to list three by hand while the child also received
+    /// `TERM_PROGRAM_VERSION`, `TERM`, the integration's own variables, the
+    /// locale and the attention wire's three. Now it is read off the launch's
+    /// composition: Git Bash with its init file and the wire open is given the
+    /// four identity declarations, `BT_SHELL_INTEGRATION`, `FORCE_HYPERLINK`, the
+    /// locale where the platform declares one, and the wire's address, name and
+    /// capability (two of them each pane's own); a PowerShell gets no
+    /// `FORCE_HYPERLINK` (its script says it); a profile row takes its name
+    /// away, and a `NO_COLOR` row takes `COLORTERM` and `TERM` with it.
+    ///
+    /// MUTATIONS: (1) drop the attention wire's rows from
+    /// `declared_environment` - the Git Bash list goes red; (2) stop taking
+    /// the profile's names away (`terminal_declarations` returning the folio
+    /// layer whole) - the `cmd` list goes red on `PROMPT`.
     #[test]
-    fn the_ghosts_a_profile_shows_are_the_declarations_it_will_get() {
+    fn the_ghosts_a_profile_shows_are_every_variable_the_launch_gives_it() {
+        let said =
+            |name: &str, value: &str| (name.to_owned(), DeclaredValue::Said(value.to_owned()));
+        let per_pane = |name: &str| (name.to_owned(), DeclaredValue::PerPane);
+        let locale: Vec<(String, DeclaredValue)> = crate::locale_declaration::held()
+            .map(|declaration| {
+                declaration
+                    .variables()
+                    .iter()
+                    .map(|(name, value)| said(name, value))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let version = env!("CARGO_PKG_VERSION");
+        let script = Path::new("C:/Folio/用户 目录/folio.bash");
+
+        let mut expected = vec![
+            said("TERM_PROGRAM", bt_pty::TERM_PROGRAM),
+            said("TERM_PROGRAM_VERSION", version),
+            said("COLORTERM", "truecolor"),
+            said("TERM", "xterm-256color"),
+            said(INSTALLED_MARKER, MODE_LOGIN),
+            said(FORCE_HYPERLINK, "1"),
+        ];
+        expected.extend(locale.iter().cloned());
+        expected.extend([
+            per_pane(crate::attention_wire::PANE_VARIABLE),
+            said(
+                crate::attention_wire::ENDPOINT_VARIABLE,
+                "folio-attention-pipe",
+            ),
+            per_pane(crate::attention_wire::CAPABILITY_VARIABLE),
+        ]);
         assert_eq!(
-            declared_environment(Integration::BashInitFile),
-            [
-                ("TERM_PROGRAM", bt_pty::TERM_PROGRAM),
-                ("COLORTERM", "truecolor"),
-                (FORCE_HYPERLINK, "1"),
-            ]
+            declared_environment(
+                &row("gitbash"),
+                bash_only(script),
+                &bare(),
+                Some("folio-attention-pipe")
+            ),
+            expected
         );
+
+        let mut expected = vec![
+            said("TERM_PROGRAM", bt_pty::TERM_PROGRAM),
+            said("TERM_PROGRAM_VERSION", version),
+            said("COLORTERM", "truecolor"),
+            said("TERM", "xterm-256color"),
+        ];
+        expected.extend(locale.iter().cloned());
         assert_eq!(
-            declared_environment(Integration::PowerShellOptIn),
-            [
-                ("TERM_PROGRAM", bt_pty::TERM_PROGRAM),
-                ("COLORTERM", "truecolor"),
+            declared_environment(&row("pwsh"), Scripts::default(), &bare(), None),
+            expected,
+            "folio.ps1 is the half that says FORCE_HYPERLINK, and with no wire open              no pane is given its three"
+        );
+
+        // The profile's own rows are written last and win: their names are not
+        // the terminal's to say, and `NO_COLOR` takes the colour pair with it.
+        let mine = row_with(
+            "cmd",
+            &[
+                ("Term_Program", "xterm"),
+                ("NO_COLOR", "1"),
+                (CMD_PROMPT, "$P 提示$G"),
+                (crate::attention_wire::PANE_VARIABLE, "日本語"),
             ],
-            "folio.ps1 is the half that says it, and saying it twice would be \
-             two places to change with one silently redundant"
         );
+        let mut expected = vec![
+            said("TERM_PROGRAM_VERSION", version),
+            said(FORCE_HYPERLINK, "1"),
+        ];
+        expected.extend(locale.iter().cloned());
+        expected.extend([
+            said(
+                crate::attention_wire::ENDPOINT_VARIABLE,
+                "folio-attention-pipe",
+            ),
+            per_pane(crate::attention_wire::CAPABILITY_VARIABLE),
+        ]);
+        let page = declared_environment(
+            &mine,
+            Scripts::default(),
+            &bare(),
+            Some("folio-attention-pipe"),
+        );
+        // `Term_Program` is `TERM_PROGRAM` only where names are case-blind.
+        if bt_pty::same_environment_name(OsStr::new("Term_Program"), OsStr::new("TERM_PROGRAM")) {
+            assert_eq!(page, expected);
+        } else {
+            expected.insert(0, said("TERM_PROGRAM", bt_pty::TERM_PROGRAM));
+            assert_eq!(page, expected);
+        }
     }
 
     /// PIN - a profile of the reader's own reaches the spawn path whole, which

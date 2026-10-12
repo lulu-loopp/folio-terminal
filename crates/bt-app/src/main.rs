@@ -40607,23 +40607,19 @@ fn create_leaf_session(
         // of the profile: every shell of every kind gets them, and a user who set one by hand in a
         // profile is setting a capability for a pane that does not exist yet.
         //
-        // The endpoint may be absent — a machine where it would not open — and then neither is
-        // written. **Half of this pair is worse than none of it**: a child holding a capability and
-        // no endpoint would fail on every call, and a child holding an endpoint and no capability
-        // would be able to connect and say nothing, which is a connection for no reason.
-        if let Some(endpoint) = attention_wire::endpoint_name() {
-            command.environment.push((
-                attention_wire::PANE_VARIABLE.into(),
-                format!("{}.{}", pane.tab.0, pane.seat.0).into(),
-            ));
-            command
-                .environment
-                .push((attention_wire::ENDPOINT_VARIABLE.into(), endpoint.into()));
-            command.environment.push((
-                attention_wire::CAPABILITY_VARIABLE.into(),
-                capability.clone().into(),
-            ));
-        }
+        // The endpoint may be absent — a machine where it would not open — and then none is
+        // written (`attention_wire::pane_environment`). The Profiles page lists the same three
+        // (`shell_integration::declared_environment`).
+        command.environment.extend(
+            attention_wire::pane_environment(
+                attention_wire::endpoint_name(),
+                std::ffi::OsString::from(format!("{}.{}", pane.tab.0, pane.seat.0)),
+                std::ffi::OsString::from(capability.clone()),
+                std::ffi::OsString::from,
+            )
+            .into_iter()
+            .map(|(name, value)| (std::ffi::OsString::from(name), value)),
+        );
         resolved_program = Some(PathBuf::from(&program));
         // **The shell is asked for, never waited for** (T-BIRTH-OFF-WINDOW). Its pseudoconsole and
         // process are made on a `bt-pty-birth` worker of its own (`pty_door::request_shell`); this
@@ -46095,27 +46091,39 @@ impl Runtime<'_> {
                 .position(|choice| *choice == profiles::integration_choice(index))
                 .unwrap_or_default(),
             integration_auto: profiles::integration_auto_label(index),
-            // **What this terminal will say to a session of this profile, less
-            // whatever this profile has already said.** Derived on both counts:
-            // a PowerShell gets no `FORCE_HYPERLINK` ghost because its own
-            // script is the half that declares links, and a name the reader has
-            // a row for is no longer the terminal's to say — which is what makes
-            // adopting a ghost a move and not a duplication.
-            ghosts: {
-                let declared =
-                    shell_integration::declared_environment(profiles::integration(index));
-                let mut slots = [None; 3];
-                for (slot, (name, value)) in
-                    slots
-                        .iter_mut()
-                        .zip(declared.into_iter().filter(|(name, _)| {
-                            !env.iter().any(|(mine, _)| mine.eq_ignore_ascii_case(name))
-                        }))
-                {
-                    *slot = Some((name, value));
-                }
-                slots
-            },
+            // **Every variable this terminal sets for a session of this profile,
+            // less whatever this profile has already said** (owner ruling
+            // 2026-10-11 on H2 Q4): read off the launch's own composition, so a
+            // PowerShell gets no `FORCE_HYPERLINK` ghost because its own script is
+            // the half that declares links, a `NO_COLOR` row takes `COLORTERM` and
+            // `TERM` away, and a name the reader has a row for is no longer the
+            // terminal's to say — which is what makes adopting a ghost a move and
+            // not a duplication.
+            ghosts: settings::held_ghosts(
+                &profiles::row_of(&profiles::id(index))
+                    .map(|row| {
+                        shell_integration::declared_environment(
+                            &row,
+                            shell_integration::Scripts::installed(),
+                            &bt_pty::SystemShellEnvironment,
+                            attention_wire::endpoint_name(),
+                        )
+                    })
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(name, value)| settings::EnvGhost {
+                        name: profiles::intern_text(&name),
+                        value: match value {
+                            shell_integration::DeclaredValue::Said(value) => {
+                                settings::GhostValue::Said(profiles::intern_text(&value))
+                            }
+                            shell_integration::DeclaredValue::PerPane => {
+                                settings::GhostValue::PerPane
+                            }
+                        },
+                    })
+                    .collect::<Vec<_>>(),
+            ),
         })
     }
 
@@ -47570,6 +47578,7 @@ impl Runtime<'_> {
                 let Some((name, value)) = self
                     .editor_subject()
                     .and_then(|subject| subject.ghosts().nth(ordinal))
+                    .and_then(|ghost| Some((ghost.name, ghost.adoptable()?)))
                 else {
                     return Ok(());
                 };
