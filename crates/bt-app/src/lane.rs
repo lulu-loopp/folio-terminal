@@ -48,16 +48,17 @@
 //! a row of `EXPECTED_FAILURES`, with the exact kind of failure and the ledger row that repairs it
 //! (`docs/plans/structural-debt.md`). `judge` is red on an unexpected pass, on a failure of a
 //! different kind, on a lane or claim that was not run, and on a claim that exercised no request.
-//! No lane is built on the seam yet: S-4 (the font, taskbar and program-walk lanes), S-5 (the
-//! hand-off lane), S-6a (the storage worker) and S-7 (the clipboard) each move one onto it, and
-//! its adapter then hands the real lane a scripted [`Executor`].
+//! The OS hand-off lane (`handoff_lane`) is built on the seam (S-5), and its adapter hands the
+//! real lane a scripted [`Executor`]; S-4 (the font, taskbar and program-walk lanes), S-6a (the
+//! storage worker) and S-7 (the clipboard) each move one more onto it, the same way.
 
 #![cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "S-4 until 2026-11-30: the seam lands before its first lane; S-4 builds the font, \
-                  taskbar and program-walk lanes on it"
+        reason = "S-4 until 2026-11-30: the hand-off lane uses none of the seam's joins, \
+                  cancels, supersessions or streaks; S-4 builds the font, taskbar and program-walk \
+                  lanes on it with them"
     )
 )]
 
@@ -711,9 +712,6 @@ pub(crate) enum Order {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Delivery {
-    /// Refusals made at the door first, then the worker's answers in execution order — the hand-off
-    /// lane's `answers()`: a later refused press can be heard before an earlier admitted one.
-    RefusalsThenCompletions,
     /// In admission order.
     Submission,
     /// Only newer than what the consumer adopted; the adopted number never goes back.
@@ -767,22 +765,24 @@ pub(crate) struct Contract {
     pub(crate) saying: Saying,
 }
 
-/// `handoff_lane`: one `bt-os-handoff` thread; ids minted by `HandoffLane::submit`, unique within
-/// one lane (a counter `start` resets; the product starts one lane for the application's life);
-/// the asking window's `Pending` is the target incarnation; 32 may wait behind the one running,
-/// and a press past that is refused with `LANE_FULL` through the same drain.
+/// `handoff_lane`, on the seam (S-5): one `bt-os-handoff` thread; ids minted by the lane's
+/// `Ledger`, unique within one lane (the product starts one lane for the application's life); the
+/// asking window's `Pending` holds the request and is the target incarnation, and a closed
+/// window's request ends in the lane's sink; the ledger owes 33 at once — the one running and 32
+/// waiting, an answer not yet taken holding its place — and a press past that is refused at the
+/// door with `LANE_FULL`; each window takes its answers in the order they were minted.
 #[cfg(test)]
 pub(crate) const HANDOFF: Contract = Contract {
     lane: Some(LaneName::Handoff),
     replacement: Replacement::Fifo,
     execution: Order::Submission,
-    delivery: Delivery::RefusalsThenCompletions,
+    delivery: Delivery::Submission,
     bounds: Bounds {
-        // `handoff_lane::CAPACITY`, written out rather than read, so that a change to either the
-        // declaration or the lane is a disagreement the suite reports.
+        // `handoff_lane::CAPACITY` and `handoff_lane::BOUND`, written out rather than read, so
+        // that a change to either the declaration or the lane is a disagreement the suite reports.
         waiting: Bound::At(32),
         executing: 1,
-        answers_held: Bound::Unbounded,
+        answers_held: Bound::At(33),
     },
     cancellation: Cancellation::Abandon,
     saying: Saying::PerRequest,
@@ -1105,21 +1105,6 @@ pub(crate) struct ExpectedFailure {
 #[cfg(test)]
 pub(crate) const EXPECTED_FAILURES: &[ExpectedFailure] = &[
     ExpectedFailure {
-        lane: LaneName::Handoff,
-        claim: Claim::AnswersHeldAreBounded,
-        failure: FailureKind::AnswersUnbounded,
-        repair: "D-71",
-        why: "the answer channel is an unbounded mpsc::channel, and turned_away a Vec",
-    },
-    ExpectedFailure {
-        lane: LaneName::Handoff,
-        claim: Claim::ADeadWorkerIsObservable,
-        failure: FailureKind::DeathUnobservable,
-        repair: "D-70",
-        why: "answers() reads a disconnected channel as empty and LANE_GONE answers only a new \
-              submission, so the requests a dead worker had accepted stay owed in Pending",
-    },
-    ExpectedFailure {
         lane: LaneName::Font,
         claim: Claim::EveryRequestEndsExactlyOnce,
         failure: FailureKind::NoTerminal,
@@ -1185,23 +1170,7 @@ pub(crate) const EXPECTED_FAILURES: &[ExpectedFailure] = &[
               drain never sees the decoration thread's death as a disconnection",
     },
     // S-3 (2026-10-11): the four claims of the side-effects contract, run on lanes not yet built
-    // on the seam. Each lane's repair ticket (S-4, S-5) moves it onto the seam and removes its rows.
-    ExpectedFailure {
-        lane: LaneName::Handoff,
-        claim: Claim::AFailureIsSaidOnce,
-        failure: FailureKind::NoFailedTerminal,
-        repair: "D-70",
-        why: "no panic is caught around a hand-off: one ends the bt-os-handoff thread, and the \
-              request it was running never ends Failed",
-    },
-    ExpectedFailure {
-        lane: LaneName::Handoff,
-        claim: Claim::AnOrphanedAnswerReachesItsSink,
-        failure: FailureKind::OrphanNotSunk,
-        repair: "D-70",
-        why: "a closed window's answer is claimed by no Pending and dropped: nothing that outlives \
-              the window receives it",
-    },
+    // on the seam. Each lane's repair ticket (S-4) moves it onto the seam and removes its rows.
     ExpectedFailure {
         lane: LaneName::Font,
         claim: Claim::ASupersededRequestSaysSo,
@@ -1967,13 +1936,6 @@ fn order_is_as_declared(run: &mut Run<'_>) -> Result<(), Failure> {
                 .filter_map(|delivered| delivered.question)
                 .collect();
             let expected: Vec<u64> = match contract.delivery {
-                Delivery::RefusalsThenCompletions => {
-                    let mut refusals = questions(true);
-                    refusals.sort_unstable();
-                    let mut answered = questions(false);
-                    answered.sort_unstable();
-                    refusals.into_iter().chain(answered).collect()
-                }
                 Delivery::Submission => {
                     let mut all = actual.clone();
                     all.sort_unstable();

@@ -27183,6 +27183,33 @@ fn unverified_reference_handoff(path: &Path) -> bt_platform::Handoff {
     bt_platform::Handoff::Open(path.to_path_buf())
 }
 
+/// **A files row's open, as the OS hand-off lane is asked it** — the system's default handler for
+/// `path`, refused in the files row's words (`Runtime::open_local_path`).
+fn open_local_path_ask(path: &Path) -> handoff_lane::Ask {
+    handoff_lane::Ask::new(
+        bt_platform::Handoff::Open(path.to_path_buf()),
+        handoff_lane::Refusal {
+            stderr: Some((
+                "recoverable files row open failure",
+                "open an activated files row with its default handler",
+            )),
+            program_notice: true,
+        },
+    )
+}
+
+/// **A reveal in the file manager, as the OS hand-off lane is asked it** — the one verb all three
+/// feet print (`Runtime::reveal_in_explorer`).
+fn reveal_ask(path: &Path) -> handoff_lane::Ask {
+    handoff_lane::Ask::new(
+        bt_platform::Handoff::Reveal(path.to_path_buf()),
+        handoff_lane::Refusal {
+            stderr: Some(("recoverable reveal failure", "show a path in File Explorer")),
+            program_notice: false,
+        },
+    )
+}
+
 /// **What a refused unverified reference says, and where** — the printed reference's own words,
 /// and the files notice for a program, as for a local file under `Ctrl`.
 const UNVERIFIED_REFERENCE_REFUSAL: handoff_lane::Refusal = handoff_lane::Refusal {
@@ -47068,13 +47095,13 @@ impl Runtime<'_> {
                 // text editor would not start is a worse answer than a row that
                 // quietly did nothing.
                 Some(settings::LinkDestination::File(path)) => {
-                    self.open_local_path(path);
+                    self.open_local_path(path)?;
                 }
                 // The configuration doors (0.4.4 ticket 05): two dialogs, whose
                 // answers are collected on a later turn, and the storage folder
                 // handed to the reveal door.
                 Some(settings::LinkDestination::Configuration(door)) => {
-                    self.open_configuration_door(door);
+                    self.open_configuration_door(door)?;
                 }
                 None if row == settings::SettingsRow::PowerShellProfileLine => {
                     shell_integration::begin_removal();
@@ -48601,15 +48628,16 @@ impl Runtime<'_> {
     /// **Handed to the OS hand-off lane** (2026-09-22), so the card arrives when the lane answers
     /// rather than while the press is still being handled — with the door's words, as before.
     fn open_font_settings(&mut self) -> Result<()> {
-        let handed = self.hand_off(
-            bt_platform::Handoff::FontsPage,
-            handoff_lane::Refusal {
-                stderr: None,
-                program_notice: false,
-            },
-        );
-        self.if_refused(handed, handoff_lane::OnRefused::FontsToast);
-        Ok(())
+        self.hand_off(
+            handoff_lane::Ask::new(
+                bt_platform::Handoff::FontsPage,
+                handoff_lane::Refusal {
+                    stderr: None,
+                    program_notice: false,
+                },
+            )
+            .if_refused(handoff_lane::OnRefused::FontsToast),
+        )
     }
 
     /// **The pencil on a picker row: open that scheme's file** (user ruling
@@ -49905,8 +49933,9 @@ impl Runtime<'_> {
     /// The ack is the lane's to trigger since 2026-09-22: it is drawn when the system has taken
     /// the file, which is what `Opened` claims.
     fn open_path_in_default_app(&mut self, path: &Path) -> Result<()> {
-        let handed = self.open_local_path(path);
-        self.when_handed_over(handed, handoff_lane::OnAccepted::PreviewOpened);
+        self.hand_off(
+            open_local_path_ask(path).when_handed_over(handoff_lane::OnAccepted::PreviewOpened),
+        )?;
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -51643,9 +51672,10 @@ impl Runtime<'_> {
     }
 
     /// Hand one path to the system's default handler, and say so when the window
-    /// declines. Returns the hand-off's id: the answer arrives later, on the OS
-    /// hand-off lane's completion (2026-09-22), and a caller that owes the reader
-    /// something on success says so with [`Self::when_handed_over`].
+    /// declines. The answer arrives later, on the OS hand-off lane's completion
+    /// (2026-09-22); a caller that owes the reader something on success hands
+    /// [`open_local_path_ask`] off itself, with the confirmation it names
+    /// ([`handoff_lane::Ask::when_handed_over`]).
     ///
     /// The refusal is spoken rather than logged: a double click that does
     /// nothing at all is indistinguishable from a double click that was not
@@ -51656,17 +51686,8 @@ impl Runtime<'_> {
     /// The answer is reported because a *foot* has something to do with it that
     /// a row has not: it confirms in place, and a confirmation printed over a
     /// reveal that never happened would be the one thing worse than silence.
-    fn open_local_path(&mut self, path: &Path) -> handoff_lane::HandoffId {
-        self.hand_off(
-            bt_platform::Handoff::Open(path.to_path_buf()),
-            handoff_lane::Refusal {
-                stderr: Some((
-                    "recoverable files row open failure",
-                    "open an activated files row with its default handler",
-                )),
-                program_notice: true,
-            },
-        )
+    fn open_local_path(&mut self, path: &Path) -> Result<()> {
+        self.hand_off(open_local_path_ask(path))
     }
 
     /// Show a path in Explorer — **the one door all three feet go through**
@@ -51681,19 +51702,14 @@ impl Runtime<'_> {
     ///
     /// Reported, because a foot confirms in place and a confirmation printed
     /// over a reveal that never happened is the one thing worse than silence —
-    /// which since 2026-09-22 is the lane's answer arriving: the foot names a
-    /// confirmation with [`Self::when_handed_over`] and it is drawn when the
-    /// system has taken the reveal. A refusal is a courtesy, not an error path: a
+    /// which since 2026-09-22 is the lane's answer arriving: the foot hands
+    /// [`reveal_ask`] off itself, naming its confirmation with
+    /// [`handoff_lane::Ask::when_handed_over`], and it is drawn when the system
+    /// has taken the reveal. A refusal is a courtesy, not an error path: a
     /// window that refuses to keep working because a file manager would not start
     /// is a worse answer than a button that quietly did nothing.
-    fn reveal_in_explorer(&mut self, path: &Path) -> handoff_lane::HandoffId {
-        self.hand_off(
-            bt_platform::Handoff::Reveal(path.to_path_buf()),
-            handoff_lane::Refusal {
-                stderr: Some(("recoverable reveal failure", "show a path in File Explorer")),
-                program_notice: false,
-            },
-        )
+    fn reveal_in_explorer(&mut self, path: &Path) -> Result<()> {
+        self.hand_off(reveal_ask(path))
     }
 
     /// [`Self::reveal_in_explorer`] for a path a worker has already answered for — the door a
@@ -51727,8 +51743,8 @@ impl Runtime<'_> {
         &mut self,
         path: &Path,
         target: bt_platform::VerifiedTarget,
-    ) -> handoff_lane::HandoffId {
-        self.hand_off(
+    ) -> Result<()> {
+        self.hand_off(handoff_lane::Ask::new(
             bt_platform::Handoff::OpenVerified(path.to_path_buf(), target),
             handoff_lane::Refusal {
                 stderr: Some((
@@ -51737,7 +51753,7 @@ impl Runtime<'_> {
                 )),
                 program_notice: true,
             },
-        )
+        ))
     }
 
     /// **Hand a path nobody asked a disk about to the system's handler** — a share on another
@@ -51749,11 +51765,11 @@ impl Runtime<'_> {
     /// never probed. The door reads `names_a_program`, so either meets the program list a printed
     /// local file meets, refused in the same words; on Windows it asks no disk, and on the OS
     /// hand-off lane a cold `\\server` holds nothing but that lane.
-    fn open_unverified_reference(&mut self, path: &Path) -> handoff_lane::HandoffId {
-        self.hand_off(
+    fn open_unverified_reference(&mut self, path: &Path) -> Result<()> {
+        self.hand_off(handoff_lane::Ask::new(
             unverified_reference_handoff(path),
             UNVERIFIED_REFERENCE_REFUSAL,
-        )
+        ))
     }
 
     /// **Hand a URI of any scheme to whatever this machine has registered for it** — `mailto:`,
@@ -51762,26 +51778,29 @@ impl Runtime<'_> {
     /// Not through [`Self::hand_url_to_the_browser`]: that door is `webnav::address_bar`, which
     /// admits the web and nothing else, and the ruling is that `Ctrl` on any scheme is the
     /// reader's consent. What the machine has no handler for, it refuses, and the lane brings the
-    /// refusal back to the surface that asked.
-    fn hand_uri_to_the_system(&mut self, uri: &str) -> handoff_lane::HandoffId {
+    /// refusal back to the surface that asked, which says it as `refused` names.
+    fn hand_uri_to_the_system(
+        &mut self,
+        uri: &str,
+        refused: handoff_lane::OnRefused,
+    ) -> Result<()> {
         self.hand_off(
-            bt_platform::Handoff::Address(uri.to_owned()),
-            handoff_lane::Refusal {
-                stderr: Some((
-                    "recoverable link hand-off failure",
-                    "hand a link to its registered handler",
-                )),
-                program_notice: false,
-            },
+            handoff_lane::Ask::new(
+                bt_platform::Handoff::Address(uri.to_owned()),
+                handoff_lane::Refusal {
+                    stderr: Some((
+                        "recoverable link hand-off failure",
+                        "hand a link to its registered handler",
+                    )),
+                    program_notice: false,
+                },
+            )
+            .if_refused(refused),
         )
     }
 
-    fn reveal_verified(
-        &mut self,
-        path: &Path,
-        target: bt_platform::VerifiedTarget,
-    ) -> handoff_lane::HandoffId {
-        self.hand_off(
+    fn reveal_verified(&mut self, path: &Path, target: bt_platform::VerifiedTarget) -> Result<()> {
+        self.hand_off(handoff_lane::Ask::new(
             bt_platform::Handoff::RevealVerified(path.to_path_buf(), target),
             handoff_lane::Refusal {
                 stderr: Some((
@@ -51790,7 +51809,7 @@ impl Runtime<'_> {
                 )),
                 program_notice: false,
             },
-        )
+        ))
     }
 
     /// Whether it is worth writing down which tabs spoke on this turn.
@@ -63807,19 +63826,12 @@ impl FolioApp {
 
     /// **Give every hand-off answer to the window that asked for it** (`handoff_lane`).
     ///
-    /// Each answer is offered to every open window and claimed by the one whose duties hold its
-    /// id — at most one, because the ids are the lane's and unique in the process. A window that
-    /// has closed, or is on its way out, is not offered anything, so an answer to it is dropped
-    /// here rather than raised somewhere else.
+    /// Each open window takes the answers its own requests hold — an answer is held by the one
+    /// window that asked, because the request is. A window on its way out is not asked, and one
+    /// that has closed holds nothing: its requests went with it, and their answers to the lane's
+    /// sink for the abandoned rather than to another window.
     fn answer_handoffs(&mut self) -> Result<()> {
-        let Some(app) = self.app.as_mut() else {
-            return Ok(());
-        };
-        let answers = app.handoff_lane.answers();
-        for answer in &answers {
-            self.for_each_window(|runtime| runtime.answer_handoff(answer))?;
-        }
-        Ok(())
+        self.for_each_window(|runtime| runtime.answer_handoffs())
     }
 
     /// Answer every toast clicked since the last turn.

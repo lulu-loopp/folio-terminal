@@ -44,7 +44,10 @@ impl Runtime<'_> {
     /// [`Self::apply_save_pick_result`] and `apply_image_pick_result`. The folder
     /// goes to the reveal door every `Show in Explorer` in this window goes
     /// through, on the OS hand-off lane — there is no second door to the system.
-    pub(crate) fn open_configuration_door(&mut self, door: settings::ConfigurationDoor) {
+    pub(crate) fn open_configuration_door(
+        &mut self,
+        door: settings::ConfigurationDoor,
+    ) -> Result<()> {
         match door {
             settings::ConfigurationDoor::Export => {
                 let asked = match &self.window.save_picker {
@@ -66,7 +69,7 @@ impl Runtime<'_> {
                 Err(error) => eprintln!("recoverable settings file chooser failure: {error}"),
             },
             settings::ConfigurationDoor::Folder => {
-                self.reveal_in_explorer(&persist::storage_dir());
+                self.reveal_in_explorer(&persist::storage_dir())?;
             }
             // **`Uninstall…`** (T-UNINSTALL-UX): the confirmation card, over this
             // dialog. Nothing is asked of the application until its *Uninstall*.
@@ -74,6 +77,7 @@ impl Runtime<'_> {
                 self.window.settings.raise_uninstall_card();
             }
         }
+        Ok(())
     }
 
     /// Collect the save dialog's answer, once, after it has shut.

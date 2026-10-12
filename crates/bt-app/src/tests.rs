@@ -223,15 +223,22 @@ fn a_share_handed_over_meets_the_same_program_list() {
     assert_eq!(handed, &path);
 
     let (wake, wakes) = crate::lane::wake_channel();
-    let mut lane = handoff_lane::HandoffLane::spawn(wake).expect("the lane starts");
-    let id = lane.submit(bt_platform::NativeWindow::stand_in(0), request);
+    let lane = handoff_lane::HandoffLane::spawn(wake).expect("the lane starts");
+    let mut pending: handoff_lane::Pending<()> = handoff_lane::Pending::default();
+    pending.owe(
+        lane.submit(bt_platform::NativeWindow::stand_in(0), request)
+            .expect("the lane admits it"),
+        (),
+    );
     let answer = loop {
-        if let Some(answer) = lane.answers().into_iter().find(|answer| answer.id == id) {
+        if let Some((_, answer, ())) = pending.answered().pop() {
             break answer;
         }
         crate::lane::wait_for_a_wake(&wakes, "the share's answer");
     };
-    let reason = answer.outcome.expect_err("a program on a share is refused");
+    let handoff_lane::Answer::Refused(reason) = answer else {
+        panic!("a program on a share is refused: {answer:?}");
+    };
     assert_eq!(reason, bt_platform::PROGRAM_REFUSED, "the door's own words");
     assert_eq!(
         UNVERIFIED_REFERENCE_REFUSAL.words(&reason).notice,

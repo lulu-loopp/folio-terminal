@@ -2090,12 +2090,9 @@ impl Runtime<'_> {
         // level too far out. A failure to reach Explorer withholds the
         // confirmation rather than claiming one, which is the honest report —
         // so the confirmation waits for the lane to say Explorer took it.
-        let handed = self.reveal_in_explorer(Path::new(&root));
-        self.when_handed_over(
-            handed,
+        self.hand_off(crate::reveal_ask(Path::new(&root)).when_handed_over(
             crate::handoff_lane::OnAccepted::Revealed(RevealedFoot::Column(seat)),
-        );
-        Ok(())
+        ))
     }
 
     /// The tree tenant, drawn — **on whichever of its two pages it is standing**.
@@ -2454,7 +2451,7 @@ impl Runtime<'_> {
             // arm is written rather than wildcarded so that the day a third door
             // reaches this function, it is a compiler error and not a silence.
             RowActivation::DefaultApp(path) => {
-                self.open_local_path(&path);
+                self.open_local_path(&path)?;
                 Ok(())
             }
             RowActivation::Nowhere => Ok(()),
