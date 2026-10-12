@@ -63843,10 +63843,10 @@ impl FolioApp {
     fn answer_handoffs(&mut self) -> Result<()> {
         let mut held = Vec::new();
         for index in 0..self.windows.len() {
-            if let Some(runtime) = self.runtime_at(index)
+            if let Some(mut runtime) = self.runtime_at(index)
                 && runtime.window.leaving.is_none()
             {
-                held.push((index, runtime.window.handoffs.answered()));
+                held.push((index, runtime.take_handoff_answers()));
             }
         }
         for (index, _, answer, duty) in handoff_lane::in_press_order(held) {

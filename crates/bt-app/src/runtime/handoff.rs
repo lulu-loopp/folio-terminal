@@ -14,7 +14,9 @@ use std::time::Instant;
 
 use anyhow::Result;
 
-use crate::handoff_lane::{Answer, Ask, Duty, FollowUp, OnAccepted, RefusalWords, Reply};
+use crate::handoff_lane::{
+    Answer, Ask, Duty, FollowUp, HandoffId, OnAccepted, RefusalWords, Reply,
+};
 use crate::{RevealedFoot, Runtime, i18n, native_window, toast};
 
 impl Runtime<'_> {
@@ -42,6 +44,13 @@ impl Runtime<'_> {
             }
             Err(reason) => self.answer_handoff(Answer::Refused(reason), duty),
         }
+    }
+
+    /// **Take every answer this window's hand-offs hold**, without answering them — the
+    /// application answers every window's in press order across the windows
+    /// (`handoff_lane::in_press_order`).
+    pub(crate) fn take_handoff_answers(&mut self) -> Vec<(HandoffId, Answer, Duty)> {
+        self.window.handoffs.answered()
     }
 
     /// **Answer one hand-off** of this window's, as [`Duty::reply`] says.
