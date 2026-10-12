@@ -5887,12 +5887,6 @@ impl PreviewBuffer {
             return Err(crate::i18n::Text::PreviewNothingToSave.text().to_owned());
         };
         let bytes = self.encoding.encode(content);
-        match bt_platform::install_txn::durable_create_dir(folder) {
-            Err(failure) if failure.error.kind() != std::io::ErrorKind::AlreadyExists => {
-                return Err(failure.to_string());
-            }
-            Ok(()) | Err(_) => {}
-        }
         let name = self
             .source
             .file_path()
@@ -5901,20 +5895,7 @@ impl PreviewBuffer {
                 || self.name.clone(),
                 |name| name.to_string_lossy().into_owned(),
             );
-        let instant = crate::seed::format_iso8601_utc(at).replace(':', "");
-        for taken in 0_u32.. {
-            let copy = folder.join(if taken == 0 {
-                format!("{instant} {name}")
-            } else {
-                format!("{instant} ({taken}) {name}")
-            });
-            match bt_platform::install_txn::durable_create(&copy, &bytes) {
-                Ok(()) => return Ok(copy),
-                Err(failure) if failure.error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(failure) => return Err(failure.to_string()),
-            }
-        }
-        unreachable!("a folder holds fewer than u32::MAX copies of one name from one instant")
+        keep_in_recovered(folder, &name, &bytes, at)
     }
 
     /// Over-limit files always name their actual size, including lossy heads.
@@ -7232,6 +7213,47 @@ pub enum SaveOutcome {
 /// removes anything in it, the diagnostics line names each copy, and the next start says where
 /// they are ([`crate::recovered`], T-RECOVERED-FOLDER).
 pub const RECOVERED_FOLDER: &str = "recovered";
+
+/// **Keep `bytes` as a copy named for `name` in `folder`** — the one way anything
+/// is put into [`RECOVERED_FOLDER`]: a dirty preview buffer on a stop that cannot
+/// ask ([`PreviewBuffer::recovery_copy`]), and a hand-editable document's change
+/// that a quit or a stop could not write into its file (design note 2026-10-11,
+/// revisions (c)2 and (d)3).
+///
+/// The folder is made durably if it is not there; the copy is `{instant} {name}` —
+/// `{instant} ({n}) {name}` when that is taken — written create-new, never over
+/// anything, with the file flushed and the folder flushed. Answers where it is.
+///
+/// # Errors
+/// The folder could not be made or the copy could not be written: the system's
+/// sentence.
+pub fn keep_in_recovered(
+    folder: &Path,
+    name: &str,
+    bytes: &[u8],
+    at: SystemTime,
+) -> Result<PathBuf, String> {
+    match bt_platform::install_txn::durable_create_dir(folder) {
+        Err(failure) if failure.error.kind() != std::io::ErrorKind::AlreadyExists => {
+            return Err(failure.to_string());
+        }
+        Ok(()) | Err(_) => {}
+    }
+    let instant = crate::seed::format_iso8601_utc(at).replace(':', "");
+    for taken in 0_u32.. {
+        let copy = folder.join(if taken == 0 {
+            format!("{instant} {name}")
+        } else {
+            format!("{instant} ({taken}) {name}")
+        });
+        match bt_platform::install_txn::durable_create(&copy, bytes) {
+            Ok(()) => return Ok(copy),
+            Err(failure) if failure.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(failure) => return Err(failure.to_string()),
+        }
+    }
+    unreachable!("a folder holds fewer than u32::MAX copies of one name from one instant")
+}
 
 /// **What became of one dirty buffer on a stop that could not ask** ([`PreviewPool::keep_dirty`]).
 #[derive(Clone, Debug, PartialEq, Eq)]

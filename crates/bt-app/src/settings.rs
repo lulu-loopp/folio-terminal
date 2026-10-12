@@ -856,28 +856,72 @@ const ENV_REMOVE_SIDE_LOGICAL_PX: f32 = 22.0;
 /// of the list rather than closing it.
 const ENV_ADD_WIDTH_LOGICAL_PX: f32 = 62.0;
 const ENV_ADD_HEIGHT_LOGICAL_PX: f32 = 24.0;
-/// **The most rows this terminal ever fills in on the reader's behalf** (plan
-/// §1.7, user ruling 2026-08-17 Q7) — what it says to a session it starts.
+/// **One row this terminal fills in on the reader's behalf** (plan §1.7, user
+/// ruling 2026-08-17 Q7): a variable a session of the profile is given that is
+/// not the profile's own — every one of them (owner ruling 2026-10-11 on H2 Q4),
+/// read off the launch's composition by
+/// `shell_integration::declared_environment`.
 ///
 /// Showing them is both the foolproof default (you can see what is being said on
-/// your behalf) and the honest one (there is no invisible second layer).
-///
-/// **Which of them a given profile actually shows is derived**
-/// (`shell_integration::declared_environment`) and not this list: a PowerShell
-/// is the one door this terminal does not declare `FORCE_HYPERLINK` through —
-/// its own script is the half that says it — so a third ghost drawn there would
-/// be the page pretending. And a name the reader has a row of their own for
-/// stops being a ghost, because the terminal no longer gets to say it: that is
-/// what a press on a ghost does (§7.1.6c-6c), and two rows of one name would be
-/// two pictures of one fact.
-///
-/// The constant survives as the **upper bound**, which is what a geometry test
-/// with no profile table under it needs.
-const ENV_GHOSTS: [(&str, &str); 3] = [
-    ("TERM_PROGRAM", bt_pty::TERM_PROGRAM),
-    ("COLORTERM", "truecolor"),
-    (FORCE_HYPERLINK_NAME, "1"),
-];
+/// your behalf) and the honest one (there is no invisible second layer). A name
+/// the reader has a row of their own for is not among them, because the
+/// profile's layer is written last and the terminal no longer gets to say it:
+/// that is what a press on a ghost does (§7.1.6c-6c), and two rows of one name
+/// would be two pictures of one fact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EnvGhost {
+    pub name: &'static str,
+    pub value: GhostValue,
+}
+
+/// What a ghost's value box says.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GhostValue {
+    /// The value every session of the profile is given; a press adopts the row
+    /// with it.
+    Said(&'static str),
+    /// A value of each pane's own ([`Text::ProfilesEnvPerPane`]). There is no
+    /// one value to adopt, so the row states a fact and holds no stop.
+    PerPane,
+}
+
+impl EnvGhost {
+    /// The value a press adopts, for a ghost that has one.
+    #[must_use]
+    pub fn adoptable(self) -> Option<&'static str> {
+        match self.value {
+            GhostValue::Said(value) => Some(value),
+            GhostValue::PerPane => None,
+        }
+    }
+
+    /// The text in the value box.
+    #[must_use]
+    fn shown(self) -> &'static str {
+        match self.value {
+            GhostValue::Said(value) => value,
+            GhostValue::PerPane => Text::ProfilesEnvPerPane.text(),
+        }
+    }
+}
+
+/// **One profile's ghosts, held for the process** so that [`EditorSubject`]
+/// stays `Copy`: the same list is the same slice, and a list is held once
+/// however often the page is laid out — the set is as small as the distinct
+/// declarations this process's profiles have had.
+#[must_use]
+pub fn held_ghosts(ghosts: &[EnvGhost]) -> &'static [EnvGhost] {
+    static HELD: std::sync::Mutex<Vec<&'static [EnvGhost]>> = std::sync::Mutex::new(Vec::new());
+    let mut held = HELD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(found) = held.iter().find(|list| **list == ghosts) {
+        return found;
+    }
+    let leaked: &'static [EnvGhost] = Box::leak(ghosts.to_vec().into_boxed_slice());
+    held.push(leaked);
+    leaked
+}
 /// `.pf-crumb { margin: 10px 0 2px }` around a line of the group label's own
 /// type — which is what it is: the editor's heading, wearing the heading's face.
 const CRUMB_MARGIN_TOP_LOGICAL_PX: f32 = 10.0;
@@ -6976,20 +7020,19 @@ pub struct EditorSubject {
     /// the caption then, as everywhere else in this dialog).
     pub integration_auto: Option<&'static str>,
     /// **The rows this terminal fills in for this profile**, in the order they
-    /// are drawn, above the reader's own.
+    /// are drawn, above the reader's own ([`EnvGhost`]).
     ///
-    /// Resolved by the runtime through `shell_integration::declared_environment`
-    /// and then stripped of every name the reader has a row of their own for,
-    /// because the terminal does not get to say a thing this profile has already
-    /// said. A fixed-length array of slots rather than a `Vec`, so this stays
+    /// Resolved by the runtime through `shell_integration::declared_environment`,
+    /// which already leaves out every name the reader has a row of their own
+    /// for. A held slice ([`held_ghosts`]) rather than a `Vec`, so this stays
     /// `Copy` — every `option_*` call reads it off a borrowed `SettingsValues`.
-    pub ghosts: [Option<(&'static str, &'static str)>; ENV_GHOSTS.len()],
+    pub ghosts: &'static [EnvGhost],
 }
 
 impl EditorSubject {
     /// The ghost rows, in the order they are drawn.
-    pub fn ghosts(self) -> impl Iterator<Item = (&'static str, &'static str)> {
-        self.ghosts.into_iter().flatten()
+    pub fn ghosts(self) -> impl Iterator<Item = EnvGhost> {
+        self.ghosts.iter().copied()
     }
 
     /// How many of them there are — the count the layout, the hit test, the
@@ -9071,7 +9114,16 @@ pub fn page_order(
     // there: a collapsed group's rows are already out of `page_items`, and its
     // `Reset` with them.
     let env_rows = content.editor.map_or(0, |editor| editor.env_rows);
-    let env_ghosts = content.editor.map_or(0, EditorSubject::ghost_count);
+    // The ghosts a press adopts, by their place among all the ghosts; a ghost
+    // whose value is each pane's own states a fact and holds no stop.
+    let env_ghosts: Vec<usize> = content.editor.map_or_else(Vec::new, |editor| {
+        editor
+            .ghosts()
+            .enumerate()
+            .filter(|(_, ghost)| ghost.adoptable().is_some())
+            .map(|(ordinal, _)| ordinal)
+            .collect()
+    });
     // **A group still opening or still closing holds no keyboard stop**
     // (animation block, second slice). It is the hit test's own law — what can be
     // pressed is what can be seen — read by the one reader in this module that
@@ -9106,7 +9158,9 @@ pub fn page_order(
             // a reader can see and act on has to be reachable from the keyboard,
             // and adopting a ghost is an action. One stop per ghost, because the
             // whole line is one target.
-            PageItem::Row(SettingsRow::ProfileEnv) => (0..env_ghosts)
+            PageItem::Row(SettingsRow::ProfileEnv) => env_ghosts
+                .iter()
+                .copied()
                 .map(SettingsTarget::EnvGhost)
                 .chain((0..env_rows).flat_map(|index| {
                     [
@@ -9913,8 +9967,11 @@ pub struct RowMenuLayout {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EnvRowLayout {
     /// Where this line sits among **the reader's own** rows; `None` for one of
-    /// the three the terminal fills in on their behalf.
+    /// the ones the terminal fills in on their behalf.
     pub index: Option<usize>,
+    /// A ghost a press adopts ([`EnvGhost::adoptable`]); `false` for a ghost
+    /// whose value is each pane's own, and for the reader's own rows.
+    pub adopts: bool,
     pub name: [f32; 4],
     pub value: [f32; 4],
     /// The `✕`. Reserved on a ghost row too and simply not drawn, exactly as the
@@ -11883,13 +11940,8 @@ pub fn layout_for_menus(
                     }
                     SettingsControl::EnvTable => {
                         let mut line = control_top;
-                        // The upper bound when there is no profile under the
-                        // page, which is what a geometry test builds: the table
-                        // is then at its tallest, which is the honest thing for
-                        // a measurement to be taken against.
-                        let ghosts = content_of
-                            .editor
-                            .map_or(ENV_GHOSTS.len(), EditorSubject::ghost_count);
+                        // No profile under the page, no declarations to show.
+                        let ghosts = content_of.editor.map_or(0, EditorSubject::ghost_count);
                         let mine = content_of.editor.map_or(0, |editor| editor.env_rows);
                         // **The name column is 170px where the row has it, and never more
                         // than a picker's share of what the row leaves for the two fields**
@@ -11904,8 +11956,13 @@ pub fn layout_for_menus(
                             px(ENV_NAME_WIDTH_LOGICAL_PX).min(COMBO_MAX_ROW_SHARE * fields);
                         for ordinal in 0..ghosts + mine {
                             let name = [row_left, line, row_left + name_width, line + field_height];
+                            let adopts = content_of
+                                .editor
+                                .and_then(|editor| editor.ghosts().nth(ordinal))
+                                .is_some_and(|ghost: EnvGhost| ghost.adoptable().is_some());
                             placed_env.push(EnvRowLayout {
                                 index: ordinal.checked_sub(ghosts),
+                                adopts: ordinal < ghosts && adopts,
                                 name,
                                 value: [
                                     name[2] + px(ENVTAB_GAP_LOGICAL_PX),
@@ -12878,7 +12935,7 @@ impl StackMetrics {
     fn stacked_height(self, row: SettingsRow, editor: Option<EditorSubject>, lines: usize) -> f32 {
         let px = |value: f32| value * self.scale;
         let control = if row == SettingsRow::ProfileEnv {
-            let rows = ENV_GHOSTS.len() + editor.map_or(0, |editor| editor.env_rows);
+            let rows = editor.map_or(0, |editor| editor.ghost_count() + editor.env_rows);
             rows as f32 * (px(FIELD_HEIGHT_LOGICAL_PX) + px(ENVTAB_GAP_LOGICAL_PX))
                 + px(ENV_ADD_HEIGHT_LOGICAL_PX)
         } else {
@@ -13879,9 +13936,12 @@ fn content_presses(
             // press adopts it, and until then there are no cells to land in — its
             // `✕` is reserved and never struck, because a column that disappeared on
             // the first rows would bend the table's right edge (mock-up,
-            // `.envrow.ghost .env-del`).
-            for cell in [line.name, line.value].into_iter().filter_map(revealed) {
-                presses.push((cell, SettingsTarget::EnvGhost(ordinal)));
+            // `.envrow.ghost .env-del`). A ghost whose value is each pane's own has
+            // no value to adopt and is not a target at all.
+            if line.adopts {
+                for cell in [line.name, line.value].into_iter().filter_map(revealed) {
+                    presses.push((cell, SettingsTarget::EnvGhost(ordinal)));
+                }
             }
             continue;
         };
@@ -15629,11 +15689,13 @@ fn push_editor_page(
         // right edge.
         let (name, value, index) = match line.index {
             None => {
-                let (name, value) = values
+                let Some(ghost): Option<EnvGhost> = values
                     .editor
                     .and_then(|editor| editor.ghosts().nth(ordinal))
-                    .unwrap_or(ENV_GHOSTS[ordinal.min(ENV_GHOSTS.len() - 1)]);
-                (name.to_owned(), value.to_owned(), None)
+                else {
+                    continue;
+                };
+                (String::from(ghost.name), String::from(ghost.shown()), None)
             }
             Some(index) => {
                 let held = ink.env.get(index);
@@ -32342,12 +32404,25 @@ mod tests {
             // `Auto`, deriving `None` — the mock-up's own drawing of this row.
             integration: 0,
             integration_auto: Some("Auto (None)"),
-            // All three, which is what a profile served by no script and holding
-            // no row of these names shows.
-            ghosts: [
-                Some(("TERM_PROGRAM", bt_pty::TERM_PROGRAM)),
-                Some(("COLORTERM", "truecolor")),
-                Some((FORCE_HYPERLINK_NAME, "1")),
+            // Three the terminal says with one value, and one each pane says
+            // its own of.
+            ghosts: &[
+                EnvGhost {
+                    name: "TERM_PROGRAM",
+                    value: GhostValue::Said(bt_pty::TERM_PROGRAM),
+                },
+                EnvGhost {
+                    name: "COLORTERM",
+                    value: GhostValue::Said("truecolor"),
+                },
+                EnvGhost {
+                    name: FORCE_HYPERLINK_NAME,
+                    value: GhostValue::Said("1"),
+                },
+                EnvGhost {
+                    name: "FOLIO_PANE",
+                    value: GhostValue::PerPane,
+                },
             ],
         }
     }
@@ -32700,8 +32775,8 @@ mod tests {
         );
         assert_eq!(
             eight.env_rows.len(),
-            ENV_GHOSTS.len() + 8,
-            "three the terminal fills in, and the reader's own under them"
+            editor_subject(true).ghost_count() + 8,
+            "the ones the terminal fills in, and the reader's own under them"
         );
     }
 
@@ -32729,21 +32804,41 @@ mod tests {
             .filter(|line| line.index.is_none())
             .collect();
         assert_eq!(ghosts.len(), subject.ghost_count());
-        for (ordinal, ghost) in ghosts.into_iter().enumerate() {
-            for box_of in [ghost.name, ghost.value] {
+        // The layer rule, drawn: the terminal's rows first, the profile's own
+        // under them, because the profile's are written last and win.
+        let first_own = placed
+            .env_rows
+            .iter()
+            .position(|line| line.index.is_some())
+            .expect("the reader's own row");
+        assert!(
+            placed.env_rows[..first_own]
+                .iter()
+                .all(|line| line.index.is_none())
+                && placed.env_rows[first_own..]
+                    .iter()
+                    .all(|line| line.index.is_some()),
+            "every ghost stands above every row of the reader's own"
+        );
+        for (ordinal, (ghost, line)) in subject.ghosts().zip(ghosts).enumerate() {
+            for box_of in [line.name, line.value] {
                 let centre = (
                     f64::from((box_of[0] + box_of[2]) / 2.0),
                     f64::from((box_of[1] + box_of[3]) / 2.0),
                 );
                 assert_eq!(
                     hit(&placed, &values, centre.0, centre.1),
-                    SettingsTarget::EnvGhost(ordinal),
-                    "the whole line is the target, because there is nothing to                      edit in a ghost until it is the reader's"
+                    if ghost.adoptable().is_some() {
+                        SettingsTarget::EnvGhost(ordinal)
+                    } else {
+                        SettingsTarget::Panel
+                    },
+                    "the whole line is the target, because there is nothing to edit in a ghost until it is the reader's — and a value each pane has its own of is nothing to adopt"
                 );
             }
             let cross = (
-                f64::from((ghost.remove[0] + ghost.remove[2]) / 2.0),
-                f64::from((ghost.remove[1] + ghost.remove[3]) / 2.0),
+                f64::from((line.remove[0] + line.remove[2]) / 2.0),
+                f64::from((line.remove[1] + line.remove[3]) / 2.0),
             );
             assert_eq!(
                 hit(&placed, &values, cross.0, cross.1),
@@ -32754,17 +32849,13 @@ mod tests {
         // A name the reader already has a row of their own for is no longer this
         // terminal's to say, so it is not among the ghosts.
         let adopted = EditorSubject {
-            ghosts: [
-                Some(("COLORTERM", "truecolor")),
-                Some((FORCE_HYPERLINK_NAME, "1")),
-                None,
-            ],
+            ghosts: &subject.ghosts[1..],
             ..subject
         };
-        assert_eq!(adopted.ghost_count(), 2);
+        assert_eq!(adopted.ghost_count(), subject.ghost_count() - 1);
         assert_eq!(
-            adopted.ghosts().next(),
-            Some(("COLORTERM", "truecolor")),
+            adopted.ghosts().next().and_then(EnvGhost::adoptable),
+            Some("truecolor"),
             "the adopted name leaves the list rather than standing beside its              own override"
         );
         let mine = placed

@@ -1020,6 +1020,20 @@ text_entries! {
     HyperlinkNoProgramSuffix,
     /// Its words alone; a substring of the long form, as above.
     HyperlinkNoProgram,
+    /// The suffix for a target whose hand-off failed on the OS hand-off lane (S-5): nothing
+    /// declined it, the hand-off itself did not run to its end.
+    HandoffCouldNotRunSuffix,
+    /// Its words alone, a substring of the long form; also the fonts card's refusal text.
+    HandoffCouldNotRun,
+    /// The suffix for a target whose hand-off the OS hand-off lane's stopped worker took with it.
+    HandoffsStoppedSuffix,
+    /// Its words alone, a substring of the long form; also the fonts card's refusal text.
+    HandoffsStopped,
+    /// The suffix for a target pressed while the OS hand-off lane already had as many hand-offs
+    /// as it takes (S-5).
+    HandoffsTooManySuffix,
+    /// Its words alone, a substring of the long form; also the fonts card's refusal text.
+    HandoffsTooMany,
 
     // ── a drag's landing caption ───────────────────────────────────────────
     DragSwapPanes,
@@ -1340,6 +1354,9 @@ text_entries! {
     ProfilesEnvAdd,
     ProfilesEnvName,
     ProfilesEnvValue,
+    /// A ghost row's value when it is each pane's own (the attention wire's
+    /// address and capability), which a profile cannot show (H2-NITS).
+    ProfilesEnvPerPane,
     /// `Auto`, `On`, `Off` — the hyperlink answer's three, where `Auto` is the
     /// terminal's own declaration and the other two are this profile overruling
     /// it.
@@ -1573,6 +1590,9 @@ text_entries! {
     /// The two rows the audit listed and declined, and the line under them.
     ShortcutReservedMoveFocus,
     ShortcutReservedResizePane,
+    /// A template: `{modifier}` is the word the declined rows' own caps spell
+    /// the `Alt` key in on this keyboard (filled by
+    /// [`shortcut_reserved_arrow_note_in`]).
     ShortcutReservedAltArrow,
     /// The recorder's standing refusal. The chord in it is key caps and stays as
     /// it is; what is translated is the reason.
@@ -2319,6 +2339,25 @@ text_entries! {
     /// there, so the only way to know the quit did not silently half-happen is to
     /// be told.
     QuitSessionNotWritten,
+    /// **The card a quit raises when it could not keep a change to a configuration file**
+    /// (T-QUIT-DOCUMENTS; design note 2026-10-11, revision (d)2): `{files}` is the files,
+    /// filled by [`quit_documents_not_saved_in`]. A plain statement; its one choice is
+    /// [`Self::QuitLeaveWithoutChange`].
+    QuitDocumentsNotSaved,
+    /// The cancelled quit's one choice: leave, without the changes the card names.
+    QuitLeaveWithoutChange,
+    /// **What the system's own message box says when a stop could keep a change to one
+    /// configuration file nowhere** (revision (d)3), `{file}` filled by [`stopped_changes_lost_in`].
+    StoppedChangeLost,
+    /// The same, for several files, `{files}` filled by [`stopped_changes_lost_in`].
+    StoppedChangesLost,
+    /// Between two of the names in a list that ends in [`Self::ListLast`] or
+    /// [`Self::ListMore`].
+    ListSeparator,
+    /// A list's last name after the others: `{names}`, then `{last}`.
+    ListLast,
+    /// A list cut at its bound: `{names}` shown, then how many more, `{count}`.
+    ListMore,
     /// **The line the system's shutdown screen shows for a Folio window while the layout is
     /// being written** (B-ENDSESSION): `ShutdownBlockReasonCreate`'s reason, up for at most the
     /// session write's budget. A state, so a few words.
@@ -3911,6 +3950,36 @@ impl Text {
                 pick(lang, " · no program to open it", " · 无程序可打开")
             }
             Self::HyperlinkNoProgram => pick(lang, "no program to open it", "无程序可打开"),
+            Self::HandoffCouldNotRunSuffix => pick(
+                lang,
+                " · the hand-off could not run",
+                " · the hand-off could not run", // zh: pending S-5
+            ),
+            Self::HandoffCouldNotRun => pick(
+                lang,
+                "the hand-off could not run",
+                "the hand-off could not run", // zh: pending S-5
+            ),
+            Self::HandoffsStoppedSuffix => pick(
+                lang,
+                " · hand-offs have stopped",
+                " · hand-offs have stopped", // zh: pending S-5
+            ),
+            Self::HandoffsStopped => pick(
+                lang,
+                "hand-offs have stopped",
+                "hand-offs have stopped", // zh: pending S-5
+            ),
+            Self::HandoffsTooManySuffix => pick(
+                lang,
+                " · too many hand-offs at once",
+                " · too many hand-offs at once", // zh: pending S-5
+            ),
+            Self::HandoffsTooMany => pick(
+                lang,
+                "too many hand-offs at once",
+                "too many hand-offs at once", // zh: pending S-5
+            ),
 
             // ── a drag's landing caption ───────────────────────────────────
             Self::DragSwapPanes => pick(lang, "Swap panes", "交换窗格"),
@@ -4149,6 +4218,11 @@ impl Text {
             Self::ProfilesEnvAdd => pick(lang, "Add", "添加"),
             Self::ProfilesEnvName => pick(lang, "Name", "名称"),
             Self::ProfilesEnvValue => pick(lang, "Value", "值"),
+            Self::ProfilesEnvPerPane => pick(
+                lang,
+                "Set per pane",
+                "Set per pane", // zh: pending H2-NITS
+            ),
             Self::ProfilesAuto => pick(lang, "Auto", "自动"),
             Self::ProfilesOn => pick(lang, "On", "开"),
             Self::ProfilesOff => pick(lang, "Off", "关"),
@@ -4309,10 +4383,12 @@ impl Text {
                 pick(lang, "Move the focus between panes", "在窗格之间移动焦点")
             }
             Self::ShortcutReservedResizePane => pick(lang, "Resize a pane", "调整窗格大小"),
+            // zh: pending H2-NITS — the existing translation with `{modifier}` where
+            // it said `Alt`; the writer checks the word order.
             Self::ShortcutReservedAltArrow => pick(
                 lang,
-                "Reserved: readline reads Alt+arrow as word movement",
-                "保留：readline 将 Alt+方向键用于按词移动",
+                "Reserved: readline reads {modifier}+arrow as word movement",
+                "保留：readline 将 {modifier}+方向键用于按词移动",
             ),
             Self::ShortcutHintAltGrZone => pick(
                 lang,
@@ -4610,6 +4686,39 @@ impl Text {
                 "session.json 写入失败。没有关闭任何窗口。",
             ),
             Self::ShutdownSavingLayout => pick(lang, "Saving your layout", "正在保存窗口布局"),
+            Self::QuitDocumentsNotSaved => pick(
+                lang,
+                "{files} could not be saved.",
+                "{files} could not be saved.", // zh: pending T-QUIT-DOCUMENTS
+            ),
+            Self::QuitLeaveWithoutChange => pick(
+                lang,
+                "Leave without this change",
+                "Leave without this change", // zh: pending T-QUIT-DOCUMENTS
+            ),
+            Self::StoppedChangeLost => pick(
+                lang,
+                "Folio stopped. A change to {file} could not be kept.",
+                "Folio stopped. A change to {file} could not be kept.", // zh: pending T-QUIT-DOCUMENTS
+            ),
+            Self::StoppedChangesLost => pick(
+                lang,
+                "Folio stopped. Changes to {files} could not be kept.",
+                "Folio stopped. Changes to {files} could not be kept.", // zh: pending T-QUIT-DOCUMENTS
+            ),
+            Self::ListSeparator => pick(
+                lang, ", ", ", ", // zh: pending T-QUIT-DOCUMENTS
+            ),
+            Self::ListLast => pick(
+                lang,
+                "{names} and {last}",
+                "{names} and {last}", // zh: pending T-QUIT-DOCUMENTS
+            ),
+            Self::ListMore => pick(
+                lang,
+                "{names} and {count} more",
+                "{names} and {count} more", // zh: pending T-QUIT-DOCUMENTS
+            ),
 
             // ── the preview pane's lock (§7.7 ⑧) ───────────────────────────
             Self::PreviewLock => pick(
@@ -6246,6 +6355,40 @@ impl Text {
         (Self::SeatOverflowOne, HostPlatform::MacOs),
         (Self::SeatOverflowMany, HostPlatform::Windows),
         (Self::SeatOverflowMany, HostPlatform::MacOs),
+        // zh: pending S-5 — what a link, an address or the fonts card says when its hand-off
+        // could not run, or the hand-off lane's worker stopped with it owed.
+        (Self::HandoffCouldNotRunSuffix, HostPlatform::Windows),
+        (Self::HandoffCouldNotRunSuffix, HostPlatform::MacOs),
+        (Self::HandoffCouldNotRun, HostPlatform::Windows),
+        (Self::HandoffCouldNotRun, HostPlatform::MacOs),
+        (Self::HandoffsStoppedSuffix, HostPlatform::Windows),
+        (Self::HandoffsStoppedSuffix, HostPlatform::MacOs),
+        (Self::HandoffsStopped, HostPlatform::Windows),
+        (Self::HandoffsStopped, HostPlatform::MacOs),
+        (Self::HandoffsTooManySuffix, HostPlatform::Windows),
+        (Self::HandoffsTooManySuffix, HostPlatform::MacOs),
+        (Self::HandoffsTooMany, HostPlatform::Windows),
+        (Self::HandoffsTooMany, HostPlatform::MacOs),
+        // zh: pending H2-NITS — a Profiles ghost row's value that each pane has
+        // its own of.
+        (Self::ProfilesEnvPerPane, HostPlatform::Windows),
+        (Self::ProfilesEnvPerPane, HostPlatform::MacOs),
+        // zh: pending T-QUIT-DOCUMENTS — the cancelled quit's card and its choice, the
+        // stopped process's native message, and the lists they name files in.
+        (Self::QuitDocumentsNotSaved, HostPlatform::Windows),
+        (Self::QuitDocumentsNotSaved, HostPlatform::MacOs),
+        (Self::QuitLeaveWithoutChange, HostPlatform::Windows),
+        (Self::QuitLeaveWithoutChange, HostPlatform::MacOs),
+        (Self::StoppedChangeLost, HostPlatform::Windows),
+        (Self::StoppedChangeLost, HostPlatform::MacOs),
+        (Self::StoppedChangesLost, HostPlatform::Windows),
+        (Self::StoppedChangesLost, HostPlatform::MacOs),
+        (Self::ListSeparator, HostPlatform::Windows),
+        (Self::ListSeparator, HostPlatform::MacOs),
+        (Self::ListLast, HostPlatform::Windows),
+        (Self::ListLast, HostPlatform::MacOs),
+        (Self::ListMore, HostPlatform::Windows),
+        (Self::ListMore, HostPlatform::MacOs),
     ];
 }
 
@@ -7329,6 +7472,15 @@ pub fn seat_overflow_notice_in(lang: Lang, count: usize) -> String {
         .replace("{count}", &count.to_string())
 }
 
+/// **The line under the shortcut page's declined rows**, with `modifier` — the
+/// word the rows' own caps spell that key in on this keyboard — in the sentence.
+#[must_use]
+pub fn shortcut_reserved_arrow_note_in(lang: Lang, modifier: &str) -> String {
+    Text::ShortcutReservedAltArrow
+        .in_lang(lang)
+        .replace("{modifier}", modifier)
+}
+
 #[must_use]
 pub fn files_more_not_shown(count: usize) -> String {
     match current() {
@@ -7399,6 +7551,65 @@ pub fn not_saved(reason: &str) -> String {
 // themselves are built by `restore::unsaved_lines` and `unsaved_line`, which are
 // a *name* and a *tab's own title* joined by an em dash — two strings this table
 // never owned.
+
+/// **How many names a card lists before it says how many more** ((b)11's bound).
+pub const NAMES_ON_A_CARD: usize = 3;
+
+/// **`files`, as one list in `lang`**: `a`, `a and b`, `a, b and c` — and past
+/// `bound` names, `a, b, c and 2 more`.
+#[must_use]
+pub fn files_listed_in(lang: Lang, files: &[&str], bound: Option<usize>) -> String {
+    let separator = Text::ListSeparator.in_lang(lang);
+    let shown = bound.map_or(files.len(), |bound| bound.min(files.len()));
+    if shown < files.len() {
+        return Text::ListMore
+            .in_lang(lang)
+            .replace("{names}", &files[..shown].join(separator))
+            .replace("{count}", &(files.len() - shown).to_string());
+    }
+    match files {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [names @ .., last] => Text::ListLast
+            .in_lang(lang)
+            .replace("{names}", &names.join(separator))
+            .replace("{last}", last),
+    }
+}
+
+/// **The cancelled quit's card** (T-QUIT-DOCUMENTS): `settings.json could not be
+/// saved.` — at most [`NAMES_ON_A_CARD`] files named, then how many more.
+#[must_use]
+pub fn quit_documents_not_saved(files: &[&str]) -> String {
+    quit_documents_not_saved_in(current(), files)
+}
+
+/// [`quit_documents_not_saved`] in a named language.
+#[must_use]
+pub fn quit_documents_not_saved_in(lang: Lang, files: &[&str]) -> String {
+    Text::QuitDocumentsNotSaved.in_lang(lang).replace(
+        "{files}",
+        &files_listed_in(lang, files, Some(NAMES_ON_A_CARD)),
+    )
+}
+
+/// **What the system's message box says when a stop kept a change nowhere**
+/// (T-QUIT-DOCUMENTS; revision (d)3): every such file, named.
+#[must_use]
+pub fn stopped_changes_lost(files: &[&str]) -> String {
+    stopped_changes_lost_in(current(), files)
+}
+
+/// [`stopped_changes_lost`] in a named language.
+#[must_use]
+pub fn stopped_changes_lost_in(lang: Lang, files: &[&str]) -> String {
+    match files {
+        [one] => Text::StoppedChangeLost.in_lang(lang).replace("{file}", one),
+        _ => Text::StoppedChangesLost
+            .in_lang(lang)
+            .replace("{files}", &files_listed_in(lang, files, None)),
+    }
+}
 
 /// **What the save branch could not save** (slice E2 phase ①, v3 复审 ④-a).
 ///
@@ -10273,6 +10484,9 @@ mod tests {
                 (Text::HyperlinkBlockedSuffix, Text::HyperlinkBlocked),
                 (Text::HyperlinkInvalidSuffix, Text::HyperlinkInvalid),
                 (Text::HyperlinkNoProgramSuffix, Text::HyperlinkNoProgram),
+                (Text::HandoffCouldNotRunSuffix, Text::HandoffCouldNotRun),
+                (Text::HandoffsStoppedSuffix, Text::HandoffsStopped),
+                (Text::HandoffsTooManySuffix, Text::HandoffsTooMany),
             ] {
                 let long = long.in_lang(lang);
                 let short = short.in_lang(lang);

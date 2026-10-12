@@ -110,6 +110,11 @@
 //!   inverts the guard, because four other modules spell the same register
 //!   names for registers of their own.
 //!
+//! * [`TraitResolver`] — **which trait a path names** ([`TraitId`]: package,
+//!   module path, name), read from the index's [`TraitRecord`]s, [`UseRecord`]s
+//!   and the trait path an [`ImplRecord`] writes — so two traits of one name in
+//!   two modules stay two (T-DOOR-REACH-TRAIT-OBJECTS).
+//!
 //! What census-1 adds (0.4.6, `docs/plans/design/ownership-census-2026-09-25.md`
 //! revision (b)2):
 //!
@@ -119,6 +124,14 @@
 //!   rules cannot resolve as an [`UnknownRow`] rather than a guess.
 //!   [`FieldCensus::judge`] is the diff gate against the committed files
 //!   (`crates/bt-source/tests/census.rs` runs it over `bt-app`).
+//!
+//! What T-PANIC-ROWS-HONEST adds:
+//!
+//! * [`FunctionPaths`] — **a free function's path followed to the item it names across the
+//!   workspace's crates**, by the census's own path rules plus one step into another crate's root
+//!   (a `use other::m::f as g;` or a re-export), answered as an identity ([`FunctionItem`]) and
+//!   never as a spelling: what `crates/bt-source/tests/contained_panic.rs` asks of each call that
+//!   is handed a closure.
 //!
 //! **The reading is `cfg`-blind on purpose.** Every declaration is followed
 //! whatever stands on it, and the host platform never selects: a file reached
@@ -139,12 +152,13 @@ mod paths;
 mod query;
 mod reject;
 mod scope;
+mod traits;
 mod universe;
 pub mod universes;
 
 pub use census::{
     CallRow, Callable, CensusFailure, Column, Committed, CommittedFile, Difference, FactRow,
-    FieldCensus, SiteRow, UnfollowedRow, UnknownRow,
+    FieldCensus, FunctionItem, FunctionPaths, SiteRow, UnfollowedRow, UnknownRow,
 };
 pub use declarations::{Compilation, DeclarationStep, ModuleBody, ReachedModule};
 pub use dep_map::{DependencyMap, Door, FieldUse, MEASURED_AT, TopicEdge, Unclassified};
@@ -153,7 +167,7 @@ pub use index::{
     Certainty, CommentKind, CommentRecord, ConditionalVariant, DeclarationPath, FileRecord,
     ImplRecord, Index, ItemIdentity, ItemKind, ItemRecord, LiteralRecord, LiteralValue, Location,
     MacroKind, MacroRecord, MacroShape, ModuleRecord, ModuleShape, Span, TokenKind, TokenRecord,
-    UnsupportedMacroShape,
+    TraitRecord, UnsupportedMacroShape, UseRecord,
 };
 pub use manifest::{Package, TargetId, TargetKind, TargetRoot, Workspace};
 pub use paths::{is_inside, normalized};
@@ -163,4 +177,5 @@ pub use query::{
 };
 pub use reject::{Position, Rejection, report};
 pub use scope::FileScoped;
+pub use traits::{TraitId, TraitResolver};
 pub use universe::{DiskScope, Universe, Vendor, is_vendored, targets_of};

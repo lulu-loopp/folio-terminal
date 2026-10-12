@@ -3403,6 +3403,13 @@ pub fn intern_path(path: &Path) -> &'static str {
     intern(&path.to_string_lossy())
 }
 
+/// One line of text held for the process, for a `Copy` subject the settings
+/// page reads (the environment table's ghosts).
+#[must_use]
+pub fn intern_text(text: &str) -> &'static str {
+    intern(text)
+}
+
 /// Whether one row is a profile of the reader's own — which is what decides
 /// whether it can be deleted, whether its colour is theirs, and which of the two
 /// verbs its editor's foot carries.
@@ -3674,44 +3681,86 @@ pub fn integration(index: usize) -> Integration {
 }
 
 /// Which spelling of an absolute path one row's shell **prints**, for the path
-/// detector — T-3 (`docs/plans/shell-matrix-2026-09-07.md`).
+/// detector — T-3 (`docs/plans/shell-matrix-2026-09-07.md`): the row at `index`
+/// in this window's table, on the platform this build is. The rule itself is
+/// [`printed_path_namespace_on`], which takes the platform as an input.
+#[must_use]
+pub fn printed_path_namespace(
+    index: usize,
+    environment: &dyn ShellEnvironment,
+) -> PrintedPathNamespace {
+    printed_path_namespace_on(
+        SeedPlatform::of_this_build(),
+        paths(index),
+        integration(index),
+        &args(index),
+        environment,
+    )
+}
+
+/// **The (platform, shell) → printed-path namespace table**, with the platform an
+/// input rather than a `cfg`, so a runner on any platform can be asked what every
+/// other one answers (T-MAC-PRINTED-NAMESPACE, 2026-10-12).
 ///
-/// Not the same question as [`paths`], and the difference is the whole of this
-/// function. [`PathNamespace`] answers *where this pane's working directory is*,
+/// | platform        | row                                              | namespace |
+/// |-----------------|--------------------------------------------------|-----------|
+/// | Windows         | starts `wsl.exe` (`paths` is [`PathNamespace::Wsl`]) | [`PrintedPathNamespace::Wsl`] |
+/// | Windows         | Windows directories behind a bash/zsh init door (Git Bash) | [`PrintedPathNamespace::Msys`] |
+/// | Windows         | every other row (PowerShell, cmd, …)             | [`PrintedPathNamespace::Windows`] |
+/// | macOS, other Unix | every row (zsh, bash, sh, the account's own shell) | [`PrintedPathNamespace::Posix`] |
+///
+/// Not the same question as [`paths`], and the difference is the Windows half of
+/// this table. [`PathNamespace`] answers *where this pane's working directory is*,
 /// and its answer for Git Bash is `Windows` on purpose: that shell's process is
 /// standing in `D:\Demo`, one directory under two spellings, and the Win32 one is
 /// the true one because it is what `CreateProcess` was handed. But the shell
 /// still **prints** `/d/Demo/report.md`, and text on the screen is read in the
 /// spelling it was written in.
 ///
-/// So the third namespace the `gitbash` row's own note refuses to become is a
-/// namespace here, and it is read off the pair the row already carries rather
-/// than off its id: a row whose directories are Windows and whose door is a
-/// **bash init file** is a bash standing in a Win32 world, which is what MSYS is.
-/// A row that starts `wsl.exe` is the distribution's own filesystem, door or no
-/// door — a WSL pane prints `/mnt/d/…` whether or not anything integrated it.
-/// Everything else prints this machine's spelling and reads it with the grammar
-/// it always had, which is why `/d/Demo` inside a PowerShell pane is not a path.
+/// So on Windows the third namespace the `gitbash` row's own note refuses to
+/// become is a namespace here, and it is read off the pair the row already
+/// carries rather than off its id: a row whose directories are Windows and whose
+/// door is a **bash or zsh init file** is a bash standing in a Win32 world, which
+/// is what MSYS is. A row that starts `wsl.exe` is the distribution's own
+/// filesystem, door or no door — a WSL pane prints `/mnt/d/…` whether or not
+/// anything integrated it. Everything else prints this machine's spelling.
+///
+/// **Off Windows the pair decides nothing.** The macOS and Unix rows carry the
+/// same `(Windows directories, init-file door)` pair Git Bash does — `paths` has
+/// no POSIX variant because a POSIX machine's directories need no translation —
+/// but a zsh on a Mac is not standing in a Win32 world: there is no MSYS layer,
+/// `/d/Demo` is the directory `d` under the root, and every shell prints the one
+/// filesystem this machine reads.
 #[must_use]
-pub fn printed_path_namespace(
-    index: usize,
+pub fn printed_path_namespace_on(
+    platform: SeedPlatform,
+    paths: PathNamespace,
+    door: Integration,
+    arguments: &[String],
     environment: &dyn ShellEnvironment,
 ) -> PrintedPathNamespace {
-    match (paths(index), integration(index)) {
-        (PathNamespace::Wsl, _) => PrintedPathNamespace::Wsl {
-            distro: wsl_distribution(index),
+    match (platform, paths, door) {
+        (SeedPlatform::MacOs | SeedPlatform::OtherUnix, _, _) => PrintedPathNamespace::Posix,
+        (SeedPlatform::Windows, PathNamespace::Wsl, _) => PrintedPathNamespace::Wsl {
+            distro: wsl_distribution_of(arguments),
             // Not knowable here, and deliberately not guessed: `wsl.exe --cd ~` is what the
             // launcher is *told*, and only the shell that read it can say what it expanded to. The
             // session fills this in from the pane's own first `OSC 7` report
             // (`PrintedPathNamespace::with_shell_home`).
             home: None,
         },
-        (PathNamespace::Windows, Integration::BashInitFile | Integration::ZshDotDir) => {
-            PrintedPathNamespace::Msys {
-                home: home_directory(environment),
-            }
-        }
-        (PathNamespace::Windows, _) => PrintedPathNamespace::Windows,
+        (
+            SeedPlatform::Windows,
+            PathNamespace::Windows,
+            Integration::BashInitFile | Integration::ZshDotDir,
+        ) => PrintedPathNamespace::Msys {
+            // Git for Windows maps `$HOME` onto the Windows home, read by the platform this
+            // answer is for rather than by the one the build is.
+            home: environment
+                .var_os(home_variable(platform))
+                .map(PathBuf::from),
+        },
+        (SeedPlatform::Windows, PathNamespace::Windows, _) => PrintedPathNamespace::Windows,
     }
 }
 
@@ -3730,7 +3779,12 @@ pub fn printed_path_namespace(
 /// something it may not.
 #[must_use]
 fn wsl_distribution(index: usize) -> Option<String> {
-    named_distribution(&args(index)).or_else(|| {
+    wsl_distribution_of(&args(index))
+}
+
+/// [`wsl_distribution`] for a row's arguments already in hand.
+fn wsl_distribution_of(arguments: &[String]) -> Option<String> {
+    named_distribution(arguments).or_else(|| {
         crate::wsl::facts()
             .default_distribution()
             .map(str::to_owned)
@@ -18386,6 +18440,175 @@ mod tests {
         );
     }
 
+    /// PIN (T-MAC-PRINTED-NAMESPACE, 2026-10-12) — **a zsh or bash on a Mac prints POSIX paths,
+    /// and only on Windows is a bash behind an init-file door a Git Bash.**
+    ///
+    /// The macOS and Unix rows carry the same `(Windows directories, init-file door)` pair the
+    /// `gitbash` row does, so a rule read off that pair alone classed every Mac shell as MSYS. The
+    /// table is driven here with the platform as an input, over every row every platform ships and
+    /// over every `(paths, door)` pair the function accepts, so one runner checks all three.
+    ///
+    /// MUTATION: drop the platform arm (answer from the shell's pair alone) and the macOS `zsh` and
+    /// `bash` rows come back `Msys` — RED.
+    #[test]
+    fn a_macos_shell_prints_posix_paths_not_msys() {
+        let platforms = [
+            SeedPlatform::Windows,
+            SeedPlatform::MacOs,
+            SeedPlatform::OtherUnix,
+        ];
+        let machine = FakeMachine::fully_equipped()
+            .with_var("USERPROFILE", r"C:\Users\alice")
+            .with_var("HOME", "/Users/alice")
+            .with_var("SHELL", "/opt/homebrew/bin/fish")
+            .with_file("/opt/homebrew/bin/fish");
+        let alices_windows_home = || PathBuf::from(r"C:\Users\alice");
+        let namespace_of = |platform: SeedPlatform, row: &Profile| {
+            printed_path_namespace_on(platform, row.paths, served_by(row), &row.args, &machine)
+        };
+
+        // Every row every platform ships.
+        for platform in platforms {
+            for row in shipped_for(platform, &machine) {
+                let expected = match (platform, row.id.as_str()) {
+                    (SeedPlatform::Windows, "gitbash") => PrintedPathNamespace::Msys {
+                        home: Some(alices_windows_home()),
+                    },
+                    (SeedPlatform::Windows, "wsl") => PrintedPathNamespace::Wsl {
+                        distro: None,
+                        home: None,
+                    },
+                    (SeedPlatform::Windows, _) => PrintedPathNamespace::Windows,
+                    (SeedPlatform::MacOs | SeedPlatform::OtherUnix, _) => {
+                        PrintedPathNamespace::Posix
+                    }
+                };
+                assert_eq!(
+                    namespace_of(platform, &row),
+                    expected,
+                    "{platform:?} row `{}`",
+                    row.id
+                );
+            }
+        }
+
+        // The rows the finding names, by name, so the loop above cannot pass by shipping none.
+        let row_on = |platform: SeedPlatform, id: &str| {
+            shipped_for(platform, &machine)
+                .into_iter()
+                .find(|row| row.id == id)
+                .unwrap_or_else(|| panic!("{platform:?} ships a `{id}` row"))
+        };
+        for id in ["zsh", "bash", BOURNE_SHELL_ID, USER_SHELL_ID] {
+            assert_eq!(
+                namespace_of(SeedPlatform::MacOs, &row_on(SeedPlatform::MacOs, id)),
+                PrintedPathNamespace::Posix,
+                "a macOS `{id}` prints the one filesystem this machine reads"
+            );
+        }
+        assert_eq!(
+            namespace_of(
+                SeedPlatform::Windows,
+                &row_on(SeedPlatform::Windows, "gitbash")
+            ),
+            PrintedPathNamespace::Msys {
+                home: Some(alices_windows_home())
+            },
+            "the same bash on Windows is Git Bash"
+        );
+        for id in ["pwsh", WINDOWS_POWERSHELL_ID, "cmd"] {
+            assert_eq!(
+                namespace_of(SeedPlatform::Windows, &row_on(SeedPlatform::Windows, id)),
+                PrintedPathNamespace::Windows,
+                "{id} on Windows spells drive-rooted paths"
+            );
+        }
+
+        // The pairs no shipped row carries.
+        let pinned_to_ubuntu = ["-d".to_owned(), "Ubuntu".to_owned()];
+        assert_eq!(
+            printed_path_namespace_on(
+                SeedPlatform::Windows,
+                PathNamespace::Windows,
+                Integration::ZshDotDir,
+                &[],
+                &machine
+            ),
+            PrintedPathNamespace::Msys {
+                home: Some(alices_windows_home())
+            },
+            "a zsh standing in a Win32 world is MSYS too"
+        );
+        assert_eq!(
+            printed_path_namespace_on(
+                SeedPlatform::Windows,
+                PathNamespace::Wsl,
+                Integration::BashInitFile,
+                &pinned_to_ubuntu,
+                &machine
+            ),
+            PrintedPathNamespace::Wsl {
+                distro: Some("Ubuntu".to_owned()),
+                home: None,
+            },
+            "a WSL row's own `-d` names its distribution, door or no door"
+        );
+        for platform in [SeedPlatform::MacOs, SeedPlatform::OtherUnix] {
+            assert_eq!(
+                printed_path_namespace_on(
+                    platform,
+                    PathNamespace::Wsl,
+                    Integration::BashInitFile,
+                    &pinned_to_ubuntu,
+                    &machine
+                ),
+                PrintedPathNamespace::Posix,
+                "{platform:?} has no WSL; every row there prints POSIX"
+            );
+        }
+    }
+
+    /// PIN (T-MAC-PRINTED-NAMESPACE round 2, 2026-10-12) — **a pane with no shell behind it, or
+    /// one its spawn has not told yet, reads this machine's own spelling**, and that is the same
+    /// answer the table gives a row with no door on that platform.
+    ///
+    /// Driven with the platform as an input, so the rule is checked for all three on any host;
+    /// and the namespace's `Default` is checked against the table for the platform this build is.
+    ///
+    /// MUTATION: `machine_own` answering `Windows` for every platform — RED on every host (the
+    /// macOS and Unix rows). MUTATION: `Default` answering `Windows` everywhere — RED on a macOS or
+    /// Unix host.
+    #[test]
+    fn a_pane_with_no_shell_reads_this_machines_own_spelling() {
+        let machine = FakeMachine::fully_equipped().with_var("USERPROFILE", r"C:\Users\alice");
+        let doorless_on = |platform: SeedPlatform| {
+            printed_path_namespace_on(
+                platform,
+                PathNamespace::Windows,
+                Integration::None,
+                &[],
+                &machine,
+            )
+        };
+        for (platform, own) in [
+            (SeedPlatform::Windows, PrintedPathNamespace::Windows),
+            (SeedPlatform::MacOs, PrintedPathNamespace::Posix),
+            (SeedPlatform::OtherUnix, PrintedPathNamespace::Posix),
+        ] {
+            assert_eq!(
+                PrintedPathNamespace::machine_own(platform == SeedPlatform::Windows),
+                own,
+                "{platform:?}"
+            );
+            assert_eq!(doorless_on(platform), own, "{platform:?}");
+        }
+        assert_eq!(
+            PrintedPathNamespace::default(),
+            doorless_on(SeedPlatform::of_this_build()),
+            "a session nobody has told yet speaks this machine's own spelling"
+        );
+    }
+
     /// PIN (user ruling 2026-09-07, §7.30) — **which distribution a WSL row's paths are opened
     /// through: the row's own `-d` argument, and the machine's default only when the row names
     /// none.**
@@ -27771,25 +27994,27 @@ mod paste_tests {
                 ]
             } else {
                 vec![
-                    ("zsh", ShellGrammar::Posix, "msys"),
-                    ("bash", ShellGrammar::Posix, "msys"),
-                    ("sh", ShellGrammar::Posix, "windows"),
+                    ("zsh", ShellGrammar::Posix, "posix"),
+                    ("bash", ShellGrammar::Posix, "posix"),
+                    ("sh", ShellGrammar::Posix, "posix"),
                 ]
             };
             assert_eq!(rows.len(), expected.len());
             for (row, (id, grammar, namespace)) in rows.iter().zip(expected) {
                 assert_eq!(row.id, id);
                 assert_eq!(derive_grammar_on(&row.program, platform), grammar);
-                // Assert the standing pair, retaining its context population. On Unix the
-                // namespace's Windows-only translation is inert even for a bash/zsh pair.
-                let pair = (row.paths, served_by(row));
-                let actual = match pair {
-                    (PathNamespace::Wsl, _) => "wsl",
-                    (
-                        PathNamespace::Windows,
-                        Integration::BashInitFile | Integration::ZshDotDir,
-                    ) => "msys",
-                    _ => "windows",
+                // The namespace the table gives this row on its own platform.
+                let actual = match printed_path_namespace_on(
+                    platform,
+                    row.paths,
+                    served_by(row),
+                    &row.args,
+                    &EmptyMachine,
+                ) {
+                    PrintedPathNamespace::Windows => "windows",
+                    PrintedPathNamespace::Posix => "posix",
+                    PrintedPathNamespace::Msys { .. } => "msys",
+                    PrintedPathNamespace::Wsl { .. } => "wsl",
                 };
                 assert_eq!(actual, namespace, "{id}");
             }
@@ -27997,11 +28222,52 @@ mod paste_tests {
         }
     }
 
+    /// PIN (T-MAC-PRINTED-NAMESPACE round 2, 2026-10-12) — **a Git Bash row whose paste keys are
+    /// overridden still prints MSYS paths.** The overrides choose how a path is *inserted*; what
+    /// the shell prints is the row's `(paths, door)` pair, read through the profile file's own
+    /// merge exactly as a loaded table reads it.
+    ///
+    /// MUTATION: let `paste_paths_as = windows` change `paths` or the door in the merge — RED.
+    #[test]
+    fn a_paste_overridden_git_bash_row_still_prints_msys_paths() {
+        for (grammar, spelling) in [
+            (Some("powershell"), Some("windows")),
+            (Some("cmd"), Some("windows-slash")),
+            (None, Some("wsl")),
+            (Some("posix"), None),
+        ] {
+            let (rows, faults) = merge_on(
+                windows_shipped(),
+                &file(grammar, spelling),
+                SeedPlatform::Windows,
+            );
+            assert!(faults.is_empty(), "{grammar:?} {spelling:?}: {faults:?}");
+            let row = rows
+                .iter()
+                .find(|row| row.id == "gitbash")
+                .expect("the file names the shipped gitbash row");
+            assert_eq!(row.paste_paths_as.as_deref(), spelling);
+            assert_eq!(
+                printed_path_namespace_on(
+                    SeedPlatform::Windows,
+                    row.paths,
+                    served_by(row),
+                    &row.args,
+                    &EmptyMachine
+                ),
+                PrintedPathNamespace::Msys { home: None },
+                "{grammar:?} {spelling:?}"
+            );
+        }
+    }
+
     #[test]
     fn namespace_resolver_keeps_its_standing_inputs_and_grammar_does_not_use_served_by() {
+        // The resolver's standing inputs are its signature now: `printed_path_namespace_on` is
+        // handed the platform, `paths`, the resolved door and the arguments, and no row, so it has
+        // no paste override to read (T-MAC-PRINTED-NAMESPACE, 2026-10-12).
         let resolver =
             crate::test_support::item_body(&ItemQuery::function("printed_path_namespace"));
-        assert!(resolver.contains("match (paths(index), integration(index))"));
         assert!(!resolver.contains("paste_as"));
         assert!(!resolver.contains("paste_paths_as"));
         let grammar = crate::test_support::item_body(&ItemQuery::function("derive_grammar"));

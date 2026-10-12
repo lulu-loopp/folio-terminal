@@ -24,7 +24,7 @@ use bt_persist::{
     read_settings, read_settings_keeping, read_settings_keeping_bytes, remove_sentinel,
 };
 
-use crate::document_request::{DocumentState, Follow, Mode, ReadNews};
+use crate::document_request::{DocumentState, Follow, Mode, QuitDocument, ReadNews};
 
 /// The name the session document wears on disk, which is also what a notice
 /// about it has to say out loud — [`KEYBINDINGS_FILE_NAME`]'s rule, one file
@@ -544,6 +544,9 @@ struct WorkerEnd {
     requests: std::sync::Weak<Mutex<Option<mpsc::Sender<StorageJob>>>>,
     up: Arc<std::sync::atomic::AtomicBool>,
     wake: LaneWake,
+    /// The jobs admitted ahead of the queue ([`StorageLane::submit_ahead`]): dropped
+    /// with the queued ones, so each such request's answer channel disconnects too.
+    ahead: Arc<Mutex<std::collections::VecDeque<StorageJob>>>,
 }
 
 impl Drop for WorkerEnd {
@@ -555,6 +558,7 @@ impl Drop for WorkerEnd {
             for job in self.ends.incoming.try_iter() {
                 drop(job);
             }
+            lane_lock(&self.ahead).clear();
         }
         (self.wake)();
     }
@@ -568,6 +572,15 @@ impl Drop for WorkerEnd {
 fn save_did_not_finish() -> String {
     let seconds = SESSION_SAVE_BUDGET.as_secs();
     format!("session save did not finish within {seconds} s; the last completed save stands")
+}
+
+/// What a quit whose one budget was spent before its session write says (T-QUIT-DOCUMENTS).
+fn quit_budget_spent() -> String {
+    let seconds = SESSION_SAVE_BUDGET.as_secs();
+    format!(
+        "the quit's {seconds} s were spent before the session could be written; the last \
+         completed save stands"
+    )
 }
 
 /// Say it once, in the words the log is read in.
@@ -663,6 +676,13 @@ enum StorageJob {
     Document(crate::document_request::DocumentJob),
     /// A hand-editable document, read while it stands still.
     Read(crate::document_request::ReadJob),
+    /// A quit's copy of a hand-editable document into the `recovered` folder,
+    /// answered on its own channel (design note 2026-10-11, revision (c)2).
+    Recovered(crate::document_request::RecoveredJob),
+    /// **A job is waiting ahead of the queue** ([`StorageLane::submit_ahead`]):
+    /// nothing to do but wake the worker, which serves every job ahead before
+    /// any it takes from the queue.
+    Ahead,
 }
 
 /// **What became of a trial's receipt**, and the thread that wrote it.
@@ -729,6 +749,9 @@ struct LaneShared {
     up: Arc<std::sync::atomic::AtomicBool>,
     /// How the loop is woken after a document answer ([`StorageLane::wake`]).
     wake: LaneWake,
+    /// **The jobs admitted ahead of the queue** — an update trial's receipt
+    /// ([`StorageLane::submit_ahead`]); written under the queue's lock.
+    ahead: Arc<Mutex<std::collections::VecDeque<StorageJob>>>,
 }
 
 /// Whether a thread serves the lane.
@@ -762,6 +785,7 @@ impl StorageLane {
                 worker: Mutex::new(LaneWorker::Waiting),
                 up: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 wake: Arc::new(wake_documents),
+                ahead: Arc::default(),
             }),
         };
         (lane, receipts)
@@ -776,6 +800,16 @@ impl StorageLane {
         (lane, UnservedJobs { _jobs: jobs })
     }
 
+    /// **A lane whose queue a test outside this module reads** ([`ScriptedJobs`]):
+    /// every job handed over is there, in the order it was queued, and nothing
+    /// else takes it.
+    #[cfg(test)]
+    pub(crate) fn scripted() -> (Self, ScriptedJobs) {
+        let (lane, jobs) = Self::held();
+        let ahead = Arc::clone(&lane.shared.ahead);
+        (lane, ScriptedJobs { jobs, ahead })
+    }
+
     /// **A lane whose queue the test serves**: every job handed over arrives on
     /// the receiver this returns, in order, and nothing else takes it.
     #[cfg(test)]
@@ -788,6 +822,7 @@ impl StorageLane {
                 worker: Mutex::new(LaneWorker::ByTest),
                 up: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                 wake: Arc::new(|| {}),
+                ahead: Arc::default(),
             }),
         };
         (lane, incoming)
@@ -804,6 +839,7 @@ impl StorageLane {
                 worker: Mutex::new(LaneWorker::Waiting),
                 up: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 wake: Arc::new(wake),
+                ahead: Arc::default(),
             }),
         }
     }
@@ -818,7 +854,7 @@ impl StorageLane {
     /// [`Self::of_its_own`], with `wake` as its wake, so a test hears what the
     /// loop would.
     #[cfg(test)]
-    fn with_a_worker_and_wake(wake: impl Fn() + Send + Sync + 'static) -> Self {
+    pub(crate) fn with_a_worker_and_wake(wake: impl Fn() + Send + Sync + 'static) -> Self {
         let (mut lane, _receipts) = Self::fresh();
         Arc::get_mut(&mut lane.shared)
             .expect("a lane just made has one owner")
@@ -837,6 +873,29 @@ impl StorageLane {
         lane_lock(&self.shared.requests)
             .as_ref()
             .is_some_and(|requests| requests.send(job).is_ok())
+    }
+
+    /// **Hand one job over ahead of the queue** (T-QUIT-DOCUMENTS, round 2): the worker
+    /// serves it before any job still queued, after the one it may be inside. Only an
+    /// update trial's receipt goes this way — a small create-new write without which the
+    /// trial is rolled back — so a quit's documents, their copies and its session write
+    /// never stand in front of it; every other job keeps the queue's order, and per-file
+    /// order holds (the receipt is no other request's file). `false`: no worker took it,
+    /// as [`Self::submit_storage_job`] answers.
+    fn submit_ahead(&self, job: StorageJob) -> bool {
+        if !SessionWriter::start(self) {
+            return false;
+        }
+        let requests = lane_lock(&self.shared.requests);
+        let Some(queue) = requests.as_ref() else {
+            return false;
+        };
+        lane_lock(&self.shared.ahead).push_back(job);
+        if queue.send(StorageJob::Ahead).is_err() {
+            lane_lock(&self.shared.ahead).pop_back();
+            return false;
+        }
+        true
     }
 
     /// **Admit one document request** — only while a worker serves the queue,
@@ -870,6 +929,11 @@ impl StorageLane {
     /// Hand a document's stable read over.
     pub(crate) fn send_read(&self, job: crate::document_request::ReadJob) -> bool {
         self.admit_document_job(StorageJob::Read(job))
+    }
+
+    /// Hand a quit's copy of a document into `recovered` over.
+    pub(crate) fn send_recovered(&self, job: crate::document_request::RecoveredJob) -> bool {
+        self.admit_document_job(StorageJob::Recovered(job))
     }
 
     /// **Wake the loop** — after a document answer is in its channel: the
@@ -975,6 +1039,7 @@ impl SessionWriter {
         let up = Arc::clone(&lane.shared.up);
         let wake = Arc::clone(&lane.shared.wake);
         let requests = Arc::downgrade(&lane.shared.requests);
+        let ahead = Arc::clone(&lane.shared.ahead);
         // Up before the thread can end, so its end is the last word on it; under
         // the queue's lock, as every write of it is.
         {
@@ -997,56 +1062,76 @@ impl SessionWriter {
                     requests,
                     up,
                     wake: Arc::clone(&wake),
+                    ahead,
                 };
-                while let Ok(job) = end.ends.incoming.recv() {
-                    let request = match job {
-                        StorageJob::Session(request) => request,
-                        // The answer is in its channel before the wake: the steward's order.
-                        StorageJob::Document(job) => {
-                            crate::document_request::serve_document(ctx, job);
-                            wake();
-                            continue;
-                        }
-                        StorageJob::Read(job) => {
-                            crate::document_request::serve_read(ctx, job);
-                            wake();
-                            continue;
-                        }
-                        StorageJob::SessionBackup(request) => {
-                            if let Err(error) = bt_persist::atomic_write_carrying_from(
-                                &request.path,
-                                &request.bytes,
-                                &request.source,
-                            ) {
-                                crate::diagnostics::note(&format!(
-                                    "BT_PERSIST {PREVIOUS_SESSION_FILE_NAME} backup failed: {error}"
-                                ));
+                // **A panic is the worker's end** (T-PANIC-ROWS-HONEST): the loop runs inside
+                // `contained_panic::contain`, which the resident panic hook lets unwind, so the job
+                // being served drops its answer (its terminal: the worker gone) and `end` then
+                // ends every job still queued and wakes the loop, as on any other end. The panic's
+                // report is in the panic log.
+                let _ = crate::contained_panic::contain(|| {
+                    'serving: while let Ok(next) = end.ends.incoming.recv() {
+                        // **Every job admitted ahead is served before the one the queue gave**
+                        // ([`StorageLane::submit_ahead`]): the worker drains them at each job it
+                        // takes, and the `Ahead` token wakes it for them when it is idle.
+                        let ahead: Vec<StorageJob> = lane_lock(&end.ahead).drain(..).collect();
+                        for job in ahead.into_iter().chain(std::iter::once(next)) {
+                            let request = match job {
+                                StorageJob::Session(request) => request,
+                                // The answer is in its channel before the wake: the steward's order.
+                                StorageJob::Document(job) => {
+                                    crate::document_request::serve_document(ctx, job);
+                                    wake();
+                                    continue;
+                                }
+                                StorageJob::Read(job) => {
+                                    crate::document_request::serve_read(ctx, job);
+                                    wake();
+                                    continue;
+                                }
+                                StorageJob::Recovered(job) => {
+                                    crate::document_request::serve_recovered(ctx, job);
+                                    wake();
+                                    continue;
+                                }
+                                StorageJob::SessionBackup(request) => {
+                                    if let Err(error) = bt_persist::atomic_write_carrying_from(
+                                        &request.path,
+                                        &request.bytes,
+                                        &request.source,
+                                    ) {
+                                        crate::diagnostics::note(&format!(
+                                            "BT_PERSIST {PREVIOUS_SESSION_FILE_NAME} backup failed: {error}"
+                                        ));
+                                    }
+                                    continue;
+                                }
+                                StorageJob::Receipt { job, answer } => {
+                                    let _ = answer.send(write_receipt(&job));
+                                    continue;
+                                }
+                                StorageJob::Handoff { job, answer } => {
+                                    let _ = answer.send(crate::update_handoff::perform(job));
+                                    continue;
+                                }
+                                StorageJob::Ahead => continue,
+                            };
+                            let result = bt_persist::atomic_write(&request.path, &request.bytes)
+                                .map_err(|error| error.to_string());
+                            if end
+                                .ends
+                                .outgoing
+                                .send(SessionWriteReceipt {
+                                    generation: request.generation,
+                                    result,
+                                })
+                                .is_err()
+                            {
+                                break 'serving;
                             }
-                            continue;
                         }
-                        StorageJob::Receipt { job, answer } => {
-                            let _ = answer.send(write_receipt(&job));
-                            continue;
-                        }
-                        StorageJob::Handoff { job, answer } => {
-                            let _ = answer.send(crate::update_handoff::perform(job));
-                            continue;
-                        }
-                    };
-                    let result = bt_persist::atomic_write(&request.path, &request.bytes)
-                        .map_err(|error| error.to_string());
-                    if end
-                        .ends
-                        .outgoing
-                        .send(SessionWriteReceipt {
-                            generation: request.generation,
-                            result,
-                        })
-                        .is_err()
-                    {
-                        break;
                     }
-                }
+                });
             },
         );
         match started {
@@ -1110,7 +1195,7 @@ impl SessionWriter {
     ) -> Option<mpsc::Receiver<ReceiptWritten>> {
         let (answer, answered) = mpsc::channel();
         self.lane
-            .submit_storage_job(StorageJob::Receipt { job, answer })
+            .submit_ahead(StorageJob::Receipt { job, answer })
             .then_some(answered)
     }
 
@@ -1162,13 +1247,16 @@ impl SessionWriter {
         &mut self,
         token: WaitToken<'_, doors::SessionWriteWait>,
         generation: u64,
+        until: Instant,
     ) -> SessionWaitAnswer {
         let _ = token;
         let mut earlier = Vec::new();
         if self.stalled {
             return (earlier, Err(SaveRefusal::TimedOut(save_did_not_finish())));
         }
-        let deadline = Instant::now() + SESSION_SAVE_BUDGET;
+        // **Never past `until`** — a quit's one budget, started by its documents phase
+        // (T-QUIT-DOCUMENTS) — and never past this wait's own bound.
+        let deadline = (Instant::now() + SESSION_SAVE_BUDGET).min(until);
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             match self.receipts.recv_timeout(left) {
@@ -1295,6 +1383,10 @@ pub struct SessionStore {
     /// **The sentinel went because the system was ending the session** (B-ENDSESSION), so a
     /// shutdown taken back puts it back — [`Self::rearm_after_the_systems_end`].
     sentinel_dropped_for_the_systems_end: bool,
+    /// **The launch backup waits** (T-QUIT-DOCUMENTS round 4): a quit that goes on with an
+    /// update trial's session release still pending holds it back from its final write
+    /// until the write's verdict says whether the release is performed or consumed.
+    launch_backup_paused: bool,
     /// **Whether this process writes the session at all** (review row R4-5).
     ///
     /// False in the second Folio over one data directory: its window works, its
@@ -1414,6 +1506,7 @@ impl SessionStore {
             launch_backup,
             armed,
             sentinel_dropped_for_the_systems_end: false,
+            launch_backup_paused: false,
             writer_of_record,
             fault,
         };
@@ -1466,9 +1559,27 @@ impl SessionStore {
             launch_backup: None,
             armed: false,
             sentinel_dropped_for_the_systems_end: false,
+            launch_backup_paused: false,
             writer_of_record,
             fault: None,
         }
+    }
+
+    /// [`Self::at`], its documents handed to `lane` — a scripted lane's queue
+    /// holds them in order beside the documents' (no receipt comes back to it).
+    #[cfg(test)]
+    pub(crate) fn at_on(session_path: PathBuf, sentinel_path: PathBuf, lane: StorageLane) -> Self {
+        let mut store = Self::at(session_path, sentinel_path);
+        let (_, receipts) = mpsc::channel();
+        store.writer = SessionWriter {
+            lane,
+            receipts,
+            sent: 0,
+            landed: 0,
+            answered: None,
+            stalled: false,
+        };
+        store
     }
 
     /// [`Self::open`] over caller-owned paths: it reads the named session and
@@ -1496,6 +1607,7 @@ impl SessionStore {
             launch_backup,
             armed: false,
             sentinel_dropped_for_the_systems_end: false,
+            launch_backup_paused: false,
             writer_of_record,
             fault: None,
         };
@@ -1584,17 +1696,45 @@ impl SessionStore {
         if !self.writer_of_record {
             return;
         }
-        if !self.armed {
-            self.armed = create_sentinel(&self.sentinel_path).is_ok();
-        }
+        self.arm_sentinel();
         self.queue_launch_backup();
         self.hand_over(Instant::now());
+    }
+
+    /// **Arm this run's sentinel, if it is not armed** — what [`Self::release_trial`] does
+    /// first, on its own (T-QUIT-DOCUMENTS round 4): a quit or a stop that disposes of an
+    /// update trial's held session release without performing it still owes the next start
+    /// a truthful `session.lock`, so a final write that does not land is said there.
+    pub(crate) fn arm_sentinel(&mut self) {
+        if self.writer_of_record && !self.armed {
+            self.armed = create_sentinel(&self.sentinel_path).is_ok();
+        }
+    }
+
+    /// **Hold the launch backup back from the writes that follow** until
+    /// [`Self::resume_launch_backup`] or [`Self::forgo_launch_backup`] (round 4).
+    pub(crate) fn pause_launch_backup(&mut self) {
+        self.launch_backup_paused = true;
+    }
+
+    /// Let the launch backup go ahead of the next session write again (round 4).
+    pub(crate) fn resume_launch_backup(&mut self) {
+        self.launch_backup_paused = false;
+    }
+
+    /// Whether this run's sentinel is armed — for a test.
+    #[cfg(test)]
+    pub(crate) fn sentinel_is_armed(&self) -> bool {
+        self.armed && self.sentinel_path.is_file()
     }
 
     /// Put the launch backup on the session writer exactly once. FIFO ordering
     /// makes it land before this run's first session write without a wait on the
     /// window thread.
     fn queue_launch_backup(&mut self) {
+        if self.launch_backup_paused {
+            return;
+        }
         let Some(request) = self.launch_backup.take() else {
             return;
         };
@@ -1730,6 +1870,12 @@ impl SessionStore {
     /// quit where it stands; a budget that ran out does not, because the disk still holds the
     /// last completed save and the reader still asked to leave. [`SaveRefusal`] is which.
     pub fn flush_judged(&mut self) -> Result<(), SaveRefusal> {
+        self.flush_judged_until(Instant::now() + SESSION_SAVE_BUDGET)
+    }
+
+    /// [`Self::flush_judged`], its wait ending at `until` at the latest — a quit's one
+    /// budget (T-QUIT-DOCUMENTS).
+    fn flush_judged_until(&mut self, until: Instant) -> Result<(), SaveRefusal> {
         let now = Instant::now();
         if !self.writes_to_disk() {
             // The second Folio over this directory (review row R4-5). `Ok(())`
@@ -1748,7 +1894,7 @@ impl SessionStore {
             let Some(outstanding) = self.writer.in_flight() else {
                 return Ok(());
             };
-            return self.wait_for_landing(outstanding, now);
+            return self.wait_for_landing(outstanding, now, until);
         }
         let bytes = bt_persist::serialize_session(&self.session).map_err(|error| {
             let error = error.to_string();
@@ -1762,11 +1908,70 @@ impl SessionStore {
             self.report_write(Err(NO_WRITER_THREAD.to_string()), now);
             return Err(SaveRefusal::Refused(NO_WRITER_THREAD.to_string()));
         };
-        let landed = self.wait_for_landing(generation, now);
+        let landed = self.wait_for_landing(generation, now, until);
         if landed.is_ok() {
             self.debouncer.mark_flushed();
         }
         landed
+    }
+
+    /// **A quit's session write, inside what is left of its one budget**
+    /// (T-QUIT-DOCUMENTS; design note 2026-10-11, revision (c)2 as ruled in the
+    /// review's round 2).
+    ///
+    /// `until` is `quit::Quit::session_write_until`: the documents phase's start plus
+    /// [`SESSION_SAVE_BUDGET`]. Before it, this is [`Self::flush_judged`] with its wait
+    /// ending at `until`. **At or past it, nothing is handed over and nothing is waited
+    /// for**: the quit's budget is spent, so the store gives the write up as a write whose
+    /// budget ran out does — the debounce is settled, the writer is marked stalled so the
+    /// way out's [`Self::close`] neither flushes anew nor waits for the thread, and
+    /// `session.lock` stays, because this run never saw this document land. The last
+    /// completed save is what the next start reads. A store that owes nothing answers
+    /// `Ok(())` either way.
+    pub(crate) fn flush_for_quit(
+        &mut self,
+        until: Instant,
+        now: Instant,
+    ) -> Result<(), SaveRefusal> {
+        if now < until {
+            return self.flush_judged_until(until);
+        }
+        if !self.writes_to_disk() {
+            self.debouncer.mark_flushed();
+            return Ok(());
+        }
+        self.take_receipts(now);
+        if !self.debouncer.is_dirty() && self.writer.in_flight().is_none() {
+            return Ok(());
+        }
+        self.writer.stalled = true;
+        self.debouncer.mark_flushed();
+        let said = quit_budget_spent();
+        eprintln!("Folio: {said}");
+        Err(SaveRefusal::TimedOut(said))
+    }
+
+    /// **Skip this run's launch backup** (T-QUIT-DOCUMENTS round 3): a quit that goes on
+    /// to its way out with an update trial's write release still held makes its own final
+    /// session write the session document of record, and nothing goes ahead of it. Said once.
+    pub(crate) fn forgo_launch_backup(&mut self) {
+        self.launch_backup_paused = false;
+        if self.launch_backup.take().is_some() {
+            crate::diagnostics::note(&format!(
+                "BT_PERSIST {PREVIOUS_SESSION_FILE_NAME} backup skipped: the quit's own session \
+                 write is this run's document of record"
+            ));
+        }
+    }
+
+    /// A launch backup owed from `source`, as an update trial holds one — for a test.
+    #[cfg(test)]
+    pub(crate) fn owing_a_launch_backup(&mut self, source: PathBuf, bytes: &[u8]) {
+        self.launch_backup = Some(SessionBackupRequest {
+            path: source.with_file_name(PREVIOUS_SESSION_FILE_NAME),
+            source,
+            bytes: Arc::from(bytes),
+        });
     }
 
     /// **Hand the final document over as a named generation, and do not wait for it** — an
@@ -1857,18 +2062,24 @@ impl SessionStore {
     /// Stand still until one named document has an answer, and book every answer that arrives on
     /// the way — a synchronous wait must not swallow the receipts the ordinary path was going to
     /// read.
-    fn wait_for_landing(&mut self, generation: u64, now: Instant) -> Result<(), SaveRefusal> {
+    fn wait_for_landing(
+        &mut self,
+        generation: u64,
+        now: Instant,
+        until: Instant,
+    ) -> Result<(), SaveRefusal> {
         // The one wait in this store is an owner-thread door. A refusal did not wait: it is the
         // stalled answer a spent budget gives, so a quit goes on rather than stopping over a
         // document that may still be on its way.
-        let (earlier, landed) =
-            admitted::<doors::SessionWriteWait, _>(|token| self.writer.wait_for(token, generation))
-                .unwrap_or_else(|_refused| {
-                    (
-                        Vec::new(),
-                        Err(SaveRefusal::TimedOut(save_did_not_finish())),
-                    )
-                });
+        let (earlier, landed) = admitted::<doors::SessionWriteWait, _>(|token| {
+            self.writer.wait_for(token, generation, until)
+        })
+        .unwrap_or_else(|_refused| {
+            (
+                Vec::new(),
+                Err(SaveRefusal::TimedOut(save_did_not_finish())),
+            )
+        });
         for receipt in earlier {
             self.apply_receipt(receipt, now);
         }
@@ -1950,6 +2161,59 @@ pub(crate) struct UnservedJobs {
     _jobs: mpsc::Receiver<StorageJob>,
 }
 
+/// **The queue of a [`StorageLane::scripted`] lane**: a test outside this module
+/// takes each job in the order it was queued and answers it itself — the quit's
+/// scripted disk.
+#[cfg(test)]
+pub(crate) struct ScriptedJobs {
+    jobs: mpsc::Receiver<StorageJob>,
+    ahead: Arc<Mutex<std::collections::VecDeque<StorageJob>>>,
+}
+
+/// One job a scripted lane's queue held, as a test answers it.
+#[cfg(test)]
+pub(crate) enum ScriptedJob {
+    Document(crate::document_request::DocumentJob),
+    Recovered(crate::document_request::RecoveredJob),
+    /// A document's stable read.
+    Read,
+    /// A session document.
+    Session,
+    /// The launch's session backup.
+    Backup,
+    /// An update trial's receipt.
+    Receipt,
+    /// Anything else the worker takes.
+    Other,
+}
+
+#[cfg(test)]
+impl ScriptedJobs {
+    /// The next job the worker would serve, if one is: a job admitted ahead first, as
+    /// the worker takes it, then the queue's. Never waits.
+    pub(crate) fn next(&self) -> Option<ScriptedJob> {
+        let job = loop {
+            if let Some(job) = lane_lock(&self.ahead).pop_front() {
+                break job;
+            }
+            match self.jobs.try_recv() {
+                Ok(StorageJob::Ahead) => {}
+                Ok(job) => break job,
+                Err(_) => return None,
+            }
+        };
+        Some(match job {
+            StorageJob::Document(job) => ScriptedJob::Document(job),
+            StorageJob::Recovered(job) => ScriptedJob::Recovered(job),
+            StorageJob::Read(_) => ScriptedJob::Read,
+            StorageJob::Session(_) => ScriptedJob::Session,
+            StorageJob::Receipt { .. } => ScriptedJob::Receipt,
+            StorageJob::SessionBackup(_) => ScriptedJob::Backup,
+            StorageJob::Handoff { .. } | StorageJob::Ahead => ScriptedJob::Other,
+        })
+    }
+}
+
 /// `settings.json` and when it reaches the disk.
 ///
 /// No debouncer, unlike [`SessionStore`], and §1.1 is explicit about why the two
@@ -1992,6 +2256,12 @@ pub struct SettingsStore {
     /// document, and a door that puts in force something else than the file
     /// said — a font this machine lacks — must not write that back as a change.
     merging: bool,
+    /// **What a quit's documents phase merged without putting it in force**
+    /// (design note 2026-10-11, revision (c)2: merges at quit are pure, no door
+    /// runs). `desired` already holds the merged document; a quit that was
+    /// cancelled leaves the window standing, and the next storage pass puts it in
+    /// force through its doors and says it ([`Self::begin_merge`]).
+    merged_at_quit: Option<crate::settings_merge::Account>,
 }
 
 impl SettingsStore {
@@ -2035,6 +2305,7 @@ impl SettingsStore {
             missing: report == ReadReport::NotFound,
             held: None,
             merging: false,
+            merged_at_quit: None,
         }
     }
 
@@ -2101,6 +2372,7 @@ impl SettingsStore {
             missing: true,
             held: None,
             merging: false,
+            merged_at_quit: None,
         }
     }
 
@@ -2196,17 +2468,18 @@ impl SettingsStore {
         &mut self,
         platform: bt_platform::HostPlatform,
     ) -> Option<crate::settings_merge::SettingsPass> {
-        if !self.document.merge_waits() {
+        let at_quit = self.merged_at_quit.take();
+        if !self.document.merge_waits() && at_quit.is_none() {
             return None;
         }
         let merges = self.document.merge_stored(|base, ours, theirs| {
             let merged = crate::settings_merge::merge(base, ours, theirs, platform);
             (merged.document, merged.account)
         });
-        if merges.is_empty() {
+        if merges.is_empty() && at_quit.is_none() {
             return None;
         }
-        let mut account = crate::settings_merge::Account::default();
+        let mut account = at_quit.unwrap_or_default();
         for merge in merges {
             account.add(merge);
         }
@@ -2220,6 +2493,28 @@ impl SettingsStore {
             crate::settings_merge::doors(self.document.projection(), &merged, platform),
             account,
         ))
+    }
+
+    /// **A quit's merge** (design note 2026-10-11, revision (c)2): every file
+    /// stored for the merge is merged and folded into `desired`, as
+    /// [`Self::begin_merge`] does, and **nothing is put in force** — no door runs,
+    /// the windows are leaving. What it merged is kept for the next storage pass,
+    /// which puts it in force should the quit be cancelled.
+    fn merge_at_quit(&mut self, platform: bt_platform::HostPlatform) {
+        if !self.document.merge_waits() {
+            return;
+        }
+        let merges = self.document.merge_stored(|base, ours, theirs| {
+            let merged = crate::settings_merge::merge(base, ours, theirs, platform);
+            (merged.document, merged.account)
+        });
+        if merges.is_empty() {
+            return;
+        }
+        let account = self.merged_at_quit.get_or_insert_with(Default::default);
+        for merge in merges {
+            account.add(merge);
+        }
     }
 
     /// **A storage pass's merge, its last step**: the writes are released, and
@@ -2251,6 +2546,48 @@ impl SettingsStore {
     }
 }
 
+/// `settings.json` in a quit (design note 2026-10-11, revision (c)2): its
+/// [`DocumentState`]'s answers, and a turn that folds a changed file in before
+/// it sends — a `Moved` or `Displaced` answer at quit is merged as the running
+/// window merges it, without the doors.
+impl QuitDocument for SettingsStore {
+    fn file(&self) -> &'static str {
+        self.document.file()
+    }
+
+    fn quit_begin(&mut self) {
+        self.document.quit_begin();
+    }
+
+    fn quit_turn(&mut self) {
+        let _ = self.document.take_answers();
+        self.merge_at_quit(bt_platform::host_platform());
+        if self.document.standing() == crate::quit::Standing::Unsent {
+            self.document.send_owed();
+        }
+    }
+
+    fn standing(&self) -> crate::quit::Standing {
+        self.document.standing()
+    }
+
+    fn keep_copy(&mut self, folder: &Path, at: std::time::SystemTime) {
+        self.document.keep_copy(folder, at);
+    }
+
+    fn copy_standing(&mut self) -> crate::quit::CopyStanding {
+        self.document.copy_standing()
+    }
+
+    fn drop_owed(&mut self) -> Option<String> {
+        self.document.drop_owed()
+    }
+
+    fn owed_bytes(&self) -> Option<Result<Vec<u8>, String>> {
+        self.document.owed_bytes()
+    }
+}
+
 /// The name the shortcut file wears on disk, which is also what a notice about
 /// it has to say out loud.
 pub const KEYBINDINGS_FILE_NAME: &str = "keybindings.json";
@@ -2279,6 +2616,41 @@ pub struct KeybindingsStore {
     document: DocumentState<KeybindingsV1>,
     /// Why the file on disk was not usable, if it was not.
     fault: Option<String>,
+}
+
+/// `keybindings.json` in a quit and on a stop: its [`DocumentState`]'s answers (T-QUIT-DOCUMENTS).
+impl QuitDocument for KeybindingsStore {
+    fn file(&self) -> &'static str {
+        self.document.file()
+    }
+
+    fn quit_begin(&mut self) {
+        self.document.quit_begin();
+    }
+
+    fn quit_turn(&mut self) {
+        self.document.quit_turn();
+    }
+
+    fn standing(&self) -> crate::quit::Standing {
+        self.document.standing()
+    }
+
+    fn keep_copy(&mut self, folder: &std::path::Path, at: std::time::SystemTime) {
+        self.document.keep_copy(folder, at);
+    }
+
+    fn copy_standing(&mut self) -> crate::quit::CopyStanding {
+        self.document.copy_standing()
+    }
+
+    fn drop_owed(&mut self) -> Option<String> {
+        self.document.drop_owed()
+    }
+
+    fn owed_bytes(&self) -> Option<Result<Vec<u8>, String>> {
+        self.document.owed_bytes()
+    }
 }
 
 impl KeybindingsStore {
@@ -2468,6 +2840,41 @@ pub struct ProfilesStore {
     document: DocumentState<ProfilesV1>,
     /// Why the file on disk was not usable, if it was not.
     fault: Option<String>,
+}
+
+/// `profiles.json` in a quit and on a stop: its [`DocumentState`]'s answers (T-QUIT-DOCUMENTS).
+impl QuitDocument for ProfilesStore {
+    fn file(&self) -> &'static str {
+        self.document.file()
+    }
+
+    fn quit_begin(&mut self) {
+        self.document.quit_begin();
+    }
+
+    fn quit_turn(&mut self) {
+        self.document.quit_turn();
+    }
+
+    fn standing(&self) -> crate::quit::Standing {
+        self.document.standing()
+    }
+
+    fn keep_copy(&mut self, folder: &std::path::Path, at: std::time::SystemTime) {
+        self.document.keep_copy(folder, at);
+    }
+
+    fn copy_standing(&mut self) -> crate::quit::CopyStanding {
+        self.document.copy_standing()
+    }
+
+    fn drop_owed(&mut self) -> Option<String> {
+        self.document.drop_owed()
+    }
+
+    fn owed_bytes(&self) -> Option<Result<Vec<u8>, String>> {
+        self.document.owed_bytes()
+    }
 }
 
 impl ProfilesStore {
@@ -3516,9 +3923,10 @@ pub(crate) mod tests {
         let first = writer.send(&path, b"first".to_vec()).expect("queued");
         let second = writer.send(&path, b"second".to_vec()).expect("queued");
         assert_eq!((first, second), (1, 2));
-        let (earlier, landed) =
-            admitted::<doors::SessionWriteWait, _>(|token| writer.wait_for(token, second))
-                .expect("admitted on the way out");
+        let (earlier, landed) = admitted::<doors::SessionWriteWait, _>(|token| {
+            writer.wait_for(token, second, Instant::now() + SESSION_SAVE_BUDGET)
+        })
+        .expect("admitted on the way out");
         assert_eq!(landed, Ok(()));
         assert_eq!(
             earlier
@@ -3618,6 +4026,7 @@ pub(crate) mod tests {
                     worker: Mutex::new(LaneWorker::Running(thread)),
                     up: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                     wake: Arc::new(|| {}),
+                    ahead: Arc::default(),
                 }),
             },
             receipts,
@@ -4946,6 +5355,7 @@ pub(crate) mod tests {
             &mut SessionWriter,
             WaitToken<'_, doors::SessionWriteWait>,
             u64,
+            Instant,
         ) -> SessionWaitAnswer = SessionWriter::wait_for;
         let _: fn(&mut SessionWriter, WaitToken<'_, doors::SessionWriterRetire>) =
             SessionWriter::close;

@@ -18,6 +18,92 @@ When it is red, classify the read, put it through the correct lane, and re-key a
 moved owner by item identity; do not add a file key unless the collision is an
 explicit row of `docs/plans/MIGRATION-DEBT.tsv`; that coupling is prose, kept equal by review, not by a test.
 
+## Source readers
+
+The rule: a test that reads source text or a committed document is on a list
+that says why. A reader bound to a Rust file is on `bt_source::FileScoped` (the
+permanent allowlist), on `docs/plans/MIGRATION-DEBT.tsv` (readers waiting on a
+seam; it only shrinks, and `scripts/ci/check-migration-debt.ps1` refuses an
+added row against the merge base) or on `docs/plans/SOURCE-READERS.tsv`
+(readers whose subject really is the bytes). Since
+T-SOURCE-READERS-TSV-TRIPWIRE (2026-10-12) every item of test or build-support
+code that reads a **committed non-Rust file** has a row on
+`SOURCE-READERS.tsv` or `MIGRATION-DEBT.tsv`, keyed by its file and its item
+(the `owner` column), and never on both: an `include_str!`/`include_bytes!` of
+a committed path, or a **call** of `read_to_string`, `fs::read` or `File::open`
+(through bt-source's call pattern; a bare mention is no call) whose own
+argument reduces to a committed document, or **any other call or method handed
+such a path** — a wrapper of the same crate (`read_session(&fixture_path(…))`),
+a function of another crate, a method called on the path — which is a reader
+named by its callee in the `mechanism` column. Each call is judged by its own
+argument: a literal, a `Path`/`.join` chain, `env!`, `concat!` and `format!`
+spliced piece by piece (placeholders take their arguments as `std` does; a
+string that spells a path into other text names that path), the innermost
+binding in scope at the call (a `let` from the end of its statement, so `let
+path = read(path)` reads the earlier one; an `if let`, `match` arm or `for`
+variable over its body; a loop over a literal list is each element in turn),
+a constant through bt-source's module trees across every first-party package
+(bare, `self::`, `super::`, `crate::`, a crate's name, `use` and `use …::*`,
+every file a module is written in, `impl` blocks' constants), and a same-file
+helper with its parameters bound. The tree compiles, so every path the
+reading code names is one Rust let it name (a `pub use` of a `pub(crate)` item
+is E0364; a glob re-exports only what it may; a type or trait the code names is
+visible to it): visibility only tells same-named candidates apart — where two
+globs bring in two constants of one name, the one visible to the module the
+path is written in (carried through every re-export; visible when every `use`
+on its way admits that module and so does the constant) is the constant, several
+visible or none is the diagnostic, and a lone candidate is the constant even
+when invisible to the reader, as the code could not have compiled otherwise.
+An associated constant written `<Type as Trait>::NAME` is the impl of the trait
+that path names, or that trait's default where the impl does not declare it;
+`Type::NAME` is the inherent impl's, or the one trait impl's, and several trait
+impls make it the diagnostic. A trait path is followed through the module
+trees, `use`s (an alias to what it names) and globs to a first-party trait;
+another crate's trait is its full written path after first-party `use`s are
+followed (`use dep::Trait as A` is `dep::Trait`, `a::Same` is not `b::Same`),
+and one that cannot be followed is the diagnostic. A constant name is SCREAMING_SNAKE_CASE:
+CI's workspace-wide `clippy -D warnings` makes `non_upper_case_globals` (not in
+the workspace's `Cargo.toml`: rustc's default warn) refuse any other, and a
+snake_case constant that is there is found by its name all the same. A macro is
+not a call (`assert_eq!(path, …)` compares), nor are the calls that only build
+or describe a path (`Path::new`, `PathBuf::from`, `.join`, `.display()` and the
+rest of the test's `PATH_BUILDING`). A path under `target/` or a temporary
+directory, or an absolute path, is not a document, and does not make another
+call in the same function a reader.
+The subject set is what `git ls-files` names minus `.rs` files; generated files
+under `target/` and bytes the shipped program embeds are not subjects.
+
+Where and what to do: `crates/bt-source/tests/tripwire.rs`.
+`no_source_reader_names_a_file_outside_the_two_lists` holds the Rust-source
+readers (four lexical shapes, by file);
+`every_reader_of_a_committed_document_is_on_a_list` holds the document readers
+(by item, through `bt-source`'s index — no script reads Rust for it), and its
+message names the item, the file and both lists;
+`every_source_reader_names_a_reason_and_is_not_also_debt` refuses a reader on
+both. When red, a reader whose subject really is the document gets a
+`SOURCE-READERS.tsv` row (file, owner as the message spells it, mechanism,
+subject, ticket, `no`, reason); a reader that pins a fact about the code by
+reading text is migrated to a `bt-source` query instead, and a debt row is never
+added. The scan never drops a path it gives up on in silence: a rooted path
+handed to any call that it cannot reduce to a literal (a parameter, a constant
+it cannot read), a `concat!`/`format!` holding a rooted piece and an
+unreducible piece anywhere (both outcomes: each fully reduced rooted piece that
+names a committed document is still a reader), a constant that reaches itself again (cycles are
+detected; acyclic chains are followed to their end), and a constant-spelled
+name the module trees hold no constant, `use`, glob or `thread_local!` of are
+counted and listed by the test as a diagnostic — grouped by cause with the
+exact total and a few examples each — not refused. Every place the evaluator answers "nothing" says beside it
+why that is a resolution, a diagnostic or no path into the checkout. The method
+exclusion is a list of names, so a reading method that shares an excluded name
+is a blind spot, and a new
+path-describing method is a false positive until it is added to
+`PATH_BUILDING`. Not covered, and said in the test's header: a path handed in
+as a parameter (the function that hands it on is not the reader; its caller
+that names the file is), a root reached through a method, a closure or another
+file's function, a read call renamed by `use … as …` (bt-source does not
+resolve aliases), and stale rows (a row whose item no longer reads is not
+refused).
+
 ## Platform cfg boundaries
 
 The rule: only the named platform modules and crate-root platform exports decide
@@ -100,7 +186,30 @@ contract's ledger, one row per request protocol, held by the
 in `window_waits_tests` and by the fifth and sixth checks of `scripts/ci/check-window-waits.ps1`. A door that
 reaches a lane started elsewhere is listed, with its reason, in
 `docs/plans/completions-door-starts.tsv`, which only shrinks; reachability is a call path to
-the function that starts the thread, never a shared type or module.
+the function that starts the thread, never a shared type or module. The path follows a call on
+a receiver stated to be a first-party trait (`dyn Trait` behind `&`, `Box`, `Arc` or `Rc`,
+`impl Trait`, a generic parameter bound by the trait, `self` in the trait's default method, or
+a path call `Trait::m` / `D::m` with `D: Trait`) into that trait's implementations, so a body
+reached only through a trait object (the update job's `driver.prepare`) needs no list line. A
+trait is its identity — package, module path and name, resolved through `use` items, globs and
+re-exports by `bt_source::TraitResolver` — so two traits of one name (the macOS and the
+Windows `PreparePoint`) are never followed together. What is followed: the method of every
+product `impl` of the trait, on every platform arm; the trait's default body, only for an
+impl that does not override it (or when there is no impl); and the trait's first-party
+supertraits, whose impls count only for types implementing the stated trait. The answer is the
+trait's implementations alone — never united with the by-name answer — and a call on a
+parameter is not typed by the parameter's declaration when another binding of its name is in
+scope at the call: one begun before the call whose scope holds it (a `let` to the end of its
+block; an `if let`/`while let` binding, each `let` of a chain included, from the end of that
+`let` through the later operands and the body; a match-arm pattern, and each `let` of its guard
+from the end of that `let`, through the arm; a `for` or closure binding over its body), the
+scopes read by parsing the function body with `syn`, and a product body that does not parse
+fails the test by name; a binding in a closed block or after the call does not shadow. What is
+not followed: a
+stored closure, a function pointer, `<X as Trait>::m`, a type written through an alias, a
+standard or third-party trait object (and a foreign supertrait's methods, even on a
+first-party implementing type), and an untyped receiver whose method name is shared; those are
+S-2a's call graph.
 When red, give the new answer, lane, thread or registry row its ledger row (or
 correct the row the code moved past); a status names the D-row or registry row
 that repairs it and only ever becomes `conforms` — never mark a row conforming
@@ -126,7 +235,9 @@ through the ledger (`admit`, or `admit_joined` for the same operation asked
 again), which mints the identity or refuses at the door, and records the sink
 the identity is owed when its requester goes; it runs each request's work
 inside `lane::task`, so a panic there is that request's `Failed` and the
-worker goes on; it ends each request it runs through the hook
+worker goes on (the task and the worker's body run inside
+`contained_panic::contain`, so the resident panic hook lets the panic reach the
+seam; S-5 round 3); it ends each request it runs through the hook
 `Ledger::publish` — `Done`, `Failed`, `Cancelled`, or `Superseded { by }` for one
 a newer, different request displaced — and wakes its consumer after it
 publishes, while a joined request ends only with the one it joined (`Joined`,
@@ -135,7 +246,8 @@ for a joined identity is refused) and `WorkerGone` comes from the ledger; it
 says no failure line of its own (the ledger says each failed request once, a
 joined one carrying a failure included, or once per streak); and its
 `LaneUnderTest` adapter hands the real lane `Executor::scripted` and reports
-`sunk` and `said`. What the proof covers:
+`sunk` and `said`. The OS hand-off lane (`handoff_lane`, S-5) is the first
+lane built this way. What the proof covers:
 `lane_contract_tests::the_ledger_ends_every_identity_exactly_once_in_every_interleaving`
 plays every order of three identities' outcomes (the six terminals, a racing
 answer after a cancel, a terminal published for a joined identity itself),
@@ -155,6 +267,32 @@ merge base: no lane gains a row for a claim the merge base already
 had; a claim new to the suite brings the rows of the lanes that do not keep it
 yet. When red, repair the lane (a repair removes its row in the same change),
 or restore the behaviour the claim caught; do not add a row to quiet it.
+
+## Contained panics
+
+The rule: under the resident application's panic hook a panic ends the process
+before any unwinding unless the hook's one decision,
+`the_hook_lets_this_panic_unwind`, says it is contained, so the only catch of a
+panic in the product is the boundary that decision honours,
+`bt_platform::contained_panic::contain` (re-exported as `bt-app`'s
+`contained_panic`), or a catch inside a closure handed to it. A worker whose
+panic is meant to be a value runs its work inside `contain`; one whose panic is
+meant to end the process catches nothing, and its `# completions` row says so
+(`docs/ARCHITECTURE.md` §5.5; T-PANIC-ROWS-HONEST, 2026-10-12).
+
+Where and what to do: `crates/bt-source/tests/contained_panic.rs` reads every
+product occurrence of `catch_unwind` in `bt-app`, `bt-platform` and `bt-pty`
+through `bt_source` items — the innermost item must be the boundary itself, by
+its identity (`bt-platform`, `crate::contained_panic`, `contain`), or the
+innermost closure around the occurrence must be an argument of a call whose
+path `bt_source::FunctionPaths` follows, through `use` items and re-exports
+across the workspace's crates, to exactly that item: a call edge, never a
+spelling. Its fixture, read beside `bt-platform`, allows a catch handed to the
+real item by an alias and by its path, and refuses a lookalike
+`contained_panic::contain` (its body and its caller), a closure handed to a
+helper that calls the boundary, a bare catch and a renamed import, by site. There is no allowlist. When red, run the work inside `contain` and give
+the panic its row's failure value, or take the catch out and say in the row
+that a panic ends the process; never wrap a catch to quiet the guard.
 
 ## Timing-bound tests
 

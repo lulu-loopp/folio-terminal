@@ -315,6 +315,10 @@ fn retire(answer: Born) {
     }
 }
 
+/// What a birth that panicked answers (`PtyError::Backend`): a fact for the pane's refusal, with
+/// nothing of the panic's own text — that is in the panic log.
+pub(crate) const BIRTH_PANICKED: &str = "the PTY birth worker panicked";
+
 /// [`request_shell`] with the birth handed in — the seam a test holds a birth at a gate through.
 pub(crate) fn request<A: Into<Born>>(
     birth: impl FnOnce(&WorkerCtx) -> A + Send + 'static,
@@ -334,15 +338,12 @@ pub(crate) fn request<A: Into<Born>>(
         bt_platform::ThreadPriority::BelowNormal,
         move |ctx| {
             // **A birth that panics is a birth that failed** (round 2): an unwinding worker would
-            // publish nothing and wake nobody, and its pane would wait in birth for ever.
-            let answer =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| birth(ctx).into()))
-                    .unwrap_or_else(|panic| {
-                        Born::from(Err(PtyError::Backend(format!(
-                            "the PTY birth worker panicked: {}",
-                            panic_message(panic.as_ref())
-                        ))))
-                    });
+            // publish nothing and wake nobody, and its pane would wait in birth for ever. Inside
+            // `contained_panic::contain`, which the resident panic hook lets unwind, so the panic
+            // reaches here in the application as in a test (T-PANIC-ROWS-HONEST). The payload is
+            // in the panic log; the error the pane says carries none of it.
+            let answer = crate::contained_panic::contain(|| birth(ctx).into())
+                .unwrap_or_else(|_| Born::from(Err(PtyError::Backend(BIRTH_PANICKED.to_owned()))));
             let stale = {
                 let mut births = births();
                 if births.abandoned.remove(&generation) {
@@ -439,6 +440,46 @@ pub(crate) fn wait_for_retirements(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (T-PANIC-ROWS-HONEST) — **a birth that panics under the resident panic hook is born as
+    /// a `PtyError::Backend`**, published once and followed by the wake. The product's hook ends
+    /// the process for a panic it is not told is contained, before any catch runs; the birth runs
+    /// inside `contained_panic::contain`, so the hook's decision at the panic is yes and the pane's
+    /// answer is the `# completions` row's failure, carrying none of the panic's text.
+    ///
+    /// MUTATION: run the birth under a bare `std::panic::catch_unwind` again — the decision at the
+    /// panic is no (the process would end there).
+    #[test]
+    fn a_birth_panic_under_the_resident_hook_is_born_as_a_backend_error() {
+        let (told, decision) = std::sync::mpsc::channel();
+        let (woke, wakes) = std::sync::mpsc::channel();
+        let woke = Mutex::new(woke);
+        let wake: OutputWake = std::sync::Arc::new(move || {
+            let _ = woke.lock().unwrap_or_else(PoisonError::into_inner).send(());
+        });
+        let mut shell = request(
+            move |_ctx| -> Born {
+                let _ = told.send(crate::the_hook_lets_this_panic_unwind());
+                panic!("scripted: 外壳出生失败 the shell's birth fails")
+            },
+            wake,
+        )
+        .expect("a birth worker");
+        assert!(
+            crate::lane::receive(&decision, "the hook's decision at the birth's panic"),
+            "the birth runs where the resident hook lets its panic unwind"
+        );
+        crate::lane::wait_for_a_wake(&wakes, "the birth's wake");
+        let born = shell
+            .take()
+            .expect("the answer is published before the wake");
+        let Err(PtyError::Backend(said)) = born.session else {
+            panic!("a panicked birth is a backend error");
+        };
+        assert_eq!(said, BIRTH_PANICKED, "and says none of the panic's text");
+        assert!(shell.take().is_none(), "one terminal");
+        assert!(wakes.try_recv().is_err(), "one wake");
+    }
 
     fn environment(rows: &[(&str, &str)]) -> Environment {
         rows.iter()

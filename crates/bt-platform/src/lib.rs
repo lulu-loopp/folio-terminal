@@ -8,6 +8,9 @@ use std::num::NonZeroIsize;
 /// admission (`docs/ARCHITECTURE.md` §5.1; design note 2026-09-26): `bt-effects`' vocabulary,
 /// re-exported, and the thread door. The one module of this crate that forbids `unsafe`.
 pub mod admission;
+/// A unit of work whose panic is its own failure under the resident fatal panic hook: the one
+/// unwind boundary of the product's workers and callbacks.
+pub mod contained_panic;
 /// The platform-free elevated-pane wire codec and its pure lifecycle models.
 pub mod elevated_protocol;
 pub mod environment;
@@ -8462,10 +8465,8 @@ pub fn choose_locale_declaration<'a>(
 ///
 /// Menlo is macOS's Consolas here for `bt-render`'s own stated reason: it has
 /// shipped in `/System/Library/Fonts` since 10.6, it is what Terminal opens
-/// with, and it cannot be removed. SF Mono is the better-looking face and is
-/// deliberately not this constant — the renderer offers it first through a
-/// preference list that asks the database whether it is really there, because
-/// SF Mono's family name and its file have both moved between releases.
+/// with, and it cannot be removed — and the renderer opens the grid in it at
+/// startup too (owner ruling 2026-10-11, H2 Q8).
 #[cfg(windows)]
 pub const DEFAULT_MONOSPACE_FAMILY: &str = "Consolas";
 #[cfg(target_os = "macos")]
@@ -17970,6 +17971,14 @@ mod windows_impl {
     /// anchored at the surface the news is about (`Runtime::toast`); a modal is
     /// how a program interrupts you, and a program that has drawn nothing has
     /// nothing to interrupt.
+    ///
+    /// **And one case after the windows** (T-QUIT-DOCUMENTS; design note
+    /// 2026-10-11, revision (d)3): a controlled stop whose windows are being
+    /// taken down — the renderer may be what failed — says through this box,
+    /// once and before the windows close, every configuration change it could
+    /// keep neither in its file nor as a copy in the data directory's `recovered`
+    /// folder. It is the same situation: there is no window to put a card on, and
+    /// the box needs no file, no data directory and no renderer of Folio's.
     ///
     /// `HWND::default()` is the ownerless box: the process has no window to be
     /// modal to, which is the whole situation. `MB_SETFOREGROUND` because the

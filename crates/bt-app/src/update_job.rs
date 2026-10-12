@@ -1236,6 +1236,10 @@ pub(crate) enum Abandon {
     SaveIncomplete,
     /// The session document was refused by the disk.
     SessionRefused,
+    /// A change to a hand-editable document could be kept neither in its file nor
+    /// as a copy in `recovered`, and the quit was cancelled (design note
+    /// 2026-10-11, revision (c)2).
+    DocumentsUnsaved,
     /// The session's receipt did not come back inside
     /// [`crate::quit::UPDATE_RECEIPT_DEADLINE`]. The quit went on; the update
     /// did not, because nobody saw the document land.
@@ -1250,6 +1254,7 @@ impl Abandon {
             Self::Cancelled => "the quit was cancelled",
             Self::SaveIncomplete => "not every unsaved file could be saved",
             Self::SessionRefused => "the session could not be written",
+            Self::DocumentsUnsaved => "a change to a configuration file could not be saved",
             Self::SessionTimedOut => "the session write did not finish in time",
         }
     }

@@ -330,6 +330,33 @@ pub(crate) fn endpoint_name() -> Option<&'static str> {
     ENDPOINT.get()?.as_ref().map(AttentionPipe::name)
 }
 
+/// **The three variables that make an agent in a pane able to say something**,
+/// in the order a shell is given them: the pane's address, the endpoint's name
+/// and the pane's capability — and none of them when `endpoint` is `None`.
+///
+/// **Half of this set is worse than none of it**: a child holding a capability
+/// and no endpoint would fail on every call, and a child holding an endpoint and
+/// no capability could connect and say nothing.
+///
+/// Generic over the value so that the spawn (an `OsString` per variable) and the
+/// Profiles page (which has no pane, and says so for the two per-pane values)
+/// read one list; `named` turns the endpoint's name into a value.
+pub(crate) fn pane_environment<V>(
+    endpoint: Option<&'static str>,
+    pane: V,
+    capability: V,
+    named: impl FnOnce(&'static str) -> V,
+) -> Vec<(&'static str, V)> {
+    let Some(endpoint) = endpoint else {
+        return Vec::new();
+    };
+    vec![
+        (PANE_VARIABLE, pane),
+        (ENDPOINT_VARIABLE, named(endpoint)),
+        (CAPABILITY_VARIABLE, capability),
+    ]
+}
+
 fn park(line: String) {
     let mut inbox = INBOX.lock().unwrap_or_else(PoisonError::into_inner);
     if inbox.len() >= INBOX_BOUND {

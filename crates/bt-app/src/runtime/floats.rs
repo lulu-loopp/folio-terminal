@@ -2382,7 +2382,7 @@ impl Runtime<'_> {
                 // this list — `bt_platform`'s own refusal for the executable
                 // list included, because the rule belongs to the door.
                 RowActivation::DefaultApp(path) => {
-                    self.open_local_path(&path);
+                    self.open_local_path(&path)?;
                 }
                 RowActivation::Nowhere => {}
             },
@@ -2400,7 +2400,7 @@ impl Runtime<'_> {
             // next to it that runs programs is the terminal" enforced at the
             // bridge rather than at each call site.
             profiles::FileMenuRow::OpenWith => {
-                self.open_local_path(&path);
+                self.open_local_path(&path)?;
             }
             // Only a tree row has a fold, and only a tree row carries the host
             // and key a fold needs. A breadcrumb's menu has neither and does not
@@ -2458,7 +2458,7 @@ impl Runtime<'_> {
             // reveal_arguments` and not by this call site knowing which kind of
             // row raised the menu.
             profiles::FileMenuRow::Reveal => {
-                self.reveal_in_explorer(&path);
+                self.reveal_in_explorer(&path)?;
             }
             // Answered above, before the single-path gate, because a row of this
             // face is about its own folder and not about the menu's path. The
@@ -2830,12 +2830,9 @@ impl Runtime<'_> {
         // spawning `explorer.exe` itself as this once did: one verb printed on
         // three strips is one verb, and a bridge that only one of the three
         // goes around is a bridge with a hole in it.
-        let handed = self.reveal_in_explorer(Path::new(&root));
-        self.when_handed_over(
-            handed,
+        self.hand_off(crate::reveal_ask(Path::new(&root)).when_handed_over(
             crate::handoff_lane::OnAccepted::Revealed(RevealedFoot::Float(id)),
-        );
-        Ok(())
+        ))
     }
 
     /// Show the **file** a preview float is holding in the OS file manager.
@@ -2860,12 +2857,9 @@ impl Runtime<'_> {
         else {
             return Ok(());
         };
-        let handed = self.reveal_in_explorer(&path);
-        self.when_handed_over(
-            handed,
+        self.hand_off(crate::reveal_ask(&path).when_handed_over(
             crate::handoff_lane::OnAccepted::Revealed(RevealedFoot::Float(id)),
-        );
-        Ok(())
+        ))
     }
 
     /// Put the float back inside a viewport that has just changed shape.
@@ -3585,36 +3579,7 @@ impl Runtime<'_> {
         // window's takes it (B-AUDIT-046 RT-1) — and a copy keeps the seat it
         // always had; see `menubar::paste_seat`.
         let focus = self.clipboard_focus();
-        let seat = if copying {
-            menubar::clipboard_seat(focus)
-        } else {
-            menubar::paste_seat(focus)
-        };
-        match seat {
-            // A surface of this window's is holding the keyboard and answers
-            // its own keys; see `ClipboardSeat::Nobody` for why doing nothing
-            // is the answer rather than the absence of one.
-            menubar::ClipboardSeat::Nobody => Ok(()),
-            // Only `paste_seat` answers a field, so this is always a paste: the
-            // pasteboard's text into the field, through the door the field's
-            // own paste chord goes through.
-            menubar::ClipboardSeat::Field(field) => self.paste_into_field(field),
-            menubar::ClipboardSeat::PreviewDocument => {
-                if copying {
-                    self.copy_preview_selection();
-                    Ok(())
-                } else {
-                    self.paste_into_preview()
-                }
-            }
-            menubar::ClipboardSeat::Terminal => {
-                if copying {
-                    self.copy_selection()
-                } else {
-                    self.paste_from_clipboard()
-                }
-            }
-        }
+        menubar::run_clipboard_verb(copying, focus, self)
     }
 
     /// The same picture for a page a float is carrying, on that window's layer.
@@ -3648,5 +3613,28 @@ impl Runtime<'_> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+}
+
+/// **The menu verb's doors are the keystroke's** ([`menubar::ClipboardDoors`]).
+impl menubar::ClipboardDoors for Runtime<'_> {
+    fn copy_terminal_selection(&mut self) -> Result<()> {
+        self.copy_selection()
+    }
+
+    fn paste_into_terminal(&mut self) -> Result<()> {
+        self.paste_from_clipboard()
+    }
+
+    fn copy_document_selection(&mut self) {
+        self.copy_preview_selection();
+    }
+
+    fn paste_into_document(&mut self) -> Result<()> {
+        self.paste_into_preview()
+    }
+
+    fn paste_into_field(&mut self, field: crate::TextFieldSeat) -> Result<()> {
+        Runtime::paste_into_field(self, field)
     }
 }

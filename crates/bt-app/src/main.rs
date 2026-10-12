@@ -13445,6 +13445,13 @@ struct App {
     /// for why it is a state machine the loop advances rather than a function the
     /// chord calls.
     quit: Option<quit::Quit>,
+    /// **The person chose, on a cancelled quit's card, to leave without the changes
+    /// it names** (T-QUIT-DOCUMENTS; design note 2026-10-11, revision (d)2): the
+    /// cancellation, chosen, for the quit that choice asks for. Written by the
+    /// card's verb ([`Self::leave_without`]) and taken when that quit begins
+    /// ([`FolioApp::begin_quit_if_asked`]), which drops exactly those documents'
+    /// changes first. A quit asked any other way finds none here and drops nothing.
+    leave_without: Option<quit::Cancelled>,
     /// **Every window this process has open, as a menu can name it** (B9, user
     /// ruling 2026-08-25).
     ///
@@ -14068,6 +14075,10 @@ struct WindowRuntime {
     /// The card that said where the edits a stop kept are, and the folder a press on it opens
     /// (T-RECOVERED-FOLDER) — [`Self::checkout_undo`]'s shape, for its reason.
     recovered_card: Option<recovered::Raised>,
+    /// **The card a cancelled quit raised on this window**, and the documents its one
+    /// choice leaves without (T-QUIT-DOCUMENTS) — [`Self::recovered_card`]'s shape, for
+    /// its reason: a verb pressed on another card chooses nothing.
+    quit_card: Option<quit::Raised>,
     /// The last dark/light this window told DWM it was wearing
     /// (`bt_platform::set_window_dark_mode`), or `None` before it has said
     /// anything (§7.1.6c-4f amendment).
@@ -18848,6 +18859,269 @@ fn keep_unsaved_edits_over(
         .collect()
 }
 
+/// **The stores a trial's release writes through** (T-QUIT-DOCUMENTS round 3): the
+/// session's and the four hand-editable documents', borrowed for one release.
+struct TrialStores<'a> {
+    session: &'a mut persist::SessionStore,
+    settings: &'a mut persist::SettingsStore,
+    keybindings: &'a mut persist::KeybindingsStore,
+    profiles: &'a mut persist::ProfilesStore,
+    pins: &'a mut pins::PinsStore,
+}
+
+/// **One writer an update's trial held back, run now** (`update_trial`, F-7) — the
+/// whole of [`App::release_trial_writes`] for one writer.
+fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'_>) {
+    use update_trial::Writer;
+    match writer {
+        // The folder is in use; its move from the old name is the next
+        // start's, which makes it as every start does.
+        Writer::DataFolderMove => {}
+        Writer::DataFolder => {
+            let _ = std::fs::create_dir_all(persist::storage_dir());
+        }
+        Writer::RefusedCopies => update_trial::keep_owed_copies(),
+        Writer::Session => stores.session.release_trial(),
+        Writer::Settings => stores.settings.release_trial(),
+        Writer::Keybindings => stores.keybindings.release_trial(),
+        Writer::Profiles => stores.profiles.release_trial(),
+        Writer::Pins => stores.pins.release_trial(),
+        Writer::UpdateCheck => update::release_trial(),
+        Writer::ProfileMigration => shell_integration::begin_startup_migration(),
+        Writer::BashScript => {
+            let _ = shell_integration::script_path();
+        }
+        Writer::ZshScripts => {
+            let _ = shell_integration::zdotdir_path();
+        }
+        // On a worker: the window thread waits for no disk here either.
+        Writer::PowerShellScript => shell_integration::begin_powershell_script_preparation(),
+        Writer::PsReadLineUpgrade => {
+            if let Some(documents) = psreadline::documents_directory()
+                && let Some(replacement) = psreadline::upgrade_recorded(
+                    &documents,
+                    &persist::storage_dir(),
+                    stores.settings.loaded().psreadline_invite,
+                )
+            {
+                eprintln!("{}", replacement.log_line());
+            }
+        }
+        Writer::ExplorerRepair => explorer_menu::begin_probe(),
+        Writer::ToastIdentity => {
+            if let Err(error) = bt_platform::Notifier::register_identity() {
+                eprintln!("BT_UPDATE_TRIAL the toast identity was not written: {error}");
+            }
+        }
+        // On its worker, as at any start's first frame.
+        Writer::RecoveredAnnouncement => recovered::ask(&persist::storage_dir()),
+    }
+}
+
+/// **Carry out what [`quit::Quit::settle_held_release`] says of an update trial's held
+/// release** (T-QUIT-DOCUMENTS rounds 3–4) — the one place each disposition is done.
+/// Performed: the launch backup goes ahead again and every writer runs through its own
+/// arm. Proceeding to the write: the rest runs; with the session's release pending, this
+/// run's sentinel is armed (what `release_trial` does first) and the launch backup held
+/// back, so the final write goes alone. Consumed: the launch backup is skipped for the run.
+fn settle_the_held_release(quit: &mut quit::Quit, stores: &mut TrialStores<'_>) {
+    match quit.settle_held_release() {
+        quit::HeldRelease::Nothing => {}
+        quit::HeldRelease::Perform(writers) => {
+            stores.session.resume_launch_backup();
+            for writer in writers {
+                release_trial_writer(writer, stores);
+            }
+        }
+        quit::HeldRelease::Proceed {
+            rest,
+            session_pending,
+        } => {
+            if session_pending {
+                stores.session.arm_sentinel();
+                stores.session.pause_launch_backup();
+            }
+            for writer in rest {
+                release_trial_writer(writer, stores);
+            }
+        }
+        quit::HeldRelease::Consumed => stores.session.forgo_launch_backup(),
+    }
+}
+
+/// **A stop that cannot ask disposes of a quit's held trial release** (T-QUIT-DOCUMENTS
+/// round 4; [`quit::Quit::release_on_a_stop`]): with the session's half held, this run's
+/// sentinel is armed and the launch backup held back — the way out's close writes the
+/// session as it does on every stop, and `session.lock` says whether it landed. The
+/// document writers are moot (the stores' step kept their changes in `recovered`); the
+/// rest is window-thread work the process is not staying for.
+fn dispose_of_a_held_release_on_a_stop(
+    quit: Option<&mut quit::Quit>,
+    session: &mut persist::SessionStore,
+) {
+    if quit.is_some_and(quit::Quit::release_on_a_stop) {
+        session.arm_sentinel();
+        session.pause_launch_backup();
+    }
+}
+
+/// **The cancelled quit's card, raised on `toasts`** (T-QUIT-DOCUMENTS; design note
+/// 2026-10-11, revision (d)2): an Error card anchored to the window, its statement the
+/// files that could not be saved — at most three named, then how many more — and its
+/// one verb, **Leave without this change**, the cancelled quit's only way out without
+/// them. A plain statement and no advice: the full list, with why, is in
+/// `diagnostics.log`.
+fn raise_cancelled_quit_card_on(
+    toasts: &mut toast::ToastHost,
+    cancelled: &quit::Cancelled,
+    motion: Motion,
+    now: Instant,
+) -> toast::ToastId {
+    toasts.raise(
+        toast::ToastKind::Error,
+        toast::ToastAnchor::Window,
+        None,
+        cancelled.sentence(),
+        Some(i18n::Text::QuitLeaveWithoutChange.text().to_owned()),
+        motion,
+        now,
+    )
+}
+
+/// **What became of one owed hand-editable document on a stop that cannot ask**
+/// (T-QUIT-DOCUMENTS; design note 2026-10-11, revision (d)3).
+///
+/// [`preview::Kept`]'s shape, as a sibling and not that type: a preview buffer is
+/// first written back to its own file and only copied when the file refuses, so
+/// each of its answers carries the buffer's name and the file's refusal. A store's
+/// document is never written to its file on this road — the storage worker that
+/// writes it may be the thing that is stuck — so there is no refusal to carry,
+/// and the file's name is the document's name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DocumentKept {
+    /// The change is in `copy`, in the `recovered` folder: the file flushed and
+    /// the folder flushed. The next start says where.
+    Kept { file: &'static str, copy: PathBuf },
+    /// No copy could be made, and why: the change went with the process.
+    Lost { file: &'static str, error: String },
+}
+
+impl DocumentKept {
+    /// **The `diagnostics.log` line**: which file, and where its change is — the
+    /// copy, or nowhere and why.
+    fn line(&self) -> String {
+        match self {
+            Self::Kept { file, copy } => format!(
+                "{APP_NAME} stopped with a change to {file} that was not saved: it is in {}",
+                copy.display()
+            ),
+            Self::Lost { file, error } => format!(
+                "{APP_NAME} stopped with a change to {file} that was not saved, and no copy \
+                 could be made ({error}); the change is lost"
+            ),
+        }
+    }
+}
+
+/// **The disk a stop that cannot ask keeps the owed documents on**: the copy into
+/// the `recovered` folder, and the line `diagnostics.log` is asked to take. A seam,
+/// so a test can refuse both without a disk that refuses.
+trait StopDisk {
+    /// Keep `bytes` as a copy named for `name` in `folder`.
+    fn keep(
+        &mut self,
+        folder: &Path,
+        name: &str,
+        bytes: &[u8],
+        at: SystemTime,
+    ) -> Result<PathBuf, String>;
+    /// Ask `diagnostics.log` to take `line`. Not relied on: the disk that refused
+    /// the copy may refuse this too.
+    fn note(&mut self, line: &str);
+}
+
+/// The machine's own disk: [`preview::keep_in_recovered`] and
+/// [`diagnostics::note`].
+struct TheDisk;
+
+impl StopDisk for TheDisk {
+    fn keep(
+        &mut self,
+        folder: &Path,
+        name: &str,
+        bytes: &[u8],
+        at: SystemTime,
+    ) -> Result<PathBuf, String> {
+        preview::keep_in_recovered(folder, name, bytes, at)
+    }
+
+    fn note(&mut self, line: &str) {
+        diagnostics::note(line);
+    }
+}
+
+/// **The channel a stop says a lost change through**: one that needs no file, no
+/// data directory and no renderer of Folio's, so it survives the failures that
+/// silence the other two (revision (d)3).
+trait NativeSay {
+    fn say(&mut self, text: &str);
+}
+
+/// The operating system's own message box ([`bt_platform::message_box`]): on a
+/// stop the windows are being taken down and the renderer may be what failed, so,
+/// as before the first window, there is no window to put a card on.
+struct SystemBox;
+
+impl NativeSay for SystemBox {
+    fn say(&mut self, text: &str) {
+        bt_platform::message_box(APP_NAME, text);
+    }
+}
+
+/// **Keep every owed hand-editable document on a stop that cannot ask**
+/// (T-QUIT-DOCUMENTS; revisions (c)2 and (d)3): each store's owed `desired`
+/// document is written into `folder` — the data directory's `recovered` folder,
+/// beside the preview edits the same stop keeps — and answers [`DocumentKept`].
+/// Each answer's line is offered to `diagnostics.log`; then **every `Lost`, said
+/// once and together, through `say`**. A stop that lost nothing says nothing: a
+/// copy that landed is said at the next start, as the preview's are
+/// (`recovered`).
+fn keep_owed_documents_over(
+    documents: &mut [&mut dyn document_request::QuitDocument],
+    folder: &Path,
+    at: SystemTime,
+    disk: &mut impl StopDisk,
+    say: &mut impl NativeSay,
+) -> Vec<DocumentKept> {
+    let kept: Vec<DocumentKept> = documents
+        .iter()
+        .filter_map(|document| {
+            let file = document.file();
+            let bytes = document.owed_bytes()?;
+            Some(
+                match bytes.and_then(|bytes| disk.keep(folder, file, &bytes, at)) {
+                    Ok(copy) => DocumentKept::Kept { file, copy },
+                    Err(error) => DocumentKept::Lost { file, error },
+                },
+            )
+        })
+        .collect();
+    for document in &kept {
+        disk.note(&document.line());
+    }
+    let lost: Vec<&str> = kept
+        .iter()
+        .filter_map(|document| match document {
+            DocumentKept::Lost { file, .. } => Some(*file),
+            DocumentKept::Kept { .. } => None,
+        })
+        .collect();
+    if !lost.is_empty() {
+        say.say(&i18n::stopped_changes_lost(&lost));
+    }
+    kept
+}
+
 /// **What an answer to one of the two exits comes to over the asking window's
 /// tabs** (B1; T-SUMMON-DIRTY-PREVIEW): the window whose close the loop is asked
 /// to re-run — `closes`, the window itself for a shut and the run's last ordinary
@@ -20427,6 +20701,25 @@ fn text_field_holding(rung: ImeOwner, settings_field: bool) -> Option<TextFieldS
         ImeOwner::Search => Some(TextFieldSeat::FindBar),
         ImeOwner::Modal => settings_field.then_some(TextFieldSeat::Settings),
         ImeOwner::FilesTree | ImeOwner::Preview | ImeOwner::Shell => None,
+    }
+}
+
+/// **What the clipboard verbs read of the keyboard**, for the rung that holds it
+/// (`Runtime::clipboard_focus`): whether a surface above the clipboard rung
+/// swallows every key, the one-line field on the rung, whether the quick edit
+/// has the keyboard, and whether the rung is the shell's.
+#[must_use]
+fn clipboard_focus_of(
+    rung: ImeOwner,
+    swallowing: bool,
+    settings_field: bool,
+    preview_edit: bool,
+) -> menubar::ClipboardFocus {
+    menubar::ClipboardFocus {
+        swallowing,
+        field: text_field_holding(rung, settings_field),
+        preview_edit,
+        shell: rung == ImeOwner::Shell,
     }
 }
 
@@ -24093,7 +24386,7 @@ fn printable_address(uri: &str) -> String {
         .collect()
 }
 
-/// **Why a link was not followed** — the three things the hover line can truly say about it
+/// **Why a link was not followed** — the things the hover line can truly say about it
 /// (owner ruling 2026-10-06: 「已拦截」/"blocked" is never said of an address that is not one).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LinkRefusal {
@@ -24104,10 +24397,16 @@ enum LinkRefusal {
     NoProgram,
     /// An address the door will not go to: a scheme, userinfo, a page asking for a window.
     Door,
+    /// The hand-off failed on the OS hand-off lane: nothing declined it (S-5).
+    CouldNotRun,
+    /// The OS hand-off lane's worker stopped with the hand-off owed, or before it (S-5).
+    WorkerStopped,
+    /// The OS hand-off lane already had as many hand-offs as it takes (S-5).
+    TooMany,
 }
 
 impl LinkRefusal {
-    /// What the address door says about `address`, as one of the three.
+    /// What the address door says about `address`, as the refusal it is.
     ///
     /// An address the door admits was refused by a door after it (the gesture rule of a page's
     /// new window), so it is the door's refusal; text the door would search for is not an
@@ -24126,6 +24425,9 @@ impl LinkRefusal {
             Self::Invalid => i18n::Text::HyperlinkInvalidSuffix.in_lang(lang),
             Self::NoProgram => i18n::Text::HyperlinkNoProgramSuffix.in_lang(lang),
             Self::Door => i18n::Text::HyperlinkBlockedSuffix.in_lang(lang),
+            Self::CouldNotRun => i18n::Text::HandoffCouldNotRunSuffix.in_lang(lang),
+            Self::WorkerStopped => i18n::Text::HandoffsStoppedSuffix.in_lang(lang),
+            Self::TooMany => i18n::Text::HandoffsTooManySuffix.in_lang(lang),
         }
     }
 
@@ -24135,6 +24437,9 @@ impl LinkRefusal {
             Self::Invalid => i18n::Text::HyperlinkInvalid.in_lang(lang),
             Self::NoProgram => i18n::Text::HyperlinkNoProgram.in_lang(lang),
             Self::Door => i18n::Text::HyperlinkBlocked.in_lang(lang),
+            Self::CouldNotRun => i18n::Text::HandoffCouldNotRun.in_lang(lang),
+            Self::WorkerStopped => i18n::Text::HandoffsStopped.in_lang(lang),
+            Self::TooMany => i18n::Text::HandoffsTooMany.in_lang(lang),
         }
     }
 }
@@ -27189,6 +27494,33 @@ fn answered_once<Subject: Eq + Copy, Answer: Clone>(
 /// lane in a test: a share handed over must meet the program list a local file meets.
 fn unverified_reference_handoff(path: &Path) -> bt_platform::Handoff {
     bt_platform::Handoff::Open(path.to_path_buf())
+}
+
+/// **A files row's open, as the OS hand-off lane is asked it** — the system's default handler for
+/// `path`, refused in the files row's words (`Runtime::open_local_path`).
+fn open_local_path_ask(path: &Path) -> handoff_lane::Ask {
+    handoff_lane::Ask::new(
+        bt_platform::Handoff::Open(path.to_path_buf()),
+        handoff_lane::Refusal {
+            stderr: Some((
+                "recoverable files row open failure",
+                "open an activated files row with its default handler",
+            )),
+            program_notice: true,
+        },
+    )
+}
+
+/// **A reveal in the file manager, as the OS hand-off lane is asked it** — the one verb all three
+/// feet print (`Runtime::reveal_in_explorer`).
+fn reveal_ask(path: &Path) -> handoff_lane::Ask {
+    handoff_lane::Ask::new(
+        bt_platform::Handoff::Reveal(path.to_path_buf()),
+        handoff_lane::Refusal {
+            stderr: Some(("recoverable reveal failure", "show a path in File Explorer")),
+            program_notice: false,
+        },
+    )
 }
 
 /// **What a refused unverified reference says, and where** — the printed reference's own words,
@@ -40205,10 +40537,11 @@ mod shell_birth_tests {
     }
 
     /// RED (round 2, B1) — **a birth worker that panics is a birth that failed**: its pane is
-    /// woken and lands the refusal toast's reason, naming the panic, instead of waiting for ever.
+    /// woken and lands the refusal toast's reason, that the birth panicked, instead of waiting for
+    /// ever. The panic's own text is not in it: it is in the panic log (T-PANIC-ROWS-HONEST).
     ///
-    /// MUTATION (observed red): the worker body without its `catch_unwind` — nothing is
-    /// published and the pane is never woken.
+    /// MUTATION (observed red): the worker body without its `contained_panic::contain` — nothing
+    /// is published and the pane is never woken.
     #[test]
     fn a_birth_worker_that_panics_lands_the_refusal() {
         let decision = decided(Started::AsAsked);
@@ -40225,9 +40558,10 @@ mod shell_birth_tests {
                 .expect("a failed birth is not this window's error")
                 .expect("it is the refusal to say")
         );
+        assert!(said.contains(pty_door::BIRTH_PANICKED), "{said}");
         assert!(
-            said.contains("the PTY birth worker panicked: 举手-planted"),
-            "{said}"
+            !said.contains("举手-planted"),
+            "the payload is not the pane's: {said}"
         );
         assert!(leaf.birth.is_none() && leaf.pty.is_none());
     }
@@ -40628,23 +40962,19 @@ fn create_leaf_session(
         // of the profile: every shell of every kind gets them, and a user who set one by hand in a
         // profile is setting a capability for a pane that does not exist yet.
         //
-        // The endpoint may be absent — a machine where it would not open — and then neither is
-        // written. **Half of this pair is worse than none of it**: a child holding a capability and
-        // no endpoint would fail on every call, and a child holding an endpoint and no capability
-        // would be able to connect and say nothing, which is a connection for no reason.
-        if let Some(endpoint) = attention_wire::endpoint_name() {
-            command.environment.push((
-                attention_wire::PANE_VARIABLE.into(),
-                format!("{}.{}", pane.tab.0, pane.seat.0).into(),
-            ));
-            command
-                .environment
-                .push((attention_wire::ENDPOINT_VARIABLE.into(), endpoint.into()));
-            command.environment.push((
-                attention_wire::CAPABILITY_VARIABLE.into(),
-                capability.clone().into(),
-            ));
-        }
+        // The endpoint may be absent — a machine where it would not open — and then none is
+        // written (`attention_wire::pane_environment`). The Profiles page lists the same three
+        // (`shell_integration::declared_environment`).
+        command.environment.extend(
+            attention_wire::pane_environment(
+                attention_wire::endpoint_name(),
+                std::ffi::OsString::from(format!("{}.{}", pane.tab.0, pane.seat.0)),
+                std::ffi::OsString::from(capability.clone()),
+                std::ffi::OsString::from,
+            )
+            .into_iter()
+            .map(|(name, value)| (std::ffi::OsString::from(name), value)),
+        );
         resolved_program = Some(PathBuf::from(&program));
         // **The shell is asked for, never waited for** (T-BIRTH-OFF-WINDOW). Its pseudoconsole and
         // process are made on a `bt-pty-birth` worker of its own (`pty_door::request_shell`); this
@@ -43808,6 +44138,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         checkout_from: None,
         checkout_undo: None,
         recovered_card: None,
+        quit_card: None,
         settings_scroll: 0.0,
         profile_menu: profiles::ProfileMenu::default(),
         chevron_turn: ChevronTurn::default(),
@@ -45301,6 +45632,7 @@ impl Runtime<'_> {
             update_job: the_update_job,
             update_shown: update_card::Shown::default(),
             quit_reason: quit::Reason::Asked,
+            leave_without: None,
             handoff_answer: None,
         };
         // **The rest of the file's windows, queued at the door.** A window that
@@ -45853,6 +46185,9 @@ impl Runtime<'_> {
         );
         if profiles_opened {
             shell_integration::begin_profile_observation_for(&self.app.profile_programs);
+            // The environment the next pane is born from, which the editor's rows are
+            // composed over (`shell_integration::page_environment`).
+            shell_integration::request_page_environment();
             // Every row's program, and WSL's distributions, asked again as the page opens.
             self.ask_the_program_walk(programs_lane::Trigger::ProfilesPage);
         }
@@ -46142,27 +46477,44 @@ impl Runtime<'_> {
                 .position(|choice| *choice == profiles::integration_choice(index))
                 .unwrap_or_default(),
             integration_auto: profiles::integration_auto_label(index),
-            // **What this terminal will say to a session of this profile, less
-            // whatever this profile has already said.** Derived on both counts:
-            // a PowerShell gets no `FORCE_HYPERLINK` ghost because its own
-            // script is the half that declares links, and a name the reader has
-            // a row for is no longer the terminal's to say — which is what makes
-            // adopting a ghost a move and not a duplication.
-            ghosts: {
-                let declared =
-                    shell_integration::declared_environment(profiles::integration(index));
-                let mut slots = [None; 3];
-                for (slot, (name, value)) in
-                    slots
-                        .iter_mut()
-                        .zip(declared.into_iter().filter(|(name, _)| {
-                            !env.iter().any(|(mine, _)| mine.eq_ignore_ascii_case(name))
-                        }))
-                {
-                    *slot = Some((name, value));
-                }
-                slots
-            },
+            // **Every variable this terminal sets for a session of this profile,
+            // less whatever this profile has already said** (owner ruling
+            // 2026-10-11 on H2 Q4): read off the launch's own composition, so a
+            // PowerShell gets no `FORCE_HYPERLINK` ghost because its own script is
+            // the half that declares links, a `NO_COLOR` row takes `COLORTERM` and
+            // `TERM` away, and a name the reader has a row for is no longer the
+            // terminal's to say — which is what makes adopting a ghost a move and
+            // not a duplication.
+            //
+            // Composed from the environment the next pane would be born from — the account's
+            // current one, asked for as the page opens — and empty while that request is out
+            // (`shell_integration::page_environment`).
+            ghosts: settings::held_ghosts(
+                &profiles::row_of(&profiles::id(index))
+                    .zip(shell_integration::page_environment())
+                    .map(|(row, before_folio)| {
+                        shell_integration::declared_environment(
+                            &row,
+                            shell_integration::Scripts::installed(),
+                            &before_folio,
+                            attention_wire::endpoint_name(),
+                        )
+                    })
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(name, value)| settings::EnvGhost {
+                        name: profiles::intern_text(&name),
+                        value: match value {
+                            shell_integration::DeclaredValue::Said(value) => {
+                                settings::GhostValue::Said(profiles::intern_text(&value))
+                            }
+                            shell_integration::DeclaredValue::PerPane => {
+                                settings::GhostValue::PerPane
+                            }
+                        },
+                    })
+                    .collect::<Vec<_>>(),
+            ),
         })
     }
 
@@ -47078,13 +47430,13 @@ impl Runtime<'_> {
                 // text editor would not start is a worse answer than a row that
                 // quietly did nothing.
                 Some(settings::LinkDestination::File(path)) => {
-                    self.open_local_path(path);
+                    self.open_local_path(path)?;
                 }
                 // The configuration doors (0.4.4 ticket 05): two dialogs, whose
                 // answers are collected on a later turn, and the storage folder
                 // handed to the reveal door.
                 Some(settings::LinkDestination::Configuration(door)) => {
-                    self.open_configuration_door(door);
+                    self.open_configuration_door(door)?;
                 }
                 None if row == settings::SettingsRow::PowerShellProfileLine => {
                     shell_integration::begin_removal();
@@ -47617,6 +47969,7 @@ impl Runtime<'_> {
                 let Some((name, value)) = self
                     .editor_subject()
                     .and_then(|subject| subject.ghosts().nth(ordinal))
+                    .and_then(|ghost| Some((ghost.name, ghost.adoptable()?)))
                 else {
                     return Ok(());
                 };
@@ -48611,15 +48964,16 @@ impl Runtime<'_> {
     /// **Handed to the OS hand-off lane** (2026-09-22), so the card arrives when the lane answers
     /// rather than while the press is still being handled — with the door's words, as before.
     fn open_font_settings(&mut self) -> Result<()> {
-        let handed = self.hand_off(
-            bt_platform::Handoff::FontsPage,
-            handoff_lane::Refusal {
-                stderr: None,
-                program_notice: false,
-            },
-        );
-        self.if_refused(handed, handoff_lane::OnRefused::FontsToast);
-        Ok(())
+        self.hand_off(
+            handoff_lane::Ask::new(
+                bt_platform::Handoff::FontsPage,
+                handoff_lane::Refusal {
+                    stderr: None,
+                    program_notice: false,
+                },
+            )
+            .if_refused(handoff_lane::OnRefused::FontsToast),
+        )
     }
 
     /// **The pencil on a picker row: open that scheme's file** (user ruling
@@ -49929,8 +50283,9 @@ impl Runtime<'_> {
     /// The ack is the lane's to trigger since 2026-09-22: it is drawn when the system has taken
     /// the file, which is what `Opened` claims.
     fn open_path_in_default_app(&mut self, path: &Path) -> Result<()> {
-        let handed = self.open_local_path(path);
-        self.when_handed_over(handed, handoff_lane::OnAccepted::PreviewOpened);
+        self.hand_off(
+            open_local_path_ask(path).when_handed_over(handoff_lane::OnAccepted::PreviewOpened),
+        )?;
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -51667,9 +52022,10 @@ impl Runtime<'_> {
     }
 
     /// Hand one path to the system's default handler, and say so when the window
-    /// declines. Returns the hand-off's id: the answer arrives later, on the OS
-    /// hand-off lane's completion (2026-09-22), and a caller that owes the reader
-    /// something on success says so with [`Self::when_handed_over`].
+    /// declines. The answer arrives later, on the OS hand-off lane's completion
+    /// (2026-09-22); a caller that owes the reader something on success hands
+    /// [`open_local_path_ask`] off itself, with the confirmation it names
+    /// ([`handoff_lane::Ask::when_handed_over`]).
     ///
     /// The refusal is spoken rather than logged: a double click that does
     /// nothing at all is indistinguishable from a double click that was not
@@ -51680,17 +52036,8 @@ impl Runtime<'_> {
     /// The answer is reported because a *foot* has something to do with it that
     /// a row has not: it confirms in place, and a confirmation printed over a
     /// reveal that never happened would be the one thing worse than silence.
-    fn open_local_path(&mut self, path: &Path) -> handoff_lane::HandoffId {
-        self.hand_off(
-            bt_platform::Handoff::Open(path.to_path_buf()),
-            handoff_lane::Refusal {
-                stderr: Some((
-                    "recoverable files row open failure",
-                    "open an activated files row with its default handler",
-                )),
-                program_notice: true,
-            },
-        )
+    fn open_local_path(&mut self, path: &Path) -> Result<()> {
+        self.hand_off(open_local_path_ask(path))
     }
 
     /// Show a path in Explorer — **the one door all three feet go through**
@@ -51705,19 +52052,14 @@ impl Runtime<'_> {
     ///
     /// Reported, because a foot confirms in place and a confirmation printed
     /// over a reveal that never happened is the one thing worse than silence —
-    /// which since 2026-09-22 is the lane's answer arriving: the foot names a
-    /// confirmation with [`Self::when_handed_over`] and it is drawn when the
-    /// system has taken the reveal. A refusal is a courtesy, not an error path: a
+    /// which since 2026-09-22 is the lane's answer arriving: the foot hands
+    /// [`reveal_ask`] off itself, naming its confirmation with
+    /// [`handoff_lane::Ask::when_handed_over`], and it is drawn when the system
+    /// has taken the reveal. A refusal is a courtesy, not an error path: a
     /// window that refuses to keep working because a file manager would not start
     /// is a worse answer than a button that quietly did nothing.
-    fn reveal_in_explorer(&mut self, path: &Path) -> handoff_lane::HandoffId {
-        self.hand_off(
-            bt_platform::Handoff::Reveal(path.to_path_buf()),
-            handoff_lane::Refusal {
-                stderr: Some(("recoverable reveal failure", "show a path in File Explorer")),
-                program_notice: false,
-            },
-        )
+    fn reveal_in_explorer(&mut self, path: &Path) -> Result<()> {
+        self.hand_off(reveal_ask(path))
     }
 
     /// [`Self::reveal_in_explorer`] for a path a worker has already answered for — the door a
@@ -51751,8 +52093,8 @@ impl Runtime<'_> {
         &mut self,
         path: &Path,
         target: bt_platform::VerifiedTarget,
-    ) -> handoff_lane::HandoffId {
-        self.hand_off(
+    ) -> Result<()> {
+        self.hand_off(handoff_lane::Ask::new(
             bt_platform::Handoff::OpenVerified(path.to_path_buf(), target),
             handoff_lane::Refusal {
                 stderr: Some((
@@ -51761,7 +52103,7 @@ impl Runtime<'_> {
                 )),
                 program_notice: true,
             },
-        )
+        ))
     }
 
     /// **Hand a path nobody asked a disk about to the system's handler** — a share on another
@@ -51773,11 +52115,11 @@ impl Runtime<'_> {
     /// never probed. The door reads `names_a_program`, so either meets the program list a printed
     /// local file meets, refused in the same words; on Windows it asks no disk, and on the OS
     /// hand-off lane a cold `\\server` holds nothing but that lane.
-    fn open_unverified_reference(&mut self, path: &Path) -> handoff_lane::HandoffId {
-        self.hand_off(
+    fn open_unverified_reference(&mut self, path: &Path) -> Result<()> {
+        self.hand_off(handoff_lane::Ask::new(
             unverified_reference_handoff(path),
             UNVERIFIED_REFERENCE_REFUSAL,
-        )
+        ))
     }
 
     /// **Hand a URI of any scheme to whatever this machine has registered for it** — `mailto:`,
@@ -51786,26 +52128,29 @@ impl Runtime<'_> {
     /// Not through [`Self::hand_url_to_the_browser`]: that door is `webnav::address_bar`, which
     /// admits the web and nothing else, and the ruling is that `Ctrl` on any scheme is the
     /// reader's consent. What the machine has no handler for, it refuses, and the lane brings the
-    /// refusal back to the surface that asked.
-    fn hand_uri_to_the_system(&mut self, uri: &str) -> handoff_lane::HandoffId {
+    /// refusal back to the surface that asked, which says it as `refused` names.
+    fn hand_uri_to_the_system(
+        &mut self,
+        uri: &str,
+        refused: handoff_lane::OnRefused,
+    ) -> Result<()> {
         self.hand_off(
-            bt_platform::Handoff::Address(uri.to_owned()),
-            handoff_lane::Refusal {
-                stderr: Some((
-                    "recoverable link hand-off failure",
-                    "hand a link to its registered handler",
-                )),
-                program_notice: false,
-            },
+            handoff_lane::Ask::new(
+                bt_platform::Handoff::Address(uri.to_owned()),
+                handoff_lane::Refusal {
+                    stderr: Some((
+                        "recoverable link hand-off failure",
+                        "hand a link to its registered handler",
+                    )),
+                    program_notice: false,
+                },
+            )
+            .if_refused(refused),
         )
     }
 
-    fn reveal_verified(
-        &mut self,
-        path: &Path,
-        target: bt_platform::VerifiedTarget,
-    ) -> handoff_lane::HandoffId {
-        self.hand_off(
+    fn reveal_verified(&mut self, path: &Path, target: bt_platform::VerifiedTarget) -> Result<()> {
+        self.hand_off(handoff_lane::Ask::new(
             bt_platform::Handoff::RevealVerified(path.to_path_buf(), target),
             handoff_lane::Refusal {
                 stderr: Some((
@@ -51814,7 +52159,7 @@ impl Runtime<'_> {
                 )),
                 program_notice: false,
             },
-        )
+        ))
     }
 
     /// Whether it is worth writing down which tabs spoke on this turn.
@@ -53532,12 +53877,12 @@ impl Runtime<'_> {
     /// the two functions to.
     fn clipboard_focus(&mut self) -> menubar::ClipboardFocus {
         let rung = ime_owner(self.keyboard_owner());
-        menubar::ClipboardFocus {
-            swallowing: self.a_surface_above_the_clipboard_rung_holds_the_keyboard(),
-            field: text_field_holding(rung, self.settings_field_holds_the_keyboard()),
-            preview_edit: self.preview_edit_focus().is_some(),
-            shell: rung == ImeOwner::Shell,
-        }
+        clipboard_focus_of(
+            rung,
+            self.a_surface_above_the_clipboard_rung_holds_the_keyboard(),
+            self.settings_field_holds_the_keyboard(),
+            self.preview_edit_focus().is_some(),
+        )
     }
 
     /// Observe focus without changing IME, native focus, or composition state.
@@ -53977,53 +54322,15 @@ impl App {
     /// into it, the copies of refused documents before the documents that would
     /// replace them. What is written is what this process holds now.
     fn release_trial_writes(&mut self, writers: Vec<update_trial::Writer>) {
-        use update_trial::Writer;
+        let mut stores = TrialStores {
+            session: &mut self.session_store,
+            settings: &mut self.settings_store,
+            keybindings: &mut self.keybindings_store,
+            profiles: &mut self.profiles_store,
+            pins: &mut self.pins_store,
+        };
         for writer in writers {
-            match writer {
-                // The folder is in use; its move from the old name is the next
-                // start's, which makes it as every start does.
-                Writer::DataFolderMove => {}
-                Writer::DataFolder => {
-                    let _ = std::fs::create_dir_all(persist::storage_dir());
-                }
-                Writer::RefusedCopies => update_trial::keep_owed_copies(),
-                Writer::Session => self.session_store.release_trial(),
-                Writer::Settings => self.settings_store.release_trial(),
-                Writer::Keybindings => self.keybindings_store.release_trial(),
-                Writer::Profiles => self.profiles_store.release_trial(),
-                Writer::Pins => self.pins_store.release_trial(),
-                Writer::UpdateCheck => update::release_trial(),
-                Writer::ProfileMigration => shell_integration::begin_startup_migration(),
-                Writer::BashScript => {
-                    let _ = shell_integration::script_path();
-                }
-                Writer::ZshScripts => {
-                    let _ = shell_integration::zdotdir_path();
-                }
-                // On a worker: the window thread waits for no disk here either.
-                Writer::PowerShellScript => {
-                    shell_integration::begin_powershell_script_preparation()
-                }
-                Writer::PsReadLineUpgrade => {
-                    if let Some(documents) = psreadline::documents_directory()
-                        && let Some(replacement) = psreadline::upgrade_recorded(
-                            &documents,
-                            &persist::storage_dir(),
-                            self.settings_store.loaded().psreadline_invite,
-                        )
-                    {
-                        eprintln!("{}", replacement.log_line());
-                    }
-                }
-                Writer::ExplorerRepair => explorer_menu::begin_probe(),
-                Writer::ToastIdentity => {
-                    if let Err(error) = bt_platform::Notifier::register_identity() {
-                        eprintln!("BT_UPDATE_TRIAL the toast identity was not written: {error}");
-                    }
-                }
-                // On its worker, as at any start's first frame.
-                Writer::RecoveredAnnouncement => recovered::ask(&persist::storage_dir()),
-            }
+            release_trial_writer(writer, &mut stores);
         }
     }
 
@@ -54156,6 +54463,98 @@ impl App {
     /// are three places for a fourth door to be written differently.
     fn ask_to_quit(&mut self) {
         self.quit_requested = true;
+    }
+
+    /// **Leave without this change, on a cancelled quit's card** (T-QUIT-DOCUMENTS;
+    /// revision (d)2): the quit is asked for again through the one door every quit
+    /// goes through, carrying the choice — the documents the card named are dropped
+    /// for this run when it begins, and nothing else is. A quit already asked for or
+    /// under way owns the windows, and the press does nothing.
+    fn leave_without(&mut self, cancelled: quit::Cancelled) {
+        if self.quit.is_some() || self.quit_requested {
+            return;
+        }
+        self.quit_reason = cancelled.resumed_reason();
+        self.swap_leave_without(Some(cancelled));
+        self.ask_to_quit();
+    }
+
+    /// **The one writer of [`Self::leave_without`]**: put `next` there and answer what
+    /// was. The card's choice puts its cancellation ([`Self::leave_without`]); the quit
+    /// that choice asks for takes it when it begins ([`FolioApp::begin_quit_if_asked`]).
+    fn swap_leave_without(&mut self, next: Option<quit::Cancelled>) -> Option<quit::Cancelled> {
+        std::mem::replace(&mut self.leave_without, next)
+    }
+
+    /// **The four hand-editable documents' stores, as a quit and a stop ask them**
+    /// (T-QUIT-DOCUMENTS), in their order: `settings.json`, `keybindings.json`,
+    /// `profiles.json`, `pins.json`. Answers what `ask` does with them; nothing of
+    /// them is lent out past it.
+    fn with_documents<R>(
+        &mut self,
+        ask: impl FnOnce(&mut [&mut dyn document_request::QuitDocument]) -> R,
+    ) -> R {
+        ask(&mut [
+            &mut self.settings_store,
+            &mut self.keybindings_store,
+            &mut self.profiles_store,
+            &mut self.pins_store,
+        ])
+    }
+
+    /// **Dispose of an update trial's held release as the quit's step says**
+    /// ([`settle_the_held_release`]), if a quit is under way.
+    fn settle_the_held_release(&mut self) {
+        let Some(quit) = self.quit.as_mut() else {
+            return;
+        };
+        settle_the_held_release(
+            quit,
+            &mut TrialStores {
+                session: &mut self.session_store,
+                settings: &mut self.settings_store,
+                keybindings: &mut self.keybindings_store,
+                profiles: &mut self.profiles_store,
+                pins: &mut self.pins_store,
+            },
+        );
+    }
+
+    /// **One turn of the quit's documents phase** over the four stores
+    /// ([`quit::Quit::documents_turn`]); `None` without a quit.
+    fn quit_documents_turn(&mut self, now: Instant) -> Option<quit::QuitStep> {
+        let quit = self.quit.as_mut()?;
+        Some(quit.documents_turn(
+            &mut [
+                &mut self.settings_store,
+                &mut self.keybindings_store,
+                &mut self.profiles_store,
+                &mut self.pins_store,
+            ],
+            now,
+        ))
+    }
+
+    /// **One turn of the quit's recovery phase** over the four stores, the copies
+    /// going into `folder` ([`quit::Quit::recovery_turn`]); `None` without a quit.
+    fn quit_recovery_turn(
+        &mut self,
+        folder: &Path,
+        at: SystemTime,
+        now: Instant,
+    ) -> Option<quit::QuitStep> {
+        let quit = self.quit.as_mut()?;
+        Some(quit.recovery_turn(
+            &mut [
+                &mut self.settings_store,
+                &mut self.keybindings_store,
+                &mut self.profiles_store,
+                &mut self.pins_store,
+            ],
+            folder,
+            at,
+            now,
+        ))
     }
 
     /// **Uninstall, on the Settings card** (T-UNINSTALL-UX): the ordinary quit is
@@ -61107,7 +61506,7 @@ mod quit_transaction_tests {
     fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
         let settle = method_body("FolioApp", "settle_quit");
         assert!(
-            settle.contains("app.session_store.flush_judged()"),
+            settle.contains("app.session_store.flush_for_quit(until, now)"),
             "the quit's write is the judged one"
         );
         assert!(
@@ -63841,17 +64240,32 @@ impl FolioApp {
 
     /// **Give every hand-off answer to the window that asked for it** (`handoff_lane`).
     ///
-    /// Each answer is offered to every open window and claimed by the one whose duties hold its
-    /// id — at most one, because the ids are the lane's and unique in the process. A window that
-    /// has closed, or is on its way out, is not offered anything, so an answer to it is dropped
-    /// here rather than raised somewhere else.
+    /// Each open window takes the answers its own requests hold — an answer is held by the one
+    /// window that asked, because the request is. A window on its way out is not asked, and one
+    /// that has closed holds nothing: its requests went with it, and their answers to the lane's
+    /// sink for the abandoned rather than to another window. Every window's answers are taken
+    /// first and then answered in press order across the windows
+    /// (`handoff_lane::in_press_order`), as the one worker ran them.
     fn answer_handoffs(&mut self) -> Result<()> {
-        let Some(app) = self.app.as_mut() else {
+        let Some(owed) = self
+            .app
+            .as_ref()
+            .map(|app| app.handoff_lane.earliest_owed())
+        else {
             return Ok(());
         };
-        let answers = app.handoff_lane.answers();
-        for answer in &answers {
-            self.for_each_window(|runtime| runtime.answer_handoff(answer))?;
+        let mut held = Vec::new();
+        for index in 0..self.windows.len() {
+            if let Some(mut runtime) = self.runtime_at(index)
+                && runtime.window.leaving.is_none()
+            {
+                held.push((index, runtime.take_handoff_answers(owed)));
+            }
+        }
+        for (index, _, answer, duty) in handoff_lane::in_press_order(held) {
+            if let Some(mut runtime) = self.runtime_at(index) {
+                runtime.answer_handoff(answer, duty)?;
+            }
         }
         Ok(())
     }
@@ -65433,6 +65847,17 @@ impl FolioApp {
     /// the storage pass's are. With no window standing the answers wait in their
     /// channels for the next wake.
     fn take_document_answers(&mut self) -> Result<()> {
+        // **Not while a quit holds the storage worker** (T-QUIT-DOCUMENTS): its documents and
+        // recovery phases take the answers themselves, on the turn this wake brings, and merge
+        // without the doors.
+        if self
+            .app
+            .as_ref()
+            .and_then(|app| app.quit.as_ref())
+            .is_some_and(quit::Quit::holds_the_storage_worker)
+        {
+            return Ok(());
+        }
         for index in 0..self.windows.len() {
             let Some(mut runtime) = self.runtime_at(index) else {
                 continue;
@@ -66281,6 +66706,32 @@ impl FolioApp {
                     self.for_each_window(|runtime| runtime.quit_discard())?;
                     self.report_to_quit(quit::Quit::discarded);
                 }
+                // **The hand-editable documents, before the session** (T-QUIT-DOCUMENTS; design
+                // note 2026-10-11, revision (c)2). Both phases are a clock read on the turn, never
+                // a wait: the storage worker wakes the loop with each answer
+                // (`AppEvent::DocumentsAnswered`, which leaves the answers to this arm while the
+                // quit holds the worker), and `Quit::deadline` wakes it at the phase's bound.
+                quit::QuitStep::Documents => {
+                    let now = Instant::now();
+                    let step = self
+                        .app
+                        .as_mut()
+                        .and_then(|app| app.quit_documents_turn(now));
+                    if step == Some(quit::QuitStep::Documents) {
+                        return Ok(());
+                    }
+                }
+                quit::QuitStep::Recovery => {
+                    let now = Instant::now();
+                    let folder = persist::storage_dir().join(preview::RECOVERED_FOLDER);
+                    let step = self
+                        .app
+                        .as_mut()
+                        .and_then(|app| app.quit_recovery_turn(&folder, SystemTime::now(), now));
+                    if step == Some(quit::QuitStep::Recovery) {
+                        return Ok(());
+                    }
+                }
                 // **Read-only, over every window, before anything else happens.**
                 quit::QuitStep::Photograph => {
                     // **And no launch is promised a window from here on** (0.4.6 U-21, §C.3),
@@ -66288,6 +66739,12 @@ impl FolioApp {
                     // photographs in the turn it began, and an update's quit then goes on turning
                     // while it waits for its receipt.
                     launch_wire::set_admitting(false);
+                    // **A trial release held through the two phases, settled for the write**
+                    // (T-QUIT-DOCUMENTS rounds 3–4): the rest of it released, the session's
+                    // half pending through the write's verdict (`Quit::settle_held_release`).
+                    if let Some(app) = self.app.as_mut() {
+                        app.settle_the_held_release();
+                    }
                     self.for_each_window(|runtime| runtime.photograph_for_quit())?;
                     self.report_to_quit(quit::Quit::photographed);
                 }
@@ -66315,10 +66772,20 @@ impl FolioApp {
                         landed
                     } else {
                         // The way out begins with the write (§5.3 rows 15–17 are admitted from
-                        // here); a refused write comes back at `Abandon`.
+                        // here); a refused write comes back at `Abandon`. **Inside what is left
+                        // of the quit's one budget** (T-QUIT-DOCUMENTS): the judged wait ends at
+                        // `Quit::session_write_until`, and a quit with none left hands nothing
+                        // over and leaves without a new flush.
                         bt_platform::admission::exiting();
+                        let now = Instant::now();
                         match self.app.as_mut() {
-                            Some(app) => app.session_store.flush_judged(),
+                            Some(app) => {
+                                let until = app
+                                    .quit
+                                    .as_ref()
+                                    .map_or(now, |quit| quit.session_write_until(now));
+                                app.session_store.flush_for_quit(until, now)
+                            }
                             None => return Ok(()),
                         }
                     };
@@ -66355,6 +66822,11 @@ impl FolioApp {
                     self.report_to_quit(|quit| quit.written(verdict));
                 }
                 quit::QuitStep::Retire => {
+                    // **The write left: a session release still pending is consumed**
+                    // (T-QUIT-DOCUMENTS round 4).
+                    if let Some(app) = self.app.as_mut() {
+                        app.settle_the_held_release();
+                    }
                     // **Not `for_each_window`**, and this is the one place in the
                     // loop where that matters: it stops at the first failure, and
                     // here every window has to be told whatever the one before it
@@ -66451,8 +66923,17 @@ impl FolioApp {
                     // no uninstaller after *Uninstall* on the Settings card (T-UNINSTALL-UX).
                     update_handoff::disarm();
                     uninstall::disarm();
+                    let mut cancelled = None;
                     if let Some(app) = self.app.as_mut() {
+                        cancelled = app.quit.as_mut().and_then(quit::Quit::take_cancelled);
+                        // **A trial release still held runs now** (rounds 3–4): cancelled in the
+                        // phases or its final write refused, the window stays, so the backup and
+                        // the session go as they would have.
+                        app.settle_the_held_release();
                         app.quit = None;
+                    }
+                    if let Some(cancelled) = cancelled {
+                        self.say_the_cancelled_quit(cancelled)?;
                     }
                     // **`NSTerminateCancel`** (M3-1): the reader answered the
                     // card with *Cancel*, or the session could not be written.
@@ -66494,6 +66975,15 @@ impl FolioApp {
             return Ok(());
         };
         let reason = std::mem::replace(&mut app.quit_reason, quit::Reason::Asked);
+        // **Only the card's choice leaves without a change** (revision (d)2): the documents
+        // it named are dropped for this run, each named in `diagnostics.log` before the way
+        // out; a quit asked any other way drops nothing and runs the transaction again.
+        let dropped = quit::dropped_on_begin(app.swap_leave_without(None));
+        if !dropped.is_empty() {
+            for line in app.with_documents(|documents| quit::drop_documents(documents, &dropped)) {
+                diagnostics::note(&line);
+            }
+        }
         app.quit = Some(quit::Quit::begin_for(names, reason));
         // The card, on every window — one question, and no window left taking
         // keys behind it. A quit with nothing to ask about raises none, so this
@@ -66512,6 +67002,34 @@ impl FolioApp {
             })?;
         }
         Ok(())
+    }
+
+    /// **Say a quit the documents phase cancelled** (T-QUIT-DOCUMENTS; revision (d)2):
+    /// every document it could not keep, with why, in `diagnostics.log`; one Error card on
+    /// the window the keyboard is on (or the oldest one standing) naming the files, with
+    /// its one choice, *Leave without this change*; and what the documents phase merged
+    /// without its doors, put in force now that the windows stay (the ordinary storage
+    /// pass, `Runtime::take_document_answers`).
+    fn say_the_cancelled_quit(&mut self, cancelled: quit::Cancelled) -> Result<()> {
+        for line in cancelled.lines() {
+            diagnostics::note(&line);
+        }
+        self.take_document_answers()?;
+        let oldest_standing = |app: &mut Self| {
+            (0..app.windows.len()).find_map(|index| {
+                let id = app.windows.key_at(index)?;
+                app.windows
+                    .get_mut(id)
+                    .is_some_and(|window| window.leaving.is_none())
+                    .then_some(id)
+            })
+        };
+        let Some(id) = self.frontmost_window().or_else(|| oldest_standing(self)) else {
+            return Ok(());
+        };
+        self.runtime(id).map_or(Ok(()), |mut runtime| {
+            runtime.raise_cancelled_quit_card(cancelled)
+        })
     }
 
     /// Hand the transaction one report, if there is a transaction to hand it to.
@@ -66556,6 +67074,12 @@ impl FolioApp {
         let app = self.app.as_mut()?;
         let quit = app.quit.as_mut()?;
         let Some(generation) = quit.awaited_generation() else {
+            // **Not handed over once the quit's one budget is spent** (T-QUIT-DOCUMENTS): the
+            // store gives the write up without a new flush, and the update with it.
+            let until = quit.session_write_until(now);
+            if until <= now {
+                return Some(app.session_store.flush_for_quit(until, now));
+            }
             return match app.session_store.hand_over_final(now) {
                 Ok(Some(generation)) => {
                     quit.requested(generation, now);
@@ -66855,6 +67379,22 @@ impl FolioApp {
             runtime.keep_unsaved_edits(&recovery);
             Ok(())
         })?;
+        // **And the four hand-editable documents' owed changes** (T-QUIT-DOCUMENTS;
+        // revisions (c)2 and (d)3), into the same folder — and every one that could be kept
+        // nowhere said through the system's own box, before a window closes.
+        if let Some(app) = self.app.as_mut() {
+            app.with_documents(|documents| {
+                keep_owed_documents_over(
+                    documents,
+                    &recovery,
+                    SystemTime::now(),
+                    &mut TheDisk,
+                    &mut SystemBox,
+                )
+            });
+            // **And a trial release a quit held, disposed of** (T-QUIT-DOCUMENTS round 4).
+            dispose_of_a_held_release_on_a_stop(app.quit.as_mut(), &mut app.session_store);
+        }
         self.for_each_window(|runtime| runtime.close_window(true))
     }
 
@@ -67562,7 +68102,15 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // done (U-32): the card follows the journal's final phase.
             AppEvent::TrialWritesReleased => {
                 if let Some(app) = self.app.as_mut() {
-                    app.release_trial_writes(update_trial::take_released());
+                    // **Held while a quit holds the storage worker** (T-QUIT-DOCUMENTS round 3):
+                    // the trial's receipt went ahead of the documents and their copies; its
+                    // release waits for the quit's outcome (`Quit::settle_held_release`).
+                    let released = update_trial::take_released();
+                    let now = match app.quit.as_mut() {
+                        Some(quit) => quit.trial_release(released),
+                        None => released,
+                    };
+                    app.release_trial_writes(now);
                     if app.update_job.after_commit(version::VERSION) {
                         diagnostics::note(
                             "Folio: update job — the update this launch said was incomplete is committed",
@@ -74789,12 +75337,63 @@ fn install_panic_log_hook_at(path: PathBuf, fatal: impl Fn(&Path) + Send + Sync 
         // conversion through the Typst compile and the rasterizer. Its
         // diagnostic belongs in the log above, never in a fatal dialog or a
         // process exit: the formula fails to source and the window lives.
-        if bt_math::render_panic_is_contained() {
+        if the_hook_lets_this_panic_unwind() {
             return;
         }
         previous(info);
         fatal(&path);
     }));
+}
+
+/// **Whether the panic hook returns and lets this thread's panic unwind** to the
+/// boundary that contains it, instead of ending the process: one formula's
+/// render (`bt_math::render_panic_is_contained`), or a worker's unit of work run
+/// inside [`contained_panic::contain`]. The report is written either way.
+fn the_hook_lets_this_panic_unwind() -> bool {
+    bt_math::render_panic_is_contained() || contained_panic::is_contained()
+}
+
+/// **A worker's unit of work whose panic is that request's failure, not the
+/// process's end** (H2-NITS round 5; T-PANIC-ROWS-HONEST) — the resident panic
+/// hook's second contained kind beside a formula's render, and the one mechanism
+/// every worker uses for it: [`bt_platform::contained_panic`], which the
+/// platform's own callbacks reach too.
+///
+/// [`contain`] marks this thread for the length of `work` and is its unwind
+/// boundary; the hook ([`the_hook_lets_this_panic_unwind`]) asks [`is_contained`]
+/// and, when it answers yes, logs the report and returns, so the unwind reaches
+/// [`contain`], which answers the panic as `Err`. A unit of work that holds no
+/// state another thread reads half-written is the only kind to contain: the
+/// caller turns the `Err` into its request's `Failed` terminal (C2, C3).
+mod contained_panic {
+    pub(crate) use bt_platform::contained_panic::{contain, is_contained};
+
+    #[cfg(test)]
+    mod tests {
+        use super::{contain, is_contained};
+        use crate::the_hook_lets_this_panic_unwind;
+
+        /// RED (H2-NITS round 5) - **the panic hook lets a contained worker's
+        /// panic unwind, and only while it is contained**: outside [`contain`]
+        /// the hook's decision is the fatal one, inside it the hook returns, and
+        /// the marker is put back when the work ends, by a panic or not.
+        ///
+        /// MUTATION: drop `contained_panic::is_contained()` from
+        /// `the_hook_lets_this_panic_unwind` - the decision inside goes red.
+        #[test]
+        fn the_hook_lets_a_contained_workers_panic_unwind() {
+            assert!(!the_hook_lets_this_panic_unwind());
+            assert_eq!(contain(the_hook_lets_this_panic_unwind).ok(), Some(true));
+            assert!(!is_contained(), "the marker ends with the work");
+            let caught = contain(|| -> u8 { panic!("scripted: 一个被包住的错误") });
+            assert!(caught.is_err(), "the panic is the boundary's answer");
+            assert!(
+                !is_contained(),
+                "and the marker is put back after a panic too"
+            );
+            assert!(!the_hook_lets_this_panic_unwind());
+        }
+    }
 }
 
 /// What a run that ended in a fault of its own reports to whoever started it.
@@ -75659,6 +76258,8 @@ mod app_peek_tests;
 mod app_preview_tests;
 #[cfg(test)]
 mod app_profiles_tests;
+#[cfg(test)]
+mod app_quit_tests;
 #[cfg(test)]
 mod app_tabs_tests;
 #[cfg(test)]
@@ -78296,16 +78897,21 @@ mod edit_menu_clipboard_tests {
         }
     }
 
-    /// PIN — **each arm is the door the keystroke already uses**, and the verb
-    /// reaches the clipboard through none of its own.
+    /// PIN — **the four doors the Edit menu ends at are the keystroke's own**,
+    /// and the verb reaches the clipboard through none of its own.
     ///
     /// A second copy path would be a second answer to what a selection is worth
     /// on the pasteboard; a second paste path would be a second place for the
     /// sanitising, the bracketing and the multi-line policy to be decided. The
-    /// four doors named here are the four the two key handlers name.
+    /// four doors named here are the four the two key handlers name. That the
+    /// menu reaches them — `menubar::run_clipboard_verb` over `Runtime`'s
+    /// `menubar::ClipboardDoors` — is driven behaviourally only up to the doors
+    /// (`a_copy_over_a_files_column_or_a_read_only_preview_takes_the_terminals_selection`);
+    /// `Runtime`'s own answer to them is unpinned, because no test builds a
+    /// `Runtime` (the D-95 class).
     ///
     /// MUTATION: read the pasteboard in `run_an_application_menu_verb` and
-    /// write the bytes itself — the last two assertions go red.
+    /// write the bytes itself — the last assertion goes red.
     #[test]
     fn the_edit_menus_clipboard_verbs_go_through_the_keystrokes_own_doors() {
         let verb = method_body("Runtime", "run_an_application_menu_verb");
@@ -78322,10 +78928,6 @@ mod edit_menu_clipboard_tests {
             ("self.paste_from_clipboard()", ladder, "the terminal"),
         ] {
             assert!(
-                verb.contains(door),
-                "the Edit menu does not reach `{door}`, which is {whose}'s own door"
-            );
-            assert!(
                 other.contains(door),
                 "`{door}` is no longer what {whose} answers its own chord with"
             );
@@ -78336,8 +78938,7 @@ mod edit_menu_clipboard_tests {
         ] {
             assert!(
                 !verb.contains(its_own),
-                "the Edit menu touches the pasteboard itself through `{its_own}` instead of \
-                 going through the door the keystroke uses"
+                "the Edit menu touches the pasteboard itself through `{its_own}` instead of                  going through the door the keystroke uses"
             );
         }
     }
@@ -78431,6 +79032,130 @@ mod edit_menu_clipboard_tests {
             }),
             ClipboardSeat::PreviewDocument
         );
+    }
+
+    /// RED (H2-NITS, owner ruling 2026-10-11 on H2 Q2: keep; round 2) — **Edit ▸
+    /// Copy over a files column, a read-only preview or a switcher copies the
+    /// terminal's selection onto the clipboard**; only the quick edit and a
+    /// surface above the clipboard rung answer it otherwise.
+    ///
+    /// Driven down the menu verb's own road: the rung's focus
+    /// (`clipboard_focus_of`, what `Runtime::clipboard_focus` answers), then
+    /// `menubar::run_clipboard_verb`, then the terminal's copy door — here the
+    /// same `copy_selection` the window's door calls, over a real session holding
+    /// a real selection, writing into a test clipboard instead of the system's.
+    /// What reaches the clipboard is the selection's text, and the selection is
+    /// spent, as a keystroke's copy spends it.
+    ///
+    /// MUTATIONS: (1) give `menubar::clipboard_seat` the paste's `!focus.shell`
+    /// arm (`Nobody`) — nothing is written; (2) let a read-only preview take the
+    /// copy (`PreviewDocument` while the shell does not hold the keyboard) — the
+    /// document's door is knocked on and the terminal's selection is not copied.
+    #[test]
+    fn a_copy_over_a_files_column_or_a_read_only_preview_takes_the_terminals_selection() {
+        use super::{
+            Bias, DualPlaneSession, ImeOwner, TextFieldSeat, ViewSelection, ViewportProjection,
+            clipboard_focus_of, copy_selection,
+        };
+        use crate::menubar::{ClipboardDoors, run_clipboard_verb};
+        use std::num::NonZeroU32;
+
+        /// The terminal's copy door over one real session, and a clipboard of
+        /// its own; every other door is a knock the test records.
+        struct Doors {
+            session: DualPlaneSession,
+            projection: ViewportProjection,
+            clipboard: Vec<String>,
+            knocked: Vec<&'static str>,
+        }
+        impl ClipboardDoors for Doors {
+            fn copy_terminal_selection(&mut self) -> anyhow::Result<()> {
+                let Self {
+                    session,
+                    projection,
+                    clipboard,
+                    ..
+                } = self;
+                copy_selection(session, projection, |text| {
+                    clipboard.push(text.to_owned());
+                    Ok(())
+                });
+                Ok(())
+            }
+            fn paste_into_terminal(&mut self) -> anyhow::Result<()> {
+                self.knocked.push("paste_into_terminal");
+                Ok(())
+            }
+            fn copy_document_selection(&mut self) {
+                self.knocked.push("copy_document_selection");
+            }
+            fn paste_into_document(&mut self) -> anyhow::Result<()> {
+                self.knocked.push("paste_into_document");
+                Ok(())
+            }
+            fn paste_into_field(&mut self, _: TextFieldSeat) -> anyhow::Result<()> {
+                self.knocked.push("paste_into_field");
+                Ok(())
+            }
+        }
+        let selected = || {
+            let mut session =
+                DualPlaneSession::new(NonZeroU32::new(24).unwrap(), NonZeroU32::new(2).unwrap());
+            session.feed("echo 中文 ok".as_bytes()).unwrap();
+            let mut projection = session.new_projection(session.layout_key());
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            let selection = ViewSelection {
+                start: frame.anchor_at(0, 5, Bias::Before).unwrap().unwrap(),
+                end: frame.anchor_at(0, 8, Bias::After).unwrap().unwrap(),
+            };
+            session.set_view_selection(Some(selection.clone()));
+            projection.set_selection(Some(selection));
+            Doors {
+                session,
+                projection,
+                clipboard: Vec::new(),
+                knocked: Vec::new(),
+            }
+        };
+        for rung in [ImeOwner::FilesTree, ImeOwner::Preview, ImeOwner::Modal] {
+            let mut doors = selected();
+            let expected = doors.session.selection_text().expect("a selection");
+            run_clipboard_verb(
+                true,
+                clipboard_focus_of(rung, false, false, false),
+                &mut doors,
+            )
+            .expect("the copy runs");
+            assert_eq!(
+                doors.clipboard,
+                [expected],
+                "{rung:?} holds the keyboard and Edit ▸ Copy did not copy the terminal's selection"
+            );
+            assert!(doors.knocked.is_empty(), "{rung:?}: {:?}", doors.knocked);
+            assert!(
+                doors.session.view_selection().is_none(),
+                "the copy spends the selection, as the keystroke's does"
+            );
+        }
+        // The quick edit takes its own copy, and a surface above the clipboard
+        // rung takes none — the two exceptions, on the same road.
+        let mut doors = selected();
+        run_clipboard_verb(
+            true,
+            clipboard_focus_of(ImeOwner::Preview, false, false, true),
+            &mut doors,
+        )
+        .expect("the copy runs");
+        assert_eq!(doors.knocked, ["copy_document_selection"]);
+        assert!(doors.clipboard.is_empty());
+        let mut doors = selected();
+        run_clipboard_verb(
+            true,
+            clipboard_focus_of(ImeOwner::Modal, true, false, false),
+            &mut doors,
+        )
+        .expect("the copy runs");
+        assert!(doors.clipboard.is_empty() && doors.knocked.is_empty());
     }
 
     /// RED (B-AUDIT-046 RT-1) — **a paste goes to the text field that holds the
@@ -78559,16 +79284,12 @@ mod edit_menu_clipboard_tests {
             "a second road to the terminal's paste in the ladder"
         );
         assert!(ladder.contains("self.paste_into_field(field)?;"));
-        let menu = method_body("Runtime", "run_an_application_menu_verb");
-        assert!(
-            menu.contains("menubar::paste_seat(focus)")
-                && menu.contains("self.paste_into_field(field)"),
-            "Edit ▸ Paste decides for itself instead of asking the seat"
-        );
+        // Edit ▸ Paste asks `menubar::paste_seat` inside `menubar::run_clipboard_verb`
+        // (the seat is pinned by `a_paste_reaches_the_terminal_only_while_the_shell_holds_the_keyboard`);
+        // `Runtime`'s call into the road is unpinned (the D-95 class).
         let focus = method_body("Runtime", "clipboard_focus");
         assert!(
-            focus.contains("text_field_holding(")
-                && focus.contains("ime_owner(self.keyboard_owner())"),
+            focus.contains("ime_owner(self.keyboard_owner())"),
             "the field is read off the ladder, not listed"
         );
         // The fields whose rungs stand above the clipboard rung take the same
@@ -79695,7 +80416,7 @@ mod refused_preview_card_tests {
         // One launcher, and it is the door it has always been.
         assert!(
             method_body("Runtime", "open_path_in_default_app")
-                .contains(concat!("self.", "open_local_path(path)")),
+                .contains(concat!("open_local_path", "_ask(path)")),
             "the card's button no longer goes through this window's one door"
         );
     }
@@ -82318,10 +83039,10 @@ mod printed_path_provenance_tests {
     fn the_open_door_is_handed_the_printed_name_and_the_reveal_the_resolved_one() {
         let press = method_body("Runtime", "activate_hyperlink");
         let open = press
-            .find("self.open_local_path_verified(&path, facts);")
+            .find("self.open_local_path_verified(&path, facts)?;")
             .expect("the open door is handed the path as printed");
         let reveal = press
-            .find("self.reveal_verified(&path, facts);")
+            .find("self.reveal_verified(&path, facts)?;")
             .expect("and so is the reveal, which takes the resolved name off the target");
         assert!(open < reveal, "the file arm stands before the folder arm");
         // And the resolved name is the doors' own transform, not a second reading of it: the

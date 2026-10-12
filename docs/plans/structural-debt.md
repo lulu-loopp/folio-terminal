@@ -71,12 +71,12 @@ they answer "what does this machine do" — not by debt.
 | 0.4.5 | 8 | 0 | 8 |
 | 0.4.6 | 4 | 0 | 4 |
 | 0.4.7 | 0 | 0 | 0 |
-| 0.4.8 (plan ticket on the row) | 27 | 27 | 0 |
+| 0.4.8 (plan ticket on the row) | 42 | 27 | 15 |
 | 0.5 (reason on the row; D-1, D-16 and D-33 are its preconditions) | 13 | 13 | 0 |
 | deferred (reason on the row) | 4 | 4 | 0 |
-| unassigned (no 0.4.8 plan ticket; listed for the coordinator) | 37 | 37 | 0 |
+| unassigned (no 0.4.8 plan ticket; listed for the coordinator) | 23 | 23 | 0 |
 | already repaid | 2 | 0 | 2 |
-| **total** | **95** | **81** | **14** |
+| **total** | **96** | **67** | **29** |
 
 (2026-09-25, A5: D-33 moved from 0.4.5 to 0.4.6 — the owner deferred the
 presentation lane, its second client, and revision (b) R8 of
@@ -119,6 +119,43 @@ unassigned to 0.4.8; D-93 and D-94 are owner questions and stay unassigned.)
 
 (2026-10-11, the merge of S-1 with T-ATTENTION-WINDOW-EXPIRY: D-95, added on 0.4.8 with O-4,
 is counted — 0.4.8 27 rows, total 95/81/14.)
+
+(2026-10-12, H2-NITS round 5: D-96 added on 0.4.8 with T-PANIC-ROWS-HONEST.)
+
+(2026-10-12, H2-NITS: the table recounted from the rows' own version and status cells. The
+lines before it counted every 0.4.8 row as open and carried an unassigned count of 37 against
+28 rows. 0.4.8 holds 37 rows, ten of them repaid — D-7, D-14, D-15, D-20, D-21, D-22, D-23,
+D-25, D-26, D-28 — and D-4 and D-19 are narrowed and open; unassigned holds 28; total 96/72/24.)
+
+(2026-10-12, T-PANIC-ROWS-HONEST: D-96 repaid. Recounted from the rows' own version and status
+cells: 0.4.8 holds 37 rows, eleven repaid (the ten above and D-96); total 96/71/25, from
+96/72/24.)
+
+(2026-10-12, S-5: D-70 and D-71 named S-5, moved from unassigned to 0.4.8 and repaid. The table
+is recounted from the rows below — each row's *Version* and whether its *Status* reads repaid:
+the lines before this one read 0.4.8 27/27/0 and unassigned 37/37/0, which counted neither the
+rows the 0.4.8 plan tickets have repaid since (D-7, D-14, D-15, D-20…D-23, D-25, D-26, D-28) nor
+the unassigned rows those tickets and S-1 round 2 moved to 0.4.8.)
+
+(2026-10-12, the merge of S-5 with H2-NITS: both recounts, from the rows — H2-NITS's D-96 on 0.4.8,
+open, and S-5's D-70 and D-71 moved to 0.4.8 and repaid: 0.4.8 39/27/12, unassigned 26/26/0, total
+96/70/26.)
+
+(2026-10-12, the merge of T-PANIC-ROWS-HONEST with S-5: recounted from the rows — S-5's D-70 and
+D-71 on 0.4.8, repaid, and D-96 on 0.4.8, repaid: 0.4.8 39/26/13, unassigned 26/26/0, total 96/69/27.)
+
+(2026-10-12, T-LEDGER-CLOSEOUTS-1012: D-39 repaid on `f7218b36` by T-OS-SIGNALS-MAC (2026-10-11),
+whose commits left the cell open; it names that ticket and moves from unassigned to 0.4.8. Recounted from the
+rows: 0.4.8 40/26/14, unassigned 25/25/0, total 96/68/28, from 96/69/27.)
+
+(2026-10-12, T-LEDGER-CLOSEOUTS-1012: D-60 repaid — its code on `64bcebdb`, its rule sentence in
+`docs/CONVENTIONS.md` — and moved from unassigned to 0.4.8. Recounted from the rows: 0.4.8 41/26/15,
+unassigned 24/24/0, total 96/67/29, from 96/68/28.)
+
+(2026-10-12, T-LEDGER-CLOSEOUTS-1012: D-40's window-thread half is repaid on `a5cb82a4`
+(T-DIRWATCH-LIFECYCLE); its remainder, the unbounded join when a directory watch is dropped, is re-homed
+from unassigned to 0.4.8 L9 (T-DROP-DOORS) and stays open. Recounted from the rows: 0.4.8 42/27/15,
+unassigned 23/23/0, total 96/67/29 unchanged.)
 
 Parts already repaid inside open rows, by the 0.4.4 tickets: ticket 10
 (`2657e5e3`) — §5.3 row 1, the OS hand-off lane, and the first instance of the
@@ -340,8 +377,8 @@ ledger's.
 | D-36 | §5.3 row 4 — `psreadline::installed_copy`'s recursive walk | §5.3 | none yet | 0.4.8 — G6 (T-INTEGRATION-INJECT-2) retires the installed module this row walks | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
 | D-37 | §5.3 row 5 — the machine's whole font collection enumerated inline | §5.3 | 50 | 0.4.5 — the traced frozen gear | repaid (ticket 50) |
 | D-38 | §5.3 row 6 — the find box re-scans every frozen line per keystroke | §5.3 | 51 | 0.4.5 — a per-keystroke cost | repaid (ticket 51) |
-| D-39 | §5.3 row 7 — macOS locale children on the pane-birth road | §5.3 | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** touched, not narrowed: both commands now lead a contained process group (`probe_output`, T-PROBE-CHILD) but still have no deadline and stay on the pane-birth road; was 0.4.6 |
-| D-40 | §5.3 row 8 — macOS `DirWatch` start and drop wait without a bound | §5.3 | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — B7 was never cut | open — both platforms' `DirWatch::drop` are rows of the closed `Drop` inventory the source guard holds (A1e, 2026-09-27); B7 repays them; **2026-10-08 (J4):** untouched; 0.4.8 B1 (T-WINDOWS-ALL) gives every window the git watch and the document re-reads, which multiplies this row's start and drop sites unless B1 repays them; was 0.4.6; **2026-10-11 (T-DIRWATCH-LIFECYCLE):** §5.3 row 8 is done — every start and drop runs on the `watch-steward` worker, the starts take a `WorkerCtx`, and the window thread holds no watch; what stays open is the unbounded join in both `Drop`s (TD-1, TD-2), now waited on by that worker |
+| D-39 | §5.3 row 7 — macOS locale children on the pane-birth road | §5.3 | T-OS-SIGNALS-MAC | 0.4.8 — T-OS-SIGNALS-MAC (2026-10-11) | **repaid on `f7218b36` (T-OS-SIGNALS-MAC, 2026-10-11; marked 2026-10-12 by T-LEDGER-CLOSEOUTS-1012)**: the locale a new pane is told is read on the locale cell's own worker (`locale_declaration::LocaleCell::serve`), both children within one ten-second budget (`bt_platform::probe_outputs_within`), and a birth reads what the cell holds (`locale_declaration::held`); `window_waits.tsv` row 7 is `done`, held by `locale_declaration::tests::row_7_no_birth_reads_the_locale_itself`; the repaying commit left this cell open; before it: open; **2026-10-08 (J4):** touched, not narrowed: both commands now lead a contained process group (`probe_output`, T-PROBE-CHILD) but still have no deadline and stay on the pane-birth road; was 0.4.6 |
+| D-40 | §5.3 row 8 — macOS `DirWatch` start and drop wait without a bound | §5.3 | L9 (T-DROP-DOORS) | 0.4.8 — L9 (T-DROP-DOORS), the closed `Drop` inventory's ticket, with D-78…D-82 (2026-10-12) | open — **half repaid**: the window-thread half on `a5cb82a4` (T-DIRWATCH-LIFECYCLE, 2026-10-11) — every directory watch starts, changes and drops on the `watch-steward` worker, the starts take a `WorkerCtx`, the window thread holds no watch, and `window_waits.tsv` row 8 is `done`; **what remains** is the unbounded `join()` when a directory watch is dropped — both platforms' `DirWatch::drop` (thread-door TD-1, TD-2), now waited on by the steward, off the window thread — re-homed to L9 (T-DROP-DOORS) by T-LEDGER-CLOSEOUTS-1012 (2026-10-12); before it: open — both platforms' `DirWatch::drop` are rows of the closed `Drop` inventory the source guard holds (A1e, 2026-09-27); B7 repays them; **2026-10-08 (J4):** untouched; 0.4.8 B1 (T-WINDOWS-ALL) gives every window the git watch and the document re-reads, which multiplies this row's start and drop sites unless B1 repays them; was 0.4.6; **2026-10-11 (T-DIRWATCH-LIFECYCLE):** §5.3 row 8 is done — every start and drop runs on the `watch-steward` worker, the starts take a `WorkerCtx`, and the window thread holds no watch; what stays open is the unbounded join in both `Drop`s (TD-1, TD-2), now waited on by that worker |
 | D-41 | §5.3 row 9 — presentation on the window thread; the present mode has no owner | §5.3; §5.4 step 4 | none yet | deferred → unassigned — construction awaits the owner's measurement-based decision after the self-inflicted waits are fixed and measured (owner, 2026-09-24; `docs/plans/design/window-thread-budget-2026-09-25.md` §R-E, replacing §4); a release is assigned only after that ruling, and this deferral does not repay D-41 | open — since ticket 37 a presented picture is a pair (frame and metrics: `SeatSignature::metrics`, `LeafSession::presented_metrics`), and the lane must carry both; **2026-10-08 (J4):** untouched |
 | D-42 | §5.3 row 10 — device recovery blocks and sleeps on the window thread | §5.3; §5.4 step 4 | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — B9 was never cut | open; **2026-10-08 (J4):** untouched; was 0.4.6; **2026-10-11 (S-1):** tracked by `# completions` row `device recovery` (through §5.3 row 10) |
 | D-43 | §5.3 row 11 — PTY birth on the window thread | §5.3; §5.4 step 5 | none yet | deferred → 0.5 toward 0.6 — needs D-1's session owner to keep input and resize order | open — admitted where it stands through `pty_door::spawn_shell`, minted in `create_leaf_session` (A1d, 2026-09-26: its door, not its move); **2026-10-08 (J4):** **narrowed**: process birth (`CreatePseudoConsole`, `CreateProcessW`, the folder `stat`, the fresh account environment) runs on the `bt-pty-birth` worker and the window thread joins it through `PtyBirth` (T-ENV-REFRESH round 4; ARCHITECTURE §5, *A shell birth has one short-lived worker*); the join stays until the session owner (D-1) |
@@ -361,7 +398,7 @@ ledger's.
 | D-57 | §12.1 — `bt-workbench` is born | §12.1 | census-3 and census-4 | 0.5 — census-4 opens the 0.5 workbench | open — day-one contents, order, public surface and guard entry in `docs/plans/design/ownership-census-2026-09-25.md` §5 (2026-09-25); **narrowed by census-3** (2026-09-25, branch `feat/bt-workbench-born`): the crate exists holding the ledger, `attention::expiry` (`WAIT_TTL`, `WaitClock`), `is_consumed` and `Places` (private counter, compile-fail doctest), `bt-app` its only dependent, `bt-layout` its only dependency; what remains is census-4 — the reach rule and its `notify` tests move, and D-48; **2026-10-08 (J4):** untouched: `bt-workbench` changed only by U-44's dead-code sweep; was 0.4.6 |
 | D-58 | `profile_runtime`'s two tests failing `WouldBlock` on a slow CI disk | `docs/DESIGN.md`, 2026-09-23 | 34 | — | repaid on `fbfab1ff` |
 | D-59 | `bt-render`'s two atlas soaks, ignored under protest | `scripts/ci/ignored-tests.txt` | none yet | deferred → the version that gains a CI runner with a real graphics adapter; whether to provision one is decided in 0.4.6 | open — ticket 37 added a CI-runnable mixed-size stress (`mixed_size_seats_share_the_atlas_and_get_their_text_back`, WARP, texture ceiling 512) and no ignore; the soaks were not extended; **2026-10-08 (J4):** untouched |
-| D-60 | two macOS `http` tests that reach the network | `docs/plans/port/m4-7/transcript.md` | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — the code is repaired; the row waits for its rule sentence | open; **2026-10-08 (J4):** **narrowed**: both tests answer from a loopback listener (`answering`, `ask_this_machine`) since `64bcebdb` (2026-09-13, before this row was written); the rule that a transport test never reaches the network is stated in no DESIGN, RULES or ARCHITECTURE sentence, so the row is not marked repaid; was 0.4.6 |
+| D-60 | two macOS `http` tests that reach the network | `docs/plans/port/m4-7/transcript.md` | T-LEDGER-CLOSEOUTS-1012 | 0.4.8 — T-LEDGER-CLOSEOUTS-1012 (2026-10-12) | **repaid 2026-10-12 (T-LEDGER-CLOSEOUTS-1012)**: the code on `64bcebdb`, and the rule now has its sentence — `docs/CONVENTIONS.md` §三, *A test the suite runs never reaches the network*: what it needs from a socket it serves itself, on a loopback listener it opened, and a probe that must reach the network is `#[ignore]`d, run by hand, and listed with its reason and expiry in `scripts/ci/ignored-tests.txt`; before it: open; **2026-10-08 (J4):** **narrowed**: both tests answer from a loopback listener (`answering`, `ask_this_machine`) since `64bcebdb` (2026-09-13, before this row was written); the rule that a transport test never reaches the network is stated in no DESIGN, RULES or ARCHITECTURE sentence, so the row is not marked repaid; was 0.4.6 |
 | D-61 | a Mac-only red test in `webnav` | ticket 13's report | 55 | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | repaid (ticket 55) |
 | D-62 | `bt-render` fails clippy on macOS: three unused constants | ticket 13's report | 55 | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | repaid (ticket 55) |
 | D-63 | the macOS CI job tests none of `bt-app`, `bt-term`, `bt-render` and lints only `bt-platform` | `.github/workflows/ci.yml`, `core-macos` | 72 | 0.4.6 | repaid (ticket 72) — the job lints the workspace and tests `bt-render` and `bt-corpus`; the `bt-app` and `bt-term` suites are not portable yet and are D-78 |
@@ -371,8 +408,8 @@ ledger's.
 | D-67 | `bt-app` fails clippy on macOS: nine app-build and five test-build unused items and ignored results | ticket 55's report | 72 | 0.4.6 — beside D-63, since widening the Mac CI job hits it | repaid (ticket 72) |
 | D-68 | the taskbar's auto-hide state asked of Explorer on the window thread: `SHAppBarMessage(ABM_GETSTATE)` inside `sample_window_place`, at every turn's head and again for a delivery between turns | the owner's next93 stall report, 2026-09-25; ticket 62 | 62 | 0.4.5 — a wait on another process inside the typing turn | repaid (ticket 62) |
 | D-69 | §5.3 row 22 — `Window::set_ime_cursor_area` called at every offer of a caret: twice in one turn (15 + 85 ms) and once for 3,138 ms under load on the owner's next93 | the owner's next93 stall reports, 2026-09-25; ticket 63 | 63 | 0.4.5 — typing stability | repaid (ticket 63) |
-| D-70 | the hand-off lane: a worker that dies leaves the requests it had accepted with no terminal outcome — `answers()` reads a disconnected channel as empty, `LANE_GONE` answers only a later submission, and the ids stay owed in each window's `Pending` | A5 (`lane::EXPECTED_FAILURES`: Handoff × a dead worker is observable) | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6; **2026-10-11 (S-1):** tracked by `# completions` row `OS hand-off`; **2026-10-11 (S-3):** also declared under two of the side-effects claims, Handoff × `AFailureIsSaidOnce` (no panic is caught around a hand-off) and × `AnOrphanedAnswerReachesItsSink` (a closed window's answer is dropped); S-5 moves the lane onto the S-3 seam |
-| D-71 | the hand-off lane: the answers held for an undrained consumer are unbounded — the answer channel is an unbounded `mpsc::channel` and `turned_away` a `Vec` | A5 (Handoff × answers held are bounded) | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6; **2026-10-11 (S-1):** tracked by `# completions` row `OS hand-off` |
+| D-70 | the hand-off lane: a worker that dies leaves the requests it had accepted with no terminal outcome — `answers()` reads a disconnected channel as empty, `LANE_GONE` answers only a later submission, and the ids stay owed in each window's `Pending` | A5 (`lane::EXPECTED_FAILURES`: Handoff × a dead worker is observable) | S-5 (T-HANDOFF-DEATH) | 0.4.8 — S-5 (2026-10-12) | **repaid 2026-10-12 (S-5)**: the hand-off lane is built on the S-3 seam, whose task and worker body run inside `contained_panic::contain` (S-5 round 3), so under the resident fatal panic hook a panic still reaches the seam — its worker started by `lane::Executor::start_worker("bt-os-handoff", …)`, every identity minted by a `lane::Ledger`, each hand-off run inside `lane::task`; the worker's end leaves every owed request `WorkerGone` (and wakes the loop) and the lane faulted, and a later press is refused at the door with `LANE_GONE`; a panic in one hand-off is that request's `Failed`, said once, and the worker goes on; a closed window's requests end in the lane's sink for the abandoned (C6), which says a refusal no window is left to hear. The four Handoff rows of `lane::EXPECTED_FAILURES` are gone; before it: open; **2026-10-08 (J4):** untouched; was 0.4.6; **2026-10-11 (S-1):** tracked by `# completions` row `OS hand-off`; **2026-10-11 (S-3):** also declared under two of the side-effects claims, Handoff × `AFailureIsSaidOnce` (no panic is caught around a hand-off) and × `AnOrphanedAnswerReachesItsSink` (a closed window's answer is dropped); S-5 moves the lane onto the S-3 seam |
+| D-71 | the hand-off lane: the answers held for an undrained consumer are unbounded — the answer channel is an unbounded `mpsc::channel` and `turned_away` a `Vec` | A5 (Handoff × answers held are bounded) | S-5 (T-HANDOFF-DEATH) | 0.4.8 — S-5 (2026-10-12) | **repaid 2026-10-12 (S-5)**: no unbounded container is left — the answer channel and `turned_away` are gone; each request's terminal is held in the lane's ledger until its window takes it (or handed to the sink), and the ledger owes at most `handoff_lane::BOUND` (33: the one running and 32 waiting, an answer not yet taken holding its place); a press past it is refused at the door, synchronously, with `LANE_FULL` as its terminal, and the window answers it at once (revision (b)3); before it: open; **2026-10-08 (J4):** untouched; was 0.4.6; **2026-10-11 (S-1):** tracked by `# completions` row `OS hand-off` |
 | D-72 | the font lane: a coalesced or superseded request gets no outcome of its own, and a walk that dies leaves `ScanState::running` set for ever — no fault, no later walk; the wake has no failure road | A5 (Font × every request ends exactly once; a dead worker is observable) | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6; **2026-10-11 (S-1):** tracked by `# completions` row `font list`; **2026-10-11 (S-3):** also declared under three of the side-effects claims, Font × `ASupersededRequestSaysSo`, × `AJoinedRequestCarriesItsTwin` (`SupersededInSilence`, `JoinedInSilence`) and × `AFailureIsSaidOnce` (a walk has no failure form); S-4 moves the lane onto the S-3 seam |
 | D-73 | the taskbar lane: the requests between two served ones get no outcome, and a worker that dies leaves `Asks::worker` set — requests are counted and never served, and nothing says so | A5 (Taskbar × every request ends exactly once; a dead worker is observable) | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6; **2026-10-11 (S-1):** tracked by `# completions` row `taskbar auto-hide`; **2026-10-11 (S-3):** also declared under three of the side-effects claims, Taskbar × `ASupersededRequestSaysSo`, × `AJoinedRequestCarriesItsTwin` and × `AFailureIsSaidOnce`; S-4 moves the lane onto the S-3 seam |
 | D-74 | the computation lane (`MathWorker`): admission and answers are unbounded `mpsc::channel`s, each way | A5 (Computation × a full lane answers without waiting; answers held are bounded) | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6; **2026-10-11 (S-1):** tracked by `# completions` rows `formula, decode and video glance`, `image scale` and `path verification` |
@@ -397,6 +434,7 @@ ledger's.
 | D-93 | the desktop notification is shown on the window thread with no admission (`NotificationDesk::show`: COM initialisation and the toast notifier built on first use) and is not a member of revision (b)6's closed C7 list; whether it becomes a request door or a ruled member is an owner question (revision (c)1) | the side-effects contract (`docs/plans/design/side-effects-contract-2026-10-11.md`, C1–C7); S-1 (T-COMPLETIONS-LEDGER, 2026-10-11), `window_waits.tsv` `# completions` | owner question (revision (c)1, beside Q1): a request door, or a ruled C7 member | unassigned — owner question (2026-10-11) | open |
 | D-94 | `PlaceHidden` and `PlaceExposure` are admitted owner-thread doors (`window_is_hidden`, `window_is_exposed`, through `Runtime::observe_window_place`) that revision (b)6's closed C7 list does not name; a new member needs an owner ruling | the side-effects contract (`docs/plans/design/side-effects-contract-2026-10-11.md`, C1–C7); S-1 (T-COMPLETIONS-LEDGER, 2026-10-11), `window_waits.tsv` `# completions` | owner question (revision (b)6: a new member of the closed C7 list needs a ruling) | unassigned — owner question (2026-10-11) | open |
 | D-95 | the ending step's wiring: the five roads that end a pane (`close_pane`, `close_tab`, `let_go_of_this_window` for a window close and the quit, `abandon_a_window_nothing_arrived_in`, `answer_restore`'s placeholder removal) each call `end_leaves_of` before their shells go, and no test drives those calls — a `Runtime` is a window and no test builds one; the step itself is pinned (`every_road_that_ends_a_pane_emits_leaf_gone_once`), as the 5400 bt-app tests drive `TabState` the same way | T-ATTENTION-WINDOW-EXPIRY (2026-10-11) | O-4 | 0.4.8 — O-4 gives `WindowRuntime` a window-free core the roads can be driven through | open |
+| D-96 | a worker panic under the resident fatal hook (`install_panic_log_hook`) ends the process from inside the hook, before any unwinding, so the request the worker was serving gets no terminal completion (C2) and the panic is never a `Failed` value (C3), on two protocols: `pty_door::request_shell` (its `# completions` row claims a panic is `PtyError::Backend`; its `catch_unwind` runs only where no fatal hook is installed) and the storage worker's two rows, a document's write and re-read (silent on a panic; `WorkerEnd::drop` runs only where no fatal hook is installed) | H2-NITS round 5 (2026-10-12) | T-PANIC-ROWS-HONEST | 0.4.8 — repaid by T-PANIC-ROWS-HONEST using the contained-panic marker H2-NITS introduced (`contained_panic::contain`, which the hook honours) | **repaid 2026-10-12 (T-PANIC-ROWS-HONEST)**: the marker is `bt_platform::contained_panic` (re-exported as `bt-app`'s `contained_panic`), the one unwind boundary; the shell birth runs inside it, so a birth that panics is `Born` with `PtyError::Backend` (the panic's text in the panic log, not in the pane's refusal); the storage worker's loop runs inside it, so a panic is the worker's end — the job being served drops its answer, `WorkerEnd` ends every queued one and then wakes the loop, and a later request is refused at the door; the same class found by the audit is repaired the same way — the locale reading, the program walk, the PSReadLine and Copilot probes and the watch steward (whose unwind guards were reached only without a fatal hook), and the macOS web view's delegate guard — and every other worker row's failure cell says that a panic ends the process under the resident hook; `crates/bt-source/tests/contained_panic.rs` refuses a product `catch_unwind` outside the boundary; before it: open |
 
 ---
 
@@ -1368,6 +1406,11 @@ lanes they name; D-51, D-54 and D-55 are 0.4.7.
   server was there before this row was written. What keeps it open is the
   rule: no sentence in DESIGN, RULES or ARCHITECTURE says a transport test
   never reaches the network.
+  **Repaid (2026-10-12, T-LEDGER-CLOSEOUTS-1012):** `docs/CONVENTIONS.md` §三 states
+  it — a test the suite runs never reaches the network; what it needs from a socket
+  it serves itself, on a loopback listener it opened. A probe that must reach the
+  network is `#[ignore]`d, run by hand, and listed with its reason and expiry in
+  `scripts/ci/ignored-tests.txt`.
 
 The other entries of `scripts/ci/ignored-tests.txt` are probes, one writer and
 two privilege-bound fixtures, each with its reason there; they are not debt.
@@ -1560,10 +1603,17 @@ drains; neither lane states a bound, and the contract asks for one.
   window's `Pending` with no outcome. Owed: a terminal outcome for every
   accepted id when the worker ends (a lane-level fault the drain reports once,
   which each window turns into its surfaces' refusals).
+  **Repaid 2026-10-12 (S-5)**: on the S-3 seam the worker's end gives every
+  owed id `WorkerGone`, announced by the loop's wake, and faults the lane; a
+  hand-off's own panic is that request's `Failed`; a closed window's ids end in
+  the lane's sink.
 - **D-71 · hand-off, answers held.** `start` builds the answer side as an
   unbounded `mpsc::channel`, and `turn_away` pushes to an unbounded `Vec`; a
   consumer that does not drain holds every answer (40 of 40 in the suite).
   Owed: a declared bound on answers held, and what a full mailbox does.
+  **Repaid 2026-10-12 (S-5)**: the ledger holds each terminal until its window
+  takes it, at most `BOUND` (33) at once, and refuses the press past it at the
+  door, synchronously.
 - **D-72 · font.** `claim_scan` folds every request made during a walk into
   one `again` round; the requests between are answered by nothing of their own.
   A walk that ends without `finish_scan` leaves `running` set, so every later
@@ -1708,3 +1758,24 @@ wait on some road, and none has a ruling that it may.
   (`end_leaves_of`: the per-leaf mark, the skip of a handover's cargo, expire before retire) is pinned
   behaviourally; that each of the five roads calls it, once and before its shells, is read by review
   only, because a `Runtime` holds a real window, renderer and compositor and no test constructs one.
+
+## D-96 — the row added on 2026-10-12 by H2-NITS round 5
+
+- **D-96 · a worker panic under the resident fatal hook.** The side-effects contract's emergency panic hook
+  is not a completion: under the resident application's hook a worker panic ends the process before any
+  unwinding, so neither a `catch_unwind` in the worker nor a `Drop` on its way out runs, and the request in
+  flight has no terminal. H2-NITS gave the hook a second contained kind beside a formula's render —
+  `contained_panic::contain`, a thread marker the hook asks before it ends the process — and the Profiles
+  page's environment read runs inside it. The pty birth and the storage worker's two rows are left for
+  T-PANIC-ROWS-HONEST, which applies the same marker (or states an honest failure cell) row by row.
+- **Repaid 2026-10-12 (T-PANIC-ROWS-HONEST).** The audit read every `catch_unwind` in the product
+  code of `bt-app`, `bt-platform` and `bt-pty` and every worker row of `# completions`. Contained
+  (the work inside `contained_panic::contain`, now `bt_platform::contained_panic` so the
+  platform's callbacks reach it): the shell birth, the storage worker's loop, the locale reading,
+  the program walk, the PSReadLine and Copilot probes, the watch steward and the macOS web view's
+  delegate guard — each a protocol whose row, or whose own unwind guard, promises a value for a
+  panic. Said in words: every other worker row's failure cell now says "a panic ends the process
+  under the resident hook"; a lane whose dead-worker road only a closed channel reaches (the files,
+  preview, git, palette-index, decoration and layout-table lanes, the trace sink) says that road
+  runs only where no fatal hook is installed, and moves onto the completion seam with its own row;
+  the uninstaller's two door processes, which install no panic hook, say a panic is their exit.

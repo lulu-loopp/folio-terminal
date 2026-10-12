@@ -336,6 +336,34 @@ pub struct Toast {
 }
 
 impl Toast {
+    /// What kind of notice it is — for a test that asks what a card was raised as.
+    #[cfg(test)]
+    #[must_use]
+    pub fn kind(&self) -> ToastKind {
+        self.kind
+    }
+
+    /// The card's statement — for a test that asks what a card says.
+    #[cfg(test)]
+    #[must_use]
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+
+    /// The card's one verb, if it offers one — for a test that asks what a card offers.
+    #[cfg(test)]
+    #[must_use]
+    pub fn action(&self) -> Option<&str> {
+        self.action.as_deref()
+    }
+
+    /// The card's id.
+    #[cfg(test)]
+    #[must_use]
+    pub fn id(&self) -> ToastId {
+        self.id
+    }
+
     /// Which surface this card belongs to — the one thing about a notice the
     /// runtime has to ask, because only the runtime can turn it into a rectangle.
     #[must_use]

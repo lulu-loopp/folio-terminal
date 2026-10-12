@@ -17,6 +17,8 @@ All notable changes to Folio are recorded here. The format follows
 ### Changed
 
 - Changes to settings.json saved in another editor while Folio runs take effect without a restart, and a setting changed in Folio at the same time is kept beside them; when both change the same setting, the file wins. <!-- zh: pending T-STORE-MERGE-SETTINGS -->
+- Quitting first saves any change to settings, shortcuts, profiles or pins that is not on disk yet. If one cannot be saved or kept in the recovered folder, Folio stays open and a card names the file, with a button to leave without that change; quitting again tries again. <!-- zh: pending T-QUIT-DOCUMENTS -->
+- If Folio stops after a failure with such a change unsaved, the change is kept in the recovered folder; if it cannot be kept anywhere, the system's own message says so. <!-- zh: pending T-QUIT-DOCUMENTS -->
 
 ### Fixed
 
@@ -35,8 +37,13 @@ All notable changes to Folio are recorded here. The format follows
 - A diff or an old version of a file that is not UTF-8 is marked as not shown exactly, and a UTF-16 file reads correctly. <!-- zh: pending H2 -->
 - With "one screen at a time" scrolling on, a notch over the commit graph moves one screenful instead of a distance that depended on the number of commits. <!-- zh: pending H2 -->
 - On a Mac, the card-scroll hint and the reserved rows in Shortcuts say Option instead of Alt. <!-- zh: pending H2 -->
+- On a Mac, the note under the reserved rows in Shortcuts says Option+arrow instead of Alt+arrow. <!-- zh: pending H2-NITS -->
+- On a Mac, the terminal opens in Menlo when no font is chosen, as it does after the choice is cleared, and symbols and emoji are drawn from Apple Symbols and Apple Color Emoji. <!-- zh: pending H2-NITS -->
+- On a keyboard layout that is not Latin, such as Russian or Greek, copy, cut, paste and select all in an edited file and M in the video player work by the key's position. <!-- zh: pending H2-NITS -->
+- A profile's environment table in Settings lists every variable Folio sets for its sessions, such as TERM and TERM_PROGRAM_VERSION, not three of them. <!-- zh: pending H2-NITS -->
 - The pane strip's "more do not fit" line is part of the translated text. <!-- zh: pending H2 -->
 - A space can be typed into the commit graph's search and the Git branch prompt, and Ctrl+Backspace deletes a word in every one-line box. <!-- zh: pending H2 -->
+- A fault while a new pane's shell is starting, or while settings, shortcuts, profiles or pins are being saved, no longer closes Folio: the pane says its shell could not start, and the save is reported as not done. <!-- zh: pending T-PANIC-ROWS-HONEST -->
 - Web page thumbnails on the focus cards now appear at display scales above 200%. <!-- zh: pending H2 -->
 - On a Mac, the names of Chinese fonts in Settings follow the system language. <!-- zh: pending H2 -->
 - A wrapped table row in accented Latin, Cyrillic, Greek or Korean keeps the space between its words, and a formula block next to Japanese or Korean prose is no longer drawn as a formula. <!-- zh: pending H2 -->

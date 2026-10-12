@@ -57,11 +57,23 @@ pub enum PrintedPathSpelling {
 /// **The translation is the existence check's own prerequisite.** §7.30 promises nothing it has not
 /// read off the disk, and a read goes through Win32; so a spelling this machine has no name for is
 /// not a candidate at all, and never reaches the ledger or the probe queue.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+///
+/// **The default is this machine's own spelling** ([`Self::machine_own`]): `Windows` on a Windows
+/// build, `Posix` everywhere else. It is what a session holds before its spawn tells it, and what
+/// a seat with no shell behind it answers.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PrintedPathNamespace {
-    /// This machine's own: a path is rooted by a drive letter and nothing else is rooted.
-    #[default]
+    /// A Windows machine's own: a path is rooted by a drive letter and nothing else is rooted.
     Windows,
+    /// A POSIX machine's own — macOS or another Unix — where a path is rooted by `/` and every
+    /// shell, zsh and bash alike, prints the one filesystem this machine reads (T-MAC-PRINTED-
+    /// NAMESPACE, 2026-10-12).
+    ///
+    /// Not [`Self::Msys`]: `/d/Demo` is a drive mount only inside Git for Windows' layer, and on a
+    /// Mac it is the directory `d` under the root. Nothing here is foreign, so nothing is
+    /// translated ([`Self::reads_a_foreign_spelling`] is `false`) and the rooted scan reads the
+    /// line with the grammar a POSIX host already has.
+    Posix,
     /// Git for Windows' MSYS layer, where `/d/Demo` is `D:\Demo` and `~` is the Windows home.
     ///
     /// The drive map is MSYS's own and it is the one thing about that layer this window needs: a
@@ -108,7 +120,21 @@ pub enum PrintedPathNamespace {
     },
 }
 
+impl Default for PrintedPathNamespace {
+    fn default() -> Self {
+        Self::machine_own(cfg!(windows))
+    }
+}
+
 impl PrintedPathNamespace {
+    /// The spelling a machine's own paths are printed in, with the platform an input: `Windows`
+    /// for a Windows machine, `Posix` for macOS and every other Unix. [`Default`] asks it for the
+    /// machine this build is.
+    #[must_use]
+    pub const fn machine_own(windows: bool) -> Self {
+        if windows { Self::Windows } else { Self::Posix }
+    }
+
     /// Spell an already representable host path for insertion (paste-paths design §2.5).
     /// This is lexical and assumes the default drive mounts; it never asks the disk or emits `~`.
     /// Inputs outside the translation's domain keep their host spelling, including foreign shares.
@@ -116,7 +142,7 @@ impl PrintedPathNamespace {
     pub fn to_pane_spelling(&self, host: &str) -> String {
         #[cfg(windows)]
         {
-            if !matches!(self, Self::Windows) {
+            if self.reads_a_foreign_spelling() {
                 let bytes = host.as_bytes();
                 if bytes.len() >= 3
                     && bytes[0].is_ascii_alphabetic()
@@ -159,7 +185,7 @@ impl PrintedPathNamespace {
     /// the scan asks before it runs at all, so a Windows pane pays nothing for this rule.
     #[must_use]
     pub fn reads_a_foreign_spelling(&self) -> bool {
-        !matches!(self, Self::Windows)
+        !matches!(self, Self::Windows | Self::Posix)
     }
 
     /// What this machine calls the place `printed` names, or `None` when it has no name for it.
@@ -179,7 +205,7 @@ impl PrintedPathNamespace {
     #[must_use]
     pub fn to_local_path(&self, printed: &str) -> Option<PathBuf> {
         match self {
-            Self::Windows => None,
+            Self::Windows | Self::Posix => None,
             Self::Msys { home } => match printed.strip_prefix('~') {
                 Some(tail) => Some(join_below(home.as_deref()?, tail.strip_prefix('/')?)),
                 None => drive_mount_to_local_path(printed.strip_prefix('/')?),
@@ -2929,7 +2955,11 @@ pub struct ContinuationRow<'a> {
 
 impl PrintedPathLinks {
     pub fn new(working_directory: Option<PathBuf>, verdicts: BTreeMap<PathBuf, bool>) -> Self {
-        Self::in_namespace(working_directory, verdicts, &PrintedPathNamespace::Windows)
+        Self::in_namespace(
+            working_directory,
+            verdicts,
+            &PrintedPathNamespace::default(),
+        )
     }
 
     /// The same ledger for a pane whose shell spells an absolute path in its own namespace

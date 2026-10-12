@@ -1313,27 +1313,17 @@ impl Runtime<'_> {
     /// so one address leaving this window is always one press that asked for
     /// it.
     ///
-    /// Answers the hand-off's id when the address passed the door and went to the
-    /// OS hand-off lane, and `None` when the door refused it — so a caller that owes
-    /// the reader a refusal can say one now, and one for the system's refusal with
-    /// [`Self::if_refused`] when the lane answers (2026-09-22).
-    pub(crate) fn hand_url_to_the_browser(
-        &mut self,
-        url: &str,
-    ) -> Result<Option<crate::handoff_lane::HandoffId>> {
-        let webnav::Decision::Navigate(target) = webnav::address_bar(url) else {
-            return Ok(None);
+    /// Answers whether the address passed the door and went to the OS hand-off
+    /// lane (2026-09-22). A caller that owes the reader a refusal of its own —
+    /// the door's now, the system's when the lane answers — hands [`browser_ask`]
+    /// off itself, naming what the system's refusal draws
+    /// ([`crate::handoff_lane::Ask::if_refused`]).
+    pub(crate) fn hand_url_to_the_browser(&mut self, url: &str) -> Result<bool> {
+        let Some(ask) = browser_ask(url) else {
+            return Ok(false);
         };
-        Ok(Some(self.hand_off(
-            bt_platform::Handoff::Address(target),
-            crate::handoff_lane::Refusal {
-                stderr: Some((
-                    "recoverable web hand-off failure",
-                    "hand a page's address to the system browser",
-                )),
-                program_notice: false,
-            },
-        )))
+        self.hand_off(ask)?;
+        Ok(true)
     }
 
     /// **`Ctrl+L`, and the double click on the name cell** — the address
@@ -2063,4 +2053,23 @@ impl crate::web_spare::Handoff<webhost::WebSeat, bt_platform::SpareParent> for W
         self.answered = Some(word);
         handed
     }
+}
+
+/// **An address for the system browser, as the OS hand-off lane is asked it** — `None` when the
+/// address door refuses it ([`webnav::address_bar`]), and otherwise the hand-off of the address
+/// the door made of it, refused in the web hand-off's words.
+pub(in crate::runtime) fn browser_ask(url: &str) -> Option<crate::handoff_lane::Ask> {
+    let webnav::Decision::Navigate(target) = webnav::address_bar(url) else {
+        return None;
+    };
+    Some(crate::handoff_lane::Ask::new(
+        bt_platform::Handoff::Address(target),
+        crate::handoff_lane::Refusal {
+            stderr: Some((
+                "recoverable web hand-off failure",
+                "hand a page's address to the system browser",
+            )),
+            program_notice: false,
+        },
+    ))
 }
