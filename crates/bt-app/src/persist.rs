@@ -17,12 +17,12 @@ use std::time::{Duration, Instant};
 use bt_platform::admission::{WaitToken, admitted, doors};
 
 use bt_persist::{
-    BindingOverrideV1, Debouncer, ExitState, KEYBINDINGS_SCHEMA_VERSION, KeybindingsPlatformV1,
-    KeybindingsV1, ProfilesV1, ReadReport, SessionV1, SettingsV1, WriteAlertAction,
-    WriteFailureTracker, create_sentinel, probe_sentinel, read_keybindings,
-    read_keybindings_keeping, read_profiles, read_profiles_keeping, read_session, read_settings,
-    read_settings_keeping, remove_sentinel, write_keybindings_atomic, write_profiles_atomic,
-    write_settings_atomic,
+    BindingOverrideV1, Debouncer, DocumentBytes, ExitState, KEYBINDINGS_SCHEMA_VERSION,
+    KeybindingsPlatformV1, KeybindingsV1, ProfilesV1, ReadReport, SessionV1, SettingsV1,
+    WriteAlertAction, WriteFailureTracker, create_sentinel, probe_sentinel, read_keybindings,
+    read_keybindings_keeping_bytes, read_profiles, read_profiles_keeping_bytes, read_session,
+    read_settings, read_settings_keeping, read_settings_keeping_bytes, remove_sentinel,
+    write_keybindings_atomic, write_profiles_atomic, write_settings_atomic,
 };
 
 /// The name the session document wears on disk, which is also what a notice
@@ -155,6 +155,79 @@ impl DocumentWrites {
     /// Take the sentence, so a card about it is raised once and not once a frame.
     pub(crate) fn take_fault(&mut self) -> Option<String> {
         self.fault.take()
+    }
+}
+
+/// **What a hand-editable document's file is known to hold**: the bytes Folio
+/// last read from it or wrote to it, and the document they parse to
+/// (`docs/plans/design/settings-reread-2026-10-11.md` §3.1, revision (b)10).
+///
+/// Each of the four stores — settings, keybindings, profiles, pins — holds one,
+/// and it is that store's alone: set when the store opens, on every write that
+/// lands, and by a re-read that takes the file.
+///
+/// - At open it is what the read had in hand: no file gives `bytes: None` and
+///   the default document; a file refused at start gives the refused bytes and
+///   the default document, because that file was not taken and is what the
+///   next write replaces (its copy is kept beside it first, review row R4-3).
+/// - A landed write sets it to the bytes written and their document.
+///
+/// **A re-read compares the file's bytes with this, never with the document in
+/// memory.** Equal bytes are Folio's own write, or no change at all. The store's
+/// in-memory document is ahead of the file whenever a change has not reached the
+/// disk — a write that failed, or a process that is not the writer — and a
+/// re-read that compared with it would take the older file as an edit and undo
+/// the change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Revision<T> {
+    /// The file's bytes; `None` when there was no file, or none whose bytes
+    /// were obtained.
+    pub(crate) bytes: Option<Arc<[u8]>>,
+    /// The document `bytes` parse to — the default for a refused file.
+    pub(crate) document: T,
+}
+
+impl<T: PartialEq> Revision<T> {
+    /// The revision a store opens with: `document` as the read returned it, and
+    /// the bytes the read had in hand.
+    pub(crate) fn opened(document: T, bytes: DocumentBytes) -> Self {
+        Self {
+            bytes: bytes.into_bytes(),
+            document,
+        }
+    }
+
+    /// A write landed: the file holds `bytes`, which are `document`.
+    pub(crate) fn landed(&mut self, bytes: Arc<[u8]>, document: T) {
+        self.bytes = Some(bytes);
+        self.document = document;
+    }
+
+    /// Whether a read found exactly the bytes this revision records. Bytes that
+    /// were not obtained are never a match: nothing is known about them.
+    pub(crate) fn holds(&self, read: &DocumentBytes) -> bool {
+        match read {
+            DocumentBytes::Absent => self.bytes.is_none(),
+            DocumentBytes::Loaded(bytes) | DocumentBytes::Refused { bytes } => {
+                self.bytes.as_deref() == Some(&**bytes)
+            }
+            DocumentBytes::Unobtained => false,
+        }
+    }
+
+    /// Take a file that is not Folio's own write and that parsed: its bytes
+    /// become the revision's, and the answer is whether its document differs.
+    ///
+    /// A second spelling of the same document — an editor that re-indents — is
+    /// a hand edit that changes no field: the bytes are adopted, so the next
+    /// read of them is no change, and nothing else moves.
+    pub(crate) fn adopt(&mut self, document: T, bytes: DocumentBytes) -> bool {
+        self.bytes = bytes.into_bytes();
+        if self.document == document {
+            return false;
+        }
+        self.document = document;
+        true
     }
 }
 
@@ -498,7 +571,7 @@ struct SessionWriteReceipt {
 struct SessionBackupRequest {
     source: PathBuf,
     path: PathBuf,
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
 }
 
 /// **One job for the storage worker**: a session document, an update
@@ -941,14 +1014,16 @@ fn launch_backup_request(
     session_path: &Path,
     session: &SessionV1,
     report: &ReadReport,
-    loaded_bytes: Option<Vec<u8>>,
+    read_bytes: DocumentBytes,
 ) -> Option<SessionBackupRequest> {
     if !matches!(report, ReadReport::Loaded)
         || !session.windows.iter().any(|window| !window.tabs.is_empty())
     {
         return None;
     }
-    let bytes = loaded_bytes?;
+    let DocumentBytes::Loaded(bytes) = read_bytes else {
+        return None;
+    };
     Some(SessionBackupRequest {
         source: session_path.to_path_buf(),
         path: session_path.with_file_name(PREVIOUS_SESSION_FILE_NAME),
@@ -980,7 +1055,7 @@ impl SessionStore {
         // the first report a crash. Read once for the process
         // ([`previous_run_ended_orderly`] answers the same probe).
         let previous_exit = previous_exit(&sentinel_path);
-        let (session, report, degradation, loaded_bytes) =
+        let (session, report, degradation, read_bytes) =
             bt_persist::read_session_keeping_bytes(&session_path, crate::update_trial::keeping());
         crate::update_trial::owe_copy(&report, &session_path, |path| {
             let _ = read_session(path);
@@ -1024,7 +1099,7 @@ impl SessionStore {
             && !writes_deferred
             && create_sentinel(&sentinel_path).is_ok();
         let launch_backup = if writer_of_record {
-            launch_backup_request(&session_path, &session, &report, loaded_bytes)
+            launch_backup_request(&session_path, &session, &report, read_bytes)
         } else {
             None
         };
@@ -1095,12 +1170,12 @@ impl SessionStore {
     #[cfg(test)]
     pub(crate) fn launched_at(session_path: PathBuf, sentinel_path: PathBuf) -> Self {
         let writer_of_record = is_writer_of_document(&session_path);
-        let (session, report, _degradation, loaded_bytes) =
+        let (session, report, _degradation, read_bytes) =
             bt_persist::read_session_keeping_bytes(&session_path, bt_persist::Keeping::Now);
         let writes_deferred =
             writer_of_record && crate::update_trial::defer(crate::update_trial::Writer::Session);
         let launch_backup = if writer_of_record {
-            launch_backup_request(&session_path, &session, &report, loaded_bytes)
+            launch_backup_request(&session_path, &session, &report, read_bytes)
         } else {
             None
         };
@@ -1573,6 +1648,8 @@ impl SessionStore {
 pub struct SettingsStore {
     path: PathBuf,
     settings: SettingsV1,
+    /// What `settings.json` is known to hold ([`Revision`]).
+    revision: Revision<SettingsV1>,
     writes: DocumentWrites,
     /// The sentence a startup owes about this file, if it owes one.
     fault: Option<String>,
@@ -1609,7 +1686,14 @@ impl SettingsStore {
         let dir = storage_dir();
         let path = settings_write_path(&dir, SETTINGS_FILE_NAME);
         make_data_folder(path.parent().unwrap_or(&dir));
-        let (settings, report) = read_settings_keeping(&path, crate::update_trial::keeping());
+        Self::read_at(path, is_writer_of(&dir))
+    }
+
+    /// Read the file at `path` into a store — [`Self::open`] once the path and
+    /// the writer's answer are known.
+    fn read_at(path: PathBuf, writer_of_record: bool) -> Self {
+        let (settings, report, bytes) =
+            read_settings_keeping_bytes(&path, crate::update_trial::keeping());
         crate::update_trial::owe_copy(&report, &path, |path| {
             let _ = read_settings(path);
         });
@@ -1621,10 +1705,11 @@ impl SettingsStore {
         );
         Self {
             path,
+            revision: Revision::opened(settings.clone(), bytes),
             settings,
             writes: DocumentWrites::new(),
             fault,
-            writer_of_record: is_writer_of(&dir),
+            writer_of_record,
             missing: report == ReadReport::NotFound,
             held: None,
         }
@@ -1674,6 +1759,7 @@ impl SettingsStore {
         Self {
             path,
             settings: SettingsV1::default(),
+            revision: Revision::opened(SettingsV1::default(), DocumentBytes::Absent),
             writes: DocumentWrites::new(),
             fault: None,
             // [`SessionStore::at`]'s rule: asked of the directory this store
@@ -1687,6 +1773,12 @@ impl SettingsStore {
     /// The settings as they currently stand.
     pub fn loaded(&self) -> &SettingsV1 {
         &self.settings
+    }
+
+    /// What `settings.json` is known to hold.
+    #[cfg(test)]
+    pub(crate) fn revision(&self) -> &Revision<SettingsV1> {
+        &self.revision
     }
 
     /// How many writes of this document the reader has asked for
@@ -1763,12 +1855,14 @@ impl SettingsStore {
         if crate::update_trial::defer(crate::update_trial::Writer::Settings) {
             return;
         }
+        let written = crate::hang_watch::during(crate::hang_watch::Station::SettingsWrite, || {
+            write_settings_atomic(&self.path, &self.settings)
+        });
         self.writes.record(
             SETTINGS_FILE_NAME,
-            crate::hang_watch::during(crate::hang_watch::Station::SettingsWrite, || {
-                write_settings_atomic(&self.path, &self.settings)
-            })
-            .map_err(|error| error.to_string()),
+            written
+                .map(|bytes| self.revision.landed(bytes, self.settings.clone()))
+                .map_err(|error| error.to_string()),
         );
     }
 }
@@ -1792,6 +1886,8 @@ pub const KEYBINDINGS_FILE_NAME: &str = "keybindings.json";
 pub struct KeybindingsStore {
     path: PathBuf,
     overrides: Vec<BindingOverrideV1>,
+    /// What `keybindings.json` is known to hold ([`Revision`]).
+    revision: Revision<KeybindingsV1>,
     /// Why the file on disk was not usable, if it was not.
     fault: Option<String>,
     writes: DocumentWrites,
@@ -1805,7 +1901,14 @@ impl KeybindingsStore {
         let dir = storage_dir();
         let path = settings_write_path(&dir, KEYBINDINGS_FILE_NAME);
         make_data_folder(path.parent().unwrap_or(&dir));
-        let (file, report) = read_keybindings_keeping(&path, crate::update_trial::keeping());
+        Self::read_at(path, is_writer_of(&dir))
+    }
+
+    /// Read the file at `path` into a store — [`Self::open`] once the path and
+    /// the writer's answer are known.
+    fn read_at(path: PathBuf, writer_of_record: bool) -> Self {
+        let (file, report, bytes) =
+            read_keybindings_keeping_bytes(&path, crate::update_trial::keeping());
         crate::update_trial::owe_copy(&report, &path, |path| {
             let _ = read_keybindings(path);
         });
@@ -1818,10 +1921,11 @@ impl KeybindingsStore {
         );
         Self {
             path,
-            overrides: file.bindings,
+            overrides: file.bindings.clone(),
+            revision: Revision::opened(file, bytes),
             fault,
             writes: DocumentWrites::new(),
-            writer_of_record: is_writer_of(&dir),
+            writer_of_record,
         }
     }
 
@@ -1833,6 +1937,7 @@ impl KeybindingsStore {
             writer_of_record: is_writer_of_document(&path),
             path,
             overrides: Vec::new(),
+            revision: Revision::opened(KeybindingsV1::default(), DocumentBytes::Absent),
             fault: None,
             writes: DocumentWrites::new(),
         }
@@ -1841,6 +1946,12 @@ impl KeybindingsStore {
     /// The overrides as they were read.
     pub fn loaded(&self) -> &[BindingOverrideV1] {
         &self.overrides
+    }
+
+    /// What `keybindings.json` is known to hold.
+    #[cfg(test)]
+    pub(crate) fn revision(&self) -> &Revision<KeybindingsV1> {
+        &self.revision
     }
 
     /// How many writes of this document the reader has asked for
@@ -1895,12 +2006,15 @@ impl KeybindingsStore {
             return;
         }
         let file = keybindings_document(self.overrides.clone(), writing_platform);
-        self.writes.record(
-            KEYBINDINGS_FILE_NAME,
+        let written =
             crate::hang_watch::during(crate::hang_watch::Station::KeybindingsWrite, || {
                 write_keybindings_atomic(&self.path, &file)
-            })
-            .map_err(|error| error.to_string()),
+            });
+        self.writes.record(
+            KEYBINDINGS_FILE_NAME,
+            written
+                .map(|bytes| self.revision.landed(bytes, file))
+                .map_err(|error| error.to_string()),
         );
     }
 }
@@ -1950,6 +2064,9 @@ pub const PROFILES_FILE_NAME: &str = "profiles.json";
 pub struct ProfilesStore {
     path: PathBuf,
     loaded: ProfilesV1,
+    /// What `profiles.json` is known to hold ([`Revision`]) — what a re-read
+    /// compares with.
+    revision: Revision<ProfilesV1>,
     /// Why the file on disk was not usable, if it was not.
     fault: Option<String>,
     writes: DocumentWrites,
@@ -1965,9 +2082,9 @@ pub struct ProfilesStore {
 /// table".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProfilesNews {
-    /// The file says exactly what the document already in force says. This is
-    /// the ordinary answer — the folder moved because something else in it was
-    /// written, or because this window wrote `profiles.json` itself.
+    /// The file holds the bytes the store's revision records — this window's
+    /// own write, or a file nobody touched — or a second spelling of the
+    /// revision's document. This is the ordinary answer.
     Unchanged,
     /// The file has been read and is now the document in force.
     Changed,
@@ -1990,7 +2107,8 @@ impl ProfilesStore {
     ///
     /// [`open`]: Self::open
     fn at(path: PathBuf) -> Self {
-        let (file, report) = read_profiles_keeping(&path, crate::update_trial::keeping());
+        let (file, report, bytes) =
+            read_profiles_keeping_bytes(&path, crate::update_trial::keeping());
         crate::update_trial::owe_copy(&report, &path, keep_profiles);
         // §5.4 case 1 — no file — is the ordinary state of nearly every machine
         // and must not alert. Everything else must, naming the file (§5.3).
@@ -2002,6 +2120,7 @@ impl ProfilesStore {
         let writer_of_record = is_writer_of_document(&path);
         Self {
             path,
+            revision: Revision::opened(file.clone(), bytes),
             loaded: file,
             fault,
             writes: DocumentWrites::new(),
@@ -2012,6 +2131,20 @@ impl ProfilesStore {
     /// The table as it was read.
     pub fn loaded(&self) -> &ProfilesV1 {
         &self.loaded
+    }
+
+    /// What `profiles.json` is known to hold.
+    #[cfg(test)]
+    pub(crate) fn revision(&self) -> &Revision<ProfilesV1> {
+        &self.revision
+    }
+
+    /// **Whether a read found the file Folio left** — the bytes of its own last
+    /// write, or the file as it was last read. Bytes, not documents: the
+    /// question is whether this is the file Folio left, and the in-memory
+    /// document is never the comparison ([`Revision`]).
+    fn is_folios_own_write(&self, read: &DocumentBytes) -> bool {
+        self.revision.holds(read)
     }
 
     /// How many writes of this document the reader has asked for
@@ -2026,19 +2159,20 @@ impl ProfilesStore {
         self.fault.take().or_else(|| self.writes.take_fault())
     }
 
-    /// **Read the file again, because the folder moved** (§7.1.6c-6d).
+    /// **Read the file again, because the storage watch heard it** (§7.1.6c-6d).
     ///
     /// Three answers, and each of them is a rule this slice had to choose:
     ///
-    /// * a document identical to the one in force is [`ProfilesNews::Unchanged`]
-    ///   and nothing else happens. This is what makes an always-armed watch over
-    ///   the *storage directory* affordable — every other file this product
-    ///   writes lives in it, and this window's own writes to `profiles.json` are
-    ///   the loudest of them all. Comparing the document rather than filtering
-    ///   the kernel's notifications is also the only comparison that is right:
-    ///   two writes with the same content are the same file, whoever made them.
-    /// * a document that parses and differs is taken, and taking it is what
-    ///   makes the next re-read quiet;
+    /// * a file whose bytes are the revision's — compared with the revision's
+    ///   bytes, never with the document in memory — is
+    ///   [`ProfilesNews::Unchanged`] and nothing else happens. This window's own
+    ///   writes to `profiles.json` are the loudest of the file's changes, and a
+    ///   change this store holds but has not written is not undone by a read of
+    ///   the older file. A file with new bytes and the revision's document — an
+    ///   editor that re-indents — is also `Unchanged`, and its bytes become the
+    ///   revision's;
+    /// * a document that parses and differs is taken, and becomes the revision,
+    ///   which is what makes the next re-read quiet;
     /// * a document that will not parse is **not** taken, and what was already
     ///   in force stays in force. Falling back to the shipped table here would
     ///   be the worst of both — the reader's list would empty *because* they
@@ -2046,21 +2180,26 @@ impl ProfilesStore {
     ///   table that is not the one they are editing. That is `reread_schemes`'s
     ///   own ruling for the scheme file in use, met one file over. Startup is
     ///   different and stays different ([`Self::open`]): there is nothing yet in
-    ///   force to keep.
+    ///   force to keep. A file refused at start is the revision's bytes, so
+    ///   reading it again unedited is the first answer, not this one.
     ///
     /// The line printed here is §5.3's, and the card the window raises for it is
     /// the caller's — this type has no way to say anything to anybody.
     pub fn reread(&mut self) -> ProfilesNews {
-        let (file, report) = read_profiles_keeping(&self.path, crate::update_trial::keeping());
+        let (file, report, bytes) =
+            read_profiles_keeping_bytes(&self.path, crate::update_trial::keeping());
         crate::update_trial::owe_copy(&report, &self.path, keep_profiles);
+        if self.is_folios_own_write(&bytes) {
+            return ProfilesNews::Unchanged;
+        }
         if let ReadReport::FellBackToDefaults { reason, kept } = &report {
             eprintln!("BT_PERSIST {PROFILES_FILE_NAME} would not parse: {reason:?} kept={kept:?}");
             return ProfilesNews::Unreadable;
         }
-        if self.loaded == file {
+        if !self.revision.adopt(file, bytes) {
             return ProfilesNews::Unchanged;
         }
-        self.loaded = file;
+        self.loaded = self.revision.document.clone();
         ProfilesNews::Changed
     }
 
@@ -2097,12 +2236,14 @@ impl ProfilesStore {
         {
             return;
         }
+        let written = crate::hang_watch::during(crate::hang_watch::Station::ProfilesWrite, || {
+            write_profiles_atomic(&self.path, &self.loaded)
+        });
         self.writes.record(
             PROFILES_FILE_NAME,
-            crate::hang_watch::during(crate::hang_watch::Station::ProfilesWrite, || {
-                write_profiles_atomic(&self.path, &self.loaded)
-            })
-            .map_err(|error| error.to_string()),
+            written
+                .map(|bytes| self.revision.landed(bytes, self.loaded.clone()))
+                .map_err(|error| error.to_string()),
         );
     }
 }
@@ -4269,9 +4410,9 @@ pub(crate) mod tests {
     ///
     /// The watch is on `%APPDATA%\Folio\` and every keystroke in the profile
     /// editor writes a file in it, so the folder moves constantly *because of
-    /// this window*. The comparison against the document already in force is the
-    /// whole of what keeps that from being a re-read that reinstalls the table
-    /// under the reader's hands.
+    /// this window*. The comparison of the file's bytes with the store's
+    /// revision is the whole of what keeps that from being a re-read that
+    /// reinstalls the table under the reader's hands.
     ///
     /// Red gate: answer `Changed` whenever the file parses and a window loses
     /// its editor's focus every time it saves.
@@ -4478,6 +4619,337 @@ pub(crate) mod tests {
             "and nothing was admitted"
         );
         drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// The four stores' revisions (`docs/plans/design/settings-reread-2026-10-11.md`
+/// §3.1, §9.2, revision (b)10 and (b)14-16): what each is set to at open and on
+/// a landed write, and the re-read of profiles and pins measured against it.
+#[cfg(test)]
+mod revision_tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use bt_persist::{BindingOverrideV1, PinKind, PinsV1, ProfileEntryV1, ProfilesV1, SettingsV1};
+
+    use super::{
+        KEYBINDINGS_FILE_NAME, KeybindingsStore, PROFILES_FILE_NAME, ProfilesNews, ProfilesStore,
+        SETTINGS_FILE_NAME, SettingsStore, is_writer_of_document,
+    };
+    use crate::pins::{PINS_FILE_NAME, PinsNews, PinsStore};
+
+    /// A private folder for one case, emptied on the way in.
+    fn scratch(case: &str) -> PathBuf {
+        let root = bt_testpath::temp_path(&format!("bt-app-revision-{case}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a private storage folder for this test");
+        root
+    }
+
+    /// A profile table of one row, titled in mixed script.
+    fn profiles(id: &str, title: &str) -> ProfilesV1 {
+        ProfilesV1 {
+            schema_version: bt_persist::PROFILES_SCHEMA_VERSION,
+            profiles: vec![ProfileEntryV1 {
+                id: id.to_owned(),
+                display_title: Some(title.to_owned()),
+                ..ProfileEntryV1::default()
+            }],
+        }
+    }
+
+    /// A pin table of folders, in the order given.
+    fn pins(folders: &[&str]) -> PinsV1 {
+        let mut table = PinsV1::default();
+        for folder in folders {
+            crate::pins::toggle_pin(&mut table, PinKind::Folder, folder);
+        }
+        table
+    }
+
+    fn file_bytes(path: &Path) -> Vec<u8> {
+        std::fs::read(path).expect("the document is on disk")
+    }
+
+    fn bytes_of(bytes: Option<&Arc<[u8]>>) -> Option<&[u8]> {
+        bytes.map(|bytes| &**bytes)
+    }
+
+    /// Whether a `.rejected-` copy of `file_name` stands in `root`.
+    fn a_copy_is_kept(root: &Path, file_name: &str) -> bool {
+        std::fs::read_dir(root)
+            .expect("the scratch folder lists")
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{file_name}.rejected-"))
+            })
+    }
+
+    /// RED (T-STORE-REVISION, §9.2; §1.5 defect 1) — **a change the store holds
+    /// but has not written is not undone by a re-read.**
+    ///
+    /// The store adopts a change before it writes, and a change that does not
+    /// reach the disk — a write refused, or, as here, a process that is not the
+    /// folder's writer — leaves the in-memory document ahead of the file. The
+    /// storage watch then hears the folder and the store re-reads the older
+    /// file. Measured against the document in memory, that file is "different"
+    /// and was installed, so the change vanished with no card. Measured against
+    /// the revision, it is the file Folio left: no change.
+    ///
+    /// MUTATION: in `ProfilesStore::reread` / `PinsStore::reread`, compare the
+    /// parsed file with `loaded()` (`if self.loaded == file { Unchanged }`,
+    /// else take it) — both answer `Changed` and the held change is gone.
+    #[test]
+    fn an_unwritten_change_is_not_undone_by_a_reread() {
+        let root = scratch("unwritten");
+        let profiles_path = root.join(PROFILES_FILE_NAME);
+        let pins_path = root.join(PINS_FILE_NAME);
+        bt_persist::write_profiles_atomic(&profiles_path, &profiles("pwsh", "PowerShell 终端"))
+            .unwrap();
+        bt_persist::write_pins_atomic(&pins_path, &pins(&["项目/folio 笔记"])).unwrap();
+        let profiles_on_disk = file_bytes(&profiles_path);
+        let pins_on_disk = file_bytes(&pins_path);
+
+        // Another process holds this folder's claim, so nothing this process
+        // stores reaches the disk.
+        let holder = bt_platform::instance::claim_data_directory(&root)
+            .expect("nothing else on this machine has this folder");
+        assert!(!is_writer_of_document(&profiles_path));
+
+        let mut profile_store = ProfilesStore::at(profiles_path.clone());
+        let held = profiles("claude", "Claude 代理");
+        assert!(profile_store.store(held.clone()));
+        assert_eq!(
+            file_bytes(&profiles_path),
+            profiles_on_disk,
+            "nothing was written"
+        );
+        assert_eq!(profile_store.reread(), ProfilesNews::Unchanged);
+        assert_eq!(profile_store.loaded(), &held, "the held change stands");
+
+        let mut pin_store = PinsStore::at(pins_path.clone());
+        assert!(pin_store.toggle(PinKind::Folder, "文档/Claude 代理"));
+        assert_eq!(file_bytes(&pins_path), pins_on_disk, "nothing was written");
+        assert_eq!(pin_store.reread(), PinsNews::Unchanged);
+        assert_eq!(
+            pin_store.targets(PinKind::Folder),
+            vec!["项目/folio 笔记".to_owned(), "文档/Claude 代理".to_owned()],
+            "the held pin stands"
+        );
+
+        drop(holder);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (§8 test 2, without its in-flight variant) — **Folio's own write is
+    /// not a hand edit**, for every store: a landed write sets the revision to
+    /// the bytes written and their document, so the re-read that write's own
+    /// notice schedules answers `Unchanged`.
+    ///
+    /// MUTATION: do not set the revision on a landed write (drop the
+    /// `revision.landed(..)` in any store's `write_now`) — the revision keeps the
+    /// bytes it opened with, the bytes assertions fail, and the profiles re-read
+    /// answers `Changed`.
+    #[test]
+    fn folios_own_write_is_not_a_hand_edit() {
+        let root = scratch("own-write");
+
+        let profiles_path = root.join(PROFILES_FILE_NAME);
+        bt_persist::write_profiles_atomic(&profiles_path, &profiles("pwsh", "PowerShell 终端"))
+            .unwrap();
+        let mut profile_store = ProfilesStore::at(profiles_path.clone());
+        let written = profiles("claude", "Claude 代理");
+        assert!(profile_store.store(written.clone()));
+        assert_eq!(
+            bytes_of(profile_store.revision().bytes.as_ref()),
+            Some(&file_bytes(&profiles_path)[..])
+        );
+        assert_eq!(profile_store.revision().document, written);
+        assert_eq!(profile_store.reread(), ProfilesNews::Unchanged);
+        assert_eq!(profile_store.loaded(), &written);
+
+        let pins_path = root.join(PINS_FILE_NAME);
+        let mut pin_store = PinsStore::at(pins_path.clone());
+        assert!(pin_store.toggle(PinKind::Folder, "项目/folio 笔记"));
+        assert_eq!(
+            bytes_of(pin_store.revision().bytes.as_ref()),
+            Some(&file_bytes(&pins_path)[..])
+        );
+        assert_eq!(pin_store.revision().document, pins(&["项目/folio 笔记"]));
+        assert_eq!(pin_store.reread(), PinsNews::Unchanged);
+
+        let settings_path = root.join(SETTINGS_FILE_NAME);
+        let mut settings_store = SettingsStore::at(settings_path.clone());
+        let settings = SettingsV1 {
+            terminal_font_family: "更纱黑体 Sarasa Mono SC".to_owned(),
+            ..SettingsV1::default()
+        };
+        assert!(settings_store.store(settings.clone()));
+        assert_eq!(
+            bytes_of(settings_store.revision().bytes.as_ref()),
+            Some(&file_bytes(&settings_path)[..])
+        );
+        assert_eq!(settings_store.revision().document, settings);
+
+        let keybindings_path = root.join(KEYBINDINGS_FILE_NAME);
+        let mut keybindings_store = KeybindingsStore::at(keybindings_path.clone());
+        let overrides = vec![BindingOverrideV1 {
+            action: "new-tab".to_owned(),
+            chord: Some("Ctrl+Shift+Y".to_owned()),
+        }];
+        assert!(keybindings_store.store(overrides.clone()));
+        assert_eq!(
+            bytes_of(keybindings_store.revision().bytes.as_ref()),
+            Some(&file_bytes(&keybindings_path)[..])
+        );
+        assert_eq!(keybindings_store.revision().document.bindings, overrides);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED ((b)14-16) — **identical bytes, and a return to the old bytes, are no
+    /// change.**
+    ///
+    /// The question a re-read asks is "is this the file Folio left?", and only
+    /// the bytes answer it: an editor's autosave of an unmodified buffer gives a
+    /// new modified time and the same bytes, and a file that moved away and back
+    /// before the pass ran is the same file. It is sharpest on a file refused at
+    /// start (half-typed, `项目/folio 笔记` mid-line): its bytes are the revision,
+    /// so saving it again unedited is no change — not a second refusal and a
+    /// second card.
+    ///
+    /// MUTATION: answer `is_folios_own_write` by comparing the file's modified
+    /// time with the one recorded at open instead of the bytes — the identical
+    /// save answers `Unreadable`.
+    #[test]
+    fn identical_bytes_and_a_return_to_old_bytes_are_no_change() {
+        let root = scratch("same-bytes");
+        let path = root.join(PROFILES_FILE_NAME);
+        let half_typed = "{ \"schema_version\": 1, \"profiles\": [ { \"id\": \"项目/folio 笔记\"";
+        std::fs::write(&path, half_typed).unwrap();
+        let mut store = ProfilesStore::at(path.clone());
+        assert!(store.take_fault().is_some(), "refused at start, and said");
+
+        // Saved again, byte for byte.
+        std::fs::write(&path, half_typed).unwrap();
+        assert_eq!(store.reread(), ProfilesNews::Unchanged);
+
+        // Moved to other bytes and back before the pass ran.
+        std::fs::write(
+            &path,
+            "{ \"schema_version\": 1, \"profiles\": [ { \"id\": \"Claude 代理\"",
+        )
+        .unwrap();
+        std::fs::write(&path, half_typed).unwrap();
+        assert_eq!(store.reread(), ProfilesNews::Unchanged);
+
+        // A finished document is a change, once; its own bytes again are not.
+        let finished = profiles("项目/folio 笔记", "Claude 代理");
+        bt_persist::write_profiles_atomic(&path, &finished).unwrap();
+        assert_eq!(store.reread(), ProfilesNews::Changed);
+        assert_eq!(store.loaded(), &finished);
+        bt_persist::write_profiles_atomic(&path, &profiles("pwsh", "PowerShell 终端")).unwrap();
+        bt_persist::write_profiles_atomic(&path, &finished).unwrap();
+        assert_eq!(store.reread(), ProfilesNews::Unchanged);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (§3.1's example) — **a re-indented file is a hand edit that changes
+    /// no field**: its bytes become the revision's and nothing else moves.
+    ///
+    /// MUTATION: in `Revision::adopt`, answer an equal document before taking
+    /// the bytes — the answer is still `Unchanged`, but the revision keeps the
+    /// old spelling and the bytes assertion fails.
+    #[test]
+    fn a_reindented_file_is_a_hand_edit_that_changes_no_field() {
+        let root = scratch("reindented");
+        let path = root.join(PINS_FILE_NAME);
+        let table = pins(&["项目/folio 笔记", "文档/Claude 代理"]);
+        bt_persist::write_pins_atomic(&path, &table).unwrap();
+        let mut store = PinsStore::at(path.clone());
+
+        let compact = serde_json::to_vec(&table).expect("the table serializes");
+        assert_ne!(compact, file_bytes(&path), "a second spelling");
+        std::fs::write(&path, &compact).unwrap();
+
+        assert_eq!(store.reread(), PinsNews::Unchanged);
+        assert_eq!(
+            bytes_of(store.revision().bytes.as_ref()),
+            Some(&compact[..]),
+            "the new spelling is the revision"
+        );
+        assert_eq!(store.revision().document, table);
+        assert_eq!(
+            store.targets(PinKind::Folder),
+            vec!["项目/folio 笔记".to_owned(), "文档/Claude 代理".to_owned()]
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED ((b)10's `Refused { bytes }`; §1.4) — **a file refused at start is
+    /// the revision, and the next write replaces it**: the revision holds the
+    /// refused bytes beside the default document, the copy R4-3 keeps is beside
+    /// the file, and a landed write makes the written bytes the revision.
+    ///
+    /// MUTATION: have `read_with_fallback_bytes` return no bytes for a refused
+    /// document (`DocumentBytes::Unobtained` in place of `Refused`) — the
+    /// revision opens with `None`.
+    #[test]
+    fn a_file_refused_at_start_is_the_revision_the_next_write_replaces() {
+        let root = scratch("refused-at-start");
+
+        let settings_path = root.join(SETTINGS_FILE_NAME);
+        let settings_text = "{ \"schema_version\": 9, \"terminal_font_family\": \"更纱黑体";
+        std::fs::write(&settings_path, settings_text).unwrap();
+        let mut settings_store =
+            SettingsStore::read_at(settings_path.clone(), is_writer_of_document(&settings_path));
+        assert!(settings_store.take_fault().is_some());
+        assert!(a_copy_is_kept(&root, SETTINGS_FILE_NAME));
+        assert_eq!(
+            bytes_of(settings_store.revision().bytes.as_ref()),
+            Some(settings_text.as_bytes())
+        );
+        assert_eq!(settings_store.revision().document, SettingsV1::default());
+        let chosen = SettingsV1 {
+            terminal_font_family: "更纱黑体 Sarasa Mono SC".to_owned(),
+            ..SettingsV1::default()
+        };
+        assert!(settings_store.store(chosen.clone()));
+        assert_eq!(
+            bytes_of(settings_store.revision().bytes.as_ref()),
+            Some(&file_bytes(&settings_path)[..])
+        );
+        assert_eq!(settings_store.revision().document, chosen);
+
+        let pins_path = root.join(PINS_FILE_NAME);
+        let pins_text = "{ \"schema_version\": 1, \"pins\": [ { \"kind\": \"folder\", \"target\": \"项目/folio 笔记\"";
+        std::fs::write(&pins_path, pins_text).unwrap();
+        let mut pin_store = PinsStore::at(pins_path.clone());
+        assert!(pin_store.take_fault().is_some());
+        assert!(a_copy_is_kept(&root, PINS_FILE_NAME));
+        assert_eq!(
+            bytes_of(pin_store.revision().bytes.as_ref()),
+            Some(pins_text.as_bytes())
+        );
+        assert_eq!(pin_store.revision().document, PinsV1::default());
+        assert_eq!(
+            pin_store.reread(),
+            PinsNews::Unchanged,
+            "the refused file, unedited, is no change"
+        );
+        assert!(pin_store.toggle(PinKind::Folder, "文档/Claude 代理"));
+        assert_eq!(
+            bytes_of(pin_store.revision().bytes.as_ref()),
+            Some(&file_bytes(&pins_path)[..])
+        );
+        assert_eq!(pin_store.revision().document, pins(&["文档/Claude 代理"]));
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }

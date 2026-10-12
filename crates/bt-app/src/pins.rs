@@ -42,8 +42,11 @@
 use std::path::{Path, PathBuf};
 
 use bt_persist::{
-    PinEntryV1, PinKind, PinsV1, ReadReport, read_pins, read_pins_keeping, write_pins_atomic,
+    DocumentBytes, PinEntryV1, PinKind, PinsV1, ReadReport, read_pins, read_pins_keeping_bytes,
+    write_pins_atomic,
 };
+
+use crate::persist::Revision;
 
 /// The name the pin file wears on disk, which is also what a notice about it has
 /// to say out loud.
@@ -121,6 +124,9 @@ fn row_of(table: &PinsV1, kind: PinKind, target: &str) -> Option<usize> {
 pub struct PinsStore {
     path: PathBuf,
     loaded: PinsV1,
+    /// What `pins.json` is known to hold ([`Revision`]) — what a re-read
+    /// compares with.
+    revision: Revision<PinsV1>,
     /// Why the file on disk was not usable, if it was not.
     fault: Option<String>,
     writes: crate::persist::DocumentWrites,
@@ -134,8 +140,9 @@ pub struct PinsStore {
 /// that will not parse is neither "nothing happened" nor "here is the new table".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PinsNews {
-    /// The file says exactly what the table already in force says — the ordinary
-    /// answer, including for this window's own writes.
+    /// The file holds the bytes the store's revision records — this window's own
+    /// write, or a file nobody touched — or a second spelling of the revision's
+    /// table. The ordinary answer.
     Unchanged,
     /// The file has been read and is now the table in force.
     Changed,
@@ -154,8 +161,8 @@ impl PinsStore {
 
     /// The same store over a named file, which is what makes every rule below
     /// testable without a `%APPDATA%`.
-    fn at(path: PathBuf) -> Self {
-        let (file, report) = read_pins_keeping(&path, crate::update_trial::keeping());
+    pub(crate) fn at(path: PathBuf) -> Self {
+        let (file, report, bytes) = read_pins_keeping_bytes(&path, crate::update_trial::keeping());
         crate::update_trial::owe_copy(&report, &path, keep_pins);
         // §5.4 case 1 — no file — is the ordinary state of a machine where
         // nobody has pinned anything, and must not alert. Everything else must,
@@ -170,11 +177,25 @@ impl PinsStore {
         let writer_of_record = crate::persist::is_writer_of_document(&path);
         Self {
             path,
+            revision: Revision::opened(file.clone(), bytes),
             loaded: file,
             fault,
             writes: crate::persist::DocumentWrites::new(),
             writer_of_record,
         }
+    }
+
+    /// What `pins.json` is known to hold.
+    #[cfg(test)]
+    pub(crate) fn revision(&self) -> &Revision<PinsV1> {
+        &self.revision
+    }
+
+    /// **Whether a read found the file Folio left** —
+    /// [`crate::persist::ProfilesStore`]'s question, one file over: the bytes,
+    /// never the document in memory.
+    fn is_folios_own_write(&self, read: &DocumentBytes) -> bool {
+        self.revision.holds(read)
     }
 
     /// Take the read fault, so a notice about it is raised once and not once a
@@ -212,24 +233,30 @@ impl PinsStore {
         pinned
     }
 
-    /// **Read the file again, because the storage folder moved.**
+    /// **Read the file again, because the storage watch heard it.**
     ///
     /// [`crate::persist::ProfilesStore::reread`]'s three answers and its whole
-    /// argument, one file over — including the third and least obvious one: a
+    /// argument, one file over. The file's bytes are compared with the
+    /// revision's, never the table with the one in memory, so a pin this store
+    /// holds but has not written is not undone by a read of the older file. A
     /// document that will not parse is **not** taken, and the table already in
-    /// force stays in force. Emptying the PINNED sections *because* the reader
+    /// force stays in force: emptying the PINNED sections *because* the reader
     /// typed a comma wrong is the one outcome a hand-editable file must not have.
     pub fn reread(&mut self) -> PinsNews {
-        let (file, report) = read_pins_keeping(&self.path, crate::update_trial::keeping());
+        let (file, report, bytes) =
+            read_pins_keeping_bytes(&self.path, crate::update_trial::keeping());
         crate::update_trial::owe_copy(&report, &self.path, keep_pins);
+        if self.is_folios_own_write(&bytes) {
+            return PinsNews::Unchanged;
+        }
         if let ReadReport::FellBackToDefaults { reason, kept } = &report {
             eprintln!("BT_PERSIST {PINS_FILE_NAME} would not parse: {reason:?} kept={kept:?}");
             return PinsNews::Unreadable;
         }
-        if self.loaded == file {
+        if !self.revision.adopt(file, bytes) {
             return PinsNews::Unchanged;
         }
-        self.loaded = file;
+        self.loaded = self.revision.document.clone();
         PinsNews::Changed
     }
 
@@ -263,9 +290,12 @@ impl PinsStore {
         if !self.writer_of_record || crate::update_trial::defer(crate::update_trial::Writer::Pins) {
             return;
         }
+        let written = write_pins_atomic(&self.path, &self.loaded);
         self.writes.record(
             PINS_FILE_NAME,
-            write_pins_atomic(&self.path, &self.loaded).map_err(|error| error.to_string()),
+            written
+                .map(|bytes| self.revision.landed(bytes, self.loaded.clone()))
+                .map_err(|error| error.to_string()),
         );
     }
 }
