@@ -41,7 +41,9 @@
 //!    downloaded folder is removed whatever happened.
 //! 5. **Rescue**: the running bundle is cloned to `rescue/<Bundle>.app` and
 //!    proved the same code (`macos_update::rescue_clone`; [`Stop::Clone`]).
-//! 6. **`Prepared`**, durably, with both bundles' identities
+//! 6. **`Prepared`**, durably, with both bundles' identities — after both
+//!    bundles, every file and folder, are on the medium
+//!    (`macos_update::make_durable`, 0.4.8 E6; [`Stop::Copy`], [`Stop::Clone`])
 //!    (`Layout::Bundle`, `deferred_launches: 0`, outcome `none`), and the
 //!    staged transaction — home, journal, lock — handed to the job with
 //!    `Poster::verified`.
@@ -130,13 +132,21 @@ pub(crate) trait Tools: Send + Sync {
     /// # Errors
     /// Why not, as a sentence.
     fn download_folder(&self, near: &Path) -> Result<PathBuf, String>;
+
+    /// Put the bundle at `bundle` on the medium: every file and folder of it,
+    /// and its own name (0.4.8 E6).
+    ///
+    /// # Errors
+    /// Why not, as a sentence.
+    fn make_durable(&self, worker: &WorkerCtx, bundle: &Path) -> Result<(), String>;
 }
 
 /// **The system's tools**: `bt_platform::macos_identity` (the running
 /// process's designated requirement, `codesign --verify --strict --deep
 /// --all-architectures -R`, and Gatekeeper's assessment recorded through its
 /// decision, F-9), `macos_update::copy_bundle` (`ditto`),
-/// `macos_update::rescue_clone` and `macos_update::item_replacement_directory`.
+/// `macos_update::rescue_clone`, `macos_update::item_replacement_directory` and
+/// `macos_update::make_durable`.
 pub(crate) struct System;
 
 impl Tools for System {
@@ -162,6 +172,10 @@ impl Tools for System {
 
     fn download_folder(&self, near: &Path) -> Result<PathBuf, String> {
         macos_update::item_replacement_directory(near).map_err(|refusal| refusal.to_string())
+    }
+
+    fn make_durable(&self, worker: &WorkerCtx, bundle: &Path) -> Result<(), String> {
+        macos_update::make_durable(worker, bundle).map_err(|refusal| refusal.to_string())
     }
 }
 
@@ -554,6 +568,22 @@ fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
             allocated.body.marker.as_ref(),
         )
         .and_then(|recorded| {
+            // What `Prepared` vouches for is on the medium before it is
+            // written (0.4.8 E6): the staged bundle and the rescue clone, each
+            // file and folder flushed, as the Windows Prepare flushes each
+            // staged file before its name. The resume's revalidation stays the
+            // second line.
+            for (bundle, stop) in [
+                (stage.as_path(), Stop::Copy),
+                (rescue.as_path(), Stop::Clone),
+            ] {
+                road.tools.make_durable(worker, bundle).map_err(|why| {
+                    crate::diagnostics::note(&format!(
+                        "Folio: update job — the staged set was not made durable: {why}"
+                    ));
+                    stop
+                })?;
+            }
             let prepared = allocated
                 .prepare_with(recorded)
                 .map_err(|_| Stop::Journal)?;

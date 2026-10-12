@@ -14971,3 +14971,11 @@ Since T-PROBE-CHILD a probe whose job (Windows) could not be created or limited 
 **The rule.** No silent degradation: a probe runs contained or not at all.
 
 **Pinned by** `probe_child_tests::a_probe_that_cannot_be_contained_is_refused_and_never_created` (Windows), `a_probe_whose_group_cannot_be_guarded_is_refused` (Unix), `macos_update::tests::a_child_ended_at_its_deadline_is_refused_with_what_it_said` and `a_refusal_keeps_the_end_of_what_was_said`.
+
+### 2026-10-12 — The macOS staged bundle and rescue clone are on the medium before `Prepared` vouches for them (0.4.8 E6, F6)
+
+The macOS Prepare staged the new bundle with `ditto` and the rescue clone with `clonefile` and never flushed either, while the `Prepared` journal that vouches for them was written durably: after a power cut the journal could outlive the bytes it certified, caught only by the resume's revalidation, which discards the update with one diagnostics line. The Windows Prepare stages through `install_txn::durable_copy`, each file flushed before its name. Now `update_prepare_macos::prepare_on` makes both bundles durable through `Tools::make_durable` — `bt_platform::macos_update::make_durable`: every regular file and every folder of the bundle `F_FULLFSYNC`'d, folders after what they hold, links left to their folder, then the folder the bundle stands in — after the copy and the clone stand in their places and before the `Prepared` write; a refusal is the Prepare's own (`Stop::Copy` for the staged bundle, `Stop::Clone` for the clone, with a diagnostics line) and abandons it: *Nothing changed.* The revalidation before a resume stays the second line.
+
+**The rule.** A journal phase never vouches for bytes that are not on the medium; on macOS as on Windows.
+
+**Pinned by** `update_prepare_macos::tests::the_staged_set_is_made_durable_before_prepared_vouches_for_it` (the seam records each flush against the journal's phase at that moment: both while `Allocated`, both bundles standing) and `macos_update::tests::on_apfs::a_staged_bundle_is_made_durable_whole` — both macOS-only — and `off_macos_the_prepares_reads_are_refused_by_name`.

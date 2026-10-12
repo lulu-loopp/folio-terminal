@@ -16,6 +16,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- On macOS, an update that is ready to install is written fully to disk before Folio records it as ready, so a power cut cannot leave a half-written update behind a ready one. <!-- zh: pending E6 -->
 - When an update check gets an answer but cannot save it, other open copies of Folio no longer ask GitHub again the same day. <!-- zh: pending E6 -->
 - Folio no longer runs a helper program (Git, PowerShell, a macOS update tool) that it could not stop again, so none can be left running behind it; on macOS, an update tool that runs too long is now reported with what it had printed. <!-- zh: pending E6 -->
 - A change to settings, shortcuts, profiles or pins that cannot be saved is now reported while Folio runs, not only at startup. <!-- zh: pending T-STORAGE-WORKER-REQUEST -->
