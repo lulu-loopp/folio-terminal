@@ -252,7 +252,12 @@ each on `lane::Coalescing` — the latest-value shape: one run out and at most o
 waiting, a request asked while one waits joined to it when it is the same
 operation and superseding it when it is not, the worker started by the first
 request, every terminal held for the application and taken in mint order
-below the earliest request still owed. What the proof covers:
+below the earliest request still owed; and the computation lane (S-8,
+`computation_lane`) on `lane::Queue` — the first-in-first-out shape: every request run in
+the order minted unless a newer one for the same target displaces it while it waits
+(`Superseded { by }`) or is the same operation and joins it, the worker started by the
+first request, a refused request handed back with its job. A lane of several threads
+keeps one ledger per thread, so one thread's end ends only its own requests. What the proof covers:
 `lane_contract_tests::the_ledger_ends_every_identity_exactly_once_in_every_interleaving`
 plays every order of three identities' outcomes (the six terminals, a racing
 answer after a cancel, a terminal published for a joined identity itself),
@@ -270,8 +275,10 @@ list — kept as data in `crates/bt-app/src/lane_expected_failures.tsv`, equal t
 the code by `lane_contract_tests::the_expected_failures_are_this_list` — to the
 merge base: no lane gains a row for a claim the merge base already
 had; a claim new to the suite brings the rows of the lanes that do not keep it
-yet. When red, repair the lane (a repair removes its row in the same change),
-or restore the behaviour the claim caught; do not add a row to quiet it.
+yet. Since S-8 every lane keeps every claim and the list's `# rows` holds only
+its header — the shrink's end, which the script accepts. When red, repair the
+lane (a repair removes its row in the same change), or restore the behaviour the
+claim caught; do not add a row to quiet it.
 
 ## Contained panics
 
