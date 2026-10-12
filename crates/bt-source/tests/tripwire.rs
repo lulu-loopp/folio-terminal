@@ -246,8 +246,9 @@
 //! committed file, which only an `exception` may name. Its `category` column
 //! then holds it, and a row with none, or with another value, is refused:
 //!
-//! * `read` — the document scan finds the item reading every document the
-//!   subject names, and a Rust-source shape the lexical scan reports on a
+//! * `read` — the documents the scan finds the item reading are exactly
+//!   those the subject names (one it reads and the row does not name is
+//!   refused as well as one it names and does not read), and a Rust-source shape the lexical scan reports on a
 //!   line of the item names every `.rs` name in it. The subject is spelled as
 //!   the mechanism resolves it: an include's literal from the row's file's
 //!   directory, any other path from the workspace root; `;` separates
@@ -4704,9 +4705,9 @@ fn every_reader_of_a_committed_document_is_on_a_list() {
 /// row with no category, or with a value that is none of these, is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Category {
-    /// A reader the scans find: every document its `subject` names is one
-    /// the document scan detects its item reading, and every `.rs` name in it
-    /// is one a Rust-source shape written in its item reports.
+    /// A reader the scans find: the documents the document scan detects its
+    /// item reading are exactly those its `subject` names, and every `.rs`
+    /// name in it is one a Rust-source shape written in its item reports.
     Read,
     /// An item the document scan's diagnostic names: it hands a call a rooted
     /// path the evaluator cannot reduce, so the read exists and its subject
@@ -4898,13 +4899,15 @@ enum Stale {
     NotAnItemFile,
     /// A ledger-key row whose owner is no line of its ledger.
     KeyGone,
-    /// A `read` or `rust-source` row whose item is not found reading what it
-    /// names: what it is found reading (documents, and the `.rs` names of the
-    /// shapes written in it; possibly nothing), what the row names that it
-    /// does not, and whether the diagnostic names the item.
+    /// A `read` or `rust-source` row whose subject is not exactly what its
+    /// item is found reading: what it is found reading (documents, and the
+    /// `.rs` names of the shapes written in it; possibly nothing), what the
+    /// row names that it does not read, the documents it reads that the row
+    /// does not name, and whether the diagnostic names the item.
     ReadsOtherwise {
         found: BTreeSet<String>,
         missing: Vec<String>,
+        extra: Vec<String>,
         diagnosed: bool,
     },
     /// A `read` row that names no document (it is `rust-source`), or a
@@ -4943,11 +4946,22 @@ impl Stale {
             Self::ReadsOtherwise {
                 found,
                 missing,
+                extra,
                 diagnosed,
             } => format!(
-                "its item is found reading {}, and not {}{}",
+                "its item is found reading {}; the row names {} that it does not read, and not \
+                 {} that it does{}",
                 listed(found),
-                missing.join(", "),
+                if missing.is_empty() {
+                    "nothing".to_owned()
+                } else {
+                    missing.join(", ")
+                },
+                if extra.is_empty() {
+                    "nothing".to_owned()
+                } else {
+                    extra.join(", ")
+                },
                 if *diagnosed {
                     "; the diagnostic names the item, and a read the evaluator cannot reduce \
                      is `unreduced`"
@@ -5015,7 +5029,7 @@ fn staleness(row: &ListedRow, evidence: &Evidence<'_>) -> Option<Stale> {
         .any(|read| answers(&read.file, &read.owners));
     match category {
         Category::Read | Category::RustSource => {
-            let mut named_documents = false;
+            let mut patterns = Vec::new();
             let mut missing = Vec::new();
             for (written, resolved) in row.subjects() {
                 if written.ends_with(".rs") {
@@ -5023,16 +5037,25 @@ fn staleness(row: &ListedRow, evidence: &Evidence<'_>) -> Option<Stale> {
                         missing.push(written);
                     }
                 } else {
-                    named_documents = true;
                     if !documents.iter().any(|path| names(&resolved, path)) {
-                        missing.push(resolved);
+                        missing.push(resolved.clone());
                     }
+                    patterns.push(resolved);
                 }
             }
-            if !missing.is_empty() {
+            // Exact, not a lower bound: a document the item reads and the
+            // row does not name is a reading the row does not record.
+            let extra: Vec<String> = documents
+                .iter()
+                .filter(|path| !patterns.iter().any(|pattern| names(pattern, path)))
+                .cloned()
+                .collect();
+            let named_documents = !patterns.is_empty();
+            if !missing.is_empty() || !extra.is_empty() {
                 Some(Stale::ReadsOtherwise {
                     found: documents.union(&shapes).cloned().collect(),
                     missing,
+                    extra,
                     diagnosed,
                 })
             } else if category == Category::Read && !named_documents {
@@ -5095,7 +5118,7 @@ fn stale_complaint(stale: &[(&ListedRow, Stale)]) -> String {
         said,
         "\nThe lists are an equality: every reader is a row, and every row is a reader or a \
          categorised exception. The `category` column says how a row is held: `read` (the \
-         document scan finds its item reading every document its subject names, and a \
+         documents the scan finds its item reading are exactly those its subject names, and a \
          Rust-source shape written in its item reports every `.rs` name in it), `unreduced` (the \
          scan's diagnostic names its item: the read exists and the evaluator cannot reduce its \
          path, so the row stays while the diagnostic entry does), `rust-source` (the four \
@@ -5238,9 +5261,13 @@ fn every_row_is_a_reader_or_a_categorised_exception() {
 /// whose owner is an item of another file, one whose item reads a different
 /// document, one with no category, a `rust-source` row whose item no shape
 /// is written in, an `exception` without a reason, a ledger key its ledger
-/// does not hold, and a non-Rust row that is not an `exception`; an
-/// `unreduced` row is accepted while the diagnostic names its item and
-/// refused once the entry is gone and no read is found.
+/// does not hold, a non-Rust row that is not an `exception`, a row naming
+/// one of the two documents its item reads (a `read` row is exact), a
+/// `read` row naming only a `.rs` name and a `rust-source` row naming a
+/// document (each the other category), and a `read` row whose item the
+/// diagnostic names reading something else; an `unreduced` row is accepted
+/// while the diagnostic names its item and refused once the entry is gone and
+/// no read is found.
 ///
 /// The plant is the crate of
 /// `a_planted_document_reader_on_neither_list_makes_the_tripwire_fire` with
@@ -5254,6 +5281,8 @@ fn every_row_is_a_reader_or_a_categorised_exception() {
 /// ledger key that is gone and a non-Rust `read` row are judged by what they
 /// read instead; skip the subject match (the `Read | RustSource` arm answers
 /// `None`) and the rows naming what their item does not read are accepted;
+/// drop `extra` (leave it empty) and the row naming one of two ledgers is
+/// accepted;
 /// take an uncategorised row for a `read` one (`Category::named(…)
 /// .unwrap_or(Category::Read)`) and the row with no category is accepted.
 #[test]
@@ -5387,6 +5416,38 @@ fn a_row_no_reader_accounts_for_is_refused() {
             "-",
             "read",
         ),
+        // One of the two ledgers its item reads: the row is not exact.
+        row(
+            LIB,
+            "tests::hands_two_ledgers_in_a_loop",
+            "read_fixture(path)",
+            "docs/plans/MIGRATION-DEBT.tsv",
+            "read",
+        ),
+        // Only a `.rs` name: a `rust-source` row written as `read`.
+        row(
+            SHAPES,
+            "shapes::TEXT",
+            "include_str!",
+            "neighbour.rs",
+            "read",
+        ),
+        // A document: a `read` row written as `rust-source`.
+        row(
+            LIB,
+            "tests::reads_the_ledger",
+            read,
+            "docs/plans/structural-debt.md",
+            "rust-source",
+        ),
+        // An item the diagnostic names, read as `read` for another document.
+        row(
+            LIB,
+            "tests::hands_a_script_with_a_computed_word",
+            "read_fixture(path)",
+            "docs/RULES.md",
+            "read",
+        ),
     ];
     let ledgers = BTreeMap::from([(LEDGER.to_owned(), BTreeSet::from([KEY.to_owned()]))]);
     let judged = |unresolved: &[UnresolvedRead]| -> Vec<(String, Stale)> {
@@ -5423,6 +5484,7 @@ fn a_row_no_reader_accounts_for_is_refused() {
             Stale::ReadsOtherwise {
                 found: ledger.clone(),
                 missing: vec!["docs/RULES.md".to_owned()],
+                extra: vec!["docs/plans/structural-debt.md".to_owned()],
                 diagnosed: false,
             },
         ),
@@ -5435,6 +5497,7 @@ fn a_row_no_reader_accounts_for_is_refused() {
             Stale::ReadsOtherwise {
                 found: ledger,
                 missing: vec!["neighbour.rs".to_owned()],
+                extra: vec!["docs/plans/structural-debt.md".to_owned()],
                 diagnosed: false,
             },
         ),
@@ -5449,6 +5512,35 @@ fn a_row_no_reader_accounts_for_is_refused() {
         (
             "docs/plans/structural-debt.md a script [read]".to_owned(),
             Stale::NotAnItemFile,
+        ),
+        (
+            format!("{LIB} tests::hands_two_ledgers_in_a_loop [read]"),
+            Stale::ReadsOtherwise {
+                found: BTreeSet::from([
+                    "docs/plans/MIGRATION-DEBT.tsv".to_owned(),
+                    "docs/plans/POINTER-DEBT.tsv".to_owned(),
+                ]),
+                missing: Vec::new(),
+                extra: vec!["docs/plans/POINTER-DEBT.tsv".to_owned()],
+                diagnosed: false,
+            },
+        ),
+        (
+            format!("{SHAPES} shapes::TEXT [read]"),
+            Stale::Miscategorised("rust-source"),
+        ),
+        (
+            format!("{LIB} tests::reads_the_ledger [rust-source]"),
+            Stale::Miscategorised("read"),
+        ),
+        (
+            format!("{LIB} tests::hands_a_script_with_a_computed_word [read]"),
+            Stale::ReadsOtherwise {
+                found: BTreeSet::from(["scripts/shell-integration/folio.ps1".to_owned()]),
+                missing: vec!["docs/RULES.md".to_owned()],
+                extra: vec!["scripts/shell-integration/folio.ps1".to_owned()],
+                diagnosed: true,
+            },
         ),
     ];
     assert_eq!(judged(&unresolved), expected);
@@ -5489,7 +5581,10 @@ fn a_row_no_reader_accounts_for_is_refused() {
     assert!(
         said.contains(SOURCE_LIST)
             && said.contains("tests::a_reader_that_does_not_exist")
-            && said.contains("found reading docs/plans/structural-debt.md, and not docs/RULES.md")
+            && said.contains(
+                "found reading docs/plans/structural-debt.md; the row names docs/RULES.md that it \
+                 does not read, and not docs/plans/structural-debt.md that it does"
+            )
             && said.contains("`unreduced`"),
         "the refusal names the list, the row, what its item reads and what unreduced means; it \
          said:\n{said}"

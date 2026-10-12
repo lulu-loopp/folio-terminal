@@ -66,6 +66,12 @@ try {
             throw "the addition was refused for the wrong reason: $output"
         }
 
+        Write-List ($categorised + $rowCategorised + $otherCategorised.Replace("tests::writes", "tests::rewritten"))
+        $output = Run-Gate 1 "an identity edited in place"
+        if ($output -notmatch "only shrinks" -or $output -notmatch "tests::rewritten") {
+            throw "the edited identity was refused for the wrong reason: $output"
+        }
+
         Write-List ($categorised + $rowCategorised + $rowCategorised + $otherCategorised)
         $output = Run-Gate 1 "duplicated row"
         if ($output -notmatch "only shrinks") { throw "the duplicate was refused for the wrong reason: $output" }
@@ -83,5 +89,5 @@ try {
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
 }
 
-Write-Host "check-migration-debt: unchanged, new column, shrink, growth, duplicate and missing-column cases pass"
+Write-Host "check-migration-debt: unchanged, new column, shrink, growth, in-place edit, duplicate and missing-column cases pass"
 exit 0

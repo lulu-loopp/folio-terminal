@@ -111,8 +111,8 @@ reader refusal spells it (an owner that is gone, or is an item of another file,
 is refused; a MIGRATION-DEBT `ledger key naming a file` resolves to a line of
 its ledger; a non-Rust file, such as a Python script, only as an `exception`),
 and holds it by its `category` column, which every row of both lists carries:
-`read` (the document scan finds the item reading every document the subject
-names, and a Rust-source shape on a line of the item names every `.rs` name in
+`read` (the documents the scan finds the item reading are exactly those the
+subject names — one it reads and the row does not name is refused too — and a Rust-source shape on a line of the item names every `.rs` name in
 it), `unreduced` (the diagnostic names the item: the read exists and the
 evaluator cannot reduce its path, so the subject is not checked; the row stays
 while the diagnostic entry does, and when the entry goes it is `read` or
@@ -124,7 +124,10 @@ literal from the row's file's directory, any other path from the workspace
 root. When red, a row whose item is gone or reads nothing is removed, a row
 whose item reads something else is corrected to what it reads, and a row whose
 reader the evaluator cannot see becomes an `exception` naming the blind spot —
-the evaluator is not widened for it. A test that reads only a file it writes
+the evaluator is not widened for it. A `.rs` row whose file bt-source does not
+index (`bt-source`'s `tests/fixtures/`, `vendor/`) is refused as an item that is
+gone, whatever its category: such a file is no reader's, and that is intended.
+A test that reads only a file it writes
 itself is no reader of a committed document and has no row.
 `a_row_no_reader_accounts_for_is_refused` plants each refusal.
 `scripts/ci/check-migration-debt.ps1` finds its six identity columns by name, so

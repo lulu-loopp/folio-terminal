@@ -455,13 +455,20 @@ jobs:
           try {
             [IO.File]::AppendAllText($file, "crates/planted/src/lib.rs`tprobe`tinclude_str!`tnothing`tP3`tno`texception`tmissing seam`tDEBT`n")
             $failed = $false
+            $said = ""
             try {
               & ./scripts/ci/check-migration-debt.ps1
             } catch {
               $failed = $true
+              $said = "$_"
             }
             if (-not $failed) {
               throw "the debt list accepted a row that is not at the merge base"
+            }
+            # Red for the shrink rule, naming the planted row: a row the gate
+            # cannot read (a lost column) would be red for another reason.
+            if ($said -notmatch "only shrinks" -or $said -notmatch "probe") {
+              throw "the planted row was refused for another reason: $said"
             }
           } finally {
             [IO.File]::WriteAllText($file, $original)
