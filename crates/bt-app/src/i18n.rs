@@ -940,6 +940,11 @@ text_entries! {
     RecoveredEditKept,
     /// The same, for `{count}` copies.
     RecoveredEditsKept,
+    /// A re-read of `settings.json` that would not parse, `{file}` filled by
+    /// [`settings_file_kept_in`] (T-STORE-MERGE-SETTINGS).
+    SettingsFileKept,
+    /// The same, for `keybindings.json` ([`keybindings_file_kept_in`]).
+    KeybindingsFileKept,
     /// The tail line of a crowded pane strip, for one seat it has no row for
     /// (AUDIT-hardcode SEAT-1; filled by [`seat_overflow_notice_in`]).
     SeatOverflowOne,
@@ -1344,6 +1349,9 @@ text_entries! {
     ProfilesEnvAdd,
     ProfilesEnvName,
     ProfilesEnvValue,
+    /// A ghost row's value when it is each pane's own (the attention wire's
+    /// address and capability), which a profile cannot show (H2-NITS).
+    ProfilesEnvPerPane,
     /// `Auto`, `On`, `Off` — the hyperlink answer's three, where `Auto` is the
     /// terminal's own declaration and the other two are this profile overruling
     /// it.
@@ -1577,6 +1585,9 @@ text_entries! {
     /// The two rows the audit listed and declined, and the line under them.
     ShortcutReservedMoveFocus,
     ShortcutReservedResizePane,
+    /// A template: `{modifier}` is the word the declined rows' own caps spell
+    /// the `Alt` key in on this keyboard (filled by
+    /// [`shortcut_reserved_arrow_note_in`]).
     ShortcutReservedAltArrow,
     /// The recorder's standing refusal. The chord in it is key caps and stays as
     /// it is; what is translated is the reason.
@@ -3810,6 +3821,16 @@ impl Text {
                 "{count} unsaved edits were kept at {folder}",
                 "{count} unsaved edits were kept at {folder}", // zh: pending T-RECOVERED-FOLDER
             ),
+            Self::SettingsFileKept => pick(
+                lang,
+                "{file} could not be read; the settings already in force were kept",
+                "{file} could not be read; the settings already in force were kept", // zh: pending T-STORE-MERGE-SETTINGS
+            ),
+            Self::KeybindingsFileKept => pick(
+                lang,
+                "{file} could not be read; the shortcuts already in force were kept",
+                "{file} could not be read; the shortcuts already in force were kept", // zh: pending T-STORE-MERGE-SETTINGS
+            ),
             Self::SeatOverflowOne => pick(
                 lang,
                 "1 more does not fit",
@@ -4163,6 +4184,11 @@ impl Text {
             Self::ProfilesEnvAdd => pick(lang, "Add", "添加"),
             Self::ProfilesEnvName => pick(lang, "Name", "名称"),
             Self::ProfilesEnvValue => pick(lang, "Value", "值"),
+            Self::ProfilesEnvPerPane => pick(
+                lang,
+                "Set per pane",
+                "Set per pane", // zh: pending H2-NITS
+            ),
             Self::ProfilesAuto => pick(lang, "Auto", "自动"),
             Self::ProfilesOn => pick(lang, "On", "开"),
             Self::ProfilesOff => pick(lang, "Off", "关"),
@@ -4323,10 +4349,12 @@ impl Text {
                 pick(lang, "Move the focus between panes", "在窗格之间移动焦点")
             }
             Self::ShortcutReservedResizePane => pick(lang, "Resize a pane", "调整窗格大小"),
+            // zh: pending H2-NITS — the existing translation with `{modifier}` where
+            // it said `Alt`; the writer checks the word order.
             Self::ShortcutReservedAltArrow => pick(
                 lang,
-                "Reserved: readline reads Alt+arrow as word movement",
-                "保留：readline 将 Alt+方向键用于按词移动",
+                "Reserved: readline reads {modifier}+arrow as word movement",
+                "保留：readline 将 {modifier}+方向键用于按词移动",
             ),
             Self::ShortcutHintAltGrZone => pick(
                 lang,
@@ -6241,6 +6269,12 @@ impl Text {
         (Self::RecoveredEditKept, HostPlatform::MacOs),
         (Self::RecoveredEditsKept, HostPlatform::Windows),
         (Self::RecoveredEditsKept, HostPlatform::MacOs),
+        // zh: pending T-STORE-MERGE-SETTINGS — the "kept" card for a settings or
+        // keybindings file that will not parse mid-run.
+        (Self::SettingsFileKept, HostPlatform::Windows),
+        (Self::SettingsFileKept, HostPlatform::MacOs),
+        (Self::KeybindingsFileKept, HostPlatform::Windows),
+        (Self::KeybindingsFileKept, HostPlatform::MacOs),
         // 0.4.8 E5: the card of a rollback that did not keep what a Folio ran over it changed.
         (Self::UpdateFailedUndone, HostPlatform::Windows),
         (Self::UpdateFailedUndone, HostPlatform::MacOs),
@@ -6264,6 +6298,10 @@ impl Text {
         (Self::HandoffsStoppedSuffix, HostPlatform::MacOs),
         (Self::HandoffsStopped, HostPlatform::Windows),
         (Self::HandoffsStopped, HostPlatform::MacOs),
+        // zh: pending H2-NITS — a Profiles ghost row's value that each pane has
+        // its own of.
+        (Self::ProfilesEnvPerPane, HostPlatform::Windows),
+        (Self::ProfilesEnvPerPane, HostPlatform::MacOs),
     ];
 }
 
@@ -7345,6 +7383,15 @@ pub fn seat_overflow_notice_in(lang: Lang, count: usize) -> String {
     template
         .in_lang(lang)
         .replace("{count}", &count.to_string())
+}
+
+/// **The line under the shortcut page's declined rows**, with `modifier` — the
+/// word the rows' own caps spell that key in on this keyboard — in the sentence.
+#[must_use]
+pub fn shortcut_reserved_arrow_note_in(lang: Lang, modifier: &str) -> String {
+    Text::ShortcutReservedAltArrow
+        .in_lang(lang)
+        .replace("{modifier}", modifier)
 }
 
 #[must_use]
@@ -8793,6 +8840,31 @@ fn pins_file_kept_in(lang: Lang, file: &str) -> String {
         Lang::English => format!("{file} could not be read; the pins already in force were kept"),
         Lang::Chinese => format!("{file} 无法读取；保留了正在生效的钉住条目"),
     }
+}
+
+/// `settings.json` refusing to parse **after** a window has been running on
+/// it (T-STORE-MERGE-SETTINGS, §3.6 of the 2026-10-11 design note) —
+/// [`pins_file_kept`]'s family: what stands in for the damaged file is the
+/// settings the reader has been using all along.
+#[must_use]
+pub fn settings_file_kept(file: &str) -> String {
+    settings_file_kept_in(current(), file)
+}
+
+fn settings_file_kept_in(lang: Lang, file: &str) -> String {
+    Text::SettingsFileKept.in_lang(lang).replace("{file}", file)
+}
+
+/// The same for `keybindings.json`: the shortcut table in force stays.
+#[must_use]
+pub fn keybindings_file_kept(file: &str) -> String {
+    keybindings_file_kept_in(current(), file)
+}
+
+fn keybindings_file_kept_in(lang: Lang, file: &str) -> String {
+    Text::KeybindingsFileKept
+        .in_lang(lang)
+        .replace("{file}", file)
 }
 
 /// **A switcher row the pin would not keep** (§7.7 ⑤, 2026-08-24).

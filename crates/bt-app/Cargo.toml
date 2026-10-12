@@ -102,6 +102,11 @@ two-face.workspace = true
 # already in the lock file for `bt-render`'s emoji query; this adds its
 # second table.
 unicode-properties.workspace = true
+# **Which script a typed letter belongs to**, and nothing else: a letter-keyed
+# verb falls back to the key's physical letter when the layout prints a letter
+# of a script other than Latin (`input::verb_letter`). Already in the lock file
+# for `bt-render`'s fallback table.
+unicode-script.workspace = true
 winit.workspace = true
 # **The attention block's two JSON documents, and neither of them is ours**
 # (`attention_hooks`, `attention_wire`). One is the user's own

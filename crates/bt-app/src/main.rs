@@ -159,6 +159,7 @@ mod seed;
 mod session_end;
 mod settings;
 mod settings_bundle;
+mod settings_merge;
 mod settling;
 mod shell_integration;
 mod shell_literal;
@@ -13265,6 +13266,13 @@ struct App {
     /// Whether the last re-read of `pins.json` found a file that would not
     /// parse, so that it is said once — [`Self::profiles_file_broken`]'s rule.
     pins_file_broken: bool,
+    /// Whether the last re-read of `settings.json` found a file that would not
+    /// parse, so that it is said once — [`Self::profiles_file_broken`]'s rule.
+    settings_file_broken: bool,
+    /// Whether the last re-read of `keybindings.json` found a file that would
+    /// not parse, so that it is said once — [`Self::profiles_file_broken`]'s
+    /// rule.
+    keybindings_file_broken: bool,
     /// **What the two documents this window is made of owe the reader** (review
     /// rows R4-3, R4-5, R4-9 and R4-10).
     ///
@@ -20419,6 +20427,25 @@ fn text_field_holding(rung: ImeOwner, settings_field: bool) -> Option<TextFieldS
         ImeOwner::Search => Some(TextFieldSeat::FindBar),
         ImeOwner::Modal => settings_field.then_some(TextFieldSeat::Settings),
         ImeOwner::FilesTree | ImeOwner::Preview | ImeOwner::Shell => None,
+    }
+}
+
+/// **What the clipboard verbs read of the keyboard**, for the rung that holds it
+/// (`Runtime::clipboard_focus`): whether a surface above the clipboard rung
+/// swallows every key, the one-line field on the rung, whether the quick edit
+/// has the keyboard, and whether the rung is the shell's.
+#[must_use]
+fn clipboard_focus_of(
+    rung: ImeOwner,
+    swallowing: bool,
+    settings_field: bool,
+    preview_edit: bool,
+) -> menubar::ClipboardFocus {
+    menubar::ClipboardFocus {
+        swallowing,
+        field: text_field_holding(rung, settings_field),
+        preview_edit,
+        shell: rung == ImeOwner::Shell,
     }
 }
 
@@ -40655,23 +40682,19 @@ fn create_leaf_session(
         // of the profile: every shell of every kind gets them, and a user who set one by hand in a
         // profile is setting a capability for a pane that does not exist yet.
         //
-        // The endpoint may be absent — a machine where it would not open — and then neither is
-        // written. **Half of this pair is worse than none of it**: a child holding a capability and
-        // no endpoint would fail on every call, and a child holding an endpoint and no capability
-        // would be able to connect and say nothing, which is a connection for no reason.
-        if let Some(endpoint) = attention_wire::endpoint_name() {
-            command.environment.push((
-                attention_wire::PANE_VARIABLE.into(),
-                format!("{}.{}", pane.tab.0, pane.seat.0).into(),
-            ));
-            command
-                .environment
-                .push((attention_wire::ENDPOINT_VARIABLE.into(), endpoint.into()));
-            command.environment.push((
-                attention_wire::CAPABILITY_VARIABLE.into(),
-                capability.clone().into(),
-            ));
-        }
+        // The endpoint may be absent — a machine where it would not open — and then none is
+        // written (`attention_wire::pane_environment`). The Profiles page lists the same three
+        // (`shell_integration::declared_environment`).
+        command.environment.extend(
+            attention_wire::pane_environment(
+                attention_wire::endpoint_name(),
+                std::ffi::OsString::from(format!("{}.{}", pane.tab.0, pane.seat.0)),
+                std::ffi::OsString::from(capability.clone()),
+                std::ffi::OsString::from,
+            )
+            .into_iter()
+            .map(|(name, value)| (std::ffi::OsString::from(name), value)),
+        );
         resolved_program = Some(PathBuf::from(&program));
         // **The shell is asked for, never waited for** (T-BIRTH-OFF-WINDOW). Its pseudoconsole and
         // process are made on a `bt-pty-birth` worker of its own (`pty_door::request_shell`); this
@@ -45294,6 +45317,8 @@ impl Runtime<'_> {
             settings_fault: settings_fault.take(),
             session_fault: session_fault.take(),
             pins_file_broken: false,
+            settings_file_broken: false,
+            keybindings_file_broken: false,
             recent,
             recent_folders,
             // **The document is assembled from these, and the first window's
@@ -45878,6 +45903,9 @@ impl Runtime<'_> {
         );
         if profiles_opened {
             shell_integration::begin_profile_observation_for(&self.app.profile_programs);
+            // The environment the next pane is born from, which the editor's rows are
+            // composed over (`shell_integration::page_environment`).
+            shell_integration::request_page_environment();
             // Every row's program, and WSL's distributions, asked again as the page opens.
             self.ask_the_program_walk(programs_lane::Trigger::ProfilesPage);
         }
@@ -46167,27 +46195,44 @@ impl Runtime<'_> {
                 .position(|choice| *choice == profiles::integration_choice(index))
                 .unwrap_or_default(),
             integration_auto: profiles::integration_auto_label(index),
-            // **What this terminal will say to a session of this profile, less
-            // whatever this profile has already said.** Derived on both counts:
-            // a PowerShell gets no `FORCE_HYPERLINK` ghost because its own
-            // script is the half that declares links, and a name the reader has
-            // a row for is no longer the terminal's to say — which is what makes
-            // adopting a ghost a move and not a duplication.
-            ghosts: {
-                let declared =
-                    shell_integration::declared_environment(profiles::integration(index));
-                let mut slots = [None; 3];
-                for (slot, (name, value)) in
-                    slots
-                        .iter_mut()
-                        .zip(declared.into_iter().filter(|(name, _)| {
-                            !env.iter().any(|(mine, _)| mine.eq_ignore_ascii_case(name))
-                        }))
-                {
-                    *slot = Some((name, value));
-                }
-                slots
-            },
+            // **Every variable this terminal sets for a session of this profile,
+            // less whatever this profile has already said** (owner ruling
+            // 2026-10-11 on H2 Q4): read off the launch's own composition, so a
+            // PowerShell gets no `FORCE_HYPERLINK` ghost because its own script is
+            // the half that declares links, a `NO_COLOR` row takes `COLORTERM` and
+            // `TERM` away, and a name the reader has a row for is no longer the
+            // terminal's to say — which is what makes adopting a ghost a move and
+            // not a duplication.
+            //
+            // Composed from the environment the next pane would be born from — the account's
+            // current one, asked for as the page opens — and empty while that request is out
+            // (`shell_integration::page_environment`).
+            ghosts: settings::held_ghosts(
+                &profiles::row_of(&profiles::id(index))
+                    .zip(shell_integration::page_environment())
+                    .map(|(row, before_folio)| {
+                        shell_integration::declared_environment(
+                            &row,
+                            shell_integration::Scripts::installed(),
+                            &before_folio,
+                            attention_wire::endpoint_name(),
+                        )
+                    })
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(name, value)| settings::EnvGhost {
+                        name: profiles::intern_text(&name),
+                        value: match value {
+                            shell_integration::DeclaredValue::Said(value) => {
+                                settings::GhostValue::Said(profiles::intern_text(&value))
+                            }
+                            shell_integration::DeclaredValue::PerPane => {
+                                settings::GhostValue::PerPane
+                            }
+                        },
+                    })
+                    .collect::<Vec<_>>(),
+            ),
         })
     }
 
@@ -47642,6 +47687,7 @@ impl Runtime<'_> {
                 let Some((name, value)) = self
                     .editor_subject()
                     .and_then(|subject| subject.ghosts().nth(ordinal))
+                    .and_then(|ghost| Some((ghost.name, ghost.adoptable()?)))
                 else {
                     return Ok(());
                 };
@@ -48938,12 +48984,12 @@ impl Runtime<'_> {
     /// **The four documents, by stamp.** The watcher thread has already reduced
     /// the kernel's names to the documents they name and stamped each in the
     /// ear's mailbox; when the folder's one clock is due, the pass asks the
-    /// storage worker to read the stamped ones among those followed live —
-    /// `profiles.json`, `pins.json` — and nothing is read here. Each answer comes
-    /// back with `AppEvent::DocumentsAnswered` ([`Self::take_document_answers`])
-    /// and is compared there with its store's revision (`persist::Revision`),
-    /// which is what absorbs this window's own writes. A stamp on
-    /// `settings.json` or `keybindings.json` is drained without a read.
+    /// storage worker to read the stamped ones — all four are followed live
+    /// (R33, owner ruling Q3 2026-10-11) — and nothing is read here. Each answer
+    /// comes back with `AppEvent::DocumentsAnswered`
+    /// ([`Self::take_document_answers`]) and is compared there with its store's
+    /// revision (`persist::Revision`), which is what absorbs this window's own
+    /// writes.
     ///
     /// The stores' write generations go with it: the watch hears the steward
     /// before it compares them, so a write accepted in the turn a failure is
@@ -48951,6 +48997,12 @@ impl Runtime<'_> {
     fn advance_storage_watch(&mut self, now: Instant) -> Result<()> {
         let write_generations = self.app.storage_write_generations();
         let documents = self.app.storage_watch.advance(now, write_generations);
+        if documents.contains(storage_watch::Document::Settings) {
+            self.app.settings_store.ask_reread();
+        }
+        if documents.contains(storage_watch::Document::Keybindings) {
+            self.app.keybindings_store.ask_reread();
+        }
         if documents.contains(storage_watch::Document::Profiles) {
             self.app.profiles_store.ask_reread();
         }
@@ -48967,7 +49019,10 @@ impl Runtime<'_> {
     /// (`persist::hear_documents`). Then the faults: a write that will not land
     /// is said on the card the start-up announcement uses — a link or a volume
     /// that cannot exchange at once, a disk's refusal at the fifth in a row.
-    /// Then what the re-reads put in force.
+    /// Then what the re-reads put in force: a file that will not parse is said
+    /// once, `settings.json`'s changes are merged and put in force through
+    /// their rows' doors (`Self::merge_documents`), and the profiles and pins
+    /// news is taken.
     pub(crate) fn take_document_answers(&mut self) -> Result<()> {
         let heard = persist::hear_documents(
             &mut self.app.settings_store,
@@ -48983,6 +49038,11 @@ impl Runtime<'_> {
                 fault,
             )?;
         }
+        self.take_kept_news(heard.settings, heard.keybindings)?;
+        // The data of the pass's one card, made whatever the presentation after
+        // the merge answers; T-STORE-NOTICE raises it.
+        let (_replaced, presented) = self.merge_documents();
+        presented?;
         self.take_profiles_news(heard.profiles)?;
         self.take_pins_news(heard.pins)
     }
@@ -53535,12 +53595,12 @@ impl Runtime<'_> {
     /// the two functions to.
     fn clipboard_focus(&mut self) -> menubar::ClipboardFocus {
         let rung = ime_owner(self.keyboard_owner());
-        menubar::ClipboardFocus {
-            swallowing: self.a_surface_above_the_clipboard_rung_holds_the_keyboard(),
-            field: text_field_holding(rung, self.settings_field_holds_the_keyboard()),
-            preview_edit: self.preview_edit_focus().is_some(),
-            shell: rung == ImeOwner::Shell,
-        }
+        clipboard_focus_of(
+            rung,
+            self.a_surface_above_the_clipboard_rung_holds_the_keyboard(),
+            self.settings_field_holds_the_keyboard(),
+            self.preview_edit_focus().is_some(),
+        )
     }
 
     /// Observe focus without changing IME, native focus, or composition state.
@@ -59126,8 +59186,14 @@ mod focus_mode_door_tests {
     /// one thing a reader who blinked through a four-second card cannot fix for
     /// themselves.
     ///
+    /// A third writer since T-STORE-MERGE-SETTINGS, and named: the storage
+    /// pass's merge, when the person on this machine edits the key in
+    /// `settings.json` by hand (design note 2026-10-11 §3.4: a hand edit here is
+    /// a statement about this machine). It is not an opinion about when the
+    /// reader has been told; it is the reader saying so.
+    ///
     /// The product-item filter excludes this test module, so the needle and the
-    /// two expected lines are written as the code spells them.
+    /// expected lines are written as the code spells them.
     ///
     /// MUTATION: spend the offer anywhere else — on the frame the bubble comes
     /// *down*, say — and this names the extra line, and a window closed four
@@ -59144,8 +59210,12 @@ mod focus_mode_door_tests {
                 format!("{needle} false;"),
                 // And given back by `Reset to defaults` on the page Cards is on.
                 needle.to_owned(),
+                // And, third, taken from a hand edit of this machine's own
+                // `settings.json` by the storage pass's merge (T-STORE-MERGE-SETTINGS):
+                // a receipt about this machine, written by a person on it.
+                format!("{needle} merged.cards_gesture_hint_offer;"),
             ],
-            "the offer has one spender and one restorer",
+            "the offer has one spender, one restorer, and the merge of a hand edit",
         );
 
         // The restore is on the Appearance page and no other: a reset of the
@@ -74790,12 +74860,85 @@ fn install_panic_log_hook_at(path: PathBuf, fatal: impl Fn(&Path) + Send + Sync 
         // conversion through the Typst compile and the rasterizer. Its
         // diagnostic belongs in the log above, never in a fatal dialog or a
         // process exit: the formula fails to source and the window lives.
-        if bt_math::render_panic_is_contained() {
+        if the_hook_lets_this_panic_unwind() {
             return;
         }
         previous(info);
         fatal(&path);
     }));
+}
+
+/// **Whether the panic hook returns and lets this thread's panic unwind** to the
+/// boundary that contains it, instead of ending the process: one formula's
+/// render (`bt_math::render_panic_is_contained`), or a worker's unit of work run
+/// inside [`contained_panic::contain`]. The report is written either way.
+fn the_hook_lets_this_panic_unwind() -> bool {
+    bt_math::render_panic_is_contained() || contained_panic::is_contained()
+}
+
+/// **A worker's unit of work whose panic is that request's failure, not the
+/// process's end** (H2-NITS round 5) — the resident panic hook's second contained
+/// kind beside a formula's render, and the one mechanism every worker uses for
+/// it (`docs/plans/structural-debt.md` D-96 names the rows still to adopt it).
+///
+/// [`contain`] marks this thread for the length of `work` and is its unwind
+/// boundary; the hook ([`the_hook_lets_this_panic_unwind`]) asks [`is_contained`]
+/// and, when it answers yes, logs the report and returns, so the unwind reaches
+/// [`contain`], which answers the panic as `Err`. A unit of work that holds no
+/// state another thread reads half-written is the only kind to contain: the
+/// caller turns the `Err` into its request's `Failed` terminal (C2, C3).
+mod contained_panic {
+    use std::cell::Cell;
+
+    thread_local! {
+        static CONTAINED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Run `work` with this thread's panics contained; `Err` carries the panic.
+    pub(crate) fn contain<T>(work: impl FnOnce() -> T) -> std::thread::Result<T> {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                CONTAINED.set(self.0);
+            }
+        }
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _restore = Restore(CONTAINED.replace(true));
+            work()
+        }))
+    }
+
+    /// Whether this thread is inside [`contain`] now.
+    pub(crate) fn is_contained() -> bool {
+        CONTAINED.get()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{contain, is_contained};
+        use crate::the_hook_lets_this_panic_unwind;
+
+        /// RED (H2-NITS round 5) - **the panic hook lets a contained worker's
+        /// panic unwind, and only while it is contained**: outside [`contain`]
+        /// the hook's decision is the fatal one, inside it the hook returns, and
+        /// the marker is put back when the work ends, by a panic or not.
+        ///
+        /// MUTATION: drop `contained_panic::is_contained()` from
+        /// `the_hook_lets_this_panic_unwind` - the decision inside goes red.
+        #[test]
+        fn the_hook_lets_a_contained_workers_panic_unwind() {
+            assert!(!the_hook_lets_this_panic_unwind());
+            assert_eq!(contain(the_hook_lets_this_panic_unwind).ok(), Some(true));
+            assert!(!is_contained(), "the marker ends with the work");
+            let caught = contain(|| -> u8 { panic!("scripted: 一个被包住的错误") });
+            assert!(caught.is_err(), "the panic is the boundary's answer");
+            assert!(
+                !is_contained(),
+                "and the marker is put back after a panic too"
+            );
+            assert!(!the_hook_lets_this_panic_unwind());
+        }
+    }
 }
 
 /// What a run that ended in a fault of its own reports to whoever started it.
@@ -78297,16 +78440,21 @@ mod edit_menu_clipboard_tests {
         }
     }
 
-    /// PIN — **each arm is the door the keystroke already uses**, and the verb
-    /// reaches the clipboard through none of its own.
+    /// PIN — **the four doors the Edit menu ends at are the keystroke's own**,
+    /// and the verb reaches the clipboard through none of its own.
     ///
     /// A second copy path would be a second answer to what a selection is worth
     /// on the pasteboard; a second paste path would be a second place for the
     /// sanitising, the bracketing and the multi-line policy to be decided. The
-    /// four doors named here are the four the two key handlers name.
+    /// four doors named here are the four the two key handlers name. That the
+    /// menu reaches them — `menubar::run_clipboard_verb` over `Runtime`'s
+    /// `menubar::ClipboardDoors` — is driven behaviourally only up to the doors
+    /// (`a_copy_over_a_files_column_or_a_read_only_preview_takes_the_terminals_selection`);
+    /// `Runtime`'s own answer to them is unpinned, because no test builds a
+    /// `Runtime` (the D-95 class).
     ///
     /// MUTATION: read the pasteboard in `run_an_application_menu_verb` and
-    /// write the bytes itself — the last two assertions go red.
+    /// write the bytes itself — the last assertion goes red.
     #[test]
     fn the_edit_menus_clipboard_verbs_go_through_the_keystrokes_own_doors() {
         let verb = method_body("Runtime", "run_an_application_menu_verb");
@@ -78323,10 +78471,6 @@ mod edit_menu_clipboard_tests {
             ("self.paste_from_clipboard()", ladder, "the terminal"),
         ] {
             assert!(
-                verb.contains(door),
-                "the Edit menu does not reach `{door}`, which is {whose}'s own door"
-            );
-            assert!(
                 other.contains(door),
                 "`{door}` is no longer what {whose} answers its own chord with"
             );
@@ -78337,8 +78481,7 @@ mod edit_menu_clipboard_tests {
         ] {
             assert!(
                 !verb.contains(its_own),
-                "the Edit menu touches the pasteboard itself through `{its_own}` instead of \
-                 going through the door the keystroke uses"
+                "the Edit menu touches the pasteboard itself through `{its_own}` instead of                  going through the door the keystroke uses"
             );
         }
     }
@@ -78432,6 +78575,130 @@ mod edit_menu_clipboard_tests {
             }),
             ClipboardSeat::PreviewDocument
         );
+    }
+
+    /// RED (H2-NITS, owner ruling 2026-10-11 on H2 Q2: keep; round 2) — **Edit ▸
+    /// Copy over a files column, a read-only preview or a switcher copies the
+    /// terminal's selection onto the clipboard**; only the quick edit and a
+    /// surface above the clipboard rung answer it otherwise.
+    ///
+    /// Driven down the menu verb's own road: the rung's focus
+    /// (`clipboard_focus_of`, what `Runtime::clipboard_focus` answers), then
+    /// `menubar::run_clipboard_verb`, then the terminal's copy door — here the
+    /// same `copy_selection` the window's door calls, over a real session holding
+    /// a real selection, writing into a test clipboard instead of the system's.
+    /// What reaches the clipboard is the selection's text, and the selection is
+    /// spent, as a keystroke's copy spends it.
+    ///
+    /// MUTATIONS: (1) give `menubar::clipboard_seat` the paste's `!focus.shell`
+    /// arm (`Nobody`) — nothing is written; (2) let a read-only preview take the
+    /// copy (`PreviewDocument` while the shell does not hold the keyboard) — the
+    /// document's door is knocked on and the terminal's selection is not copied.
+    #[test]
+    fn a_copy_over_a_files_column_or_a_read_only_preview_takes_the_terminals_selection() {
+        use super::{
+            Bias, DualPlaneSession, ImeOwner, TextFieldSeat, ViewSelection, ViewportProjection,
+            clipboard_focus_of, copy_selection,
+        };
+        use crate::menubar::{ClipboardDoors, run_clipboard_verb};
+        use std::num::NonZeroU32;
+
+        /// The terminal's copy door over one real session, and a clipboard of
+        /// its own; every other door is a knock the test records.
+        struct Doors {
+            session: DualPlaneSession,
+            projection: ViewportProjection,
+            clipboard: Vec<String>,
+            knocked: Vec<&'static str>,
+        }
+        impl ClipboardDoors for Doors {
+            fn copy_terminal_selection(&mut self) -> anyhow::Result<()> {
+                let Self {
+                    session,
+                    projection,
+                    clipboard,
+                    ..
+                } = self;
+                copy_selection(session, projection, |text| {
+                    clipboard.push(text.to_owned());
+                    Ok(())
+                });
+                Ok(())
+            }
+            fn paste_into_terminal(&mut self) -> anyhow::Result<()> {
+                self.knocked.push("paste_into_terminal");
+                Ok(())
+            }
+            fn copy_document_selection(&mut self) {
+                self.knocked.push("copy_document_selection");
+            }
+            fn paste_into_document(&mut self) -> anyhow::Result<()> {
+                self.knocked.push("paste_into_document");
+                Ok(())
+            }
+            fn paste_into_field(&mut self, _: TextFieldSeat) -> anyhow::Result<()> {
+                self.knocked.push("paste_into_field");
+                Ok(())
+            }
+        }
+        let selected = || {
+            let mut session =
+                DualPlaneSession::new(NonZeroU32::new(24).unwrap(), NonZeroU32::new(2).unwrap());
+            session.feed("echo 中文 ok".as_bytes()).unwrap();
+            let mut projection = session.new_projection(session.layout_key());
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            let selection = ViewSelection {
+                start: frame.anchor_at(0, 5, Bias::Before).unwrap().unwrap(),
+                end: frame.anchor_at(0, 8, Bias::After).unwrap().unwrap(),
+            };
+            session.set_view_selection(Some(selection.clone()));
+            projection.set_selection(Some(selection));
+            Doors {
+                session,
+                projection,
+                clipboard: Vec::new(),
+                knocked: Vec::new(),
+            }
+        };
+        for rung in [ImeOwner::FilesTree, ImeOwner::Preview, ImeOwner::Modal] {
+            let mut doors = selected();
+            let expected = doors.session.selection_text().expect("a selection");
+            run_clipboard_verb(
+                true,
+                clipboard_focus_of(rung, false, false, false),
+                &mut doors,
+            )
+            .expect("the copy runs");
+            assert_eq!(
+                doors.clipboard,
+                [expected],
+                "{rung:?} holds the keyboard and Edit ▸ Copy did not copy the terminal's selection"
+            );
+            assert!(doors.knocked.is_empty(), "{rung:?}: {:?}", doors.knocked);
+            assert!(
+                doors.session.view_selection().is_none(),
+                "the copy spends the selection, as the keystroke's does"
+            );
+        }
+        // The quick edit takes its own copy, and a surface above the clipboard
+        // rung takes none — the two exceptions, on the same road.
+        let mut doors = selected();
+        run_clipboard_verb(
+            true,
+            clipboard_focus_of(ImeOwner::Preview, false, false, true),
+            &mut doors,
+        )
+        .expect("the copy runs");
+        assert_eq!(doors.knocked, ["copy_document_selection"]);
+        assert!(doors.clipboard.is_empty());
+        let mut doors = selected();
+        run_clipboard_verb(
+            true,
+            clipboard_focus_of(ImeOwner::Modal, true, false, false),
+            &mut doors,
+        )
+        .expect("the copy runs");
+        assert!(doors.clipboard.is_empty() && doors.knocked.is_empty());
     }
 
     /// RED (B-AUDIT-046 RT-1) — **a paste goes to the text field that holds the
@@ -78560,16 +78827,12 @@ mod edit_menu_clipboard_tests {
             "a second road to the terminal's paste in the ladder"
         );
         assert!(ladder.contains("self.paste_into_field(field)?;"));
-        let menu = method_body("Runtime", "run_an_application_menu_verb");
-        assert!(
-            menu.contains("menubar::paste_seat(focus)")
-                && menu.contains("self.paste_into_field(field)"),
-            "Edit ▸ Paste decides for itself instead of asking the seat"
-        );
+        // Edit ▸ Paste asks `menubar::paste_seat` inside `menubar::run_clipboard_verb`
+        // (the seat is pinned by `a_paste_reaches_the_terminal_only_while_the_shell_holds_the_keyboard`);
+        // `Runtime`'s call into the road is unpinned (the D-95 class).
         let focus = method_body("Runtime", "clipboard_focus");
         assert!(
-            focus.contains("text_field_holding(")
-                && focus.contains("ime_owner(self.keyboard_owner())"),
+            focus.contains("ime_owner(self.keyboard_owner())"),
             "the field is read off the ladder, not listed"
         );
         // The fields whose rungs stand above the clipboard rung take the same

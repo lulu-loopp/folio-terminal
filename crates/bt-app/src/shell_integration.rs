@@ -1979,11 +1979,8 @@ const LOCALE_VARIABLES: [&str; 3] = ["LC_ALL", "LC_CTYPE", "LANG"];
 /// that exports `LANG` is read by the shell this declaration starts, so the
 /// person who set one keeps it.
 ///
-/// **The Profiles page's ghost rows do not list this yet** — see
-/// [`declared_environment`], which answers from an integration alone and has no
-/// machine to ask. That page is drawn by a settings surface whose own port is a
-/// later ticket, and a ghost row that claimed a locale variable for a window
-/// that had inherited one would be the page saying something the spawn does not.
+/// The Profiles page lists what this declares through [`declared_environment`],
+/// which composes the same command for the same environment.
 fn locale_declaration(
     system: Option<&LocaleDeclaration>,
     environment: &dyn ShellEnvironment,
@@ -2060,30 +2057,241 @@ pub fn declares_hyperlinks(profile: &Profile) -> bool {
         .is_none_or(|(_, value)| value == bt_pty::TERM_PROGRAM)
 }
 
-/// The rows the editor's environment table draws on the reader's behalf —
-/// **what this terminal itself will say to a session of this profile** (plan
-/// §1.7, user ruling 2026-08-17 Q7).
+/// One value the Profiles page shows for a variable this terminal sets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeclaredValue {
+    /// The value every session of the profile is given.
+    Said(String),
+    /// A value of each pane's own — its address on the attention wire and its
+    /// capability — which a profile, having no pane, cannot show.
+    PerPane,
+}
+
+/// **Every variable this terminal sets for a session of `profile`, as the
+/// spawn sets it** (owner ruling 2026-10-11 on H2 Q4; AUDIT-hardcode SHL-S1,
+/// SET-26) — the rows the editor's environment table draws on the reader's
+/// behalf (plan §1.7, user ruling 2026-08-17 Q7), above the profile's own.
 ///
-/// Derived rather than a constant list, because a constant list was already
-/// wrong in one place: `FORCE_HYPERLINK` is the one declaration this module does
-/// *not* make for a PowerShell — its own script is the half that says it, and
-/// saying it from both ends would be two places to change with one silently
-/// redundant. A ghost drawn there would be this page pretending, which is what
-/// this page exists to stop.
+/// Composed the way a pane is born, step for step: the command [`shell_command`]
+/// makes for the profile and the attention wire's variables
+/// ([`crate::attention_wire::pane_environment`]), then the declarations that
+/// depend on the environment re-derived from `before_folio`
+/// ([`derive_environment_for_birth`], the birth worker's own call), then
+/// [`bt_pty::terminal_declarations`], which adds the identity declarations
+/// (`TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, and `COLORTERM`/`TERM` unless a
+/// layer names `NO_COLOR`) and takes away every name the profile's own layer
+/// sets. That is the layer rule (`profiles::Profile::env`): the profile's rows
+/// are written last and win.
 ///
-/// The reader's own rows are not filtered out here: the caller knows which names
-/// it holds, and a ghost is dropped by the surface that can see both lists
-/// (`settings::EditorSubject`).
+/// `before_folio` is the environment the next pane's declarations are derived
+/// from — the account's current logon environment where the platform has one,
+/// this process's own where it has not or the read failed (2026-10-05 ruling;
+/// [`page_environment`] holds the one the Profiles page read when it opened).
 #[must_use]
-pub fn declared_environment(integration: Integration) -> Vec<(&'static str, &'static str)> {
-    let mut declared = vec![
-        ("TERM_PROGRAM", bt_pty::TERM_PROGRAM),
-        ("COLORTERM", "truecolor"),
-    ];
-    if integration != Integration::PowerShellOptIn {
-        declared.push((FORCE_HYPERLINK, "1"));
+pub fn declared_environment(
+    profile: &Profile,
+    scripts: Scripts<'_>,
+    before_folio: &[(OsString, OsString)],
+    endpoint: Option<&'static str>,
+) -> Vec<(String, DeclaredValue)> {
+    let mut command = shell_command(profile, &[], scripts, &ComposedEnvironment(before_folio));
+    // The wire's three go into the terminal's layer where the spawn puts them;
+    // the two a pane has its own of travel as empty values and are named per
+    // pane below.
+    let wire = crate::attention_wire::pane_environment(
+        endpoint,
+        DeclaredValue::PerPane,
+        DeclaredValue::PerPane,
+        |name| DeclaredValue::Said(name.to_owned()),
+    );
+    command.environment.extend(wire.iter().map(|(name, value)| {
+        let value = match value {
+            DeclaredValue::Said(value) => OsString::from(value),
+            DeclaredValue::PerPane => OsString::new(),
+        };
+        (OsString::from(*name), value)
+    }));
+    derive_environment_for_birth(
+        command.environment_derivation,
+        before_folio,
+        &mut command.environment,
+        &command.profile_environment,
+    );
+    bt_pty::terminal_declarations(&command.environment, &command.profile_environment)
+        .into_iter()
+        .map(|(name, value)| {
+            let per_pane = wire.iter().any(|(wired, value)| {
+                *value == DeclaredValue::PerPane
+                    && bt_pty::same_environment_name(OsStr::new(wired), &name)
+            });
+            let value = if per_pane {
+                DeclaredValue::PerPane
+            } else {
+                DeclaredValue::Said(value.to_string_lossy().into_owned())
+            };
+            (name.to_string_lossy().into_owned(), value)
+        })
+        .collect()
+}
+
+/// **How one request for the next pane's environment ended** — the side-effects
+/// contract's terminals (C2, revision (b)4) this protocol has.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PageEnvironmentEnd {
+    /// The block a birth would derive its declarations from now: the account's
+    /// current logon environment, or this process's own where the platform has
+    /// none.
+    Done(Vec<(OsString, OsString)>),
+    /// The read failed or its worker could not start; the page composes over
+    /// this process's environment, as a birth does when its read fails.
+    Failed(String),
+    /// A newer request was made while this one was out (C4).
+    Superseded { by: u64 },
+}
+
+/// **The Profiles page's environment request, its owed answer and its sink**
+/// (`# completions` row "the Profiles page's environment"): the numbers minted,
+/// the one request still out, the completions not yet taken, and the block the
+/// page composes from — process statics, so an answer that lands after the
+/// page closed waits for the next visit's consumer (C6).
+struct PageEnvironment {
+    minted: u64,
+    owed: Option<u64>,
+    ended: Vec<(u64, PageEnvironmentEnd)>,
+    current: Option<Vec<(OsString, OsString)>>,
+}
+
+static PAGE_ENVIRONMENT: Mutex<PageEnvironment> = Mutex::new(PageEnvironment {
+    minted: 0,
+    owed: None,
+    ended: Vec::new(),
+    current: None,
+});
+
+/// The cell's lock: held only across a queue operation on either side.
+fn page_environment_cell() -> std::sync::MutexGuard<'static, PageEnvironment> {
+    PAGE_ENVIRONMENT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Mint a request: the one still out completes `Superseded`, and the block held
+/// so far — the previous visit's — is dropped. Answers the new number.
+fn mint_page_environment() -> u64 {
+    let mut cell = page_environment_cell();
+    cell.minted += 1;
+    let minted = cell.minted;
+    if let Some(older) = cell.owed.replace(minted) {
+        cell.ended
+            .push((older, PageEnvironmentEnd::Superseded { by: minted }));
     }
-    declared
+    cell.current = None;
+    minted
+}
+
+/// Request `asked` ends with `end` — exactly once: a request already completed
+/// as `Superseded` files nothing more.
+fn complete_page_environment(asked: u64, end: PageEnvironmentEnd) {
+    let mut cell = page_environment_cell();
+    if cell.owed == Some(asked) {
+        cell.owed = None;
+        cell.ended.push((asked, end));
+    }
+}
+
+/// The end a request's read makes: the account's current logon environment
+/// (`fresh_logon_environment`, pane birth's read), this process's own where the
+/// platform has none, or the read's error.
+///
+/// The read runs inside `contained_panic::contain`, which the resident panic
+/// hook honours: a panic in it is logged, unwinds to that boundary and answers
+/// `Failed` (C2, C3) instead of ending the process.
+fn read_page_environment(
+    read: impl FnOnce() -> std::io::Result<Option<Vec<(OsString, OsString)>>>,
+) -> PageEnvironmentEnd {
+    match crate::contained_panic::contain(read) {
+        Ok(Ok(Some(block))) => PageEnvironmentEnd::Done(block),
+        Ok(Ok(None)) => PageEnvironmentEnd::Done(std::env::vars_os().collect()),
+        Ok(Err(error)) => PageEnvironmentEnd::Failed(error.to_string()),
+        Err(_) => PageEnvironmentEnd::Failed("the read panicked".to_owned()),
+    }
+}
+
+/// **A request's worker body**: the read, its end filed under `asked`, then the
+/// wake — every path, a contained panic included, reaches the wake.
+fn answer_page_environment_request(
+    asked: u64,
+    read: impl FnOnce() -> std::io::Result<Option<Vec<(OsString, OsString)>>>,
+    wake: impl FnOnce(),
+) {
+    complete_page_environment(asked, read_page_environment(read));
+    wake();
+}
+
+/// **The Profiles page asks for the environment the next pane is born from**
+/// (owner ruling 2026-10-05; H2-NITS round 2): one request per opening of the
+/// page, answered on a `profiles-page-environment` worker and announced by the
+/// window's wake. The door mints the request and starts its worker; a worker
+/// that cannot start is the request's synchronous `Failed` (C2).
+pub fn request_page_environment() {
+    let asked = mint_page_environment();
+    let started = bt_platform::spawn_at_priority(
+        "profiles-page-environment",
+        bt_platform::ThreadPriority::BelowNormal,
+        move |worker| {
+            answer_page_environment_request(
+                asked,
+                || bt_platform::environment::fresh_logon_environment(worker),
+                || {
+                    if let Some(wake) = WAKE.get() {
+                        wake();
+                    }
+                },
+            );
+        },
+    );
+    if let Err(error) = started {
+        complete_page_environment(
+            asked,
+            PageEnvironmentEnd::Failed(format!("its worker could not start: {error}")),
+        );
+    }
+}
+
+/// **The environment the next pane's declarations would be derived from**, as
+/// the Profiles page's last request answered it — `None` while it is out.
+///
+/// The consumer: takes every completion once, says each failure once in the
+/// diagnostics, and keeps the newest request's answer. A failure composes over
+/// this process's environment, as a birth whose read failed does.
+///
+/// **Only the newest request's end is filed.** One that completed and was not
+/// yet taken when a newer request was minted is the newer one's to replace: it
+/// counts as `Superseded { by: minted }`, and the page stays empty until the
+/// newest answers rather than showing the previous visit's environment.
+#[must_use]
+pub fn page_environment() -> Option<Vec<(OsString, OsString)>> {
+    let mut cell = page_environment_cell();
+    let newest = cell.minted;
+    for (asked, end) in std::mem::take(&mut cell.ended) {
+        let end = if asked == newest {
+            end
+        } else {
+            PageEnvironmentEnd::Superseded { by: newest }
+        };
+        match end {
+            PageEnvironmentEnd::Done(block) => cell.current = Some(block),
+            PageEnvironmentEnd::Failed(reason) => {
+                eprintln!(
+                    "Profiles page: the current environment could not be read ({reason}); \
+                     its rows are composed over Folio's own (request {asked})"
+                );
+                cell.current = Some(std::env::vars_os().collect());
+            }
+            PageEnvironmentEnd::Superseded { .. } => {}
+        }
+    }
+    cell.current.clone()
 }
 
 /// `existing` — whatever `PROMPT` this process inherited — with the command
@@ -9692,31 +9900,263 @@ mod tests {
         )));
     }
 
-    /// PIN - **the editor's ghosts are what this terminal will actually say.**
+    /// RED (H2-NITS, owner ruling 2026-10-11 on H2 Q4; AUDIT-hardcode SHL-S1,
+    /// SET-26) - **the editor's ghosts are every variable the launch gives a
+    /// session of the profile, in the order it lays them down, and none the
+    /// profile says itself.**
     ///
-    /// A constant list of three was already wrong in one place: PowerShell is
-    /// the one door this module does not declare `FORCE_HYPERLINK` through, so a
-    /// third ghost drawn on that page would be the page pretending - which is
-    /// the thing the page exists to stop.
+    /// The page used to list three by hand while the child also received
+    /// `TERM_PROGRAM_VERSION`, `TERM`, the integration's own variables, the
+    /// locale and the attention wire's three. Now it is read off the launch's
+    /// composition: Git Bash with its init file and the wire open is given the
+    /// four identity declarations, `BT_SHELL_INTEGRATION`, `FORCE_HYPERLINK`, the
+    /// locale where the platform declares one, and the wire's address, name and
+    /// capability (two of them each pane's own); a PowerShell gets no
+    /// `FORCE_HYPERLINK` (its script says it); a profile row takes its name
+    /// away, and a `NO_COLOR` row takes `COLORTERM` and `TERM` with it.
+    ///
+    /// MUTATIONS: (1) drop the attention wire's rows from
+    /// `declared_environment` - the Git Bash list goes red; (2) stop taking
+    /// the profile's names away (`terminal_declarations` returning the folio
+    /// layer whole) - the `cmd` list goes red on `PROMPT`.
     #[test]
-    fn the_ghosts_a_profile_shows_are_the_declarations_it_will_get() {
+    fn the_ghosts_a_profile_shows_are_every_variable_the_launch_gives_it() {
+        let said =
+            |name: &str, value: &str| (name.to_owned(), DeclaredValue::Said(value.to_owned()));
+        let per_pane = |name: &str| (name.to_owned(), DeclaredValue::PerPane);
+        let locale: Vec<(String, DeclaredValue)> = crate::locale_declaration::held()
+            .map(|declaration| {
+                declaration
+                    .variables()
+                    .iter()
+                    .map(|(name, value)| said(name, value))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let version = env!("CARGO_PKG_VERSION");
+        let script = Path::new("C:/Folio/用户 目录/folio.bash");
+
+        let mut expected = vec![
+            said("TERM_PROGRAM", bt_pty::TERM_PROGRAM),
+            said("TERM_PROGRAM_VERSION", version),
+            said("COLORTERM", "truecolor"),
+            said("TERM", "xterm-256color"),
+            said(INSTALLED_MARKER, MODE_LOGIN),
+            per_pane(crate::attention_wire::PANE_VARIABLE),
+            said(
+                crate::attention_wire::ENDPOINT_VARIABLE,
+                "folio-attention-pipe",
+            ),
+            per_pane(crate::attention_wire::CAPABILITY_VARIABLE),
+            // Re-derived at birth from the environment, so laid down after the
+            // wire's three, as the birth worker lays them.
+            said(FORCE_HYPERLINK, "1"),
+        ];
+        expected.extend(locale.iter().cloned());
         assert_eq!(
-            declared_environment(Integration::BashInitFile),
-            [
-                ("TERM_PROGRAM", bt_pty::TERM_PROGRAM),
-                ("COLORTERM", "truecolor"),
-                (FORCE_HYPERLINK, "1"),
-            ]
+            declared_environment(
+                &row("gitbash"),
+                bash_only(script),
+                &[],
+                Some("folio-attention-pipe")
+            ),
+            expected
         );
+
+        let mut expected = vec![
+            said("TERM_PROGRAM", bt_pty::TERM_PROGRAM),
+            said("TERM_PROGRAM_VERSION", version),
+            said("COLORTERM", "truecolor"),
+            said("TERM", "xterm-256color"),
+        ];
+        expected.extend(locale.iter().cloned());
         assert_eq!(
-            declared_environment(Integration::PowerShellOptIn),
-            [
-                ("TERM_PROGRAM", bt_pty::TERM_PROGRAM),
-                ("COLORTERM", "truecolor"),
+            declared_environment(&row("pwsh"), Scripts::default(), &[], None),
+            expected,
+            "folio.ps1 is the half that says FORCE_HYPERLINK, and with no wire open no pane is given its three"
+        );
+
+        // The profile's own rows are written last and win: their names are not
+        // the terminal's to say, and `NO_COLOR` takes the colour pair with it.
+        let mine = row_with(
+            "cmd",
+            &[
+                ("Term_Program", "xterm"),
+                ("NO_COLOR", "1"),
+                (CMD_PROMPT, "$P 提示$G"),
+                (crate::attention_wire::PANE_VARIABLE, "日本語"),
             ],
-            "folio.ps1 is the half that says it, and saying it twice would be \
-             two places to change with one silently redundant"
         );
+        let mut expected = vec![
+            said("TERM_PROGRAM_VERSION", version),
+            said(
+                crate::attention_wire::ENDPOINT_VARIABLE,
+                "folio-attention-pipe",
+            ),
+            per_pane(crate::attention_wire::CAPABILITY_VARIABLE),
+            said(FORCE_HYPERLINK, "1"),
+        ];
+        expected.extend(locale.iter().cloned());
+        let page =
+            declared_environment(&mine, Scripts::default(), &[], Some("folio-attention-pipe"));
+        // `Term_Program` is `TERM_PROGRAM` only where names are case-blind.
+        if bt_pty::same_environment_name(OsStr::new("Term_Program"), OsStr::new("TERM_PROGRAM")) {
+            assert_eq!(page, expected);
+        } else {
+            expected.insert(0, said("TERM_PROGRAM", bt_pty::TERM_PROGRAM));
+            assert_eq!(page, expected);
+        }
+    }
+
+    /// RED (H2-NITS round 2) - **the page reads the environment the next pane is
+    /// born from, not Folio's own.** A `PROMPT` and a `FORCE_HYPERLINK` the
+    /// account set after Folio started (the block handed in stands for the
+    /// account's current logon environment, which this process never saw) are
+    /// what the page shows: `cmd`'s prompt is prefixed onto the account's, and
+    /// the account's own hyperlink answer leaves no `FORCE_HYPERLINK` row.
+    ///
+    /// MUTATION: compose from this process's environment
+    /// (`bt_pty::SystemShellEnvironment` / `std::env::vars_os()` in
+    /// `declared_environment`) - the prompt is the process's (and, where this
+    /// process has no `FORCE_HYPERLINK`, that row comes back).
+    #[test]
+    fn the_ghosts_read_the_environment_the_next_pane_is_born_from() {
+        let account: Vec<(OsString, OsString)> = vec![
+            (OsString::from(CMD_PROMPT), OsString::from("新 $P$G")),
+            (OsString::from(FORCE_HYPERLINK), OsString::from("0")),
+        ];
+        assert_ne!(
+            std::env::var_os(CMD_PROMPT).as_deref(),
+            Some(OsStr::new("新 $P$G")),
+            "the fixture's prompt is one this process does not have"
+        );
+        let page = declared_environment(&row("cmd"), Scripts::default(), &account, None);
+        let value = |wanted: &str| {
+            page.iter()
+                .find(|(name, _)| name == wanted)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(
+            value(CMD_PROMPT),
+            Some(DeclaredValue::Said(
+                cmd_prompt(Some(OsString::from("新 $P$G")))
+                    .to_string_lossy()
+                    .into_owned()
+            ))
+        );
+        assert_eq!(value(FORCE_HYPERLINK), None, "{page:?}");
+    }
+
+    /// RED (H2-NITS rounds 3 and 4) - **every request for the page's environment
+    /// ends exactly once, and only the newest request's answer is what the page
+    /// composes from.** A request made while another is out completes the older
+    /// one `Superseded`; the older read landing afterwards files nothing; an older
+    /// request that completed and was not yet taken when a newer one was minted is
+    /// superseded by it, and the page stays empty until the newest answers; a
+    /// failed read is said and composes over this process's environment.
+    ///
+    /// MUTATIONS: (1) let `complete_page_environment` file a request that is no
+    /// longer owed - the older read's block replaces the newer one; (2) drop the
+    /// `Superseded` completion in `mint_page_environment` - the older request has
+    /// no end; (3) file every taken end in `page_environment` without comparing
+    /// its number with the newest minted - the previous visit's block shows while
+    /// the newest request is out.
+    /// The page environment's cell is one per process: its tests take turns.
+    static PAGE_ENVIRONMENT_TESTS: Mutex<()> = Mutex::new(());
+
+    /// Take a turn at the cell, starting from no request out, no end untaken
+    /// and nothing held; the numbers go on from where the last test left them.
+    fn page_environment_alone() -> std::sync::MutexGuard<'static, ()> {
+        let turn = PAGE_ENVIRONMENT_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut cell = page_environment_cell();
+        cell.owed = None;
+        cell.ended.clear();
+        cell.current = None;
+        turn
+    }
+
+    #[test]
+    fn every_page_environment_request_ends_once_and_the_newest_wins() {
+        let _alone = page_environment_alone();
+        let block =
+            |value: &str| vec![(OsString::from("FOLIO_H2_NITS_PIN"), OsString::from(value))];
+        let first = mint_page_environment();
+        let second = mint_page_environment();
+        assert_eq!(
+            page_environment_cell().ended,
+            [(first, PageEnvironmentEnd::Superseded { by: second })]
+        );
+        assert_eq!(
+            page_environment(),
+            None,
+            "nothing is held while a request is out"
+        );
+        complete_page_environment(second, PageEnvironmentEnd::Done(block("新")));
+        complete_page_environment(first, PageEnvironmentEnd::Done(block("旧")));
+        assert_eq!(page_environment(), Some(block("新")));
+        assert!(
+            page_environment_cell().ended.is_empty(),
+            "each end is taken once"
+        );
+
+        // Completed, not yet taken, then a newer request: the older answer is
+        // superseded, not shown.
+        let third = mint_page_environment();
+        complete_page_environment(third, PageEnvironmentEnd::Done(block("上次")));
+        let fourth = mint_page_environment();
+        assert_eq!(
+            page_environment(),
+            None,
+            "request {third}'s answer is the previous visit's while {fourth} is out"
+        );
+        complete_page_environment(fourth, PageEnvironmentEnd::Done(block("这次")));
+        assert_eq!(page_environment(), Some(block("这次")));
+
+        let fifth = mint_page_environment();
+        complete_page_environment(
+            fifth,
+            read_page_environment(|| Err(std::io::Error::other("拒绝"))),
+        );
+        assert_eq!(
+            page_environment(),
+            Some(std::env::vars_os().collect()),
+            "a failed read composes over this process's environment"
+        );
+        assert_eq!(
+            read_page_environment(|| Ok(Some(block("账户")))),
+            PageEnvironmentEnd::Done(block("账户"))
+        );
+    }
+
+    /// RED (H2-NITS round 5) - **a panic in the page's read is that request's
+    /// `Failed`, and the window is still woken.** The scripted read panics inside
+    /// the request's worker body; the request ends `Failed` (C2, C3), the wake
+    /// runs once, and nothing else the page holds changes.
+    ///
+    /// MUTATION: run the read without `contained_panic::contain` - the panic
+    /// escapes the worker body and this test panics.
+    #[test]
+    fn a_panic_in_the_page_read_is_a_failed_end_and_a_wake() {
+        let _alone = page_environment_alone();
+        let asked = mint_page_environment();
+        let woken = std::cell::Cell::new(0);
+        answer_page_environment_request(
+            asked,
+            || panic!("scripted: the account's environment block could not be walked"),
+            || woken.set(woken.get() + 1),
+        );
+        assert_eq!(woken.get(), 1, "the window is woken after a panicking read");
+        let ended = page_environment_cell().ended.clone();
+        assert_eq!(
+            ended,
+            [(
+                asked,
+                PageEnvironmentEnd::Failed("the read panicked".to_owned())
+            )]
+        );
+        assert_eq!(page_environment_cell().owed, None, "nothing is left owed");
     }
 
     /// PIN - a profile of the reader's own reaches the spawn path whole, which

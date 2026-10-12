@@ -26,7 +26,7 @@
 //!   re-lined a file it was only asked to fix a typo in would be a preview that
 //!   rewrites every line of the next diff.
 
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
 
 use crate::preview::{PREVIEW_TEXT_TAB_WIDTH, expand_tabs};
 
@@ -526,7 +526,12 @@ pub enum EditCommand {
 /// partial: a files column has nothing to type into, so a letter arriving there
 /// means nothing; an editor is exactly a thing to type into, so every key it
 /// receives is its own.
-pub fn command(key: &Key, modifiers: ModifiersState) -> EditCommand {
+///
+/// `physical` is the key's place on the keyboard: a chord's letter is
+/// [`crate::input::verb_letter`]'s, so on a layout that prints another script
+/// on the letter keys the copy, cut, paste and select-all chords are the keys
+/// at `C`, `X`, `V` and `A`.
+pub fn command(key: &Key, physical: PhysicalKey, modifiers: ModifiersState) -> EditCommand {
     // **The modifier an application verb wears here**, asked of the platform
     // since M1-7: Control on Windows, Command on a Mac. The name stays `ctrl`
     // because every arm below is about what this editor *does* with it, and what
@@ -547,8 +552,8 @@ pub fn command(key: &Key, modifiers: ModifiersState) -> EditCommand {
     // this editor and not a way of typing `@`.
     let altgr = modifiers.control_key() && alt;
     if ctrl && !alt {
-        if let Key::Character(text) = key {
-            return match text.to_ascii_lowercase().as_str() {
+        if let Key::Character(_) = key {
+            return match crate::input::verb_letter(key, physical) {
                 // **Not the editor's** (ruling 9, 2026-08-12): `Ctrl+S` is a
                 // scoped row of `shortcuts::BINDINGS` and is resolved above this
                 // surface, so a save is one verb reached through one table
@@ -560,11 +565,11 @@ pub fn command(key: &Key, modifiers: ModifiersState) -> EditCommand {
                 // resolved above this surface, and named here so that the rule
                 // reads as a rule rather than as three chords that happen to fall
                 // through the arm below.
-                "s" | "z" | "y" => EditCommand::Ignore,
-                "c" => EditCommand::Copy,
-                "x" => EditCommand::Cut,
-                "v" => EditCommand::Paste,
-                "a" => EditCommand::SelectAll,
+                Some('s' | 'z' | 'y') => EditCommand::Ignore,
+                Some('c') => EditCommand::Copy,
+                Some('x') => EditCommand::Cut,
+                Some('v') => EditCommand::Paste,
+                Some('a') => EditCommand::SelectAll,
                 _ => EditCommand::Ignore,
             };
         }
@@ -902,6 +907,85 @@ mod tests {
             .expect("one of the two is the host's command modifier")
     }
 
+    /// A key whose place on the keyboard is not identified — the layout's
+    /// character is all a test of an unmodified or a Latin key needs.
+    fn nowhere() -> PhysicalKey {
+        PhysicalKey::Unidentified(winit::keyboard::NativeKeyCode::Unidentified)
+    }
+
+    /// The key at `code`'s place, printing `text` in the layout in force.
+    fn at_key(text: &str, code: winit::keyboard::KeyCode) -> (Key, PhysicalKey) {
+        (Key::Character(text.into()), PhysicalKey::Code(code))
+    }
+
+    /// RED (H2-NITS, owner ruling 2026-10-11 on H2 Q6; AUDIT-hardcode PRV-6) —
+    /// **on a layout that prints another script on the letter keys, the quick
+    /// edit's four chords are the keys at `C`, `X`, `V` and `A`**; a Latin
+    /// layout is read as it prints, and AltGr stays typing.
+    ///
+    /// Russian, Greek and Hebrew put `с`/`ψ`/`ב` where a US keyboard has `C`.
+    /// AZERTY prints `a` on the key a US keyboard calls `Q` and `q` on its `A`:
+    /// the printed letter wins there, so the physical `A` is not select-all.
+    ///
+    /// MUTATIONS: (1) drop the physical fallback from `input::verb_letter`
+    /// (return `None` for a non-Latin letter) — the Russian copy goes red;
+    /// (2) apply the fallback to every letter (return the physical letter
+    /// first) — AZERTY's `q` on the physical `A` becomes select-all and goes red.
+    #[test]
+    fn a_non_latin_layout_reaches_the_quick_edits_chords_by_their_keys() {
+        use winit::keyboard::KeyCode;
+        let chord = command_modifier();
+        for (layout, c, x, v, a) in [
+            ("Russian", "с", "ч", "м", "ф"),
+            ("Greek", "ψ", "χ", "ω", "α"),
+            ("Hebrew", "ב", "ס", "ה", "ש"),
+        ] {
+            for ((text, code), verb) in [
+                ((c, KeyCode::KeyC), EditCommand::Copy),
+                ((x, KeyCode::KeyX), EditCommand::Cut),
+                ((v, KeyCode::KeyV), EditCommand::Paste),
+                ((a, KeyCode::KeyA), EditCommand::SelectAll),
+            ] {
+                let (key, physical) = at_key(text, code);
+                assert_eq!(command(&key, physical, chord), verb, "{layout} {text}");
+                // Uppercase too: Shift held with the chord prints the capital.
+                let (key, physical) = at_key(&text.to_uppercase(), code);
+                assert_eq!(
+                    command(&key, physical, chord),
+                    verb,
+                    "{layout} {text} shifted"
+                );
+                // Unmodified, the key types its own letter.
+                let (key, physical) = at_key(text, code);
+                assert_eq!(
+                    command(&key, physical, ModifiersState::empty()),
+                    EditCommand::Insert(text.to_owned()),
+                    "{layout} {text} typed"
+                );
+            }
+        }
+        // A Latin layout is read as it prints: AZERTY's `q` on the physical `A`
+        // is nothing, its `a` on the physical `Q` is select-all.
+        let (key, physical) = at_key("q", KeyCode::KeyA);
+        assert_eq!(command(&key, physical, chord), EditCommand::Ignore);
+        let (key, physical) = at_key("a", KeyCode::KeyQ);
+        assert_eq!(command(&key, physical, chord), EditCommand::SelectAll);
+        // A Latin letter outside ASCII on a letter key names no chord.
+        let (key, physical) = at_key("ç", KeyCode::KeyC);
+        assert_eq!(command(&key, physical, chord), EditCommand::Ignore);
+        // AltGr arrives as Ctrl+Alt and is typing on a keyboard that has it,
+        // whatever script the key prints — the fallback is never asked.
+        let (key, physical) = at_key("с", KeyCode::KeyC);
+        assert_ne!(
+            command(
+                &key,
+                physical,
+                ModifiersState::CONTROL | ModifiersState::ALT
+            ),
+            EditCommand::Copy
+        );
+    }
+
     /// A caret with nothing selected, at one offset.
     fn at(offset: usize) -> EditCaret {
         EditCaret {
@@ -1140,33 +1224,46 @@ mod tests {
         let ch = |text: &str| Key::Character(text.into());
         let none = ModifiersState::empty();
         assert_eq!(
-            command(&ch("a"), none),
+            command(&ch("a"), nowhere(), none),
             EditCommand::Insert("a".to_owned()),
             "a letter is typed, never encoded"
         );
         // The save chord belongs to the registry's scoped row and is swallowed
         // here rather than typed — a `Ctrl+S` that inserted an `s` into the file
         // would be the worst of both readings.
-        assert_eq!(command(&ch("s"), command_modifier()), EditCommand::Ignore);
-        assert_eq!(command(&ch("v"), command_modifier()), EditCommand::Paste);
         assert_eq!(
-            command(&Key::Named(NamedKey::Escape), none),
+            command(&ch("s"), nowhere(), command_modifier()),
+            EditCommand::Ignore
+        );
+        assert_eq!(
+            command(&ch("v"), nowhere(), command_modifier()),
+            EditCommand::Paste
+        );
+        assert_eq!(
+            command(&Key::Named(NamedKey::Escape), nowhere(), none),
             EditCommand::Release
         );
-        assert_eq!(command(&Key::Named(NamedKey::Tab), none), EditCommand::Tab);
         assert_eq!(
-            command(&Key::Named(NamedKey::Enter), none),
+            command(&Key::Named(NamedKey::Tab), nowhere(), none),
+            EditCommand::Tab
+        );
+        assert_eq!(
+            command(&Key::Named(NamedKey::Enter), nowhere(), none),
             EditCommand::Newline
         );
         assert_eq!(
-            command(&Key::Named(NamedKey::ArrowUp), ModifiersState::SHIFT),
+            command(
+                &Key::Named(NamedKey::ArrowUp),
+                nowhere(),
+                ModifiersState::SHIFT
+            ),
             EditCommand::Move {
                 motion: Motion::Up,
                 extend: true
             }
         );
         assert_eq!(
-            command(&Key::Named(NamedKey::Home), command_modifier()),
+            command(&Key::Named(NamedKey::Home), nowhere(), command_modifier()),
             EditCommand::Move {
                 motion: Motion::DocStart,
                 extend: false
@@ -1178,6 +1275,7 @@ mod tests {
         assert_eq!(
             command(
                 &ch("\u{20ac}"),
+                nowhere(),
                 ModifiersState::CONTROL | ModifiersState::ALT
             ),
             if bt_platform::host_platform() == bt_platform::HostPlatform::MacOs {
@@ -1188,7 +1286,7 @@ mod tests {
         );
         // And a key with nothing to do is still the editor's.
         assert_eq!(
-            command(&Key::Named(NamedKey::F5), none),
+            command(&Key::Named(NamedKey::F5), nowhere(), none),
             EditCommand::Ignore
         );
     }

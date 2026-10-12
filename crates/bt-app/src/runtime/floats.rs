@@ -3579,36 +3579,7 @@ impl Runtime<'_> {
         // window's takes it (B-AUDIT-046 RT-1) — and a copy keeps the seat it
         // always had; see `menubar::paste_seat`.
         let focus = self.clipboard_focus();
-        let seat = if copying {
-            menubar::clipboard_seat(focus)
-        } else {
-            menubar::paste_seat(focus)
-        };
-        match seat {
-            // A surface of this window's is holding the keyboard and answers
-            // its own keys; see `ClipboardSeat::Nobody` for why doing nothing
-            // is the answer rather than the absence of one.
-            menubar::ClipboardSeat::Nobody => Ok(()),
-            // Only `paste_seat` answers a field, so this is always a paste: the
-            // pasteboard's text into the field, through the door the field's
-            // own paste chord goes through.
-            menubar::ClipboardSeat::Field(field) => self.paste_into_field(field),
-            menubar::ClipboardSeat::PreviewDocument => {
-                if copying {
-                    self.copy_preview_selection();
-                    Ok(())
-                } else {
-                    self.paste_into_preview()
-                }
-            }
-            menubar::ClipboardSeat::Terminal => {
-                if copying {
-                    self.copy_selection()
-                } else {
-                    self.paste_from_clipboard()
-                }
-            }
-        }
+        menubar::run_clipboard_verb(copying, focus, self)
     }
 
     /// The same picture for a page a float is carrying, on that window's layer.
@@ -3642,5 +3613,28 @@ impl Runtime<'_> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+}
+
+/// **The menu verb's doors are the keystroke's** ([`menubar::ClipboardDoors`]).
+impl menubar::ClipboardDoors for Runtime<'_> {
+    fn copy_terminal_selection(&mut self) -> Result<()> {
+        self.copy_selection()
+    }
+
+    fn paste_into_terminal(&mut self) -> Result<()> {
+        self.paste_from_clipboard()
+    }
+
+    fn copy_document_selection(&mut self) {
+        self.copy_preview_selection();
+    }
+
+    fn paste_into_document(&mut self) -> Result<()> {
+        self.paste_into_preview()
+    }
+
+    fn paste_into_field(&mut self, field: crate::TextFieldSeat) -> Result<()> {
+        Runtime::paste_into_field(self, field)
     }
 }

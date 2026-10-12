@@ -14,6 +14,10 @@ All notable changes to Folio are recorded here. The format follows
 - A Folio installed with Homebrew now updates itself in place from About, like a copy you dragged to Applications; Homebrew keeps managing and uninstalling it. <!-- zh: 用 Homebrew 安装的 Folio 现在也能在关于页中就地更新，和拖进应用程序文件夹的副本一样；Homebrew 仍负责管理和卸载。 -->
 - After a graphics failure, Folio tells you at its next start where it kept your unsaved edit, with a button that opens the folder. <!-- zh: pending T-RECOVERED-FOLDER -->
 
+### Changed
+
+- Changes to settings.json saved in another editor while Folio runs take effect without a restart, and a setting changed in Folio at the same time is kept beside them; when both change the same setting, the file wins. <!-- zh: pending T-STORE-MERGE-SETTINGS -->
+
 ### Fixed
 
 - A change to settings, shortcuts, profiles or pins that cannot be saved is now reported while Folio runs, not only at startup. <!-- zh: pending T-STORAGE-WORKER-REQUEST -->
@@ -28,6 +32,10 @@ All notable changes to Folio are recorded here. The format follows
 - A diff or an old version of a file that is not UTF-8 is marked as not shown exactly, and a UTF-16 file reads correctly. <!-- zh: pending H2 -->
 - With "one screen at a time" scrolling on, a notch over the commit graph moves one screenful instead of a distance that depended on the number of commits. <!-- zh: pending H2 -->
 - On a Mac, the card-scroll hint and the reserved rows in Shortcuts say Option instead of Alt. <!-- zh: pending H2 -->
+- On a Mac, the note under the reserved rows in Shortcuts says Option+arrow instead of Alt+arrow. <!-- zh: pending H2-NITS -->
+- On a Mac, the terminal opens in Menlo when no font is chosen, as it does after the choice is cleared, and symbols and emoji are drawn from Apple Symbols and Apple Color Emoji. <!-- zh: pending H2-NITS -->
+- On a keyboard layout that is not Latin, such as Russian or Greek, copy, cut, paste and select all in an edited file and M in the video player work by the key's position. <!-- zh: pending H2-NITS -->
+- A profile's environment table in Settings lists every variable Folio sets for its sessions, such as TERM and TERM_PROGRAM_VERSION, not three of them. <!-- zh: pending H2-NITS -->
 - The pane strip's "more do not fit" line is part of the translated text. <!-- zh: pending H2 -->
 - A space can be typed into the commit graph's search and the Git branch prompt, and Ctrl+Backspace deletes a word in every one-line box. <!-- zh: pending H2 -->
 - Web page thumbnails on the focus cards now appear at display scales above 200%. <!-- zh: pending H2 -->
