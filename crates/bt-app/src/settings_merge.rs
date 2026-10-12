@@ -463,16 +463,15 @@ pub(crate) trait MergeWindow {
     /// `SettingsStore::end_merge`: the writes released, the merged document
     /// sent conditionally.
     fn merge_end(&mut self);
+    /// The pass's one line, written to `diagnostics.log`.
+    fn merge_say(&mut self, line: &str);
     /// The open dialog re-derived and the chrome presented.
     fn merge_present(&mut self) -> anyhow::Result<()>;
 }
 
-/// **What one pass came to**: its line, its card's data, and whether the
-/// presentation after it went through.
+/// **What one pass came to**: its card's data, and whether the presentation
+/// after it went through.
 pub(crate) struct PassOutcome {
-    /// The pass's line for `diagnostics.log`, which its caller writes whatever
-    /// the presentation answered; `None` when nothing was merged.
-    pub(crate) line: Option<String>,
     pub(crate) replaced: Option<ReplacedInFile>,
     pub(crate) presented: anyhow::Result<()>,
 }
@@ -496,13 +495,12 @@ fn holds(in_force: &SettingsV1, change: &SettingChange) -> bool {
 /// failed (`apply_block_max_height`'s frame) applied it, and its error is said
 /// beside it. A refused unit stays in `desired` as the file said it, and what
 /// is in force keeps its own value ((b)6). Then a value no row on this
-/// platform shows is stored as it came, the writes are released, and the
-/// pass's line and its card's data are made — before the presentation, which
-/// cannot take them away.
+/// platform shows is stored as it came, the writes are released, the pass's
+/// line is written and its card's data is made — both before the
+/// presentation, which cannot take them away.
 pub(crate) fn run_pass(window: &mut impl MergeWindow) -> PassOutcome {
     let Some(mut pass) = window.merge_begin() else {
         return PassOutcome {
-            line: None,
             replaced: None,
             presented: Ok(()),
         };
@@ -529,7 +527,7 @@ pub(crate) fn run_pass(window: &mut impl MergeWindow) -> PassOutcome {
         window.merge_store_as_it_came(change);
     }
     window.merge_end();
-    let line = pass.diagnostics();
+    window.merge_say(&pass.diagnostics());
     let replaced = pass.replaced();
     let presented = if pass.doors.apply.is_empty() && pass.doors.elsewhere.is_empty() {
         Ok(())
@@ -537,7 +535,6 @@ pub(crate) fn run_pass(window: &mut impl MergeWindow) -> PassOutcome {
         window.merge_present()
     };
     PassOutcome {
-        line: Some(line),
         replaced,
         presented,
     }
@@ -756,6 +753,8 @@ mod tests {
         store: SettingsStore,
         _jobs: crate::persist::UnservedJobs,
         presentation_fails: bool,
+        /// What the pass said and presented, in the order it happened.
+        log: Vec<String>,
     }
 
     impl MergeWindow for Window {
@@ -793,7 +792,12 @@ mod tests {
             self.store.end_merge();
         }
 
+        fn merge_say(&mut self, line: &str) {
+            self.log.push(line.to_owned());
+        }
+
         fn merge_present(&mut self) -> anyhow::Result<()> {
+            self.log.push("presented".to_owned());
             if self.presentation_fails {
                 anyhow::bail!("呈现失败 the chrome could not be presented");
             }
@@ -813,6 +817,7 @@ mod tests {
                 store,
                 _jobs: jobs,
                 presentation_fails: false,
+                log: Vec::new(),
             },
         )
     }
@@ -834,7 +839,7 @@ mod tests {
         let outcome = run_pass(&mut window);
         let acrylic = crate::settings::SettingsRow::Acrylic.title();
         assert_eq!(
-            outcome.line.as_deref(),
+            window.log.first().map(String::as_str),
             Some(
                 format!(
                     "BT_PERSIST settings.json merged: took 2 from the file, kept 0 from Folio, \
@@ -874,7 +879,7 @@ mod tests {
         let outcome = run_pass(&mut window);
         let row = crate::settings::SettingsRow::BlockMaxHeight.title();
         assert_eq!(
-            outcome.line.as_deref(),
+            window.log.first().map(String::as_str),
             Some(
                 format!(
                     "BT_PERSIST settings.json merged: took 1 from the file, kept 0 from Folio, \
@@ -889,12 +894,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// RED (round 3 (c)) — **a presentation that fails after the walk keeps the
-    /// card's data**: the line and the data are made before the chrome is
-    /// presented, and its failure is answered beside them.
+    /// RED (round 3 (c), round 4) — **a presentation that fails after the walk
+    /// keeps the card's data, and the line is already in the log**: the line is
+    /// written and the data made before the chrome is presented, and its
+    /// failure is answered beside them.
     ///
-    /// MUTATION: in `run_pass`, present first and return at its failure — the
-    /// card's data is gone.
+    /// MUTATIONS: in `run_pass`, present first and return at its failure — the
+    /// card's data is gone; write the line after the presentation — the log's
+    /// first entry is the presentation.
     #[test]
     fn a_presentation_failure_after_the_walk_keeps_the_card_data() {
         let theirs = SettingsV1 {
@@ -910,7 +917,13 @@ mod tests {
             replaced.not_applied,
             vec![crate::settings::SettingsRow::Acrylic.title().to_owned()]
         );
-        assert!(outcome.line.is_some());
+        assert_eq!(window.log.len(), 2, "one line, one presentation");
+        assert!(
+            window.log[0].starts_with("BT_PERSIST settings.json merged:"),
+            "the line was written before the presentation: {:?}",
+            window.log
+        );
+        assert_eq!(window.log[1], "presented");
         let _ = std::fs::remove_dir_all(&root);
     }
 

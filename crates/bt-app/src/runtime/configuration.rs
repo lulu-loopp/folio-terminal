@@ -357,9 +357,6 @@ impl Runtime<'_> {
     /// presentation never takes it away.
     pub(crate) fn merge_documents(&mut self) -> (document_request::MergeNotice, Result<()>) {
         let outcome = settings_merge::run_pass(self);
-        if let Some(line) = &outcome.line {
-            eprintln!("{line}");
-        }
         let mut notice = document_request::MergeNotice::default();
         notice.files.extend(outcome.replaced);
         (notice, outcome.presented)
@@ -612,6 +609,10 @@ impl settings_merge::MergeWindow for Runtime<'_> {
 
     fn merge_end(&mut self) {
         self.app.settings_store.end_merge();
+    }
+
+    fn merge_say(&mut self, line: &str) {
+        eprintln!("{line}");
     }
 
     fn merge_present(&mut self) -> Result<()> {
