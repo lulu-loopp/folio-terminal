@@ -185,7 +185,11 @@ impl LocaleCell {
         let started = bt_platform::spawn_at_priority(
             "locale-reading",
             bt_platform::ThreadPriority::BelowNormal,
-            move |ctx| self.serve(ctx),
+            // Contained (`contained_panic::contain`), so under the resident panic hook a reading
+            // that panics reaches `ReadingOut` and is published as a failed reading.
+            move |ctx| {
+                let _ = crate::contained_panic::contain(|| self.serve(ctx));
+            },
         );
         if let Err(error) = started {
             // Answered as a failed reading, so a pane waiting for the first one is born (with
@@ -481,6 +485,50 @@ mod tests {
             declaration,
             failure: Some(why.to_owned()),
         }
+    }
+
+    /// RED (T-PANIC-ROWS-HONEST) — **a reading that panics under the resident panic hook is
+    /// published as a failed reading, said once, and the loop is woken.** The product's hook ends
+    /// the process for a panic it is not told is contained; the worker's body runs inside
+    /// `contained_panic::contain`, so the hook's decision at the panic is yes and the unwind
+    /// reaches `ReadingOut`, which files the failed reading a waiting birth is born on.
+    ///
+    /// MUTATION: the worker's body without `contained_panic::contain` — the decision at the panic
+    /// is no (the process would end there).
+    #[test]
+    fn a_reading_that_panics_under_the_resident_hook_is_a_failed_reading() {
+        let (told, decision) = mpsc::channel();
+        let (noted, notes) = mpsc::channel();
+        let cell: &'static LocaleCell = Box::leak(Box::new(LocaleCell::new(
+            true,
+            move |_ctx| -> LocaleReading {
+                let _ = told.send(crate::the_hook_lets_this_panic_unwind());
+                panic!("scripted: 区域设置读不出来 the locale could not be read")
+            },
+            move |line: &str| {
+                let _ = noted.send(line.to_owned());
+            },
+        )));
+        let (woke, wakes) = crate::lane::wake_channel();
+        cell.install_wake(woke);
+        cell.ask(LocaleTrigger::Launch);
+        assert!(
+            crate::lane::receive(&decision, "the hook's decision inside the reading"),
+            "the reading runs where the resident hook lets its panic unwind"
+        );
+        crate::lane::wait_for_a_wake(&wakes, "the dead reading's wake");
+        assert!(cell.settled(), "a waiting birth may be born");
+        let newest = cell.lock().newest.clone();
+        assert_eq!(
+            newest,
+            Some((1, failed("the reading ended before its answer"))),
+            "published as a failed reading"
+        );
+        assert!(
+            crate::lane::receive(&notes, "the dead reading's line")
+                .contains("ended before its answer")
+        );
+        assert!(wakes.try_recv().is_err(), "one wake");
     }
 
     /// Wait until no reading is out or waiting and the worker has gone.

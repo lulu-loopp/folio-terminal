@@ -125,6 +125,14 @@
 //!   [`FieldCensus::judge`] is the diff gate against the committed files
 //!   (`crates/bt-source/tests/census.rs` runs it over `bt-app`).
 //!
+//! What T-PANIC-ROWS-HONEST adds:
+//!
+//! * [`FunctionPaths`] — **a free function's path followed to the item it names across the
+//!   workspace's crates**, by the census's own path rules plus one step into another crate's root
+//!   (a `use other::m::f as g;` or a re-export), answered as an identity ([`FunctionItem`]) and
+//!   never as a spelling: what `crates/bt-source/tests/contained_panic.rs` asks of each call that
+//!   is handed a closure.
+//!
 //! **The reading is `cfg`-blind on purpose.** Every declaration is followed
 //! whatever stands on it, and the host platform never selects: a file reached
 //! only under `cfg(windows)` is enumerated on macOS too, because a guard that
@@ -150,7 +158,7 @@ pub mod universes;
 
 pub use census::{
     CallRow, Callable, CensusFailure, Column, Committed, CommittedFile, Difference, FactRow,
-    FieldCensus, SiteRow, UnfollowedRow, UnknownRow,
+    FieldCensus, FunctionItem, FunctionPaths, SiteRow, UnfollowedRow, UnknownRow,
 };
 pub use declarations::{Compilation, DeclarationStep, ModuleBody, ReachedModule};
 pub use dep_map::{DependencyMap, Door, FieldUse, MEASURED_AT, TopicEdge, Unclassified};

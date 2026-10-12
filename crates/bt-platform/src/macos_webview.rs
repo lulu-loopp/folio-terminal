@@ -90,7 +90,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -140,8 +139,14 @@ use crate::{Compositor, EnvironmentAnswer, NativeWindow, WebWarmUp};
 /// **The refusal and never the permission**, without exception: a door that
 /// failed to decide has not decided, and the only safe reading of "we do not
 /// know" is the one that lets nothing through.
+///
+/// **Contained** ([`crate::contained_panic::contain`]): the resident application's
+/// panic hook ends the process before any unwinding for a panic it is not told is
+/// contained, so a bare `catch_unwind` here would never be reached in Folio. Inside
+/// `contain` the hook writes its report and returns, and the panic reaches this
+/// boundary as the refusal.
 fn guarded<T>(what: &str, refusal: T, body: impl FnOnce() -> T) -> T {
-    match std::panic::catch_unwind(AssertUnwindSafe(body)) {
+    match crate::contained_panic::contain(body) {
         Ok(answer) => answer,
         Err(panic) => {
             let said = panic
@@ -2661,5 +2666,34 @@ mod door_tests {
             !a_gesture_is_behind(WKNavigationType::Other),
             "a script's own navigation is not a gesture"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::guarded;
+
+    /// RED (T-PANIC-ROWS-HONEST) — **a delegate body runs where the resident panic hook lets its
+    /// panic unwind, and the panic is the refusing answer.** The hook's decision asks
+    /// `contained_panic::is_contained` (its half of `the_hook_lets_this_panic_unwind`): inside a
+    /// `guarded` body it is yes, so a panic there reaches `guarded` as the refusal instead of
+    /// ending the process; outside it is no.
+    ///
+    /// MUTATION: `guarded` back on a bare `std::panic::catch_unwind` — the decision inside the
+    /// body is no.
+    #[test]
+    fn a_delegate_panic_under_the_resident_hook_is_the_refusal() {
+        assert!(!crate::contained_panic::is_contained());
+        assert!(
+            guarded("a probe of the decision", false, || {
+                crate::contained_panic::is_contained()
+            }),
+            "the body runs contained"
+        );
+        let refused = guarded("a planted panic 委托", "refused", || {
+            panic!("scripted: a delegate body that fails 失败")
+        });
+        assert_eq!(refused, "refused", "the panic is the refusing answer");
+        assert!(!crate::contained_panic::is_contained());
     }
 }
