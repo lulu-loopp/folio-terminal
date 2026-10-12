@@ -16,7 +16,7 @@ Where and what to do: the guard is
 `file_reads_source_tests::file_reads_every_product_content_door_has_a_lane`.
 When it is red, classify the read, put it through the correct lane, and re-key a
 moved owner by item identity; do not add a file key unless the collision is an
-explicit row of `docs/plans/MIGRATION-DEBT.tsv`; that coupling is prose, kept equal by review, not by a test.
+explicit row of `docs/plans/MIGRATION-DEBT.tsv`. One direction of that coupling is a test: a debt row keyed `ledger key naming a file` must be a line of the ledger (`every_row_is_a_reader_or_a_categorised_exception`, below); the other — every file key has its debt row — is prose, kept by review.
 
 ## Source readers
 
@@ -100,9 +100,39 @@ path-describing method is a false positive until it is added to
 `PATH_BUILDING`. Not covered, and said in the test's header: a path handed in
 as a parameter (the function that hands it on is not the reader; its caller
 that names the file is), a root reached through a method, a closure or another
-file's function, a read call renamed by `use … as …` (bt-source does not
-resolve aliases), and stale rows (a row whose item no longer reads is not
-refused).
+file's function, and a read call renamed by `use … as …` (bt-source does not
+resolve aliases).
+
+Since T-SOURCE-READERS-STALE (2026-10-12) the two lists are a **two-way
+equality**: every reader is a row, and every row is a reader or a categorised
+exception. `every_row_is_a_reader_or_a_categorised_exception` resolves each
+row's `(file, owner)` to an item bt-source finds in that file, spelled as the
+reader refusal spells it (an owner that is gone, or is an item of another file,
+is refused; a MIGRATION-DEBT `ledger key naming a file` resolves to a line of
+its ledger; a non-Rust file, such as a Python script, only as an `exception`),
+and holds it by its `category` column, which every row of both lists carries:
+`read` (the documents the scan finds the item reading are exactly those the
+subject names — one it reads and the row does not name is refused too — and a Rust-source shape on a line of the item names every `.rs` name in
+it), `unreduced` (the diagnostic names the item: the read exists and the
+evaluator cannot reduce its path, so the subject is not checked; the row stays
+while the diagnostic entry does, and when the entry goes it is `read` or
+stale), `rust-source` (every name in the subject is a `.rs` name a Rust-source
+shape on a line of the item reports), or `exception` (a reader no scan sees;
+its `reason`, or `needed_seam`, names the blind spot). No other value, none
+missing. The subject is spelled as the mechanism resolves it: an include's
+literal from the row's file's directory, any other path from the workspace
+root. When red, a row whose item is gone or reads nothing is removed, a row
+whose item reads something else is corrected to what it reads, and a row whose
+reader the evaluator cannot see becomes an `exception` naming the blind spot —
+the evaluator is not widened for it. A `.rs` row whose file bt-source does not
+index (`bt-source`'s `tests/fixtures/`, `vendor/`) is refused as an item that is
+gone, whatever its category: such a file is no reader's, and that is intended.
+A test that reads only a file it writes
+itself is no reader of a committed document and has no row.
+`a_row_no_reader_accounts_for_is_refused` plants each refusal.
+`scripts/ci/check-migration-debt.ps1` finds its six identity columns by name, so
+the `category` column is not a new debt row
+(`scripts/ci/check-migration-debt-tests.ps1`).
 
 ## Platform cfg boundaries
 
@@ -305,6 +335,45 @@ real item by an alias and by its path, and refuses a lookalike
 helper that calls the boundary, a bare catch and a renamed import, by site. There is no allowlist. When red, run the work inside `contain` and give
 the panic its row's failure value, or take the catch out and say in the row
 that a panic ends the process; never wrap a catch to quiet the guard.
+
+The join half (T-JOINED-PANIC-VALUES, 2026-10-12): a `JoinHandle::join` answers
+`Err` under the resident hook only for a thread whose body is contained, so a
+join whose `Err` is made into a value — a variant, an error, a default — must
+join such a thread. The same file reads every product `join` of `bt-app`,
+`bt-platform`, `bt-pty`, `bt-term`, `bt-render`, `bt-corpus` and `bt-persist`:
+one that throws its result away or carries the panic on (`unwrap`, `expect`) is
+not judged; any other is refused unless its handle follows — through `let`s,
+values given to a `self` field in its package, free functions' tails (by
+`FunctionPaths`) and method receivers — to a thread start (`std`'s
+`thread::spawn`, a `spawn` method, or the thread door `spawn_at_priority`
+by its identity) whose closure is a call edge to the boundary. Every occurrence
+of `join` is a supported shape or refused with its site, never passed: a handle
+handed in as a parameter, bound by a pattern that is not the whole value,
+returned by an associated function or another method, started through a renamed
+`use` of `spawn` or taken out of a collection is refused; so are `join()` in a
+macro's tokens, a path-called `join` in a macro's tokens whatever its arguments
+(`JoinHandle::join(h)` inside `assert!`), and `JoinHandle::join` handed on as a
+value. A `T::join(x)` through a type other than `JoinHandle` passes only when it
+is one of a closed list — the four `windows_future` async types
+(`IAsyncAction`, `IAsyncOperation`, `IAsyncActionWithProgress`,
+`IAsyncOperationWithProgress`) written in full, `windows_future::…::join`, the
+WinRT deployment waits — and the first segment is not shadowed there (no
+workspace crate, no `use` or glob in scope, no item or module of the package by
+that name); any other path-called `join` is refused, a generic parameter's
+associated type (`T::Handle::join(h)`) and a dependency's own thread handle
+written from its crate root (`ScopedJoinHandle::join(h)`) among them. A method
+`join` that takes arguments, a `fn join` declaration and a name that is not
+called (a binding, a field, a member: `let (join, run)`, `layout.join`) are no
+join. Its fixture `tests/fixtures/joined_panic` allows a door thread contained
+through an alias and a contained handle kept in a field, and refuses a bare
+thread's `Err → Panicked` arm, the lookalike, a free function's bare handle made a
+default, a parameter, a helper-mediated body, an associated function's handle, a
+renamed spawn, a collection, a macro's `join()`, a join handed on as a value, a
+foreign type's join through an imported name, a path-called join in a macro, a
+generic parameter's handle, a dependency's thread handle and a listed type's
+join whose crate name a local module shadows. When red,
+contain the thread's body and give the panic its failure value, or carry the
+panic on (`expect`) and say the thread's panic ends the process.
 
 ## Timing-bound tests
 

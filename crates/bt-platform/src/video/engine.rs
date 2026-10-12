@@ -897,7 +897,10 @@ pub fn can_play_types(types: &[&str]) -> Vec<CanPlay> {
     ) else {
         return none();
     };
-    let answers = thread.join().unwrap_or_default();
+    // The probe's panic is not "plays nothing": under the resident panic hook it ends the
+    // process before this join (the thread is not contained), and where no fatal hook is
+    // installed the join carries it on.
+    let answers = thread.join().expect("the video type probe panicked");
     if answers.len() == types.len() {
         answers
     } else {
@@ -1133,7 +1136,9 @@ impl Machinery {
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 // Every handle has gone without saying so — a panic between the
-                // `Engine` being made and being dropped. Same ending.
+                // `Engine` being made and being dropped, which under the resident
+                // panic hook ends the process first: this arm runs only where no
+                // fatal hook is installed. Same ending.
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             }
             self.take_frame(shared);

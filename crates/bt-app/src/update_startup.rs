@@ -98,9 +98,8 @@ use bt_platform::install_txn::{self, Held, Hold};
 use crate::cli;
 use crate::update_job::Failure;
 use crate::update_txn::{
-    AfterRollback, Class, Clearing, Digest, Header, Home, JournalRead, Nonce, Outcome, Phase,
-    Removal, Role, Sight, StartAction, StartView, TxnId, after_rollback, at_start,
-    rolled_back_untried,
+    AfterRollback, Class, Clearing, Digest, Header, Home, Nonce, Outcome, Phase, Removal, Role,
+    Sight, StartAction, StartView, TxnId, after_rollback, at_start, rolled_back_untried,
 };
 
 /// **The pass has run.** Only [`pass`] makes one, and `launch_wire::hand_over`
@@ -458,7 +457,6 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
             .map(|nonce| (journal.txn, nonce)),
         Sight::Header { .. } | Sight::Envelope { .. } | Sight::Unreadable(_) => None,
     };
-    let journal = JournalRead::Read(header.clone());
     let trial = trial_of(start.trial, world);
     let is_last_trial = trial
         .zip(trial_starting)
@@ -515,7 +513,7 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
     };
     let measured = lock.is_some() && matches!(header.class, Class::Preparing | Class::Deferred);
     let view = StartView {
-        journal,
+        header: header.clone(),
         lock_free: lock.is_some(),
         own_image: measured.then(|| image(start.own_exe)).flatten(),
         rescue_image: measured

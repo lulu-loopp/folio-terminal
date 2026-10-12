@@ -446,12 +446,13 @@ fn every_exit_path_detaches_what_it_attached() {
 /// `kill(pid, 0)` answers `ESRCH`. The call returns within the deadline plus
 /// the sweep, far inside the thirty seconds the stand-in would sleep.
 ///
-/// MUTATION: in `run_at`, wait for the child with no deadline
-/// (`child.wait()` in place of the `try_wait` loop).
+/// MUTATION: in `held_to`, wait for the child with no deadline
+/// (`child.wait()` in place of `wait_within`).
 #[cfg(unix)]
 #[test]
 fn attach_is_bounded() {
     use stand_in::{QUICK, Stand};
+    use std::time::Instant;
     let stand = Stand::new("bounded");
     stand.set("hangs", "ok");
     let table = |root: &Path| stand.under(root);
