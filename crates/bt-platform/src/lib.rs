@@ -3439,8 +3439,14 @@ impl ProbeChild {
     }
 }
 
+/// One output stream of a probe, read to its end on a thread of its own.
+///
+/// **The reader's body runs inside [`contained_panic::contain`]** (T-JOINED-PANIC-VALUES): the
+/// resident panic hook lets a panic there unwind to the boundary, so the thread ends with its
+/// answer slot still empty, and that — and only that — is what [`Self::finish`] reads as the
+/// reader having panicked: the probe's refusal, an `io::Error` its caller already answers for.
 struct ProbePipeDrain {
-    thread: std::thread::JoinHandle<()>,
+    thread: std::thread::JoinHandle<std::thread::Result<()>>,
     answer: std::sync::Arc<std::sync::Mutex<Option<std::io::Result<Vec<u8>>>>>,
 }
 
@@ -3470,14 +3476,16 @@ fn drain_probe_pipe<R: std::io::Read + Send + 'static>(
     let answer = std::sync::Arc::new(std::sync::Mutex::new(None));
     let worker_answer = answer.clone();
     let thread = spawn_at_priority(name, ThreadPriority::BelowNormal, move |_worker| {
-        let mut bytes = Vec::new();
-        let result = match pipe {
-            Some(mut pipe) => pipe.read_to_end(&mut bytes).map(|_| bytes),
-            None => Ok(bytes),
-        };
-        *worker_answer
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+        contained_panic::contain(move || {
+            let mut bytes = Vec::new();
+            let result = match pipe {
+                Some(mut pipe) => pipe.read_to_end(&mut bytes).map(|_| bytes),
+                None => Ok(bytes),
+            };
+            *worker_answer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+        })
     })?;
     Ok(ProbePipeDrain { thread, answer })
 }
@@ -5548,6 +5556,41 @@ mod probe_run_tests {
         assert_eq!(said(&answers[0]), "first-第一");
         assert!(answers[1].is_err(), "{:?}", answers[1]);
         assert_eq!(said(&answers[2]), "third-第三");
+    }
+
+    /// A probe's output pipe whose read panics, after saying whether the panic is contained —
+    /// the half of the resident hook's decision (`the_hook_lets_this_panic_unwind`) that a worker
+    /// of `bt-platform` decides.
+    struct PanickingPipe(std::sync::mpsc::Sender<bool>);
+
+    impl std::io::Read for PanickingPipe {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            let _ = self.0.send(contained_panic::is_contained());
+            std::panic::panic_any("scripted: 探针的输出读取 panicked");
+        }
+    }
+
+    /// RED (T-JOINED-PANIC-VALUES) — **a probe stream reader's panic is the probe's refusal**:
+    /// the reader's body runs inside `contained_panic::contain`, so at the panic the resident
+    /// hook's decision is "unwind", the reader ends with no answer, and `finish` answers the
+    /// stream's `io::Error` — which every probe's caller already answers for — instead of the
+    /// process ending in the hook.
+    ///
+    /// MUTATION: the reader's body without `contained_panic::contain` (in `drain_probe_pipe`) —
+    /// the decision at the panic is no, and the first assert goes red.
+    #[test]
+    fn a_probe_stream_readers_panic_is_the_probes_refusal() {
+        let (told, decision) = std::sync::mpsc::channel();
+        let drain = drain_probe_pipe("bt-probe-panic-test", Some(PanickingPipe(told)))
+            .expect("a reader thread");
+        let refusal = drain
+            .finish("stdout")
+            .expect_err("a reader that panicked has no answer");
+        assert!(
+            decision.recv().expect("the read was reached"),
+            "the hook's decision at the reader's panic is to let it unwind"
+        );
+        assert_eq!(refusal.to_string(), "probe stdout reader panicked");
     }
 }
 
@@ -17103,9 +17146,9 @@ mod windows_impl {
             };
             // A `RecvError` is the thread ending without a word, which is a
             // panic between the spawn and the read — there is no return path
-            // there that does not send. It is still an answer and not an
-            // unreachable: this is a terminal, and a panic taken as a panic
-            // takes somebody's scrollback with it.
+            // there that does not send. The watcher is not contained, so under the
+            // resident panic hook that panic ends the process before the channel
+            // closes: this arm is reached only where no fatal hook is installed.
             let refused = match listening.recv() {
                 Ok(Ok(())) => {
                     return Ok(Self {
