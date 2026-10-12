@@ -10064,11 +10064,22 @@ mod tests {
     /// The page environment's cell is one per process: its tests take turns.
     static PAGE_ENVIRONMENT_TESTS: Mutex<()> = Mutex::new(());
 
-    #[test]
-    fn every_page_environment_request_ends_once_and_the_newest_wins() {
-        let _alone = PAGE_ENVIRONMENT_TESTS
+    /// Take a turn at the cell, starting from no request out, no end untaken
+    /// and nothing held; the numbers go on from where the last test left them.
+    fn page_environment_alone() -> std::sync::MutexGuard<'static, ()> {
+        let turn = PAGE_ENVIRONMENT_TESTS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut cell = page_environment_cell();
+        cell.owed = None;
+        cell.ended.clear();
+        cell.current = None;
+        turn
+    }
+
+    #[test]
+    fn every_page_environment_request_ends_once_and_the_newest_wins() {
+        let _alone = page_environment_alone();
         let block =
             |value: &str| vec![(OsString::from("FOLIO_H2_NITS_PIN"), OsString::from(value))];
         let first = mint_page_environment();
@@ -10128,9 +10139,7 @@ mod tests {
     /// escapes the worker body and this test panics.
     #[test]
     fn a_panic_in_the_page_read_is_a_failed_end_and_a_wake() {
-        let _alone = PAGE_ENVIRONMENT_TESTS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _alone = page_environment_alone();
         let asked = mint_page_environment();
         let woken = std::cell::Cell::new(0);
         answer_page_environment_request(
