@@ -21,8 +21,8 @@ use std::path::PathBuf;
 
 use bt_platform::admission::{DoorKey, Phase, doors};
 use bt_source::{
-    Certainty, FileRecord, Index, ItemKind, ItemQuery, ItemRecord, MacroKind, Occurrence,
-    TargetKind,
+    Certainty, FileRecord, ImplRecord, Index, ItemKind, ItemQuery, ItemRecord, MacroKind,
+    Occurrence, TargetKind, TraitId, TraitResolver,
 };
 
 use super::{STATION_COUNT, Station};
@@ -899,7 +899,7 @@ fn callees_in(world: &World, body: &str, site_name: &str) -> Vec<String> {
 #[cfg(any())]
 struct ReceiverTypingSourceShapes {
     typed_field: CappedReads,
-    boxed_driver: Box<dyn Driver>,
+    boxed_driver: Box<dyn crate::update_job::Driver>,
 }
 
 #[cfg(any())]
@@ -1765,20 +1765,22 @@ struct World {
     callables: HashMap<String, Vec<Callable>>,
     fields: HashMap<(String, String), Vec<(usize, &'static ItemRecord)>>,
     deref_types: BTreeSet<String>,
-    /// The product's `trait` declarations, by the trait's name.
-    traits: HashMap<&'static str, Vec<TraitDecl>>,
-    /// The types a product `impl` block implements a trait for, by the trait's bare name
-    /// ([`bare_trait`]).
-    implementors: HashMap<String, BTreeSet<String>>,
+    /// Which trait a path names, over the product's packages.
+    resolver: TraitResolver<'static>,
+    /// The method items every trait declaration of the packages declares, by the trait's identity
+    /// — with a default body or without.
+    declared: BTreeMap<TraitId, Vec<(usize, &'static ItemRecord)>>,
+    /// The product `impl` blocks of each first-party trait, by the trait's identity (the trait
+    /// path each block writes, resolved in its own module), each with the product methods
+    /// written in it.
+    implementations: BTreeMap<TraitId, Vec<Implementation>>,
 }
 
-/// One product `trait` declaration: its package, the tokens from `trait` to its body's `{`, and the
-/// span from `trait` to the closing `}`.
-struct TraitDecl {
+/// One product `impl` block of a first-party trait, and the product methods written in it.
+struct Implementation {
     src: usize,
-    header: Vec<Tok>,
-    from: usize,
-    to: usize,
+    block: &'static ImplRecord,
+    methods: Vec<&'static ItemRecord>,
 }
 
 /// Words that open a parenthesis without calling anything.
@@ -1850,8 +1852,14 @@ impl World {
         let mut fields: HashMap<(String, String), Vec<(usize, &'static ItemRecord)>> =
             HashMap::new();
         let mut deref_types = BTreeSet::new();
-        let mut traits: HashMap<&'static str, Vec<TraitDecl>> = HashMap::new();
-        let mut implementors: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let resolver = TraitResolver::new(
+            &srcs
+                .iter()
+                .map(|src| (src.package, src.index))
+                .collect::<Vec<_>>(),
+        );
+        let mut declared: BTreeMap<TraitId, Vec<(usize, &'static ItemRecord)>> = BTreeMap::new();
+        let mut implementations: BTreeMap<TraitId, Vec<Implementation>> = BTreeMap::new();
         for (at, src) in srcs.iter().enumerate() {
             for block in src.index.impls() {
                 if src.in_product(block.whole().start())
@@ -1863,35 +1871,45 @@ impl World {
                 {
                     deref_types.insert(block.type_owner().to_owned());
                 }
-                if let Some(name) = block.trait_name()
-                    && src.in_product(block.whole().start())
-                {
-                    implementors
-                        .entry(bare_trait(name).to_owned())
-                        .or_default()
-                        .insert(block.type_owner().to_owned());
+                if !src.in_product(block.whole().start()) {
+                    continue;
+                }
+                for id in resolver.implemented(src.package, block) {
+                    let methods = src
+                        .index
+                        .items()
+                        .iter()
+                        .filter(|record| {
+                            record.kind().is_callable()
+                                && block.body().holds(record.whole().start())
+                                && src.product_item(record)
+                        })
+                        .collect();
+                    implementations.entry(id).or_default().push(Implementation {
+                        src: at,
+                        block,
+                        methods,
+                    });
                 }
             }
-            for keyword in src.named("trait") {
-                if !src.in_product(keyword) {
-                    continue;
+            for declaration in src.index.traits() {
+                let methods: Vec<(usize, &'static ItemRecord)> = src
+                    .index
+                    .items()
+                    .iter()
+                    .filter(|record| {
+                        record.kind().is_callable()
+                            && record.type_owner().is_none()
+                            && declaration.body().holds(record.whole().start())
+                    })
+                    .map(|record| (at, record))
+                    .collect();
+                for id in resolver.identities(src.package, declaration) {
+                    declared
+                        .entry(id)
+                        .or_default()
+                        .extend(methods.iter().copied());
                 }
-                let toks = src.lex(keyword, src.file_end(keyword).min(keyword + 4096));
-                let Some(name) = toks.get(1).filter(|tok| tok.kind == Kind::Ident) else {
-                    continue;
-                };
-                let Some(open) = toks.iter().position(|tok| src.is(Some(tok), "{")) else {
-                    continue;
-                };
-                let Some(close) = src.group(toks[open].start).last().copied() else {
-                    continue;
-                };
-                traits.entry(src.text(*name)).or_default().push(TraitDecl {
-                    src: at,
-                    header: toks[..open].to_vec(),
-                    from: keyword,
-                    to: close.end,
-                });
             }
             for record in src.index.items() {
                 if record.kind() == ItemKind::Field
@@ -1950,8 +1968,9 @@ impl World {
             callables,
             fields,
             deref_types,
-            traits,
-            implementors,
+            resolver,
+            declared,
+            implementations,
         }
     }
 
@@ -2078,90 +2097,87 @@ impl World {
 }
 
 impl World {
-    /// Whether the product declares a `trait` named `name` in a package `from` can name.
-    fn first_party_trait(&self, from: usize, name: &str) -> bool {
-        self.traits
-            .get(name)
-            .into_iter()
-            .flatten()
-            .any(|decl| self.reach[from].contains(&decl.src))
-    }
-
-    /// **The first-party methods a call of `method` on a value known only by `traits` can run.**
-    /// A trait counts when the product declares it where the caller (`from`) can name it, and so
-    /// does every trait such a declaration names as a supertrait, where the declaring package can
-    /// name it, to a fixed point; a trait the product does not declare (a standard or a
-    /// third-party one) is foreign. The answer is each default method named `method`, with a body,
-    /// of a first-party trait, and each `method` of a product `impl` of a first-party trait — or of
-    /// a foreign supertrait, for a type that implements a first-party trait. Every arm is in: a
-    /// `cfg(target_os)` impl is an implementation like any other. Traits are told apart by their
-    /// bare names ([`bare_trait`]), so two first-party traits of one name are followed together.
+    /// **The first-party methods a call of `method` on a value known only by the traits `stated`
+    /// can run** — `None` when no first-party trait among them, or among their supertraits,
+    /// declares `method` (a method of a standard or third-party trait, or of a foreign
+    /// supertrait), which leaves the call to the untyped reading.
+    ///
+    /// The traits are identities ([`TraitId`]): two traits of one name in two modules are two.
+    /// The supertraits are followed to a fixed point, each resolved where it is declared. For each
+    /// trait of them that declares `method`, the answer is the `method` of each product `impl` of
+    /// it — for a supertrait, only the impls for a type that implements a stated trait — on every
+    /// arm the records carry (a `cfg(target_os)` impl is an implementation like any other); and
+    /// the trait's default `method`, with its body, when one of those impls does not override it
+    /// or when there is none.
     fn trait_methods(
         &self,
-        from: usize,
-        traits: &[&'static str],
+        stated: &BTreeSet<TraitId>,
         method: &str,
     ) -> Option<Vec<(usize, &'static ItemRecord)>> {
-        let mut first_party: BTreeSet<&str> = BTreeSet::new();
-        let mut foreign: BTreeSet<&str> = BTreeSet::new();
-        let mut work: Vec<(usize, &'static str)> =
-            traits.iter().map(|name| (from, *name)).collect();
-        while let Some((at, name)) = work.pop() {
-            let decls: Vec<&TraitDecl> = self
-                .traits
-                .get(name)
+        let mut closure = stated.clone();
+        let mut work: Vec<TraitId> = stated.iter().cloned().collect();
+        while let Some(id) = work.pop() {
+            for supertrait in self.resolver.supertraits(&id) {
+                if closure.insert(supertrait.clone()) {
+                    work.push(supertrait);
+                }
+            }
+        }
+        let declaring: Vec<&TraitId> = closure
+            .iter()
+            .filter(|id| {
+                self.declared.get(*id).is_some_and(|methods| {
+                    methods.iter().any(|(_, record)| record.name() == method)
+                })
+            })
+            .collect();
+        if declaring.is_empty() {
+            return None;
+        }
+        let implementors: BTreeSet<&str> = stated
+            .iter()
+            .flat_map(|id| self.implementations.get(id).into_iter().flatten())
+            .map(|implementation| implementation.block.type_owner())
+            .collect();
+        let mut out: Vec<(usize, &'static ItemRecord)> = Vec::new();
+        for id in declaring {
+            let blocks: Vec<&Implementation> = self
+                .implementations
+                .get(id)
                 .into_iter()
                 .flatten()
-                .filter(|decl| self.reach[at].contains(&decl.src))
+                .filter(|implementation| {
+                    stated.contains(id) || implementors.contains(implementation.block.type_owner())
+                })
                 .collect();
-            if decls.is_empty() {
-                foreign.insert(name);
-                continue;
-            }
-            if !first_party.insert(name) {
-                continue;
-            }
-            for decl in decls {
-                work.extend(
-                    supertraits(&self.srcs[decl.src], &decl.header)
+            let mut default_runs = blocks.is_empty();
+            for implementation in blocks {
+                let overrides: Vec<&'static ItemRecord> = implementation
+                    .methods
+                    .iter()
+                    .copied()
+                    .filter(|record| record.name() == method)
+                    .collect();
+                default_runs |= overrides.is_empty();
+                out.extend(
+                    overrides
                         .into_iter()
-                        .map(|supertrait| (decl.src, supertrait)),
+                        .map(|record| (implementation.src, record)),
+                );
+            }
+            if default_runs {
+                out.extend(
+                    self.declared[id]
+                        .iter()
+                        .copied()
+                        .filter(|(_, record)| record.name() == method && record.body().is_some()),
                 );
             }
         }
-        if first_party.is_empty() {
-            return None;
-        }
-        let types: BTreeSet<&String> = first_party
-            .iter()
-            .flat_map(|name| self.implementors.get(*name).into_iter().flatten())
-            .collect();
-        let methods = self.callables.get(method).into_iter().flatten();
-        Some(
-            methods
-                .filter_map(|callable| {
-                    let record = callable.record?;
-                    let declared_in = bare_trait(callable.trait_name.as_deref()?);
-                    let runs = match &callable.type_owner {
-                        None => first_party.contains(declared_in) && record.body().is_some(),
-                        Some(owner) => {
-                            types.contains(owner)
-                                && (first_party.contains(declared_in)
-                                    || foreign.contains(declared_in))
-                        }
-                    };
-                    runs.then_some((callable.src, record))
-                })
-                .collect(),
-        )
+        let mut seen = BTreeSet::new();
+        out.retain(|(src, record)| seen.insert((*src, record.whole().start())));
+        Some(out)
     }
-}
-
-/// A trait's bare name as an `impl` block or a bound writes it: the path's last segment without
-/// its arguments — `crate::update_job::Driver` and `Owed<Id>` are `Driver` and `Owed`.
-fn bare_trait(spelled: &str) -> &str {
-    let path = spelled.split(['<', '(']).next().unwrap_or(spelled).trim();
-    path.rsplit("::").next().unwrap_or(path).trim()
 }
 
 /// The index of the `>` closing the `<` at `toks[open]`.
@@ -2185,10 +2201,10 @@ fn angle_close(src: &Src, toks: &[Tok], open: usize) -> Option<usize> {
     None
 }
 
-/// The traits a bound list names, by their bare names: `Driver + Send + 'static` names `Driver`
-/// and `Send`, `for<'a> crate::lane::Owed<Id>` names `Owed`; a lifetime and a relaxed `?Sized`
-/// name nothing.
-fn bound_traits(src: &Src, toks: &[Tok]) -> Vec<&'static str> {
+/// The traits a bound list names, each as the path it is written as, without arguments:
+/// `Driver + Send + 'static` names `Driver` and `Send`, `for<'a> crate::lane::Owed<Id>` names
+/// `crate::lane::Owed`; a lifetime and a relaxed `?Sized` name nothing.
+fn bound_traits(src: &Src, toks: &[Tok]) -> Vec<Vec<&'static str>> {
     let mut bounds: Vec<&[Tok]> = Vec::new();
     let mut depth = 0usize;
     let mut start = 0;
@@ -2217,15 +2233,15 @@ fn bound_traits(src: &Src, toks: &[Tok]) -> Vec<&'static str> {
                 bound = &bound[angle_close(src, bound, 1)? + 1..];
             }
             let mut at = usize::from(src.is(bound.first(), "::"));
-            let mut last = None;
+            let mut path = Vec::new();
             while let Some(segment) = bound.get(at).filter(|tok| tok.kind == Kind::Ident) {
-                last = Some(src.text(*segment));
+                path.push(src.text(*segment));
                 if !src.is(bound.get(at + 1), "::") {
                     break;
                 }
                 at += 2;
             }
-            last
+            (!path.is_empty()).then_some(path)
         })
         .collect()
 }
@@ -2238,7 +2254,7 @@ fn header_bounds(
     src: &Src,
     toks: &[Tok],
     after: usize,
-    into: &mut HashMap<&'static str, Vec<&'static str>>,
+    into: &mut HashMap<&'static str, Vec<Vec<&'static str>>>,
 ) {
     if src.is(toks.get(after + 1), "<")
         && let Some(close) = angle_close(src, toks, after + 1)
@@ -2272,44 +2288,17 @@ fn header_bounds(
     }
 }
 
-/// The supertraits a `trait` header (`trait Name<…>: A + B where Self: C`) names: the bounds after
-/// its name and those its `where` clause puts on `Self`.
-fn supertraits(src: &Src, header: &[Tok]) -> Vec<&'static str> {
-    let at = if src.is(header.get(2), "<") {
-        angle_close(src, header, 2).map_or(header.len(), |close| close + 1)
-    } else {
-        2
-    };
-    let clause = header
-        .iter()
-        .position(|tok| src.is(Some(tok), "where"))
-        .unwrap_or(header.len());
-    let mut out = Vec::new();
-    if at < clause && src.is(header.get(at), ":") {
-        out.extend(bound_traits(src, &header[at + 1..clause]));
-    }
-    if clause < header.len() {
-        for predicate in split_commas(src, &header[clause + 1..]) {
-            if let [name, colon, rest @ ..] = predicate.as_slice()
-                && src.is(Some(name), "Self")
-                && src.is(Some(colon), ":")
-            {
-                out.extend(bound_traits(src, rest));
-            }
-        }
-    }
-    out
-}
-
-/// **The traits a written type states its value is known by**, by their bare names: `dyn A + B`
-/// and `impl A` name their bounds, behind any `&`, `&mut`, lifetime, `Box<…>`, `Arc<…>` or
-/// `Rc<…>`, and a generic parameter of `generics` names its bounds. `None` for every other type —
-/// a concrete type states no trait, and an alias is not resolved.
+/// **The traits a written type states its value is known by**: `dyn A + B` and `impl A` name
+/// their bounds (each resolved by `resolve`), behind any `&`, `&mut`, lifetime, `Box<…>`, `Arc<…>`
+/// or `Rc<…>`, and a generic parameter of `generics` names its bounds. `None` for every other type
+/// — a concrete type states no trait, and an alias is not resolved. A standard or third-party
+/// bound resolves to no trait, so `dyn std::io::Write` states an empty set.
 fn stated_traits(
     src: &Src,
     toks: &[Tok],
-    generics: &HashMap<&'static str, Vec<&'static str>>,
-) -> Option<Vec<&'static str>> {
+    generics: &HashMap<&'static str, BTreeSet<TraitId>>,
+    resolve: &dyn Fn(&[&str]) -> BTreeSet<TraitId>,
+) -> Option<BTreeSet<TraitId>> {
     let mut at = 0;
     while src.is(toks.get(at), "&") {
         at += 1;
@@ -2322,7 +2311,12 @@ fn stated_traits(
     }
     let toks = &toks[at..];
     if src.is(toks.first(), "dyn") || src.is(toks.first(), "impl") {
-        return Some(bound_traits(src, &toks[1..]));
+        return Some(
+            bound_traits(src, &toks[1..])
+                .iter()
+                .flat_map(|path| resolve(path))
+                .collect(),
+        );
     }
     let Some(open) = toks.iter().position(|tok| src.is(Some(tok), "<")) else {
         let [name] = toks else {
@@ -2348,16 +2342,7 @@ fn stated_traits(
     let [inner]: [Vec<Tok>; 1] = split_commas(src, &toks[open + 1..toks.len() - 1])
         .try_into()
         .ok()?;
-    stated_traits(src, &inner, generics)
-}
-
-/// The traits a call's receiver is stated to be known by ([`Body::receiver_traits`]), by their
-/// bare names.
-struct Stated {
-    traits: Vec<&'static str>,
-    /// Whether the receiver can be nothing else: a parameter no other binding may shadow, and not
-    /// a path call's qualifier, which may name a type too.
-    alone: bool,
+    stated_traits(src, &inner, generics, resolve)
 }
 
 /// One call, or one macro invocation, found in a body.
@@ -2394,7 +2379,7 @@ struct Body<'w> {
     annotated: HashMap<&'static str, (usize, Vec<Tok>)>,
     /// The bounds on the generic parameters the body can name ([`Body::generic_bounds`]), read
     /// the first time a call asks.
-    generics: std::cell::OnceCell<HashMap<&'static str, Vec<&'static str>>>,
+    generics: std::cell::OnceCell<HashMap<&'static str, BTreeSet<TraitId>>>,
     toks: Vec<Tok>,
 }
 
@@ -2521,64 +2506,67 @@ impl<'w> Body<'w> {
         }
     }
 
-    /// **The traits a call's receiver is stated to be known by** ([`stated_traits`]); `None` when
-    /// the source states none. The receiver is read where the source writes its type: a parameter,
-    /// a local of [`annotated_lets`] bound before the call, `self.field` by every declaration of
-    /// the field (all of them must state a trait), and `self` in a trait's default method, which is
+    /// **The traits a call's receiver is stated to be known by** ([`stated_traits`]), by their
+    /// identities; `None` when the source states none. The receiver is read where the source
+    /// writes its type: a parameter no other binding in the body shadows ([`binding_count`]), a
+    /// local of [`annotated_lets`] bound before the call, `self.field` by every declaration of the
+    /// field (all of them must state a trait), and `self` in a trait's default method, which is
     /// the trait. A path call's qualifier states its traits when it is a generic parameter, `Self`
-    /// in a trait's default method, or a trait the product declares where the body can name it.
-    /// The traits are all the receiver can be ([`Stated::alone`]) except for a parameter whose
-    /// name another binding in the body may shadow ([`binding_count`]) and a path call, whose
-    /// qualifier may name a type too.
-    fn receiver_traits(&self, site: &Site) -> Option<Stated> {
+    /// in a trait's default method, or a path that resolves to a first-party trait
+    /// (`Driver::prepare`, `crate::update_job::Driver::prepare`).
+    fn receiver_traits(&self, site: &Site) -> Option<BTreeSet<TraitId>> {
         let s = self.s();
         let generics = self.generics.get_or_init(|| self.generic_bounds());
-        let alone = |traits| Stated {
-            traits,
-            alone: true,
-        };
+        let resolve = |path: &[&str]| self.traits_named(path);
         match &site.form {
             Form::Method(Some(chain)) => match chain.as_slice() {
-                ["self"] => generics.get("Self").cloned().map(alone),
+                ["self"] => generics.get("Self").cloned(),
                 [name] => match self.params.get(name) {
-                    Some(written) => Some(Stated {
-                        traits: stated_traits(s, written, generics)?,
-                        alone: binding_count(s, &self.toks, &self.params, name) == 1,
-                    }),
+                    Some(written) => (binding_count(s, &self.toks, &self.params, name) == 1)
+                        .then(|| stated_traits(s, written, generics, &resolve))
+                        .flatten(),
                     None => self
                         .annotated
                         .get(name)
                         .filter(|(bound, _)| *bound < site.at)
-                        .and_then(|(_, written)| stated_traits(s, written, generics))
-                        .map(alone),
+                        .and_then(|(_, written)| stated_traits(s, written, generics, &resolve)),
                 },
                 ["self", field] => {
                     let declared = self.self_field_written(field);
                     if declared.is_empty() {
                         return None;
                     }
-                    let mut traits = Vec::new();
+                    let mut traits = BTreeSet::new();
                     for written in declared {
-                        traits.extend(stated_traits(s, &written, generics)?);
+                        traits.extend(stated_traits(s, &written, generics, &resolve)?);
                     }
-                    Some(alone(traits))
+                    Some(traits)
                 }
                 _ => None,
             },
             Form::Path(quals) => {
-                let qualifier = *quals.last()?;
-                let traits = match generics.get(qualifier) {
-                    Some(bounds) => bounds.clone(),
-                    None if self.world.first_party_trait(self.src, qualifier) => vec![qualifier],
-                    None => return None,
-                };
-                Some(Stated {
-                    traits,
-                    alone: false,
-                })
+                if let [qualifier] = quals.as_slice()
+                    && let Some(bounds) = generics.get(qualifier)
+                {
+                    return Some(bounds.clone());
+                }
+                let named = self.traits_named(quals);
+                (!named.is_empty()).then_some(named)
             }
             _ => None,
         }
+    }
+
+    /// The first-party traits a path written in this body names, in each module the body is
+    /// declared in.
+    fn traits_named(&self, path: &[&str]) -> BTreeSet<TraitId> {
+        let path: Vec<String> = path.iter().map(|segment| (*segment).to_owned()).collect();
+        let package = self.s().package;
+        self.record
+            .module_paths()
+            .into_iter()
+            .flat_map(|module| self.world.resolver.resolve(package, module, &path))
+            .collect()
     }
 
     /// The type each declaration of `self.field` writes, read as [`Body::self_field_type`] reads
@@ -2603,12 +2591,13 @@ impl<'w> Body<'w> {
             .collect()
     }
 
-    /// The bounds on every generic parameter the body can name, by parameter: its `impl` block's,
-    /// its own, and — in a trait's default method — its trait's, where `Self` is bound by the trait.
-    fn generic_bounds(&self) -> HashMap<&'static str, Vec<&'static str>> {
+    /// The traits bounding every generic parameter the body can name, by parameter: its `impl`
+    /// block's, its own, and — in a trait's default method — its trait's, where `Self` is the
+    /// trait. Each bound is resolved in the body's module.
+    fn generic_bounds(&self) -> HashMap<&'static str, BTreeSet<TraitId>> {
         let s = self.s();
         let start = self.record.whole().start();
-        let mut bounds = HashMap::new();
+        let mut written: HashMap<&'static str, Vec<Vec<&'static str>>> = HashMap::new();
         if let Some(block) = s
             .index
             .impls()
@@ -2618,23 +2607,25 @@ impl<'w> Body<'w> {
         {
             let toks = s.lex(block.whole().start(), block.body().start());
             if let Some(at) = toks.iter().position(|tok| s.is(Some(tok), "impl")) {
-                header_bounds(s, &toks, at, &mut bounds);
+                header_bounds(s, &toks, at, &mut written);
             }
         }
+        let mut bounds: HashMap<&'static str, BTreeSet<TraitId>> = HashMap::new();
         if self.record.type_owner().is_none()
-            && let Some(trait_name) = self.record.trait_name()
+            && let Some(declaration) = s
+                .index
+                .traits()
+                .iter()
+                .filter(|declaration| declaration.body().holds(start))
+                .min_by_key(|declaration| declaration.body().len())
         {
-            let name = bare_trait(trait_name);
-            bounds.insert("Self", vec![name]);
-            if let Some(decl) = self
-                .world
-                .traits
-                .get(name)
-                .into_iter()
-                .flatten()
-                .find(|decl| decl.src == self.src && decl.from <= start && start < decl.to)
-            {
-                header_bounds(s, &decl.header, 1, &mut bounds);
+            bounds.insert(
+                "Self",
+                self.world.resolver.identities(s.package, declaration),
+            );
+            let toks = s.lex(declaration.whole().start(), declaration.body().start());
+            if let Some(at) = toks.iter().position(|tok| s.is(Some(tok), "trait")) {
+                header_bounds(s, &toks, at + 1, &mut written);
             }
         }
         let declaration = s.lex(
@@ -2642,7 +2633,13 @@ impl<'w> Body<'w> {
             self.record.declaration().end(),
         );
         if let Some(at) = declaration.iter().position(|tok| s.is(Some(tok), "fn")) {
-            header_bounds(s, &declaration, at + 1, &mut bounds);
+            header_bounds(s, &declaration, at + 1, &mut written);
+        }
+        for (name, paths) in written {
+            bounds
+                .entry(name)
+                .or_default()
+                .extend(paths.iter().flat_map(|path| self.traits_named(path)));
         }
         bounds
     }
@@ -2842,12 +2839,7 @@ fn binding_count(src: &Src, toks: &[Tok], params: &HashMap<&str, Vec<Tok>>, name
     }
     let mut at = 0;
     while at < toks.len() {
-        if src.is(toks.get(at), "|")
-            && let Some(close) = toks[at + 1..]
-                .iter()
-                .position(|tok| src.is(Some(tok), "|"))
-                .map(|close| close + at + 1)
-        {
+        if let Some(close) = closure_parameters(src, toks, at) {
             count += usize::from(receiver_pattern_names(src, &toks[at + 1..close]).contains(name));
             at = close + 1;
         } else {
@@ -2855,6 +2847,44 @@ fn binding_count(src: &Src, toks: &[Tok], params: &HashMap<&str, Vec<Tok>>, name
         }
     }
     count
+}
+
+/// Words after which a `|` opens a closure's parameters rather than continuing an operand.
+const CLOSURE_LEADS: [&str; 6] = ["move", "return", "in", "else", "break", "async"];
+
+/// When `toks[at]` is the `|` opening a closure's parameters, the index of the `|` closing them.
+///
+/// A `|` that follows an operand — a name, a literal, `)`, `]`, `}` or `?` — is a match or-pattern's
+/// bar (`Some(0) | None =>`, `if let A | B = …`) or a bitwise or, never a closure: a closure stands
+/// where an expression starts (after `(`, `,`, `=`, `{`, `;`, `=>`, an operator, or `move`). Its
+/// parameters end at the next `|` outside any bracket.
+fn closure_parameters(src: &Src, toks: &[Tok], at: usize) -> Option<usize> {
+    if !src.is(toks.get(at), "|") {
+        return None;
+    }
+    if let Some(before) = at.checked_sub(1).map(|before| toks[before]) {
+        let operand = match before.kind {
+            Kind::Literal | Kind::Lifetime => true,
+            Kind::Ident => !CLOSURE_LEADS.contains(&src.text(before)),
+            Kind::Punct => [")", "]", "}", "?"].contains(&src.text(before)),
+        };
+        if operand {
+            return None;
+        }
+    }
+    let mut depth = 0usize;
+    for (inner, tok) in toks.iter().enumerate().skip(at + 1) {
+        if tok.kind != Kind::Punct {
+            continue;
+        }
+        match src.text(*tok) {
+            "(" | "[" | "{" => depth += 1,
+            ")" | "]" | "}" => depth = depth.checked_sub(1)?,
+            "|" if depth == 0 => return Some(inner),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn assigned(src: &Src, toks: &[Tok], name: &str, after: usize) -> bool {
@@ -8593,21 +8623,25 @@ fn builder_thread_names(world: &World) -> BTreeSet<String> {
 /// than taken to be every method of that name (which would make every door reach nearly every
 /// function).
 ///
-/// **A call on a receiver stated to be a first-party trait names every implementation of that
-/// trait** ([`Body::receiver_traits`], [`World::trait_methods`]): `driver.prepare(…)` with
-/// `driver: &dyn Driver` names `prepare` of every product `impl Driver for …`, on every platform
-/// arm the records carry, and the trait's own default `prepare` if it has one. The receiver's
-/// stated type is `dyn Trait` (bare, behind `&`, `Box`, `Arc`, `Rc`), `impl Trait`, or a generic
-/// parameter bound by the trait, inline or in a `where` clause; in a trait's default method
-/// `self` is the trait, and a path call qualified by a first-party trait or a bound parameter
-/// names its implementations as well as what the resolver answers. Dynamic dispatch can run any
-/// of these, so following all of them over-approximates the reach — more bodies served, never
-/// fewer — which is the conservative direction for the question the reach answers (*is this body
-/// reached?*). A trait with no first-party implementation adds nothing. A standard or
-/// third-party trait is not first-party and is not expanded: the call is read as an untyped one
-/// is. Not followed, here as before: a stored closure, a function pointer, a type written
-/// through an alias, and an untyped receiver whose method name is shared — S-2a's call graph is
-/// what follows those.
+/// **A call on a receiver stated to be a first-party trait names that trait's implementations,
+/// and nothing else** ([`Body::receiver_traits`], [`World::trait_methods`]): `driver.prepare(…)`
+/// with `driver: &dyn Driver` names `prepare` of every product `impl` of
+/// `crate::update_job::Driver`, on every platform arm the records carry, and the trait's own
+/// default `prepare` only for an impl that does not override it. The receiver's stated type is
+/// `dyn Trait` (bare, behind `&`, `Box`, `Arc`, `Rc`), `impl Trait`, or a generic parameter bound
+/// by the trait, inline or in a `where` clause; in a trait's default method `self` is the trait;
+/// a path call names the trait when its qualifier resolves to one (`Driver::prepare`) or is a
+/// bound parameter (`D::prepare`). A trait is its identity ([`TraitId`], resolved by
+/// [`TraitResolver`]), so two traits of one name are never followed together. The answer is never
+/// united with the by-name one: the trait's implementations are what dispatch can run. Dynamic
+/// dispatch can run any of them, so following all of them is the conservative direction for the
+/// question the reach answers (*is this body reached?*) without naming anything dispatch cannot
+/// run. A trait with no first-party implementation adds nothing. A call whose stated traits are
+/// all standard or third-party, or whose method no first-party trait among them declares (a
+/// foreign supertrait's), is read as an untyped one is; so is a parameter another binding in the
+/// body really shadows ([`binding_count`]). Not followed, here as before: a stored closure, a
+/// function pointer, `<X as Trait>::m`, a type written through an alias, and an untyped receiver
+/// whose method name is shared — S-2a's call graph is what follows those.
 fn named_callees(body: &Body<'_>, site: &Site) -> Vec<(usize, &'static ItemRecord)> {
     let callees = resolved(body, site);
     let untyped_method = matches!(site.form, Form::Method(_)) && !body.receiver_is_typed(site);
@@ -8619,22 +8653,9 @@ fn named_callees(body: &Body<'_>, site: &Site) -> Vec<(usize, &'static ItemRecor
     let Some(stated) = body.receiver_traits(site) else {
         return by_name;
     };
-    let Some(mut dispatched) = body
-        .world
-        .trait_methods(body.src, &stated.traits, site.name)
-    else {
-        return by_name;
-    };
-    if !stated.alone {
-        for callee in by_name {
-            if !dispatched.iter().any(|(src, record)| {
-                *src == callee.0 && record.whole().start() == callee.1.whole().start()
-            }) {
-                dispatched.push(callee);
-            }
-        }
-    }
-    dispatched
+    body.world
+        .trait_methods(&stated, site.name)
+        .unwrap_or(by_name)
 }
 
 /// **The functions a door reaches**: the door's own declarations and every product function
@@ -8768,11 +8789,15 @@ fn uncalled_bodies() -> BTreeSet<&'static str> {
 /// any other. A row's thread that the product starts under no such name is refused too. This is
 /// the interim reachability `bt-source`'s items allow ([`named_callees`]): a call on a receiver
 /// stated to be a first-party trait (`dyn Trait` behind `&`, `Box`, `Arc` or `Rc`, `impl Trait`, a
-/// bound generic parameter) is followed into every first-party implementation of that trait, on
-/// every platform arm; a call through a stored closure or a function pointer, a call on a value
-/// known only by a standard or third-party trait, a receiver whose type is written through an
-/// alias or not written at all and whose method name is shared is not followed (S-2a's call graph
-/// is).
+/// bound generic parameter, `Trait::m`) is followed into that trait's implementations — the trait
+/// by its identity, every platform arm, its default only where an impl does not override it — and
+/// nothing else; a call through a stored closure or a function pointer, `<X as Trait>::m`, a call
+/// on a value known only by a standard or third-party trait, a receiver whose type is written
+/// through an alias or not written at all and whose method name is shared is not followed (S-2a's
+/// call graph is). With the trait identity, no worker body is served through a same-named trait
+/// (`a_trait_is_its_identity_and_a_default_runs_only_where_it_is_not_overridden` holds it over the
+/// real tree), and the five `completions-door-starts.tsv` lines are each used and none is stale
+/// (this test).
 ///
 /// MUTATION: give the hand-off row the door `HandoffLane::answers` (it drains the lane's answers
 /// and starts nothing; its thread still `bt-os-handoff`) and it goes red: `run_handoff_lane` is
@@ -8922,10 +8947,13 @@ fn worker_door_body_failures(world: &World, effects: &[Vec<&str>]) -> Vec<String
 }
 
 // Parsed by the guard but absent from the Rust build, as `ReceiverTypingSourceShapes` is: each
-// function calls `prepare` on a receiver stated to be the update job's `Driver` in one of the
-// shapes `stated_traits` reads (`ReceiverTypingSourceShapes::trait_shape_field` is the field's).
+// function calls `prepare` on a receiver stated in one of the shapes `stated_traits` reads
+// (`ReceiverTypingSourceShapes::trait_shape_field` is the field's), or in one it must refuse.
 #[cfg(any())]
 mod trait_dispatch_source_shapes {
+    use crate::update_job::Driver;
+    use crate::update_prepare_windows::PreparePoint;
+
     fn trait_shape_borrowed(driver: &dyn Driver) {
         let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
     }
@@ -8966,7 +8994,39 @@ mod trait_dispatch_source_shapes {
         let _ = D::prepare(driver, unreachable!(), unreachable!(), unreachable!());
     }
 
-    trait Driver {
+    fn trait_shape_trait_path(driver: &dyn Driver) {
+        let _ = Driver::prepare(driver, unreachable!(), unreachable!(), unreachable!());
+    }
+
+    fn trait_shape_absolute_path(driver: &dyn Driver) {
+        let _ = crate::update_job::Driver::prepare(
+            driver,
+            unreachable!(),
+            unreachable!(),
+            unreachable!(),
+        );
+    }
+
+    fn trait_shape_or_pattern(driver: &dyn Driver, state: Option<u8>) {
+        match state {
+            Some(0) | None => {}
+            Some(_) => {
+                let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
+            }
+        }
+        let _ = matches!(state, Some(1) | Some(2));
+    }
+
+    fn trait_shape_shadowed(driver: &dyn Driver, other: &crate::preview_wrap::Cache) {
+        let driver = other;
+        let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
+    }
+
+    fn trait_shape_windows_point(point: &dyn PreparePoint) {
+        let _ = point.prepare(unreachable!(), unreachable!(), unreachable!());
+    }
+
+    trait LocalDriver: Driver {
         fn trait_shape_default(&self) {
             let _ = self.prepare(unreachable!(), unreachable!(), unreachable!());
         }
@@ -8994,33 +9054,47 @@ fn fixture(world: &World, name: &str) -> (usize, &'static ItemRecord) {
         .unwrap_or_else(|| panic!("the cfg-false fixture `{name}` is indexed"))
 }
 
-/// The keys of every product implementation of the update job's `Driver::prepare`, read from the
-/// `impl` blocks `bt-source` records — independently of the walk under test.
-fn driver_prepare_implementations(world: &World) -> BTreeSet<String> {
-    let mut keys = BTreeSet::new();
-    for src in &world.srcs {
-        for block in src.index.impls() {
-            let implements_driver = block
-                .trait_name()
-                .is_some_and(|name| bare_trait(name) == "Driver");
-            if !implements_driver || !src.in_product(block.whole().start()) {
-                continue;
-            }
-            keys.extend(
-                src.index
-                    .items()
-                    .iter()
-                    .filter(|record| {
-                        record.kind().is_callable()
-                            && record.name() == "prepare"
-                            && block.body().holds(record.whole().start())
-                            && src.product_item(record)
-                    })
-                    .map(|record| key_of(src, record)),
-            );
-        }
+/// A first-party trait's identity in `bt-app`, by its module path and name.
+fn bt_app_trait(module_path: &str, name: &str) -> TraitId {
+    TraitId {
+        package: "bt-app".to_owned(),
+        module_path: module_path.to_owned(),
+        name: name.to_owned(),
     }
-    keys
+}
+
+/// The keys of the product overrides of `method` in every `impl` of the trait `id`.
+fn implementations_of(world: &World, id: &TraitId, method: &str) -> BTreeSet<String> {
+    world
+        .implementations
+        .get(id)
+        .into_iter()
+        .flatten()
+        .flat_map(|implementation| {
+            implementation
+                .methods
+                .iter()
+                .filter(|record| record.name() == method)
+                .map(|record| key_of(&world.srcs[implementation.src], record))
+        })
+        .collect()
+}
+
+/// The keys of what the calls of `method` in the fixture function `shape` name.
+fn named_in_shape(world: &World, shape: &str, method: &str) -> BTreeSet<String> {
+    let (src, record) = fixture(world, shape);
+    let body = Body::new(world, src, record);
+    let sites: Vec<Site> = body
+        .sites()
+        .into_iter()
+        .filter(|site| site.name == method)
+        .collect();
+    assert!(!sites.is_empty(), "`{shape}` calls `{method}`");
+    sites
+        .iter()
+        .flat_map(|site| named_callees(&body, site))
+        .map(|(at, record)| key_of(&world.srcs[at], record))
+        .collect()
 }
 
 /// The `# effects` row the trait-object test plants: a `worker-door-body` for the macOS
@@ -9030,29 +9104,37 @@ const PLANTED_DRIVER_BODY: &str = "bt-app\t-\tcrate::update_prepare_macos::prepa
                                    std::fs::read_dir 1\tworker-door-body\tWorkerCtx\t";
 
 /// RED (T-DOOR-REACH-TRAIT-OBJECTS) — **a call through a trait object reaches every first-party
-/// implementation of the trait.**
+/// implementation of the trait, and nothing else.**
 ///
 /// The update job's press reaches its Prepare only through `driver: &dyn Driver`
-/// (`Job::answer_verb` → `driver.prepare(…)`). Every receiver shape `stated_traits` reads names
-/// exactly the product's implementations of `Driver::prepare` — read from `bt-source`'s impl
-/// blocks, every platform arm — and a path call qualified by a bound parameter names at least
-/// those; the `update download and staging` row's reach holds all of them; and a ledger copy that
-/// plants a `worker-door-body` row for the macOS Prepare's road (run only on the thread
-/// `<MacPrepare as Driver>::prepare` starts) holds the fourth equality with no line in either
-/// shrink-only list.
+/// (`Job::answer_verb` → `driver.prepare(…)`). A ledger copy that plants a `worker-door-body` row
+/// for the macOS Prepare's road (run only on the thread `<MacPrepare as Driver>::prepare` starts)
+/// holds the fourth equality with no line in either shrink-only list; the `update download and
+/// staging` row's reach holds every implementation; and every receiver shape `stated_traits`
+/// reads — the path calls `D::prepare`, `Driver::prepare` and `crate::update_job::Driver::prepare`
+/// among them — names **exactly** the product's implementations of `crate::update_job::Driver`'s
+/// `prepare`, every platform arm, and not `preview_wrap::Cache::prepare` or any other method of
+/// that name.
 ///
-/// MUTATION: make [`named_callees`] return `by_name` before it asks for the receiver's traits (no
-/// trait expansion) — every shape names nobody, and the planted body runs on `bt-update-job`
-/// with no row's door leading there.
+/// MUTATIONS: make [`named_callees`] return `by_name` before it asks for the receiver's traits
+/// (no trait expansion) — the planted body runs on `bt-update-job` with no row's door leading
+/// there; give a path call the union of the trait's implementations and the by-name answer
+/// (round 1's rule) — `D::prepare` names `preview_wrap::Cache::prepare` too.
 #[test]
 fn a_trait_object_call_reaches_every_first_party_implementation() {
     let world = World::new();
-    let implementations = driver_prepare_implementations(&world);
-    let mac = "bt-app crate::update_prepare_macos::<MacPrepare as Driver>::prepare";
-    assert!(
-        implementations.contains(mac),
-        "the product implements `Driver::prepare` for macOS: {implementations:?}"
-    );
+    let driver = bt_app_trait("crate::update_job", "Driver");
+    let implementations = implementations_of(&world, &driver, "prepare");
+    for platform in [
+        "update_prepare_macos::<MacPrepare",
+        "update_prepare_windows::<WinPrepare",
+    ] {
+        assert!(
+            implementations.iter().any(|key| key.contains(platform)),
+            "the product implements `Driver::prepare` on `{platform}`: {implementations:?}"
+        );
+    }
+
     let marker = "# effects\n";
     let header = REGISTRY.find(marker).expect("the registry has `# effects`") + marker.len();
     let rows = header
@@ -9075,8 +9157,9 @@ fn a_trait_object_call_reaches_every_first_party_implementation() {
         worker_roots(&world)
             .iter()
             .filter(|root| root.reached.contains(&key))
-            .all(|root| implementations
-                .contains(&key_of(&world.srcs[root.spawner.0], root.spawner.1))),
+            .all(|root| {
+                implementations.contains(&key_of(&world.srcs[root.spawner.0], root.spawner.1))
+            }),
         "the planted body runs only on threads a `Driver` implementation starts"
     );
     let failures = worker_door_body_failures(&world, &effects);
@@ -9108,55 +9191,228 @@ fn a_trait_object_call_reaches_every_first_party_implementation() {
         row.door
     );
 
-    let shapes = [
-        ("trait_shape_borrowed", true),
-        ("trait_shape_boxed", true),
-        ("trait_shape_shared", true),
-        ("trait_shape_counted", true),
-        ("trait_shape_bound", true),
-        ("trait_shape_clause", true),
-        ("trait_shape_opaque", true),
-        ("trait_shape_annotated", true),
-        ("trait_shape_field", true),
-        ("trait_shape_default", true),
-        ("trait_shape_qualified", false),
-    ];
-    for (shape, alone) in shapes {
-        let (src, record) = fixture(&world, shape);
-        let body = Body::new(&world, src, record);
-        let named: BTreeSet<String> = body
-            .sites()
-            .iter()
-            .filter(|site| site.name == "prepare")
-            .flat_map(|site| named_callees(&body, site))
-            .map(|(at, record)| key_of(&world.srcs[at], record))
-            .collect();
-        if alone {
-            assert_eq!(
-                named, implementations,
-                "`{shape}` names every implementation of `Driver::prepare` and nothing else"
-            );
-        } else {
-            assert!(
-                named.is_superset(&implementations),
-                "`{shape}` names every implementation of `Driver::prepare`: {named:?}"
-            );
+    for shape in [
+        "trait_shape_qualified",
+        "trait_shape_trait_path",
+        "trait_shape_absolute_path",
+        "trait_shape_borrowed",
+        "trait_shape_boxed",
+        "trait_shape_shared",
+        "trait_shape_counted",
+        "trait_shape_bound",
+        "trait_shape_clause",
+        "trait_shape_opaque",
+        "trait_shape_annotated",
+        "trait_shape_field",
+    ] {
+        assert_eq!(
+            named_in_shape(&world, shape, "prepare"),
+            implementations,
+            "`{shape}` names every implementation of `Driver::prepare` and nothing else"
+        );
+    }
+}
+
+/// RED (T-DOOR-REACH-TRAIT-OBJECTS round 2) — **a trait is its identity: a call on one of two
+/// traits of one name reaches that trait's implementations alone, and a trait's default method
+/// runs only for an implementation that does not override it.**
+///
+/// `point: &dyn update_prepare_windows::PreparePoint` names exactly the Windows `PreparePoint`'s
+/// implementations of `prepare`, none of the macOS one's (the same name, the same implementing
+/// type name `Ours`). Over the real tree, for every first-party trait the product implements and
+/// every method it declares: each `impl` method the dispatch names belongs to a block of that
+/// trait or of one of its supertraits — so no worker body is served through a same-named trait —,
+/// each override is named, and the trait's default body is named exactly when an implementation
+/// does not override it (or none exists). In `LocalDriver: Driver`'s default method, `self` is
+/// `LocalDriver`, and `self.prepare(…)` names nothing: no product type implements `LocalDriver`,
+/// and `Driver::prepare` has no default.
+///
+/// MUTATIONS: in [`World::of`], file an `impl` block under every trait of the name its trait
+/// resolves to (round 1's bare-name keying) — the Windows call names the macOS overrides too; in
+/// [`World::trait_methods`], name the default whenever there is one — a default every
+/// implementation overrides is named.
+#[test]
+fn a_trait_is_its_identity_and_a_default_runs_only_where_it_is_not_overridden() {
+    let world = World::new();
+    let windows = bt_app_trait("crate::update_prepare_windows", "PreparePoint");
+    let macos = bt_app_trait("crate::update_prepare_macos", "PreparePoint");
+    let windows_points = implementations_of(&world, &windows, "prepare");
+    let macos_points = implementations_of(&world, &macos, "prepare");
+    assert!(
+        !windows_points.is_empty() && !macos_points.is_empty(),
+        "both platforms implement their own `PreparePoint::prepare`"
+    );
+    assert!(windows_points.is_disjoint(&macos_points));
+    assert_eq!(
+        named_in_shape(&world, "trait_shape_windows_point", "prepare"),
+        windows_points,
+        "a call on the Windows `PreparePoint` names its implementations alone"
+    );
+
+    let mut names: BTreeMap<&str, BTreeSet<&TraitId>> = BTreeMap::new();
+    for id in world.implementations.keys() {
+        names.entry(id.name.as_str()).or_default().insert(id);
+    }
+    assert!(
+        names.values().any(|ids| ids.len() > 1),
+        "the product implements two traits of one name, which the identity keeps apart"
+    );
+    let mut defaults_checked = 0;
+    for (id, blocks) in &world.implementations {
+        let mut closure = BTreeSet::from([id.clone()]);
+        let mut work = vec![id.clone()];
+        while let Some(next) = work.pop() {
+            for supertrait in world.resolver.supertraits(&next) {
+                if closure.insert(supertrait.clone()) {
+                    work.push(supertrait);
+                }
+            }
+        }
+        let declared = world.declared.get(id).cloned().unwrap_or_default();
+        let methods: BTreeSet<&str> = declared.iter().map(|(_, record)| record.name()).collect();
+        for method in methods {
+            let named: BTreeSet<(usize, usize)> = world
+                .trait_methods(&BTreeSet::from([id.clone()]), method)
+                .expect("the trait declares the method")
+                .iter()
+                .map(|(src, record)| (*src, record.whole().start()))
+                .collect();
+            for (src, start) in &named {
+                let in_a_block = world.srcs[*src]
+                    .index
+                    .impls()
+                    .iter()
+                    .any(|block| block.body().holds(*start));
+                if !in_a_block {
+                    continue;
+                }
+                assert!(
+                    closure.iter().any(|trait_id| {
+                        world
+                            .implementations
+                            .get(trait_id)
+                            .into_iter()
+                            .flatten()
+                            .any(|implementation| {
+                                implementation.src == *src
+                                    && implementation.block.body().holds(*start)
+                            })
+                    }),
+                    "`{id}::{method}` names a method of a block of no trait of its own"
+                );
+            }
+            let mut runs_default = blocks.is_empty();
+            for implementation in blocks {
+                let overrides: Vec<&&ItemRecord> = implementation
+                    .methods
+                    .iter()
+                    .filter(|record| record.name() == method)
+                    .collect();
+                runs_default |= overrides.is_empty();
+                for record in overrides {
+                    assert!(
+                        named.contains(&(implementation.src, record.whole().start())),
+                        "`{id}::{method}` leaves out an override"
+                    );
+                }
+            }
+            for (src, record) in declared
+                .iter()
+                .filter(|(_, record)| record.name() == method && record.body().is_some())
+            {
+                defaults_checked += 1;
+                assert_eq!(
+                    named.contains(&(*src, record.whole().start())),
+                    runs_default,
+                    "`{id}::{method}`'s default is named exactly when an implementation does \
+                     not override it"
+                );
+            }
         }
     }
+    assert!(
+        defaults_checked > 0,
+        "the product has trait defaults to check"
+    );
+
+    let (src, record) = fixture(&world, "trait_shape_default");
+    let body = Body::new(&world, src, record);
+    let site = body
+        .sites()
+        .into_iter()
+        .find(|site| site.name == "prepare")
+        .expect("the default method calls `prepare`");
+    let stated = body
+        .receiver_traits(&site)
+        .expect("`self` in a default method is its trait");
+    assert_eq!(
+        stated.iter().map(|id| id.name.as_str()).collect::<Vec<_>>(),
+        ["LocalDriver"]
+    );
+    assert_eq!(
+        named_in_shape(&world, "trait_shape_default", "prepare"),
+        BTreeSet::new(),
+        "no product type implements `LocalDriver`"
+    );
+}
+
+/// RED (T-DOOR-REACH-TRAIT-OBJECTS round 2) — **a match's or-pattern binds nothing, and a
+/// parameter a later `let` really shadows is not typed by its declaration.**
+///
+/// `trait_shape_or_pattern` writes `Some(0) | None` in a match arm and `Some(1) | Some(2)` in a
+/// `matches!` after it, with `driver.prepare(…)` between the two bars: the bars are patterns'
+/// (each follows an operand), not a closure's, so `driver` is bound once and the call names the
+/// `Driver` implementations. `trait_shape_shadowed` writes `let driver = other;` before its call:
+/// the parameter's `&dyn Driver` says nothing of the local, the call is read as an untyped one
+/// (a name many methods share: nobody).
+///
+/// MUTATIONS: in [`closure_parameters`], pair every `|` with the next one (round 1's pairing) — the
+/// or-pattern call names nobody; type a parameter whatever its binding count — the shadowed call
+/// names the `Driver` implementations.
+#[test]
+fn a_match_or_pattern_binds_nothing_and_a_real_shadow_is_not_typed() {
+    let world = World::new();
+    let implementations = implementations_of(
+        &world,
+        &bt_app_trait("crate::update_job", "Driver"),
+        "prepare",
+    );
+    assert_eq!(
+        named_in_shape(&world, "trait_shape_or_pattern", "prepare"),
+        implementations,
+        "an or-pattern's bars do not shadow `driver`"
+    );
+    let (src, record) = fixture(&world, "trait_shape_shadowed");
+    let body = Body::new(&world, src, record);
+    let site = body
+        .sites()
+        .into_iter()
+        .find(|site| site.name == "prepare")
+        .expect("the shadowed call is indexed");
+    assert!(
+        body.receiver_traits(&site).is_none(),
+        "a shadowed parameter's declared trait does not type the call"
+    );
+    assert!(
+        named_in_shape(&world, "trait_shape_shadowed", "prepare").is_disjoint(&implementations),
+        "the shadowed call names no `Driver` implementation"
+    );
 }
 
 /// RED (T-DOOR-REACH-TRAIT-OBJECTS) — **a trait the product does not declare adds nothing to the
 /// reach.**
 ///
 /// `std_trait_shape` writes and flushes through `sink: &mut dyn std::io::Write`: the receiver is
-/// stated, and states only a standard trait, so the walk does not expand it (the product's own
-/// `impl std::io::Write for ProcessStderr` is not taken to be the callee) and the call is read as
-/// an untyped one is; `flush` is a name many first-party methods share, so the call names
-/// nobody, and the walk from the function reaches the function alone.
+/// stated, and states only a standard trait, which resolves to no first-party trait — so the walk
+/// does not expand it (the product's own `impl std::io::Write for ProcessStderr` is not taken to
+/// be the callee) and the call is read as an untyped one is; `flush` is a name many first-party
+/// methods share, so the call names nobody, and the walk from the function reaches the function
+/// alone.
 ///
-/// MUTATION: in [`World::trait_methods`], count a trait the product does not declare as
-/// first-party (push it to `first_party` instead of `foreign`) — the reach grows by
-/// `<ProcessStderr as std::io::Write>::flush`.
+/// MUTATION: expand third-party traits — give a trait no package declares an identity of its
+/// last segment, in [`World::of`] for the product blocks implementing it (with their methods as
+/// its declared ones) and in [`Body::traits_named`] for a bound naming it — and the reach grows
+/// by `<ProcessStderr as std::io::Write>::flush`.
 #[test]
 fn a_trait_with_no_first_party_impl_adds_nothing_to_the_reach() {
     let world = World::new();
@@ -9179,14 +9435,12 @@ fn a_trait_with_no_first_party_impl_adds_nothing_to_the_reach() {
             let stated = body
                 .receiver_traits(&site)
                 .expect("`sink` is stated to be a trait object");
-            assert_eq!(stated.traits, ["Write"], "`sink.{}`", site.name);
             assert!(
-                world
-                    .trait_methods(src, &stated.traits, site.name)
-                    .is_none(),
-                "`Write` is not a first-party trait (`sink.{}`)",
+                stated.is_empty(),
+                "`std::io::Write` is no first-party trait (`sink.{}`)",
                 site.name
             );
+            assert!(world.trait_methods(&stated, site.name).is_none());
             asked += 1;
         }
     }
