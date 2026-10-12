@@ -173,10 +173,15 @@ meant to end the process catches nothing, and its `# completions` row says so
 
 Where and what to do: `crates/bt-source/tests/contained_panic.rs` reads every
 product occurrence of `catch_unwind` in `bt-app`, `bt-platform` and `bt-pty`
-through `bt_source` items — the innermost item must be the boundary itself, or
-the occurrence must lie inside the arguments of a `…contained_panic::contain(…)`
-call — and its fixture test plants three bare catches that must be refused by
-site. There is no allowlist. When red, run the work inside `contain` and give
+through `bt_source` items — the innermost item must be the boundary itself, by
+its identity (`bt-platform`, `crate::contained_panic`, `contain`), or the
+innermost closure around the occurrence must be an argument of a call whose
+path `bt_source::FunctionPaths` follows, through `use` items and re-exports
+across the workspace's crates, to exactly that item: a call edge, never a
+spelling. Its fixture, read beside `bt-platform`, allows a catch handed to the
+real item by an alias and by its path, and refuses a lookalike
+`contained_panic::contain` (its body and its caller), a closure handed to a
+helper that calls the boundary, a bare catch and a renamed import, by site. There is no allowlist. When red, run the work inside `contain` and give
 the panic its row's failure value, or take the catch out and say in the row
 that a panic ends the process; never wrap a catch to quiet the guard.
 

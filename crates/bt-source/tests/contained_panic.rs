@@ -1,78 +1,109 @@
 //! **No bare `catch_unwind` in the product** (T-PANIC-ROWS-HONEST): every catch of a panic in
-//! `bt-app`, `bt-platform` and `bt-pty` is the one boundary, `contained_panic::contain`, or sits
-//! inside a closure handed to it.
+//! `bt-app`, `bt-platform` and `bt-pty` is the one boundary, `bt_platform::contained_panic::contain`,
+//! or sits in a closure handed to it.
 //!
 //! The resident application's panic hook ends the process from inside the hook, before any
 //! unwinding, unless its one decision — `the_hook_lets_this_panic_unwind` — says the panic is
 //! contained. A bare `std::panic::catch_unwind` is therefore reached only where no such hook is
 //! installed: in a test, never in Folio, so the failure value it builds is decorative there.
-//! `contained_panic::contain` marks the thread for the length of its work, which is what the
-//! hook asks; it is the only catch the hook lets a panic reach.
+//! `contain` marks the thread for the length of its work, which is what the hook asks; it is the
+//! only catch the hook lets a panic reach.
 //!
 //! # What it reads, exactly
 //!
 //! Each package's own sources ([`Index::of_package`]), and in them every **product** occurrence
 //! of the identifier `catch_unwind` ([`bt_source::Occurrence::in_the_product`]: test files,
 //! `#[cfg(test)]` items and inline test modules are not read) — a call, a path handed on as a
-//! value, and a `use` of it under any name, so an import renamed out of sight is refused where
-//! it is written. An occurrence is allowed when
+//! value, and a `use` of it under any name, so an import renamed out of sight is refused where it
+//! is written. An occurrence is allowed when
 //!
-//! * its innermost item is the function `contain` of a module named `contained_panic` — the
-//!   boundary itself; or
-//! * it lies inside the arguments of a call whose path ends `contained_panic::contain` — a catch
-//!   inside the closure handed to the boundary.
+//! * its innermost item **is** the boundary — the item identity [`BOUNDARY`] (package, module
+//!   path, name), never a spelling; or
+//! * the innermost closure around it is an argument of a call whose path
+//!   [`FunctionPaths::functions_named`] follows — through the module's `use` items and the crates'
+//!   re-exports, `bt-app`'s `contained_panic` included — to exactly that item: **a call edge**.
 //!
-//! Anything else is refused by `path:line:column`. There is no allowlist: a thread whose death
-//! is meant to be the process's has no catch at all, and its `# completions` row says that a
-//! panic ends the process under the resident hook (`crates/bt-app/src/window_waits.tsv`).
+//! So a function named `contain` in a module named `contained_panic` that is not the item is
+//! refused, its body and its callers alike; an alias of the real item is followed to it; and a
+//! closure handed to some other function that then calls the boundary is refused — the rule is a
+//! direct edge from the closure's call to the boundary, not what the callee does with it.
+//! Anything else is refused by `path:line:column`. There is no allowlist: a thread whose death is
+//! meant to be the process's has no catch at all, and its `# completions` row says that a panic
+//! ends the process under the resident hook (`crates/bt-app/src/window_waits.tsv`).
 //!
 //! # What it does not see
 //!
-//! A call to `contain` written inside a macro's token tree is not parsed, so a catch handed to
-//! the boundary there is refused, never allowed; and `bt-math`'s render boundary, which the hook
-//! honours through `render_panic_is_contained`, is outside the three packages.
+//! A call written inside a macro's token tree is not parsed, and a `use` written inside a function
+//! body is not followed, so a catch handed to the boundary that way is refused, never allowed; and
+//! `bt-math`'s render boundary, which the hook honours separately through
+//! `render_panic_is_contained`, is outside the three packages.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use bt_source::{
-    DiskScope, Index, ItemRecord, Pattern, Search, Span, TargetId, TargetKind, TargetRoot,
-    Universe, Vendor, View, Workspace, needle, report,
+    DiskScope, FunctionItem, FunctionPaths, Index, ItemKind, ItemRecord, Pattern, Search, Span,
+    TargetId, TargetKind, TargetRoot, Universe, Vendor, View, Workspace, needle, report,
 };
+use syn::spanned::Spanned as _;
 
 /// The packages whose product code the guard reads.
 const PACKAGES: [&str; 3] = ["bt-app", "bt-platform", "bt-pty"];
 
-/// The boundary's module.
-const MODULE: &str = "contained_panic";
+/// The boundary's identity: package, module path, name.
+const BOUNDARY: (&str, &str, &str) = ("bt-platform", "crate::contained_panic", "contain");
 
-/// The boundary's function.
-const BOUNDARY: &str = "contain";
-
-/// The byte ranges, within one file, of the argument list of every call whose path ends
-/// `contained_panic::contain`.
-#[derive(Default)]
-struct HandedToTheBoundary {
-    arguments: Vec<Range<usize>>,
+fn boundary() -> FunctionItem {
+    FunctionItem {
+        package: BOUNDARY.0.to_owned(),
+        module: BOUNDARY.1.to_owned(),
+        name: BOUNDARY.2.to_owned(),
+    }
 }
 
-impl<'ast> syn::visit::Visit<'ast> for HandedToTheBoundary {
+/// One closure of a file: its byte range there, and — when it is an argument of a call written
+/// as a path — that path and where the call is written.
+struct Closure {
+    range: Range<usize>,
+    handed_to: Option<(Vec<String>, usize)>,
+}
+
+/// Every closure of one file.
+#[derive(Default)]
+struct Closures {
+    found: Vec<Closure>,
+    /// The closures that are arguments of a path call, by their start, with that call.
+    arguments: BTreeMap<usize, (Vec<String>, usize)>,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for Closures {
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        if let syn::Expr::Path(path) = &*call.func {
+        if let syn::Expr::Path(path) = &*call.func
+            && path.qself.is_none()
+        {
             let segments: Vec<String> = path
                 .path
                 .segments
                 .iter()
                 .map(|segment| segment.ident.to_string())
                 .collect();
-            if segments.ends_with(&[MODULE.to_owned(), BOUNDARY.to_owned()]) {
-                let open = call.paren_token.span.open().byte_range();
-                let close = call.paren_token.span.close().byte_range();
-                self.arguments.push(open.start..close.end);
+            let at = call.span().byte_range().start;
+            for argument in &call.args {
+                if let syn::Expr::Closure(closure) = argument {
+                    self.arguments
+                        .insert(closure.span().byte_range().start, (segments.clone(), at));
+                }
             }
         }
         syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_closure(&mut self, closure: &'ast syn::ExprClosure) {
+        let range = closure.span().byte_range();
+        let handed_to = self.arguments.get(&range.start).cloned();
+        self.found.push(Closure { range, handed_to });
+        syn::visit::visit_expr_closure(self, closure);
     }
 }
 
@@ -92,20 +123,19 @@ fn innermost_item(index: &Index, span: Span) -> Option<&ItemRecord> {
         .min_by_key(|record| record.whole().len())
 }
 
-/// Whether `item` is the boundary itself: a free function `contain` in a module named
-/// `contained_panic`.
-fn is_the_boundary(item: &ItemRecord) -> bool {
-    item.name() == BOUNDARY
+/// Whether `item` is the boundary itself, by identity.
+fn is_the_boundary(index: &Index, item: &ItemRecord) -> bool {
+    let package = &index.file_of(item).owners()[0].target.package;
+    item.kind() == ItemKind::Function
         && item.type_owner().is_none()
-        && item
-            .module_paths()
-            .iter()
-            .any(|module| module.rsplit("::").next() == Some(MODULE))
+        && package == BOUNDARY.0
+        && item.name() == BOUNDARY.2
+        && item.module_paths().contains(&BOUNDARY.1)
 }
 
-/// Every product `catch_unwind` of `index`, judged; a refused site's path is written relative to
-/// `root`.
-fn read(index: &Index, root: &Path) -> Reading {
+/// Every product `catch_unwind` of `index`, judged with `paths`; a refused site's path is written
+/// relative to `root`.
+fn read(index: &Index, paths: &FunctionPaths, root: &Path) -> Reading {
     let found = index
         .search(&Search::new(
             needle!(Pattern::identifier("catch_unwind")),
@@ -113,7 +143,7 @@ fn read(index: &Index, root: &Path) -> Reading {
         ))
         .unwrap_or_else(|failure| panic!("{failure}"))
         .in_the_product(index);
-    let mut handed: BTreeMap<usize, Vec<Range<usize>>> = BTreeMap::new();
+    let mut closures: BTreeMap<usize, Vec<Closure>> = BTreeMap::new();
     let mut reading = Reading {
         allowed: 0,
         refused: Vec::new(),
@@ -124,17 +154,27 @@ fn read(index: &Index, root: &Path) -> Reading {
             .file_at(span.start())
             .expect("an occurrence is in a file");
         let base = file.span().start();
-        let arguments = handed.entry(base).or_insert_with(|| {
+        let in_file = closures.entry(base).or_insert_with(|| {
             let parsed = syn::parse_file(index.text(file.span()))
                 .unwrap_or_else(|error| panic!("{}: {error}", file.path().display()));
-            let mut calls = HandedToTheBoundary::default();
-            syn::visit::Visit::visit_file(&mut calls, &parsed);
-            calls.arguments
+            let mut visitor = Closures::default();
+            syn::visit::Visit::visit_file(&mut visitor, &parsed);
+            visitor.found
         });
-        let handed_to_the_boundary = arguments
+        let innermost_closure = in_file
             .iter()
-            .any(|range| base + range.start <= span.start() && span.end() <= base + range.end);
-        if handed_to_the_boundary || innermost_item(index, span).is_some_and(is_the_boundary) {
+            .filter(|closure| {
+                base + closure.range.start <= span.start() && span.end() <= base + closure.range.end
+            })
+            .min_by_key(|closure| closure.range.len());
+        let handed_to_the_boundary = innermost_closure
+            .and_then(|closure| closure.handed_to.as_ref())
+            .is_some_and(|(path, at)| {
+                paths.functions_named(index, base + at, path) == BTreeSet::from([boundary()])
+            });
+        let in_the_boundary =
+            innermost_item(index, span).is_some_and(|item| is_the_boundary(index, item));
+        if handed_to_the_boundary || in_the_boundary {
             reading.allowed += 1;
             continue;
         }
@@ -160,7 +200,7 @@ fn workspace_root() -> PathBuf {
 }
 
 /// RED (T-PANIC-ROWS-HONEST) — **every catch of a panic in the product is the contained-panic
-/// boundary or inside it.**
+/// boundary or in a closure handed to it.**
 ///
 /// MUTATION: put `pty_door::request`'s birth back on a bare `std::panic::catch_unwind` (or plant
 /// any bare catch in the three packages' product code) and this names its line.
@@ -168,13 +208,24 @@ fn workspace_root() -> PathBuf {
 fn no_product_catch_unwind_is_outside_the_contained_panic_boundary() {
     let workspace =
         Workspace::read(&workspace_root()).unwrap_or_else(|rejection| panic!("{rejection}"));
-    let root = workspace.root();
+    let indexes: Vec<&Index> = PACKAGES
+        .iter()
+        .map(|package| Index::of_package(package))
+        .collect();
+    let paths = FunctionPaths::read(&indexes);
+    let platform = Index::of_package(BOUNDARY.0);
+    assert!(
+        platform
+            .items()
+            .iter()
+            .any(|item| is_the_boundary(platform, item)),
+        "the boundary {BOUNDARY:?} is not an item of the product — the guard has nothing to allow"
+    );
     let mut refused = Vec::new();
     let mut allowed = 0;
-    for package in PACKAGES {
-        let index = Index::of_package(package);
+    for (package, index) in PACKAGES.iter().zip(&indexes) {
         assert!(!index.files().is_empty(), "{package}: no file read");
-        let reading = read(index, root);
+        let reading = read(index, &paths, workspace.root());
         println!(
             "contained-panic guard: {package}: {} file(s), {} catch(es) at the boundary, {} \
              refused",
@@ -208,16 +259,16 @@ fn fixture_directory() -> PathBuf {
         .join("contained_panic")
 }
 
-/// The `contained_panic` fixture, indexed.
+/// The `contained_panic` fixture, indexed as a crate called `lookalike`.
 fn fixture() -> Index {
     let directory = fixture_directory();
     let universe = Universe::declare(
         "the contained-panic fixture",
         vec![TargetRoot {
             id: TargetId {
-                package: "contained_panic".to_owned(),
+                package: "lookalike".to_owned(),
                 kind: TargetKind::Library,
-                name: "contained_panic".to_owned(),
+                name: "lookalike".to_owned(),
             },
             file: directory.join("lib.rs"),
         }],
@@ -228,26 +279,35 @@ fn fixture() -> Index {
     Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
 }
 
-/// RED (T-PANIC-ROWS-HONEST) — **a planted bare `catch_unwind` is refused, by its site; the
-/// boundary's own catch, a catch inside a closure handed to it and a test's catch are not.**
+/// RED (T-PANIC-ROWS-HONEST round 2) — **a catch is allowed by a call edge to the real boundary,
+/// never by a name.** The fixture, read beside `bt-platform`, hands two catches to the real item —
+/// through a renamed `use` and by its path — and plants five the guard refuses: the body of a
+/// lookalike `contained_panic::contain` and a closure handed to it, a closure handed to a helper
+/// that itself calls the boundary, a bare call, and an import renamed out of sight (a test's catch
+/// is not read).
 ///
-/// The fixture plants three bare catches: a call in an ordinary function, an import renamed out
-/// of sight, and a call in a function named `contain` in a module that is not the boundary.
-///
-/// MUTATIONS: ① allow every occurrence whose innermost item is named `contain` (drop the module
-/// test in `is_the_boundary`) — the third plant is not refused; ② drop the closure rule —
-/// `nested`'s catch is refused.
+/// MUTATIONS: ① judge the call by its spelling (a path ending `contained_panic::contain`, as round
+/// 1 did) — the lookalike's caller is allowed; ② follow no `use` item (judge only paths written in
+/// full) — the alias is refused.
 #[test]
-fn a_planted_bare_catch_unwind_is_refused_by_its_site() {
+fn a_catch_is_allowed_by_a_call_edge_to_the_boundary_never_by_a_name() {
     let index = fixture();
-    let reading = read(&index, &fixture_directory());
+    let paths = FunctionPaths::read(&[&index, Index::of_package(BOUNDARY.0)]);
+    let reading = read(&index, &paths, &fixture_directory());
     assert_eq!(
         reading.refused,
-        ["lib.rs:18:17", "lib.rs:22:17", "lib.rs:31:21"],
-        "the three plants, and nothing else"
+        [
+            "lib.rs:10:29",
+            "lib.rs:28:52",
+            "lib.rs:38:27",
+            "lib.rs:43:17",
+            "lib.rs:5:17"
+        ],
+        "the lookalike's body and its caller, the helper's closure, the bare call and the renamed \
+         import"
     );
     assert_eq!(
         reading.allowed, 2,
-        "the boundary's own catch and the one handed to it"
+        "the alias and the path, each a call edge to the real item"
     );
 }

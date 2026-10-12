@@ -59,6 +59,7 @@
 //!   module the call is written in. A call that names a callable of the
 //!   subject package and does not resolve is [`FieldCensus::unfollowed`].
 
+mod paths;
 mod resolve;
 mod types;
 mod walk;
@@ -68,6 +69,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use crate::index::{Index, ItemRecord};
+pub use paths::{FunctionItem, FunctionPaths};
 use resolve::{Fact, Resolver, Subject};
 pub use walk::Column;
 use walk::Walk;
