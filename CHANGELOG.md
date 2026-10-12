@@ -39,6 +39,7 @@ All notable changes to Folio are recorded here. The format follows
 - A profile's environment table in Settings lists every variable Folio sets for its sessions, such as TERM and TERM_PROGRAM_VERSION, not three of them. <!-- zh: pending H2-NITS -->
 - The pane strip's "more do not fit" line is part of the translated text. <!-- zh: pending H2 -->
 - A space can be typed into the commit graph's search and the Git branch prompt, and Ctrl+Backspace deletes a word in every one-line box. <!-- zh: pending H2 -->
+- A fault while a new pane's shell is starting, or while settings, shortcuts, profiles or pins are being saved, no longer closes Folio: the pane says its shell could not start, and the save is reported as not done. <!-- zh: pending T-PANIC-ROWS-HONEST -->
 - Web page thumbnails on the focus cards now appear at display scales above 200%. <!-- zh: pending H2 -->
 - On a Mac, the names of Chinese fonts in Settings follow the system language. <!-- zh: pending H2 -->
 - A wrapped table row in accented Latin, Cyrillic, Greek or Korean keeps the space between its words, and a formula block next to Japanese or Korean prose is no longer drawn as a formula. <!-- zh: pending H2 -->

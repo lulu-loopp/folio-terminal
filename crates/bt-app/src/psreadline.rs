@@ -459,7 +459,11 @@ impl PsReadLineProbe {
         let started = bt_platform::spawn_at_priority(
             "psreadline-probe",
             bt_platform::ThreadPriority::BelowNormal,
-            move |ctx| self.serve(ctx),
+            // Contained (`contained_panic::contain`), so under the resident panic hook a probe that
+            // panics reaches `ProbeOut`, which leaves the probe askable, with one line.
+            move |ctx| {
+                let _ = crate::contained_panic::contain(|| self.serve(ctx));
+            },
         );
         if let Err(error) = started {
             // The request stays standing and the next one tries the thread again.
@@ -2271,6 +2275,51 @@ pub(crate) mod tests {
             version: Version::parse(version),
             policy: ExecutionPolicy::RemoteSigned,
         })
+    }
+
+    /// RED (T-PANIC-ROWS-HONEST) — **a probe that panics under the resident panic hook leaves the
+    /// probe askable, said once, and the next request is answered.** The product's hook ends the
+    /// process for a panic it is not told is contained; the worker's body runs inside
+    /// `contained_panic::contain`, so the hook's decision at the panic is yes and the unwind
+    /// reaches `ProbeOut`, which marks the worker gone.
+    ///
+    /// MUTATION: the worker's body without `contained_panic::contain` — the decision at the panic
+    /// is no (the process would end there).
+    #[test]
+    fn a_probe_that_panics_under_the_resident_hook_leaves_the_probe_askable() {
+        let (told, decision) = std::sync::mpsc::channel();
+        let (noted, notes) = std::sync::mpsc::channel();
+        let first = std::sync::atomic::AtomicBool::new(true);
+        let probe: &'static PsReadLineProbe = Box::leak(Box::new(PsReadLineProbe::new(
+            move |_ctx| {
+                if first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    let _ = told.send(crate::the_hook_lets_this_panic_unwind());
+                    panic!("scripted: PowerShell 探测中途失败 the probe fails");
+                }
+                answered("2.4.6")
+            },
+            move |line: &str| {
+                let _ = noted.send(line.to_owned());
+            },
+        )));
+        let (woke, wakes) = crate::lane::wake_channel();
+        probe.install_wake(woke);
+        probe.ask(ProbeTrigger::Birth);
+        assert!(
+            crate::lane::receive(&decision, "the hook's decision inside the probe"),
+            "the probe runs where the resident hook lets its panic unwind"
+        );
+        assert!(
+            crate::lane::receive(&notes, "the dead probe's line")
+                .contains("ended before its answer")
+        );
+        probe.ask(ProbeTrigger::Birth);
+        next_answer(&wakes, "the probe after the dead one");
+        assert_eq!(
+            probe.answer(),
+            answered("2.4.6"),
+            "the next request is answered"
+        );
     }
 
     /// RED (T-PROBE-NO-CACHED-FAILURE) — **a probe that failed is asked again by the next
