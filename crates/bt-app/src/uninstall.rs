@@ -1175,15 +1175,20 @@ fn detach_images_under(home: &Path) -> Result<(), String> {
         return Ok(());
     }
     let home = home.to_path_buf();
+    detach_on_a_worker(move |worker| {
+        bt_platform::macos_update::detach_all_under(worker, &home)
+            .map_err(|refusal| refusal.to_string())
+    })
+}
+
+/// Run `detach` on the detach's worker and wait for it; a panic in it is the step's refusal.
+fn detach_on_a_worker(
+    detach: impl FnOnce(&bt_platform::admission::WorkerCtx) -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
     bt_platform::spawn_at_priority(
         "folio-update-home-detach",
         bt_platform::ThreadPriority::BelowNormal,
-        move |worker| {
-            crate::contained_panic::contain(move || {
-                bt_platform::macos_update::detach_all_under(worker, &home)
-                    .map_err(|refusal| refusal.to_string())
-            })
-        },
+        move |worker| crate::contained_panic::contain(move || detach(worker)),
     )
     .map_err(|error| error.to_string())?
     .join()
