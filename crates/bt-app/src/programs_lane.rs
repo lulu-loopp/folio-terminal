@@ -2,8 +2,9 @@
 //! `docs/ARCHITECTURE.md` §4.4 and §5.1's observation lane).
 //!
 //! One question, four answers: which program each profile row starts on this machine (the
-//! `PATH` walk of `profiles::ProfilePrograms::resolve_row`), what WSL's installation says
-//! (`wsl::read_this_machine`, once the walk has found `wsl.exe`), where git is
+//! `PATH` walk of `profiles::ProfilePrograms::resolve_row`, and what kind of program it found,
+//! `profiles::shell_program_of`), what WSL's installation says
+//! (`wsl::read_this_machine`, once the walk has found `wsl.exe` or a Store alias), where git is
 //! (`profiles::find_git`), and where the agents keep their configuration
 //! (`attention_hooks::AgentHomes`, T-FRESH-FACTS — the same environment, four variables). Until this lane the first was asked on the window thread at launch and
 //! at every table edit, and all three were asked once and kept for the life of the process, so a
@@ -174,7 +175,8 @@ impl Answers {
 pub trait Machine: Send + Sync {
     /// The environment this walk reads programs out of.
     fn environment(&self, ctx: &WorkerCtx, note: &dyn Fn(&str)) -> Box<dyn ShellEnvironment>;
-    /// WSL's installation, asked only once the walk has found `wsl.exe`.
+    /// WSL's installation, asked at most once a walk: once the walk has found `wsl.exe`, or for
+    /// the first row whose program is among the Store's aliases.
     fn wsl(&self) -> WslFacts;
     /// Classify one absolute PATH directory. Test machines are local unless they say otherwise;
     /// the product delegates the worker-only filesystem question to `bt-platform`.
@@ -317,9 +319,23 @@ fn walk(
         file_questions: std::cell::Cell::new(0),
     };
     let mut wsl_found = false;
+    // WSL's installation, read at most once a walk: for the first program among the Store's
+    // aliases (`profiles::shell_program_of`), or after the rows once `wsl.exe` was found.
+    let installation: std::cell::OnceCell<WslFacts> = std::cell::OnceCell::new();
+    let read_installation = || installation.get_or_init(|| machine.wsl()).clone();
     for row in ordered(&request.rows, &request.first) {
         let program = ProfilePrograms::resolve_row(row, &counting);
         wsl_found |= row.id == profiles::WSL_ID && program.is_some();
+        let shell = program
+            .as_deref()
+            .map_or(profiles::ShellProgram::Native, |program| {
+                profiles::shell_program_of(
+                    profiles::SeedPlatform::of_this_build(),
+                    Path::new(program),
+                    &counting,
+                    &read_installation,
+                )
+            });
         let asked_first = request.first.contains(&row.id);
         publish(Published::Row(
             RowVerdict {
@@ -327,14 +343,15 @@ fn walk(
                 id: row.id.clone(),
                 source: row.program.clone(),
                 program,
+                shell,
             },
             asked_first,
         ));
     }
     let wsl = if wsl_found {
-        machine.wsl()
+        read_installation()
     } else {
-        WslFacts::default()
+        installation.get().cloned().unwrap_or_default()
     };
     let git = profiles::find_git(&counting);
     let agent_homes = AgentHomes::in_environment(&|name| counting.var_os(name));
@@ -1038,6 +1055,35 @@ pub(crate) mod tests {
         assert_eq!(answers.verdicts[0].generation, second);
     }
 
+    /// PIN (T-WINDOWS-SHELL-NAMESPACES, 2026-10-12) — **a walk says what kind of program each row
+    /// found**, asking the disk on its own worker: a bash with `cygwin1.dll` beside it is Cygwin's,
+    /// and becomes so on the walk after the library arrives.
+    ///
+    /// MUTATION: the walk publishing `ShellProgram::Native` for every row — RED on the second walk.
+    ///
+    /// **Windows only:** off Windows every program is `Native`.
+    #[cfg(windows)]
+    #[test]
+    fn a_walk_says_what_kind_of_program_each_row_found() {
+        let machine = FakeMachine::with_path(&[bin_dir()]);
+        let (lane, wakes, _) = lane(machine.clone());
+        let rows = [row("cygbash", "bash.exe")];
+        machine.install(&bin("bash.exe"));
+
+        let first = lane.request(request(&rows, Trigger::Launch));
+        let answers = answers_through(lane, &wakes, first);
+        assert_eq!(answers.verdicts[0].shell, profiles::ShellProgram::Native);
+
+        machine.install(&bin("cygwin1.dll"));
+        let second = lane.request(request(&rows, Trigger::Environment));
+        let answers = answers_through(lane, &wakes, second);
+        assert_eq!(
+            answers.verdicts[0].shell,
+            profiles::ShellProgram::Cygwin,
+            "the library beside the program makes it Cygwin's"
+        );
+    }
+
     /// RED — **WSL and git are read again by every walk** (the "git/WSL refresh rows").
     ///
     /// MUTATION (observed red, each alone): `walk` reading WSL only when `generation == 1` (the
@@ -1669,6 +1715,7 @@ pub(crate) mod contract_adapter {
                 id: row.id.clone(),
                 source: row.program.clone(),
                 program: Some("stale".into()),
+                shell: crate::profiles::ShellProgram::Native,
             };
             if self.programs.adopt([stale]) {
                 self.raised.push(Delivered {

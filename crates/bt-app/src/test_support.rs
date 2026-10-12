@@ -2426,6 +2426,7 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         profile: profiles::fallback_profile_id().to_owned(),
         paste_recipient: profiles::paste_recipient(
             profiles::fallback_profile(),
+            &profiles::ShellProgram::Native,
             &bt_pty::SystemShellEnvironment,
         ),
         // And the door that profile is served through, which is the one the
@@ -2435,6 +2436,7 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         // And no program either, which is the honest shape of the same
         // fact: nothing was started, so nothing can have announced itself.
         program: None,
+        shell: profiles::ShellProgram::Native,
         // Nor a place: a fixture was never put down anywhere.
         spawn_place: None,
         born_named: false,

@@ -2182,7 +2182,7 @@ fn a_shell_that_fell_back_records_its_birth_place_in_its_own_namespace() {
         .find("let profile = if let Some(fallback) = &shell_fallback {")
         .expect("the swap");
     let placed = birth
-        .find("place_leaf(leaf, decision, seed, &profile, in_birth);")
+        .find("place_leaf(leaf, decision, &profile, in_birth);")
         .expect("the leaf is placed for the started profile");
     assert!(swapped < placed, "{birth}");
     let place = free_fn_body("place_leaf");
@@ -2221,7 +2221,7 @@ fn a_shell_that_fell_back_keeps_its_birth_place_and_drops_the_launchers_mark() {
         .find("let profile = if let Some(fallback) = &shell_fallback {")
         .expect("the swap");
     let placed = birth
-        .find("place_leaf(leaf, decision, seed, &profile, in_birth);")
+        .find("place_leaf(leaf, decision, &profile, in_birth);")
         .expect("the leaf is placed for the started profile");
     assert!(swapped < placed, "{birth}");
 }
