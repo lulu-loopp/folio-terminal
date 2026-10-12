@@ -40224,10 +40224,11 @@ mod shell_birth_tests {
     }
 
     /// RED (round 2, B1) — **a birth worker that panics is a birth that failed**: its pane is
-    /// woken and lands the refusal toast's reason, naming the panic, instead of waiting for ever.
+    /// woken and lands the refusal toast's reason, that the birth panicked, instead of waiting for
+    /// ever. The panic's own text is not in it: it is in the panic log (T-PANIC-ROWS-HONEST).
     ///
-    /// MUTATION (observed red): the worker body without its `catch_unwind` — nothing is
-    /// published and the pane is never woken.
+    /// MUTATION (observed red): the worker body without its `contained_panic::contain` — nothing
+    /// is published and the pane is never woken.
     #[test]
     fn a_birth_worker_that_panics_lands_the_refusal() {
         let decision = decided(Started::AsAsked);
@@ -40244,9 +40245,10 @@ mod shell_birth_tests {
                 .expect("a failed birth is not this window's error")
                 .expect("it is the refusal to say")
         );
+        assert!(said.contains(pty_door::BIRTH_PANICKED), "{said}");
         assert!(
-            said.contains("the PTY birth worker panicked: 举手-planted"),
-            "{said}"
+            !said.contains("举手-planted"),
+            "the payload is not the pane's: {said}"
         );
         assert!(leaf.birth.is_none() && leaf.pty.is_none());
     }
