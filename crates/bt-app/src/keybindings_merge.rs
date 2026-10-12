@@ -15,10 +15,13 @@
 //!   carried across by `shortcuts::read_chord_in`, the launch's and an import's rule; a
 //!   line that cannot be carried across is **carried**;
 //! - one departure per action: **the last line about an action that reads is the one in
-//!   force, and an earlier line about it is neither dealt nor reported** — the selection
-//!   `settings_bundle::read_keybindings` makes on every road (launch, import, this
-//!   merge's door); the earlier lines are **carried** while the action keeps that line;
-//! - a line naming an action this build has no row for is **carried**.
+//!   force, and an earlier line about it — readable or not — is neither dealt nor
+//!   reported** — one function, `settings_bundle::read_lines`, makes that selection on
+//!   every road (launch, import, this merge's sides and its door); the earlier lines are
+//!   **carried** while the action keeps that line;
+//! - a line naming an action this build has no row for is **carried** — every such line,
+//!   where the launch's reader reports only the last about one id: both put none of them
+//!   in force, so the difference is only what the launch says, never what is in force.
 //!
 //! **The one rule for what is carried** ((b)8): it is in the merged document verbatim,
 //! in the file's position, and never rewritten, applied or owed — in this run and at the
@@ -66,11 +69,10 @@ use bt_persist::{BindingOverrideV1, KEYBINDINGS_SCHEMA_VERSION, KeybindingsV1};
 
 use crate::document_request::ReplacedInFile;
 use crate::persist::KEYBINDINGS_FILE_NAME;
-use crate::settings_bundle::{dialect_of, read_keybindings};
+use crate::settings_bundle::{LineRead, read_keybindings, read_lines};
 use crate::settings_merge::{Account, PassOutcome, Unit, unit};
 use crate::shortcuts::{
     Chord, ChordVerdict, Override, Shortcuts, format_chord_on, parse_chord, parse_chord_in,
-    read_chord_in,
 };
 
 /// **One action's departure as a side states it**: the chord as the merged document
@@ -140,46 +142,31 @@ fn side_of(
     table: &Shortcuts,
     platform: bt_platform::HostPlatform,
 ) -> Side {
-    // Each line read in the side's own dialect and carried to this one: the rule the
-    // launch's reader and an import read with (`shortcuts::read_chord_in`).
-    let from = dialect_of(document.writing_platform);
+    // Each line as every reader takes it — read in the side's own dialect and carried to
+    // this one, and shadowed by a later line about its action that reads, whether it
+    // reads itself or not (`settings_bundle::read_lines`, the launch's and an import's
+    // selection too).
     let mut untranslatable = Vec::new();
-    let read: Vec<Option<(String, Departure)>> = document
-        .bindings
-        .iter()
-        .map(|line| {
-            table.row(&line.action)?;
-            let departure = match &line.chord {
-                None => Departure::of(None, None, platform),
-                Some(chord) => match read_chord_in(chord, from, platform) {
-                    Ok(read) => Departure::of(Some(chord), Some(&read), platform),
-                    Err(why) => {
-                        untranslatable.push((line.clone(), why));
-                        return None;
-                    }
-                },
-            };
-            Some((line.action.clone(), departure))
-        })
-        .collect();
     let mut units = BTreeMap::new();
-    let mut lines = Vec::with_capacity(read.len());
-    for (index, (line, departure)) in document.bindings.iter().zip(&read).enumerate() {
-        let in_force = departure.as_ref().filter(|(action, _)| {
-            !read[index + 1..]
-                .iter()
-                .flatten()
-                .any(|(later, _)| later == action)
-        });
-        match in_force {
-            Some((action, departure)) => {
-                units.insert(action.clone(), departure.clone());
-                lines.push(Line::InForce(action.clone()));
+    let mut lines = Vec::with_capacity(document.bindings.len());
+    for (line, read) in document.bindings.iter().zip(read_lines(document, platform)) {
+        if table.row(&line.action).is_none() {
+            lines.push(Line::Carried(line.clone()));
+            continue;
+        }
+        match read {
+            LineRead::Shadowed => lines.push(Line::Shadowed(line.clone(), line.action.clone())),
+            LineRead::Reads(chord) => {
+                units.insert(
+                    line.action.clone(),
+                    Departure::of(line.chord.as_deref(), chord.as_ref(), platform),
+                );
+                lines.push(Line::InForce(line.action.clone()));
             }
-            None => lines.push(match departure {
-                Some((action, _)) => Line::Shadowed(line.clone(), action.clone()),
-                None => Line::Carried(line.clone()),
-            }),
+            LineRead::Refused(why) => {
+                untranslatable.push((line.clone(), why));
+                lines.push(Line::Carried(line.clone()));
+            }
         }
     }
     Side {
@@ -1224,6 +1211,41 @@ mod tests {
             chord_of(&table, "new-tab", PLATFORM).as_deref(),
             Some("Ctrl+Shift+k"),
             "New tab's later line"
+        );
+    }
+
+    /// RED (round 4, the review's blocker) — **an earlier line that does not read is shadowed
+    /// like any other.** A hand edit puts `Cmd+K` (not a Windows chord) before New tab's
+    /// `Ctrl+K` in a Windows file: the launch says nothing, and the merge names nothing — no
+    /// card. Then Folio sets New tab back to its default: the merge leaves New tab no line,
+    /// and its earlier `Cmd+K` goes with it, so the next start has nothing to refuse.
+    ///
+    /// MUTATION: shadow only by readable lines in `side_of` (round 3's selection: a line
+    /// that does not read is `Carried`, never `Shadowed`) — the clean edit names New tab, and
+    /// `Cmd+K` outlives its action's line.
+    #[test]
+    fn an_unreadable_earlier_line_is_shadowed_and_goes_with_its_action() {
+        let edited = windows(vec![
+            line("new-tab", Some("Cmd+K")),
+            line("new-tab", Some("Ctrl+k")),
+        ]);
+        let base = windows(Vec::new());
+        let merged = merge(&base, &base, &edited, PLATFORM);
+        let pass = KeybindingsPass::new(merged.document.clone(), PLATFORM, merged.about.clone());
+        assert_eq!(pass.replaced(), None, "a clean hand edit says nothing");
+        assert_eq!(merged.document.bindings, edited.bindings);
+
+        let reset = merge(&edited, &base, &edited, PLATFORM);
+        assert_eq!(
+            reset.document.bindings,
+            Vec::<BindingOverrideV1>::new(),
+            "no line for New tab, the earlier one with it"
+        );
+        let (table, faults) = next_start("unreadable-shadowed", &reset.document);
+        assert!(faults.is_empty(), "{faults:?}");
+        assert_eq!(
+            chord_of(&table, "new-tab", PLATFORM),
+            chord_of(&Shortcuts::defaults_for(PLATFORM), "new-tab", PLATFORM)
         );
     }
 }

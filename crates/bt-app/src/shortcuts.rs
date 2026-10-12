@@ -7449,6 +7449,11 @@ mod tests {
             ("Ctrl+K", Some(Windows), OtherUnix, Some(k(ctrl))),
             ("Cmd+Ctrl+K", Some(MacOs), Windows, None),
             ("Win+Ctrl+K", Some(Windows), MacOs, None),
+            // No command word to carry: a macOS file's bare `Ctrl+K` is `Ctrl+K` anywhere,
+            // and so is a file's with no recorded dialect.
+            ("Ctrl+K", Some(MacOs), Windows, Some(k(ctrl))),
+            ("Ctrl+K", None, Windows, Some(k(ctrl))),
+            ("Ctrl+K", None, MacOs, Some(k(ctrl))),
         ] {
             assert_eq!(
                 read_chord_in(text, written_in, here).ok(),

@@ -55,7 +55,7 @@ use bt_persist::{
 use serde_json::Value;
 
 use crate::settings::SettingsRow;
-use crate::shortcuts::{Override, OverrideFault, Shortcuts, format_chord_on, read_chord_in};
+use crate::shortcuts::{Chord, Override, OverrideFault, Shortcuts, format_chord_on, read_chord_in};
 
 /// Something an import could not put in force, named the way the reader would
 /// look for it — a shortcut's id, a scheme's file, a settings row.
@@ -536,40 +536,74 @@ pub(crate) fn read_keybindings(
     file: &KeybindingsV1,
     platform: bt_platform::HostPlatform,
 ) -> (Shortcuts, Vec<OverrideFault>) {
-    let source = dialect_of(file.writing_platform);
-    let read: Vec<Result<Option<String>, &'static str>> = file
-        .bindings
-        .iter()
-        .map(|entry| match entry.chord.as_deref() {
-            Some(chord) => read_chord_in(chord, source, platform)
-                .map(|chord| Some(format_chord_on(&chord, platform))),
-            None => Ok(None),
-        })
-        .collect();
     let mut faults = Vec::new();
     let mut overrides: Vec<Override> = Vec::new();
-    for (index, (entry, line)) in file.bindings.iter().zip(&read).enumerate() {
-        let shadowed = file.bindings[index + 1..]
-            .iter()
-            .zip(&read[index + 1..])
-            .any(|(later, read)| later.action == entry.action && read.is_ok());
-        if shadowed {
-            continue;
-        }
+    for (entry, line) in file.bindings.iter().zip(read_lines(file, platform)) {
         match line {
-            Ok(chord) => overrides.push(Override {
+            LineRead::Shadowed => {}
+            LineRead::Reads(chord) => overrides.push(Override {
                 id: entry.action.clone(),
-                chord: chord.clone(),
+                chord: chord.map(|chord| format_chord_on(&chord, platform)),
             }),
-            Err(reason) => faults.push(OverrideFault {
+            LineRead::Refused(reason) => faults.push(OverrideFault {
                 id: entry.action.clone(),
-                reason: (*reason).to_owned(),
+                reason: reason.to_owned(),
             }),
         }
     }
     let mut table = Shortcuts::defaults_for(platform);
     faults.extend(table.apply_overrides(&overrides));
     (table, faults)
+}
+
+/// **What one line of a shortcut document comes to** ([`read_lines`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LineRead {
+    /// A later line about the same action reads: this one is neither dealt nor
+    /// reported, whether it reads or not.
+    Shadowed,
+    /// The line reads: its chord in this platform's dialect (`None`: `null`).
+    Reads(Option<Chord>),
+    /// The line does not read, and no later line about its action does.
+    Refused(&'static str),
+}
+
+/// **Each line of a shortcut document, as every reader takes it** — the one
+/// selection rule `read_keybindings` and the keybindings merge both read with:
+/// each line read in the document's own dialect and carried to `platform`
+/// ([`read_chord_in`]); **a line with a later line about the same action that
+/// reads is shadowed**, whether it reads itself or not. "Reads" means the chord
+/// parses here — a later line the table then refuses (a chord another row
+/// holds) still shadows the earlier one, and leaves its action at its default.
+pub(crate) fn read_lines(
+    file: &KeybindingsV1,
+    platform: bt_platform::HostPlatform,
+) -> Vec<LineRead> {
+    let source = dialect_of(file.writing_platform);
+    let read: Vec<Result<Option<Chord>, &'static str>> = file
+        .bindings
+        .iter()
+        .map(|entry| match entry.chord.as_deref() {
+            Some(chord) => read_chord_in(chord, source, platform).map(Some),
+            None => Ok(None),
+        })
+        .collect();
+    file.bindings
+        .iter()
+        .zip(&read)
+        .enumerate()
+        .map(|(index, (entry, line))| {
+            let shadowed = file.bindings[index + 1..]
+                .iter()
+                .zip(&read[index + 1..])
+                .any(|(later, read)| later.action == entry.action && read.is_ok());
+            match (shadowed, line) {
+                (true, _) => LineRead::Shadowed,
+                (false, Ok(chord)) => LineRead::Reads(chord.clone()),
+                (false, Err(reason)) => LineRead::Refused(reason),
+            }
+        })
+        .collect()
 }
 
 /// **The shortcut table a launch starts with**: the store's document read by
