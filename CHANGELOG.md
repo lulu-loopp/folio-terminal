@@ -22,6 +22,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- On macOS, an update that is ready to install is written fully to disk before Folio records it as ready, so a power cut cannot leave a half-written update behind a ready one. <!-- zh: pending E6 -->
+- When an update check gets an answer but cannot save it, other open copies of Folio no longer ask GitHub again the same day. <!-- zh: pending E6 -->
+- Folio no longer runs a helper program (Git, PowerShell, a macOS update tool) that it could not stop again, so none can be left running behind it; on macOS, an update tool that runs too long is now reported with what it had printed. <!-- zh: pending E6 -->
 - A change to settings, shortcuts, profiles or pins that cannot be saved is now reported while Folio runs, not only at startup. <!-- zh: pending T-STORAGE-WORKER-REQUEST -->
 - Folio no longer overwrites an edit you save in another editor at the moment Folio saves the same settings, shortcuts, profiles or pins file, and no longer replaces such a file when it is a link or has a second name; it says the file could not be saved instead. <!-- zh: pending T-STORAGE-WORKER-REQUEST -->
 - A line a link asked to jump to, still waiting for its file, is no longer applied to a different file opened onto the same pane. <!-- zh: pending O-8 -->
@@ -35,6 +38,7 @@ All notable changes to Folio are recorded here. The format follows
 - With "one screen at a time" scrolling on, a notch over the commit graph moves one screenful instead of a distance that depended on the number of commits. <!-- zh: pending H2 -->
 - On a Mac, the card-scroll hint and the reserved rows in Shortcuts say Option instead of Alt. <!-- zh: pending H2 -->
 - On a Mac, the note under the reserved rows in Shortcuts says Option+arrow instead of Alt+arrow. <!-- zh: pending H2-NITS -->
+- A link or page the system cannot open now says why: no program to open it, not found, or access denied — "no program to open it" only when that is so. <!-- zh: pending T-HANDOFF-DOOR-REASON -->
 - On a Mac, the terminal opens in Menlo when no font is chosen, as it does after the choice is cleared, and symbols and emoji are drawn from Apple Symbols and Apple Color Emoji. <!-- zh: pending H2-NITS -->
 - On a keyboard layout that is not Latin, such as Russian or Greek, copy, cut, paste and select all in an edited file and M in the video player work by the key's position. <!-- zh: pending H2-NITS -->
 - A profile's environment table in Settings lists every variable Folio sets for its sessions, such as TERM and TERM_PROGRAM_VERSION, not three of them. <!-- zh: pending H2-NITS -->

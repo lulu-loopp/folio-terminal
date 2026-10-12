@@ -187,6 +187,14 @@ use crate::update_txn::{
 
 /// `open`, by its absolute path: LaunchServices starts the trial as it starts
 /// any application (§C.5), and the old build again after a rollback.
+///
+/// **A hand-off, deliberately not a contained probe** (`bt_platform::spawn_probe`):
+/// what `open` asks for must outlive the applier that asks — the trial is the
+/// window the user is left with, and the relaunched build is the user's Folio —
+/// so it never goes into a process group the applier ends at a deadline or at
+/// its exit. A held `open -W` ([`open_trial`]) is bounded by the trial's watch,
+/// which lets it go, never by a probe deadline (ARCHITECTURE's child-process
+/// table, the `open` row).
 pub(crate) const OPEN: &str = "/usr/bin/open";
 
 /// **How long the applier waits, and how often it looks.**
@@ -2241,7 +2249,8 @@ pub(crate) fn verify_restored_here(bundle: &Path) -> Result<(), String> {
 
 /// `open -n -a <bundle> [--args <args>]`, detached, through the one door for
 /// a child: `open` returns once LaunchServices has the launch, and is not
-/// waited on.
+/// waited on. Uncontained on purpose ([`OPEN`]): the build it relaunches
+/// outlives this process.
 pub(crate) fn open_bundle(bundle: &Path, args: &[OsString]) -> io::Result<()> {
     let mut open = bt_platform::quiet_command(OPEN);
     open.arg("-n").arg("-a").arg(bundle);
@@ -2253,7 +2262,9 @@ pub(crate) fn open_bundle(bundle: &Path, args: &[OsString]) -> io::Result<()> {
 
 /// **The trial's launch** (U-38): `open -n -W -a <bundle> --args <args>`,
 /// through the one door for a child, held ([`Launch`]) — `open -W` returns when
-/// the application it opened ends.
+/// the application it opened ends. Uncontained on purpose ([`OPEN`]): the
+/// trial must outlive the applier, so the helper is ended only by its own
+/// handle when the watch lets it go.
 ///
 /// # Errors
 /// `open` could not be started.
