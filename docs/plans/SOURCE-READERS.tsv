@@ -19,6 +19,7 @@
 # writes itself) is review-owned.
 file	owner	mechanism	subject	ticket	disturbed_by_2a	reason
 crates/bt-app/build.rs	build-script-build::main	resource_bytes(path)	assets/app-icon/folio.ico	T-SOURCE-READERS-TSV-TRIPWIRE	no	the build script embeds the committed application icon in the executable's resources; the icon bytes are the build input
+crates/bt-app/build.rs	build-script-build::release_manifest	std::fs::read_to_string(path)	scripts/release/archive-members.txt	T-SOURCE-READERS-TSV-TRIPWIRE	no	the committed release member list; the build script reads it to hash every member into the manifest folio.exe embeds
 crates/bt-app/src/animation.rs	animation::tests::fixture	fixture / manifest read	tests/assets/folio-anim-test.gif	T-SOURCE-READERS-TSV-TRIPWIRE	no	committed test asset (an animated GIF) whose decoded frames are the subject under test
 crates/bt-app/src/app_preview_tests.rs	app_preview_tests::a_file_rewritten_under_the_loop_ends_the_playback_and_is_reopened	fixture / manifest read	tests/assets/folio-anim-test.gif	T-SOURCE-READERS-TSV-TRIPWIRE	no	committed test asset (an animated GIF, reached through an_animated_file) whose bytes are rewritten into a scratch file to change it under the playback loop
 crates/bt-app/src/app_preview_tests.rs	app_preview_tests::a_playback_with_a_fill_in_the_air	animation::decode(path)	tests/assets/folio-anim-test.gif	T-SOURCE-READERS-TSV-TRIPWIRE	no	committed test asset(s) handed to the decoder or preview under test; their bytes are the input
