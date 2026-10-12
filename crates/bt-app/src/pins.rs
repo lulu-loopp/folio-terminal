@@ -197,6 +197,12 @@ impl PinsStore {
             .collect()
     }
 
+    /// How many writes of this document the reader has asked for
+    /// (`storage_watch::StorageWatch::advance`).
+    pub(crate) fn write_generation(&self) -> u64 {
+        self.writes.generation()
+    }
+
     /// Pin or unpin one target and put the table on disk. Answers whether it is
     /// pinned now, which is what the row that was just clicked has to draw.
     pub fn toggle(&mut self, kind: PinKind, target: &str) -> bool {
@@ -236,6 +242,7 @@ impl PinsStore {
         if !self.writes.wants_write(changed) {
             return false;
         }
+        self.writes.requested();
         self.loaded = file;
         if changed {
             self.writes.rearm();

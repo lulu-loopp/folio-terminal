@@ -712,7 +712,7 @@ enum AppEvent {
     /// clock in the window, and a commit still asked whether a palette had
     /// changed.
     SchemesChanged,
-    /// **The kernel says something in `%APPDATA%\Folio\` moved** (§7.1.6c-6d,
+    /// **The kernel named a hand-editable document in `%APPDATA%\Folio\`** (§7.1.6c-6d,
     /// `storage_watch`).
     ///
     /// The third of the same family, and separate from [`Self::SchemesChanged`]
@@ -722,10 +722,12 @@ enum AppEvent {
     /// hand-edited re-read every scheme file in the folder — two rescans for
     /// every one piece of news, each of them about the wrong file.
     ///
-    /// One variant for the *folder* and not one per file in it: `profiles.json`
-    /// and `pins.json` are both in it, both hand-editable, and the kernel says
-    /// the same word about either. Which of them actually moved is answered by
-    /// re-reading each and comparing — see `storage_watch`'s header.
+    /// One variant for the folder and not one per document: which of the four
+    /// (`settings.json`, `keybindings.json`, `profiles.json`, `pins.json`) the
+    /// kernel named is already stamped, per document, in the ear's mailbox on
+    /// the watcher thread, and a name that is none of them sends nothing. The
+    /// event only wakes the loop to the folder's one clock; see
+    /// `storage_watch`'s header.
     StorageChanged,
     /// **The window's ground picture has been decoded** (§7.1.6c-4d).
     ///
@@ -12872,19 +12874,17 @@ struct App {
     motion: Motion,
     /// The schemes folder's watch and its debounce (§7.1.6c-4c).
     scheme_watch: scheme_watch::SchemeWatch,
-    /// And the storage folder's, which is `profiles.json`'s and `pins.json`'s
-    /// (§7.1.6c-6d).
+    /// And the storage folder's: a named, shallow ear for its four
+    /// hand-editable documents (§7.1.6c-6d).
     ///
-    /// A second subscription rather than a share of the one above, although the
-    /// schemes folder is *inside* this one and `DirWatch` watches a tree: one
-    /// clock for both would mean every `settings.json` toggle re-read every
-    /// scheme file on disk, and the reason to watch a folder is never "because
-    /// something in it moved" but "because this file may have".
+    /// A second subscription rather than a share of the one above: the schemes
+    /// folder is inside this one, and one clock for both would mean a scheme
+    /// saved re-read the documents and a document saved re-read every scheme.
+    /// This ear is shallow, so it does not hear inside `schemes\` at all.
     ///
-    /// **One subscription for two files in it**, though, which is the other half
-    /// of the same sentence: both are in this folder, and the re-read-and-compare
-    /// that a notification is worth costs two small reads whichever of them the
-    /// kernel was actually talking about. See `storage_watch`'s header.
+    /// **One subscription and one clock for the four documents, by stamp**: the
+    /// mailbox keeps the latest stamp per document, and a due pass re-reads only
+    /// the stamped ones. See `storage_watch`'s header.
     storage_watch: storage_watch::StorageWatch,
     /// The scheme file currently reported broken, so that it is reported once.
     ///
@@ -45230,12 +45230,17 @@ impl Runtime<'_> {
         // at — the other is the instant `Customise scheme…` creates it. Nothing
         // asks whether the folder exists on a schedule; see `scheme_watch`.
         runtime.app.scheme_watch.arm(&runtime.app.event_proxy);
-        // And the folder that one is inside, for `profiles.json`'s sake
-        // (§7.1.6c-6d). One moment and not two: the storage directory was
-        // created by the first store that opened, several hundred lines above
-        // this, so there is no second moment at which arming could start
-        // succeeding.
-        runtime.app.storage_watch.arm(&runtime.app.event_proxy);
+        // And the folder that one is inside, for its four hand-editable
+        // documents (§7.1.6c-6d). One moment and not two: the storage directory
+        // was created by the first store that opened, several hundred lines
+        // above this, so there is no second moment at which arming could start
+        // succeeding. A refusal is retried by the next document write
+        // (`advance_storage_watch`).
+        let storage_write_generations = runtime.app.storage_write_generations();
+        runtime
+            .app
+            .storage_watch
+            .arm(&runtime.app.event_proxy, storage_write_generations);
         runtime.refresh_scheme_sources();
         // After the window is up and the tree is solved, because a page needs a
         // rectangle before it can be given one — and after `show_new_window`,
@@ -48696,21 +48701,30 @@ impl Runtime<'_> {
     }
 
     /// [`Self::advance_scheme_watch`]'s twin, called once per turn of the loop
-    /// beside every other clock in this window, and costing one comparison while
-    /// nothing is happening.
+    /// beside every other clock in this window, and costing a few comparisons
+    /// while nothing is happening.
     ///
-    /// **Both files, on one piece of news.** The kernel's word is about the
-    /// folder, not about a file in it, so which of the two moved is not a fact
-    /// anybody here has — it is derived by re-reading each and comparing, which
-    /// is the same comparison that already had to absorb this window's own
-    /// writes. `pins.json` is re-read even when `profiles.json` was what changed,
-    /// and that costs one small read of a file that is nearly always identical.
+    /// **The four documents, by stamp.** The watcher thread has already reduced
+    /// the kernel's names to the documents they name and stamped each in the
+    /// ear's mailbox; when the folder's one clock is due, the pass re-reads the
+    /// stamped ones among those followed live — `profiles.json`, `pins.json` —
+    /// and each re-read compares with the document in force, which is what
+    /// absorbs this window's own writes. A stamp on `settings.json` or
+    /// `keybindings.json` is drained without a read.
+    ///
+    /// The stores' write generations go with it: the watch hears the steward
+    /// before it compares them, so a write accepted in the turn a failure is
+    /// heard retries the folder's watch (`StorageWatch::advance`).
     fn advance_storage_watch(&mut self, now: Instant) -> Result<()> {
-        if !self.app.storage_watch.due(now) {
-            return Ok(());
+        let write_generations = self.app.storage_write_generations();
+        let documents = self.app.storage_watch.advance(now, write_generations);
+        if documents.contains(storage_watch::Document::Profiles) {
+            self.reread_profiles()?;
         }
-        self.reread_profiles()?;
-        self.reread_pins()
+        if documents.contains(storage_watch::Document::Pins) {
+            self.reread_pins()?;
+        }
+        Ok(())
     }
 
     /// Read `pins.json` again, and put in force whatever that changed.
@@ -53699,6 +53713,18 @@ impl Runtime<'_> {
 }
 
 impl App {
+    /// **The four hand-editable documents' write generations**, in
+    /// `storage_watch::Document` order — what the storage watch reads to learn
+    /// that the reader asked for a document write.
+    fn storage_write_generations(&self) -> [u64; 4] {
+        [
+            self.settings_store.write_generation(),
+            self.keybindings_store.write_generation(),
+            self.profiles_store.write_generation(),
+            self.pins_store.write_generation(),
+        ]
+    }
+
     fn decoration_senders(&self) -> DecorationSenders {
         DecorationSenders {
             math: self.math_worker.tasks.clone(),
@@ -67326,9 +67352,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // in `scheme_watch`'s mailbox, and `about_to_wait` is where the
             // quiet window is read.
             AppEvent::SchemesChanged => Ok(()),
-            // And the same again for the folder that one sits in: the time it
-            // moved is in `storage_watch`'s mailbox, and `about_to_wait` is
-            // where the quiet window is read.
+            // And the same again for the folder that one sits in: which of its
+            // four documents were named, and when, is in `storage_watch`'s
+            // mailbox, and `about_to_wait` is where the quiet window is read.
             AppEvent::StorageChanged => Ok(()),
             // The answer is already in `psreadline::probe()`; what is owed is a
             // frame that reads it. `refresh_chrome` rebuilds the row's sentence

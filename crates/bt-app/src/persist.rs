@@ -79,6 +79,9 @@ pub(crate) struct DocumentWrites {
     streak: u32,
     /// The sentence the reader is owed, once, when the streak has run out.
     fault: Option<String>,
+    /// How many writes of this document the reader has asked for — the event
+    /// the storage watch retries an unheard folder on.
+    generation: u64,
 }
 
 impl DocumentWrites {
@@ -88,6 +91,7 @@ impl DocumentWrites {
             unsaved: false,
             streak: 0,
             fault: None,
+            generation: 0,
         }
     }
 
@@ -105,6 +109,16 @@ impl DocumentWrites {
     /// press.
     pub(crate) fn may_retry(&self) -> bool {
         self.streak < MAX_WRITE_ATTEMPTS
+    }
+
+    /// Count a write the reader asked for and the store accepted.
+    pub(crate) fn requested(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// How many writes of this document the reader has asked for.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Book one attempt, and answer whether the document is on the disk now.
@@ -1675,6 +1689,12 @@ impl SettingsStore {
         &self.settings
     }
 
+    /// How many writes of this document the reader has asked for
+    /// (`storage_watch::StorageWatch::advance`).
+    pub(crate) fn write_generation(&self) -> u64 {
+        self.writes.generation()
+    }
+
     /// Whether this machine had no `settings.json` when the process started.
     ///
     /// Still true after the first write: it is a fact about the launch, not
@@ -1697,6 +1717,7 @@ impl SettingsStore {
         if !self.writes.wants_write(changed) {
             return false;
         }
+        self.writes.requested();
         self.settings = settings;
         if changed {
             self.writes.rearm();
@@ -1822,6 +1843,12 @@ impl KeybindingsStore {
         &self.overrides
     }
 
+    /// How many writes of this document the reader has asked for
+    /// (`storage_watch::StorageWatch::advance`).
+    pub(crate) fn write_generation(&self) -> u64 {
+        self.writes.generation()
+    }
+
     /// Take the read fault, so a notice about it is raised once and not once a
     /// frame. A write that has stopped landing is owed the same card, and is
     /// taken through the same door.
@@ -1839,6 +1866,7 @@ impl KeybindingsStore {
         if !self.writes.wants_write(changed) {
             return false;
         }
+        self.writes.requested();
         self.overrides = overrides;
         if changed {
             self.writes.rearm();
@@ -1986,6 +2014,12 @@ impl ProfilesStore {
         &self.loaded
     }
 
+    /// How many writes of this document the reader has asked for
+    /// (`storage_watch::StorageWatch::advance`).
+    pub(crate) fn write_generation(&self) -> u64 {
+        self.writes.generation()
+    }
+
     /// Take the read fault, so a notice about it is raised once and not once a
     /// frame. A write that has stopped landing comes through the same door.
     pub fn take_fault(&mut self) -> Option<String> {
@@ -2039,6 +2073,7 @@ impl ProfilesStore {
         if !self.writes.wants_write(changed) {
             return false;
         }
+        self.writes.requested();
         self.loaded = file;
         if changed {
             self.writes.rearm();

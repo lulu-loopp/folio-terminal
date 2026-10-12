@@ -14,8 +14,10 @@
 //! What is **not** here is every reason a particular folder is watched: which
 //! directory, which [`AppEvent`] wakes the loop, when arming is attempted and
 //! what a failure to arm is worth saying. Those differ per folder and are the
-//! whole content of [`crate::scheme_watch`] and [`crate::storage_watch`], which
-//! are this type wearing one folder's policy each.
+//! whole content of [`crate::scheme_watch`], which is this type wearing the
+//! schemes folder's policy. The storage folder has its own named, shallow ear
+//! ([`crate::storage_watch`]): which of its documents was named is the news
+//! there, and a nameless tree watch cannot say it.
 //!
 //! # What a notification means here
 //!
