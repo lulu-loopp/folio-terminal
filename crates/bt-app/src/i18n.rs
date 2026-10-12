@@ -1020,6 +1020,20 @@ text_entries! {
     HyperlinkNoProgramSuffix,
     /// Its words alone; a substring of the long form, as above.
     HyperlinkNoProgram,
+    /// The suffix for a target whose hand-off failed on the OS hand-off lane (S-5): nothing
+    /// declined it, the hand-off itself did not run to its end.
+    HandoffCouldNotRunSuffix,
+    /// Its words alone, a substring of the long form; also the fonts card's refusal text.
+    HandoffCouldNotRun,
+    /// The suffix for a target whose hand-off the OS hand-off lane's stopped worker took with it.
+    HandoffsStoppedSuffix,
+    /// Its words alone, a substring of the long form; also the fonts card's refusal text.
+    HandoffsStopped,
+    /// The suffix for a target pressed while the OS hand-off lane already had as many hand-offs
+    /// as it takes (S-5).
+    HandoffsTooManySuffix,
+    /// Its words alone, a substring of the long form; also the fonts card's refusal text.
+    HandoffsTooMany,
 
     // ── a drag's landing caption ───────────────────────────────────────────
     DragSwapPanes,
@@ -3917,6 +3931,36 @@ impl Text {
                 pick(lang, " · no program to open it", " · 无程序可打开")
             }
             Self::HyperlinkNoProgram => pick(lang, "no program to open it", "无程序可打开"),
+            Self::HandoffCouldNotRunSuffix => pick(
+                lang,
+                " · the hand-off could not run",
+                " · the hand-off could not run", // zh: pending S-5
+            ),
+            Self::HandoffCouldNotRun => pick(
+                lang,
+                "the hand-off could not run",
+                "the hand-off could not run", // zh: pending S-5
+            ),
+            Self::HandoffsStoppedSuffix => pick(
+                lang,
+                " · hand-offs have stopped",
+                " · hand-offs have stopped", // zh: pending S-5
+            ),
+            Self::HandoffsStopped => pick(
+                lang,
+                "hand-offs have stopped",
+                "hand-offs have stopped", // zh: pending S-5
+            ),
+            Self::HandoffsTooManySuffix => pick(
+                lang,
+                " · too many hand-offs at once",
+                " · too many hand-offs at once", // zh: pending S-5
+            ),
+            Self::HandoffsTooMany => pick(
+                lang,
+                "too many hand-offs at once",
+                "too many hand-offs at once", // zh: pending S-5
+            ),
 
             // ── a drag's landing caption ───────────────────────────────────
             Self::DragSwapPanes => pick(lang, "Swap panes", "交换窗格"),
@@ -6259,6 +6303,20 @@ impl Text {
         (Self::SeatOverflowOne, HostPlatform::MacOs),
         (Self::SeatOverflowMany, HostPlatform::Windows),
         (Self::SeatOverflowMany, HostPlatform::MacOs),
+        // zh: pending S-5 — what a link, an address or the fonts card says when its hand-off
+        // could not run, or the hand-off lane's worker stopped with it owed.
+        (Self::HandoffCouldNotRunSuffix, HostPlatform::Windows),
+        (Self::HandoffCouldNotRunSuffix, HostPlatform::MacOs),
+        (Self::HandoffCouldNotRun, HostPlatform::Windows),
+        (Self::HandoffCouldNotRun, HostPlatform::MacOs),
+        (Self::HandoffsStoppedSuffix, HostPlatform::Windows),
+        (Self::HandoffsStoppedSuffix, HostPlatform::MacOs),
+        (Self::HandoffsStopped, HostPlatform::Windows),
+        (Self::HandoffsStopped, HostPlatform::MacOs),
+        (Self::HandoffsTooManySuffix, HostPlatform::Windows),
+        (Self::HandoffsTooManySuffix, HostPlatform::MacOs),
+        (Self::HandoffsTooMany, HostPlatform::Windows),
+        (Self::HandoffsTooMany, HostPlatform::MacOs),
         // zh: pending H2-NITS — a Profiles ghost row's value that each pane has
         // its own of.
         (Self::ProfilesEnvPerPane, HostPlatform::Windows),
@@ -10299,6 +10357,9 @@ mod tests {
                 (Text::HyperlinkBlockedSuffix, Text::HyperlinkBlocked),
                 (Text::HyperlinkInvalidSuffix, Text::HyperlinkInvalid),
                 (Text::HyperlinkNoProgramSuffix, Text::HyperlinkNoProgram),
+                (Text::HandoffCouldNotRunSuffix, Text::HandoffCouldNotRun),
+                (Text::HandoffsStoppedSuffix, Text::HandoffsStopped),
+                (Text::HandoffsTooManySuffix, Text::HandoffsTooMany),
             ] {
                 let long = long.in_lang(lang);
                 let short = short.in_lang(lang);

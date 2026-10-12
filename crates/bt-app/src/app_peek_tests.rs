@@ -1107,9 +1107,9 @@ fn a_ctrl_click_on_the_foot_reveals_the_file() {
     );
     let press = method_body("Runtime", "press_file_peek_foot");
     for door in [
-        "self.reveal_in_explorer(&path);",
+        "self.reveal_in_explorer(&path)?;",
         "let facts = self.verified_target(seat, &path);",
-        "self.reveal_verified(&path, facts);",
+        "self.reveal_verified(&path, facts)?;",
         "input::pointer_chord_held(self.window.modifiers_held)",
     ] {
         assert!(

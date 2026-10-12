@@ -8,36 +8,59 @@
 //! stay synchronous; this module is the one place that calls them, from one below-normal thread,
 //! and the window hears the answer through its event loop.
 //!
+//! **Built on the completion seam** (`crate::lane`; the side-effects contract's C1–C7, revision
+//! (b)7; S-5): the worker is started by a [`crate::lane::Executor`] (the thread door's in the
+//! product, the suite's scripted one under test), every identity is minted by a
+//! [`crate::lane::Ledger`], each hand-off runs inside [`crate::lane::task`], and every request
+//! ends through the ledger's hooks.
+//!
 //! # The contract
 //!
-//! * **Identity.** Every request gets a [`HandoffId`] minted here, unique for the life of the
-//!   process. The window that asked keeps what it owes the answer in its own [`Pending`], under
-//!   that id — which is the target incarnation: a window that closes takes its `Pending` with it,
-//!   and a new window that happens to reuse a platform handle starts with an empty one.
+//! * **Identity.** Every admitted request gets a [`HandoffId`] minted by the lane's ledger, unique
+//!   for the life of the lane (one per process). The window that asked holds the request, and what
+//!   it owes the answer, in its own [`Pending`] under that id — which is the target incarnation: a
+//!   window that closes takes its `Pending` with it, and a new window that happens to reuse a
+//!   platform handle starts with an empty one.
 //! * **Ordering.** One thread, one FIFO queue: hand-offs are executed in press order, across
-//!   every window, and answered in that order.
-//! * **Capacity.** [`CAPACITY`] requests may wait. Nothing is coalesced — each press is a
-//!   distinct request, and two presses on one link are two hand-offs, as they always were. A
-//!   press that finds the queue full is not waited on: it is answered with [`LANE_FULL`] as its
-//!   refusal, through the same wake and the same drain as every other answer.
-//! * **Completion.** `Ok(())` — the operating system accepted it — or `Err(reason)` — the door's
-//!   own refusal or the system's, byte for byte what the door returned. Never "the other program
-//!   finished": the lane returns when `ShellExecuteW` or `NSWorkspace` does.
-//! * **Abandonment.** A completion is raised only in the window whose [`Pending`] holds its id. A
-//!   window that has closed holds nothing, so its completions are dropped — never raised in
-//!   another window.
-//! * **Wake.** The lane publishes the completion first and then wakes the loop
-//!   (`AppEvent::HandoffAnswered`); the loop drains with `try_recv` and never blocks on the lane.
+//!   every window, and answered in that order across every window — the application reads the
+//!   earliest request still owed ([`HandoffLane::earliest_owed`]) once, each window takes the
+//!   answers its requests hold below it, and they are put back in the order the ledger minted
+//!   them before any is answered ([`in_press_order`]). A request that ends while the windows are
+//!   being read waits for the next drain, so no later answer is ever taken before it.
+//! * **Capacity.** The ledger owes at most [`BOUND`] identities at once — the one running and
+//!   [`CAPACITY`] waiting; an answer its window has not taken yet holds its place. Nothing is
+//!   coalesced — each press is a distinct request, and two presses on one link are two hand-offs,
+//!   as they always were. A press past the bound is refused at the door, synchronously, with
+//!   [`LANE_FULL`] as its terminal outcome, and no identity is minted for it (revision (b)3); a
+//!   press after the worker has ended is refused the same way with [`LANE_GONE`].
+//! * **Completion.** Every admitted request ends exactly once: `Done` with the door's own
+//!   `Result` — `Ok(())`, the operating system accepted it, or `Err(reason)`, the door's own
+//!   refusal or the system's, byte for byte what the door returned (never "the other program
+//!   finished": the lane returns when `ShellExecuteW` or `NSWorkspace` does); `Failed` when the
+//!   hand-off panicked, which its task catches — the worker goes on, and the ledger says the
+//!   failure in `diagnostics.log` once; or `WorkerGone` for every request still owed when the
+//!   worker's thread ends, which leaves the lane faulted.
+//! * **Abandonment.** An answer is raised only in the window whose [`Pending`] holds its id. A
+//!   window that closes drops its requests, and each one's terminal goes to the lane's sink for
+//!   the abandoned (C6) — never to another window. The sink lets a success go and says a refusal
+//!   in `diagnostics.log` ([`abandoned`]).
+//! * **Wake.** The worker publishes the terminal first and then wakes the loop
+//!   (`AppEvent::HandoffAnswered`); the ledger wakes it the same way when the worker ends, after
+//!   every owed request has its terminal. The loop takes the answers without waiting and never
+//!   blocks on the lane.
 //!
 //! Results come back the first of `ARCHITECTURE` §5.1's three ways — an `AppEvent` through the
 //! event-loop proxy — because this lane is `bt-app`'s and may name `AppEvent`.
 
-use std::collections::HashMap;
-use std::sync::mpsc;
+use std::collections::BTreeMap;
+use std::convert::Infallible;
+use std::sync::{Arc, mpsc};
 
 use anyhow::{Context, Result};
 use bt_platform::admission::WorkerCtx;
 use bt_platform::{Handoff, NativeWindow};
+
+use crate::lane::{self, Executor, Ledger, Owed, Refused, Saying, Terminal};
 
 /// How many hand-offs may wait behind the one running.
 ///
@@ -45,193 +68,316 @@ use bt_platform::{Handoff, NativeWindow};
 /// extension that never returns is an accounted-for queue and not an unbounded one.
 pub(crate) const CAPACITY: usize = 32;
 
-/// The refusal a press meets when [`CAPACITY`] hand-offs are already waiting.
+/// **How many identities the lane's ledger owes at once**: the one running and [`CAPACITY`]
+/// waiting. An answer its window has not taken yet holds its place, so the answers held for an
+/// undrained window are bounded by the same number.
+pub(crate) const BOUND: usize = CAPACITY + 1;
+
+/// The refusal a press meets when the ledger already owes [`BOUND`] hand-offs.
 pub(crate) const LANE_FULL: &str = "the hand-off lane is full";
 
 /// The refusal a press meets when the lane's thread is gone.
 pub(crate) const LANE_GONE: &str = "the hand-off lane has stopped";
 
-/// **One hand-off's name**, minted by [`HandoffLane::submit`] and unique in this process.
+/// The lane's name in the lines its ledger says.
+const LANE: &str = "the OS hand-off lane";
+
+/// **One hand-off's name**, minted by the lane's ledger and unique for the life of the lane.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub(crate) struct HandoffId(u64);
 
+impl From<u64> for HandoffId {
+    fn from(minted: u64) -> Self {
+        Self(minted)
+    }
+}
+
+/// How one hand-off ended: the door's own `Result` when it was done; a panic in it is `Failed`.
+pub(crate) type HandoffTerminal = Terminal<HandoffId, Result<(), String>, Infallible>;
+
+/// The lane's sink for the abandoned, shared by every request it admits.
+type Sink = Arc<dyn Fn(HandoffId, HandoffTerminal) + Send + Sync>;
+
+/// **What a hand-off is owed when its window has gone** (C6): the lane's sink for the abandoned,
+/// which outlives every window.
+pub(crate) struct Abandoned(Sink);
+
+impl Owed<HandoffId> for Abandoned {
+    type Answer = Result<(), String>;
+    type Error = Infallible;
+
+    fn sink(self, id: HandoffId, terminal: HandoffTerminal) {
+        (self.0)(id, terminal);
+    }
+}
+
+/// **The product's sink for the abandoned**: a hand-off whose window closed before its answer
+/// came. A success is let go; the door's or the system's refusal, which no window is left to say,
+/// is said through `say` (`diagnostics::note`). A failure and the worker's end were said by the
+/// ledger as they were delivered, so they are not said twice.
+pub(crate) fn abandoned(id: HandoffId, terminal: &HandoffTerminal, say: &dyn Fn(&str)) {
+    if let Terminal::Done(Err(reason)) = terminal {
+        say(&format!(
+            "{LANE}: hand-off {id:?}, asked by a window that has closed, was refused: {reason}"
+        ));
+    }
+}
+
+/// One admitted hand-off, held by the window that asked: its terminal is taken once, and a window
+/// that drops it leaves the terminal to the sink.
+pub(crate) type HandoffRequest = lane::Request<HandoffId, Abandoned>;
+
 /// What the window thread puts on the queue.
-struct Request {
+struct Job {
     id: HandoffId,
     window: NativeWindow,
     handoff: Handoff,
 }
 
-/// **One hand-off, answered** — the id it was asked under and the door's own `Result`.
+/// **Why a hand-off was refused**, as a value: by whom, and in which words.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Completion {
-    pub(crate) id: HandoffId,
-    pub(crate) outcome: Result<(), String>,
+pub(crate) enum Declined {
+    /// The hand-off door refused it, or the system did — the door's own `Err`, byte for byte.
+    /// The door's answer does not say more: `ShellExecuteW`'s code and `NSWorkspace`'s `NO` are
+    /// both read by the door into this one sentence.
+    System(String),
+    /// The lane's ledger already owed [`BOUND`] hand-offs (said [`LANE_FULL`]).
+    LaneFull,
+    /// The lane's worker had ended (said [`LANE_GONE`]).
+    LaneGone,
+    /// The asking window could not be named to the door, in the platform's words.
+    NoWindow(String),
 }
 
-/// **The lane's owner, held by the application** — the sending half, the answers, and the
-/// counter that names requests.
+impl Declined {
+    /// The refusal's own words: the stderr line's reason and the diagnostics a refusal leaves.
+    pub(crate) fn reason(&self) -> &str {
+        match self {
+            Self::System(reason) | Self::NoWindow(reason) => reason,
+            Self::LaneFull => LANE_FULL,
+            Self::LaneGone => LANE_GONE,
+        }
+    }
+}
+
+/// **One hand-off, answered**, as the window that asked hears it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Answer {
+    /// The operating system accepted it.
+    HandedOver,
+    /// It was refused — at the lane's door (full, its worker gone, a window that could not be
+    /// named), by the hand-off door, or by the system.
+    Refused(Declined),
+    /// The hand-off panicked, in these words; the ledger has said them.
+    Failed(String),
+    /// The lane's worker ended with the hand-off owed; the ledger has said so.
+    WorkerGone,
+}
+
+impl Answer {
+    fn of(terminal: HandoffTerminal) -> Self {
+        match terminal {
+            Terminal::Done(Ok(())) => Self::HandedOver,
+            Terminal::Done(Err(reason)) => Self::Refused(Declined::System(reason)),
+            Terminal::Failed(failure) => Self::Failed(failure.to_string()),
+            Terminal::WorkerGone => Self::WorkerGone,
+            Terminal::Cancelled | Terminal::Superseded { .. } | Terminal::Joined { .. } => {
+                unreachable!("the hand-off lane cancels, supersedes and joins nothing")
+            }
+        }
+    }
+}
+
+/// **The lane's owner, held by the application** — the ledger that mints and ends every request,
+/// the queue's sending half, and the sink a closed window's requests are owed.
 pub(crate) struct HandoffLane {
-    requests: mpsc::SyncSender<Request>,
-    answers: mpsc::Receiver<Completion>,
-    /// Presses the queue could not take, answered with their refusal on the next drain.
-    turned_away: Vec<Completion>,
-    /// The loop's wake, for those: a refusal nobody drains is a press with no answer.
-    wake: Box<dyn Fn() + Send>,
-    next: u64,
+    ledger: Arc<Ledger<HandoffId, Abandoned>>,
+    jobs: mpsc::Sender<Job>,
+    sink: Sink,
 }
 
 impl HandoffLane {
     /// **Start the lane** — one thread, `bt-os-handoff`, below normal, for the life of the
-    /// process.
+    /// process, through the thread door; its ledger's lines, and the refusals no window is left
+    /// to hear, said in `diagnostics.log`.
     ///
     /// The thread enters its [`bt_platform::ShellThread`] first, which on Windows is the COM
     /// apartment `ShellExecuteW` wants, and then hands each request to the door it names. The
     /// entry takes the capability the thread door lent this thread's body — the hand-off is a
     /// worker-only door, and this lane is the one worker that holds it.
-    pub(crate) fn spawn(wake: impl Fn() + Clone + Send + 'static) -> Result<Self> {
+    pub(crate) fn spawn(wake: impl Fn() + Send + Sync + 'static) -> Result<Self> {
         Self::start(
+            &Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
             |ctx| {
                 let shell = bt_platform::ShellThread::enter(ctx);
                 move |window: NativeWindow, handoff: &Handoff| shell.hand_over(window, handoff)
             },
             wake,
+            crate::diagnostics::note,
+            |id, terminal| abandoned(id, &terminal, &crate::diagnostics::note),
         )
     }
 
-    /// The lane with the executor made on its own thread, from the capability the door lent it —
-    /// the production one above, or a recording one in a test.
-    fn start<M, E, W>(make_executor: M, wake: W) -> Result<Self>
+    /// The lane with its worker started by `executor`, and the door made on that thread from the
+    /// capability the executor lent it — the production one above, or a recording one in a test.
+    /// `say` is where the ledger's lines go, and `sink` what a closed window's request ends in.
+    fn start<M, D>(
+        executor: &Executor,
+        make_door: M,
+        wake: impl Fn() + Send + Sync + 'static,
+        say: impl Fn(&str) + Send + Sync + 'static,
+        sink: impl Fn(HandoffId, HandoffTerminal) + Send + Sync + 'static,
+    ) -> Result<Self>
     where
-        M: FnOnce(&WorkerCtx) -> E + Send + 'static,
-        E: FnMut(NativeWindow, &Handoff) -> Result<(), String>,
-        W: Fn() + Clone + Send + 'static,
+        M: FnOnce(&WorkerCtx) -> D + Send + 'static,
+        D: FnMut(NativeWindow, &Handoff) -> Result<(), String>,
     {
-        let (request_tx, request_rx) = mpsc::sync_channel::<Request>(CAPACITY);
-        let (answer_tx, answer_rx) = mpsc::channel::<Completion>();
-        let lane_wake = wake.clone();
-        bt_platform::spawn_at_priority(
-            "bt-os-handoff",
-            bt_platform::ThreadPriority::BelowNormal,
-            move |ctx| run_handoff_lane(ctx, request_rx, answer_tx, make_executor(ctx), lane_wake),
-        )
-        .context("spawn the OS hand-off lane")?;
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+        let ledger_wake = Arc::clone(&wake);
+        let ledger = Ledger::new(LANE, Some(BOUND), Saying::PerRequest, say, move || {
+            ledger_wake()
+        });
+        let (jobs, queue) = mpsc::channel::<Job>();
+        let publish = Arc::clone(&ledger);
+        executor
+            .start_worker("bt-os-handoff", Arc::clone(&ledger), move |ctx| {
+                run_handoff_lane(ctx, queue, &publish, make_door(ctx), &*wake)
+            })
+            .map_err(|end| anyhow::anyhow!("{end}"))
+            .context("spawn the OS hand-off lane")?;
         Ok(Self {
-            requests: request_tx,
-            answers: answer_rx,
-            turned_away: Vec::new(),
-            wake: Box::new(wake),
-            next: 0,
+            ledger,
+            jobs,
+            sink: Arc::new(sink),
         })
     }
 
-    fn mint(&mut self) -> HandoffId {
-        let id = HandoffId(self.next);
-        self.next += 1;
-        id
+    /// **The earliest request still owed an answer** — every request below it has ended, because
+    /// the one worker ends them in the order they were minted (and its end ends the rest). The
+    /// drain reads it once, before any window takes its answers ([`Pending::answered`]).
+    pub(crate) fn earliest_owed(&self) -> Option<HandoffId> {
+        self.ledger.earliest_owed()
     }
 
-    /// **Put one hand-off on the lane and return at once** with its id.
-    ///
-    /// A press the lane cannot take — [`CAPACITY`] already waiting, or the thread gone — is
-    /// answered with that refusal on the next drain, like every other answer, so the caller never
-    /// has two ways to hear one.
-    pub(crate) fn submit(&mut self, window: NativeWindow, handoff: Handoff) -> HandoffId {
-        let id = self.mint();
-        let refused = match self.requests.try_send(Request {
-            id,
+    /// **Put one hand-off on the lane and return at once** with its request, or refuse it at the
+    /// door with its terminal outcome: [`Declined::LaneFull`] past [`BOUND`],
+    /// [`Declined::LaneGone`] once the worker has ended. A refused press mints no identity.
+    pub(crate) fn submit(
+        &self,
+        window: NativeWindow,
+        handoff: Handoff,
+    ) -> Result<HandoffRequest, Declined> {
+        let request = self
+            .ledger
+            .admit(Abandoned(Arc::clone(&self.sink)))
+            .map_err(|refused| match refused {
+                Refused::Full { .. } => Declined::LaneFull,
+                Refused::Faulted(_) => Declined::LaneGone,
+                Refused::TwinEnded => unreachable!("the hand-off lane joins nothing"),
+            })?;
+        // A worker that has ended and not yet told the ledger has dropped the queue's receiving
+        // end; its end is on its way to the ledger, which ends this request `WorkerGone` with the
+        // rest it owes, so the job is let go here.
+        let _ = self.jobs.send(Job {
+            id: request.id(),
             window,
             handoff,
-        }) {
-            Ok(()) => return id,
-            Err(mpsc::TrySendError::Full(_)) => LANE_FULL,
-            Err(mpsc::TrySendError::Disconnected(_)) => LANE_GONE,
-        };
-        self.turn_away(id, refused.to_owned());
-        id
-    }
-
-    /// **A hand-off that never reached the lane**, answered with `reason` on the next drain — the
-    /// press whose window could not be named, as well as the two refusals of [`Self::submit`].
-    pub(crate) fn refuse(&mut self, reason: String) -> HandoffId {
-        let id = self.mint();
-        self.turn_away(id, reason);
-        id
-    }
-
-    fn turn_away(&mut self, id: HandoffId, reason: String) {
-        self.turned_away.push(Completion {
-            id,
-            outcome: Err(reason),
         });
-        (self.wake)();
-    }
-
-    /// Every answer that has arrived, without waiting for one — the presses turned away first,
-    /// then the lane's own in the order it answered them.
-    pub(crate) fn answers(&mut self) -> Vec<Completion> {
-        let mut all = std::mem::take(&mut self.turned_away);
-        all.extend(self.answers.try_iter());
-        all
+        Ok(request)
     }
 }
 
-/// **The lane's body**: one request, one door, one answer, then the wake — `run_path_verify_worker`'s
-/// shape, and nothing else runs here.
+/// **The lane's body**: one request, one door inside its task, its terminal published, then the
+/// wake — `run_path_verify_worker`'s shape, and nothing else runs here.
 fn run_handoff_lane(
     worker: &WorkerCtx,
-    requests: mpsc::Receiver<Request>,
-    answers: mpsc::Sender<Completion>,
+    jobs: mpsc::Receiver<Job>,
+    ledger: &Ledger<HandoffId, Abandoned>,
     mut execute: impl FnMut(NativeWindow, &Handoff) -> Result<(), String>,
-    wake: impl Fn(),
+    wake: &dyn Fn(),
 ) {
-    let _ = worker;
-    while let Ok(Request {
+    while let Ok(Job {
         id,
         window,
         handoff,
-    }) = requests.recv()
+    }) = jobs.recv()
     {
-        let outcome = execute(window, &handoff);
-        if answers.send(Completion { id, outcome }).is_err() {
-            return;
-        }
+        let terminal = match lane::task(worker, |_ctx| {
+            Ok::<_, Infallible>(execute(window, &handoff))
+        }) {
+            Ok(outcome) => Terminal::Done(outcome),
+            Err(failure) => Terminal::Failed(failure),
+        };
+        ledger.publish(id, terminal);
         wake();
     }
 }
 
-/// **What one window owes the answers to its own hand-offs**, by id.
+/// **What one window owes the answers to its own hand-offs** — each request it holds, by id, with
+/// what its answer is owed.
 ///
-/// Held by the window, so that closing the window is what abandons them.
+/// Held by the window, so that closing the window is what abandons them: the requests go with it,
+/// and their terminals to the lane's sink.
 pub(crate) struct Pending<D> {
-    owed: HashMap<HandoffId, D>,
+    owed: BTreeMap<HandoffId, (HandoffRequest, D)>,
 }
 
 impl<D> Default for Pending<D> {
     fn default() -> Self {
         Self {
-            owed: HashMap::new(),
+            owed: BTreeMap::new(),
         }
     }
 }
 
 impl<D> Pending<D> {
-    /// Remember what the answer to `id` is owed.
-    pub(crate) fn owe(&mut self, id: HandoffId, duty: D) {
-        self.owed.insert(id, duty);
+    /// Hold `request`, and remember what its answer is owed.
+    pub(crate) fn owe(&mut self, request: HandoffRequest, duty: D) {
+        self.owed.insert(request.id(), (request, duty));
     }
 
-    /// The duty for `id`, to change what the answer will do — `None` when this window did not
-    /// ask it or it has already been answered.
-    pub(crate) fn duty_mut(&mut self, id: HandoffId) -> Option<&mut D> {
-        self.owed.get_mut(&id)
+    /// **Take every answer below `owed`** — the lane's [`HandoffLane::earliest_owed`], read once
+    /// for every window of one drain — in the order the lane minted the requests, without waiting
+    /// for one; each request's terminal taken once, with its duty. A request at or past `owed` is
+    /// left for the next drain even when it has ended since, so that no window takes an answer
+    /// before an earlier one another window has not been asked for yet.
+    pub(crate) fn answered(&mut self, owed: Option<HandoffId>) -> Vec<(HandoffId, Answer, D)> {
+        let ended: Vec<(HandoffId, HandoffTerminal)> = self
+            .owed
+            .iter_mut()
+            .take_while(|(id, _)| owed.is_none_or(|owed| **id < owed))
+            .filter_map(|(id, (request, _))| Some((*id, request.take()?)))
+            .collect();
+        ended
+            .into_iter()
+            .filter_map(|(id, terminal)| {
+                let (_, duty) = self.owed.remove(&id)?;
+                Some((id, Answer::of(terminal), duty))
+            })
+            .collect()
     }
+}
 
-    /// **Claim an answer**: the duty when this window asked for it, and `None` otherwise — which
-    /// is how a completion finds its window and no other.
-    pub(crate) fn claim(&mut self, id: HandoffId) -> Option<D> {
-        self.owed.remove(&id)
-    }
+/// **Every window's answers, in press order across the windows** — what each window `K` took from
+/// its own [`Pending`], merged by the id the ledger minted, which is the order the presses were
+/// made in and the one worker ran them in. The application answers them in this order, each in
+/// the window that asked.
+pub(crate) fn in_press_order<K, D>(
+    per_window: impl IntoIterator<Item = (K, Vec<(HandoffId, Answer, D)>)>,
+) -> Vec<(K, HandoffId, Answer, D)>
+where
+    K: Copy,
+{
+    let mut all: Vec<(K, HandoffId, Answer, D)> = per_window
+        .into_iter()
+        .flat_map(|(window, answers)| {
+            answers
+                .into_iter()
+                .map(move |(id, answer, duty)| (window, id, answer, duty))
+        })
+        .collect();
+    all.sort_by_key(|(_, id, _, _)| *id);
+    all
 }
 
 /// **What one window owes one of its hand-offs' answers** — the refusal's words, and what a
@@ -240,6 +386,119 @@ pub(crate) struct Duty {
     pub(crate) refusal: Refusal,
     pub(crate) accepted: Option<OnAccepted>,
     pub(crate) refused: Option<OnRefused>,
+}
+
+impl Duty {
+    /// **What the window does for `answer`**, as values — the one function the window's answer
+    /// and the tests both read.
+    ///
+    /// Every refusal says the surface's own words with its reason (the stderr line, the files
+    /// notice), and then what the surface asked for beyond them, in the words of who refused:
+    /// only the door's or the system's refusal says there is nothing to open it with (the fonts
+    /// card holding the door's own sentence); a full lane says so; a lane whose worker has
+    /// stopped — at the door, or with the hand-off owed — says hand-offs have stopped; a hand-off
+    /// that failed, or whose window could not be named, says it could not run. None claims the
+    /// system declined what it was never asked.
+    pub(crate) fn reply(self, answer: Answer) -> Reply {
+        let could_not_run = || {
+            (
+                crate::i18n::Text::HandoffCouldNotRun.text().to_owned(),
+                crate::LinkRefusal::CouldNotRun,
+            )
+        };
+        let stopped = || {
+            (
+                crate::i18n::Text::HandoffsStopped.text().to_owned(),
+                crate::LinkRefusal::WorkerStopped,
+            )
+        };
+        let (reason, (shown, link)) = match answer {
+            Answer::HandedOver => return Reply::HandedOver(self.accepted),
+            Answer::Refused(declined) => {
+                let reason = declined.reason().to_owned();
+                let said = match declined {
+                    Declined::System(reason) => (reason, crate::LinkRefusal::NoProgram),
+                    Declined::LaneFull => (
+                        crate::i18n::Text::HandoffsTooMany.text().to_owned(),
+                        crate::LinkRefusal::TooMany,
+                    ),
+                    Declined::LaneGone => stopped(),
+                    Declined::NoWindow(_) => could_not_run(),
+                };
+                (reason, said)
+            }
+            Answer::Failed(words) => (words, could_not_run()),
+            Answer::WorkerGone => (LANE_GONE.to_owned(), stopped()),
+        };
+        Reply::Refused {
+            words: self.refusal.words(&reason),
+            then: self.refused.map(|then| match then {
+                OnRefused::HyperlinkRefused(hyperlink) => FollowUp::Hover(hyperlink, link),
+                OnRefused::PreviewAddressRefused(surface, address) => {
+                    FollowUp::Address(surface, address, link)
+                }
+                OnRefused::FontsToast => FollowUp::FontsToast(shown),
+            }),
+        }
+    }
+}
+
+/// **What a window does for one answer** ([`Duty::reply`]).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Reply {
+    /// The system took it: the confirmation the surface named, if any.
+    HandedOver(Option<OnAccepted>),
+    /// It was refused, failed, or lost with the lane's worker: the surface's own words, and what
+    /// the surface asked to happen beyond them.
+    Refused {
+        words: RefusalWords,
+        then: Option<FollowUp>,
+    },
+}
+
+/// **What a surface shows beyond a refusal's words**, with the refusal it says.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum FollowUp {
+    /// The hover line under the address a `Ctrl`+click was on.
+    Hover(bt_viewport::HyperlinkHit, crate::LinkRefusal),
+    /// The notice a refused address raises on the preview surface a link was pressed on.
+    Address(crate::PreviewSurface, String, crate::LinkRefusal),
+    /// The settings dialog's card under `Install fonts…`, holding these words.
+    FontsToast(String),
+}
+
+/// **One hand-off as a surface asks for it**: the request, and what its answer is owed — said
+/// before it is handed off, because a press refused at the lane's door is answered at once.
+pub(crate) struct Ask {
+    pub(crate) handoff: Handoff,
+    pub(crate) duty: Duty,
+}
+
+impl Ask {
+    /// A hand-off whose refusal says `refusal`'s words, and that owes nothing else.
+    pub(crate) fn new(handoff: Handoff, refusal: Refusal) -> Self {
+        Self {
+            handoff,
+            duty: Duty {
+                refusal,
+                accepted: None,
+                refused: None,
+            },
+        }
+    }
+
+    /// What to draw when the system has taken it — a confirmation that claims the hand-off
+    /// happened, which is why it waits for the answer.
+    pub(crate) fn when_handed_over(mut self, then: OnAccepted) -> Self {
+        self.duty.accepted = Some(then);
+        self
+    }
+
+    /// What to say, beyond the refusal's own words, when the system declines it.
+    pub(crate) fn if_refused(mut self, then: OnRefused) -> Self {
+        self.duty.refused = Some(then);
+        self
+    }
 }
 
 /// What a surface draws when the system has taken its hand-off.
@@ -306,46 +565,56 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::lane::Gate;
 
-    /// A lane whose executor writes down what it was handed and answers `answer`, so the lane's
-    /// own queue, thread and wake are the real ones and only the door is a stand-in; its wakes
-    /// come back on a channel.
+    /// What a test lane's sink for the abandoned was handed, in order.
+    type Sunk = Arc<Mutex<Vec<(HandoffId, HandoffTerminal)>>>;
+
+    /// A lane on the product's executor whose door writes down what it was handed and answers
+    /// `answer`, so the lane's ledger, queue, thread and wake are the real ones and only the door
+    /// is a stand-in; its wakes come back on a channel, and what its sink is handed is kept.
     fn recording_lane(
+        executor: &Executor,
         answer: impl Fn(&Handoff) -> Result<(), String> + Send + 'static,
-        delay: impl Fn(usize) -> Duration + Send + 'static,
-    ) -> (HandoffLane, Arc<Mutex<Vec<Handoff>>>, mpsc::Receiver<()>) {
+    ) -> (
+        HandoffLane,
+        Arc<Mutex<Vec<Handoff>>>,
+        mpsc::Receiver<()>,
+        Sunk,
+    ) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&seen);
+        let sunk: Sunk = Arc::default();
+        let kept = Arc::clone(&sunk);
         let (wake, wakes) = crate::lane::wake_channel();
         let lane = HandoffLane::start(
+            executor,
             move |_ctx| {
                 move |_window: NativeWindow, handoff: &Handoff| {
-                    let count = {
-                        let mut log = log.lock().expect("the log");
-                        log.push(handoff.clone());
-                        log.len()
-                    };
-                    std::thread::sleep(delay(count));
+                    log.lock().expect("the log").push(handoff.clone());
                     answer(handoff)
                 }
             },
             wake,
+            |_line: &str| {},
+            move |id, terminal| kept.lock().expect("the sink").push((id, terminal)),
         )
         .expect("the lane starts");
-        (lane, seen, wakes)
+        (lane, seen, wakes, sunk)
     }
 
-    /// Every answer to `count` requests, each awaited on the lane's own wake — which follows its
-    /// answer's publication — within the lane suite's patience.
-    fn answers(
-        lane: &mut HandoffLane,
+    /// Every answer to `count` requests `pending` holds, each awaited on the lane's own wake —
+    /// which follows its terminal's publication — within the lane suite's patience.
+    fn answers<D>(
+        lane: &HandoffLane,
+        pending: &mut Pending<D>,
         wakes: &mpsc::Receiver<()>,
         count: usize,
-    ) -> Vec<Completion> {
-        let mut all = lane.answers();
+    ) -> Vec<(HandoffId, Answer, D)> {
+        let mut all = pending.answered(lane.earliest_owed());
         while all.len() < count {
             crate::lane::wait_for_a_wake(wakes, &format!("answer {} of {count}", all.len() + 1));
-            all.extend(lane.answers());
+            all.extend(pending.answered(lane.earliest_owed()));
         }
         all
     }
@@ -354,32 +623,50 @@ mod tests {
         NativeWindow::stand_in(0)
     }
 
-    /// RED (ticket 10) — **hand-offs complete in press order.**
+    /// RED (ticket 10; S-5 round 2) — **hand-offs complete in press order, across windows.**
     ///
     /// Two presses in a row are two things the reader asked for in a sequence — a reveal and then
-    /// an open, say — and a lane that ran them out of order would put the second window behind
-    /// the first. The executor here takes longer over the first request than the later ones, so a
-    /// lane that ran requests concurrently, or answered whichever finished first, is caught.
+    /// an open, say — and a lane that ran or answered them out of order would put the second
+    /// window behind the first, whichever windows they were pressed in. Five presses alternate
+    /// between two windows while the suite's executor holds the worker; once all five have ended,
+    /// the windows' answers are taken the way `FolioApp::answer_handoffs` takes them, and come
+    /// out in press order — not one window's and then the other's.
     ///
-    /// MUTATION: spawn a thread per request in `run_handoff_lane` (`std::thread::spawn` around
-    /// `execute`), and the answers arrive shortest-first.
+    /// MUTATION: drop the sort in [`in_press_order`] (each window's answers then follow the
+    /// other's), and the answers come out by window.
     #[test]
     fn handoffs_complete_in_press_order() {
-        let (mut lane, seen, wakes) = recording_lane(
-            |_| Ok(()),
-            |count| Duration::from_millis(if count == 1 { 60 } else { 1 }),
-        );
+        let gate = Arc::new(Gate::default());
+        let (lane, seen, wakes, _) =
+            recording_lane(&Executor::scripted(Arc::clone(&gate)), |_| Ok(()));
         let requests: Vec<Handoff> = (0..5)
             .map(|at| Handoff::Address(format!("https://example.invalid/{at}")))
             .collect();
-        let ids: Vec<HandoffId> = requests
-            .iter()
-            .map(|request| lane.submit(window(), request.clone()))
-            .collect();
-        let answered: Vec<HandoffId> = answers(&mut lane, &wakes, ids.len())
-            .into_iter()
-            .map(|completion| completion.id)
-            .collect();
+        let mut windows: [Pending<()>; 2] = [Pending::default(), Pending::default()];
+        let mut ids = Vec::new();
+        gate.hold();
+        for (at, request) in requests.iter().enumerate() {
+            let admitted = lane
+                .submit(window(), request.clone())
+                .expect("the lane admits it");
+            ids.push(admitted.id());
+            // The first press in the second window, so that window order is not press order.
+            windows[(at + 1) % 2].owe(admitted, ());
+        }
+        gate.release();
+        for at in 0..ids.len() {
+            crate::lane::wait_for_a_wake(&wakes, &format!("answer {} of {}", at + 1, ids.len()));
+        }
+        let [first, second] = &mut windows;
+        let owed = lane.earliest_owed();
+        let answered: Vec<HandoffId> =
+            in_press_order([(0, first.answered(owed)), (1, second.answered(owed))])
+                .into_iter()
+                .map(|(_, id, answer, ())| {
+                    assert_eq!(answer, Answer::HandedOver);
+                    id
+                })
+                .collect();
         assert_eq!(answered, ids, "answered in the order pressed");
         assert_eq!(
             *seen.lock().expect("the log"),
@@ -388,98 +675,556 @@ mod tests {
         );
     }
 
-    /// RED (ticket 10) — **a completion for a closed window is dropped.**
+    /// RED (S-5 round 4) — **an answer that ends while the windows are being read waits for the
+    /// next drain**, so press order holds across drains, not only inside one.
     ///
-    /// The answer to a hand-off belongs to the window that asked: a confirmation or a refusal
-    /// raised in a different window would be a sentence about something that reader never did.
-    /// A window's duties live in its own [`Pending`], so closing the window drops them; the ids
-    /// are the lane's and unique in the process, so no other window can claim the answer by
-    /// accident — including a window opened afterwards, which starts empty.
+    /// Window A asked 1, 3 and 5, window B 2, 4 and 6. With 1–3 answered and the worker held on
+    /// 4, a drain reads the earliest request still owed (4), then A takes its answers; the worker
+    /// is let go and answers 4, 5 and 6 before B is read — the moment the scheduler can put
+    /// between two windows' reads. B takes only 2, below the mark, so the first drain answers 1,
+    /// 2, 3 and the next 4, 5, 6. Read without the mark, B would take 2, 4 and 6 at once and A's 5
+    /// would come after 6. (This race is what made `OrderIsAsDeclared` fail now and then on a
+    /// machine whose worker ran between the two windows' reads.)
     ///
-    /// MUTATION: make `Pending::claim` answer the first duty it holds whatever the id
-    /// (`self.owed.drain().next().map(|(_, duty)| duty)`), and the second window claims the first
-    /// window's answer.
+    /// MUTATION: take every ended answer whatever the mark (`owed` ignored in
+    /// [`Pending::answered`]), and 6 is answered before 5.
     #[test]
-    fn a_completion_for_a_closed_window_is_dropped() {
-        let (mut lane, _, wakes) = recording_lane(|_| Ok(()), |_| Duration::ZERO);
-        let mut first: Pending<&str> = Pending::default();
-        let mut second: Pending<&str> = Pending::default();
-        let asked = lane.submit(window(), Handoff::FontsPage);
-        first.owe(asked, "the first window's confirmation");
-        let other = lane.submit(window(), Handoff::FontsPage);
-        second.owe(other, "the second window's confirmation");
-        // The first window closes before its answer arrives.
-        drop(first);
-        let mut third: Pending<&str> = Pending::default();
+    fn an_answer_that_ends_while_the_windows_are_read_waits_for_the_next_drain() {
+        let gate = Arc::new(Gate::default());
+        let (lane, _, wakes, _) =
+            recording_lane(&Executor::scripted(Arc::clone(&gate)), |_| Ok(()));
+        let mut a: Pending<()> = Pending::default();
+        let mut b: Pending<()> = Pending::default();
+        let mut press = |into_a: bool| {
+            let request = lane
+                .submit(window(), Handoff::FontsPage)
+                .expect("the lane admits it");
+            let id = request.id();
+            if into_a {
+                a.owe(request, ());
+            } else {
+                b.owe(request, ());
+            }
+            id
+        };
+        let mut ids = vec![press(true), press(false), press(true)];
+        for at in 0..3 {
+            crate::lane::wait_for_a_wake(&wakes, &format!("answer {} of 3", at + 1));
+        }
+        gate.hold();
+        ids.push(press(false));
+        assert!(gate.wait_entered(4), "the worker holds the fourth press");
+        ids.push(press(true));
+        ids.push(press(false));
 
-        let all = answers(&mut lane, &wakes, 2);
-        let theirs = all
-            .iter()
-            .find(|completion| completion.id == asked)
-            .expect("the lane answered the closed window's request");
+        let owed = lane.earliest_owed();
+        assert_eq!(owed, Some(ids[3]), "the fourth is the earliest still owed");
+        let first_a = a.answered(owed);
+        gate.release();
+        for at in 3..6 {
+            crate::lane::wait_for_a_wake(&wakes, &format!("answer {} of 6", at + 1));
+        }
+        let first_b = b.answered(owed);
+        let first: Vec<HandoffId> = in_press_order([(0, first_a), (1, first_b)])
+            .into_iter()
+            .map(|(_, id, _, ())| id)
+            .collect();
+        let owed = lane.earliest_owed();
+        let second: Vec<HandoffId> = in_press_order([(0, a.answered(owed)), (1, b.answered(owed))])
+            .into_iter()
+            .map(|(_, id, _, ())| id)
+            .collect();
         assert_eq!(
-            second.claim(theirs.id),
-            None,
-            "not raised in another window"
+            first,
+            ids[..3],
+            "the first drain answers what ended before it"
         );
-        assert_eq!(third.claim(theirs.id), None, "nor in one opened since");
         assert_eq!(
-            second.claim(other),
-            Some("the second window's confirmation"),
-            "and the window that asked still hears its own"
+            second,
+            ids[3..],
+            "and the next drain the rest, in press order"
         );
     }
 
-    /// PIN (ticket 10) — **a flood is refused at the door of the queue, never waited on.**
+    /// RED (S-5 round 2) — **a hand-off that could not run is said on its surface, in words of its
+    /// own.**
     ///
-    /// The window thread may not block on the lane. With the executor held, the queue fills to
-    /// [`CAPACITY`] behind the one running, and every press past that is answered with
-    /// [`LANE_FULL`] on the next drain — each press is its own request with its own id, so nothing
-    /// is merged to make room.
+    /// The fonts card's press has no stderr line and no notice: its refusal is the card under
+    /// `Install fonts…`. A hand-off that panicked, or that the lane's stopped worker took with it,
+    /// is still answered there, with "the hand-off could not run" or "hand-offs have
+    /// stopped" — never silence, and never the system's refusal. A link's hover line and an
+    /// address's notice say the same two refusals, not "no program to open it".
     ///
-    /// MUTATION: `send` instead of `try_send` in `submit`, and this test hangs past its deadline.
+    /// MUTATION: answer `Answer::Failed` in [`Duty::reply`] with no follow-up (`then: None`, as
+    /// the window's answer did when it returned after the refusal's words), and the fonts card
+    /// says nothing.
+    #[test]
+    fn a_hand_off_that_could_not_run_is_said_on_its_surface() {
+        let fonts = || Duty {
+            refusal: Refusal {
+                stderr: None,
+                program_notice: false,
+            },
+            accepted: None,
+            refused: Some(OnRefused::FontsToast),
+        };
+        let failed = Answer::Failed("the task panicked: no shell".to_owned());
+        assert_eq!(
+            fonts().reply(failed.clone()),
+            Reply::Refused {
+                words: RefusalWords {
+                    line: None,
+                    notice: None,
+                },
+                then: Some(FollowUp::FontsToast(
+                    crate::i18n::Text::HandoffCouldNotRun.text().to_owned()
+                )),
+            },
+            "a failed hand-off from the fonts card raises the card"
+        );
+        assert_eq!(
+            fonts().reply(Answer::WorkerGone),
+            Reply::Refused {
+                words: RefusalWords {
+                    line: None,
+                    notice: None,
+                },
+                then: Some(FollowUp::FontsToast(
+                    crate::i18n::Text::HandoffsStopped.text().to_owned()
+                )),
+            },
+            "so does one the stopped worker took"
+        );
+        assert_eq!(
+            fonts().reply(Answer::Refused(Declined::System("no handler".to_owned()))),
+            Reply::Refused {
+                words: RefusalWords {
+                    line: None,
+                    notice: None,
+                },
+                then: Some(FollowUp::FontsToast("no handler".to_owned())),
+            },
+            "and a refusal still raises it in the system's words"
+        );
+
+        let surface = crate::PreviewSurface::Seat(crate::LeafId {
+            tab: crate::TabId(1),
+            seat: bt_layout::SeatId(2),
+        });
+        let address = |refusal| Duty {
+            refusal: Refusal {
+                stderr: Some(("recoverable link hand-off failure", "hand a link over")),
+                program_notice: false,
+            },
+            accepted: None,
+            refused: Some(refusal),
+        };
+        let link = OnRefused::PreviewAddressRefused(surface, "mailto:a@example.invalid".into());
+        assert_eq!(
+            address(link.clone()).reply(failed),
+            Reply::Refused {
+                words: RefusalWords {
+                    line: Some(
+                        "recoverable link hand-off failure: hand a link over: the task \
+                         panicked: no shell"
+                            .to_owned()
+                    ),
+                    notice: None,
+                },
+                then: Some(FollowUp::Address(
+                    surface,
+                    "mailto:a@example.invalid".to_owned(),
+                    crate::LinkRefusal::CouldNotRun
+                )),
+            },
+            "an address's notice says the hand-off could not run, not that nothing opens it"
+        );
+        assert_eq!(
+            address(link).reply(Answer::WorkerGone),
+            Reply::Refused {
+                words: RefusalWords {
+                    line: Some(format!(
+                        "recoverable link hand-off failure: hand a link over: {LANE_GONE}"
+                    )),
+                    notice: None,
+                },
+                then: Some(FollowUp::Address(
+                    surface,
+                    "mailto:a@example.invalid".to_owned(),
+                    crate::LinkRefusal::WorkerStopped
+                )),
+            },
+        );
+    }
+
+    /// RED (S-5; the side-effects contract's C6) — **a hand-off asked by a window that closed
+    /// reaches the abandoned sink**, and no other window.
+    ///
+    /// The answer to a hand-off belongs to the window that asked: a confirmation or a refusal
+    /// raised in a different window would be a sentence about something that reader never did. A
+    /// window holds its requests in its own [`Pending`], so closing the window drops them, and
+    /// each one's terminal goes to the lane's sink for the abandoned — which outlives every
+    /// window — exactly once. No other window takes it, including one opened afterwards, which
+    /// starts empty. The product's sink lets a success go and says a refusal no window is left to
+    /// hear ([`abandoned`]).
+    ///
+    /// MUTATION: make `<Abandoned as Owed>::sink` discard what it is handed (an empty body), and
+    /// the closed window's answer reaches nothing.
+    #[test]
+    fn a_hand_off_asked_by_a_window_that_closed_reaches_the_abandoned_sink() {
+        let (lane, _, wakes, sunk) = recording_lane(
+            &Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
+            |_| Ok(()),
+        );
+        let mut first: Pending<&str> = Pending::default();
+        let mut second: Pending<&str> = Pending::default();
+        let asked = lane
+            .submit(window(), Handoff::FontsPage)
+            .expect("the lane admits it");
+        let asked_id = asked.id();
+        first.owe(asked, "the first window's confirmation");
+        let other = lane
+            .submit(window(), Handoff::FontsPage)
+            .expect("the lane admits it");
+        let other_id = other.id();
+        second.owe(other, "the second window's confirmation");
+        // The first window closes before its answer is taken.
+        drop(first);
+        let mut third: Pending<&str> = Pending::default();
+
+        // One thread, in press order: by the time the second window's answer is in, the first's
+        // has ended — in the sink, wherever the window's close fell.
+        assert_eq!(
+            answers(&lane, &mut second, &wakes, 1),
+            vec![(
+                other_id,
+                Answer::HandedOver,
+                "the second window's confirmation"
+            )],
+            "the window that asked still hears its own, and only its own"
+        );
+        assert_eq!(
+            third.answered(lane.earliest_owed()),
+            Vec::new(),
+            "nor one opened since"
+        );
+        assert_eq!(
+            *sunk.lock().expect("the sink"),
+            vec![(asked_id, Terminal::Done(Ok(())))],
+            "the closed window's answer reached the sink, once"
+        );
+
+        // The product's sink: a refusal is said, a success let go.
+        let said = Mutex::new(Vec::new());
+        let say = |line: &str| said.lock().expect("the lines").push(line.to_owned());
+        abandoned(asked_id, &Terminal::Done(Ok(())), &say);
+        abandoned(
+            asked_id,
+            &Terminal::Done(Err("no program is registered for it".to_owned())),
+            &say,
+        );
+        let said = said.into_inner().expect("the lines");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].ends_with("was refused: no program is registered for it"),
+            "{said:?}"
+        );
+    }
+
+    /// RED (S-5 round 4) — **a press refused at the lane's door says who refused it**, on every
+    /// surface, and never that nothing can open it.
+    ///
+    /// The real lane refuses a press synchronously when it is full and when its worker has ended;
+    /// each refusal reaches the link's hover line, the address's notice and the fonts card in its
+    /// own words — "too many hand-offs at once", "hand-offs have stopped" — and the surface's
+    /// stderr line with the lane's reason. A window that could not be named says the hand-off
+    /// could not run. Only the door's or the system's own refusal says "no program to open it".
+    ///
+    /// MUTATION: map every `Answer::Refused` to `LinkRefusal::NoProgram` with its reason as the
+    /// card's words in [`Duty::reply`] (as round 3 did), and each door refusal says "no program".
+    #[test]
+    fn a_press_refused_at_the_lanes_door_says_who_refused_it() {
+        let gate = Arc::new(Gate::default());
+        let (wake, _wakes) = crate::lane::wake_channel();
+        let lane = HandoffLane::start(
+            &Executor::scripted(Arc::clone(&gate)),
+            |_ctx| |_window: NativeWindow, _handoff: &Handoff| Ok(()),
+            wake,
+            |_line: &str| {},
+            |_id, _terminal| {},
+        )
+        .expect("the lane starts");
+        gate.hold();
+        let mut held: Pending<()> = Pending::default();
+        held.owe(
+            lane.submit(window(), Handoff::FontsPage)
+                .expect("the first press is admitted"),
+            (),
+        );
+        assert!(gate.wait_entered(1), "the worker starts the first press");
+        for _ in 0..CAPACITY {
+            held.owe(
+                lane.submit(window(), Handoff::FontsPage)
+                    .expect("a press within the bound is admitted"),
+                (),
+            );
+        }
+        let full = lane
+            .submit(window(), Handoff::FontsPage)
+            .err()
+            .expect("the press past the bound is refused at the door");
+        assert_eq!(full, Declined::LaneFull);
+        gate.release();
+        drop(held);
+        drop(lane);
+
+        let hyperlink = crate::test_support::hyperlink_hit("https://example.invalid/");
+        let surface = crate::PreviewSurface::Seat(crate::LeafId {
+            tab: crate::TabId(1),
+            seat: bt_layout::SeatId(2),
+        });
+        let duty = |refused: OnRefused| Duty {
+            refusal: Refusal {
+                stderr: Some(("recoverable link hand-off failure", "hand a link over")),
+                program_notice: false,
+            },
+            accepted: None,
+            refused: Some(refused),
+        };
+        let surfaces = |declined: &Declined| -> Vec<Reply> {
+            [
+                OnRefused::HyperlinkRefused(hyperlink.clone()),
+                OnRefused::PreviewAddressRefused(surface, "https://example.invalid/".to_owned()),
+                OnRefused::FontsToast,
+            ]
+            .into_iter()
+            .map(|refused| duty(refused).reply(Answer::Refused(declined.clone())))
+            .collect()
+        };
+        let expected = |reason: &str, words: crate::i18n::Text, link: crate::LinkRefusal| {
+            let words_of = RefusalWords {
+                line: Some(format!(
+                    "recoverable link hand-off failure: hand a link over: {reason}"
+                )),
+                notice: None,
+            };
+            vec![
+                Reply::Refused {
+                    words: words_of.clone(),
+                    then: Some(FollowUp::Hover(hyperlink.clone(), link)),
+                },
+                Reply::Refused {
+                    words: words_of.clone(),
+                    then: Some(FollowUp::Address(
+                        surface,
+                        "https://example.invalid/".to_owned(),
+                        link,
+                    )),
+                },
+                Reply::Refused {
+                    words: words_of,
+                    then: Some(FollowUp::FontsToast(words.text().to_owned())),
+                },
+            ]
+        };
+        assert_eq!(
+            surfaces(&full),
+            expected(
+                LANE_FULL,
+                crate::i18n::Text::HandoffsTooMany,
+                crate::LinkRefusal::TooMany
+            ),
+            "a full lane says so on every surface"
+        );
+        assert_eq!(
+            surfaces(&Declined::LaneGone),
+            expected(
+                LANE_GONE,
+                crate::i18n::Text::HandoffsStopped,
+                crate::LinkRefusal::WorkerStopped
+            ),
+            "a stopped lane says so on every surface"
+        );
+        assert_eq!(
+            surfaces(&Declined::NoWindow("no window handle".to_owned())),
+            expected(
+                "no window handle",
+                crate::i18n::Text::HandoffCouldNotRun,
+                crate::LinkRefusal::CouldNotRun
+            ),
+            "a window that could not be named: the hand-off could not run"
+        );
+        let system = surfaces(&Declined::System("no handler".to_owned()));
+        assert_eq!(
+            system[0],
+            Reply::Refused {
+                words: RefusalWords {
+                    line: Some(
+                        "recoverable link hand-off failure: hand a link over: no handler"
+                            .to_owned()
+                    ),
+                    notice: None,
+                },
+                then: Some(FollowUp::Hover(
+                    hyperlink.clone(),
+                    crate::LinkRefusal::NoProgram
+                )),
+            },
+            "and only the system's refusal says nothing can open it"
+        );
+    }
+
+    /// RED (S-5 round 3; D-70) — **a hand-off's panic is contained under the resident panic
+    /// hook.** The product's hook ends the process for a panic it is not told is contained, before
+    /// any catch runs; the door is called inside the seam's task, so the hook's decision there is
+    /// yes and a panicking hand-off is that request's `Failed`, not the end of Folio.
+    ///
+    /// MUTATION: run both the seam's task and its worker body under `catch_unwind` instead of
+    /// `contained_panic::contain` (`lane::task`, `Executor::start_worker`), and the decision at the
+    /// door is no. (Either one alone still contains the door.)
+    #[test]
+    fn a_hand_offs_panic_is_contained_under_the_resident_hook() {
+        let (told, heard) = mpsc::channel();
+        let told = Mutex::new(told);
+        let (lane, _, wakes, _) = recording_lane(
+            &Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
+            move |_| {
+                let _ = told
+                    .lock()
+                    .expect("the channel")
+                    .send(crate::the_hook_lets_this_panic_unwind());
+                Ok(())
+            },
+        );
+        let mut pending: Pending<()> = Pending::default();
+        pending.owe(
+            lane.submit(window(), Handoff::FontsPage)
+                .expect("the lane admits it"),
+            (),
+        );
+        assert!(
+            crate::lane::receive(&heard, "the door's decision"),
+            "the door runs where the hook lets a panic unwind"
+        );
+        assert_eq!(answers(&lane, &mut pending, &wakes, 1).len(), 1);
+    }
+
+    /// PIN (ticket 10) — **a flood of presses is refused at the lane's door, never waited on.**
+    ///
+    /// The window thread may not block on the lane. With the door held, the ledger fills to
+    /// [`BOUND`] — the one running and [`CAPACITY`] behind it — and every press past that is
+    /// refused at once, with [`LANE_FULL`] as its terminal; each admitted press is its own request
+    /// with its own id, so nothing is merged to make room.
+    ///
+    /// MUTATION: build the lane's ledger with no bound (`None` for `Some(BOUND)` in
+    /// `HandoffLane::start`), and no press is refused.
     #[test]
     fn a_flood_of_presses_is_refused_rather_than_waited_on() {
         let gate = Arc::new(Mutex::new(()));
         let held = gate.lock().expect("the gate");
         let inside = Arc::clone(&gate);
-        let (mut lane, _, _) = recording_lane(
+        let (lane, _, _, _) = recording_lane(
+            &Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
             move |_| {
                 drop(inside.lock().expect("the gate"));
                 Ok(())
             },
-            |_| Duration::ZERO,
         );
         let started = Instant::now();
-        let ids: Vec<HandoffId> = (0..CAPACITY + 3)
+        let presses: Vec<Result<HandoffRequest, Declined>> = (0..BOUND + 3)
             .map(|at| lane.submit(window(), Handoff::Open(PathBuf::from(format!("{at}")))))
             .collect();
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "the press never waits"
         );
+        let ids: Vec<HandoffId> = presses
+            .iter()
+            .filter_map(|press| press.as_ref().ok().map(lane::Request::id))
+            .collect();
         assert!(
             ids.windows(2).all(|pair| pair[0] < pair[1]),
             "every press is its own request"
         );
-        let refused: Vec<Completion> = lane.answers();
-        assert!(
-            refused.len() >= 2
-                && refused
-                    .iter()
-                    .all(|answer| answer.outcome == Err(LANE_FULL.to_owned())),
-            "the presses past the bound are answered with the refusal: {refused:?}"
+        let refused: Vec<&Declined> = presses
+            .iter()
+            .filter_map(|press| press.as_ref().err())
+            .collect();
+        assert_eq!(
+            refused,
+            vec![&Declined::LaneFull; 3],
+            "the presses past the bound are refused at the door"
         );
         drop(held);
+    }
+
+    /// RED (S-5; D-71) — **the hand-off lane refuses synchronously above its bound**, and its
+    /// answers held are bounded by the same number.
+    ///
+    /// With the worker held on the suite's executor, the ledger takes [`BOUND`] presses and
+    /// refuses the next at the door, minting nothing for it. An answer its window has not taken
+    /// holds its place: with every request answered and none taken, a press is still refused; once
+    /// the window takes its answers, the next press is admitted, under the next id.
+    ///
+    /// MUTATION: build the lane's ledger with no bound (`None` for `Some(BOUND)` in
+    /// `HandoffLane::start`) — unbounded admission — and the press past the bound is admitted.
+    #[test]
+    fn the_hand_off_lane_refuses_synchronously_above_its_bound() {
+        let gate = Arc::new(Gate::default());
+        let (wake, wakes) = crate::lane::wake_channel();
+        let lane = HandoffLane::start(
+            &Executor::scripted(Arc::clone(&gate)),
+            |_ctx| |_window: NativeWindow, _handoff: &Handoff| Ok(()),
+            wake,
+            |_line: &str| {},
+            |_id, _terminal| {},
+        )
+        .expect("the lane starts");
+        let press = || lane.submit(window(), Handoff::FontsPage);
+        gate.hold();
+        let mut pending: Pending<()> = Pending::default();
+        let first = press().expect("the first press is admitted");
+        let first_id = first.id();
+        pending.owe(first, ());
+        assert!(gate.wait_entered(1), "the worker starts the first press");
+        for _ in 0..CAPACITY {
+            pending.owe(press().expect("a press within the bound is admitted"), ());
+        }
+        assert_eq!(
+            press().err(),
+            Some(Declined::LaneFull),
+            "refused at the door, at once"
+        );
+
+        gate.release();
+        for at in 0..BOUND {
+            crate::lane::wait_for_a_wake(&wakes, &format!("answer {} of {BOUND}", at + 1));
+        }
+        assert_eq!(
+            press().err(),
+            Some(Declined::LaneFull),
+            "an answer not yet taken holds its place"
+        );
+        assert_eq!(
+            pending.answered(lane.earliest_owed()).len(),
+            BOUND,
+            "every press answered"
+        );
+        let next = press().expect("taken answers make room");
+        assert_eq!(
+            next.id(),
+            HandoffId(first_id.0 + BOUND as u64),
+            "a refused press minted no identity"
+        );
     }
 
     /// RED (ticket 10) — **a refused hand-off raises the same words it did before.**
     ///
     /// The refusal used to be read off the door's `Result` on the window thread, wrapped in an
     /// `anyhow` context and printed with `{:#}`; the files notice was raised when that text held
-    /// the program refusal. The door now answers on the lane, so the words are rebuilt from a
-    /// [`Completion`] — and a reader must not be able to tell. Run through the **real** lane with
-    /// the **real** [`bt_platform::ShellThread`] over the **real** verifier's answer for a real
+    /// the program refusal. The door now answers on the lane, so the words are rebuilt from an
+    /// [`Answer`] — and a reader must not be able to tell. Run through the **real** lane with the
+    /// **real** [`bt_platform::ShellThread`] over the **real** verifier's answer for a real
     /// folder, against the old code's own spelling of the same line. The door's own answer for that
     /// spelling is asked through the only road to it that is left (A1b made the verbs private to
     /// `bt_platform::handoff`): a `ShellThread` entered on a second thread the thread door started,
@@ -508,15 +1253,20 @@ mod tests {
         assert!(facts.exists, "the verifier saw the fixture");
 
         let (wake, wakes) = crate::lane::wake_channel();
-        let mut lane = HandoffLane::spawn(wake).expect("the lane starts");
+        let lane = HandoffLane::spawn(wake).expect("the lane starts");
         let requests = [
             Handoff::OpenVerified(program.clone(), facts.clone()),
             Handoff::OpenVerified(missing.clone(), bt_platform::VerifiedTarget::absent()),
         ];
+        let mut pending: Pending<()> = Pending::default();
         for request in &requests {
-            lane.submit(window(), request.clone());
+            pending.owe(
+                lane.submit(window(), request.clone())
+                    .expect("the lane admits it"),
+                (),
+            );
         }
-        let answered = answers(&mut lane, &wakes, requests.len());
+        let answered = answers(&lane, &mut pending, &wakes, requests.len());
 
         // The old surface: `Runtime::open_local_path_verified` as it stood on the window thread.
         let refusal = Refusal {
@@ -551,18 +1301,19 @@ mod tests {
         .join()
         .expect("the door answered");
         let old = doors.map(before);
-        for (completion, old) in answered.iter().zip(old) {
-            let reason = completion
-                .outcome
-                .as_ref()
-                .expect_err("the lane carried the door's refusal");
-            assert_eq!(refusal.words(reason), old, "{completion:?}");
+        let reasons: Vec<String> = answered
+            .iter()
+            .map(|(_, answer, ())| match answer {
+                Answer::Refused(Declined::System(reason)) => reason.clone(),
+                other => panic!("the lane carried the door's refusal, not {other:?}"),
+            })
+            .collect();
+        for (reason, old) in reasons.iter().zip(old) {
+            assert_eq!(refusal.words(reason), old, "{reason}");
         }
         if bt_platform::host_platform() != bt_platform::HostPlatform::OtherUnix {
             assert_eq!(
-                refusal
-                    .words(answered[0].outcome.as_ref().unwrap_err())
-                    .notice,
+                refusal.words(&reasons[0]).notice,
                 Some(crate::files_program_refused_notice()),
                 "a program is refused in the reader's words"
             );
@@ -636,22 +1387,24 @@ mod tests {
 }
 
 /// **The lane contract's adapter** (`crate::lane`, `lane_contract_tests`): the real lane — its
-/// queue, its thread, its drain and each window's [`Pending`] — with the suite's
-/// [`crate::lane::Gate`] standing in for the door and its [`crate::lane::WakeProbe`] for the
-/// loop's wake. Nothing of the lane is copied.
+/// ledger, its queue, its worker body, its sink and each window's [`Pending`] — with the suite's
+/// scripted [`crate::lane::Executor`] starting the worker, so the suite's [`crate::lane::Gate`]
+/// holds each task, ends the worker or fails a hand-off, and its [`crate::lane::WakeProbe`] stands
+/// for the loop's wake. Only the door is a stand-in; nothing of the lane is copied.
 #[cfg(test)]
 pub(crate) mod contract_adapter {
     use std::collections::{BTreeMap, HashMap};
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, PoisonError};
 
     use bt_platform::{Handoff, NativeWindow};
 
-    use super::{Completion, HandoffId, HandoffLane, Pending};
+    use super::{Answer, HandoffId, HandoffLane, HandoffTerminal, Pending, in_press_order};
     use crate::lane::{
-        Admission, Contract, Delivered, Gate, HANDOFF, LaneUnderTest, Outcome, WakeProbe,
+        Admission, Contract, Delivered, Executor, Gate, HANDOFF, LaneUnderTest, Outcome, WakeProbe,
     };
 
-    /// The address a question is handed over as, so the executor can say which one it runs.
+    /// The address a question is handed over as, so the door can say which one it runs.
     const ADDRESS: &str = "https://lane-contract.invalid/";
 
     fn question_of(handoff: &Handoff) -> Option<u64> {
@@ -661,30 +1414,57 @@ pub(crate) mod contract_adapter {
         }
     }
 
+    fn outcome(answer: Answer) -> Outcome {
+        match answer {
+            Answer::HandedOver => Outcome::Answered,
+            Answer::Refused(declined) => Outcome::Refused(declined.reason().to_owned()),
+            Answer::Failed(words) => Outcome::Failed(words),
+            Answer::WorkerGone => Outcome::WorkerGone,
+        }
+    }
+
     struct HandoffAdapter {
         lane: HandoffLane,
         gate: Arc<Gate>,
         probe: Arc<WakeProbe>,
         /// One `Pending` per open window; a closed window's is dropped, as `WindowRuntime`'s is.
-        windows: BTreeMap<u32, Pending<u64>>,
+        windows: BTreeMap<u32, Pending<()>>,
         /// The suite's own record of which question each id carried, for its tally.
         questions: HashMap<HandoffId, u64>,
+        /// What the lane's sink for the abandoned has been handed and the suite not yet read.
+        sunk: Arc<Mutex<Vec<(HandoffId, HandoffTerminal)>>>,
+        /// The lines the ledger said, counted through its `say`.
+        said: Arc<AtomicUsize>,
     }
 
-    /// A fresh lane on its own `bt-os-handoff` thread.
+    /// A fresh lane, its `bt-os-handoff` worker started by the suite's executor.
     pub(crate) fn make() -> Box<dyn LaneUnderTest> {
         let gate = Arc::new(Gate::default());
         let probe = Arc::new(WakeProbe::default());
+        let sunk = Arc::new(Mutex::new(Vec::new()));
+        let said = Arc::new(AtomicUsize::new(0));
         let door = Arc::clone(&gate);
         let wake = Arc::clone(&probe);
+        let (kept, counted) = (Arc::clone(&sunk), Arc::clone(&said));
         let lane = HandoffLane::start(
+            &Executor::scripted(Arc::clone(&gate)),
             move |_ctx| {
                 move |_window: NativeWindow, handoff: &Handoff| {
-                    door.pass(question_of(handoff));
+                    if let Some(question) = question_of(handoff) {
+                        door.execute(question);
+                    }
                     Ok(())
                 }
             },
             move || wake.woke(),
+            move |_line: &str| {
+                counted.fetch_add(1, Ordering::SeqCst);
+            },
+            move |id, terminal| {
+                kept.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push((id, terminal));
+            },
         )
         .expect("the hand-off lane starts");
         Box::new(HandoffAdapter {
@@ -693,6 +1473,8 @@ pub(crate) mod contract_adapter {
             probe,
             windows: BTreeMap::new(),
             questions: HashMap::new(),
+            sunk,
+            said,
         })
     }
 
@@ -709,17 +1491,28 @@ pub(crate) mod contract_adapter {
             &self.probe
         }
 
+        /// `Runtime::hand_off`: the lane's own admission, the request held in the asking window's
+        /// `Pending`, or the refusal at the door as the press's terminal.
         fn submit(&mut self, target: u32, question: u64) -> Admission {
-            let id = self.lane.submit(
+            match self.lane.submit(
                 NativeWindow::stand_in(0),
                 Handoff::Address(format!("{ADDRESS}{question}")),
-            );
-            self.questions.insert(id, question);
-            self.windows.entry(target).or_default().owe(id, question);
-            Admission {
-                ticket: Some(id.0),
-                question,
-                refused: None,
+            ) {
+                Ok(request) => {
+                    let id = request.id();
+                    self.questions.insert(id, question);
+                    self.windows.entry(target).or_default().owe(request, ());
+                    Admission {
+                        ticket: Some(id.0),
+                        question,
+                        refused: None,
+                    }
+                }
+                Err(declined) => Admission {
+                    ticket: None,
+                    question,
+                    refused: Some(declined.reason().to_owned()),
+                },
             }
         }
 
@@ -727,29 +1520,44 @@ pub(crate) mod contract_adapter {
             self.windows.remove(&target);
         }
 
-        /// `FolioApp::answer_handoffs`: every answer offered to every open window, claimed by the
-        /// one whose `Pending` holds its id.
+        /// `FolioApp::answer_handoffs`: every open window takes the answers it holds.
         fn drain(&mut self) -> Vec<Delivered> {
-            let answers = self.lane.answers();
-            answers
+            let owed = self.lane.earliest_owed();
+            let held: Vec<(u32, _)> = self
+                .windows
+                .iter_mut()
+                .map(|(window, pending)| (*window, pending.answered(owed)))
+                .collect();
+            in_press_order(held)
                 .into_iter()
-                .map(|Completion { id, outcome }| Delivered {
-                    target: self
-                        .windows
-                        .iter_mut()
-                        .find_map(|(window, pending)| pending.claim(id).map(|_| *window)),
+                .map(|(window, id, answer, ())| Delivered {
+                    target: Some(window),
                     ticket: Some(id.0),
                     question: self.questions.get(&id).copied(),
-                    outcome: match outcome {
-                        Ok(()) => Outcome::Answered,
-                        Err(reason) => Outcome::Refused(reason),
-                    },
+                    outcome: outcome(answer),
                 })
                 .collect()
         }
 
         fn offer_stale(&mut self, _ticket: u64) {
             unreachable!("the hand-off lane's target is the asking window, not the application");
+        }
+
+        fn sunk(&mut self) -> Vec<Delivered> {
+            let sunk =
+                std::mem::take(&mut *self.sunk.lock().unwrap_or_else(PoisonError::into_inner));
+            sunk.into_iter()
+                .map(|(id, terminal)| Delivered {
+                    target: None,
+                    ticket: Some(id.0),
+                    question: self.questions.get(&id).copied(),
+                    outcome: outcome(Answer::of(terminal)),
+                })
+                .collect()
+        }
+
+        fn said(&self) -> Option<usize> {
+            Some(self.said.load(Ordering::SeqCst))
         }
     }
 }

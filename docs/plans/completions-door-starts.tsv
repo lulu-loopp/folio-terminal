@@ -7,7 +7,7 @@
 # `scripts/ci/check-window-waits.ps1` refuses a line added against the merge base: this list only
 # shrinks (side-effects contract 2026-10-11, S-1 round 3).
 door	starter	reason
-Runtime::hand_off	bt-app crate::handoff_lane::HandoffLane::start	the hand-off lane is started once, with the application (`HandoffLane::spawn` in `Runtime::create`); the door submits to its channel
+Runtime::hand_off	bt-app crate::handoff_lane::HandoffLane::start	the hand-off lane is started once, with the application (`HandoffLane::spawn` in `Runtime::create`, which calls `HandoffLane::start`, where `lane::Executor::start_worker` names the thread); the door admits through the lane's ledger and sends to its queue, and calls no starter
 foreground_program::request	bt-app crate::foreground_program::Worker::spawn	the foreground-program worker is started once, with the application; the door sends to its channel
 GitWorker::request	bt-app crate::git::GitWorker::spawn	the git worker is started once, with the application; the door sends to its channel
 LayoutTables::shifted_character	bt-app crate::layout_tables::LayoutTables::spawn	the layout-table worker is started once, with the application; the door sends to its bounded queue

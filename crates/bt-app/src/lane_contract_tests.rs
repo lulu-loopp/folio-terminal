@@ -243,9 +243,10 @@ fn report(verdicts: &[Verdict]) -> String {
 /// red. The rows name the ledger entries that repair them (D-70…D-76), so a repair that lands
 /// turns this red until its row is removed.
 ///
-/// MUTATION: `send` instead of `try_send` in `HandoffLane::submit` — the hand-off lane's full
-/// queue makes the asker wait (`SubmissionWaited`, an undeclared failure). Or delete the hand-off
-/// lane's D-70 row from `EXPECTED_FAILURES` — its dead-worker failure is undeclared.
+/// MUTATION: build the hand-off lane's ledger with no bound (`None` for `Some(BOUND)` in
+/// `HandoffLane::start`) — it admits the whole flood (`BoundBroken`, an undeclared failure). Or
+/// delete the computation lane's D-76 row from `EXPECTED_FAILURES` — its dead-worker failure is
+/// undeclared.
 #[test]
 fn every_lane_runs_every_claim_and_fails_only_where_the_ledger_says() {
     let verdicts = run_every_lane(&Claim::ALL);
@@ -265,10 +266,10 @@ fn every_lane_runs_every_claim_and_fails_only_where_the_ledger_says() {
 /// that is older than the one adopted is raised nowhere. The computation lane admits without a
 /// bound (D-74), which is declared; it still never makes the asker wait.
 ///
-/// MUTATION: make `Pending::claim` answer the first duty it holds whatever the id
-/// (`self.owed.drain().next().map(|(_, duty)| duty)`) — the hand-off lane raises a closed window's
-/// answer in the other window (`RaisedInAnotherTarget`). Or drop the generation comparison in
-/// `MonospaceFamilySlot::adopt` — the font lane raises a late answer (`StaleAnswerRaised`).
+/// MUTATION: build the hand-off lane's ledger with no bound (`None` for `Some(BOUND)` in
+/// `HandoffLane::start`) — it admits the whole flood (`BoundBroken`). Or drop the generation
+/// comparison in `MonospaceFamilySlot::adopt` — the font lane raises a late answer
+/// (`StaleAnswerRaised`).
 #[test]
 fn every_lane_answers_a_full_queue_without_waiting_and_raises_no_abandoned_answer() {
     let claims = [
@@ -285,16 +286,17 @@ fn every_lane_answers_a_full_queue_without_waiting_and_raises_no_abandoned_answe
     );
 }
 
-/// RED (A5) — **The hand-off lane behaves exactly as before behind the contract.**
+/// RED (A5; S-5) — **The hand-off lane behaves exactly as before behind the contract**, and keeps
+/// every claim of it on the seam.
 ///
 /// The hand-off lane is the reference instance: its declared policy is the one its module doc
-/// states — 32 waiting behind one running, a press past that answered with `LANE_FULL` through
-/// the drain, ids that rise with every press — and the adapter wraps it without a change. Its
-/// verdicts are exactly its partial contract: every claim passes but the two its rows declare
-/// (the unbounded answers, D-71; the dead worker's owed answers, D-70). The flood below is the
-/// module's own `a_flood_of_presses_is_refused_rather_than_waited_on`, asked through the adapter.
+/// states — 32 waiting behind one running, a press past that refused at the door with
+/// `LANE_FULL`, ids that rise with every press — and the adapter drives the real lane with the
+/// suite's executor. Since S-5 its verdicts are its whole contract: every claim passes, the four
+/// rows it had (D-70, D-71) gone. The flood below is the module's own
+/// `a_flood_of_presses_is_refused_rather_than_waited_on`, asked through the adapter.
 ///
-/// MUTATION: set `CAPACITY` to 31 — the declared bound and the queue disagree (`BoundBroken`), and
+/// MUTATION: set `CAPACITY` to 31 — the declared bound and the ledger disagree (`BoundBroken`), and
 /// one more press is refused.
 #[test]
 fn the_handoff_lane_behaves_exactly_as_before_behind_the_contract() {
@@ -337,17 +339,52 @@ fn the_handoff_lane_behaves_exactly_as_before_behind_the_contract() {
         tickets.windows(2).all(|pair| pair[0] < pair[1]),
         "every press is its own request: {tickets:?}"
     );
-    let refused = lane.drain();
+    let while_held = lane.drain();
     lane.gate().release();
     assert_eq!(
+        while_held,
+        Vec::new(),
+        "nothing is answered while the door is held"
+    );
+    let refused: Vec<&Admission> = flood
+        .iter()
+        .filter(|admission| admission.refused.is_some())
+        .collect();
+    assert_eq!(
         refused,
-        vec![Delivered {
-            target: Some(0),
-            ticket: flood.last().and_then(|admission| admission.ticket),
-            question: Some(crate::handoff_lane::CAPACITY as u64 + 1),
-            outcome: Outcome::Refused(crate::handoff_lane::LANE_FULL.to_owned()),
+        vec![&Admission {
+            ticket: None,
+            question: crate::handoff_lane::CAPACITY as u64 + 1,
+            refused: Some(crate::handoff_lane::LANE_FULL.to_owned()),
         }],
-        "the one press past the bound is refused in the lane's own words, to the window that asked"
+        "the one press past the bound is refused at the door in the lane's own words, and is \
+         given no identity"
+    );
+}
+
+/// RED (S-5; D-70) — **A hand-off pressed after the lane's worker ended is refused at the door.**
+///
+/// The worker's end leaves every request it owed `WorkerGone` (the claim
+/// `ADeadWorkerIsObservable`, run first on the real lane here) and the lane in fault: the next
+/// press is not queued for a thread that will never take it, and no window waits on it — it is
+/// refused at once, in `LANE_GONE`'s words.
+///
+/// MUTATION: answer `Refused::Faulted` with `Declined::LaneFull` in `HandoffLane::submit`, and
+/// the words differ.
+#[test]
+fn a_hand_off_pressed_after_the_worker_ended_is_refused_at_the_door() {
+    let [handoff, ..] = adapters();
+    let mut lane = (handoff.make)();
+    let (_, died) = check(lane.as_mut(), Claim::ADeadWorkerIsObservable);
+    assert_eq!(
+        died,
+        Ok(()),
+        "the worker's death is observable and announced"
+    );
+    assert_eq!(
+        lane.submit(0, 9).refused,
+        Some(crate::handoff_lane::LANE_GONE.to_owned()),
+        "a press after the death is refused at the door"
     );
 }
 
@@ -1643,6 +1680,65 @@ impl Owed<u64> for SentOn {
     fn sink(self, _id: u64, terminal: Terminal<u64, u64, String>) {
         let _ = self.0.send(terminal);
     }
+}
+
+/// RED (S-5 round 3) — **The seam contains its panics under the resident panic hook.** The
+/// product's hook ends the process for every panic it is not told is contained, and it runs before
+/// any `catch_unwind`; so a task's panic reaches `lane::task` as that request's `Failed`, and a
+/// panic outside a task reaches `Executor::start_worker` as the worker's end, only if the hook's
+/// decision, `the_hook_lets_this_panic_unwind`, answers yes at that point. Asked on the product's
+/// executor, inside a task and in the worker's body outside any task: yes both times, and still
+/// yes in the body after the task; a task run on a thread the executor did not start contains
+/// itself; and nothing on this thread is contained.
+///
+/// MUTATION: in `lane::task`, run the task under `catch_unwind` instead of
+/// `contained_panic::contain` — the bare task's decision is no. Or the same in
+/// `Executor::start_worker` around the body — the decision in the body is no.
+#[test]
+fn the_seam_contains_its_task_and_worker_panics_under_the_resident_hook() {
+    let (told, heard) = mpsc::channel();
+    let ledger: Arc<Ledger<u64, SentOn>> = Ledger::new(
+        "contained",
+        None,
+        Saying::PerRequest,
+        |_line: &str| {},
+        || {},
+    );
+    Executor::thread_door(bt_platform::ThreadPriority::Normal)
+        .start_worker("lane-contract-contained", Arc::clone(&ledger), move |ctx| {
+            let in_body = crate::the_hook_lets_this_panic_unwind();
+            let in_task = task(ctx, |_ctx| {
+                Ok::<bool, String>(crate::the_hook_lets_this_panic_unwind())
+            });
+            let after_task = crate::the_hook_lets_this_panic_unwind();
+            let _ = told.send((in_body, in_task, after_task));
+        })
+        .expect("the worker starts");
+    let (in_body, in_task, after_task) = receive(&heard, "the worker's answers");
+    // A task contains itself as well, on a thread the executor did not start.
+    let bare = bt_platform::spawn_at_priority(
+        "lane-contract-bare-task",
+        bt_platform::ThreadPriority::Normal,
+        |ctx| {
+            task(ctx, |_ctx| {
+                Ok::<bool, String>(crate::the_hook_lets_this_panic_unwind())
+            })
+        },
+    )
+    .expect("the thread starts")
+    .join()
+    .expect("the task returned");
+    assert_eq!(bare, Ok(true), "a task contains its own panic");
+    assert!(
+        in_body,
+        "a panic in the worker's body unwinds to the executor"
+    );
+    assert_eq!(in_task, Ok(true), "a panic in a task unwinds to the task");
+    assert!(after_task, "the body is still contained after its task");
+    assert!(
+        !crate::the_hook_lets_this_panic_unwind(),
+        "and nothing outside the seam is"
+    );
 }
 
 /// RED (S-3) — **A task panic is that request's failure; the worker's end is every owed request's

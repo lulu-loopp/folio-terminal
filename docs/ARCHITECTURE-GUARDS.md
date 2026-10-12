@@ -195,7 +195,9 @@ through the ledger (`admit`, or `admit_joined` for the same operation asked
 again), which mints the identity or refuses at the door, and records the sink
 the identity is owed when its requester goes; it runs each request's work
 inside `lane::task`, so a panic there is that request's `Failed` and the
-worker goes on; it ends each request it runs through the hook
+worker goes on (the task and the worker's body run inside
+`contained_panic::contain`, so the resident panic hook lets the panic reach the
+seam; S-5 round 3); it ends each request it runs through the hook
 `Ledger::publish` — `Done`, `Failed`, `Cancelled`, or `Superseded { by }` for one
 a newer, different request displaced — and wakes its consumer after it
 publishes, while a joined request ends only with the one it joined (`Joined`,
@@ -204,7 +206,8 @@ for a joined identity is refused) and `WorkerGone` comes from the ledger; it
 says no failure line of its own (the ledger says each failed request once, a
 joined one carrying a failure included, or once per streak); and its
 `LaneUnderTest` adapter hands the real lane `Executor::scripted` and reports
-`sunk` and `said`. What the proof covers:
+`sunk` and `said`. The OS hand-off lane (`handoff_lane`, S-5) is the first
+lane built this way. What the proof covers:
 `lane_contract_tests::the_ledger_ends_every_identity_exactly_once_in_every_interleaving`
 plays every order of three identities' outcomes (the six terminals, a racing
 answer after a cancel, a terminal published for a joined identity itself),

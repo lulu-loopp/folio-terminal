@@ -6,118 +6,118 @@
 //! `hand_url_to_the_browser`, `activate_local_image_path`, `open_font_settings`, since
 //! ticket 14 `open_unverified_reference` and `hand_uri_to_the_system`, and since ticket 39
 //! `open_preview_in_browser` for a page it hands over by its address — each call
-//! [`Runtime::hand_off`] with the request and the words its refusal has always had. None of them
-//! calls a `bt_platform::handoff` door itself (`no_handoff_runs_on_the_window_thread`).
+//! [`Runtime::hand_off`] with an [`Ask`]: the request, the words its refusal has always had, and
+//! what its answer is owed. None of them calls a `bt_platform::handoff` door itself
+//! (`no_handoff_runs_on_the_window_thread`).
 
 use std::time::Instant;
 
 use anyhow::Result;
 
-use crate::handoff_lane::{Completion, Duty, HandoffId, OnAccepted, OnRefused, Refusal};
+use crate::handoff_lane::{
+    Answer, Ask, Declined, Duty, FollowUp, HandoffId, OnAccepted, RefusalWords, Reply,
+};
 use crate::{RevealedFoot, Runtime, i18n, native_window, toast};
 
 impl Runtime<'_> {
-    /// **Put one hand-off on the lane**, remember what its answer is owed, and return at once.
+    /// **Put one hand-off on the lane**, hold its request with what its answer is owed, and
+    /// return at once.
     ///
-    /// The window is named here, on the window thread, because that is where the handle lives;
-    /// a window that cannot be named is a refusal answered through the same drain as the rest.
-    pub(crate) fn hand_off(
-        &mut self,
-        handoff: bt_platform::Handoff,
-        refusal: Refusal,
-    ) -> HandoffId {
-        let id = match native_window(&self.window.window) {
+    /// The window is named here, on the window thread, because that is where the handle lives. A
+    /// press the lane refuses at its door — full, or its worker gone — or whose window cannot be
+    /// named has its terminal now, and is answered now, with the same duty as a refusal the lane
+    /// brings back, in the words of who refused (the side-effects contract, revision (b)3).
+    pub(crate) fn hand_off(&mut self, ask: Ask) -> Result<()> {
+        let Ask { handoff, duty } = ask;
+        let admitted = match native_window(&self.window.window) {
             Ok(native) => self.app.handoff_lane.submit(native, handoff),
-            Err(error) => self.app.handoff_lane.refuse(format!("{error:#}")),
+            Err(error) => Err(Declined::NoWindow(format!("{error:#}"))),
         };
-        self.window.handoffs.owe(
-            id,
-            Duty {
-                refusal,
-                accepted: None,
-                refused: None,
-            },
-        );
-        id
-    }
-
-    /// **What to draw when the system has taken hand-off `id`** — a confirmation that claims the
-    /// hand-off happened, which is why it waits for the answer.
-    pub(crate) fn when_handed_over(&mut self, id: HandoffId, then: OnAccepted) {
-        if let Some(duty) = self.window.handoffs.duty_mut(id) {
-            duty.accepted = Some(then);
+        match admitted {
+            Ok(request) => {
+                self.window.handoffs.owe(request, duty);
+                Ok(())
+            }
+            Err(reason) => self.answer_handoff(Answer::Refused(reason), duty),
         }
     }
 
-    /// **What to say, beyond the refusal's own words, when the system declines hand-off `id`.**
-    pub(crate) fn if_refused(&mut self, id: HandoffId, then: OnRefused) {
-        if let Some(duty) = self.window.handoffs.duty_mut(id) {
-            duty.refused = Some(then);
-        }
+    /// **Take every answer this window's hand-offs hold below `owed`** (the lane's earliest
+    /// request still owed, read once for the whole drain), without answering them — the
+    /// application answers every window's in press order across the windows
+    /// (`handoff_lane::in_press_order`).
+    pub(crate) fn take_handoff_answers(
+        &mut self,
+        owed: Option<HandoffId>,
+    ) -> Vec<(HandoffId, Answer, Duty)> {
+        self.window.handoffs.answered(owed)
     }
 
-    /// **Answer one completion, if it is this window's.**
+    /// **Answer one hand-off** of this window's, as [`Duty::reply`] says.
     ///
-    /// A completion this window did not ask for is not claimed and changes nothing here. Success
-    /// is silent unless the surface named a confirmation; a refusal says what that surface said on
-    /// the window thread before the lane existed ([`Refusal::words`]).
-    pub(crate) fn answer_handoff(&mut self, completion: &Completion) -> Result<()> {
-        let Some(duty) = self.window.handoffs.claim(completion.id) else {
-            return Ok(());
-        };
-        match &completion.outcome {
-            Ok(()) => match duty.accepted {
-                Some(OnAccepted::Revealed(foot)) => {
-                    self.window.revealed_foot = Some((foot, Instant::now()));
-                    // A float's foot is drawn in the overlay and a column's or a preview's in
-                    // the chrome — the two refreshes each surface's own press used to call.
-                    let changed = match foot {
-                        RevealedFoot::Float(_) => self.refresh_overlay(),
-                        RevealedFoot::Column(_) | RevealedFoot::Preview(_) => self.refresh_chrome(),
-                    };
-                    if changed {
-                        self.present_chrome_change()?;
+    /// Success is silent unless the surface named a confirmation; a refusal says what that
+    /// surface said on the window thread before the lane existed ([`crate::handoff_lane::Refusal::
+    /// words`]) and what the surface asked for beyond it; a hand-off that failed or was lost with
+    /// the lane's worker is said through the same follow-up, in words of its own.
+    pub(crate) fn answer_handoff(&mut self, answer: Answer, duty: Duty) -> Result<()> {
+        match duty.reply(answer) {
+            Reply::HandedOver(accepted) => self.handed_over(accepted),
+            Reply::Refused { words, then } => {
+                self.say_refusal(words)?;
+                match then {
+                    Some(FollowUp::Hover(hyperlink, refusal)) => {
+                        self.window.hyperlink_hover.show_refused(hyperlink, refusal);
+                        self.publish_interaction_frame()
                     }
-                }
-                Some(OnAccepted::PreviewOpened) => {
-                    self.window.preview_opened_at = Some(Instant::now());
-                    if self.refresh_chrome() {
-                        self.present_chrome_change()?;
+                    Some(FollowUp::Address(surface, address, refusal)) => {
+                        self.say_address_refused(surface, &address, refusal)
                     }
-                }
-                None => {}
-            },
-            Err(reason) => {
-                let words = duty.refusal.words(reason);
-                if let Some(line) = words.line {
-                    eprintln!("{line}");
-                }
-                if let Some(notice) = words.notice {
-                    self.window.files_notice = Some((notice.to_owned(), Instant::now()));
-                    self.publish_interaction_frame()?;
-                }
-                match duty.refused {
-                    // The system took the hand-off and had nothing to open it with.
-                    Some(OnRefused::HyperlinkRefused(hyperlink)) => {
-                        self.window
-                            .hyperlink_hover
-                            .show_refused(hyperlink, crate::LinkRefusal::NoProgram);
-                        self.publish_interaction_frame()?;
-                    }
-                    Some(OnRefused::PreviewAddressRefused(surface, address)) => {
-                        self.say_address_refused(surface, &address, crate::LinkRefusal::NoProgram)?;
-                    }
-                    Some(OnRefused::FontsToast) => {
-                        self.toast(
-                            toast::ToastKind::Error,
-                            toast::ToastAnchor::Window,
-                            Some(i18n::Text::InstallFonts.text().to_owned()),
-                            reason.clone(),
-                        )?;
-                    }
-                    None => {}
+                    Some(FollowUp::FontsToast(words)) => self.toast(
+                        toast::ToastKind::Error,
+                        toast::ToastAnchor::Window,
+                        Some(i18n::Text::InstallFonts.text().to_owned()),
+                        words,
+                    ),
+                    None => Ok(()),
                 }
             }
+        }
+    }
+
+    /// The confirmation a surface named for a hand-off the system took, drawn.
+    fn handed_over(&mut self, accepted: Option<OnAccepted>) -> Result<()> {
+        match accepted {
+            Some(OnAccepted::Revealed(foot)) => {
+                self.window.revealed_foot = Some((foot, Instant::now()));
+                // A float's foot is drawn in the overlay and a column's or a preview's in
+                // the chrome — the two refreshes each surface's own press used to call.
+                let changed = match foot {
+                    RevealedFoot::Float(_) => self.refresh_overlay(),
+                    RevealedFoot::Column(_) | RevealedFoot::Preview(_) => self.refresh_chrome(),
+                };
+                if changed {
+                    self.present_chrome_change()?;
+                }
+            }
+            Some(OnAccepted::PreviewOpened) => {
+                self.window.preview_opened_at = Some(Instant::now());
+                if self.refresh_chrome() {
+                    self.present_chrome_change()?;
+                }
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
+    /// The surface's own refusal words: its stderr line, and the files notice.
+    fn say_refusal(&mut self, words: RefusalWords) -> Result<()> {
+        if let Some(line) = words.line {
+            eprintln!("{line}");
+        }
+        if let Some(notice) = words.notice {
+            self.window.files_notice = Some((notice.to_owned(), Instant::now()));
+            self.publish_interaction_frame()?;
         }
         Ok(())
     }
