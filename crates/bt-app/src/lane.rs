@@ -50,19 +50,10 @@
 //! a row of `EXPECTED_FAILURES`, with the exact kind of failure and the ledger row that repairs it
 //! (`docs/plans/structural-debt.md`). `judge` is red on an unexpected pass, on a failure of a
 //! different kind, on a lane or claim that was not run, and on a claim that exercised no request.
-//! The OS hand-off lane (`handoff_lane`) is built on the seam (S-5), and its adapter hands the
-//! real lane a scripted [`Executor`]; S-4 (the font, taskbar and program-walk lanes), S-6a (the
-//! storage worker) and S-7 (the clipboard) each move one more onto it, the same way.
-
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "S-4 until 2026-11-30: the hand-off lane uses none of the seam's joins, \
-                  cancels, supersessions or streaks; S-4 builds the font, taskbar and program-walk \
-                  lanes on it with them"
-    )
-)]
+//! The OS hand-off lane (`handoff_lane`, S-5) is built on the seam, and so are the font, taskbar
+//! and program-walk lanes (`settings::FontLane`, `taskbar_lane`, `programs_lane`; S-4), each a
+//! latest-value lane on [`Coalescing`]; each adapter hands its real lane a scripted [`Executor`].
+//! S-6a (the storage worker) and S-7 (the clipboard) each move one more onto it, the same way.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -94,6 +85,15 @@ pub(crate) enum Terminal<Id, T, E> {
     /// The work failed, or panicked inside its task.
     Failed(TaskFailure<E>),
     /// The lane dropped the request before its work was done, at its requester's word.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "S-6a until 2026-11-30: no lane on the seam cancels a request yet; the \
+                      contract's terminal set keeps it (C2), and the storage worker's document \
+                      saves are the first lane that may drop one at its requester's word"
+        )
+    )]
     Cancelled,
     /// A newer, different request displaced this one (C4), and `by` is that request.
     Superseded { by: Id },
@@ -406,7 +406,9 @@ where
             .map(|(id, _)| *id)
     }
 
-    /// The fault the lane is in: how its worker ended, once it has.
+    /// The fault the lane is in: how its worker ended, once it has. A lane's consumer learns it
+    /// from the terminals and the refusals; the proof reads it here.
+    #[cfg(test)]
     pub(crate) fn fault(&self) -> Option<WorkerEnd> {
         lock(&self.book).fault.clone()
     }
@@ -833,6 +835,11 @@ where
         }
     }
 
+    /// What `read` makes of the run waiting now, if one is. One lock; never waits for the worker.
+    pub(crate) fn waiting<R>(&self, read: impl FnOnce(Option<&Waiting<Id, Op>>) -> R) -> R {
+        read(lock(&self.book).waiting.as_ref())
+    }
+
     /// **The application takes every terminal it is owed below the earliest request still owed**
     /// ([`Ledger::earliest_owed`], read once, before the requests are looked at), in the order the
     /// ledger minted them, each once. A request at or past the mark waits for the next take even
@@ -1090,11 +1097,14 @@ pub(crate) const COMPUTATION: Contract = Contract {
     saying: Saying::PerRequest,
 };
 
-/// `programs_lane`: numbered requests (`Asks::requested`); one `program-walk` worker that serves
-/// the newest request standing, the requests made while a walk is out answered by the next walk;
-/// answers published per row into a mailbox that keeps the newest per row, and adopted by
-/// `ProfilePrograms::adopt` only when not older than the answer held for the row; the target is
-/// the application. A walk's end answers every request numbered up to it.
+/// `programs_lane`, on the seam (S-4): one `program-walk` worker; ids minted by the lane's
+/// `Ledger`; one walk out and one waiting — a request made while one waits joins it when it asks
+/// about the same table and supersedes it when it asks about a different one; the walk's rows
+/// published into a mailbox that keeps the newest per row and adopted by `ProfilePrograms::adopt`
+/// only when not older than the answer held for the row; the application holds every request and
+/// takes their terminals in mint order (`ProgramsLane::take`); the ledger owes 64 at once — a
+/// terminal not yet taken holding its place — and refuses the rest at the door; a failed walk is
+/// said once per streak and not walked again on its own.
 #[cfg(test)]
 pub(crate) const PROGRAMS: Contract = Contract {
     lane: Some(LaneName::Programs),
@@ -1104,10 +1114,11 @@ pub(crate) const PROGRAMS: Contract = Contract {
     bounds: Bounds {
         waiting: Bound::At(1),
         executing: 1,
-        answers_held: Bound::At(1),
+        // `programs_lane::BOUND`, written out rather than read.
+        answers_held: Bound::At(64),
     },
     cancellation: Cancellation::Never,
-    saying: Saying::PerRequest,
+    saying: Saying::PerStreak,
 };
 
 /// The obligations of §R-D, one each.
@@ -1352,14 +1363,6 @@ pub(crate) struct ExpectedFailure {
 #[cfg(test)]
 pub(crate) const EXPECTED_FAILURES: &[ExpectedFailure] = &[
     ExpectedFailure {
-        lane: LaneName::Programs,
-        claim: Claim::EveryRequestEndsExactlyOnce,
-        failure: FailureKind::NoTerminal,
-        repair: "D-85",
-        why: "the worker serves the newest request standing; the ones made while a walk was out \
-              get no outcome of their own (the next walk answers them, said in diagnostics)",
-    },
-    ExpectedFailure {
         lane: LaneName::Computation,
         claim: Claim::FullLaneAnswersWithoutWaiting,
         failure: FailureKind::AdmissionUnbounded,
@@ -1389,31 +1392,8 @@ pub(crate) const EXPECTED_FAILURES: &[ExpectedFailure] = &[
               drain never sees the decoration thread's death as a disconnection",
     },
     // S-3 (2026-10-11): the four claims of the side-effects contract, run on lanes not yet built
-    // on the seam. Each lane's repair ticket (S-4) moves it onto the seam and removes its rows.
-    ExpectedFailure {
-        lane: LaneName::Programs,
-        claim: Claim::ASupersededRequestSaysSo,
-        failure: FailureKind::SupersededInSilence,
-        repair: "D-85",
-        why: "the requests made while a walk is out are answered by the next walk and get no \
-              outcome of their own",
-    },
-    ExpectedFailure {
-        lane: LaneName::Programs,
-        claim: Claim::AJoinedRequestCarriesItsTwin,
-        failure: FailureKind::JoinedInSilence,
-        repair: "D-85",
-        why: "a second ask for the same walk is served only as the newest number; the older ask \
-              gets no outcome",
-    },
-    ExpectedFailure {
-        lane: LaneName::Programs,
-        claim: Claim::AFailureIsSaidOnce,
-        failure: FailureKind::NoFailedTerminal,
-        repair: "D-85",
-        why: "no panic is caught around a walk: one ends the program-walk worker, and the \
-              request never ends Failed",
-    },
+    // on the seam. Each lane's repair ticket moves it onto the seam and removes its rows (S-5 the
+    // hand-off lane's, S-4 the font, taskbar and program-walk lanes').
     ExpectedFailure {
         lane: LaneName::Computation,
         claim: Claim::AFailureIsSaidOnce,

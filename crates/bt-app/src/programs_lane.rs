@@ -15,17 +15,30 @@
 //! this process's launch environment — an installer's new `PATH` entry is in the first and never
 //! in the second.
 //!
-//! **The contract** (`crate::lane`'s shape; measured cost in DESIGN 2026-10-08): numbered
-//! requests; one `program-walk` worker, started by the first request and waiting for the next; it
-//! serves the newest request standing, and the requests made while a walk is out are answered by
-//! the next walk (said once in `diagnostics.log` when that walk ends); each walk runs in the band
-//! its request carries (below);
+//! **The contract** (`crate::lane`'s shape; measured cost in DESIGN 2026-10-08), **built on the
+//! completion seam** (`crate::lane`; the side-effects contract's C1–C7, S-4): every request's
+//! identity is minted by the lane's [`crate::lane::Ledger`], or the request is refused at the door
+//! (the ledger owes [`BOUND`], or the worker has ended); one `program-walk` worker, started by the
+//! first request through a [`crate::lane::Executor`] (the thread door's in the product, the
+//! suite's scripted one under test) and waiting for the next; one walk out and at most one
+//! waiting. A request made while one waits is **joined** to it when it asks about the same rows
+//! (`Joined { with }`: one walk answers both, its rows asked first and its urgency kept), and
+//! **supersedes** it when it asks about a different table (`Superseded { by }`: the newer table is
+//! walked, and the older request's rows asked first and urgency kept); a request made while a walk
+//! is out waits for the next walk, because the machine may have changed since that walk read it
+//! (said once in `diagnostics.log` when that walk ends). Each walk runs in its task
+//! ([`crate::lane::task`]): its end is the operation's `Done`, carrying the walk's number; a panic
+//! in it is the request's `Failed`, said once per streak by the ledger, and the worker goes on;
+//! the worker's end ends every request still owed `WorkerGone`, faults the lane and wakes the loop.
+//! **A walk that failed is not walked again on its own** (revision (b)5, rule 1): the next request
+//! — a new trigger below — walks again. Each walk runs in the band its request carries (below);
 //! answers are published row by row into a mailbox that keeps the newest answer per row, then the
-//! machine facts, then the walk's end; the event loop is woken after the walk's end and after each
-//! row the request asked for first, and never before the publication it is woken for. The
-//! window thread adopts them between frames and refuses an answer older than the one it holds for
-//! the same row (`ProfilePrograms::adopt`). No request waits, and nothing here has a deadline: a
-//! slow `PATH` entry makes the rows behind it late, and late answers are used.
+//! machine facts, then the walk's terminal; the event loop is woken after the walk's terminal and
+//! after each row the request asked for first, and never before the publication it is woken for.
+//! The window thread takes the terminals in the order the requests were made and adopts the rows
+//! between frames, refusing an answer older than the one it holds for the same row
+//! (`ProfilePrograms::adopt`). No request waits, and nothing here has a deadline: a slow `PATH`
+//! entry makes the rows behind it late, and late answers are used.
 //!
 //! **Rows the default's rule reads are answered first** (the request's `first`, from
 //! `profiles::default_chain` and any pane waiting for its row), so a walk held up behind one slow
@@ -52,17 +65,48 @@
 //! `SystemSettingsWatch` already has); and a pane's birth that finds a row it needs unknown.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::sync::{Condvar, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use bt_platform::admission::WorkerCtx;
 use bt_pty::ShellEnvironment;
 
 use crate::attention_hooks::AgentHomes;
+use crate::lane::{self, Coalescing, Executor, Ledger, Refused, Saying, Terminal, Waiting};
 use crate::profiles::{self, Profile, ProfilePrograms, RowVerdict};
 use crate::wsl::WslFacts;
+
+/// **How many requests the lane's ledger owes at once**: the walk out, the one waiting and every
+/// request joined to it, and every terminal the window thread has not taken yet. Each request is
+/// a launch, a table edit, a menu or page opening, a broadcast, or a pane in birth asking for its
+/// row — a restored session's panes each ask once — and the window thread takes the terminals at
+/// every wake. The bound makes a walk stuck inside a slow `PATH` entry an accounted-for set of
+/// requests, not an unbounded one; a request past it is refused at the door, and the walk already
+/// standing walks every row it would have asked about.
+pub(crate) const BOUND: usize = 64;
+
+/// The lane's name in the lines its ledger says.
+const LANE_NAME: &str = "program walk";
+
+/// **One request for a walk**, its identity minted by the lane's ledger and rising with every
+/// request — the number a walk's answers carry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct ProgramsId(u64);
+
+impl From<u64> for ProgramsId {
+    fn from(minted: u64) -> Self {
+        Self(minted)
+    }
+}
+
+/// What a walk request is owed: the application asked it and holds it.
+type ProgramsOwed = lane::ToTheApplication<u64, Infallible>;
+
+/// How one walk request ended: `Done` carries the number of the walk that answered it.
+pub(crate) type ProgramsTerminal = Terminal<ProgramsId, u64, Infallible>;
 
 /// **Why a walk was asked for** — said in the diagnostics line and the perf trace, and nothing
 /// decides on it.
@@ -77,8 +121,6 @@ pub enum Trigger {
     Environment,
     PathDirectory,
     Birth,
-    /// The walk before it ended before its last answer ([`ProgramsLane::request_after_death`]).
-    AfterDeath,
 }
 
 impl Trigger {
@@ -93,7 +135,6 @@ impl Trigger {
             Self::Environment => "system setting changed",
             Self::PathDirectory => "PATH directory changed",
             Self::Birth => "a pane waits for its program",
-            Self::AfterDeath => "the walk before it ended early",
         }
     }
 
@@ -146,27 +187,34 @@ pub struct ProgramEnvironmentSnapshot {
     pub directories: Vec<PathBuf>,
 }
 
-/// **What the window thread finds** when it drains the mailbox.
+/// **What the window thread finds** when it drains the lane.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Answers {
     /// The newest answer for each row published since the last drain.
     pub verdicts: Vec<RowVerdict>,
     /// The newest machine facts published since the last drain.
     pub facts: Option<MachineFacts>,
-    /// The newest walk that ran to its end since the last drain.
-    pub finished: Option<u64>,
-    /// The newest walk whose worker died before its end, since the last drain.
-    pub died: Option<u64>,
+    /// Every request the application made that has ended since the last drain, by its number, in
+    /// the order the requests were made: each one's terminal, taken once.
+    pub(crate) ends: Vec<(u64, ProgramsTerminal)>,
 }
 
 impl Answers {
     /// Whether the drain found nothing at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.verdicts.is_empty()
-            && self.facts.is_none()
-            && self.finished.is_none()
-            && self.died.is_none()
+        self.verdicts.is_empty() && self.facts.is_none() && self.ends.is_empty()
+    }
+
+    /// **The newest walk that ran to its end since the last drain** — the number a request's
+    /// `Done` carries, or the one it joined. A walk that failed, or a worker that ended, ran to no
+    /// end, and asks nothing again on its own (revision (b)5).
+    #[must_use]
+    pub fn finished(&self) -> Option<u64> {
+        self.ends
+            .iter()
+            .filter_map(|(_, terminal)| lane::answer_of(terminal.clone()))
+            .max()
     }
 }
 
@@ -385,30 +433,13 @@ fn ordered<'a>(rows: &'a [Profile], first: &[String]) -> Vec<&'a Profile> {
     ordered
 }
 
-/// The requests, and the worker that serves them.
+/// What the lane counts beside its requests: the panes waiting on a walk, and the walk out.
 #[derive(Default)]
 struct Asks {
-    /// The number of the newest request; counted from `1`.
-    requested: u64,
-    /// The newest request not yet started.
-    waiting: Option<Waiting>,
     /// The walk out now: its number, why, and how many requests were made while it was out.
     out: Option<(u64, Trigger, u64)>,
-    /// A worker thread is running (started by the first request, waiting for the next).
-    worker: bool,
     /// How many panes are in birth, each waiting on a walk's answer ([`PaneWaits`]).
     panes_waiting: usize,
-    /// The number of the last walk asked for because one died
-    /// ([`ProgramsLane::request_after_death`]); `0` before any.
-    asked_after_death: u64,
-}
-
-impl Asks {
-    /// Whether a walk out now has a pane waiting on it beyond what its own request said: a pane in
-    /// birth, or an urgent request standing behind it.
-    fn a_pane_waits(&self) -> bool {
-        self.panes_waiting > 0 || self.waiting.as_ref().is_some_and(|waiting| waiting.urgent)
-    }
 }
 
 /// **A pane in birth, counted by the lane while it waits** — held by the pane
@@ -436,12 +467,40 @@ impl Drop for PaneWaits {
     }
 }
 
-/// **A request not yet started**: its number, the request, and whether its walk runs at normal
-/// priority — its own trigger's urgency or that of a request it replaced.
-struct Waiting {
-    generation: u64,
+/// **What a walk standing for the worker is asked to do**: the request — the newest of the ones
+/// it answers, with the rows every one of them asked first — and whether it runs at normal
+/// priority: its own trigger's urgency or that of a request it joined or replaced.
+struct Walk {
     request: WalkRequest,
     urgent: bool,
+}
+
+impl Walk {
+    /// The same operation: a walk of the same table. The rows asked first and the trigger only
+    /// order and name the walk; the answers are the same.
+    fn same(waiting: &Self, asked: &Self) -> bool {
+        waiting.request.rows == asked.request.rows
+    }
+
+    /// The walk standing after `newer` joined or replaced `older`: the newer request's table and
+    /// trigger, its rows asked first followed by the older's, and the more urgent band of the two
+    /// — a launch joined or replaced before its walk started is still the walk the first panes
+    /// wait on.
+    fn fold(older: Self, newer: Self) -> Self {
+        let mut first = newer.request.first;
+        for id in older.request.first {
+            if !first.contains(&id) {
+                first.push(id);
+            }
+        }
+        Self {
+            request: WalkRequest {
+                first,
+                ..newer.request
+            },
+            urgent: older.urgent || newer.urgent,
+        }
+    }
 }
 
 /// What the worker has published and the window thread has not drained.
@@ -449,36 +508,66 @@ struct Waiting {
 struct Mailbox {
     verdicts: BTreeMap<String, RowVerdict>,
     facts: Option<MachineFacts>,
-    finished: Option<u64>,
-    died: Option<u64>,
 }
 
-/// **The lane**: the machine it asks, the numbered requests, the mailbox, the wake.
+/// **The lane**: the machine it asks, the requests, the mailbox, the wake.
 ///
 /// A type rather than statics so a test runs a lane of its own, with a machine it wrote and a
 /// diagnostics door it reads, beside the product's.
 pub struct ProgramsLane {
     machine: Box<dyn Machine>,
     asks: Mutex<Asks>,
-    asked: Condvar,
     mailbox: Mutex<Mailbox>,
-    wake: OnceLock<Box<dyn Fn() + Send + Sync>>,
-    note: Box<dyn Fn(&str) + Send + Sync>,
+    /// How the lane brings the event loop round once [`Self::install_wake`] has taught it; shared
+    /// with the ledger, which wakes it after the worker's end.
+    wake: Arc<OnceLock<Box<dyn Fn() + Send + Sync>>>,
+    /// The lane's diagnostics door, shared with the ledger.
+    note: Arc<dyn Fn(&str) + Send + Sync>,
+    executor: Executor,
+    requests: Coalescing<ProgramsId, ProgramsOwed, Walk>,
 }
 
 impl ProgramsLane {
-    /// A lane asking `machine`, saying its diagnostics lines through `note`.
+    /// A lane asking `machine`, saying its diagnostics lines through `note`; its worker is started
+    /// through the thread door by the first request.
     pub fn new(
         machine: impl Machine + 'static,
         note: impl Fn(&str) + Send + Sync + 'static,
     ) -> Self {
+        let note: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(note);
+        let said = Arc::clone(&note);
+        Self::start_with(
+            Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
+            machine,
+            note,
+            move |line: &str| said(line),
+        )
+    }
+
+    /// A lane whose worker `executor` starts, asking `machine`, saying its own lines through `note`
+    /// and its ledger's through `say` (in the product both are `diagnostics.log`). The worker sets its own band for every walk, so the band it is started in lasts
+    /// only until its first walk begins.
+    fn start_with(
+        executor: Executor,
+        machine: impl Machine + 'static,
+        note: Arc<dyn Fn(&str) + Send + Sync>,
+        say: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Self {
+        let wake: Arc<OnceLock<Box<dyn Fn() + Send + Sync>>> = Arc::new(OnceLock::new());
+        let installed = Arc::clone(&wake);
+        let ledger = Ledger::new(LANE_NAME, Some(BOUND), Saying::PerStreak, say, move || {
+            if let Some(wake) = installed.get() {
+                wake();
+            }
+        });
         Self {
             machine: Box::new(machine),
             asks: Mutex::new(Asks::default()),
-            asked: Condvar::new(),
             mailbox: Mutex::new(Mailbox::default()),
-            wake: OnceLock::new(),
-            note: Box::new(note),
+            wake,
+            note,
+            executor,
+            requests: Coalescing::new(ledger),
         }
     }
 
@@ -487,70 +576,32 @@ impl ProgramsLane {
         let _ = self.wake.set(Box::new(wake));
     }
 
-    /// **Number a request and see that the worker serves it.** Never waits for a walk: a lock,
-    /// and a condition-variable signal or — the first time, and after a worker died — a thread
-    /// start. Answers the request's number.
-    pub fn request(&'static self, request: WalkRequest) -> u64 {
+    /// **Make a request and see that the worker serves it** — the lane's one admission. Never
+    /// waits for a walk: a lock, a ledger entry and a condition-variable signal or — the first
+    /// time — a thread start. Answers the request's number, or the ledger's refusal at the door:
+    /// it already owes [`BOUND`], or the worker has ended (a thread the door refused is that end,
+    /// which the executor reports to the ledger and the ledger says once).
+    pub(crate) fn request(&'static self, request: WalkRequest) -> Result<u64, Refused> {
         let mut asks = self.lock();
-        asks.requested += 1;
-        let generation = asks.requested;
-        // A request replaced before its walk started keeps the rows it wanted first, behind the
-        // newer request's own, and its urgency: a launch replaced by a menu's request before its
-        // walk started is still the walk the first panes wait on.
-        let mut first = request.first;
-        let mut urgent = request.trigger.urgent() || asks.panes_waiting > 0;
-        if let Some(replaced) = asks.waiting.take() {
-            urgent |= replaced.urgent;
-            for id in replaced.request.first {
-                if !first.contains(&id) {
-                    first.push(id);
-                }
-            }
-        }
-        asks.waiting = Some(Waiting {
-            generation,
-            request: WalkRequest { first, ..request },
-            urgent,
-        });
+        let urgent = request.trigger.urgent() || asks.panes_waiting > 0;
+        let asked = self.requests.ask(
+            Walk { request, urgent },
+            ProgramsOwed::owed(),
+            Walk::same,
+            Walk::fold,
+        )?;
         if let Some((_, _, joined)) = asks.out.as_mut() {
             *joined += 1;
         }
-        if asks.worker {
-            self.asked.notify_one();
-            return generation;
-        }
-        asks.worker = true;
         drop(asks);
-        // Started in the band of the request that starts it; every walk then sets its own.
-        let started = bt_platform::spawn_at_priority("program-walk", band(urgent), move |ctx| {
-            self.serve(ctx);
-        });
-        if let Err(error) = started {
-            // The request stays standing and the next one tries the thread again; nothing on the
-            // window thread waits for an answer meanwhile.
-            self.lock().worker = false;
-            (self.note)(&format!(
-                "program walk: its worker would not start ({error}); request {generation} is \
-                 served when the next request starts one"
-            ));
+        if asked.start {
+            let _ = self.executor.start_worker(
+                "program-walk",
+                Arc::clone(self.requests.ledger()),
+                move |ctx| run_program_walk(ctx, self),
+            );
         }
-        generation
-    }
-
-    /// **A walk that died is walked again, once** (T-FRESH-FACTS round 2): the window thread hands
-    /// the lane the number of a walk it was told died, and the lane asks for one walk in its place
-    /// unless that walk was itself the one asked for after a death, or older — so a walk that
-    /// dies every time is not walked in a loop, and its next ordinary trigger starts it again.
-    /// Answers the new request's number, or `None` when none was asked. The facts a dead walk
-    /// never published (WSL, git, the agent folders) are what a pane, the Git page and the
-    /// first-run card would otherwise wait on until some unrelated trigger.
-    pub fn request_after_death(&'static self, died: u64, request: WalkRequest) -> Option<u64> {
-        if died <= self.lock().asked_after_death {
-            return None;
-        }
-        let generation = self.request(request);
-        self.lock().asked_after_death = generation;
-        Some(generation)
+        Ok(asked.id.0)
     }
 
     /// **Count a pane in birth until the answer is dropped.** One lock; never waits for the worker.
@@ -559,85 +610,32 @@ impl ProgramsLane {
         PaneWaits { lane: self }
     }
 
-    /// **Everything published since the last drain.** One lock; never waits for the worker.
+    /// **Everything ended and published since the last drain** — the window thread's acceptance:
+    /// first every terminal the lane has ended, in the order the requests were made, then the
+    /// mailbox, so the facts a walk published before its terminal are found with it. Never waits
+    /// for the worker.
     pub fn take(&self) -> Answers {
-        let mut mailbox = self.mailbox();
-        let mailbox = std::mem::take(&mut *mailbox);
+        let ends = self
+            .requests
+            .ended()
+            .into_iter()
+            .map(|(id, terminal)| (id.0, terminal))
+            .collect();
+        let mailbox = std::mem::take(&mut *self.mailbox());
         Answers {
             verdicts: mailbox.verdicts.into_values().collect(),
             facts: mailbox.facts,
-            finished: mailbox.finished,
-            died: mailbox.died,
+            ends,
         }
     }
 
-    /// **The worker's whole body**: take the newest request, walk, publish, and wait for the next.
-    fn serve(&self, ctx: &WorkerCtx) {
-        loop {
-            let Waiting {
-                generation,
-                request,
-                mut urgent,
-            } = {
-                let mut asks = self.lock();
-                let waiting = loop {
-                    if let Some(waiting) = asks.waiting.take() {
-                        break waiting;
-                    }
-                    asks = self
-                        .asked
-                        .wait(asks)
-                        .unwrap_or_else(PoisonError::into_inner);
-                };
-                asks.out = Some((waiting.generation, waiting.request.trigger, 0));
-                waiting
-            };
-            // The walk's band is its request's. Off Windows a band is requested, not enforced
-            // (RULES 53), and the answer is not consulted.
-            let _ = bt_platform::set_current_thread_priority(band(urgent));
-            // A walk that unwinds leaves the lane able to answer: the worker is marked gone, so
-            // the next request starts another, and the window thread is told which walk died.
-            let guard = WalkOut {
-                lane: self,
-                generation,
-            };
-            let started = Instant::now();
-            let (path_entries, file_questions) = walk(
-                self.machine.as_ref(),
-                ctx,
-                generation,
-                &request,
-                &mut |published| {
-                    self.publish(published);
-                    // A pane that started waiting while this walk was out lands on its answer:
-                    // the rest of the walk runs in a waiting pane's band.
-                    if !urgent && self.lock().a_pane_waits() {
-                        urgent = true;
-                        let _ = bt_platform::set_current_thread_priority(band(true));
-                    }
-                },
-                &*self.note,
-            );
-            std::mem::forget(guard);
-            let elapsed = started.elapsed();
-            let joined = self.lock().out.take().map_or(0, |(_, _, joined)| joined);
-            if std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty()) {
-                crate::trace_sink::stderr_line(format!(
-                    "BT_PERF_TRACE program_walk_us={} generation={generation} trigger={:?} \
-                     rows={} path_entries={path_entries} file_questions={file_questions} \
-                     joined={joined} band={:?}",
-                    elapsed.as_micros(),
-                    request.trigger.name(),
-                    request.rows.len(),
-                    band(urgent),
-                ));
-            }
-            if joined > 0 {
-                (self.note)(&joined_line(generation, request.trigger, elapsed, joined));
-            }
-            self.mailbox().finished = Some(generation);
-            self.wake();
-        }
+    /// Whether a walk out now has a pane waiting on it beyond what its own request said: a pane in
+    /// birth, or an urgent request standing behind it.
+    fn a_pane_waits(&self) -> bool {
+        self.lock().panes_waiting > 0
+            || self
+                .requests
+                .waiting(|waiting| waiting.is_some_and(|waiting| waiting.op.urgent))
     }
 
     fn publish(&self, published: Published) {
@@ -688,6 +686,72 @@ impl ProgramsLane {
     }
 }
 
+/// **The lane's worker body**: the next walk standing, walked inside its task in its request's
+/// band for the newest request it answers, its rows and facts published as they come, its terminal
+/// published, then the wake — and round again, for the life of the lane.
+fn run_program_walk(ctx: &WorkerCtx, lane: &ProgramsLane) {
+    loop {
+        let Waiting {
+            operation,
+            newest,
+            op: Walk {
+                request,
+                mut urgent,
+            },
+        } = lane.requests.next(ctx);
+        let generation = newest.0;
+        lane.lock().out = Some((generation, request.trigger, 0));
+        // The walk's band is its request's. Off Windows a band is requested, not enforced
+        // (RULES 53), and the answer is not consulted.
+        let _ = bt_platform::set_current_thread_priority(band(urgent));
+        let started = Instant::now();
+        let walked = lane::task(ctx, |ctx| {
+            Ok::<_, Infallible>(walk(
+                lane.machine.as_ref(),
+                ctx,
+                generation,
+                &request,
+                &mut |published| {
+                    lane.publish(published);
+                    // A pane that started waiting while this walk was out lands on its answer:
+                    // the rest of the walk runs in a waiting pane's band.
+                    if !urgent && lane.a_pane_waits() {
+                        urgent = true;
+                        let _ = bt_platform::set_current_thread_priority(band(true));
+                    }
+                },
+                &*lane.note,
+            ))
+        });
+        let elapsed = started.elapsed();
+        let joined = lane.lock().out.take().map_or(0, |(_, _, joined)| joined);
+        let terminal = match walked {
+            Ok((path_entries, file_questions)) => {
+                if std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty()) {
+                    crate::trace_sink::stderr_line(format!(
+                        "BT_PERF_TRACE program_walk_us={} generation={generation} trigger={:?} \
+                         rows={} path_entries={path_entries} file_questions={file_questions} \
+                         joined={joined} band={:?}",
+                        elapsed.as_micros(),
+                        request.trigger.name(),
+                        request.rows.len(),
+                        band(urgent),
+                    ));
+                }
+                Terminal::Done(generation)
+            }
+            Err(failure) => Terminal::Failed(failure),
+        };
+        if joined > 0 {
+            (lane.note)(&joined_line(generation, request.trigger, elapsed, joined));
+        }
+        lane.requests.ledger().publish(operation, terminal);
+        // After the terminal is published and never before: a wake that raced it would send the
+        // loop to find the walk not ended.
+        lane.wake();
+    }
+}
+
 /// **The line for requests that were not walked on their own** — made while a walk was out,
 /// they are answered by the next walk, which serves the newest of them.
 fn joined_line(generation: u64, trigger: Trigger, elapsed: Duration, joined: u64) -> String {
@@ -697,30 +761,6 @@ fn joined_line(generation: u64, trigger: Trigger, elapsed: Duration, joined: u64
         trigger.name(),
         elapsed.as_millis()
     )
-}
-
-/// **A walk on its way**: dropped only by an unwind (a finished walk forgets it), when it marks
-/// the worker gone and tells the window thread which walk died.
-struct WalkOut<'a> {
-    lane: &'a ProgramsLane,
-    generation: u64,
-}
-
-impl Drop for WalkOut<'_> {
-    fn drop(&mut self) {
-        {
-            let mut asks = self.lane.lock();
-            asks.worker = false;
-            asks.out = None;
-        }
-        (self.lane.note)(&format!(
-            "program walk {} ended before its last answer; rows it had not answered keep the \
-             answers they had, and the next request starts the walk again",
-            self.generation
-        ));
-        self.lane.mailbox().died = Some(self.generation);
-        self.lane.wake();
-    }
 }
 
 /// The product's lane, asking this machine and writing its lines to `diagnostics.log`.
@@ -734,32 +774,21 @@ pub fn install_wake(wake: impl Fn() + Send + Sync + 'static) {
 }
 
 /// [`ProgramsLane::request`] on the product's lane, over the live table: the rows the default's
-/// rule reads first (`stored_default` is `settings.json`'s choice), then `also_first`.
-pub fn request(trigger: Trigger, stored_default: &str, also_first: &[String]) -> u64 {
+/// rule reads first (`stored_default` is `settings.json`'s choice), then `also_first`. A request
+/// the lane refuses at its door has that refusal as its outcome and is waited on by nobody: the
+/// walk already standing walks every row it would have asked about.
+pub fn request(trigger: Trigger, stored_default: &str, also_first: &[String]) {
     let mut first = profiles::default_chain(stored_default);
     for id in also_first {
         if !first.contains(id) {
             first.insert(0, id.clone());
         }
     }
-    LANE.request(WalkRequest {
+    let _ = LANE.request(WalkRequest {
         rows: profiles::table().profiles().to_vec(),
         first,
         trigger,
-    })
-}
-
-/// [`ProgramsLane::request_after_death`] on the product's lane, over the live table and the rows
-/// the default's rule reads first.
-pub fn request_after_death(died: u64, stored_default: &str) -> Option<u64> {
-    LANE.request_after_death(
-        died,
-        WalkRequest {
-            rows: profiles::table().profiles().to_vec(),
-            first: profiles::default_chain(stored_default),
-            trigger: Trigger::AfterDeath,
-        },
-    )
+    });
 }
 
 /// [`ProgramsLane::pane_waits`] on the product's lane.
@@ -775,9 +804,9 @@ pub fn take() -> Answers {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::lane::wait_for_a_wake;
+    use crate::lane::{Executor, Gate, wait_for_a_wake, wake_channel};
     use crate::profiles::{ProgramCandidate, ProgramSource};
-    use std::sync::{Arc, mpsc};
+    use std::sync::{Arc, Condvar, mpsc};
 
     /// **A machine a test writes**: a `PATH`, the files on it, WSL's distributions — all of it
     /// changeable while the lane runs, which is the whole point (a program installed after
@@ -953,27 +982,30 @@ pub(crate) mod tests {
             if answers.facts.is_some() {
                 gathered.facts = answers.facts;
             }
-            if answers.died.is_some() {
-                gathered.died = answers.died;
-            }
-            if answers
-                .finished
+            gathered.ends.extend(answers.ends);
+            if gathered
+                .finished()
                 .is_some_and(|finished| finished >= generation)
             {
-                gathered.finished = answers.finished;
                 return gathered;
             }
             wait_for_a_wake(wakes, &format!("walk {generation}'s end"));
         }
     }
 
-    /// Drain until a walk's death is reported, and answer which walk died.
-    fn death_reported(lane: &ProgramsLane, wakes: &mpsc::Receiver<()>, of: u64) -> Option<u64> {
+    /// Drain until request `of` has ended, gathering every terminal taken on the way.
+    fn ends_through(
+        lane: &ProgramsLane,
+        wakes: &mpsc::Receiver<()>,
+        of: u64,
+    ) -> Vec<(u64, ProgramsTerminal)> {
+        let mut ended = Vec::new();
         loop {
-            wait_for_a_wake(wakes, &format!("walk {of}'s death"));
-            if let Some(died) = lane.take().died {
-                return Some(died);
+            ended.extend(lane.take().ends);
+            if ended.iter().any(|(id, _)| *id == of) {
+                return ended;
             }
+            wait_for_a_wake(wakes, &format!("request {of}'s terminal"));
         }
     }
 
@@ -1019,14 +1051,18 @@ pub(crate) mod tests {
         let (lane, wakes, _) = lane(machine.clone());
         let rows = [row("rg", "rg.exe")];
 
-        let first = lane.request(request(&rows, Trigger::Launch));
+        let first = lane
+            .request(request(&rows, Trigger::Launch))
+            .expect("admitted");
         let answers = answers_through(lane, &wakes, first);
         assert_eq!(answers.verdicts.len(), 1);
         assert_eq!(answers.verdicts[0].program, None, "not installed yet");
         assert_eq!(answers.verdicts[0].generation, first);
 
         machine.install(&bin("rg.exe"));
-        let second = lane.request(request(&rows, Trigger::Environment));
+        let second = lane
+            .request(request(&rows, Trigger::Environment))
+            .expect("admitted");
         let answers = answers_through(lane, &wakes, second);
         assert_eq!(
             answers.verdicts[0].program.as_deref(),
@@ -1053,7 +1089,9 @@ pub(crate) mod tests {
         let rows = [wsl_row];
         machine.install(&bin("wsl.exe"));
 
-        let first = lane.request(request(&rows, Trigger::Launch));
+        let first = lane
+            .request(request(&rows, Trigger::Launch))
+            .expect("admitted");
         let answers = answers_through(lane, &wakes, first);
         let facts = answers.facts.expect("a walk publishes the machine facts");
         assert_eq!(facts.wsl, WslFacts::default());
@@ -1063,7 +1101,9 @@ pub(crate) mod tests {
         machine.set_wsl(distributions.clone());
         let git = profiles::git_file_name_on(bt_platform::host_platform());
         machine.install(&bin(git));
-        let second = lane.request(request(&rows, Trigger::ProfilesPage));
+        let second = lane
+            .request(request(&rows, Trigger::ProfilesPage))
+            .expect("admitted");
         let answers = answers_through(lane, &wakes, second);
         let facts = answers.facts.expect("the second walk publishes its facts");
         assert_eq!(facts.generation, second);
@@ -1081,14 +1121,18 @@ pub(crate) mod tests {
         let machine = FakeMachine::with_path(&[bin_dir()]);
         let (lane, wakes, _) = lane(machine.clone());
         let rows = [row("rg", "rg.exe")];
-        let first = lane.request(request(&rows, Trigger::Launch));
+        let first = lane
+            .request(request(&rows, Trigger::Launch))
+            .expect("admitted");
         let facts = answers_through(lane, &wakes, first)
             .facts
             .expect("a walk publishes the machine facts");
         assert_eq!(facts.agent_homes, AgentHomes::default());
 
         machine.set_variable("CODEX_HOME", r"D:\代理\codex home");
-        let second = lane.request(request(&rows, Trigger::Environment));
+        let second = lane
+            .request(request(&rows, Trigger::Environment))
+            .expect("admitted");
         let facts = answers_through(lane, &wakes, second)
             .facts
             .expect("the second walk publishes its facts");
@@ -1135,7 +1179,9 @@ pub(crate) mod tests {
         );
         let (lane, wakes, _) = lane(machine);
 
-        let generation = lane.request(request(&[], Trigger::Launch));
+        let generation = lane
+            .request(request(&[], Trigger::Launch))
+            .expect("admitted");
         let snapshot = answers_through(lane, &wakes, generation)
             .facts
             .expect("the walk publishes facts")
@@ -1156,15 +1202,21 @@ pub(crate) mod tests {
         let (lane, wakes, notes) = lane(machine.clone());
         let rows = [row("rg", "rg.exe")];
         machine.hold();
-        let held = lane.request(request(&rows, Trigger::Launch));
+        let held = lane
+            .request(request(&rows, Trigger::Launch))
+            .expect("admitted");
         // Wait until the worker has taken it, so the next three find it out.
         while lane.lock().out.is_none() {
             std::thread::yield_now();
         }
         machine.install(&bin("rg.exe"));
-        lane.request(request(&rows, Trigger::ProgramMenu));
-        lane.request(request(&rows, Trigger::ProgramMenu));
-        let newest = lane.request(request(&rows, Trigger::Environment));
+        lane.request(request(&rows, Trigger::ProgramMenu))
+            .expect("admitted");
+        lane.request(request(&rows, Trigger::ProgramMenu))
+            .expect("admitted");
+        let newest = lane
+            .request(request(&rows, Trigger::Environment))
+            .expect("admitted");
         machine.release();
 
         let answers = answers_through(lane, &wakes, newest);
@@ -1268,7 +1320,7 @@ pub(crate) mod tests {
         let rows = [row("rg", "rg.exe")];
         let banded = || bands.lock().unwrap().clone();
         let walk_for = |trigger| {
-            let generation = lane.request(request(&rows, trigger));
+            let generation = lane.request(request(&rows, trigger)).expect("admitted");
             answers_through(lane, &wakes, generation);
         };
 
@@ -1283,12 +1335,16 @@ pub(crate) mod tests {
 
         // Walk 3 is held out; a launch request waits behind it and a menu's request replaces it.
         machine.hold();
-        lane.request(request(&rows, Trigger::ProfilesPage));
+        lane.request(request(&rows, Trigger::ProfilesPage))
+            .expect("admitted");
         while lane.lock().out.is_none() {
             std::thread::yield_now();
         }
-        lane.request(request(&rows, Trigger::Launch));
-        let replacing = lane.request(request(&rows, Trigger::ProgramMenu));
+        lane.request(request(&rows, Trigger::Launch))
+            .expect("admitted");
+        let replacing = lane
+            .request(request(&rows, Trigger::ProgramMenu))
+            .expect("admitted");
         machine.release();
         answers_through(lane, &wakes, replacing);
         walk_for(Trigger::Environment);
@@ -1313,7 +1369,9 @@ pub(crate) mod tests {
         let two = [row("rg", "rg.exe"), row("fd", "fd.exe")];
         questions.lock().unwrap().clear();
         machine.hold();
-        let held = lane.request(request(&two, Trigger::ProgramMenu));
+        let held = lane
+            .request(request(&two, Trigger::ProgramMenu))
+            .expect("admitted");
         while lane.lock().out.is_none() {
             std::thread::yield_now();
         }
@@ -1340,11 +1398,13 @@ pub(crate) mod tests {
         let machine = FakeMachine::with_path(&[bin_dir()]);
         let (lane, wakes, _) = lane(machine.clone());
         let rows = [row("a", "a.exe"), row("b", "b.exe"), row("默认", "c.exe")];
-        let generation = lane.request(WalkRequest {
-            rows: rows.to_vec(),
-            first: vec!["默认".to_owned()],
-            trigger: Trigger::Birth,
-        });
+        let generation = lane
+            .request(WalkRequest {
+                rows: rows.to_vec(),
+                first: vec!["默认".to_owned()],
+                trigger: Trigger::Birth,
+            })
+            .expect("admitted");
         answers_through(lane, &wakes, generation);
         let asked = machine.asked();
         assert_eq!(
@@ -1354,143 +1414,297 @@ pub(crate) mod tests {
         );
     }
 
-    /// RED — **a walk that dies leaves the lane able to answer**: the window thread hears which
-    /// walk died, and the next request starts a new worker that answers.
-    ///
-    /// MUTATION (observed red): `WalkOut::drop` returning at once — no death is reported and the
-    /// next request is never served (the worker flag stays set).
-    /// RED (T-FRESH-FACTS round 2) — **a walk that died is walked again once, and only once.**
-    ///
-    /// MUTATION (observed red): `request_after_death` answering `None` at once (the death
-    /// ignored) — no walk answers in the dead one's place.
-    #[test]
-    fn a_walk_that_died_is_walked_again_once() {
-        struct DiesOnce(FakeMachine, Arc<Mutex<bool>>);
-        impl Machine for DiesOnce {
-            fn environment(
-                &self,
-                ctx: &WorkerCtx,
-                note: &dyn Fn(&str),
-            ) -> Box<dyn ShellEnvironment> {
-                let mut first = self.1.lock().unwrap();
-                if *first {
-                    *first = false;
-                    drop(first);
-                    panic!("the walk dies on purpose");
-                }
-                self.0.environment(ctx, note)
+    /// **A machine whose first walk dies**: the walk panics as it asks for its environment, and
+    /// every later walk asks the fake machine.
+    struct DiesOnce(FakeMachine, Arc<Mutex<bool>>);
+
+    impl Machine for DiesOnce {
+        fn environment(&self, ctx: &WorkerCtx, note: &dyn Fn(&str)) -> Box<dyn ShellEnvironment> {
+            let mut first = self.1.lock().unwrap();
+            if *first {
+                *first = false;
+                drop(first);
+                panic!("the walk dies on purpose — 走查中止");
             }
-            fn wsl(&self) -> WslFacts {
-                self.0.wsl()
-            }
+            self.0.environment(ctx, note)
         }
-        let machine = FakeMachine::with_path(&[bin_dir()]);
-        machine.set_variable("CODEX_HOME", r"D:\代理\codex");
-        let lane: &'static ProgramsLane = Box::leak(Box::new(ProgramsLane::new(
-            DiesOnce(machine, Arc::new(Mutex::new(true))),
-            |_: &str| {},
-        )));
-        let (woke, wakes) = mpsc::channel();
-        let woke = Mutex::new(woke);
-        lane.install_wake(move || {
-            let _ = woke.lock().unwrap().send(());
+
+        fn wsl(&self) -> WslFacts {
+            self.0.wsl()
+        }
+    }
+
+    /// **A lane of the test's own on the suite's executor** over `gate`, asking `machine`, its
+    /// wakes and its diagnostics lines coming back on channels. Leaked, for the `'static` its
+    /// worker needs.
+    fn scripted_lane(
+        gate: &Arc<Gate>,
+        machine: impl Machine + 'static,
+    ) -> (
+        &'static ProgramsLane,
+        mpsc::Receiver<()>,
+        mpsc::Receiver<String>,
+    ) {
+        let (noted, notes) = mpsc::channel();
+        let noted = Mutex::new(noted);
+        let note: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |line: &str| {
+            let _ = noted.lock().unwrap().send(line.to_owned());
         });
-        let rows = [row("rg", "rg.exe")];
-        let dead = lane.request(request(&rows, Trigger::Launch));
-        assert_eq!(death_reported(lane, &wakes, dead), Some(dead));
-        let again = lane
-            .request_after_death(dead, request(&rows, Trigger::AfterDeath))
-            .expect("the dead walk is walked again");
-        let facts = answers_through(lane, &wakes, again)
-            .facts
-            .expect("the walk in its place publishes the facts the dead one never did");
-        assert_eq!(facts.generation, again);
+        let said = Arc::clone(&note);
+        let lane: &'static ProgramsLane = Box::leak(Box::new(ProgramsLane::start_with(
+            Executor::scripted(Arc::clone(gate)),
+            machine,
+            note,
+            move |line: &str| said(line),
+        )));
+        let (wake, wakes) = wake_channel();
+        lane.install_wake(wake);
+        (lane, wakes, notes)
+    }
+
+    /// RED (S-4; D-85) — **The requests made during a walk end `Superseded` or `Joined`, and the
+    /// one the next walk serves ends `Done`** (revision (b)4).
+    ///
+    /// A walk is held out; three requests are made behind it. The first waits for the next walk.
+    /// The second asks about the same table — the same operation — and joins it. The third asks
+    /// about a different table (a row was added): a newer, different operation, so the waiting
+    /// request ends `Superseded { by: the third }`, its join carrying that, and the next walk walks
+    /// the newer table for the third, which ends `Done` with that walk's number.
+    ///
+    /// MUTATION: the old silence — `Coalescing::ask` displacing the waiting request without
+    /// publishing its `Superseded` — the first two requests behind the walk never end, and the
+    /// drain finds only the walk out's terminal and the third's.
+    #[test]
+    fn requests_made_during_a_walk_end_superseded_or_joined_and_the_served_one_done() {
+        let gate = Arc::new(Gate::default());
+        let (lane, wakes, _) = scripted_lane(&gate, FakeMachine::with_path(&[bin_dir()]));
+        let one = [row("rg", "rg.exe")];
+        let two = [row("rg", "rg.exe"), row("fd", "fd.exe")];
+        gate.hold();
+        let out = lane
+            .request(request(&one, Trigger::Launch))
+            .expect("admitted");
+        assert!(gate.wait_entered(1), "the walk is out");
+        let waiting = lane
+            .request(request(&one, Trigger::ProgramMenu))
+            .expect("admitted behind the walk out");
+        let joined = lane
+            .request(request(&one, Trigger::Environment))
+            .expect("the same table, joined to it");
+        let newer = lane
+            .request(request(&two, Trigger::TableChanged))
+            .expect("a different table, waiting in its place");
+        gate.release();
+        let ended = ends_through(lane, &wakes, newer);
         assert_eq!(
-            lane.request_after_death(dead, request(&rows, Trigger::AfterDeath)),
-            None,
-            "the same death is not walked twice"
+            ended,
+            [
+                (out, Terminal::Done(out)),
+                (
+                    waiting,
+                    Terminal::Superseded {
+                        by: ProgramsId(newer)
+                    }
+                ),
+                (
+                    joined,
+                    Terminal::Joined {
+                        with: ProgramsId(waiting),
+                        outcome: Box::new(Terminal::Superseded {
+                            by: ProgramsId(newer)
+                        }),
+                    }
+                ),
+                (newer, Terminal::Done(newer)),
+            ]
         );
+        assert_eq!(gate.entered(), 2, "two walks for four requests");
+    }
+
+    /// RED (S-4; D-85) — **A worker that dies ends every request it owes `WorkerGone`, wakes the
+    /// loop, says so once, and the next request is refused at the door.**
+    ///
+    /// Until S-4 a walk that unwound marked the worker gone (`WalkOut`) and the next request
+    /// started another: the death was a lane state, not a terminal of the requests it owed. The
+    /// suite's gate ends the worker while it holds one walk out and two requests stand behind it.
+    ///
+    /// MUTATION: leave `Asks::worker` set — `Ledger::worker_ended` returning at once (the death
+    /// leaves the lane as it was) — no wake comes, and the wait for it runs out of patience.
+    #[test]
+    fn a_dead_walk_ends_every_owed_request_worker_gone_and_the_next_request_is_refused() {
+        let gate = Arc::new(Gate::default());
+        let (lane, wakes, notes) = scripted_lane(&gate, FakeMachine::with_path(&[bin_dir()]));
+        let rows = [row("rg", "rg.exe")];
+        gate.hold();
+        let out = lane
+            .request(request(&rows, Trigger::Launch))
+            .expect("admitted");
+        assert!(gate.wait_entered(1), "the walk is out");
+        let waiting = lane
+            .request(request(&rows, Trigger::ProgramMenu))
+            .expect("admitted behind it");
+        let joined = lane
+            .request(request(&rows, Trigger::ProgramMenu))
+            .expect("and joined to that");
+        gate.kill();
+        gate.release();
+        wait_for_a_wake(&wakes, "the worker's end");
         assert_eq!(
-            lane.request_after_death(again, request(&rows, Trigger::AfterDeath)),
-            None,
-            "nor is the walk asked for after a death, if it dies too"
+            lane.take().ends,
+            [
+                (out, Terminal::WorkerGone),
+                (waiting, Terminal::WorkerGone),
+                (
+                    joined,
+                    Terminal::Joined {
+                        with: ProgramsId(waiting),
+                        outcome: Box::new(Terminal::WorkerGone),
+                    }
+                ),
+            ]
+        );
+        assert!(
+            matches!(
+                lane.request(request(&rows, Trigger::Environment)),
+                Err(crate::lane::Refused::Faulted(
+                    crate::lane::WorkerEnd::Panicked(_)
+                ))
+            ),
+            "a request after the worker's end is refused at the door, minting nothing"
+        );
+        let said: Vec<String> = notes.try_iter().collect();
+        assert_eq!(said.len(), 1, "the end is said once: {said:?}");
+        assert!(
+            said[0].contains("3 request(s) owed end as WorkerGone"),
+            "{said:?}"
         );
     }
 
+    /// RED (S-4; revision (b)5, rule 1) — **A dead walk is not asked again on its own.**
+    ///
+    /// A walk that dies is its request's `Failed`, said once; the window thread takes it, and
+    /// nothing is asked in its place — no request is minted, nothing is owed, the worker waits.
+    /// The next new input asks again, and that walk answers. (T-FRESH-FACTS round 2 walked a
+    /// dead walk again once, on the window thread's word; the contract forbids a new request
+    /// scheduled because a terminal failed.)
+    ///
+    /// MUTATION: the old automatic re-ask — `ProgramsLane::take` asking again in the failed
+    /// request's place (round 2's `request_after_death`, moved into the acceptance) — a request
+    /// is owed after the take.
+    #[test]
+    fn a_dead_walk_is_not_asked_again_on_its_own() {
+        let gate = Arc::new(Gate::default());
+        let machine = FakeMachine::with_path(&[bin_dir()]);
+        machine.set_variable("CODEX_HOME", r"D:\代理\codex");
+        let (lane, wakes, notes) =
+            scripted_lane(&gate, DiesOnce(machine, Arc::new(Mutex::new(true))));
+        let rows = [row("rg", "rg.exe")];
+        let dead = lane
+            .request(request(&rows, Trigger::Launch))
+            .expect("admitted");
+        wait_for_a_wake(&wakes, "the dead walk's terminal");
+        // Every walk from here on is held at the gate: one asked on its own would stay owed.
+        gate.hold();
+        let answers = lane.take();
+        assert!(
+            matches!(answers.ends[..], [(id, Terminal::Failed(_))] if id == dead),
+            "{answers:?}"
+        );
+        assert_eq!(answers.finished(), None, "the walk ran to no end");
+        assert_eq!(
+            lane.requests.ledger().earliest_owed(),
+            None,
+            "nothing is asked in the dead walk's place"
+        );
+        assert_eq!(gate.entered(), 1, "and no second walk has begun");
+        let said: Vec<String> = notes.try_iter().collect();
+        assert_eq!(said.len(), 1, "the failure is said once: {said:?}");
+        assert!(said[0].contains("走查中止"), "{said:?}");
+
+        gate.release();
+        let next = lane
+            .request(request(&rows, Trigger::ProgramMenu))
+            .expect("the next new input asks again");
+        let facts = answers_through(lane, &wakes, next)
+            .facts
+            .expect("and that walk publishes the facts the dead one never did");
+        assert_eq!(facts.generation, next);
+    }
+
+    /// RED — **a walk that dies leaves the lane able to answer**: its request ends `Failed`, the
+    /// window thread hears it and the ledger says it once, the worker goes on, and the next
+    /// request is answered by it.
+    ///
+    /// MUTATION: run the walk outside its task in `run_program_walk` (`walk(..)` called bare) —
+    /// the panic ends the worker: the request ends `WorkerGone`, and the next one is refused.
     #[test]
     fn a_walk_that_dies_is_reported_and_the_next_request_is_answered() {
-        struct Dies(FakeMachine, Arc<Mutex<bool>>);
-        impl Machine for Dies {
-            fn environment(
-                &self,
-                ctx: &WorkerCtx,
-                note: &dyn Fn(&str),
-            ) -> Box<dyn ShellEnvironment> {
-                let mut first = self.1.lock().unwrap();
-                if *first {
-                    *first = false;
-                    drop(first);
-                    panic!("the walk dies on purpose");
-                }
-                self.0.environment(ctx, note)
-            }
-            fn wsl(&self) -> WslFacts {
-                self.0.wsl()
-            }
-        }
         let machine = FakeMachine::with_path(&[bin_dir()]);
         let (noted, notes) = mpsc::channel();
         let noted = Mutex::new(noted);
         let lane: &'static ProgramsLane = Box::leak(Box::new(ProgramsLane::new(
-            Dies(machine, Arc::new(Mutex::new(true))),
+            DiesOnce(machine, Arc::new(Mutex::new(true))),
             move |line: &str| {
                 let _ = noted.lock().unwrap().send(line.to_owned());
             },
         )));
-        let (woke, wakes) = mpsc::channel();
-        let woke = Mutex::new(woke);
-        lane.install_wake(move || {
-            let _ = woke.lock().unwrap().send(());
-        });
+        let (wake, wakes) = wake_channel();
+        lane.install_wake(wake);
         let rows = [row("rg", "rg.exe")];
-        let dead = lane.request(request(&rows, Trigger::Launch));
-        assert_eq!(death_reported(lane, &wakes, dead), Some(dead));
-        // Said before the death was published, so it is there now.
+        let dead = lane
+            .request(request(&rows, Trigger::Launch))
+            .expect("admitted");
+        let ended = ends_through(lane, &wakes, dead);
+        assert!(
+            matches!(ended[..], [(id, Terminal::Failed(_))] if id == dead),
+            "{ended:?}"
+        );
+        // Said as the terminal was taken, so it is there now.
         assert!(
             notes
                 .try_recv()
                 .expect("the death is said")
-                .contains("ended before its last answer")
+                .contains("the walk dies on purpose"),
         );
-        let next = lane.request(request(&rows, Trigger::ProgramMenu));
+        let next = lane
+            .request(request(&rows, Trigger::ProgramMenu))
+            .expect("admitted");
         let answers = answers_through(lane, &wakes, next);
         assert_eq!(answers.verdicts[0].generation, next);
     }
 }
 
 /// **The lane contract's adapter** (`crate::lane`, `lane_contract_tests`): a [`ProgramsLane`] of
-/// its own — the real numbered requests, worker, mailbox and wake — over a machine whose walk the
-/// suite's [`crate::lane::Gate`] can hold. Acceptance is the product's: `ProfilePrograms::adopt`
-/// against the live table, which refuses an answer older than the one held.
+/// its own — the real admission, worker body, ledger, mailbox and take — its worker started by the
+/// suite's executor, over a machine whose walk executes the suite's question: each question is a
+/// table of one row whose program is a path naming it, so the same question is the same table
+/// (joined) and a different one a different table (superseding), and the walk's one file question
+/// is where the suite's [`crate::lane::Gate`] counts it and fires a panic planted in it.
+/// Acceptance is the product's take: the terminals in the order they were minted.
 #[cfg(test)]
 pub(crate) mod contract_adapter {
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::{Machine, ProgramsLane, Trigger, WalkRequest};
+    use super::{Machine, ProgramsId, ProgramsLane, ProgramsTerminal, Trigger, WalkRequest};
     use crate::lane::{
-        Admission, Contract, Delivered, Gate, LaneUnderTest, Outcome, PROGRAMS, WakeProbe,
+        Admission, Contract, Delivered, Executor, Gate, LaneUnderTest, Outcome, PROGRAMS, Terminal,
+        WakeProbe,
     };
-    use crate::profiles::{ProfilePrograms, RowVerdict};
+    use crate::profiles::ProgramSource;
     use crate::wsl::WslFacts;
     use bt_platform::admission::WorkerCtx;
     use bt_pty::ShellEnvironment;
+
+    /// The prefix of the path each question's row names.
+    const QUESTION: &str = "lane-contract-question-";
 
     struct Gated(Arc<Gate>);
 
     impl Machine for Gated {
         fn environment(&self, _ctx: &WorkerCtx, _note: &dyn Fn(&str)) -> Box<dyn ShellEnvironment> {
-            self.0.pass(None);
-            Box::new(Nothing)
+            Box::new(Questioned(Arc::clone(&self.0)))
         }
 
         fn wsl(&self) -> WslFacts {
@@ -1498,14 +1712,23 @@ pub(crate) mod contract_adapter {
         }
     }
 
-    struct Nothing;
+    /// An environment with no variables, whose one file question per walk — the row's own path —
+    /// executes the question that path names.
+    struct Questioned(Arc<Gate>);
 
-    impl ShellEnvironment for Nothing {
+    impl ShellEnvironment for Questioned {
         fn var_os(&self, _key: &str) -> Option<std::ffi::OsString> {
             None
         }
 
-        fn is_file(&self, _path: &std::path::Path) -> bool {
+        fn is_file(&self, path: &Path) -> bool {
+            if let Some(question) = path
+                .to_str()
+                .and_then(|path| path.strip_prefix(QUESTION))
+                .and_then(|question| question.parse().ok())
+            {
+                self.0.execute(question);
+            }
             false
         }
     }
@@ -1514,10 +1737,10 @@ pub(crate) mod contract_adapter {
         lane: &'static ProgramsLane,
         gate: Arc<Gate>,
         probe: Arc<WakeProbe>,
-        /// What the window thread holds.
-        programs: ProfilePrograms,
-        /// The newest walk the consumer has heard from.
-        seen: u64,
+        /// The suite's own record of which question each request carried.
+        questions: std::collections::HashMap<u64, u64>,
+        /// The lines the ledger said, counted through its `say`.
+        said: Arc<AtomicUsize>,
         /// A stale answer the acceptance took, raised at the next drain.
         raised: Vec<Delivered>,
     }
@@ -1525,9 +1748,15 @@ pub(crate) mod contract_adapter {
     pub(crate) fn make() -> Box<dyn LaneUnderTest> {
         let gate = Arc::new(Gate::default());
         let probe = Arc::new(WakeProbe::default());
-        let lane: &'static ProgramsLane = Box::leak(Box::new(ProgramsLane::new(
+        let said = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&said);
+        let lane: &'static ProgramsLane = Box::leak(Box::new(ProgramsLane::start_with(
+            Executor::scripted(Arc::clone(&gate)),
             Gated(Arc::clone(&gate)),
-            |_: &str| {},
+            Arc::new(|_: &str| {}),
+            move |_: &str| {
+                counted.fetch_add(1, Ordering::SeqCst);
+            },
         )));
         let wake = Arc::clone(&probe);
         lane.install_wake(move || wake.woke());
@@ -1535,18 +1764,36 @@ pub(crate) mod contract_adapter {
             lane,
             gate,
             probe,
-            programs: ProfilePrograms::unknown(),
-            seen: 0,
+            questions: std::collections::HashMap::new(),
+            said,
             raised: Vec::new(),
         })
     }
 
-    /// The one row the suite's walks answer: the shipped fallback, which every table has.
-    fn rows() -> Vec<crate::profiles::Profile> {
-        vec![
-            crate::profiles::row_of(crate::profiles::fallback_profile_id())
-                .expect("the shipped table has its fallback"),
-        ]
+    /// The table a question asks about: the shipped fallback row, its program the path that names
+    /// the question.
+    fn rows(question: u64) -> Vec<crate::profiles::Profile> {
+        let mut row = crate::profiles::row_of(crate::profiles::fallback_profile_id())
+            .expect("the shipped table has its fallback");
+        row.program = ProgramSource::Path(PathBuf::from(format!("{QUESTION}{question}")));
+        vec![row]
+    }
+
+    fn outcome(terminal: ProgramsTerminal) -> Outcome {
+        match terminal {
+            Terminal::Done(_) => Outcome::Answered,
+            Terminal::Failed(failure) => Outcome::Failed(failure.to_string()),
+            Terminal::Cancelled => Outcome::Cancelled,
+            Terminal::Superseded { by } => Outcome::Superseded { by: by.0 },
+            Terminal::Joined {
+                with,
+                outcome: carried,
+            } => Outcome::Joined {
+                with: with.0,
+                carried: Box::new(self::outcome(*carried)),
+            },
+            Terminal::WorkerGone => Outcome::WorkerGone,
+        }
     }
 
     impl LaneUnderTest for ProgramsAdapter {
@@ -1562,16 +1809,27 @@ pub(crate) mod contract_adapter {
             &self.probe
         }
 
+        /// `programs_lane::request`, on this lane: the lane's own admission, or its refusal at the
+        /// door as the request's terminal.
         fn submit(&mut self, _target: u32, question: u64) -> Admission {
-            let ticket = self.lane.request(WalkRequest {
-                rows: rows(),
+            match self.lane.request(WalkRequest {
+                rows: rows(question),
                 first: Vec::new(),
                 trigger: Trigger::ProgramMenu,
-            });
-            Admission {
-                ticket: Some(ticket),
-                question,
-                refused: None,
+            }) {
+                Ok(ticket) => {
+                    self.questions.insert(ticket, question);
+                    Admission {
+                        ticket: Some(ticket),
+                        question,
+                        refused: None,
+                    }
+                }
+                Err(refused) => Admission {
+                    ticket: None,
+                    question,
+                    refused: Some(format!("{refused:?}")),
+                },
             }
         }
 
@@ -1579,49 +1837,36 @@ pub(crate) mod contract_adapter {
             unreachable!("the program walk's target is the application, which does not close");
         }
 
-        /// The window thread's drain: the rows adopted, and the newest walk heard from — by a
-        /// row it answered or by its end — raised once. A walk that died is a fault.
+        /// The window thread's drain (`FolioApp::adopt_program_walk`): the terminals taken in the
+        /// order they were minted, each a delivery.
         fn drain(&mut self) -> Vec<Delivered> {
             let answers = self.lane.take();
-            let newest = answers
-                .verdicts
-                .iter()
-                .map(|verdict| verdict.generation)
-                .chain(answers.finished)
-                .max();
-            self.programs.adopt(answers.verdicts);
             let mut delivered = std::mem::take(&mut self.raised);
-            if let Some(died) = answers.died {
-                delivered.push(Delivered {
-                    target: Some(0),
-                    ticket: Some(died),
-                    question: None,
-                    outcome: Outcome::Fault("the walk's worker died".to_owned()),
-                });
-            }
-            if let Some(newest) = newest.filter(|newest| *newest > self.seen) {
-                self.seen = newest;
-                delivered.push(Delivered {
-                    target: Some(0),
-                    ticket: Some(newest),
-                    question: None,
-                    outcome: Outcome::Answered,
-                });
-            }
+            delivered.extend(
+                answers
+                    .ends
+                    .into_iter()
+                    .map(|(ticket, terminal)| Delivered {
+                        target: Some(0),
+                        ticket: Some(ticket),
+                        question: self.questions.get(&ticket).copied(),
+                        outcome: outcome(terminal),
+                    }),
+            );
             delivered
         }
 
-        /// A late answer to the older walk `ticket`, offered to the window thread's acceptance:
-        /// the adoption refuses it because the row holds a newer walk's answer.
+        /// A late answer to the older walk `ticket`, through the lane's own publication, which
+        /// refuses a second terminal; taking it would be an answer raised. (The acceptance's own
+        /// refusal of a row older than the one held is `ProfilePrograms::adopt`'s, pinned by its
+        /// tests: the rows the suite walks name paths no live row has, so it takes none of them.)
         fn offer_stale(&mut self, ticket: u64) {
-            let row = &rows()[0];
-            let stale = RowVerdict {
-                generation: ticket,
-                id: row.id.clone(),
-                source: row.program.clone(),
-                program: Some("stale".into()),
-            };
-            if self.programs.adopt([stale]) {
+            if self
+                .lane
+                .requests
+                .ledger()
+                .publish(ProgramsId(ticket), Terminal::Done(ticket))
+            {
                 self.raised.push(Delivered {
                     target: Some(0),
                     ticket: Some(ticket),
@@ -1629,6 +1874,10 @@ pub(crate) mod contract_adapter {
                     outcome: Outcome::Answered,
                 });
             }
+        }
+
+        fn said(&self) -> Option<usize> {
+            Some(self.said.load(Ordering::SeqCst))
         }
     }
 }
