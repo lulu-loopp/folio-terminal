@@ -892,7 +892,10 @@ policy is `PlainWriter`, a volume that cannot exchange is refused for every
 request. **One queue is per-file order**: every request naming one path is
 served in the order it was queued, whichever store or buffer queued it. The
 four stores hold the queue as `persist::StorageLane` clones of the session
-store's, send `Restore` until the merge tickets, and after start the window
+store's (a document request is admitted only while the worker is up — the
+session store starts it at open — and one no worker takes is completed as refused
+and wakes the loop), send `Restore` until the merge tickets (a `Conflict` makes
+the restored file the revision and holds the document's write until the merge), and after start the window
 thread reads and writes none of the four documents (§5.3 row 20 narrowed).
 **The trial's watch** (`folio-trial-watch`, `BelowNormal`, only in a trial) reads
 `H\journal.json` every 250 ms through `file_reads` on `Lane::UpdateJournal`,
