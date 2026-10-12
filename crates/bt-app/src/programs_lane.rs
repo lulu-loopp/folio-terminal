@@ -1111,39 +1111,6 @@ pub(crate) mod tests {
         assert_eq!(answers.verdicts[0].generation, second);
     }
 
-    /// PIN (T-WINDOWS-SHELL-NAMESPACES, 2026-10-12) — **a walk says what kind of program each row
-    /// found**, asking the disk on its own worker: a bash with `cygwin1.dll` beside it is Cygwin's,
-    /// and becomes so on the walk after the library arrives.
-    ///
-    /// MUTATION: the walk publishing `ShellProgram::Native` for every row — RED on the second walk.
-    ///
-    /// **Windows only:** off Windows every program is `Native`.
-    #[cfg(windows)]
-    #[test]
-    fn a_walk_says_what_kind_of_program_each_row_found() {
-        let machine = FakeMachine::with_path(&[bin_dir()]);
-        let (lane, wakes, _) = lane(machine.clone());
-        let rows = [row("cygbash", "bash.exe")];
-        machine.install(&bin("bash.exe"));
-
-        let first = lane
-            .request(request(&rows, Trigger::Launch))
-            .expect("admitted");
-        let answers = answers_through(lane, &wakes, first);
-        assert_eq!(answers.verdicts[0].shell, profiles::ShellProgram::Native);
-
-        machine.install(&bin("cygwin1.dll"));
-        let second = lane
-            .request(request(&rows, Trigger::Environment))
-            .expect("admitted");
-        let answers = answers_through(lane, &wakes, second);
-        assert_eq!(
-            answers.verdicts[0].shell,
-            profiles::ShellProgram::Cygwin,
-            "the library beside the program makes it Cygwin's"
-        );
-    }
-
     /// RED — **WSL and git are read again by every walk** (the "git/WSL refresh rows").
     ///
     /// MUTATION (observed red, each alone): `walk` reading WSL only when `generation == 1` (the

@@ -988,10 +988,14 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
 
 /// The family `program` belongs to, or `None` for a program no row names.
 fn shell_family(program: &ProgramSource) -> Option<&'static ShellFamily> {
-    let stem = program_stem(program)?;
+    family_of_stem(&program_stem(program)?)
+}
+
+/// The family a program stem ([`program_stem`]) belongs to.
+fn family_of_stem(stem: &str) -> Option<&'static ShellFamily> {
     SHELL_FAMILIES
         .iter()
-        .find(|family| family.stems.contains(&stem.as_str()))
+        .find(|family| family.stems.contains(&stem))
 }
 
 fn derive_grammar_on(
@@ -2720,10 +2724,10 @@ fn compose_on(
 ///
 /// **What the shell prints is a wider question** ([`printed_path_namespace_on`]): it follows the
 /// program alone, so every launcher into a distribution prints `/mnt/c/…` whatever its door. The
-/// two agree where they overlap, because both read `wsl.exe` by one rule ([`starts_wsl_exe`]): a
-/// row whose directories are WSL's prints WSL's spelling.
+/// two agree where they overlap, because both read `wsl.exe` off one row of [`SHELL_FAMILIES`]
+/// (its `wsl_launcher`): a row whose directories are WSL's prints WSL's spelling.
 fn derived_paths(profile: &Profile) -> PathNamespace {
-    if starts_wsl_exe(&profile.program)
+    if shell_family(&profile.program).is_some_and(|family| family.wsl_launcher)
         && matches!(
             served_by(profile),
             Integration::BashInitFile | Integration::ZshDotDir
@@ -2733,19 +2737,6 @@ fn derived_paths(profile: &Profile) -> PathNamespace {
     } else {
         PathNamespace::Windows
     }
-}
-
-/// Whether `program` is `wsl.exe`, by any path — the launcher row of [`SHELL_FAMILIES`].
-fn starts_wsl_exe(program: &ProgramSource) -> bool {
-    program_stem(program).is_some_and(|stem| stem_is_wsl_exe(&stem))
-}
-
-/// [`starts_wsl_exe`] for a program stem already in hand — the one rule both it and
-/// [`shell_program_of`] read.
-fn stem_is_wsl_exe(stem: &str) -> bool {
-    SHELL_FAMILIES
-        .iter()
-        .any(|family| family.wsl_launcher && family.stems.contains(&stem))
 }
 
 /// **What a row's program is, as far as the spelling its shell prints goes** — the program's half
@@ -2811,7 +2802,7 @@ pub(crate) fn shell_program_of(
         .rsplit_once('.')
         .map_or(file, |(stem, _)| stem)
         .to_ascii_lowercase();
-    if stem_is_wsl_exe(&stem) {
+    if family_of_stem(&stem).is_some_and(|family| family.wsl_launcher) {
         return ShellProgram::WslExe;
     }
     let aliases = environment
@@ -16242,7 +16233,7 @@ mod tests {
     /// starts `wsl.exe`, by the rule [`shell_program_of`] reads, read off the row alone so that
     /// every host can ask it.
     pub(super) fn shipped_kind(row: &Profile) -> ShellProgram {
-        if starts_wsl_exe(&row.program) {
+        if shell_family(&row.program).is_some_and(|family| family.wsl_launcher) {
             ShellProgram::WslExe
         } else {
             ShellProgram::Native
@@ -28134,6 +28125,44 @@ mod tests {
     ///
     /// MUTATION (observed red): `ProgramsLane::serve` returning after its first walk — the lane
     /// asks only at launch, and the row never appears.
+    /// PIN (T-WINDOWS-SHELL-NAMESPACES, 2026-10-12) — **a walk says what kind of program each row
+    /// found**, asking the disk on its own worker: a bash with `cygwin1.dll` beside it is Cygwin's,
+    /// and becomes so on the walk after the library arrives.
+    ///
+    /// MUTATION: the walk publishing `ShellProgram::Native` for every row — RED on the second walk.
+    ///
+    /// **Windows only:** off Windows every program is `Native`.
+    #[cfg(windows)]
+    #[test]
+    fn a_walk_says_what_kind_of_program_each_row_found() {
+        use crate::programs_lane::{Trigger, WalkRequest, tests as lane_tests};
+        let machine = lane_tests::FakeMachine::with_path(&[lane_tests::bin_dir()]);
+        let (lane, wakes, _) = lane_tests::lane(machine.clone());
+        let rows = vec![lane_tests::row("cygbash", "bash.exe")];
+        let ask = |trigger| {
+            lane.request(WalkRequest {
+                rows: rows.clone(),
+                first: Vec::new(),
+                trigger,
+            })
+            .expect("admitted")
+        };
+        machine.install(&lane_tests::bin("bash.exe"));
+
+        let first = ask(Trigger::Launch);
+        let answers = lane_tests::answers_through(lane, &wakes, first);
+        assert_eq!(answers.verdicts[0].shell, ShellProgram::Native);
+
+        machine.install(&lane_tests::bin("cygwin1.dll"));
+        let second = ask(Trigger::Environment);
+        let answers = lane_tests::answers_through(lane, &wakes, second);
+        assert_eq!(
+            answers.verdicts[0].shell,
+            ShellProgram::Cygwin,
+            "the library beside the program makes it Cygwin's"
+        );
+    }
+
     #[test]
     fn a_program_installed_while_folio_runs_appears_in_the_menu_after_the_broadcast_and_after_a_menu_opens()
      {
