@@ -772,10 +772,13 @@ unsafe extern "C" {
 /// The single message box this product is allowed to raise, for the Windows
 /// arm's reason: everything Folio says once it has a window it says on a card
 /// anchored at the surface the news is about, and a program that has drawn
-/// nothing has nothing to interrupt. Its two callers are
-/// `bt_app::announce_panic` — the panic hook, when the resident run has no
-/// console to write to — and `say_at_the_front_door`, which is a launch that is
-/// about to exit.
+/// nothing — or whose windows are being taken down — has nothing to put a card
+/// on. Its three callers are `bt_app::announce_panic` — the panic hook, when the
+/// resident run has no console to write to — `say_at_the_front_door`, which is a
+/// launch that is about to exit, and `SystemBox::say`, a controlled stop saying,
+/// before its windows close, the configuration changes it could keep nowhere
+/// (T-QUIT-DOCUMENTS). That third one runs on the window thread, which on macOS
+/// is the main thread, with the application running and its windows still up.
 ///
 /// **Two conditions, and the fallback below them is not a degradation.**
 /// `-[NSAlert runModal]` may only be called on the main thread, and it needs a
@@ -793,7 +796,7 @@ unsafe extern "C" {
 /// so a second modal started from inside one can wait forever. It cannot happen
 /// from here. The completion block [`sheet`] installs contains exactly two
 /// statements — park the answer, mark the view dirty — and calls nothing in
-/// `bt-app`; neither of this function's two callers is reachable from it. The
+/// `bt-app`; none of this function's three callers is reachable from it. The
 /// only path that could is a Rust panic *inside* the block reaching the hook,
 /// and a panic there unwinds into Objective-C and ends the process before any
 /// hook of ours is consulted (X-2 measured exactly that). The sheet is also not

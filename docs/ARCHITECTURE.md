@@ -649,7 +649,9 @@ Owner `bt-app::quit::Quit`, unchanged; `quit::Reason` is `Asked` (the chord,
 the menu bar's Quit, the system's quit) or `UpdateRestart { txn }`, written by
 `App::restart_for_update` through the one door `App::ask_to_quit` and spent in
 `FolioApp::begin_quit_if_asked` (`Quit::begin_for`). Every cancelable step runs
-unchanged. What the reason changes: the write is a named generation the loop
+unchanged, the documents phase among them (T-QUIT-DOCUMENTS: a quit it cancels
+gives the update up, `update_job::Abandon::DocumentsUnsaved`, and the quit the
+card's choice asks for is a person's). What the reason changes: the write is a named generation the loop
 waits for across turns (`SessionStore::hand_over_final` / `landing_of`, bounded
 by `quit::UPDATE_RECEIPT_DEADLINE` as a clock on the turn, never a wait); a
 Cancel, an incomplete save or a refused write gives the update up with the
@@ -1515,13 +1517,14 @@ product code of `bt-app`, `bt-platform` or `bt-pty` catches a panic outside it
 | quit's session write wait | `SessionWriter::wait_for` | window (row 16) | return | a timeout lets the quit go on; a stopped writer stops it | the one generation it waits for | — | owner-thread |
 | the session writer's close | `SessionWriter::close` | window (row 16b) | return | past the budget the writer is let go | — | — | owner-thread |
 | an update quit's session receipt | `SessionStore::hand_over_final` | session-writer | polled | a refused write stops the quit; overdue past `UPDATE_RECEIPT_DEADLINE`; a panic on the storage worker is contained (`contained_panic::contain`, which the resident hook honours) and is the worker's end: each request it owed ends refused, then the wake, and a later request is refused at the door | the one generation it waits for | — | D-88 |
-| the trial's receipt | `SessionStore::write_receipt` | session-writer | polled | a failed write is written again on a doubling backoff; a dead writer reads as pending; a panic on the storage worker is contained (`contained_panic::contain`, which the resident hook honours) and is the worker's end: each request it owed ends refused, then the wake, and a later request is refused at the door | one per process | — | D-88, D-89 |
+| the trial's receipt | `SessionStore::write_receipt` | session-writer | polled | a failed write is written again on a doubling backoff; a dead writer reads as pending; a panic on the storage worker is contained (`contained_panic::contain`, which the resident hook honours) and is the worker's end: each request it owed ends refused, then the wake, and a later request is refused at the door | one per process, admitted ahead of the queue (served before every job still queued, a quit's documents and copies among them); the trial's write release waits for the quit's outcome | — | D-88, D-89 |
 | the update hand-off at quit | `FolioApp::hand_the_update_over` | session-writer | polled | overdue past `HANDOFF_DEADLINE`, one line; a panic on the storage worker is contained (`contained_panic::contain`, which the resident hook honours) and is the worker's end: each request it owed ends refused, then the wake, and a later request is refused at the door | one per quit | dropped when the quit ends | D-88 |
 | a document's save | `Runtime::save_preview_on` | window (row 20) | return | `SaveOutcome::{Conflict, Failed}` to the pane | — | — | row 20 |
 | a preview file's rename | `Runtime::rename_preview_file` | window (row 20) | return | a toast | — | — | row 20 |
 | a files row's rename | `Runtime::rename_files_row` | window (row 20) | return | a toast | — | — | row 20 |
 | a hand-editable document's write | `DocumentState::send_owed` | session-writer | DocumentsAnswered | `Refused { cause }`: a link or a volume that cannot exchange is a card at once, a disk's refusal a card at the fifth in a row; the door admits a request only while the worker is up, decided under the queue's lock (it starts no thread), and completes one no worker takes as refused and wakes the loop; the worker's end takes the same lock to mark the lane down and drop what is queued, each such request answered as refused, and wakes the loop after; a refused write is sent once more by the next press or ear pass, never on a clock; a panic on the storage worker is contained (`contained_panic::contain`, which the resident hook honours) and is the worker's end: each request it owed ends refused, then the wake, and a later request is refused at the door | one write in flight per document; a press meanwhile moves `desired`, the pending slot, sent after the answer; every answer is processed in worker order, a generation gating only visible effects; a `Conflict` — and, for a document sent `Merge`, any file stored for its merge — holds the document, and no write is sent until the merge folds it in (`settings.json`'s on the same `DocumentsAnswered` turn, `Runtime::merge_documents`); a re-read while held moves the revision and the merge's file bytes and never releases the hold | the store, which the application holds for the process's life | conforms |
 | a hand-editable document's re-read | `DocumentState::ask_read` | session-writer | DocumentsAnswered | an unreadable or unparseable file is an answer that keeps the document in force; a read no worker takes is completed as not served and wakes the loop, one line, and the next pass asks again; a panic on the storage worker is contained (`contained_panic::contain`, which the resident hook honours) and is the worker's end: each request it owed ends refused, then the wake, and a later request is refused at the door | one read on the worker per document; an ask while one is out is served by one more read after it | the store, which the application holds for the process's life | conforms |
+| a hand-editable document's copy at quit | `StorageLane::send_recovered` | session-writer | DocumentsAnswered | the copy's own `Result`: a refused copy, or one with no receipt by `quit::QUIT_RECOVERY_BY` (a clock read on the quit's turn), cancels the quit and names the file on its card; a copy no worker takes is answered as refused where it is handed over; a panic on the storage worker is contained (`contained_panic::contain`, which the resident hook honours) and is the worker's end: each request it owed ends refused, then the wake, and a later request is refused at the door | one copy per document per quit, sent once; the next quit's documents phase begins afresh | the store, which the application holds for the process's life | conforms |
 | a diagnostics line | `diagnostics::note` | window (row 20) | return | the append's failure is discarded | — | — | row 20 |
 | Claude's agent hooks | `Runtime::apply_claude_hooks` | window (row 2) | return | `Outcome::Refused` to a toast | — | — | row 2 |
 | Codex's notify hook | `Runtime::apply_codex_notify` | window (row 2) | return | `Outcome::Refused` to a toast | — | — | row 2 |
@@ -1987,12 +1990,45 @@ they do not share a call stack.
 
 **Normal quit** is a four-phase transaction: `FolioApp::settle_quit` advances
 `bt-app::quit::QuitStep` through the dirty gate, the read-only photograph, the
-judged atomic write (`Runtime::quit_save`; a refused disk means do not leave)
-and retirement. It has two triggers (`quit::Reason`, U-21): a person asking,
+judged atomic write (`Runtime::quit_save`; a refused disk means do not leave,
+unless the person chooses to leave without the change the refusal names, on the
+card that names it) and retirement. It has two triggers (`quit::Reason`, U-21): a person asking,
 and the update's Restart, whose write is a named generation judged by its own
 receipt under a deadline and whose way out hands the transaction to its
 applier. `bt-app::restore::DirtyGate` / `GateRequest` is reachable from
 quit, close-tab, close-pane and git-discard.
+
+Between the gate and the photograph the quit puts the four hand-editable
+documents on the disk (T-QUIT-DOCUMENTS; design note
+`docs/plans/design/settings-reread-2026-10-11.md`, revisions (c)2, (d)2):
+`QuitStep::Documents` sends each owed document to the storage worker and turns
+the loop, merging a `Moved` or `Displaced` answer without its doors, until each
+has landed or has a terminal answer (refused, a file no merge can fold, or
+held for its merge) — by `quit::QUIT_DOCUMENTS_BY`; `QuitStep::Recovery` copies
+each document with a terminal answer into the data directory's `recovered`
+folder (create-new, the file and the folder flushed) by `quit::QUIT_RECOVERY_BY`.
+Both bounds are measured from the start of the documents phase and derived
+from the one `persist::SESSION_SAVE_BUDGET`; each is a clock read on the turn,
+never a wait, and while the quit holds the worker nothing else of the run's is
+queued behind the documents and their copies — except an update trial's receipt,
+which goes ahead of them (`StorageLane::submit_ahead`: a small create-new write the
+trial is rolled back without); the receipt goes ahead; the trial's write release waits for the quit's outcome, a value the quit owns at every moment and every exit disposes of explicitly — held while the two phases hold the worker; performed when the quit is abandoned (cancelled in the phases, or its final write refused); past the phases, the rest released behind the landed copies while the session's half stays pending through the write, this run's sentinel armed and the launch backup held back; consumed when the write lands or times out (the quit's own final write is the document of record, the backup skipped); and on a stop that cannot ask, the sentinel armed for the session's half, the document writers moot (kept in `recovered`), the rest dropped (`Quit::trial_release`,
+`Quit::settle_held_release`) — so the session write goes behind them. **The session
+write spends only what is left of that one budget**: its wait, the ordinary quit's
+judged flush and an update's receipt alike, ends at `Quit::session_write_until`
+(the documents phase's start plus `SESSION_SAVE_BUDGET`), and a quit that reaches
+it with nothing left hands nothing over and leaves without a new flush
+(`SessionStore::flush_for_quit`: the write given up as a timed-out one, the way
+out's close not flushing again, `session.lock` left standing).
+A document still unanswered at the first bound, or a copy refused or unanswered
+at the second, **cancels the quit**: the windows stay, `diagnostics.log` names
+every such file with why, and one Error card on the window names the files (at
+most three, then how many more) with one choice, *Leave without this change*.
+Only that choice leaves without them: the quit it asks for drops exactly those
+documents' owed changes for the run, each written to `diagnostics.log` with its
+units before the way out. A quit asked again by the menu, the shortcut or a
+window's close runs the transaction again from the documents phase; dismissing
+the card leaves Folio open and the changes owed.
 
 **Controlled failure** is `FolioApp::fail` — twelve call sites — and a loop
 stopped by something that is not a window closing (`exiting`). It attempts
@@ -2003,7 +2039,14 @@ preview buffer written back through `PreviewBuffer::save`, the quit's judged
 write with its conflict check, and where the file refuses or has changed on disk,
 copied into the data directory's `recovered` folder, never over the file — with
 one `diagnostics.log` line each saying where the edit is (and, at the next start,
-one toast whose verb opens the folder: `recovered`, T-RECOVERED-FOLDER); then every window is
+one toast whose verb opens the folder: `recovered`, T-RECOVERED-FOLDER); then the
+four hand-editable documents' owed changes are copied into the same folder
+(`keep_owed_documents_over`, T-QUIT-DOCUMENTS), each answering `Kept` or `Lost`,
+each offered to `diagnostics.log`, and every `Lost` said once, together, through
+the system's own message box (`bt_platform::message_box`, behind the `NativeSay`
+seam) before a window closes — the surviving native path, which needs no file,
+no data directory and no renderer of Folio's; a stop that lost nothing raises no
+box; then every window is
 closed with `ending` (`Runtime::close_window(true)` finishes a pending rename and
 marks the session dirty), the windows cleared and the application finished. The
 writes are made on the window thread and are done when the call returns, as the
