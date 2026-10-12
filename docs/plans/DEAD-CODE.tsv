@@ -31,5 +31,4 @@
 crate	file	item	form	reason
 bt-app	src/update_handoff.rs	Staged.lock	expect	a lock is held by owning it; nothing reads it (install_txn::Held's drop releases it)
 bt-app	src/update_job.rs	(module)	expect	the drivers land after the card: U-20/U-27 drive and report, U-21 quits ((b).5)
-bt-app	src/update_txn.rs	(module)	expect	the protocol lands before its drivers: U-11, U-12 and U-20…U-29 call it ((b).5)
 bt-app	src/webnav.rs	(module)	allow	

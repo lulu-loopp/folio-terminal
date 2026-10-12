@@ -236,12 +236,16 @@ fn a_share_handed_over_meets_the_same_program_list() {
         }
         crate::lane::wait_for_a_wake(&wakes, "the share's answer");
     };
-    let handoff_lane::Answer::Refused(handoff_lane::Declined::System(reason)) = answer else {
+    let handoff_lane::Answer::Refused(handoff_lane::Declined::System(refusal)) = answer else {
         panic!("a program on a share is refused: {answer:?}");
     };
-    assert_eq!(reason, bt_platform::PROGRAM_REFUSED, "the door's own words");
     assert_eq!(
-        UNVERIFIED_REFERENCE_REFUSAL.words(&reason).notice,
+        refusal,
+        bt_platform::HandOffRefusal::Other(bt_platform::PROGRAM_REFUSED.to_owned()),
+        "the door's own words"
+    );
+    assert_eq!(
+        UNVERIFIED_REFERENCE_REFUSAL.words(refusal.reason()).notice,
         Some(files_program_refused_notice()),
         "and the reader is told, as for a local program"
     );

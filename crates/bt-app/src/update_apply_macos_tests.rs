@@ -2081,7 +2081,7 @@ fn a_failed_swap_back_is_stuck_with_everything_kept() {
     let header = journal.header();
     assert_eq!(header.class, Class::Destructive);
     let sent = crate::update_txn::StartView {
-        journal: crate::update_txn::JournalRead::Read(header),
+        header,
         lock_free: true,
         own_image: None,
         rescue_image: None,
@@ -2496,7 +2496,7 @@ fn rolled_back_leaves_only_what_the_old_build_reads() {
         (Class::Terminal, HeaderOutcome::RolledBack)
     );
     let view = crate::update_txn::StartView {
-        journal: crate::update_txn::JournalRead::Read(header),
+        header,
         lock_free: true,
         own_image: None,
         rescue_image: None,

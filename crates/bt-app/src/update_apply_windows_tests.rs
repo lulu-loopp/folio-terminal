@@ -4626,6 +4626,8 @@ fn own_receipt(install: &Install, nonce: Nonce) -> crate::update_trial::ReceiptJ
     let (me, started) = this_process();
     crate::update_trial::ReceiptJob {
         path: install.home.receipt_path(install.txn, &nonce),
+        journal: install.home.journal(),
+        txn: install.txn,
         bytes: Receipt {
             txn: install.txn,
             nonce,
