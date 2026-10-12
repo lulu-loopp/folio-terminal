@@ -523,9 +523,9 @@ impl DirWatch {
 
         // A `RecvError` is the thread ending without a word, which is a panic
         // between the spawn and the start — there is no return path there that
-        // does not send. It is still an answer and not an unreachable: this is a
-        // terminal, and a panic taken as a panic takes somebody's scrollback
-        // with it.
+        // does not send. The watcher is not contained, so under the resident
+        // panic hook that panic ends the process before the channel closes: this
+        // arm is reached only where no fatal hook is installed.
         match listening.recv() {
             Ok(Ok(stopper)) => Ok(Self {
                 stopper,

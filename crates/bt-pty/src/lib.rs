@@ -643,12 +643,16 @@ const READER_EXIT_BUDGET: Duration = Duration::from_secs(2);
 const READER_EXIT_POLL: Duration = Duration::from_millis(2);
 
 /// What a bounded join found.
+///
+/// **A reader's panic is not one of the answers** (T-JOINED-PANIC-VALUES). The reader's body is
+/// not contained — the shipped `bt-pty` has no edge to `bt-platform`'s `contained_panic`, and the
+/// reader pushes into the ring the window thread reads — so under the resident panic hook its
+/// panic ends the process from inside the hook, before this join could see it. Where no fatal
+/// hook is installed (a test) the join carries the panic on rather than naming a value for it.
 #[derive(Debug, Eq, PartialEq)]
 enum ReaderExit {
     /// It ended.
     Ended,
-    /// It ended by panicking, which is a fact about this session the caller answers for.
-    Panicked,
     /// It had not ended when the budget ran out, and has been let go.
     StillReading,
 }
@@ -665,10 +669,10 @@ fn join_within(budget: Duration, reader: JoinHandle<()>) -> ReaderExit {
     let deadline = Instant::now() + budget;
     loop {
         if reader.is_finished() {
-            return match reader.join() {
-                Ok(()) => ReaderExit::Ended,
-                Err(_) => ReaderExit::Panicked,
-            };
+            reader
+                .join()
+                .expect("the PTY reader panicked, which no fatal panic hook ended here");
+            return ReaderExit::Ended;
         }
         if Instant::now() >= deadline {
             return ReaderExit::StillReading;
@@ -1282,8 +1286,6 @@ pub enum PtyError {
     },
     #[error("PTY backend reported a zero cell dimension")]
     ZeroBackendDimension,
-    #[error("PTY reader thread panicked")]
-    ReaderPanicked,
 }
 
 fn backend(error: impl std::fmt::Display) -> PtyError {
@@ -2740,9 +2742,6 @@ impl PtySession {
         if let Some(reader) = self.reader.take() {
             match join_within(READER_EXIT_BUDGET, reader) {
                 ReaderExit::Ended => {}
-                ReaderExit::Panicked => {
-                    failure.get_or_insert(PtyError::ReaderPanicked);
-                }
                 ReaderExit::StillReading => {
                     eprintln!(
                         "a pane closed while its reader was still inside a read on the \
@@ -5088,6 +5087,34 @@ mod tests {
             join_within(Duration::from_secs(30), reader),
             ReaderExit::Ended,
             "a reader that does end is joined the moment it does"
+        );
+    }
+
+    /// RED (T-JOINED-PANIC-VALUES) — **a reader's panic is no answer of the bounded join: the
+    /// join carries it on.**
+    ///
+    /// Under the resident panic hook the reader's panic ends the process before any join (its
+    /// body is not contained, see [`ReaderExit`]), so a value for it would be a claim Folio does
+    /// not keep. Where no fatal hook is installed — here — the thread that joins a panicked reader
+    /// panics in turn, and that thread's own join is where this test reads it.
+    ///
+    /// MUTATION: give the join a value arm again (`Err(_) => ReaderExit::Ended` in `join_within`)
+    /// — the joining thread returns that value and `expect_err` goes red.
+    #[test]
+    fn a_reader_panic_is_carried_on_by_the_join_not_named() {
+        let reader = std::thread::spawn(|| {
+            std::panic::panic_any("scripted: 读取线程 panicked");
+        });
+        let joiner = std::thread::spawn(move || join_within(Duration::from_secs(30), reader));
+        let carried = joiner
+            .join()
+            .expect_err("a panicked reader is no `ReaderExit`; the join carries the panic on");
+        let said = carried
+            .downcast_ref::<String>()
+            .expect("`expect` panics with its message and the reader's payload");
+        assert!(
+            said.contains("the PTY reader panicked"),
+            "the carried panic says what panicked: {said}"
         );
     }
 
