@@ -2380,6 +2380,9 @@ struct Body<'w> {
     /// The bounds on the generic parameters the body can name ([`Body::generic_bounds`]), read
     /// the first time a call asks.
     generics: std::cell::OnceCell<HashMap<&'static str, BTreeSet<TraitId>>>,
+    /// The lexical scopes of the body's bindings ([`binding_scopes`]), read the first time a
+    /// call on a parameter asks.
+    scopes: std::cell::OnceCell<Option<Vec<BindingScope>>>,
     toks: Vec<Tok>,
 }
 
@@ -2422,6 +2425,7 @@ impl<'w> Body<'w> {
             locals,
             annotated,
             generics: std::cell::OnceCell::new(),
+            scopes: std::cell::OnceCell::new(),
             toks,
         }
     }
@@ -2523,13 +2527,12 @@ impl<'w> Body<'w> {
             Form::Method(Some(chain)) => match chain.as_slice() {
                 ["self"] => generics.get("Self").cloned(),
                 [name] => match self.params.get(name) {
-                    Some(written) => self
-                        .toks
-                        .iter()
-                        .position(|tok| tok.start == site.at)
-                        .is_some_and(|call| !shadowed_at(s, &self.toks, name, call))
-                        .then(|| stated_traits(s, written, generics, &resolve))
-                        .flatten(),
+                    Some(written) => {
+                        let scopes = self.scopes.get_or_init(|| binding_scopes(s, self.record));
+                        (!shadowed_at(scopes.as_deref(), name, site.at))
+                            .then(|| stated_traits(s, written, generics, &resolve))
+                            .flatten()
+                    }
                     None => self
                         .annotated
                         .get(name)
@@ -2892,205 +2895,139 @@ fn closure_parameters(src: &Src, toks: &[Tok], at: usize) -> Option<usize> {
     None
 }
 
-/// The index of the `}` closing the innermost `{` that holds `toks[at]`; the end of `toks` when
-/// none does.
-fn enclosing_block_end(src: &Src, toks: &[Tok], at: usize) -> usize {
-    let mut depth = 0usize;
-    for before in (0..at).rev() {
-        match src.text(toks[before]) {
-            "}" if toks[before].kind == Kind::Punct => depth += 1,
-            "{" if toks[before].kind == Kind::Punct => {
-                if depth == 0 {
-                    return closing(src, toks, before).unwrap_or(toks.len());
-                }
-                depth -= 1;
+/// How many function bodies [`binding_scopes`] could not parse — each one's parameters are then
+/// read as shadowed (untyped). Printed by
+/// `a_match_or_pattern_binds_nothing_and_a_real_shadow_is_not_typed`; never silent.
+static UNPARSED_BODIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// One binding a function body introduces: the name, and the `[from, to)` union offsets of its
+/// lexical scope.
+type BindingScope = (String, usize, usize);
+
+/// **The lexical scope of every binding a function body introduces**, read with `syn` from the
+/// body's text (the bytes `bt-source`'s item record spans — the source `bt-source` itself lowers
+/// with `syn`), as union offsets: a `let` from the end of its statement to the end of its
+/// enclosing block; an `if let` / `while let` pattern over the branch or loop body; a `for`
+/// pattern over the loop body; a match arm's pattern over the arm (its guard included); a
+/// closure's parameters over its body. Macro invocations are opaque tokens to `syn` and introduce
+/// no binding. `None` when the body does not parse (counted in [`UNPARSED_BODIES`]).
+fn binding_scopes(src: &Src, record: &ItemRecord) -> Option<Vec<BindingScope>> {
+    let body = record.body()?;
+    let Ok(block) = syn::parse_str::<syn::Block>(src.index.text(body)) else {
+        UNPARSED_BODIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return None;
+    };
+    let mut reader = ScopeReader {
+        base: body.start(),
+        scopes: Vec::new(),
+    };
+    syn::visit::Visit::visit_block(&mut reader, &block);
+    Some(reader.scopes)
+}
+
+/// The walk of [`binding_scopes`].
+struct ScopeReader {
+    base: usize,
+    scopes: Vec<BindingScope>,
+}
+
+impl ScopeReader {
+    fn start(&self, node: &impl syn::spanned::Spanned) -> usize {
+        self.base + node.span().byte_range().start
+    }
+
+    fn end(&self, node: &impl syn::spanned::Spanned) -> usize {
+        self.base + node.span().byte_range().end
+    }
+
+    /// Every name `pattern` binds, scoped `[from, to)`.
+    fn bind(&mut self, pattern: &syn::Pat, from: usize, to: usize) {
+        struct Names(Vec<String>);
+        impl<'ast> syn::visit::Visit<'ast> for Names {
+            fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+                self.0.push(node.ident.to_string());
+                syn::visit::visit_pat_ident(self, node);
             }
+        }
+        let mut names = Names(Vec::new());
+        syn::visit::Visit::visit_pat(&mut names, pattern);
+        self.scopes
+            .extend(names.0.into_iter().map(|name| (name, from, to)));
+    }
+
+    /// The `let` patterns of a condition — one, or each of a `&&` chain — scoped to `body`.
+    fn bind_condition(&mut self, condition: &syn::Expr, body: &syn::Block) {
+        match condition {
+            syn::Expr::Let(binding) => {
+                let (from, to) = (self.start(body), self.end(body));
+                self.bind(&binding.pat, from, to);
+            }
+            syn::Expr::Binary(chain) if matches!(chain.op, syn::BinOp::And(_)) => {
+                self.bind_condition(&chain.left, body);
+                self.bind_condition(&chain.right, body);
+            }
+            syn::Expr::Paren(inner) => self.bind_condition(&inner.expr, body),
             _ => {}
         }
     }
-    toks.len()
 }
 
-/// Words of an expression after which an operand is expected (`in`, `if`, `match`, `let`, …) —
-/// `async`, `unsafe` and `loop` among them, whose block is an operand; any other name is one.
-const EXPECT_AN_OPERAND: [&str; 15] = [
-    "in", "if", "match", "while", "let", "return", "break", "move", "else", "mut", "ref", "box",
-    "async", "unsafe", "loop",
-];
-
-/// The `[from, to)` token range, braces included, of the body of the `if`, `while`, `for` or
-/// `match` whose head starts at `toks[from]` (the keyword, or the `=` or `in` the head's expression
-/// follows) — `None` when there is none.
-///
-/// Rust's own rule: struct literals are not allowed in a head, so a depth-zero `{` met while the
-/// head **expects an operand** opens a block expression inside the head (`{ values }[0]`,
-/// `{ value } as usize`, `{ predicate }()`), and one met while the head **holds an operand** opens
-/// the body. The head expects an operand at its start and after an operator, `=`, `in`, a `,` or
-/// a closure's parameters; it holds one after a name, a literal, a lifetime, a bracketed group (a
-/// call, an index, a parenthesised operand), a block expression, `?`, and a cast's type (`as`
-/// takes a type, which never starts with `{`). An open-ended range (`0..`) holds its operand when
-/// a `{` follows it.
-fn block_from(src: &Src, toks: &[Tok], from: usize) -> Option<(usize, usize)> {
-    let mut expects = true;
-    let mut at = from;
-    while let Some(tok) = toks.get(at) {
-        let text = src.text(*tok);
-        match tok.kind {
-            Kind::Literal | Kind::Lifetime => expects = false,
-            Kind::Ident if text == "as" => {
-                at = type_end(src, toks, at + 1);
-                expects = false;
-                continue;
+impl<'ast> syn::visit::Visit<'ast> for ScopeReader {
+    fn visit_block(&mut self, block: &'ast syn::Block) {
+        let to = self.end(block);
+        for statement in &block.stmts {
+            if let syn::Stmt::Local(local) = statement {
+                let from = self.end(local);
+                self.bind(&local.pat, from, to);
             }
-            Kind::Ident => expects = EXPECT_AN_OPERAND.contains(&text),
-            Kind::Punct => match text {
-                "{" => {
-                    let close = closing(src, toks, at)?;
-                    if !expects {
-                        return Some((at, close + 1));
-                    }
-                    at = close + 1;
-                    expects = false;
-                    continue;
-                }
-                "(" | "[" => {
-                    at = closing(src, toks, at)? + 1;
-                    expects = false;
-                    continue;
-                }
-                ")" | "]" | "}" | ";" => return None,
-                "?" => expects = false,
-                "|" if expects => {
-                    if let Some(close) = closure_parameters(src, toks, at) {
-                        at = close + 1;
-                        continue;
-                    }
-                }
-                ".." => expects = !src.is(toks.get(at + 1), "{"),
-                _ => expects = true,
-            },
         }
-        at += 1;
+        syn::visit::visit_block(self, block);
     }
-    None
-}
 
-/// The index just past the type that starts at `toks[at]`: references, pointers, `dyn`/`impl`
-/// and `mut`/`const` qualifiers, a bracketed type, or a path with its `<…>` arguments.
-fn type_end(src: &Src, toks: &[Tok], mut at: usize) -> usize {
-    while ["&", "*", "mut", "const", "dyn", "impl"]
-        .iter()
-        .any(|word| src.is(toks.get(at), word))
-        || toks.get(at).is_some_and(|tok| tok.kind == Kind::Lifetime)
-    {
-        at += 1;
+    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        self.bind_condition(&node.cond, &node.then_branch);
+        syn::visit::visit_expr_if(self, node);
     }
-    if src.is(toks.get(at), "(") || src.is(toks.get(at), "[") {
-        return closing(src, toks, at).map_or(toks.len(), |close| close + 1);
+
+    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+        self.bind_condition(&node.cond, &node.body);
+        syn::visit::visit_expr_while(self, node);
     }
-    while toks.get(at).is_some_and(|tok| tok.kind == Kind::Ident) {
-        at += 1;
-        if src.is(toks.get(at), "<") {
-            at = angle_close(src, toks, at).map_or(toks.len(), |close| close + 1);
+
+    fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+        let (from, to) = (self.start(&node.body), self.end(&node.body));
+        self.bind(&node.pat, from, to);
+        syn::visit::visit_expr_for_loop(self, node);
+    }
+
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        let (from, to) = (self.start(&node.pat), self.end(&node.body));
+        self.bind(&node.pat, from, to);
+        syn::visit::visit_arm(self, node);
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        let (from, to) = (self.start(&node.body), self.end(&node.body));
+        for input in &node.inputs {
+            self.bind(input, from, to);
         }
-        if !src.is(toks.get(at), "::") {
-            break;
-        }
-        at += 1;
+        syn::visit::visit_expr_closure(self, node);
     }
-    at
 }
 
 /// **Whether a binding of `name` other than the parameter is in scope at the call whose name
-/// token is `toks[call]`** — the parameter's declared type then says nothing of the receiver. A
-/// binding shadows only where its scope holds the call and it began before it: a `let` from the
-/// end of its statement to the end of its enclosing block (an `if let` or `while let` over its
-/// body); a `for` pattern over the loop's body; a match arm's pattern over the arm; a closure's
-/// parameters over the closure's body. A binding in a sibling or an already-closed block, or one
-/// that begins after the call, does not shadow.
-fn shadowed_at(src: &Src, toks: &[Tok], name: &str, call: usize) -> bool {
-    let holds = |from: usize, to: usize| from <= call && call < to;
-    for (at, tok) in toks.iter().enumerate() {
-        if at >= call {
-            break;
-        }
-        if src.is(Some(tok), "let") {
-            let end = let_end(src, toks, at + 1);
-            let statement = &toks[at + 1..end];
-            let pattern_end = top_level_token(src, statement, "=").unwrap_or(statement.len());
-            if !receiver_pattern_names(src, &statement[..pattern_end]).contains(name) {
-                continue;
-            }
-            let conditional = at.checked_sub(1).is_some_and(|before| {
-                src.is(toks.get(before), "if") || src.is(toks.get(before), "while")
-            });
-            let scope = if conditional {
-                block_from(src, toks, at + 1 + pattern_end)
-            } else {
-                Some((end, enclosing_block_end(src, toks, at)))
-            };
-            if scope.is_some_and(|(from, to)| holds(from, to)) {
-                return true;
-            }
-        }
-        if src.is(Some(tok), "for") {
-            let rest = &toks[at + 1..];
-            if let Some(end) = top_level_token(src, rest, "in")
-                && receiver_pattern_names(src, &rest[..end]).contains(name)
-                && block_from(src, toks, at + 1 + end).is_some_and(|(from, to)| holds(from, to))
-            {
-                return true;
-            }
-        }
-        if src.is(Some(tok), "match") {
-            let Some((open, end)) = block_from(src, toks, at + 1) else {
-                continue;
-            };
-            let close = end - 1;
-            let mut arm = open + 1;
-            while arm < close {
-                let arrow = depth_zero(src, toks, arm, &["=>"]);
-                if arrow >= close {
-                    break;
-                }
-                let guard = toks[arm..arrow]
-                    .iter()
-                    .position(|tok| src.is(Some(tok), "if"))
-                    .map_or(arrow, |guard| arm + guard);
-                let body = arrow + 1;
-                let arm_end = if src.is(toks.get(body), "{") {
-                    closing(src, toks, body).map_or(close, |end| end + 1)
-                } else {
-                    depth_zero(src, toks, body, &[","]).min(close)
-                };
-                if receiver_pattern_names(src, &toks[arm..guard]).contains(name)
-                    && holds(guard, arm_end)
-                {
-                    return true;
-                }
-                arm = if src.is(toks.get(arm_end), ",") {
-                    arm_end + 1
-                } else {
-                    arm_end
-                };
-            }
-        }
-        if let Some(bar) = closure_parameters(src, toks, at)
-            && receiver_pattern_names(src, &toks[at + 1..bar]).contains(name)
-        {
-            let end = if src.is(toks.get(bar + 1), "{") {
-                closing(src, toks, bar + 1).map_or(toks.len(), |end| end + 1)
-            } else {
-                depth_zero(src, toks, bar + 1, &[",", ";"])
-            };
-            if holds(bar + 1, end) {
-                return true;
-            }
-        }
-    }
-    false
+/// token starts at union offset `call`** — the parameter's declared type then says nothing of
+/// the receiver. Read from `syn`'s scopes ([`binding_scopes`]): a binding shadows only where its
+/// scope holds the call, so one in a sibling or an already-closed block, or one that begins after
+/// the call, does not. A body that does not parse gives no scope information, and the call is
+/// read as shadowed (untyped).
+fn shadowed_at(scopes: Option<&[BindingScope]>, name: &str, call: usize) -> bool {
+    scopes.is_none_or(|scopes| {
+        scopes
+            .iter()
+            .any(|(bound, from, to)| bound == name && *from <= call && call < *to)
+    })
 }
-
 fn assigned(src: &Src, toks: &[Tok], name: &str, after: usize) -> bool {
     toks.iter().enumerate().any(|(at, tok)| {
         if tok.start <= after || !src.is(Some(tok), "=") {
@@ -9296,6 +9233,42 @@ mod trait_dispatch_source_shapes {
         }
     }
 
+    fn trait_shape_turbofish_match(driver: &dyn Driver) {
+        match None::<&Cache> {
+            Some(driver) => drop(driver.prepare(unreachable!(), unreachable!(), unreachable!())),
+            None => {}
+        }
+    }
+
+    fn trait_shape_match_in_head(driver: &dyn Driver, other: Option<&Cache>) {
+        if let Some(driver) = match other {
+            Some(found) => Some(found),
+            None => None,
+        } {
+            let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
+        }
+    }
+
+    fn trait_shape_closure_return(driver: &dyn Driver) {
+        let call = |a: u8| -> i32 {
+            let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
+            i32::from(a)
+        };
+        let _ = call(0);
+    }
+
+    fn trait_shape_closure_return_head(driver: &dyn Driver) {
+        match |a: u8| -> u8 { a } {
+            driver => drop(driver.prepare(unreachable!(), unreachable!(), unreachable!())),
+        }
+    }
+
+    fn trait_shape_const_head(driver: &dyn Driver) {
+        while let Some(driver) = const { None::<&Cache> } {
+            let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
+        }
+    }
+
     fn trait_shape_later_shadow(driver: &dyn Driver, other: &crate::preview_wrap::Cache) {
         let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
         let driver = other;
@@ -9654,16 +9627,20 @@ fn a_trait_is_its_identity_and_a_default_runs_only_where_it_is_not_overridden() 
 /// `{ other } as …`, `{ next }()`) is not the body either, so those calls are untyped too. In
 /// `if let Some(driver) = other {} { … }` the empty `{}` is the body and the block after it a
 /// sibling, whose call `driver` (the parameter) types; so does a call under `if { value } as usize
-/// > 0` and `if { others }[0]…`, after a closed `for driver in others {}`.
+/// > 0` and `if { others }[0]…`, after a closed `for driver in others {}`. A `match` on a
+/// turbofish (`None::<&Cache>`), an `if let` whose head is itself a `match`, and a `while let`
+/// whose head is `const { … }` bind `driver` over their body (untyped), and so does a `match` on a
+/// closure with a return type (`match |a: u8| -> u8 { a } { driver => … }`); a closure with a
+/// return type binds only its own parameters, so a call on `driver` inside one is typed. The
+/// scopes are `syn`'s ([`binding_scopes`]); every product body's parse is counted and the count of
+/// those that do not parse is printed (`SCOPE_UNPARSED_BODIES`).
 ///
-/// MUTATIONS: in [`closure_parameters`], pair every `|` with the next one (round 1's pairing) — the
-/// or-pattern call names nobody; type a parameter whatever binds its name — the shadowed call
-/// names the `Driver` implementations; refuse a parameter's type whenever another binding of its
-/// name stands anywhere in the body (round 2's count, [`binding_count`] `!= 1`) — the closed-block
-/// and the later shadow name nobody; in [`block_from`], take the first depth-zero `{` for the body
-/// (round 3's rule) — the block-headed `if let`, `for` and `match` calls are typed; skip a head
-/// group only when `{`, `.` or `?` follows it (round 4's rule) — the index, cast and call heads are
-/// typed and the sibling block's call is not.
+/// MUTATIONS: type a parameter whatever binds its name — the shadowed call names the `Driver`
+/// implementations; refuse a parameter's type whenever another binding of its name stands anywhere
+/// in the body (round 2's count, [`binding_count`] `!= 1`) — the closed-block and the later shadow
+/// name nobody; restore round 5's token walk over heads for the scopes — the turbofish `match`,
+/// the `match`-headed `if let`, the `const`-headed `while let` and the `match` on a closure with a
+/// return type are each read as typed.
 #[test]
 fn a_match_or_pattern_binds_nothing_and_a_real_shadow_is_not_typed() {
     let world = World::new();
@@ -9700,6 +9677,10 @@ fn a_match_or_pattern_binds_nothing_and_a_real_shadow_is_not_typed() {
         "trait_shape_index_head",
         "trait_shape_cast_head",
         "trait_shape_call_head",
+        "trait_shape_turbofish_match",
+        "trait_shape_match_in_head",
+        "trait_shape_const_head",
+        "trait_shape_closure_return_head",
     ] {
         let (src, record) = fixture(&world, shape);
         let body = Body::new(&world, src, record);
@@ -9718,6 +9699,7 @@ fn a_match_or_pattern_binds_nothing_and_a_real_shadow_is_not_typed() {
         "trait_shape_later_shadow",
         "trait_shape_sibling_block",
         "trait_shape_unbound_heads",
+        "trait_shape_closure_return",
     ] {
         assert_eq!(
             named_in_shape(&world, shape, "prepare"),
@@ -9725,6 +9707,18 @@ fn a_match_or_pattern_binds_nothing_and_a_real_shadow_is_not_typed() {
             "`{shape}`: a binding out of scope at the call does not shadow `driver`"
         );
     }
+    let mut parsed = 0;
+    for (at, src) in world.srcs.iter().enumerate() {
+        for record in src.index.items() {
+            if record.kind().is_callable() && src.product_item(record) && record.body().is_some() {
+                parsed += usize::from(binding_scopes(&world.srcs[at], record).is_some());
+            }
+        }
+    }
+    eprintln!(
+        "SCOPE_PARSED_BODIES\t{parsed}\nSCOPE_UNPARSED_BODIES\t{}",
+        UNPARSED_BODIES.load(std::sync::atomic::Ordering::Relaxed)
+    );
 }
 
 /// RED (T-DOOR-REACH-TRAIT-OBJECTS) — **a trait the product does not declare adds nothing to the
