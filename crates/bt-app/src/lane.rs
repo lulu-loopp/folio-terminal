@@ -533,12 +533,14 @@ impl Executor {
 
     /// **Start a lane's worker**, `name` its thread's name. When the thread ends — the body
     /// returns, or a panic outside a task unwinds it — `ends` is told how. A thread the door
-    /// refuses is reported to `ends` too, and the refusal is answered here.
+    /// refuses is reported to `ends` too, and the refusal is answered here. The body is lent the
+    /// thread's `WorkerCtx`, as every body the thread door starts is, and the [`Worker`] that runs
+    /// its tasks.
     pub(crate) fn start_worker(
         &self,
         name: &'static str,
         ends: Arc<impl Ends + 'static>,
-        body: impl FnOnce(&Worker<'_>) + Send + 'static,
+        body: impl FnOnce(&WorkerCtx, &Worker<'_>) + Send + 'static,
     ) -> Result<(), WorkerEnd> {
         #[cfg(test)]
         let script = self.script.clone();
@@ -549,7 +551,7 @@ impl Executor {
                 #[cfg(test)]
                 script,
             };
-            let cause = match catch_unwind(AssertUnwindSafe(|| body(&worker))) {
+            let cause = match catch_unwind(AssertUnwindSafe(|| body(ctx, &worker))) {
                 Ok(()) => WorkerEnd::Returned,
                 Err(panic) => {
                     WorkerEnd::Panicked(crate::pty_door::panic_message(panic.as_ref()).to_owned())
@@ -576,11 +578,6 @@ pub(crate) struct Worker<'a> {
 }
 
 impl Worker<'_> {
-    /// The capability a worker-only door takes.
-    pub(crate) fn ctx(&self) -> &WorkerCtx {
-        self.ctx
-    }
-
     /// **Run one request's task.** A panic inside it is that request's failure,
     /// `TaskFailure::Panicked`, and the worker goes on (C3; `pty_door`'s birth does the same).
     pub(crate) fn task<T, E>(
@@ -598,15 +595,12 @@ impl Worker<'_> {
 
     /// Where a task begins, outside its panic catch: the suite's gate holds it here, or ends the
     /// worker here.
-    #[cfg(test)]
     fn arrive(&self) {
+        #[cfg(test)]
         if let Some(gate) = &self.script {
             gate.arrive();
         }
     }
-
-    #[cfg(not(test))]
-    fn arrive(&self) {}
 }
 
 #[cfg(test)]

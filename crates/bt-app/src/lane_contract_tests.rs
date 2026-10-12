@@ -1146,7 +1146,7 @@ fn scripted_lane(contract: &'static Contract, policy: Policy, planted: Planted) 
         .start_worker(
             "lane-contract-scripted",
             Arc::clone(&ledger),
-            move |worker| {
+            move |_ctx, worker| {
                 while let Some((id, question)) = jobs.next() {
                     let task = || {
                         worker.task(|_ctx| {
@@ -1574,9 +1574,8 @@ fn a_task_panic_fails_its_request_and_a_worker_s_end_leaves_the_owed_ones_worker
         .start_worker(
             "lane-contract-thread-door",
             Arc::clone(&ledger),
-            move |worker| {
-                name.send(worker.ctx().name())
-                    .expect("the test is listening");
+            move |ctx, worker| {
+                name.send(ctx.name()).expect("the test is listening");
                 for id in jobs.iter() {
                     if id == 3 {
                         panic!("the worker's body itself fails");
