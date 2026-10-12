@@ -102,12 +102,21 @@ reaches a lane started elsewhere is listed, with its reason, in
 `docs/plans/completions-door-starts.tsv`, which only shrinks; reachability is a call path to
 the function that starts the thread, never a shared type or module. The path follows a call on
 a receiver stated to be a first-party trait (`dyn Trait` behind `&`, `Box`, `Arc` or `Rc`,
-`impl Trait`, a generic parameter bound by the trait) into every first-party implementation of
-that trait on every platform arm — an over-approximation, which is the conservative direction
-for *is this body reached* — so a body reached only through a trait object (the update job's
-`driver.prepare`) needs no list line. It does not follow a stored closure, a function pointer,
-a standard or third-party trait, a type written through an alias, or an untyped receiver whose
-method name is shared; those are S-2a's call graph.
+`impl Trait`, a generic parameter bound by the trait, `self` in the trait's default method, or
+a path call `Trait::m` / `D::m` with `D: Trait`) into that trait's implementations, so a body
+reached only through a trait object (the update job's `driver.prepare`) needs no list line. A
+trait is its identity — package, module path and name, resolved through `use` items, globs and
+re-exports by `bt_source::TraitResolver` — so two traits of one name (the macOS and the
+Windows `PreparePoint`) are never followed together. What is followed: the method of every
+product `impl` of the trait, on every platform arm; the trait's default body, only for an
+impl that does not override it (or when there is no impl); and the trait's first-party
+supertraits, whose impls count only for types implementing the stated trait. The answer is the
+trait's implementations alone — never united with the by-name answer — and a parameter another
+binding in the body really shadows is not typed by its declaration. What is not followed: a
+stored closure, a function pointer, `<X as Trait>::m`, a type written through an alias, a
+standard or third-party trait object (and a foreign supertrait's methods, even on a
+first-party implementing type), and an untyped receiver whose method name is shared; those are
+S-2a's call graph.
 When red, give the new answer, lane, thread or registry row its ledger row (or
 correct the row the code moved past); a status names the D-row or registry row
 that repairs it and only ever becomes `conforms` — never mark a row conforming
