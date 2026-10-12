@@ -2911,14 +2911,28 @@ fn enclosing_block_end(src: &Src, toks: &[Tok], at: usize) -> usize {
     toks.len()
 }
 
-/// The `[from, to)` token range a block opened by the first `{` at bracket depth zero at or after
-/// `from` covers, braces included; `None` when there is no such block.
+/// The `[from, to)` token range, braces included, of the body of the `if`, `while`, `for` or
+/// `match` whose head starts at `toks[from]` — `None` when there is none. The head is walked at
+/// bracket depth zero, and a `{…}` group that the head goes on after (another `{`, a `.` or a
+/// `?` follows it: `for x in { values() } { … }`, `match { v }.get() { … }`) is a block
+/// expression inside the head, not the body; the first group the head does not go on after is.
 fn block_from(src: &Src, toks: &[Tok], from: usize) -> Option<(usize, usize)> {
-    let open = depth_zero(src, toks, from, &["{"]);
-    if !src.is(toks.get(open), "{") {
-        return None;
+    let mut at = from;
+    loop {
+        let open = depth_zero(src, toks, at, &["{"]);
+        if !src.is(toks.get(open), "{") {
+            return None;
+        }
+        let close = closing(src, toks, open)?;
+        if ["{", ".", "?"]
+            .iter()
+            .any(|next| src.is(toks.get(close + 1), next))
+        {
+            at = close + 1;
+            continue;
+        }
+        return Some((open, close + 1));
     }
-    Some((open, closing(src, toks, open)? + 1))
 }
 
 /// **Whether a binding of `name` other than the parameter is in scope at the call whose name
@@ -2963,13 +2977,10 @@ fn shadowed_at(src: &Src, toks: &[Tok], name: &str, call: usize) -> bool {
             }
         }
         if src.is(Some(tok), "match") {
-            let open = depth_zero(src, toks, at + 1, &["{"]);
-            let Some(close) = (open < toks.len())
-                .then(|| closing(src, toks, open))
-                .flatten()
-            else {
+            let Some((open, end)) = block_from(src, toks, at + 1) else {
                 continue;
             };
+            let close = end - 1;
             let mut arm = open + 1;
             while arm < close {
                 let arrow = depth_zero(src, toks, arm, &["=>"]);
@@ -9079,6 +9090,7 @@ fn worker_door_body_failures(world: &World, effects: &[Vec<&str>]) -> Vec<String
 // (`ReceiverTypingSourceShapes::trait_shape_field` is the field's), or in one it must refuse.
 #[cfg(any())]
 mod trait_dispatch_source_shapes {
+    use crate::preview_wrap::Cache;
     use crate::update_job::Driver;
     use crate::update_prepare_windows::PreparePoint;
 
@@ -9156,6 +9168,31 @@ mod trait_dispatch_source_shapes {
             let _ = driver;
         }
         let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
+    }
+
+    fn trait_shape_if_let_block_head(driver: &dyn Driver, other: Option<&Cache>) {
+        if let Some(driver) = { other } {
+            let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
+        }
+    }
+
+    fn trait_shape_for_block_head(driver: &dyn Driver, others: &[&Cache]) {
+        for driver in { others } {
+            let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
+        }
+    }
+
+    fn trait_shape_match_block_head(driver: &dyn Driver, other: Option<&Cache>) {
+        match { other } {
+            Some(driver) => drop(driver.prepare(unreachable!(), unreachable!(), unreachable!())),
+            None => {}
+        }
+    }
+
+    fn trait_shape_closure_in_head(driver: &dyn Driver, others: &[&Cache]) {
+        for driver in others.iter().map(|driver| *driver) {
+            let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
+        }
     }
 
     fn trait_shape_later_shadow(driver: &dyn Driver, other: &crate::preview_wrap::Cache) {
@@ -9508,13 +9545,17 @@ fn a_trait_is_its_identity_and_a_default_runs_only_where_it_is_not_overridden() 
 /// the same block: the parameter's `&dyn Driver` says nothing of the local, the call is read as an
 /// untyped one (a name many methods share: nobody). `trait_shape_closed_shadow` shadows `driver`
 /// only inside a block closed before the call, and `trait_shape_later_shadow` only after the call:
-/// neither binding is in scope at the call, which names the `Driver` implementations.
+/// neither binding is in scope at the call, which names the `Driver` implementations. An `if let`,
+/// a `for` and a `match` whose head is a block (`{ other }`) bind `driver` over their body, past
+/// the head's block, so their calls are untyped; in `for driver in others.iter().map(|driver| …)`
+/// the closure's parameter is scoped to the closure, and the loop's pattern shadows the call.
 ///
 /// MUTATIONS: in [`closure_parameters`], pair every `|` with the next one (round 1's pairing) — the
 /// or-pattern call names nobody; type a parameter whatever binds its name — the shadowed call
 /// names the `Driver` implementations; refuse a parameter's type whenever another binding of its
 /// name stands anywhere in the body (round 2's count, [`binding_count`] `!= 1`) — the closed-block
-/// and the later shadow name nobody.
+/// and the later shadow name nobody; in [`block_from`], take the first depth-zero `{` for the body
+/// (round 3's rule) — the block-headed `if let`, `for` and `match` calls are typed.
 #[test]
 fn a_match_or_pattern_binds_nothing_and_a_real_shadow_is_not_typed() {
     let world = World::new();
@@ -9543,6 +9584,24 @@ fn a_match_or_pattern_binds_nothing_and_a_real_shadow_is_not_typed() {
         named_in_shape(&world, "trait_shape_shadowed", "prepare").is_disjoint(&implementations),
         "the shadowed call names no `Driver` implementation"
     );
+    for shape in [
+        "trait_shape_if_let_block_head",
+        "trait_shape_for_block_head",
+        "trait_shape_match_block_head",
+        "trait_shape_closure_in_head",
+    ] {
+        let (src, record) = fixture(&world, shape);
+        let body = Body::new(&world, src, record);
+        let site = body
+            .sites()
+            .into_iter()
+            .find(|site| site.name == "prepare")
+            .expect("the shadowed call is indexed");
+        assert!(
+            body.receiver_traits(&site).is_none(),
+            "`{shape}`: the construct's own binding is in scope at the call, past a block in its head"
+        );
+    }
     for shape in ["trait_shape_closed_shadow", "trait_shape_later_shadow"] {
         assert_eq!(
             named_in_shape(&world, shape, "prepare"),
