@@ -2552,7 +2552,7 @@ fn merge(shipped: Vec<Profile>, file: &ProfilesV1) -> (Vec<Profile>, Vec<Profile
 /// 4).
 pub(crate) fn installable() -> impl Fn(&ProfileEntryV1) -> bool {
     let shipped_ids: Vec<String> = shipped().into_iter().map(|profile| profile.id).collect();
-    move |entry| entry.program.is_some() || shipped_ids.iter().any(|id| *id == entry.id)
+    move |entry: &ProfileEntryV1| entry.program.is_some() || shipped_ids.contains(&entry.id)
 }
 
 /// **The table [`install`] would put in force from `file`**, and what it

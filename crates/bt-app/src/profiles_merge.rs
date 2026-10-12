@@ -92,7 +92,7 @@ enum Reading {
 }
 
 /// **One side read the installer's way**: each row's [`Reading`], in order.
-fn read(document: &ProfilesV1, usable: &dyn Fn(&ProfileEntryV1) -> bool) -> Vec<Reading> {
+fn reading_of(document: &ProfilesV1, usable: &dyn Fn(&ProfileEntryV1) -> bool) -> Vec<Reading> {
     let mut in_force: HashMap<&str, usize> = HashMap::new();
     for (at, entry) in document.profiles.iter().enumerate() {
         if usable(entry) {
@@ -113,8 +113,8 @@ fn read(document: &ProfilesV1, usable: &dyn Fn(&ProfileEntryV1) -> bool) -> Vec<
 /// One side's rows in force, in the side's order.
 fn rows_in_force<'a>(document: &'a ProfilesV1, reading: &[Reading]) -> Vec<&'a ProfileEntryV1> {
     let mut rows = Vec::new();
-    for (entry, read) in document.profiles.iter().zip(reading) {
-        if *read == Reading::InForce {
+    for (at, entry) in document.profiles.iter().enumerate() {
+        if reading[at] == Reading::InForce {
             rows.push(entry);
         }
     }
@@ -127,8 +127,8 @@ fn refused_rows<'a>(
     reading: &[Reading],
 ) -> HashMap<&'a str, Vec<ProfileEntryV1>> {
     let mut refused: HashMap<&'a str, Vec<ProfileEntryV1>> = HashMap::new();
-    for (entry, read) in document.profiles.iter().zip(reading) {
-        if *read == Reading::Refused {
+    for (at, entry) in document.profiles.iter().enumerate() {
+        if reading[at] == Reading::Refused {
             refused
                 .entry(entry.id.as_str())
                 .or_default()
@@ -140,8 +140,8 @@ fn refused_rows<'a>(
 
 /// The ids of a side's refused rows, each once, after those in `ids`.
 fn push_refused_ids<'a>(ids: &mut Vec<&'a str>, document: &'a ProfilesV1, reading: &[Reading]) {
-    for (entry, read) in document.profiles.iter().zip(reading) {
-        if *read == Reading::Refused && !ids.contains(&entry.id.as_str()) {
+    for (at, entry) in document.profiles.iter().enumerate() {
+        if reading[at] == Reading::Refused && !ids.contains(&entry.id.as_str()) {
             ids.push(entry.id.as_str());
         }
     }
@@ -268,13 +268,17 @@ pub(crate) fn merge(
     usable: &dyn Fn(&ProfileEntryV1) -> bool,
 ) -> Merged {
     let mut account = Account::default();
-    let (b_read, o_read, t_read) = (read(base, usable), read(ours, usable), read(theirs, usable));
+    let (b_read, o_read, t_read) = (
+        reading_of(base, usable),
+        reading_of(ours, usable),
+        reading_of(theirs, usable),
+    );
     let (b_rows, o_rows) = (rows_in_force(base, &b_read), rows_in_force(ours, &o_read));
     // The file's sequence: each id's row in force, and every row after it
     // carried as its duplicate. Refused rows are units of their own.
     let mut t_sequence: Vec<Slot> = Vec::new();
-    for (index, (entry, reading)) in theirs.profiles.iter().zip(&t_read).enumerate() {
-        match reading {
+    for (index, entry) in theirs.profiles.iter().enumerate() {
+        match t_read[index] {
             Reading::InForce => t_sequence.push(Slot::Row(entry.id.clone())),
             Reading::Duplicate => t_sequence.push(Slot::Carried(index, entry.id.clone())),
             Reading::Refused => {}
@@ -1112,7 +1116,7 @@ mod tests {
         ProfilesV1::apply_press(
             &mut desired,
             &table(&[live, b.clone()]),
-            &table(&[b.clone()]),
+            &table(std::slice::from_ref(&b)),
         );
         assert_eq!(desired.profiles, vec![refused, b]);
         assert_eq!(
