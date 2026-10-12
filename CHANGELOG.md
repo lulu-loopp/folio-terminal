@@ -27,6 +27,7 @@ All notable changes to Folio are recorded here. The format follows
 - With "one screen at a time" scrolling on, a notch over the commit graph moves one screenful instead of a distance that depended on the number of commits. <!-- zh: pending H2 -->
 - On a Mac, the card-scroll hint and the reserved rows in Shortcuts say Option instead of Alt. <!-- zh: pending H2 -->
 - On a Mac, the note under the reserved rows in Shortcuts says Option+arrow instead of Alt+arrow. <!-- zh: pending H2-NITS -->
+- On a Mac, the terminal opens in Menlo when no font is chosen, as it does after the choice is cleared, and symbols and emoji are drawn from Apple Symbols and Apple Color Emoji. <!-- zh: pending H2-NITS -->
 - The pane strip's "more do not fit" line is part of the translated text. <!-- zh: pending H2 -->
 - A space can be typed into the commit graph's search and the Git branch prompt, and Ctrl+Backspace deletes a word in every one-line box. <!-- zh: pending H2 -->
 - Web page thumbnails on the focus cards now appear at display scales above 200%. <!-- zh: pending H2 -->
