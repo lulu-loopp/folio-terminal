@@ -1040,6 +1040,19 @@ text_entries! {
     HandoffsTooManySuffix,
     /// Its words alone, a substring of the long form; also the fonts card's refusal text.
     HandoffsTooMany,
+    /// The suffix for a target the hand-off door found was not there (T-HANDOFF-DOOR-REASON).
+    HandoffNotFoundSuffix,
+    /// Its words alone, a substring of the long form; also the fonts card's refusal text.
+    HandoffNotFound,
+    /// The suffix for a target the system refused access to (T-HANDOFF-DOOR-REASON).
+    HandoffAccessDeniedSuffix,
+    /// Its words alone, a substring of the long form; also the fonts card's refusal text.
+    HandoffAccessDenied,
+    /// The suffix for a target the door or the system refused for a reason of no named kind
+    /// (T-HANDOFF-DOOR-REASON); the reason itself goes to the stderr line only.
+    HandoffNotOpenedSuffix,
+    /// Its words alone, a substring of the long form; also the fonts card's refusal text.
+    HandoffNotOpened,
 
     // ── a drag's landing caption ───────────────────────────────────────────
     DragSwapPanes,
@@ -3996,6 +4009,36 @@ impl Text {
                 "too many hand-offs at once",
                 "too many hand-offs at once", // zh: pending S-5
             ),
+            Self::HandoffNotFoundSuffix => pick(
+                lang,
+                " · not found",
+                " · not found", // zh: pending T-HANDOFF-DOOR-REASON
+            ),
+            Self::HandoffNotFound => pick(
+                lang,
+                "not found",
+                "not found", // zh: pending T-HANDOFF-DOOR-REASON
+            ),
+            Self::HandoffAccessDeniedSuffix => pick(
+                lang,
+                " · access denied",
+                " · access denied", // zh: pending T-HANDOFF-DOOR-REASON
+            ),
+            Self::HandoffAccessDenied => pick(
+                lang,
+                "access denied",
+                "access denied", // zh: pending T-HANDOFF-DOOR-REASON
+            ),
+            Self::HandoffNotOpenedSuffix => pick(
+                lang,
+                " · not opened",
+                " · not opened", // zh: pending T-HANDOFF-DOOR-REASON
+            ),
+            Self::HandoffNotOpened => pick(
+                lang,
+                "not opened",
+                "not opened", // zh: pending T-HANDOFF-DOOR-REASON
+            ),
 
             // ── a drag's landing caption ───────────────────────────────────
             Self::DragSwapPanes => pick(lang, "Swap panes", "交换窗格"),
@@ -6390,6 +6433,21 @@ impl Text {
         (Self::HandoffsTooManySuffix, HostPlatform::MacOs),
         (Self::HandoffsTooMany, HostPlatform::Windows),
         (Self::HandoffsTooMany, HostPlatform::MacOs),
+        // zh: pending T-HANDOFF-DOOR-REASON — what a link, an address or the fonts card says when
+        // the hand-off door found its target was not there, was refused access to it, or was
+        // refused it for a reason of no named kind.
+        (Self::HandoffNotFoundSuffix, HostPlatform::Windows),
+        (Self::HandoffNotFoundSuffix, HostPlatform::MacOs),
+        (Self::HandoffNotFound, HostPlatform::Windows),
+        (Self::HandoffNotFound, HostPlatform::MacOs),
+        (Self::HandoffAccessDeniedSuffix, HostPlatform::Windows),
+        (Self::HandoffAccessDeniedSuffix, HostPlatform::MacOs),
+        (Self::HandoffAccessDenied, HostPlatform::Windows),
+        (Self::HandoffAccessDenied, HostPlatform::MacOs),
+        (Self::HandoffNotOpenedSuffix, HostPlatform::Windows),
+        (Self::HandoffNotOpenedSuffix, HostPlatform::MacOs),
+        (Self::HandoffNotOpened, HostPlatform::Windows),
+        (Self::HandoffNotOpened, HostPlatform::MacOs),
         // zh: pending H2-NITS — a Profiles ghost row's value that each pane has
         // its own of.
         (Self::ProfilesEnvPerPane, HostPlatform::Windows),
@@ -10522,6 +10580,9 @@ mod tests {
                 (Text::HandoffCouldNotRunSuffix, Text::HandoffCouldNotRun),
                 (Text::HandoffsStoppedSuffix, Text::HandoffsStopped),
                 (Text::HandoffsTooManySuffix, Text::HandoffsTooMany),
+                (Text::HandoffNotFoundSuffix, Text::HandoffNotFound),
+                (Text::HandoffAccessDeniedSuffix, Text::HandoffAccessDenied),
+                (Text::HandoffNotOpenedSuffix, Text::HandoffNotOpened),
             ] {
                 let long = long.in_lang(lang);
                 let short = short.in_lang(lang);
