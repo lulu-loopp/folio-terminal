@@ -2724,8 +2724,10 @@ impl KeybindingsStore {
         Self::read_at(path, writer_of_record, lane)
     }
 
-    /// The overrides as they stand.
-    pub fn loaded(&self) -> &[BindingOverrideV1] {
+    /// The overrides as they stand: what a test asks of the projection — the
+    /// launch reads [`Self::file_document`] and the window its one table.
+    #[cfg(test)]
+    pub(crate) fn loaded(&self) -> &[BindingOverrideV1] {
         &self.document.projection().bindings
     }
 
