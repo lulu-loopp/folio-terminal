@@ -2197,7 +2197,7 @@ pub(crate) mod tests {
     struct FakeMachine {
         answers: std::sync::Arc<Mutex<Vec<Option<Probe>>>>,
         runs: std::sync::Arc<Mutex<u64>>,
-        gate: std::sync::Arc<(Mutex<bool>, std::sync::Condvar)>,
+        gate: std::sync::Arc<crate::lane::Hold>,
     }
 
     impl FakeMachine {
@@ -2208,12 +2208,7 @@ pub(crate) mod tests {
         }
 
         fn run(&self) -> Option<Probe> {
-            let (held, released) = &*self.gate;
-            let mut held = held.lock().unwrap();
-            while *held {
-                held = released.wait(held).unwrap();
-            }
-            drop(held);
+            self.gate.pass();
             *self.runs.lock().unwrap() += 1;
             let mut answers = self.answers.lock().unwrap();
             if answers.len() > 1 {
@@ -2228,12 +2223,16 @@ pub(crate) mod tests {
         }
 
         fn hold(&self) {
-            *self.gate.0.lock().unwrap() = true;
+            self.gate.hold();
+        }
+
+        /// Waits until a probe stands in its run, held there: the probe is out.
+        fn wait_held(&self, what: &str) {
+            self.gate.wait_standing(what);
         }
 
         fn release(&self) {
-            *self.gate.0.lock().unwrap() = false;
-            self.gate.1.notify_all();
+            self.gate.release();
         }
     }
 
@@ -2384,9 +2383,7 @@ pub(crate) mod tests {
         let (probe, wakes, notes) = probe_over(&machine);
         machine.hold();
         probe.ask(ProbeTrigger::TerminalPage);
-        while probe.lock().out.is_none() {
-            std::thread::yield_now();
-        }
+        machine.wait_held("the first probe, held");
         probe.ask(ProbeTrigger::Birth);
         probe.ask(ProbeTrigger::TerminalPage);
         probe.ask(ProbeTrigger::TerminalPage);

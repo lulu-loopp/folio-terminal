@@ -326,9 +326,10 @@ impl World for Fake {
                     &mut crate::update_trial::watchdog_asleep(),
                 );
             }));
-            while !self.home.unkept(txn).exists() {
-                std::thread::yield_now();
-            }
+            let mark = self.home.unkept(txn);
+            crate::lane::wait_until(&format!("the trial's mark {}", mark.display()), || {
+                mark.exists()
+            });
         }
         let receipt = Receipt {
             txn,

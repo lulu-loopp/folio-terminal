@@ -1087,9 +1087,10 @@ fn a_live_trial_that_takes_its_mark_back_leaves_no_not_kept_card() {
             );
         });
         *launched_watcher.lock().unwrap() = Some(handle);
-        while !home.unkept(txn).exists() {
-            std::thread::yield_now();
-        }
+        let unkept = home.unkept(txn);
+        crate::lane::wait_until(&format!("the trial's mark {}", unkept.display()), || {
+            unkept.exists()
+        });
         let receipt = Receipt {
             txn,
             nonce,
