@@ -1511,7 +1511,7 @@ fn join_fixture() -> Index {
 }
 
 /// The fixture's refused joins and shapes, by the site of their `join`.
-const FIXTURE_REFUSED: [&str; 14] = [
+const FIXTURE_REFUSED: [&str; 15] = [
     "lib.rs:118:15",
     "lib.rs:125:12",
     "lib.rs:132:47",
@@ -1521,6 +1521,7 @@ const FIXTURE_REFUSED: [&str; 14] = [
     "lib.rs:159:34",
     "lib.rs:169:16",
     "lib.rs:175:48",
+    "lib.rs:182:38",
     "lib.rs:24:18",
     "lib.rs:46:12",
     "lib.rs:75:14",
@@ -1533,7 +1534,7 @@ const FIXTURE_REFUSED: [&str; 14] = [
 /// a name; and what the reading cannot follow is refused, never passed.** The fixture, read beside
 /// `bt-platform`, allows two joins — a thread started through the thread door whose body is
 /// handed to the boundary by an alias, and a contained handle given to a `self` field and joined
-/// by a method — and refuses fourteen: a bare thread joined with an `Err → Panicked` arm, a thread
+/// by a method — and refuses fifteen: a bare thread joined with an `Err → Panicked` arm, a thread
 /// whose body is the lookalike `contained_panic::contain`, a free function's bare handle made a
 /// default, a handle handed in as a parameter, a body that calls a helper that calls the boundary,
 /// a handle an associated function returns, a contained body started through a renamed `use` of
@@ -1541,7 +1542,8 @@ const FIXTURE_REFUSED: [&str; 14] = [
 /// `JoinHandle::join` handed on as a value, a foreign type's `join` called through an imported
 /// name, `JoinHandle::join(h)` inside a macro's tokens, a generic parameter's associated type's
 /// `join` (`T::Handle::join(h)`) and a dependency's own thread handle written in full from its
-/// crate's root — neither of the last two on the closed foreign list. A foreign crate's `join` named by its full type path is no thread's; two joins of bare
+/// crate's root — neither of the last two on the closed foreign list — and a listed type's full
+/// path whose crate name a `use` in scope shadows. A foreign crate's `join` named by its full type path is no thread's; two joins of bare
 /// threads are not judged (one thrown away, one carried on); five occurrences are no join by their
 /// shape (a declaration, a binding and its value, two `join`s with arguments); a test's join is
 /// not read.
@@ -1553,7 +1555,8 @@ const FIXTURE_REFUSED: [&str; 14] = [
 /// the reading did not parse (round 1's `continue`) — the macro's join and the join handed on
 /// pass; ⑤ judge a macro's `join` by its arguments before its path (round 2's order) — the
 /// macro's `JoinHandle::join(h)` passes; ⑥ judge a path-called `join` foreign by elimination
-/// (round 2's rule) — the generic parameter's and the dependency's handles pass.
+/// (round 2's rule) — the generic parameter's and the dependency's handles pass; ⑦ drop the
+/// shadowing checks (accept the list on its spelling alone) — the shadowed crate name passes.
 #[test]
 fn a_join_is_a_value_by_a_call_edge_from_its_thread_to_the_boundary() {
     let index = join_fixture();
@@ -1570,7 +1573,7 @@ fn a_join_is_a_value_by_a_call_edge_from_its_thread_to_the_boundary() {
         .collect();
     assert_eq!(
         sites, FIXTURE_REFUSED,
-        "the associated function's handle, the renamed spawn, the collection, the macro's join, the join handed on as a value, the foreign type's join through an imported name, the path-called join in a macro, the generic parameter's handle, the dependency's thread handle, the bare thread's panic arm, the lookalike's thread, the free function's bare handle, \
+        "the associated function's handle, the renamed spawn, the collection, the macro's join, the join handed on as a value, the foreign type's join through an imported name, the path-called join in a macro, the generic parameter's handle, the dependency's thread handle, the shadowed crate name, the bare thread's panic arm, the lookalike's thread, the free function's bare handle, \
          the parameter and the helper's thread: {:#?}",
         reading.refused
     );

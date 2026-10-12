@@ -175,6 +175,13 @@ pub fn a_dependencys_thread_handle(handle: u8) -> bool {
     crossbeam_utils::thread::ScopedJoinHandle::join(handle).is_err()
 }
 
+/// A listed type's full path whose crate name a `use` in scope shadows: refused (the first
+/// segment is not that crate here).
+pub fn a_shadowed_crate_name(handle: u8) -> bool {
+    use crate::contained_panic as windows_future;
+    windows_future::IAsyncOperation::join(handle).is_err()
+}
+
 /// A binding named `join` and its value: names, no join.
 pub fn a_binding_named_join() -> u8 {
     let (join, run) = (1, 2);
