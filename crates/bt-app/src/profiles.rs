@@ -18756,7 +18756,9 @@ mod tests {
             );
         }
 
-        // The pairs no shipped row carries.
+        // What the loop above does not reach: a zsh door on a Windows program, a WSL row's own
+        // `-d` (the shipped `wsl` row carries the same program and door, without it), and a WSL
+        // launcher on a platform that has no WSL.
         let pinned_to_ubuntu = ["-d".to_owned(), "Ubuntu".to_owned()];
         assert_eq!(
             printed_path_namespace_on(
@@ -28476,8 +28478,10 @@ mod paste_tests {
         }
     }
 
+    /// Every row each platform seeds, in order and none besides: its id, its grammar, and the
+    /// namespace the table gives it on its own platform.
     #[test]
-    fn every_seed_row_has_a_grammar_and_standing_namespace_pair() {
+    fn the_seed_rows_come_in_this_order_with_these_grammars_and_namespaces() {
         for platform in [SeedPlatform::Windows, SeedPlatform::MacOs] {
             let rows = shipped_for(platform, &EmptyMachine);
             let expected = if platform == SeedPlatform::Windows {
