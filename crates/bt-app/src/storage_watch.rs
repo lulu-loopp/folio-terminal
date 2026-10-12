@@ -32,9 +32,12 @@
 //! # What a stamp is worth
 //!
 //! A stamp says a document *may* have changed. Whether it did is answered by
-//! re-reading it and comparing with the document in force, because this
-//! window's own writes name the same documents and the comparison is what tells
-//! them from a hand edit. The pass re-reads only the stamped documents among
+//! re-reading it and comparing its bytes with the store's revision — the bytes
+//! Folio last read from it or wrote to it ([`persist::Revision`]) — because
+//! this window's own writes name the same documents and the comparison is what
+//! tells them from a hand edit. The document in memory is never the
+//! comparison: a change the store holds but has not written is not undone by a
+//! read of the older file. The pass re-reads only the stamped documents among
 //! those this build follows live (`profiles.json`, `pins.json`); a stamp on
 //! `settings.json` or `keybindings.json` is drained without a read.
 //!
