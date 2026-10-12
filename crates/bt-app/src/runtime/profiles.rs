@@ -654,7 +654,8 @@ impl Runtime<'_> {
         Ok(true)
     }
 
-    /// Read the file again, and put in force whatever that changed.
+    /// Put in force whatever a re-read of the file changed — the storage
+    /// worker's answer, taken on `AppEvent::DocumentsAnswered`.
     ///
     /// **What follows the change, and what deliberately does not.**
     ///
@@ -690,17 +691,16 @@ impl Runtime<'_> {
     ///   deletion *this window* performed and the card exists to offer the way
     ///   back it took away; an editor's deletion is a fact, and its way back is
     ///   the file.
-    pub(crate) fn reread_profiles(&mut self) -> Result<()> {
-        match self.app.profiles_store.reread() {
-            persist::ProfilesNews::Unchanged => {
-                self.app.profiles_file_broken = false;
-                return Ok(());
-            }
+    pub(crate) fn take_profiles_news(
+        &mut self,
+        news: crate::document_request::ReadNews,
+    ) -> Result<()> {
+        match news.unreadable {
             // The colours-do-not-move ruling, one file over: what is in force
             // stays in force and one card says the file could not be read. The
             // reader is looking at their own half-typed JSON, and emptying their
             // profile list *because* of it would be the window fighting them.
-            persist::ProfilesNews::Unreadable => {
+            Some(true) => {
                 if !std::mem::replace(&mut self.app.profiles_file_broken, true) {
                     self.toast(
                         toast::ToastKind::Error,
@@ -709,9 +709,12 @@ impl Runtime<'_> {
                         i18n::profiles_file_kept(persist::PROFILES_FILE_NAME),
                     )?;
                 }
-                return Ok(());
             }
-            persist::ProfilesNews::Changed => self.app.profiles_file_broken = false,
+            Some(false) => self.app.profiles_file_broken = false,
+            None => {}
+        }
+        if !news.taken {
+            return Ok(());
         }
         // One card per refused entry, `report_skipped_schemes`' shape: a file
         // with two bad rows is two things to fix. They are the same sentences
@@ -730,7 +733,7 @@ impl Runtime<'_> {
     }
 
     /// **Put the table the store now holds in force**, and answer the entries it
-    /// could not honour — the half of [`Self::reread_profiles`] that follows a
+    /// could not honour — the half of [`Self::take_profiles_news`] that follows a
     /// document which changed, and the half an import's `profiles` part goes
     /// through (0.4.4 ticket 05), so a table arriving in an exported file and a
     /// table arriving by a hand edit are put in force by one function.
@@ -752,6 +755,9 @@ impl Runtime<'_> {
         // so a table that moves cannot move a pane's profile at all, and the loop
         // that used to heal one door of four is a loop with nothing left to do.
         let faults = profiles::install(self.app.profiles_store.loaded());
+        // What the next press is measured against is the table now in force: a
+        // row the installer refused stays in the document and out of it.
+        self.app.profiles_store.project(profiles::to_file());
 
         if let Some(id) = editing {
             match profiles::table().position_of_id(&id) {

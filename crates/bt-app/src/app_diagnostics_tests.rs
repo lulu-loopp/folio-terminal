@@ -107,3 +107,56 @@ fn an_unchanged_deadline_fold_answers_the_same_named_instant() {
     assert_eq!(first, Some(("winner", epoch)));
     assert_eq!(second, first);
 }
+
+/// RED ((b)14-8; design note 2026-10-11 (b)7, defect 5) — **a write fault after start reaches a
+/// card.**
+///
+/// Every `take_fault` of the four stores used to be asked at start only, so a write that stopped
+/// landing mid-run was owed a card nobody raised. The answers' handler now asks each store after
+/// taking every answer. Here the file has a second name — a dotfiles tree that links it in — so
+/// the write is refused at once, and the handler's faults carry the sentence the start-up card
+/// says, naming the file.
+///
+/// MUTATION: never call `take_fault` after start (drop the faults from `persist::hear_documents`)
+/// — no sentence comes back.
+#[test]
+fn a_write_fault_after_start_reaches_a_card() {
+    let root = bt_testpath::temp_path("bt-app-fault-after-start");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a private storage folder for this test");
+    let pins_path = root.join(pins::PINS_FILE_NAME);
+    std::fs::write(
+        &pins_path,
+        bt_persist::serialize_pins(&bt_persist::PinsV1::default()).unwrap(),
+    )
+    .unwrap();
+    std::fs::hard_link(&pins_path, root.join("点文件 dotfiles-pins.json"))
+        .expect("a second name for the file");
+
+    let mut settings = persist::SettingsStore::at(root.join(persist::SETTINGS_FILE_NAME));
+    let mut keybindings = persist::KeybindingsStore::at_on(
+        root.join(persist::KEYBINDINGS_FILE_NAME),
+        persist::StorageLane::of_its_own(),
+    );
+    let mut profiles = persist::ProfilesStore::at_on(
+        root.join(persist::PROFILES_FILE_NAME),
+        persist::StorageLane::of_its_own(),
+    );
+    let mut pins = pins::PinsStore::at(pins_path.clone());
+    assert!(pins.toggle(bt_persist::PinKind::Folder, "项目/folio 笔记"));
+    let _ = pins.settle();
+
+    let heard = persist::hear_documents(&mut settings, &mut keybindings, &mut profiles, &mut pins);
+    assert_eq!(
+        heard.faults,
+        vec![i18n::persisted_file_unwritable(pins::PINS_FILE_NAME)],
+        "one card, naming the file"
+    );
+    assert!(
+        persist::hear_documents(&mut settings, &mut keybindings, &mut profiles, &mut pins)
+            .faults
+            .is_empty(),
+        "and said once"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
