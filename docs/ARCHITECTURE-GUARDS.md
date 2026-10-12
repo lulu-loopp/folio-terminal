@@ -32,19 +32,22 @@ code that reads a **committed non-Rust file** has a row on
 (the `owner` column), and never on both: an `include_str!`/`include_bytes!` of
 a committed path, or a **call** of `read_to_string`, `fs::read` or `File::open`
 (through bt-source's call pattern; a bare mention is no call) whose own
-argument reduces to a committed document — judged one call at a time, from a
-literal, a `Path`/`.join` chain, `env!`/`concat!`, a binding before the call, a
-same-file constant, or a same-file helper rooted at `CARGO_MANIFEST_DIR`; or
-**any other call or method handed such a path** — a wrapper of the same crate
-(`read_session(&fixture_path(…))`), a function of another crate, a method
-called on the path — which is a reader named by its callee in the `mechanism`
-column. A macro is not a call (`assert_eq!(path, …)` compares), nor are the
-calls that only build or describe a path (`Path::new`, `PathBuf::from`,
-`.join`, `.display()` and the rest of the test's `PATH_BUILDING`). A `for` loop
-over a literal list binds its variable to each element in turn, and every one
-is judged. A path under `target/` or a temporary directory, or an absolute
-path, is not a document, and does not make another call in the same function a
-reader.
+argument reduces to a committed document, or **any other call or method handed
+such a path** — a wrapper of the same crate (`read_session(&fixture_path(…))`),
+a function of another crate, a method called on the path — which is a reader
+named by its callee in the `mechanism` column. Each call is judged by its own
+argument: a literal, a `Path`/`.join` chain, `env!`, `concat!` and `format!`
+spliced piece by piece (a string that spells a path into other text names that
+path), the innermost binding in scope at the call (a `let` over the rest of its
+block, a `for` variable over the loop's body; a loop over a literal list is
+each element in turn), a constant by bare name or through `self::`, `super::`
+and `crate::` along bt-source's module tree (following `use` and `use …::*`),
+and a same-file helper with its parameters bound. A macro is not a call
+(`assert_eq!(path, …)` compares), nor are the calls that only build or
+describe a path (`Path::new`, `PathBuf::from`, `.join`, `.display()` and the
+rest of the test's `PATH_BUILDING`). A path under `target/` or a temporary
+directory, or an absolute path, is not a document, and does not make another
+call in the same function a reader.
 The subject set is what `git ls-files` names minus `.rs` files; generated files
 under `target/` and bytes the shipped program embeds are not subjects.
 
@@ -60,18 +63,20 @@ both. When red, a reader whose subject really is the document gets a
 subject, ticket, `no`, reason); a reader that pins a fact about the code by
 reading text is migrated to a `bt-source` query instead, and a debt row is never
 added. The scan never drops a path it gives up on in silence: a rooted path
-handed to any call that it cannot reduce to a literal (a parameter, a
-`format!`, another crate's constant), and a constant or helper that reaches
-itself again (cycles are detected; acyclic chains are followed to their end),
-are counted and listed by the test as a diagnostic — file, line, item, callee,
-why — not refused. The method exclusion is a list of names, so a reading method
-that shares an excluded name is a blind spot, and a new path-describing method
-is a false positive until it is added to `PATH_BUILDING`. Not covered, and said in the test's
-header: a path handed in as a parameter (the function that hands it on is not
-the reader; its caller that names the file is), a root reached through a
-method, a closure or another file's function, a read call renamed by
-`use … as …` (bt-source does not resolve aliases), and stale rows (a row whose
-item no longer reads is not refused).
+handed to any call that it cannot reduce to a literal (a parameter, a `format!`
+hole it cannot fill, another crate's constant), a constant or helper that
+reaches itself again (cycles are detected; acyclic chains are followed to their
+end), and a `self::`/`super::`/`crate::` constant the module tree does not
+hold are counted and listed by the test as a diagnostic — file, line, item,
+callee, why — not refused. The method exclusion is a list of names, so a
+reading method that shares an excluded name is a blind spot, and a new
+path-describing method is a false positive until it is added to
+`PATH_BUILDING`. Not covered, and said in the test's header: a path handed in
+as a parameter (the function that hands it on is not the reader; its caller
+that names the file is), a root reached through a method, a closure or another
+file's function, a read call renamed by `use … as …` (bt-source does not
+resolve aliases), and stale rows (a row whose item no longer reads is not
+refused).
 
 ## Platform cfg boundaries
 
