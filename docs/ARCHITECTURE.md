@@ -1166,7 +1166,9 @@ in a `Ledger<Id, Owed>`, which mints each identity or refuses it at the door and
 ends each in exactly one terminal (`Done`, `Failed`, `Cancelled`,
 `Superseded { by }`, `Joined { with }`, `WorkerGone`), delivered to its
 requester once or to the sink it is owed; the worker ends identities through
-`publish`, the executor reports the thread's end through `worker_ended`, and a
+`publish` (never a joined one, which ends with the request it joined), the executor
+reports the thread's end through `worker_ended`, which ends what is owed and then
+wakes the consumer through the wake the ledger is built with, and a
 panic inside one request's task fails that request while the worker goes on.
 Four claims hold it: **(9)** a superseded request says so; **(10)** a joined
 request carries its twin's outcome; **(11)** a failure is said once (or once per
