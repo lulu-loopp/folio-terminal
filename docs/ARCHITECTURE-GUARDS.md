@@ -45,14 +45,22 @@ variable over its body; a loop over a literal list is each element in turn),
 a constant through bt-source's module trees across every first-party package
 (bare, `self::`, `super::`, `crate::`, a crate's name, `use` and `use …::*`,
 every file a module is written in, `impl` blocks' constants), and a same-file
-helper with its parameters bound. A constant resolves only where Rust lets the
-reading module name it: in another crate only a `pub` item reached through
-`pub` modules or a `pub use`, in the same crate a private item from its module
-and the modules under it, `pub(crate)` crate-wide and `pub(super)`/`pub(in …)`
-as spelled; a path that visibility hides is the diagnostic. An associated
-constant written `<Type as Trait>::NAME` is the impl of the trait that path
-names (through `use`s and re-exports); `Type::NAME` is the inherent impl's, or
-the one trait impl's, and several trait impls make it the diagnostic. A constant name is SCREAMING_SNAKE_CASE:
+helper with its parameters bound. The tree compiles, so every path the
+reading code names is one Rust let it name (a `pub use` of a `pub(crate)` item
+is E0364; a glob re-exports only what it may; a type or trait the code names is
+visible to it): visibility only tells same-named candidates apart — where two
+globs bring in two constants of one name, the one visible to the module the
+path is written in (carried through every re-export) is the constant, several
+visible or none is the diagnostic, and a lone candidate is the constant even
+when invisible to the reader, as the code could not have compiled otherwise.
+An associated constant written `<Type as Trait>::NAME` is the impl of the trait
+that path names, or that trait's default where the impl does not declare it;
+`Type::NAME` is the inherent impl's, or the one trait impl's, and several trait
+impls make it the diagnostic. A trait path is followed through the module
+trees, `use`s (an alias to what it names) and globs to a first-party trait;
+another crate's trait is its full written path after first-party `use`s are
+followed (`use dep::Trait as A` is `dep::Trait`, `a::Same` is not `b::Same`),
+and one that cannot be followed is the diagnostic. A constant name is SCREAMING_SNAKE_CASE:
 CI's workspace-wide `clippy -D warnings` makes `non_upper_case_globals` (not in
 the workspace's `Cargo.toml`: rustc's default warn) refuse any other, and a
 snake_case constant that is there is found by its name all the same. A macro is
