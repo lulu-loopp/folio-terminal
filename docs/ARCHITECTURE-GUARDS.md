@@ -185,6 +185,25 @@ helper that calls the boundary, a bare catch and a renamed import, by site. Ther
 the panic its row's failure value, or take the catch out and say in the row
 that a panic ends the process; never wrap a catch to quiet the guard.
 
+The join half (T-JOINED-PANIC-VALUES, 2026-10-12): a `JoinHandle::join` answers
+`Err` under the resident hook only for a thread whose body is contained, so a
+join whose `Err` is made into a value — a variant, an error, a default — must
+join such a thread. The same file reads every product `join` of `bt-app`,
+`bt-platform`, `bt-pty`, `bt-term`, `bt-render`, `bt-corpus` and `bt-persist`:
+one that throws its result away or carries the panic on (`unwrap`, `expect`) is
+not judged; any other is refused unless its handle follows — through `let`s,
+values given to a `self` field in its package, free functions' tails (by
+`FunctionPaths`) and method receivers — to a thread start (`std`'s
+`thread::spawn`, a `spawn` method, or the thread door `spawn_at_priority`
+by its identity) whose closure is a call edge to the boundary. A handle handed
+in as a parameter, or bound by a pattern that is not the whole value, is not
+followed and is refused. Its fixture `tests/fixtures/joined_panic` allows a door
+thread contained through an alias and a contained handle kept in a field, and
+refuses a bare thread's `Err → Panicked` arm, the lookalike, a free function's
+bare handle made a default, a parameter and a helper-mediated body. When red,
+contain the thread's body and give the panic its failure value, or carry the
+panic on (`expect`) and say the thread's panic ends the process.
+
 ## Timing-bound tests
 
 The rule: a test that depends on wall-clock progress is exceptional, named, and
