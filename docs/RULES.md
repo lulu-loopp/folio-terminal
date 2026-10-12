@@ -1060,7 +1060,9 @@ with the store's writes held so the batch lands as one write. A hand edit enters
 the same doors: the storage pass's merge puts each value the file gave through its
 row's function, with the writes held the same way, and a merged `keybindings.json`
 rebuilds the one table from this build's defaults and the merged departures through
-`Shortcuts::apply_overrides`. A part the file does
+`Shortcuts::apply_overrides`. A shortcut document has one reading rule — at launch, on
+an import and in the merge each line is read in the dialect its file records and carried
+to this one (`shortcuts::read_chord_in`), and what that refuses is refused by all three. A part the file does
 not carry is left alone. Three keys are receipts about this machine and are not
 imported (`first_run_card`, `cards_gesture_hint_offer`, `web_pages_used`);
 `Focus mode` and `Shell integration` are
