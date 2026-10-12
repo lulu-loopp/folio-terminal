@@ -1,5 +1,9 @@
 //! **No source reader names a file outside the three lists** — the plan's §6.1
-//! tripwire, `no_source_reader_names_a_file_outside_the_two_lists`.
+//! tripwire, `no_source_reader_names_a_file_outside_the_two_lists` — **and no
+//! reader of a committed document is on neither list**
+//! (T-SOURCE-READERS-TSV-TRIPWIRE,
+//! `every_reader_of_a_committed_document_is_on_a_list`; see *The document
+//! readers*).
 //!
 //! Three lists classify every reader bound to a file.
 //! `docs/plans/MIGRATION-DEBT.tsv` is the temporary one: every reader blocked on
@@ -14,12 +18,13 @@
 //!
 //! # Written without the query layer, on purpose
 //!
-//! The scan below is plain text matching. It does not call `enumerate`, it does
-//! not build a [`bt_source::Universe`], it does not parse. That is §6.1's
-//! instruction and the reason is simple: this is the guard *against* the
-//! mechanism, and a bug in the mechanism must not be able to switch it off. It
-//! is also why the crate's own allowlist type is here on the allowlist — see
-//! [`bt_source::FileScoped::TheTripwireItself`].
+//! The Rust-source scan below is plain text matching. It does not call
+//! `enumerate`, it does not build a [`bt_source::Universe`], it does not parse.
+//! That is §6.1's instruction and the reason is simple: this is the guard
+//! *against* the mechanism, and a bug in the mechanism must not be able to
+//! switch it off. It is also why the crate's own allowlist type is here on the
+//! allowlist — see [`bt_source::FileScoped::TheTripwireItself`]. (The document
+//! half below is not a guard against the mechanism, and reads through it.)
 //!
 //! # Why it lives here
 //!
@@ -61,12 +66,68 @@
 //! building the path and another reading it, is seen only if both are in the
 //! same file and the reading one names the path; and the scan reads no Python,
 //! so `scripts/dev/*.py` are on the debt list and out of its reach.
+//!
+//! # The document readers
+//!
+//! The four shapes are about Rust source. A test that reads a committed
+//! *document* — a `.tsv` ledger, a `.md` page, a fixture, a packaging manifest
+//! — is the other half of what the two lists classify, and
+//! `every_reader_of_a_committed_document_is_on_a_list` holds it: **every item
+//! of test or build-support code that reads a committed non-Rust file is a row
+//! of `SOURCE-READERS.tsv` or of `MIGRATION-DEBT.tsv`**, keyed by its file and
+//! its item (the `owner` column), and one on neither is refused naming the
+//! item, the file and both lists. A reader on both is refused by
+//! `every_source_reader_names_a_reason_and_is_not_also_debt`.
+//!
+//! * **The subject set** is every file `git ls-files` names that does not end
+//!   in `.rs`: `docs/`, `scripts/`, `packaging/`, `assets/`, `tests/`,
+//!   `licenses/`, `vendor/`, the root's files and every crate's non-Rust files
+//!   (`src/**/*.tsv`, `tests/fixtures/`, `tests/fonts/`, the manifests).
+//!   Generated files under `target/` are not committed, and so not subjects.
+//! * **The readers** are the items of every first-party package's `src/`,
+//!   `tests/`, `examples/`, `benches/` and build script (`bt-source`'s
+//!   `tests/fixtures/` aside) whose bytes no build of the shipped program
+//!   contains ([`bt_source::Occurrence::in_the_product`]) — a bundled asset is
+//!   the product's, not a reader's — and that read in one of two ways:
+//!   1. an `include_str!` or `include_bytes!` whose literal, taken from the
+//!      including file's directory, is a committed document;
+//!   2. a function whose body calls `read_to_string`, `fs::read` or
+//!      `File::open` on a path that is either **rooted in the checkout** — the
+//!      body names `CARGO_MANIFEST_DIR`, or calls a free function of its own
+//!      file that does (transitively), with no literal leading into `target/`
+//!      — or **spelled out**: a literal of the body, or of a `const` or
+//!      `static` of its file the body names, that is a whole path from the
+//!      workspace root or the package directory to a committed document. A
+//!      rooted body is a reader of whatever committed file a literal piece of
+//!      its path ends; one that names none computes its path, and is a
+//!      reader of what it computes. A read that names only Rust source keeps
+//!      the four shapes' rules.
+//! * **The item** is the innermost function holding the read; outside every
+//!   function it is the `const` or `static` the include initialises, or the
+//!   module itself. The name is the module path without `crate`, with an
+//!   integration test's, example's, bench's or build script's target name in
+//!   front (`census::committed_census`).
+//!
+//! This half reads Rust through `bt-source`'s index, because its key is an
+//! item and only the index knows which module a byte is in. What it does not
+//! see, written down rather than discovered: a path handed in as a parameter
+//! by a rooted caller (the reader is the function that reads, and it neither
+//! roots the path nor spells it — `scan` above, which reads `.ps1` files, is
+//! one); a root helper in another file, or reached through a method; a bare
+//! file name in an unrooted body (`README.md` is as often a scratch file's
+//! name); and a read through any other call than the three. Rows are not
+//! checked the other way: a row whose item no longer reads is not refused.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use bt_source::{FileScoped, Scope};
+use bt_source::{
+    Certainty, DiskScope, FileRecord, FileScoped, Index, ItemKind, ItemRecord, LiteralValue,
+    MacroKind, Occurrence, Package, Pattern, Scope, Search, Span, TargetId, TargetKind, TargetRoot,
+    TokenKind, Universe, Vendor, View, Workspace, is_vendored, needle, normalized, report,
+    universes,
+};
 
 /// The temporary list, from the workspace root.
 const DEBT_LIST: &str = "docs/plans/MIGRATION-DEBT.tsv";
@@ -828,6 +889,810 @@ fn every_source_reader_names_a_reason_and_is_not_also_debt() {
     }
 }
 
+// ──────────────────────────────────────────────────── the document readers ──
+
+/// The macros that read a file's bytes into the program at compile time.
+const INCLUDE_MACROS: [&str; 2] = ["include_str", "include_bytes"];
+
+/// What a document reader does with the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Reading {
+    /// `include_str!` or `include_bytes!` of a committed path.
+    Included,
+    /// `read_to_string`, `fs::read` or `File::open` on a path the item roots in
+    /// the checkout or spells out.
+    AtRunTime,
+}
+
+impl Reading {
+    fn said(self) -> &'static str {
+        match self {
+            Self::Included => "includes a committed document",
+            Self::AtRunTime => "reads a committed document at run time",
+        }
+    }
+}
+
+/// One item of test or build-support code that reads a committed document.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct DocumentReader {
+    /// The Rust file the item is written in, from the workspace root.
+    file: String,
+    line: usize,
+    /// Every name the item answers to — one per way its file is reached — in
+    /// the spelling both lists' `owner` column is written in.
+    owners: BTreeSet<String>,
+    readings: BTreeSet<Reading>,
+    /// The committed documents its literals name, from the workspace root.
+    /// Empty when the path is computed and no literal names a file.
+    subjects: BTreeSet<String>,
+}
+
+impl DocumentReader {
+    fn named(&self) -> String {
+        let subjects = if self.subjects.is_empty() {
+            "a path it computes under the checkout".to_owned()
+        } else {
+            self.subjects.iter().cloned().collect::<Vec<_>>().join(", ")
+        };
+        format!(
+            "{}:{} {} {} — {}",
+            self.file,
+            self.line,
+            self.owners.iter().cloned().collect::<Vec<_>>().join(" / "),
+            self.readings
+                .iter()
+                .map(|reading| reading.said())
+                .collect::<Vec<_>>()
+                .join(" and "),
+            subjects
+        )
+    }
+}
+
+/// Every file the repository commits, from the workspace root, forward slashes.
+///
+/// `git ls-files` and not a directory walk, because the subject is what is
+/// *committed*: a walk would also find `target/`'s generated files and a
+/// developer's untracked ones, and neither is a document a test may depend on.
+fn committed_files(root: &Path) -> BTreeSet<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z"])
+        .output()
+        .unwrap_or_else(|error| {
+            panic!("git ls-files names what the repository commits, and it did not start: {error}")
+        });
+    assert!(
+        output.status.success(),
+        "git ls-files failed in {}: {}",
+        root.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("the repository's paths are UTF-8")
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// Whether a committed path is a document: any committed file that is not
+/// Rust source. Rust source keeps the four shapes above.
+fn is_document(path: &str) -> bool {
+    !path.ends_with(".rs")
+}
+
+/// The whole of a first-party package; `bt-source`'s `tests/fixtures/` are
+/// source *about* compilation and are declared out, as `timing.rs` does.
+fn package_universe(package: &Package) -> Universe {
+    if package.name() == "bt-source" {
+        let scopes = vec![
+            DiskScope::under(package.directory().join("src")),
+            DiskScope::under(package.directory().join("tests")).excluding(&["fixtures"]),
+        ];
+        return Universe::declare(
+            "the whole of bt-source, fixtures aside",
+            package.targets().to_vec(),
+            scopes,
+            Vendor::Excluded,
+        )
+        .expect("this crate is where it says it is");
+    }
+    universes::whole_package(package, Vendor::Excluded).expect("a package of this workspace")
+}
+
+/// Every first-party package's directory and index.
+fn first_party_indices(root: &Path) -> Vec<(PathBuf, Index)> {
+    let workspace = Workspace::read(root).expect("this workspace");
+    workspace
+        .packages()
+        .iter()
+        .filter(|package| !is_vendored(package.directory()))
+        .map(|package| {
+            let index = Index::build(&package_universe(package))
+                .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+            (package.directory().to_path_buf(), index)
+        })
+        .collect()
+}
+
+/// The committed files a literal's value names: the value, its `.` and `..`
+/// segments dropped, as a whole trailing run of a committed path's segments.
+/// `docs/plans/X.tsv` names one file; `X.tsv` names every committed file called
+/// that.
+fn named_by(value: &str, committed: &BTreeSet<String>) -> BTreeSet<String> {
+    let segments: Vec<&str> = value
+        .split(['/', '\\'])
+        .filter(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
+        .collect();
+    if segments.is_empty() {
+        return BTreeSet::new();
+    }
+    let tail = segments.join("/");
+    committed
+        .iter()
+        .filter(|path| {
+            path.as_str() == tail
+                || path
+                    .strip_suffix(tail.as_str())
+                    .is_some_and(|head| head.ends_with('/'))
+        })
+        .cloned()
+        .collect()
+}
+
+/// One index, read for its document readers.
+struct DocumentScan<'a> {
+    index: &'a Index,
+    root: &'a Path,
+    /// The package's own directory, where `cargo test` runs its tests.
+    package: &'a Path,
+    committed: &'a BTreeSet<String>,
+}
+
+impl DocumentScan<'_> {
+    /// The decoded value of every string literal inside `[start, end)`.
+    fn strings_in(&self, start: usize, end: usize) -> Vec<&str> {
+        let literals = self.index.literals();
+        let first = literals.partition_point(|literal| literal.span().start() < start);
+        literals[first..]
+            .iter()
+            .take_while(|literal| literal.span().end() <= end)
+            .filter_map(|literal| match literal.value() {
+                LiteralValue::Str(value) => Some(value.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The identifier tokens inside `[start, end)`, with where each starts.
+    fn names_in(&self, start: usize, end: usize) -> Vec<(usize, &str)> {
+        let tokens = self.index.tokens();
+        let first = tokens.partition_point(|token| token.span().start() < start);
+        tokens[first..]
+            .iter()
+            .take_while(|token| token.span().end() <= end)
+            .filter(|token| token.kind() == TokenKind::Identifier)
+            .map(|token| (token.span().start(), self.index.text(token.name_span())))
+            .collect()
+    }
+
+    /// The free functions a body calls by name: an identifier with an opening
+    /// parenthesis after it and neither `.` nor `fn` before it.
+    fn calls_in(&self, body: Span) -> BTreeSet<&str> {
+        let union = self.index.union();
+        self.names_in(body.start(), body.end())
+            .into_iter()
+            .filter(|(at, name)| {
+                let after = union[at + name.len()..].trim_start();
+                let before = union[..*at].trim_end();
+                after.starts_with('(') && !before.ends_with('.') && !before.ends_with("fn")
+            })
+            .map(|(_, name)| name)
+            .collect()
+    }
+
+    /// Whether a body roots a path in the checkout itself: it names the crate's
+    /// own directory, and no literal of it leads into `target/`, whose files
+    /// are built, not committed.
+    fn roots_in_the_checkout(&self, body: Span) -> bool {
+        let strings = self.strings_in(body.start(), body.end());
+        let names_the_manifest_directory = strings.contains(&MANIFEST_DIRECTORY)
+            || self
+                .names_in(body.start(), body.end())
+                .iter()
+                .any(|(_, name)| *name == MANIFEST_DIRECTORY);
+        let leads_into_target = strings.iter().any(|value| {
+            value
+                .split(['/', '\\'])
+                .find(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
+                == Some("target")
+        });
+        names_the_manifest_directory && !leads_into_target
+    }
+
+    /// The free functions that root a path in the checkout, each by its file
+    /// and its name: it roots one itself, or calls one of its own file's that
+    /// does. A call is resolved within the caller's file because a name is all
+    /// a call carries, and `root` or `scratch` is a helper of a dozen files.
+    fn root_helpers(&self) -> BTreeSet<(usize, &str)> {
+        let free: Vec<(usize, &str, Span)> = self
+            .index
+            .items()
+            .iter()
+            .filter(|item| item.kind() == ItemKind::Function && item.type_owner().is_none())
+            .filter_map(|item| {
+                Some((
+                    self.index.file_of(item).span().start(),
+                    item.name(),
+                    item.body()?,
+                ))
+            })
+            .collect();
+        let calls: Vec<BTreeSet<&str>> = free
+            .iter()
+            .map(|(_, _, body)| self.calls_in(*body))
+            .collect();
+        let mut helpers: BTreeSet<(usize, &str)> = free
+            .iter()
+            .filter(|(_, _, body)| self.roots_in_the_checkout(*body))
+            .map(|(file, name, _)| (*file, *name))
+            .collect();
+        loop {
+            let before = helpers.len();
+            for ((file, name, _), called) in free.iter().zip(&calls) {
+                if called
+                    .iter()
+                    .any(|callee| helpers.contains(&(*file, *callee)))
+                {
+                    helpers.insert((*file, *name));
+                }
+            }
+            if helpers.len() == before {
+                return helpers;
+            }
+        }
+    }
+
+    /// Where a statement beginning at `start` ends: after its `;` at depth
+    /// zero, or at the `}` that closes the block it is written in, literals and
+    /// comments stepped over.
+    fn statement_end(&self, start: usize, limit: usize) -> usize {
+        let union = self.index.union().as_bytes();
+        let literals = self.index.literals();
+        let comments = self.index.comments();
+        let mut depth = 0usize;
+        let mut position = start;
+        while position < limit {
+            if let Some(literal) = literals
+                .get(literals.partition_point(|literal| literal.span().end() <= position))
+                .filter(|literal| literal.span().holds(position))
+            {
+                position = literal.span().end();
+                continue;
+            }
+            if let Some(comment) = comments
+                .get(comments.partition_point(|comment| comment.span().end() <= position))
+                .filter(|comment| comment.span().holds(position))
+            {
+                position = comment.span().end();
+                continue;
+            }
+            match union[position] {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' if depth > 0 => depth -= 1,
+                b'}' => return position,
+                b';' if depth == 0 => return position + 1,
+                _ => {}
+            }
+            position += 1;
+        }
+        limit
+    }
+
+    /// Every `const` and `static` a file declares: its name and the bytes of
+    /// its statement, from the keyword to the `;`.
+    fn value_statements(&self, file: &FileRecord) -> Vec<(&str, usize, usize)> {
+        let span = file.span();
+        let names = self.names_in(span.start(), span.end());
+        let mut found = Vec::new();
+        for (at, (start, keyword)) in names.iter().enumerate() {
+            if *keyword != "const" && *keyword != "static" {
+                continue;
+            }
+            // `const fn`, `const unsafe fn` and `const extern` declare a
+            // function, not a value.
+            let Some((_, name)) = names[at + 1..].iter().find(|(_, name)| *name != "mut") else {
+                continue;
+            };
+            if matches!(*name, "fn" | "unsafe" | "extern" | "async") {
+                continue;
+            }
+            found.push((*name, *start, self.statement_end(*start, span.end())));
+        }
+        found
+    }
+
+    /// The decoded string values of every `const` and `static` a file
+    /// declares, by name.
+    fn file_values(&self, file: &FileRecord) -> BTreeMap<&str, Vec<&str>> {
+        let mut values: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (name, start, end) in self.value_statements(file) {
+            values
+                .entry(name)
+                .or_default()
+                .extend(self.strings_in(start, end));
+        }
+        values
+    }
+
+    /// The innermost `const` or `static` whose statement holds `at`.
+    fn declared_value(&self, at: usize) -> Option<&str> {
+        let file = self.index.file_at(at).expect("a byte of the index");
+        self.value_statements(file)
+            .into_iter()
+            .filter(|(_, start, end)| *start <= at && at < *end)
+            .min_by_key(|(_, start, end)| end - start)
+            .map(|(name, _, _)| name)
+    }
+
+    fn innermost_callable(&self, at: usize) -> Option<&ItemRecord> {
+        self.index
+            .items()
+            .iter()
+            .filter(|item| item.kind().is_callable())
+            .filter(|item| item.body().is_some_and(|body| body.holds(at)))
+            .min_by_key(|item| item.whole().len())
+    }
+
+    /// A module path as the lists write it: `crate` left off, and an
+    /// integration test's, example's, bench's or build script's target name in
+    /// front, which is what tells `census::x` from a library's `x`.
+    fn qualified(file: &FileRecord, declared: &str) -> String {
+        let owner = file
+            .owners()
+            .iter()
+            .filter(|owner| {
+                declared == owner.module_path
+                    || declared.starts_with(&format!("{}::", owner.module_path))
+            })
+            .max_by_key(|owner| owner.module_path.len())
+            .expect("a module path extends its file's");
+        let path = declared
+            .strip_prefix("crate")
+            .map_or(declared, |rest| rest.trim_start_matches("::"));
+        match owner.target.kind {
+            TargetKind::Library | TargetKind::Binary => path.to_owned(),
+            _ if path.is_empty() => owner.target.name.clone(),
+            _ => format!("{}::{path}", owner.target.name),
+        }
+    }
+
+    fn joined(module: &str, name: &str) -> String {
+        if module.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{module}::{name}")
+        }
+    }
+
+    fn item_names(&self, item: &ItemRecord) -> BTreeSet<String> {
+        let file = self.index.file_of(item);
+        let name = match item.type_owner() {
+            Some(owner) => format!("{owner}::{}", item.name()),
+            None => item.name().to_owned(),
+        };
+        item.module_paths()
+            .into_iter()
+            .map(|declared| Self::joined(&Self::qualified(file, declared), &name))
+            .collect()
+    }
+
+    /// The names the bytes at `at` answer to: the innermost function around
+    /// them, or — outside every function — the `const` or `static` they
+    /// initialise, or their module itself when the statement declares neither
+    /// (an attribute's argument).
+    fn owners_of(&self, at: usize) -> BTreeSet<String> {
+        if let Some(item) = self.innermost_callable(at) {
+            return self.item_names(item);
+        }
+        let file = self.index.file_at(at).expect("a byte of the index");
+        let module = self
+            .index
+            .modules()
+            .iter()
+            .filter(|module| module.span().holds(at))
+            .min_by_key(|module| module.span().len())
+            .expect("every byte is in a module");
+        let value = self.declared_value(at);
+        module
+            .module_paths()
+            .iter()
+            .map(|path| {
+                let module_name = Self::qualified(file, path);
+                match value {
+                    Some(value) => Self::joined(&module_name, value),
+                    None => module_name,
+                }
+            })
+            .collect()
+    }
+
+    /// The committed file a literal's value names as a whole path from the
+    /// workspace root or from the package directory, if it names one. A bare
+    /// file name is not a path from anywhere: `README.md` is what a test calls
+    /// the file it writes into its own scratch directory as often as not.
+    fn anchored(&self, value: &str) -> BTreeSet<String> {
+        if !value.contains(['/', '\\']) {
+            return BTreeSet::new();
+        }
+        let root = normalized(self.root);
+        let value = value.replace('\\', "/");
+        [self.root, self.package]
+            .into_iter()
+            .map(|base| from_root(&normalized(&base.join(&value)), &root))
+            .filter(|path| self.committed.contains(path))
+            .collect()
+    }
+
+    fn line(&self, at: usize) -> usize {
+        self.index.locate(at).expect("a byte of the index").line
+    }
+
+    fn relative(&self, file: &FileRecord) -> String {
+        from_root(&normalized(file.path()), &normalized(self.root))
+    }
+
+    fn in_the_product(&self, span: Span) -> bool {
+        Occurrence {
+            span,
+            certainty: Certainty::Resolved,
+        }
+        .in_the_product(self.index)
+    }
+
+    /// Every `include_str!` and `include_bytes!` of a committed document
+    /// outside the product.
+    fn included(&self) -> Vec<DocumentReader> {
+        let root = normalized(self.root);
+        let mut found = Vec::new();
+        for invocation in self.index.macros() {
+            if invocation.kind() != MacroKind::Invocation
+                || !INCLUDE_MACROS.contains(&invocation.name())
+                || self.in_the_product(invocation.span())
+            {
+                continue;
+            }
+            let file = self
+                .index
+                .file_at(invocation.span().start())
+                .expect("a byte of the index");
+            let directory = file.path().parent().expect("a file is in a directory");
+            let subjects: BTreeSet<String> = self
+                .strings_in(invocation.tokens().start(), invocation.tokens().end())
+                .into_iter()
+                .map(|value| from_root(&normalized(&directory.join(value)), &root))
+                .filter(|path| self.committed.contains(path) && is_document(path))
+                .collect();
+            if subjects.is_empty() {
+                continue;
+            }
+            found.push(DocumentReader {
+                file: self.relative(file),
+                line: self.line(invocation.span().start()),
+                owners: self.owners_of(invocation.span().start()),
+                readings: BTreeSet::from([Reading::Included]),
+                subjects,
+            });
+        }
+        found
+    }
+
+    /// Every function outside the product whose body reads a file at run time
+    /// on a path it roots in the checkout, or on a path one of its literals
+    /// spells out to a committed document.
+    fn read_at_run_time(&self) -> Vec<DocumentReader> {
+        let helpers = self.root_helpers();
+        let mut sites = Vec::new();
+        for pattern in [
+            needle!(Pattern::call("read_to_string")),
+            needle!(Pattern::path("fs::read")),
+            needle!(Pattern::path("File::open")),
+        ] {
+            sites.extend(
+                self.index
+                    .search(&Search::new(pattern, View::Identifiers))
+                    .unwrap_or_else(|failure| panic!("{failure}"))
+                    .spans(),
+            );
+        }
+        sites.sort();
+        // The first read of each function, by the function's own bytes.
+        let mut first_read: BTreeMap<Span, usize> = BTreeMap::new();
+        for site in sites {
+            if self.in_the_product(site) {
+                continue;
+            }
+            if let Some(item) = self.innermost_callable(site.start()) {
+                first_read.entry(item.whole()).or_insert(site.start());
+            }
+        }
+        let mut values_by_file: BTreeMap<String, BTreeMap<&str, Vec<&str>>> = BTreeMap::new();
+        let mut found = Vec::new();
+        for (whole, site) in first_read {
+            let item = self
+                .innermost_callable(site)
+                .filter(|item| item.whole() == whole)
+                .expect("the function the read was found in");
+            let body = item
+                .body()
+                .expect("a function with a read in it has a body");
+            let file = self.index.file_of(item);
+            let values = values_by_file
+                .entry(self.relative(file))
+                .or_insert_with(|| self.file_values(file));
+            let referenced: Vec<&str> = self
+                .names_in(body.start(), body.end())
+                .into_iter()
+                .filter_map(|(_, name)| values.get(name))
+                .flatten()
+                .copied()
+                .collect();
+            let rooted = self.roots_in_the_checkout(body)
+                || self
+                    .calls_in(body)
+                    .iter()
+                    .any(|callee| helpers.contains(&(file.span().start(), *callee)));
+            // A rooted path is built a piece at a time, so a piece names every
+            // committed file it ends; an unrooted one reaches the checkout only
+            // as a whole path from the workspace root or from the package
+            // directory, where `cargo test` runs a test.
+            let named: BTreeSet<String> = self
+                .strings_in(body.start(), body.end())
+                .into_iter()
+                .chain(referenced)
+                .flat_map(|value| {
+                    if rooted {
+                        named_by(value, self.committed)
+                    } else {
+                        self.anchored(value)
+                    }
+                })
+                .collect();
+            let documents: BTreeSet<String> = named
+                .iter()
+                .filter(|path| is_document(path.as_str()))
+                .cloned()
+                .collect();
+            // A read that names only Rust source is a Rust-source reader, which
+            // the four shapes above hold; a rooted one that names no committed
+            // file computes its path, and reads whatever it computes.
+            let reads_a_document = !documents.is_empty() || (rooted && named.is_empty());
+            if reads_a_document {
+                found.push(DocumentReader {
+                    file: self.relative(file),
+                    line: self.line(site),
+                    owners: self.item_names(item),
+                    readings: BTreeSet::from([Reading::AtRunTime]),
+                    subjects: documents,
+                });
+            }
+        }
+        found
+    }
+}
+
+/// Every reader of a committed document in `indices`, one per item, in file
+/// and item order.
+fn document_readers(
+    indices: &[(PathBuf, Index)],
+    root: &Path,
+    committed: &BTreeSet<String>,
+) -> Vec<DocumentReader> {
+    let mut by_item: BTreeMap<(String, BTreeSet<String>), DocumentReader> = BTreeMap::new();
+    for (package, index) in indices {
+        let scan = DocumentScan {
+            index,
+            root,
+            package,
+            committed,
+        };
+        for reader in scan.included().into_iter().chain(scan.read_at_run_time()) {
+            match by_item.entry((reader.file.clone(), reader.owners.clone())) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(reader);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let held = entry.get_mut();
+                    held.line = held.line.min(reader.line);
+                    held.readings.extend(reader.readings);
+                    held.subjects.extend(reader.subjects);
+                }
+            }
+        }
+    }
+    by_item.into_values().collect()
+}
+
+/// Every `(file, owner)` the two lists carry.
+fn listed_readers(root: &Path) -> BTreeSet<(String, String)> {
+    debt_rows(root)
+        .into_iter()
+        .chain(source_rows(root))
+        .map(|row| (row["file"].clone(), row["owner"].clone()))
+        .collect()
+}
+
+/// The document readers on neither list.
+fn unlisted_documents<'a>(
+    readers: &'a [DocumentReader],
+    listed: &BTreeSet<(String, String)>,
+) -> Vec<&'a DocumentReader> {
+    readers
+        .iter()
+        .filter(|reader| {
+            !reader
+                .owners
+                .iter()
+                .any(|owner| listed.contains(&(reader.file.clone(), owner.clone())))
+        })
+        .collect()
+}
+
+/// What the document half says when it fires: each item, its file, both lists.
+fn document_complaint(strays: &[&DocumentReader]) -> String {
+    let mut said = String::new();
+    let _ = writeln!(
+        said,
+        "{} reader(s) of a committed document are on neither list:\n",
+        strays.len()
+    );
+    for stray in strays {
+        let _ = writeln!(said, "    {}", stray.named());
+    }
+    let _ = write!(
+        said,
+        "\nEach needs a row keyed by its file and its item (the `owner` column) on one of the \
+         two lists:\n\n  * {SOURCE_LIST} — a test whose subject really is the document's bytes: \
+         file, owner, mechanism, subject, ticket, disturbed_by_2a and the reason.\n  * \
+         {DEBT_LIST} — a reader waiting on a seam. It only shrinks: \
+         scripts/ci/check-migration-debt.ps1 refuses an added row.\n\nA reader on both lists is \
+         refused as well."
+    );
+    said
+}
+
+/// RED (T-SOURCE-READERS-TSV-TRIPWIRE) — **every item of test or
+/// build-support code that reads a committed document is a row of one of the
+/// two lists.**
+///
+/// MUTATION: add `#[test] fn planted() { std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/plans/structural-debt.md")).unwrap(); }`
+/// to any crate's tests, or a `const` that `include_str!`s a committed `.tsv`,
+/// and this names the item, its file and both lists.
+/// `a_planted_document_reader_on_neither_list_makes_the_tripwire_fire` is the
+/// same mutation on a tree of its own.
+#[test]
+fn every_reader_of_a_committed_document_is_on_a_list() {
+    let root = workspace_root();
+    let committed = committed_files(&root);
+    let documents = committed
+        .iter()
+        .filter(|path| is_document(path.as_str()))
+        .count();
+    // The floor is on what git names, not on the readers: a `git` that ran in
+    // the wrong place names nothing, and an empty subject set finds no reader.
+    assert!(
+        documents > 500,
+        "git names {documents} committed documents under {}, which is not this repository",
+        root.display()
+    );
+    let readers = document_readers(&first_party_indices(&root), &root, &committed);
+    let listed = listed_readers(&root);
+    let strays = unlisted_documents(&readers, &listed);
+    println!(
+        "{} committed documents; {} readers of them; {} rows on the two lists",
+        documents,
+        readers.len(),
+        listed.len()
+    );
+    assert!(strays.is_empty(), "{}", document_complaint(&strays));
+}
+
+/// RED — **a planted test that reads a committed document at run time, and a
+/// planted `const` that includes one, are each found, named by their item, and
+/// refused while neither list has a row for them.**
+///
+/// The plant is a crate of its own under the machine's temporary directory,
+/// with the real repository's committed paths as the subject set; written
+/// whole, it would be two readers in this file.
+#[test]
+fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
+    let plot = temporary_directory("planted-documents");
+    let module = plot.join("crates").join("planted").join("src");
+    std::fs::create_dir_all(&module).expect("a tree of our own");
+    std::fs::write(module.join("lib.rs"), planted_document_reader()).expect("the plant");
+    let universe = Universe::declare(
+        "the planted document reader",
+        vec![TargetRoot {
+            id: TargetId {
+                package: "planted".to_owned(),
+                kind: TargetKind::Library,
+                name: "planted".to_owned(),
+            },
+            file: module.join("lib.rs"),
+        }],
+        vec![DiskScope::under(&module)],
+        Vendor::Excluded,
+    )
+    .expect("the plant is there");
+    let index =
+        Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+    let committed = committed_files(&workspace_root());
+
+    let indices = [(plot.join("crates").join("planted"), index)];
+    let readers = document_readers(&indices, &plot, &committed);
+    let found: Vec<(String, Vec<Reading>, Vec<String>)> = readers
+        .iter()
+        .map(|reader| {
+            (
+                reader
+                    .owners
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" / "),
+                reader.readings.iter().copied().collect(),
+                reader.subjects.iter().cloned().collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (
+                "tests::LIST".to_owned(),
+                vec![Reading::Included],
+                vec!["crates/bt-app/src/window_waits.tsv".to_owned()]
+            ),
+            (
+                "tests::reads_the_ledger".to_owned(),
+                vec![Reading::AtRunTime],
+                vec!["docs/plans/structural-debt.md".to_owned()]
+            ),
+        ],
+        "the scan found {readers:#?}"
+    );
+
+    let listed = listed_readers(&workspace_root());
+    let strays = unlisted_documents(&readers, &listed);
+    assert_eq!(
+        strays.len(),
+        2,
+        "a planted reader was taken for a listed one"
+    );
+    let said = document_complaint(&strays);
+    assert!(
+        said.contains("crates/planted/src/lib.rs")
+            && said.contains("tests::reads_the_ledger")
+            && said.contains("docs/plans/structural-debt.md")
+            && said.contains("tests::LIST")
+            && said.contains(DEBT_LIST)
+            && said.contains(SOURCE_LIST),
+        "the refusal names each item, its file and both lists; it said:\n{said}"
+    );
+
+    // With a row each, neither is a stray.
+    let rows: BTreeSet<(String, String)> = ["tests::LIST", "tests::reads_the_ledger"]
+        .into_iter()
+        .map(|owner| ("crates/planted/src/lib.rs".to_owned(), owner.to_owned()))
+        .collect();
+    assert!(unlisted_documents(&readers, &rows).is_empty());
+
+    std::fs::remove_dir_all(&plot).expect("the plant is taken away again");
+}
+
 // ───────────────────────────────────────────────────────────── the fixture ──
 
 /// A file that reads its own tree in all four of the shapes the scan knows.
@@ -849,6 +1714,28 @@ fn planted_reader() -> String {
              let root = std::path::Path::new(env!(\"{MANIFEST_DIRECTORY}\")).join(\"src\");\n    \
              for entry in std::fs::{DIRECTORY_READ}(&root).unwrap().flatten() {{\n        \
                  if entry.path().extension().is_some_and(|kind| kind == {RUST_EXTENSION}) {{}}\n    \
+             }}\n\
+         }}\n"
+    )
+}
+
+/// A crate whose test module reads a committed document at run time and
+/// includes another in a `const`, on neither list.
+///
+/// Assembled rather than spelled, for `planted_reader`'s reason.
+fn planted_document_reader() -> String {
+    let including = concat!("include_", "str!");
+    let reading = concat!("read_", "to_string");
+    format!(
+        "//! A planted document reader, on neither list.\n\
+         #[cfg(test)]\n\
+         mod tests {{\n    \
+             const LIST: &str = {including}(\"../../bt-app/src/window_waits.tsv\");\n    \
+             #[test]\n    \
+             fn reads_the_ledger() {{\n        \
+                 let root = std::path::Path::new(env!(\"{MANIFEST_DIRECTORY}\"));\n        \
+                 let text = std::fs::{reading}(root.join(\"../../docs/plans/structural-debt.md\"));\n        \
+                 assert!(text.is_ok());\n    \
              }}\n\
          }}\n"
     )
