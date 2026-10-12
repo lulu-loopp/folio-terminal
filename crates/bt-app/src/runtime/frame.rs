@@ -1744,6 +1744,15 @@ impl Runtime<'_> {
         hang_watch::during(hang_watch::Station::ClockAdvanceCursorBlinkIfDue, || {
             self.advance_cursor_blink_if_due(now)
         })?;
+        // **A quit that holds the storage worker** (T-QUIT-DOCUMENTS): while its documents
+        // and their copies are on it, nothing else of this run's is queued there — no
+        // re-read for the storage watch and no autosave — so the session write goes behind
+        // them and behind nothing else. The watch keeps its stamps and the store its debt.
+        let quit_holds_the_worker = self
+            .app
+            .quit
+            .as_ref()
+            .is_some_and(crate::quit::Quit::holds_the_storage_worker);
         if application_clocks {
             // A poll of the world outside this process, put back on the clock
             // run's name the moment it returns (T-STATION-SPLIT).
@@ -1751,9 +1760,11 @@ impl Runtime<'_> {
             hang_watch::during(hang_watch::Station::ClockAdvanceSchemeWatch, || {
                 self.advance_scheme_watch(now)
             })?;
-            hang_watch::during(hang_watch::Station::ClockAdvanceStorageWatch, || {
-                self.advance_storage_watch(now)
-            })?;
+            if !quit_holds_the_worker {
+                hang_watch::during(hang_watch::Station::ClockAdvanceStorageWatch, || {
+                    self.advance_storage_watch(now)
+                })?;
+            }
             hang_watch::at(leaving);
         }
         // The update check is the one external fact whose semantics is a
@@ -1838,7 +1849,7 @@ impl Runtime<'_> {
         hang_watch::during(hang_watch::Station::ClockAdvanceGitWatch, || {
             self.advance_git_watch()
         })?;
-        if application_clocks {
+        if application_clocks && !quit_holds_the_worker {
             // `flush_if_due` stamps [`hang_watch::Station::Autosave`] itself,
             // and since T-STATION-SPLIT that name covers the file it writes and
             // nothing else: the clock run below says its own name on the very

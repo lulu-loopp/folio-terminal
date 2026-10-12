@@ -24,7 +24,7 @@ use bt_persist::{
     read_settings, read_settings_keeping, read_settings_keeping_bytes, remove_sentinel,
 };
 
-use crate::document_request::{DocumentState, Follow, Mode, ReadNews};
+use crate::document_request::{DocumentState, Follow, Mode, QuitDocument, ReadNews};
 
 /// The name the session document wears on disk, which is also what a notice
 /// about it has to say out loud — [`KEYBINDINGS_FILE_NAME`]'s rule, one file
@@ -663,6 +663,9 @@ enum StorageJob {
     Document(crate::document_request::DocumentJob),
     /// A hand-editable document, read while it stands still.
     Read(crate::document_request::ReadJob),
+    /// A quit's copy of a hand-editable document into the `recovered` folder,
+    /// answered on its own channel (design note 2026-10-11, revision (c)2).
+    Recovered(crate::document_request::RecoveredJob),
 }
 
 /// **What became of a trial's receipt**, and the thread that wrote it.
@@ -776,6 +779,15 @@ impl StorageLane {
         (lane, UnservedJobs { _jobs: jobs })
     }
 
+    /// **A lane whose queue a test outside this module reads** ([`ScriptedJobs`]):
+    /// every job handed over is there, in the order it was queued, and nothing
+    /// else takes it.
+    #[cfg(test)]
+    pub(crate) fn scripted() -> (Self, ScriptedJobs) {
+        let (lane, jobs) = Self::held();
+        (lane, ScriptedJobs { jobs })
+    }
+
     /// **A lane whose queue the test serves**: every job handed over arrives on
     /// the receiver this returns, in order, and nothing else takes it.
     #[cfg(test)]
@@ -870,6 +882,11 @@ impl StorageLane {
     /// Hand a document's stable read over.
     pub(crate) fn send_read(&self, job: crate::document_request::ReadJob) -> bool {
         self.admit_document_job(StorageJob::Read(job))
+    }
+
+    /// Hand a quit's copy of a document into `recovered` over.
+    pub(crate) fn send_recovered(&self, job: crate::document_request::RecoveredJob) -> bool {
+        self.admit_document_job(StorageJob::Recovered(job))
     }
 
     /// **Wake the loop** — after a document answer is in its channel: the
@@ -1009,6 +1026,11 @@ impl SessionWriter {
                         }
                         StorageJob::Read(job) => {
                             crate::document_request::serve_read(ctx, job);
+                            wake();
+                            continue;
+                        }
+                        StorageJob::Recovered(job) => {
+                            crate::document_request::serve_recovered(ctx, job);
                             wake();
                             continue;
                         }
@@ -1469,6 +1491,23 @@ impl SessionStore {
             writer_of_record,
             fault: None,
         }
+    }
+
+    /// [`Self::at`], its documents handed to `lane` — a scripted lane's queue
+    /// holds them in order beside the documents' (no receipt comes back to it).
+    #[cfg(test)]
+    pub(crate) fn at_on(session_path: PathBuf, sentinel_path: PathBuf, lane: StorageLane) -> Self {
+        let mut store = Self::at(session_path, sentinel_path);
+        let (_, receipts) = mpsc::channel();
+        store.writer = SessionWriter {
+            lane,
+            receipts,
+            sent: 0,
+            landed: 0,
+            answered: None,
+            stalled: false,
+        };
+        store
     }
 
     /// [`Self::open`] over caller-owned paths: it reads the named session and
@@ -1950,6 +1989,43 @@ pub(crate) struct UnservedJobs {
     _jobs: mpsc::Receiver<StorageJob>,
 }
 
+/// **The queue of a [`StorageLane::scripted`] lane**: a test outside this module
+/// takes each job in the order it was queued and answers it itself — the quit's
+/// scripted disk.
+#[cfg(test)]
+pub(crate) struct ScriptedJobs {
+    jobs: mpsc::Receiver<StorageJob>,
+}
+
+/// One job a scripted lane's queue held, as a test answers it.
+#[cfg(test)]
+pub(crate) enum ScriptedJob {
+    Document(crate::document_request::DocumentJob),
+    Recovered(crate::document_request::RecoveredJob),
+    /// A document's stable read.
+    Read,
+    /// A session document.
+    Session,
+    /// Anything else the worker takes.
+    Other,
+}
+
+#[cfg(test)]
+impl ScriptedJobs {
+    /// The next job queued, if one is. Never waits.
+    pub(crate) fn next(&self) -> Option<ScriptedJob> {
+        self.jobs.try_recv().ok().map(|job| match job {
+            StorageJob::Document(job) => ScriptedJob::Document(job),
+            StorageJob::Recovered(job) => ScriptedJob::Recovered(job),
+            StorageJob::Read(_) => ScriptedJob::Read,
+            StorageJob::Session(_) => ScriptedJob::Session,
+            StorageJob::SessionBackup(_)
+            | StorageJob::Receipt { .. }
+            | StorageJob::Handoff { .. } => ScriptedJob::Other,
+        })
+    }
+}
+
 /// `settings.json` and when it reaches the disk.
 ///
 /// No debouncer, unlike [`SessionStore`], and §1.1 is explicit about why the two
@@ -1992,6 +2068,12 @@ pub struct SettingsStore {
     /// document, and a door that puts in force something else than the file
     /// said — a font this machine lacks — must not write that back as a change.
     merging: bool,
+    /// **What a quit's documents phase merged without putting it in force**
+    /// (design note 2026-10-11, revision (c)2: merges at quit are pure, no door
+    /// runs). `desired` already holds the merged document; a quit that was
+    /// cancelled leaves the window standing, and the next storage pass puts it in
+    /// force through its doors and says it ([`Self::begin_merge`]).
+    merged_at_quit: Option<crate::settings_merge::Account>,
 }
 
 impl SettingsStore {
@@ -2035,6 +2117,7 @@ impl SettingsStore {
             missing: report == ReadReport::NotFound,
             held: None,
             merging: false,
+            merged_at_quit: None,
         }
     }
 
@@ -2101,6 +2184,7 @@ impl SettingsStore {
             missing: true,
             held: None,
             merging: false,
+            merged_at_quit: None,
         }
     }
 
@@ -2196,17 +2280,18 @@ impl SettingsStore {
         &mut self,
         platform: bt_platform::HostPlatform,
     ) -> Option<crate::settings_merge::SettingsPass> {
-        if !self.document.merge_waits() {
+        let at_quit = self.merged_at_quit.take();
+        if !self.document.merge_waits() && at_quit.is_none() {
             return None;
         }
         let merges = self.document.merge_stored(|base, ours, theirs| {
             let merged = crate::settings_merge::merge(base, ours, theirs, platform);
             (merged.document, merged.account)
         });
-        if merges.is_empty() {
+        if merges.is_empty() && at_quit.is_none() {
             return None;
         }
-        let mut account = crate::settings_merge::Account::default();
+        let mut account = at_quit.unwrap_or_default();
         for merge in merges {
             account.add(merge);
         }
@@ -2220,6 +2305,28 @@ impl SettingsStore {
             crate::settings_merge::doors(self.document.projection(), &merged, platform),
             account,
         ))
+    }
+
+    /// **A quit's merge** (design note 2026-10-11, revision (c)2): every file
+    /// stored for the merge is merged and folded into `desired`, as
+    /// [`Self::begin_merge`] does, and **nothing is put in force** — no door runs,
+    /// the windows are leaving. What it merged is kept for the next storage pass,
+    /// which puts it in force should the quit be cancelled.
+    fn merge_at_quit(&mut self, platform: bt_platform::HostPlatform) {
+        if !self.document.merge_waits() {
+            return;
+        }
+        let merges = self.document.merge_stored(|base, ours, theirs| {
+            let merged = crate::settings_merge::merge(base, ours, theirs, platform);
+            (merged.document, merged.account)
+        });
+        if merges.is_empty() {
+            return;
+        }
+        let account = self.merged_at_quit.get_or_insert_with(Default::default);
+        for merge in merges {
+            account.add(merge);
+        }
     }
 
     /// **A storage pass's merge, its last step**: the writes are released, and
@@ -2251,6 +2358,48 @@ impl SettingsStore {
     }
 }
 
+/// `settings.json` in a quit (design note 2026-10-11, revision (c)2): its
+/// [`DocumentState`]'s answers, and a turn that folds a changed file in before
+/// it sends — a `Moved` or `Displaced` answer at quit is merged as the running
+/// window merges it, without the doors.
+impl QuitDocument for SettingsStore {
+    fn file(&self) -> &'static str {
+        self.document.file()
+    }
+
+    fn quit_begin(&mut self) {
+        self.document.quit_begin();
+    }
+
+    fn quit_turn(&mut self) {
+        let _ = self.document.take_answers();
+        self.merge_at_quit(bt_platform::host_platform());
+        if self.document.standing() == crate::quit::Standing::Unsent {
+            self.document.send_owed();
+        }
+    }
+
+    fn standing(&self) -> crate::quit::Standing {
+        self.document.standing()
+    }
+
+    fn keep_copy(&mut self, folder: &Path, at: std::time::SystemTime) {
+        self.document.keep_copy(folder, at);
+    }
+
+    fn copy_standing(&mut self) -> crate::quit::CopyStanding {
+        self.document.copy_standing()
+    }
+
+    fn drop_owed(&mut self) -> Option<String> {
+        self.document.drop_owed()
+    }
+
+    fn owed_bytes(&self) -> Option<Result<Vec<u8>, String>> {
+        self.document.owed_bytes()
+    }
+}
+
 /// The name the shortcut file wears on disk, which is also what a notice about
 /// it has to say out loud.
 pub const KEYBINDINGS_FILE_NAME: &str = "keybindings.json";
@@ -2279,6 +2428,41 @@ pub struct KeybindingsStore {
     document: DocumentState<KeybindingsV1>,
     /// Why the file on disk was not usable, if it was not.
     fault: Option<String>,
+}
+
+/// `keybindings.json` in a quit and on a stop: its [`DocumentState`]'s answers (T-QUIT-DOCUMENTS).
+impl QuitDocument for KeybindingsStore {
+    fn file(&self) -> &'static str {
+        self.document.file()
+    }
+
+    fn quit_begin(&mut self) {
+        self.document.quit_begin();
+    }
+
+    fn quit_turn(&mut self) {
+        self.document.quit_turn();
+    }
+
+    fn standing(&self) -> crate::quit::Standing {
+        self.document.standing()
+    }
+
+    fn keep_copy(&mut self, folder: &std::path::Path, at: std::time::SystemTime) {
+        self.document.keep_copy(folder, at);
+    }
+
+    fn copy_standing(&mut self) -> crate::quit::CopyStanding {
+        self.document.copy_standing()
+    }
+
+    fn drop_owed(&mut self) -> Option<String> {
+        self.document.drop_owed()
+    }
+
+    fn owed_bytes(&self) -> Option<Result<Vec<u8>, String>> {
+        self.document.owed_bytes()
+    }
 }
 
 impl KeybindingsStore {
@@ -2468,6 +2652,41 @@ pub struct ProfilesStore {
     document: DocumentState<ProfilesV1>,
     /// Why the file on disk was not usable, if it was not.
     fault: Option<String>,
+}
+
+/// `profiles.json` in a quit and on a stop: its [`DocumentState`]'s answers (T-QUIT-DOCUMENTS).
+impl QuitDocument for ProfilesStore {
+    fn file(&self) -> &'static str {
+        self.document.file()
+    }
+
+    fn quit_begin(&mut self) {
+        self.document.quit_begin();
+    }
+
+    fn quit_turn(&mut self) {
+        self.document.quit_turn();
+    }
+
+    fn standing(&self) -> crate::quit::Standing {
+        self.document.standing()
+    }
+
+    fn keep_copy(&mut self, folder: &std::path::Path, at: std::time::SystemTime) {
+        self.document.keep_copy(folder, at);
+    }
+
+    fn copy_standing(&mut self) -> crate::quit::CopyStanding {
+        self.document.copy_standing()
+    }
+
+    fn drop_owed(&mut self) -> Option<String> {
+        self.document.drop_owed()
+    }
+
+    fn owed_bytes(&self) -> Option<Result<Vec<u8>, String>> {
+        self.document.owed_bytes()
+    }
 }
 
 impl ProfilesStore {

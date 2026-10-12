@@ -1142,6 +1142,8 @@ mod tests {
             step = match step {
                 QuitStep::Ask => quit.answer(QuitAnswer::Discard),
                 QuitStep::Discard => quit.discarded(),
+                QuitStep::Documents => quit.documents(&[], start),
+                QuitStep::Recovery => quit.recovery(&[], start),
                 QuitStep::Photograph => quit.photographed(),
                 QuitStep::Write if quit.awaited_generation().is_none() => quit.requested(7, start),
                 QuitStep::Write => quit.written(WriteVerdict::Landed),
@@ -1452,6 +1454,7 @@ mod tests {
                 _ => {
                     steps.push(quit.answer(QuitAnswer::Discard));
                     steps.push(quit.discarded());
+                    steps.push(quit.documents(&[], Instant::now()));
                     steps.push(quit.photographed());
                     steps.push(quit.requested(3, Instant::now()));
                     quit.written(WriteVerdict::Refused)
@@ -1498,7 +1501,8 @@ mod tests {
         let staged = staged(&folder);
         let (mut job, reason) = quitting_job();
         let mut quit = Quit::begin_for(Vec::new(), reason);
-        assert_eq!(quit.step(), QuitStep::Photograph);
+        assert_eq!(quit.step(), QuitStep::Documents);
+        assert_eq!(quit.documents(&[], Instant::now()), QuitStep::Photograph);
         quit.photographed();
         let mut store =
             SessionStore::at(folder.0.join("session.json"), folder.0.join("session.lock"));

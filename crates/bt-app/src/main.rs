@@ -13445,6 +13445,13 @@ struct App {
     /// for why it is a state machine the loop advances rather than a function the
     /// chord calls.
     quit: Option<quit::Quit>,
+    /// **The person chose, on a cancelled quit's card, to leave without the changes
+    /// it names** (T-QUIT-DOCUMENTS; design note 2026-10-11, revision (d)2): the
+    /// cancellation, chosen, for the quit that choice asks for. Written by the
+    /// card's verb ([`Self::leave_without`]) and taken when that quit begins
+    /// ([`FolioApp::begin_quit_if_asked`]), which drops exactly those documents'
+    /// changes first. A quit asked any other way finds none here and drops nothing.
+    leave_without: Option<quit::Cancelled>,
     /// **Every window this process has open, as a menu can name it** (B9, user
     /// ruling 2026-08-25).
     ///
@@ -14068,6 +14075,10 @@ struct WindowRuntime {
     /// The card that said where the edits a stop kept are, and the folder a press on it opens
     /// (T-RECOVERED-FOLDER) — [`Self::checkout_undo`]'s shape, for its reason.
     recovered_card: Option<recovered::Raised>,
+    /// **The card a cancelled quit raised on this window**, and the documents its one
+    /// choice leaves without (T-QUIT-DOCUMENTS) — [`Self::recovered_card`]'s shape, for
+    /// its reason: a verb pressed on another card chooses nothing.
+    quit_card: Option<quit::Raised>,
     /// The last dark/light this window told DWM it was wearing
     /// (`bt_platform::set_window_dark_mode`), or `None` before it has said
     /// anything (§7.1.6c-4f amendment).
@@ -18846,6 +18857,29 @@ fn keep_unsaved_edits_over(
     tabs.iter_mut()
         .flat_map(|tab| tab.preview_pool.keep_dirty(recovery, at))
         .collect()
+}
+
+/// **The cancelled quit's card, raised on `toasts`** (T-QUIT-DOCUMENTS; design note
+/// 2026-10-11, revision (d)2): an Error card anchored to the window, its statement the
+/// files that could not be saved — at most three named, then how many more — and its
+/// one verb, **Leave without this change**, the cancelled quit's only way out without
+/// them. A plain statement and no advice: the full list, with why, is in
+/// `diagnostics.log`.
+fn raise_cancelled_quit_card_on(
+    toasts: &mut toast::ToastHost,
+    cancelled: &quit::Cancelled,
+    motion: Motion,
+    now: Instant,
+) -> toast::ToastId {
+    toasts.raise(
+        toast::ToastKind::Error,
+        toast::ToastAnchor::Window,
+        None,
+        cancelled.sentence(),
+        Some(i18n::Text::QuitLeaveWithoutChange.text().to_owned()),
+        motion,
+        now,
+    )
 }
 
 /// **What an answer to one of the two exits comes to over the asking window's
@@ -43808,6 +43842,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         checkout_from: None,
         checkout_undo: None,
         recovered_card: None,
+        quit_card: None,
         settings_scroll: 0.0,
         profile_menu: profiles::ProfileMenu::default(),
         chevron_turn: ChevronTurn::default(),
@@ -45301,6 +45336,7 @@ impl Runtime<'_> {
             update_job: the_update_job,
             update_shown: update_card::Shown::default(),
             quit_reason: quit::Reason::Asked,
+            leave_without: None,
             handoff_answer: None,
         };
         // **The rest of the file's windows, queued at the door.** A window that
@@ -54156,6 +54192,73 @@ impl App {
     /// are three places for a fourth door to be written differently.
     fn ask_to_quit(&mut self) {
         self.quit_requested = true;
+    }
+
+    /// **Leave without this change, on a cancelled quit's card** (T-QUIT-DOCUMENTS;
+    /// revision (d)2): the quit is asked for again through the one door every quit
+    /// goes through, carrying the choice — the documents the card named are dropped
+    /// for this run when it begins, and nothing else is. A quit already asked for or
+    /// under way owns the windows, and the press does nothing.
+    fn leave_without(&mut self, cancelled: quit::Cancelled) {
+        if self.quit.is_some() || self.quit_requested {
+            return;
+        }
+        self.quit_reason = cancelled.resumed_reason();
+        self.leave_without = Some(cancelled);
+        self.ask_to_quit();
+    }
+
+    /// **The four hand-editable documents' stores, as a quit and a stop ask them**
+    /// (T-QUIT-DOCUMENTS), in their order: `settings.json`, `keybindings.json`,
+    /// `profiles.json`, `pins.json`. Answers what `ask` does with them; nothing of
+    /// them is lent out past it.
+    fn with_documents<R>(
+        &mut self,
+        ask: impl FnOnce(&mut [&mut dyn document_request::QuitDocument]) -> R,
+    ) -> R {
+        ask(&mut [
+            &mut self.settings_store,
+            &mut self.keybindings_store,
+            &mut self.profiles_store,
+            &mut self.pins_store,
+        ])
+    }
+
+    /// **One turn of the quit's documents phase** over the four stores
+    /// ([`quit::Quit::documents_turn`]); `None` without a quit.
+    fn quit_documents_turn(&mut self, now: Instant) -> Option<quit::QuitStep> {
+        let quit = self.quit.as_mut()?;
+        Some(quit.documents_turn(
+            &mut [
+                &mut self.settings_store,
+                &mut self.keybindings_store,
+                &mut self.profiles_store,
+                &mut self.pins_store,
+            ],
+            now,
+        ))
+    }
+
+    /// **One turn of the quit's recovery phase** over the four stores, the copies
+    /// going into `folder` ([`quit::Quit::recovery_turn`]); `None` without a quit.
+    fn quit_recovery_turn(
+        &mut self,
+        folder: &Path,
+        at: SystemTime,
+        now: Instant,
+    ) -> Option<quit::QuitStep> {
+        let quit = self.quit.as_mut()?;
+        Some(quit.recovery_turn(
+            &mut [
+                &mut self.settings_store,
+                &mut self.keybindings_store,
+                &mut self.profiles_store,
+                &mut self.pins_store,
+            ],
+            folder,
+            at,
+            now,
+        ))
     }
 
     /// **Uninstall, on the Settings card** (T-UNINSTALL-UX): the ordinary quit is
@@ -65433,6 +65536,17 @@ impl FolioApp {
     /// the storage pass's are. With no window standing the answers wait in their
     /// channels for the next wake.
     fn take_document_answers(&mut self) -> Result<()> {
+        // **Not while a quit holds the storage worker** (T-QUIT-DOCUMENTS): its documents and
+        // recovery phases take the answers themselves, on the turn this wake brings, and merge
+        // without the doors.
+        if self
+            .app
+            .as_ref()
+            .and_then(|app| app.quit.as_ref())
+            .is_some_and(quit::Quit::holds_the_storage_worker)
+        {
+            return Ok(());
+        }
         for index in 0..self.windows.len() {
             let Some(mut runtime) = self.runtime_at(index) else {
                 continue;
@@ -66281,6 +66395,32 @@ impl FolioApp {
                     self.for_each_window(|runtime| runtime.quit_discard())?;
                     self.report_to_quit(quit::Quit::discarded);
                 }
+                // **The hand-editable documents, before the session** (T-QUIT-DOCUMENTS; design
+                // note 2026-10-11, revision (c)2). Both phases are a clock read on the turn, never
+                // a wait: the storage worker wakes the loop with each answer
+                // (`AppEvent::DocumentsAnswered`, which leaves the answers to this arm while the
+                // quit holds the worker), and `Quit::deadline` wakes it at the phase's bound.
+                quit::QuitStep::Documents => {
+                    let now = Instant::now();
+                    let step = self
+                        .app
+                        .as_mut()
+                        .and_then(|app| app.quit_documents_turn(now));
+                    if step == Some(quit::QuitStep::Documents) {
+                        return Ok(());
+                    }
+                }
+                quit::QuitStep::Recovery => {
+                    let now = Instant::now();
+                    let folder = persist::storage_dir().join(preview::RECOVERED_FOLDER);
+                    let step = self
+                        .app
+                        .as_mut()
+                        .and_then(|app| app.quit_recovery_turn(&folder, SystemTime::now(), now));
+                    if step == Some(quit::QuitStep::Recovery) {
+                        return Ok(());
+                    }
+                }
                 // **Read-only, over every window, before anything else happens.**
                 quit::QuitStep::Photograph => {
                     // **And no launch is promised a window from here on** (0.4.6 U-21, §C.3),
@@ -66451,8 +66591,13 @@ impl FolioApp {
                     // no uninstaller after *Uninstall* on the Settings card (T-UNINSTALL-UX).
                     update_handoff::disarm();
                     uninstall::disarm();
+                    let mut cancelled = None;
                     if let Some(app) = self.app.as_mut() {
+                        cancelled = app.quit.as_mut().and_then(quit::Quit::take_cancelled);
                         app.quit = None;
+                    }
+                    if let Some(cancelled) = cancelled {
+                        self.say_the_cancelled_quit(cancelled)?;
                     }
                     // **`NSTerminateCancel`** (M3-1): the reader answered the
                     // card with *Cancel*, or the session could not be written.
@@ -66494,6 +66639,15 @@ impl FolioApp {
             return Ok(());
         };
         let reason = std::mem::replace(&mut app.quit_reason, quit::Reason::Asked);
+        // **Only the card's choice leaves without a change** (revision (d)2): the documents
+        // it named are dropped for this run, each named in `diagnostics.log` before the way
+        // out; a quit asked any other way drops nothing and runs the transaction again.
+        let dropped = quit::dropped_on_begin(app.leave_without.take());
+        if !dropped.is_empty() {
+            for line in app.with_documents(|documents| quit::drop_documents(documents, &dropped)) {
+                diagnostics::note(&line);
+            }
+        }
         app.quit = Some(quit::Quit::begin_for(names, reason));
         // The card, on every window — one question, and no window left taking
         // keys behind it. A quit with nothing to ask about raises none, so this
@@ -66512,6 +66666,34 @@ impl FolioApp {
             })?;
         }
         Ok(())
+    }
+
+    /// **Say a quit the documents phase cancelled** (T-QUIT-DOCUMENTS; revision (d)2):
+    /// every document it could not keep, with why, in `diagnostics.log`; one Error card on
+    /// the window the keyboard is on (or the oldest one standing) naming the files, with
+    /// its one choice, *Leave without this change*; and what the documents phase merged
+    /// without its doors, put in force now that the windows stay (the ordinary storage
+    /// pass, `Runtime::take_document_answers`).
+    fn say_the_cancelled_quit(&mut self, cancelled: quit::Cancelled) -> Result<()> {
+        for line in cancelled.lines() {
+            diagnostics::note(&line);
+        }
+        self.take_document_answers()?;
+        let oldest_standing = |app: &mut Self| {
+            (0..app.windows.len()).find_map(|index| {
+                let id = app.windows.key_at(index)?;
+                app.windows
+                    .get_mut(id)
+                    .is_some_and(|window| window.leaving.is_none())
+                    .then_some(id)
+            })
+        };
+        let Some(id) = self.frontmost_window().or_else(|| oldest_standing(self)) else {
+            return Ok(());
+        };
+        self.runtime(id).map_or(Ok(()), |mut runtime| {
+            runtime.raise_cancelled_quit_card(cancelled)
+        })
     }
 
     /// Hand the transaction one report, if there is a transaction to hand it to.
@@ -75659,6 +75841,8 @@ mod app_peek_tests;
 mod app_preview_tests;
 #[cfg(test)]
 mod app_profiles_tests;
+#[cfg(test)]
+mod app_quit_tests;
 #[cfg(test)]
 mod app_tabs_tests;
 #[cfg(test)]

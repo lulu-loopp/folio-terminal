@@ -23,6 +23,20 @@
 //!    that is what makes the browser-exit deadline a dead letter: nothing drives
 //!    the clock it is hung on once the loop has stopped (審 #14).
 //!
+//! # The documents before the session
+//!
+//! Between the gate and the photograph the quit puts the hand-editable documents
+//! on the disk (`docs/plans/design/settings-reread-2026-10-11.md`, revisions (c)2
+//! and (d)2): [`QuitStep::Documents`] sends each owed document and turns the loop
+//! until every one has landed or has a terminal answer, and [`QuitStep::Recovery`]
+//! copies each one that could not be written into the data directory's
+//! `recovered` folder. One [`crate::persist::SESSION_SAVE_BUDGET`] covers both and
+//! the session write after them ([`QUIT_DOCUMENTS_BY`], [`QUIT_RECOVERY_BY`]). **A
+//! quit that cannot keep the person's change is cancelled, not completed**: the
+//! window stays, and one card names the files with one choice, *Leave without this
+//! change* ([`Raised`]). Only that choice leaves without them ([`dropped_on_begin`]);
+//! a quit asked again runs the transaction again.
+//!
 //! So the transaction is a value the loop advances, and the effects belong to
 //! whoever holds the windows. This module owns the **order** and the **verdicts**
 //! and nothing else, which is what makes both testable without a GPU.
@@ -52,8 +66,11 @@
 //! something that is *not* a quit and not a window closing, and for that job its
 //! shape is right.
 
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::time::{Duration, Instant, SystemTime};
 
+use crate::document_request::QuitDocument;
+use crate::toast::{ToastHit, ToastId};
 use crate::update_job::{Abandon, Progress, Step};
 use crate::update_txn::TxnId;
 
@@ -92,6 +109,38 @@ pub const PAGE_TEARDOWN_DEADLINE: Duration =
 /// must not hand the installation to an applier — while for the quit it is the
 /// ordinary [`WriteVerdict::TimedOut`], which leaves.
 pub(crate) const UPDATE_RECEIPT_DEADLINE: Duration = crate::persist::SESSION_SAVE_BUDGET;
+
+/// **When a quit's documents phase ends, measured from its start** (design note
+/// `docs/plans/design/settings-reread-2026-10-11.md`, revision (c)2): half of
+/// [`crate::persist::SESSION_SAVE_BUDGET`], 1.5 s.
+///
+/// **The budget is the session store's own, shared and not added to.** One
+/// `SESSION_SAVE_BUDGET` from the start of [`QuitStep::Documents`] covers the four
+/// hand-editable documents, the copies of the ones that could not be written
+/// ([`QuitStep::Recovery`]), and the session write queued after them. Each owed
+/// document is sent once more — a quit is one of the triggers an owed edit is retried
+/// on — and every answer is processed as the running window processes it, a `Moved`
+/// or `Displaced` merged (purely: no door runs) and the merged document sent again.
+/// The phase ends when every store has landed or has an answer no further write of
+/// this quit changes. **A document still unanswered at this bound cancels the
+/// quit**: the storage worker is inside its write, and a copy queued behind it could
+/// not land. Like [`UPDATE_RECEIPT_DEADLINE`], a clock read on each turn
+/// ([`Quit::deadline`]), never a wait.
+pub(crate) const QUIT_DOCUMENTS_BY: Duration = crate::persist::SESSION_SAVE_BUDGET
+    .checked_div(2)
+    .expect("the session budget halves");
+
+/// **When a quit's recovery phase ends, measured from the start of its documents
+/// phase** (revision (c)2): five sixths of [`crate::persist::SESSION_SAVE_BUDGET`],
+/// 2.5 s — the half second after it is the session write's, which is queued only
+/// behind copies that landed and only while the budget lasts.
+///
+/// A copy that has no receipt by this bound cancels the quit, as a refused copy
+/// does: the change it carries is in no file and in no copy.
+pub(crate) const QUIT_RECOVERY_BY: Duration = crate::persist::SESSION_SAVE_BUDGET
+    .saturating_mul(5)
+    .checked_div(6)
+    .expect("the session budget divides by six");
 
 /// **How long the way out waits for the hand-over's answer** (U-21; sized by
 /// U-34): fifteen seconds.
@@ -172,6 +221,178 @@ pub(crate) enum Handoff {
 struct Receipt {
     generation: u64,
     until: Instant,
+}
+
+/// **Why a document the documents phase sent had no answer by
+/// [`QUIT_DOCUMENTS_BY`]**, as `diagnostics.log` says it.
+const NO_ANSWER_IN_TIME: &str = "its write had no answer within the quit's time";
+
+/// **Where one hand-editable document stands in a quit's documents phase**
+/// (revision (c)2), as its store answers [`QuitDocument::standing`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Standing {
+    /// Nothing of this run's is owed: the file holds what Folio wants on it, this
+    /// process does not write it, or an update's trial holds its writes.
+    Settled,
+    /// Owed, with nothing on the storage worker: the turn sends it.
+    Unsent,
+    /// A write is on the storage worker and unanswered.
+    Waiting,
+    /// Owed, and no write this quit makes will land it — `Refused` of any kind, a
+    /// file that changed on disk and that no merge can fold (one that will not
+    /// parse, or a document whose merge is still to be built), or a document
+    /// held for its merge — and why.
+    Terminal(String),
+}
+
+/// **Where one document's copy into `recovered` stands** (the recovery phase).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CopyStanding {
+    /// On the storage worker, unanswered.
+    Waiting,
+    /// The copy landed: the file is flushed and so is the folder.
+    Kept(std::path::PathBuf),
+    /// The copy was refused, and why.
+    Refused(String),
+}
+
+/// **A document a cancelled quit could not keep**: its file, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Unsaved {
+    pub(crate) file: &'static str,
+    pub(crate) why: String,
+}
+
+/// **A quit the documents phase cancelled** (revisions (c)2 and (d)2): the
+/// documents it could not keep, and whether the person chose, on its card, to
+/// leave without them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Cancelled {
+    unsaved: Vec<Unsaved>,
+    /// Why the cancelled quit began; the quit the card's choice resumes begins for
+    /// the same reason, except an update's, which the cancellation gave up.
+    reason: Reason,
+    /// **Leave without this change** was pressed on the card.
+    chosen: bool,
+}
+
+impl Cancelled {
+    /// A person's quit cancelled over `files`, each with why — for a test that raises
+    /// its card.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn of(files: &[&'static str]) -> Self {
+        Self {
+            unsaved: files
+                .iter()
+                .map(|file| Unsaved {
+                    file,
+                    why: "its write was refused: 磁盘已满 the disk is full".to_owned(),
+                })
+                .collect(),
+            reason: Reason::Asked,
+            chosen: false,
+        }
+    }
+
+    /// The files the card names, in the stores' order.
+    #[must_use]
+    pub(crate) fn files(&self) -> Vec<&'static str> {
+        self.unsaved.iter().map(|unsaved| unsaved.file).collect()
+    }
+
+    /// **The card's statement**: the files, at most three named, then how many
+    /// more ((b)11's bound).
+    #[must_use]
+    pub(crate) fn sentence(&self) -> String {
+        crate::i18n::quit_documents_not_saved(&self.files())
+    }
+
+    /// **The full list for `diagnostics.log`**, one line per document with why —
+    /// the card names at most three.
+    #[must_use]
+    pub(crate) fn lines(&self) -> Vec<String> {
+        self.unsaved
+            .iter()
+            .map(|unsaved| {
+                format!(
+                    "{} did not quit: {} could not be saved ({})",
+                    crate::APP_NAME,
+                    unsaved.file,
+                    unsaved.why
+                )
+            })
+            .collect()
+    }
+
+    /// **The card's choice was made**: the person leaves without the named
+    /// documents' changes.
+    #[must_use]
+    pub(crate) fn chosen(mut self) -> Self {
+        self.chosen = true;
+        self
+    }
+
+    /// Why the quit the choice resumes begins: the cancelled quit's reason, except
+    /// an update's Restart, which the cancellation already gave up and said.
+    #[must_use]
+    pub(crate) fn resumed_reason(&self) -> Reason {
+        match self.reason {
+            Reason::UpdateRestart { .. } => Reason::Asked,
+            reason => reason,
+        }
+    }
+}
+
+/// **What a quit beginning drops first** (revision (d)2): the documents a
+/// cancelled quit's card named, **only when the person chose Leave without this
+/// change on it**. A quit asked again without that choice — by the menu, the
+/// shortcut or a window's close — is not a discard: it runs the transaction again
+/// from the documents phase, and drops nothing. The cancellation is spent either
+/// way.
+#[must_use]
+pub(crate) fn dropped_on_begin(cancelled: Option<Cancelled>) -> Vec<&'static str> {
+    cancelled
+        .filter(|cancelled| cancelled.chosen)
+        .map(|cancelled| cancelled.files())
+        .unwrap_or_default()
+}
+
+/// **Drop, for this run, the owed changes of the documents named `files`** — the
+/// person chose, on the card that named them, to leave without them (revision
+/// (d)2) — and answer the `diagnostics.log` lines naming each file and its units,
+/// which are written before the way out. Every other document is left as it was.
+pub(crate) fn drop_documents(
+    documents: &mut [&mut dyn QuitDocument],
+    files: &[&'static str],
+) -> Vec<String> {
+    documents
+        .iter_mut()
+        .filter(|document| files.contains(&document.file()))
+        .filter_map(|document| document.drop_owed())
+        .collect()
+}
+
+/// **The cancelled quit's card, and what a press on it answers** (revision (d)2):
+/// one Error card on the window, its statement naming the files, and its one verb,
+/// **Leave without this change**.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Raised {
+    pub(crate) card: ToastId,
+    pub(crate) cancelled: Cancelled,
+}
+
+impl Raised {
+    /// **The choice, when the press was the card's verb** — the cancellation, now
+    /// chosen. The card's `×`, a press on its body and another card's verb choose
+    /// nothing: dismissing the card leaves Folio open and its changes owed.
+    #[must_use]
+    pub(crate) fn press(&self, hit: ToastHit) -> Option<Cancelled> {
+        match hit {
+            ToastHit::Action(card) if card == self.card => Some(self.cancelled.clone().chosen()),
+            ToastHit::Action(_) | ToastHit::Card(_) | ToastHit::Close(_) => None,
+        }
+    }
 }
 
 /// What a press on the summary card answers.
@@ -255,6 +476,16 @@ pub enum QuitStep {
     /// because it is a change to every window and the answer arrives inside one:
     /// the same reason the whole transaction is a value the loop advances.
     Discard,
+    /// **Put the owed hand-editable documents on the disk** (revision (c)2's documents
+    /// phase): send each owed one, take what the storage worker answers, and report
+    /// with [`Quit::documents_turn`] — on every turn, until every store has landed or
+    /// has a terminal answer, or [`QUIT_DOCUMENTS_BY`] has passed.
+    Documents,
+    /// **Copy each document that could not be written into the data directory's
+    /// `recovered` folder** (revision (c)2's recovery phase), and report with
+    /// [`Quit::recovery_turn`] — on every turn, until every copy has landed, one is
+    /// refused, or [`QUIT_RECOVERY_BY`] has passed.
+    Recovery,
     /// Take every window's picture and assemble the document. **Read-only** —
     /// nothing is torn down here. Report with [`Quit::photographed`].
     Photograph,
@@ -305,6 +536,15 @@ impl WriteVerdict {
 pub struct Quit {
     phase: Phase,
     reason: Reason,
+    /// **When the documents phase began** — the start of the one
+    /// [`crate::persist::SESSION_SAVE_BUDGET`] the documents, their copies and the
+    /// session write share. Set by the phase's first turn.
+    documents_from: Option<Instant>,
+    /// The documents the documents phase could not write, each with why: the
+    /// recovery phase copies these, and a cancellation names them.
+    unsaved: Vec<Unsaved>,
+    /// The cancellation this quit ended in, until the driver takes it.
+    cancelled: Option<Cancelled>,
     /// The update this quit is running for, if it is one (U-21).
     update: Option<Update>,
     /// What the card names, collected once when the question was put.
@@ -323,6 +563,8 @@ enum Phase {
     Asking,
     Saving,
     Discarding,
+    Documents,
+    Recovery,
     Photographing,
     /// The write. An update's quit hands a named generation over and waits for
     /// its receipt across turns (`receipt`); every other quit is one call.
@@ -362,7 +604,7 @@ impl Quit {
     #[must_use]
     pub(crate) fn begin_for(names: Vec<String>, reason: Reason) -> Self {
         let phase = if names.is_empty() {
-            Phase::Photographing
+            Phase::Documents
         } else {
             Phase::Asking
         };
@@ -377,6 +619,9 @@ impl Quit {
         Self {
             phase,
             reason,
+            documents_from: None,
+            unsaved: Vec::new(),
+            cancelled: None,
             update,
             names,
             hover: None,
@@ -420,6 +665,8 @@ impl Quit {
             Phase::Asking => QuitStep::Ask,
             Phase::Saving => QuitStep::Save,
             Phase::Discarding => QuitStep::Discard,
+            Phase::Documents => QuitStep::Documents,
+            Phase::Recovery => QuitStep::Recovery,
             Phase::Photographing => QuitStep::Photograph,
             Phase::Writing { .. } => QuitStep::Write,
             Phase::Retiring => QuitStep::Retire,
@@ -549,7 +796,7 @@ impl Quit {
             return self.step();
         }
         self.phase = if report.is_complete() {
-            Phase::Photographing
+            Phase::Documents
         } else {
             self.give_up_the_update(Abandon::SaveIncomplete);
             Phase::Abandoned
@@ -562,8 +809,203 @@ impl Quit {
         if self.phase != Phase::Discarding {
             return self.step();
         }
+        self.phase = Phase::Documents;
+        self.step()
+    }
+
+    /// **Whether the quit holds the storage worker for its documents and their
+    /// copies** ([`QuitStep::Documents`], [`QuitStep::Recovery`]): nothing but what
+    /// those phases send is queued on it meanwhile — no autosave of the session and
+    /// no re-read for the storage watch — so the session write is queued behind the
+    /// documents and their copies, and behind nothing else of this run's.
+    #[must_use]
+    pub(crate) fn holds_the_storage_worker(&self) -> bool {
+        matches!(self.phase, Phase::Documents | Phase::Recovery)
+    }
+
+    /// **One turn of the documents phase over `documents`** (revision (c)2): the
+    /// first turn hands every owed document over once more (a quit is a trigger an
+    /// owed edit is retried on, design note §4.1); every turn takes what the storage
+    /// worker answered, merges purely what a merge can fold, sends what is owed and
+    /// has nothing on the worker, and reports each store's [`Standing`] to
+    /// [`Self::documents`].
+    pub(crate) fn documents_turn(
+        &mut self,
+        documents: &mut [&mut dyn QuitDocument],
+        now: Instant,
+    ) -> QuitStep {
+        if self.phase != Phase::Documents {
+            return self.step();
+        }
+        if self.documents_from.is_none() {
+            for document in documents.iter_mut() {
+                document.quit_begin();
+            }
+        }
+        for document in documents.iter_mut() {
+            document.quit_turn();
+        }
+        let standings: Vec<(&'static str, Standing)> = documents
+            .iter()
+            .map(|document| (document.file(), document.standing()))
+            .collect();
+        self.documents(&standings, now)
+    }
+
+    /// **The documents phase, decided from each store's standing at `now`.**
+    ///
+    /// The phase's clock starts at its first report. While a store is still
+    /// waiting for an answer (or has one to send), the phase goes on until
+    /// [`QUIT_DOCUMENTS_BY`], and past it the quit is **cancelled**: the window
+    /// stays, and [`Self::take_cancelled`] names every document not on the disk.
+    /// Once none is waiting, the phase is over: with every store landed the quit
+    /// goes on to the photograph and the session write; with a terminal answer
+    /// among them, to [`QuitStep::Recovery`] for those documents.
+    pub(crate) fn documents(
+        &mut self,
+        standings: &[(&'static str, Standing)],
+        now: Instant,
+    ) -> QuitStep {
+        if self.phase != Phase::Documents {
+            return self.step();
+        }
+        let start = *self.documents_from.get_or_insert(now);
+        let waiting = standings
+            .iter()
+            .any(|(_, standing)| matches!(standing, Standing::Waiting | Standing::Unsent));
+        if waiting {
+            if now >= start + QUIT_DOCUMENTS_BY {
+                let unsaved = standings
+                    .iter()
+                    .filter_map(|(file, standing)| {
+                        let why = match standing {
+                            Standing::Settled => return None,
+                            Standing::Waiting | Standing::Unsent => NO_ANSWER_IN_TIME.to_owned(),
+                            Standing::Terminal(why) => why.clone(),
+                        };
+                        Some(Unsaved { file, why })
+                    })
+                    .collect();
+                self.cancel(unsaved);
+            }
+            return self.step();
+        }
+        self.unsaved = standings
+            .iter()
+            .filter_map(|(file, standing)| match standing {
+                Standing::Terminal(why) => Some(Unsaved {
+                    file,
+                    why: why.clone(),
+                }),
+                Standing::Settled | Standing::Waiting | Standing::Unsent => None,
+            })
+            .collect();
+        self.phase = if self.unsaved.is_empty() {
+            Phase::Photographing
+        } else {
+            Phase::Recovery
+        };
+        self.step()
+    }
+
+    /// **One turn of the recovery phase over `documents`** (revision (c)2): each
+    /// document the documents phase could not write is handed to the storage worker
+    /// as a copy into `folder` once, and every copy's standing is reported to
+    /// [`Self::recovery`].
+    pub(crate) fn recovery_turn(
+        &mut self,
+        documents: &mut [&mut dyn QuitDocument],
+        folder: &Path,
+        at: SystemTime,
+        now: Instant,
+    ) -> QuitStep {
+        if self.phase != Phase::Recovery {
+            return self.step();
+        }
+        let mut copies = Vec::new();
+        for document in documents.iter_mut() {
+            if self
+                .unsaved
+                .iter()
+                .any(|unsaved| unsaved.file == document.file())
+            {
+                document.keep_copy(folder, at);
+                copies.push((document.file(), document.copy_standing()));
+            }
+        }
+        self.recovery(&copies, now)
+    }
+
+    /// **The recovery phase, decided from each copy's standing at `now`.**
+    ///
+    /// Every copy landed: the quit goes on to the photograph and the session write.
+    /// A copy refused, or one still without its receipt at [`QUIT_RECOVERY_BY`],
+    /// **cancels the quit**, naming every document the phase was copying.
+    pub(crate) fn recovery(
+        &mut self,
+        copies: &[(&'static str, CopyStanding)],
+        now: Instant,
+    ) -> QuitStep {
+        if self.phase != Phase::Recovery {
+            return self.step();
+        }
+        let start = *self.documents_from.get_or_insert(now);
+        let refused = copies
+            .iter()
+            .any(|(_, copy)| matches!(copy, CopyStanding::Refused(_)));
+        let waiting = copies
+            .iter()
+            .any(|(_, copy)| matches!(copy, CopyStanding::Waiting));
+        if refused || (waiting && now >= start + QUIT_RECOVERY_BY) {
+            let unsaved = std::mem::take(&mut self.unsaved)
+                .into_iter()
+                .map(|unsaved| {
+                    let copy = copies.iter().find(|(file, _)| *file == unsaved.file);
+                    let why = match copy {
+                        Some((_, CopyStanding::Refused(error))) => {
+                            format!("{}; no copy could be kept: {error}", unsaved.why)
+                        }
+                        Some((_, CopyStanding::Waiting)) | None => {
+                            format!("{}; its copy had no answer in time", unsaved.why)
+                        }
+                        Some((_, CopyStanding::Kept(copy))) => {
+                            format!("{}; a copy is in {}", unsaved.why, copy.display())
+                        }
+                    };
+                    Unsaved {
+                        file: unsaved.file,
+                        why,
+                    }
+                })
+                .collect();
+            self.cancel(unsaved);
+            return self.step();
+        }
+        if waiting {
+            return self.step();
+        }
         self.phase = Phase::Photographing;
         self.step()
+    }
+
+    /// **The quit cannot keep the person's change, so it does not leave**
+    /// (revision (c)2; A§11 "a refused disk means do not leave"): the window
+    /// stays, the update riding on the quit is given up, and the documents not
+    /// kept are named for the card.
+    fn cancel(&mut self, unsaved: Vec<Unsaved>) {
+        self.give_up_the_update(Abandon::DocumentsUnsaved);
+        self.cancelled = Some(Cancelled {
+            unsaved,
+            reason: self.reason,
+            chosen: false,
+        });
+        self.phase = Phase::Abandoned;
+    }
+
+    /// **The cancellation this quit ended in**, taken once, for its card and its
+    /// lines in `diagnostics.log`.
+    pub(crate) fn take_cancelled(&mut self) -> Option<Cancelled> {
+        self.cancelled.take()
     }
 
     /// Every window has been photographed and the document is assembled.
@@ -744,6 +1186,11 @@ impl Quit {
     #[must_use]
     pub fn deadline(&self) -> Option<Instant> {
         match self.phase {
+            // The two phases' bounds, both measured from the documents phase's start:
+            // its answers and its copies' wake the loop themselves, so the bound is
+            // the only clock either needs.
+            Phase::Documents => self.documents_from.map(|start| start + QUIT_DOCUMENTS_BY),
+            Phase::Recovery => self.documents_from.map(|start| start + QUIT_RECOVERY_BY),
             Phase::Waiting { until }
             | Phase::Writing {
                 receipt: Some(Receipt { until, .. }),
@@ -777,6 +1224,10 @@ impl Quit {
 }
 
 #[cfg(test)]
+#[path = "quit_tests.rs"]
+mod quit_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -807,6 +1258,9 @@ mod tests {
             if seen.last() == Some(&QuitStep::Discard) {
                 seen.push(quit.discarded());
             }
+        }
+        if seen.last() == Some(&QuitStep::Documents) {
+            seen.push(quit.documents(&[], Instant::now()));
         }
         if seen.last() == Some(&QuitStep::Photograph) {
             seen.push(quit.photographed());
@@ -856,7 +1310,7 @@ mod tests {
     fn a_quit_with_nothing_dirty_puts_no_card_up() {
         let quit = Quit::begin(Vec::new());
         assert!(!quit.is_asking());
-        assert_eq!(quit.step(), QuitStep::Photograph);
+        assert_eq!(quit.step(), QuitStep::Documents);
     }
 
     /// PIN — **cancel moves nothing.**
@@ -942,6 +1396,7 @@ mod tests {
         // pages, leave.
         let mut quit = Quit::begin(Vec::new());
         let start = Instant::now();
+        assert_eq!(quit.documents(&[], start), QuitStep::Photograph);
         assert_eq!(quit.photographed(), QuitStep::Write);
         assert_eq!(quit.written(WriteVerdict::TimedOut), QuitStep::Retire);
         assert!(
@@ -964,6 +1419,7 @@ mod tests {
     fn the_wait_for_the_pages_ends_either_way() {
         let start = Instant::now();
         let mut quit = Quit::begin(Vec::new());
+        quit.documents(&[], start);
         quit.photographed();
         quit.written(WriteVerdict::Landed);
         assert_eq!(quit.retired(start), QuitStep::WaitForPages);
@@ -976,6 +1432,7 @@ mod tests {
         );
 
         let mut early = Quit::begin(Vec::new());
+        early.documents(&[], start);
         early.photographed();
         early.written(WriteVerdict::Landed);
         early.retired(start);
@@ -1031,7 +1488,9 @@ mod tests {
         assert!(!quit.document_is_written(), "with the card up");
         assert_eq!(quit.answer(QuitAnswer::Discard), QuitStep::Discard);
         assert!(!quit.document_is_written(), "while the changes are dropped");
-        assert_eq!(quit.discarded(), QuitStep::Photograph);
+        assert_eq!(quit.discarded(), QuitStep::Documents);
+        assert!(!quit.document_is_written(), "while the documents go");
+        assert_eq!(quit.documents(&[], Instant::now()), QuitStep::Photograph);
         assert!(!quit.document_is_written(), "while the pictures are taken");
         assert_eq!(quit.photographed(), QuitStep::Write);
         assert!(!quit.document_is_written(), "while it is being written");
@@ -1040,6 +1499,10 @@ mod tests {
         assert_eq!(quit.retired(Instant::now()), QuitStep::WaitForPages);
         assert!(quit.document_is_written(), "while the pages go");
         let mut abandoned = Quit::begin(Vec::new());
+        assert_eq!(
+            abandoned.documents(&[], Instant::now()),
+            QuitStep::Photograph
+        );
         assert_eq!(abandoned.photographed(), QuitStep::Write);
         assert_eq!(abandoned.written(WriteVerdict::Refused), QuitStep::Abandon);
         assert!(
@@ -1066,7 +1529,9 @@ mod tests {
         assert!(!quit.document_is_frozen(), "with the card up");
         assert_eq!(quit.answer(QuitAnswer::Discard), QuitStep::Discard);
         assert!(!quit.document_is_frozen(), "while the changes are dropped");
-        assert_eq!(quit.discarded(), QuitStep::Photograph);
+        assert_eq!(quit.discarded(), QuitStep::Documents);
+        assert!(!quit.document_is_frozen(), "while the documents go");
+        assert_eq!(quit.documents(&[], now), QuitStep::Photograph);
         assert!(!quit.document_is_frozen(), "while the pictures are taken");
         assert_eq!(quit.photographed(), QuitStep::Write);
         assert!(quit.document_is_frozen(), "once they have been");
@@ -1083,6 +1548,7 @@ mod tests {
         assert!(quit.document_is_frozen(), "all the way out");
 
         let mut abandoned = Quit::begin_for(Vec::new(), Reason::UpdateRestart { txn });
+        abandoned.documents(&[], now);
         abandoned.photographed();
         abandoned.requested(9, now);
         assert_eq!(abandoned.written(WriteVerdict::Refused), QuitStep::Abandon);
@@ -1106,6 +1572,7 @@ mod tests {
             !asked.writes_by_receipt(),
             "a person's quit writes as it always has"
         );
+        asked.documents(&[], now);
         asked.photographed();
         asked.written(WriteVerdict::Landed);
         asked.retired(now);
@@ -1121,6 +1588,7 @@ mod tests {
             let mut quit = Quit::begin_for(Vec::new(), Reason::UpdateRestart { txn });
             assert_eq!(quit.reason(), Reason::UpdateRestart { txn });
             assert!(quit.writes_by_receipt());
+            quit.documents(&[], now);
             quit.photographed();
             quit.requested(3, now);
             assert_eq!(quit.awaited_generation(), Some(3));
@@ -1192,6 +1660,8 @@ mod tests {
                     failed: vec![("b.md".to_owned(), "the disk is full".to_owned())],
                 }),
                 QuitStep::Discard => quit.discarded(),
+                QuitStep::Documents => quit.documents(&[], Instant::now()),
+                QuitStep::Recovery => quit.recovery(&[], Instant::now()),
                 QuitStep::Photograph => quit.photographed(),
                 QuitStep::Write => quit.written(verdict),
                 QuitStep::Retire => quit.retired(Instant::now()),
@@ -1254,8 +1724,9 @@ mod tests {
             // A write the store refused.
             let mut quit = Quit::begin(Vec::new());
             assert_eq!(
-                walk_with_the_phase(&mut quit, QuitStep::Photograph, WriteVerdict::Refused),
+                walk_with_the_phase(&mut quit, QuitStep::Documents, WriteVerdict::Refused),
                 vec![
+                    (QuitStep::Documents, Some(Phase::Running)),
                     (QuitStep::Photograph, Some(Phase::Running)),
                     (QuitStep::Write, Some(Phase::Exiting)),
                     (QuitStep::Abandon, Some(Phase::Running)),
@@ -1264,8 +1735,9 @@ mod tests {
             // A quit that goes.
             let mut quit = Quit::begin(Vec::new());
             assert_eq!(
-                walk_with_the_phase(&mut quit, QuitStep::Photograph, WriteVerdict::Landed),
+                walk_with_the_phase(&mut quit, QuitStep::Documents, WriteVerdict::Landed),
                 vec![
+                    (QuitStep::Documents, Some(Phase::Running)),
                     (QuitStep::Photograph, Some(Phase::Running)),
                     (QuitStep::Write, Some(Phase::Exiting)),
                     (QuitStep::Retire, Some(Phase::Exiting)),

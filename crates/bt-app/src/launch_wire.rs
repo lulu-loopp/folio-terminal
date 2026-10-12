@@ -1612,6 +1612,8 @@ mod tests {
             assert!(!asks(&quit), "a launch was admitted at {step:?}: {seen:?}");
             step = match step {
                 QuitStep::Discard => quit.discarded(),
+                QuitStep::Documents => quit.documents(&[], now),
+                QuitStep::Recovery => quit.recovery(&[], now),
                 QuitStep::Photograph => quit.photographed(),
                 QuitStep::Write if quit.awaited_generation().is_none() => quit.requested(4, now),
                 QuitStep::Write => quit.written(WriteVerdict::Landed),

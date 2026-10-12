@@ -5,7 +5,8 @@ use crate::{
     AttentionDelivery, NoticeHost, NoticeStrip, OVER_IN_PANE_TOP_FIRST, OverInPane, PointerTarget,
     PreviewSurface, Runtime, TaskbarFlash, UserInputKind, WindowRuntime, answer_attention_in,
     attention, attention_trace, emit_attention_lines, float, i18n, marks, native_window,
-    next_attention_stop, notice, notify, profiles, seats, taskbar_lane, toast,
+    next_attention_stop, notice, notify, profiles, quit, raise_cancelled_quit_card_on, seats,
+    taskbar_lane, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -195,6 +196,39 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// **Say a cancelled quit on this window** (T-QUIT-DOCUMENTS; design note 2026-10-11,
+    /// revision (d)2): one Error card naming the files that could not be saved, with its one
+    /// choice ([`raise_cancelled_quit_card_on`]). A card an earlier cancellation raised here is
+    /// taken down first: the newest cancellation is the one its choice is about.
+    pub(crate) fn raise_cancelled_quit_card(&mut self, cancelled: quit::Cancelled) -> Result<()> {
+        let now = Instant::now();
+        if let Some(earlier) = self.window.quit_card.take() {
+            self.window
+                .toasts
+                .dismiss(earlier.card, now, self.app.motion);
+        }
+        let card =
+            raise_cancelled_quit_card_on(&mut self.window.toasts, &cancelled, self.app.motion, now);
+        self.window.quit_card = Some(quit::Raised { card, cancelled });
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// **The cancelled quit's one choice** (revision (d)2): *Leave without this change* asks
+    /// for the quit again, carrying the documents the card named. A verb pressed on another
+    /// card leaves the offer standing; the card's `×` is not a choice and never reaches here.
+    fn take_quit_choice(&mut self, card: toast::ToastId) {
+        let Some(raised) = self.window.quit_card.take() else {
+            return;
+        };
+        match raised.press(toast::ToastHit::Action(card)) {
+            Some(chosen) => self.app.leave_without(chosen),
+            None => self.window.quit_card = Some(raised),
+        }
+    }
+
     /// **The verb on the card that says where kept edits are**: the folder, handed to the
     /// system's file manager through the window's one reveal. A verb pressed on another card
     /// leaves the offer standing.
@@ -328,6 +362,7 @@ impl Runtime<'_> {
             self.take_powershell_profile_undo(id);
             self.take_checkout_undo(id)?;
             self.take_recovered_folder(id);
+            self.take_quit_choice(id);
             if self
                 .window
                 .toasts

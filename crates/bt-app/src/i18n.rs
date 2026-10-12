@@ -2319,6 +2319,25 @@ text_entries! {
     /// there, so the only way to know the quit did not silently half-happen is to
     /// be told.
     QuitSessionNotWritten,
+    /// **The card a quit raises when it could not keep a change to a configuration file**
+    /// (T-QUIT-DOCUMENTS; design note 2026-10-11, revision (d)2): `{files}` is the files,
+    /// filled by [`quit_documents_not_saved_in`]. A plain statement; its one choice is
+    /// [`Self::QuitLeaveWithoutChange`].
+    QuitDocumentsNotSaved,
+    /// The cancelled quit's one choice: leave, without the changes the card names.
+    QuitLeaveWithoutChange,
+    /// **What the system's own message box says when a stop could keep a change to one
+    /// configuration file nowhere** (revision (d)3), `{file}` filled by [`stopped_changes_lost_in`].
+    StoppedChangeLost,
+    /// The same, for several files, `{files}` filled by [`stopped_changes_lost_in`].
+    StoppedChangesLost,
+    /// Between two of the names in a list that ends in [`Self::ListLast`] or
+    /// [`Self::ListMore`].
+    ListSeparator,
+    /// A list's last name after the others: `{names}`, then `{last}`.
+    ListLast,
+    /// A list cut at its bound: `{names}` shown, then how many more, `{count}`.
+    ListMore,
     /// **The line the system's shutdown screen shows for a Folio window while the layout is
     /// being written** (B-ENDSESSION): `ShutdownBlockReasonCreate`'s reason, up for at most the
     /// session write's budget. A state, so a few words.
@@ -4610,6 +4629,39 @@ impl Text {
                 "session.json 写入失败。没有关闭任何窗口。",
             ),
             Self::ShutdownSavingLayout => pick(lang, "Saving your layout", "正在保存窗口布局"),
+            Self::QuitDocumentsNotSaved => pick(
+                lang,
+                "{files} could not be saved.",
+                "{files} could not be saved.", // zh: pending T-QUIT-DOCUMENTS
+            ),
+            Self::QuitLeaveWithoutChange => pick(
+                lang,
+                "Leave without this change",
+                "Leave without this change", // zh: pending T-QUIT-DOCUMENTS
+            ),
+            Self::StoppedChangeLost => pick(
+                lang,
+                "Folio stopped. A change to {file} could not be kept.",
+                "Folio stopped. A change to {file} could not be kept.", // zh: pending T-QUIT-DOCUMENTS
+            ),
+            Self::StoppedChangesLost => pick(
+                lang,
+                "Folio stopped. Changes to {files} could not be kept.",
+                "Folio stopped. Changes to {files} could not be kept.", // zh: pending T-QUIT-DOCUMENTS
+            ),
+            Self::ListSeparator => pick(
+                lang, ", ", ", ", // zh: pending T-QUIT-DOCUMENTS
+            ),
+            Self::ListLast => pick(
+                lang,
+                "{names} and {last}",
+                "{names} and {last}", // zh: pending T-QUIT-DOCUMENTS
+            ),
+            Self::ListMore => pick(
+                lang,
+                "{names} and {count} more",
+                "{names} and {count} more", // zh: pending T-QUIT-DOCUMENTS
+            ),
 
             // ── the preview pane's lock (§7.7 ⑧) ───────────────────────────
             Self::PreviewLock => pick(
@@ -6246,6 +6298,22 @@ impl Text {
         (Self::SeatOverflowOne, HostPlatform::MacOs),
         (Self::SeatOverflowMany, HostPlatform::Windows),
         (Self::SeatOverflowMany, HostPlatform::MacOs),
+        // zh: pending T-QUIT-DOCUMENTS — the cancelled quit's card and its choice, the
+        // stopped process's native message, and the lists they name files in.
+        (Self::QuitDocumentsNotSaved, HostPlatform::Windows),
+        (Self::QuitDocumentsNotSaved, HostPlatform::MacOs),
+        (Self::QuitLeaveWithoutChange, HostPlatform::Windows),
+        (Self::QuitLeaveWithoutChange, HostPlatform::MacOs),
+        (Self::StoppedChangeLost, HostPlatform::Windows),
+        (Self::StoppedChangeLost, HostPlatform::MacOs),
+        (Self::StoppedChangesLost, HostPlatform::Windows),
+        (Self::StoppedChangesLost, HostPlatform::MacOs),
+        (Self::ListSeparator, HostPlatform::Windows),
+        (Self::ListSeparator, HostPlatform::MacOs),
+        (Self::ListLast, HostPlatform::Windows),
+        (Self::ListLast, HostPlatform::MacOs),
+        (Self::ListMore, HostPlatform::Windows),
+        (Self::ListMore, HostPlatform::MacOs),
     ];
 }
 
@@ -7399,6 +7467,65 @@ pub fn not_saved(reason: &str) -> String {
 // themselves are built by `restore::unsaved_lines` and `unsaved_line`, which are
 // a *name* and a *tab's own title* joined by an em dash — two strings this table
 // never owned.
+
+/// **How many names a card lists before it says how many more** ((b)11's bound).
+pub const NAMES_ON_A_CARD: usize = 3;
+
+/// **`files`, as one list in `lang`**: `a`, `a and b`, `a, b and c` — and past
+/// `bound` names, `a, b, c and 2 more`.
+#[must_use]
+pub fn files_listed_in(lang: Lang, files: &[&str], bound: Option<usize>) -> String {
+    let separator = Text::ListSeparator.in_lang(lang);
+    let shown = bound.map_or(files.len(), |bound| bound.min(files.len()));
+    if shown < files.len() {
+        return Text::ListMore
+            .in_lang(lang)
+            .replace("{names}", &files[..shown].join(separator))
+            .replace("{count}", &(files.len() - shown).to_string());
+    }
+    match files {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [names @ .., last] => Text::ListLast
+            .in_lang(lang)
+            .replace("{names}", &names.join(separator))
+            .replace("{last}", last),
+    }
+}
+
+/// **The cancelled quit's card** (T-QUIT-DOCUMENTS): `settings.json could not be
+/// saved.` — at most [`NAMES_ON_A_CARD`] files named, then how many more.
+#[must_use]
+pub fn quit_documents_not_saved(files: &[&str]) -> String {
+    quit_documents_not_saved_in(current(), files)
+}
+
+/// [`quit_documents_not_saved`] in a named language.
+#[must_use]
+pub fn quit_documents_not_saved_in(lang: Lang, files: &[&str]) -> String {
+    Text::QuitDocumentsNotSaved.in_lang(lang).replace(
+        "{files}",
+        &files_listed_in(lang, files, Some(NAMES_ON_A_CARD)),
+    )
+}
+
+/// **What the system's message box says when a stop kept a change nowhere**
+/// (T-QUIT-DOCUMENTS; revision (d)3): every such file, named.
+#[must_use]
+pub fn stopped_changes_lost(files: &[&str]) -> String {
+    stopped_changes_lost_in(current(), files)
+}
+
+/// [`stopped_changes_lost`] in a named language.
+#[must_use]
+pub fn stopped_changes_lost_in(lang: Lang, files: &[&str]) -> String {
+    match files {
+        [one] => Text::StoppedChangeLost.in_lang(lang).replace("{file}", one),
+        _ => Text::StoppedChangesLost
+            .in_lang(lang)
+            .replace("{files}", &files_listed_in(lang, files, None)),
+    }
+}
 
 /// **What the save branch could not save** (slice E2 phase ①, v3 复审 ④-a).
 ///
