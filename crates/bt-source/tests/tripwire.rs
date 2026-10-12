@@ -99,13 +99,21 @@
 //!      as far as its own spelling goes: a string literal, a
 //!      `Path::new`/`PathBuf::from`/`.join(…)`/`.parent()` chain, `env!` and
 //!      `concat!`, a `let` binding of the same function written before the
-//!      call, a `const` or `static` of the same file, and a call of a free
-//!      function of the same file (its tail, with its parameters bound to what
-//!      the call hands it). Its base is the package directory
+//!      call, a `for` loop's variable over a literal list (an array, `&[…]`,
+//!      `vec![…]`, `.iter()` over one, a name bound to one; a tuple pattern
+//!      picks its field) — which is each element in turn, every one judged —
+//!      a `const` or `static` of the same file (by its name, or
+//!      `self::NAME`; a longer path names another item), and a call of a
+//!      free function of the same file (its tail, with its parameters bound
+//!      to what the call hands it). Constants and helpers are followed as far
+//!      as their chains go; one that reaches itself again on the same
+//!      resolution path is a cycle. Its base is the package directory
 //!      (`CARGO_MANIFEST_DIR`, or a relative path, which `cargo test` resolves
-//!      there), a scratch root (`temp_dir`, `temp_path`, `tempfile`) or a base
-//!      this reading cannot see (a parameter, a field, a loop variable, another
-//!      file's function). A path under the package directory that lands on a
+//!      there), a scratch root (`temp_dir`, `temp_path`, `tempfile`), an
+//!      absolute path (outside the checkout: a committed absolute path into it
+//!      would be a machine path, which `scripts/check-machine-paths.ps1`
+//!      refuses), or a base this reading cannot see (a parameter, a field,
+//!      another file's function). A path under the package directory that lands on a
 //!      committed document is a read of it; one that lands under `target/`,
 //!      on Rust source or on an uncommitted file is not; a scratch path is
 //!      not. A path on an unseen base reads a committed document only when
@@ -114,10 +122,12 @@
 //!      function that reads its own output under `target/` and a committed
 //!      `.tsv` is a reader of the `.tsv` alone.
 //!
-//!      A rooted call whose path keeps a piece this reading cannot reduce
-//!      (`root.join(name)` with `name` a loop variable, a `format!`, another
-//!      crate's constant) is not judged: it is counted and listed as a
-//!      diagnostic — printed by the test and in its refusal — and not refused.
+//!      **A path this reading gives up on is never dropped in silence.** A
+//!      rooted path that keeps a piece it cannot reduce (`root.join(name)`
+//!      with `name` a parameter, a `format!`, another crate's constant), and a
+//!      constant or helper that comes back to itself, is not judged: it is
+//!      counted and listed as a diagnostic — file, line, item, callee and why,
+//!      printed by the test and counted in its refusal — and not refused.
 //!   3. **any other call or method handed a committed document**: every call
 //!      of a path (`read_session(…)`, `Engine::open(…)`, `std::fs::copy(…)`)
 //!      and every method call is judged by each of its arguments and by the
@@ -131,8 +141,8 @@
 //!      `PathBuf::from`, `String::from`, and the methods in [`PATH_BUILDING`]
 //!      (`join`, `parent`, `display`, `to_str`, `file_name`…). Here a relative
 //!      string is a string, not a path into the checkout: only the three reads
-//!      resolve one from the package directory, and an unreduced rooted path
-//!      is no diagnostic.
+//!      resolve one from the package directory. An unreduced rooted path, or a
+//!      cycle, handed to any of these calls joins the same diagnostic.
 //! * **The item** is the innermost function holding the call; outside every
 //!   function it is the `const` or `static` the include initialises, or the
 //!   module itself. The name is the module path without `crate`, with an
@@ -149,9 +159,12 @@
 //! parameter (`bt_persist::read_settings` is the reader of what it is
 //! handed; its caller, which names the fixture, is the row); a read call
 //! renamed by `use … as …`, since bt-source does not resolve aliases; a call
-//! inside a macro whose arguments do not parse as expressions; and the rooted
-//! reads it lists as unreduced. Rows are not checked the other way: a row whose item no
-//! longer reads is not refused.
+//! inside a macro whose arguments do not parse as expressions; a method that
+//! reads under a name [`PATH_BUILDING`] excludes, since that list is of names
+//! (and a new path-describing method is a reader until it is added there); a
+//! loop over anything but a literal list; and the paths it lists as
+//! unreduced. Rows are not checked the other way: a row whose item no longer
+//! reads is not refused.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -1360,46 +1373,62 @@ impl DocumentScan<'_> {
                         function: call.function,
                         position: call.offset,
                         parameters: BTreeMap::new(),
-                        depth: 0,
+                        visiting: Vec::new(),
                     }
                     .of(expression)
                 };
-                if reads.contains_key(&at) {
-                    let value = call.arguments.first().map_or(Value::Opaque, evaluate);
-                    match self.judge(value, true) {
-                        Judgement::NotADocument => {}
-                        Judgement::Document(subject) => readers.push(DocumentReader {
-                            file: self.relative(file),
-                            line: self.line(at),
-                            owners: self.owners_of(at),
-                            readings: BTreeSet::from([Reading::AtRunTime]),
-                            subjects: BTreeSet::from([subject]),
-                        }),
-                        Judgement::Unresolved => unresolved.push(UnresolvedRead {
-                            file: self.relative(file),
-                            line: self.line(at),
-                            owners: self.owners_of(at),
-                        }),
-                    }
+                // The three reads are judged by their path argument and
+                // resolve a relative one; every other call by each argument
+                // and by what it is called on.
+                let read = reads.contains_key(&at);
+                let handed: Vec<&syn::Expr> = if read {
+                    call.arguments.iter().take(1).collect()
+                } else {
+                    call.receiver.iter().chain(&call.arguments).collect()
+                };
+                let judgements: Vec<Judgement> = handed
+                    .into_iter()
+                    .flat_map(|expression| self.judge(evaluate(expression), read))
+                    .collect();
+                if judgements
+                    .iter()
+                    .all(|judgement| matches!(judgement, Judgement::NotADocument))
+                    || (!read && self.token_in_the_product(at))
+                {
                     continue;
                 }
-                let subjects: BTreeSet<String> = call
-                    .receiver
+                let subjects: BTreeSet<String> = judgements
                     .iter()
-                    .chain(&call.arguments)
-                    .filter_map(|expression| match self.judge(evaluate(expression), false) {
-                        Judgement::Document(subject) => Some(subject),
-                        Judgement::NotADocument | Judgement::Unresolved => None,
+                    .filter_map(|judgement| match judgement {
+                        Judgement::Document(subject) => Some(subject.clone()),
+                        Judgement::NotADocument | Judgement::Unresolved(_) => None,
                     })
                     .collect();
-                if subjects.is_empty() || self.token_in_the_product(at) {
+                for why in judgements.iter().filter_map(|judgement| match judgement {
+                    Judgement::Unresolved(why) => Some(*why),
+                    Judgement::NotADocument | Judgement::Document(_) => None,
+                }) {
+                    unresolved.push(UnresolvedRead {
+                        file: self.relative(file),
+                        line: self.line(at),
+                        owners: self.owners_of(at),
+                        callee: call.callee.clone(),
+                        why,
+                    });
+                }
+                if subjects.is_empty() {
                     continue;
                 }
+                let reading = if read {
+                    Reading::AtRunTime
+                } else {
+                    Reading::HandedTo(call.callee.clone())
+                };
                 readers.push(DocumentReader {
                     file: self.relative(file),
                     line: self.line(at),
                     owners: self.owners_of(at),
-                    readings: BTreeSet::from([Reading::HandedTo(call.callee.clone())]),
+                    readings: BTreeSet::from([reading]),
                     subjects,
                 });
             }
@@ -1418,26 +1447,34 @@ impl DocumentScan<'_> {
     /// What one path handed to a call is. `read` says whether the call is one
     /// of the three run-time reads, which resolve a relative path from the
     /// package directory.
-    fn judge(&self, value: Value, read: bool) -> Judgement {
-        let Value::Path {
-            base,
-            segments,
-            open,
-        } = value.into_path()
-        else {
-            return Judgement::NotADocument;
-        };
+    fn judge(&self, value: Value, read: bool) -> Vec<Judgement> {
+        match value.into_path() {
+            Value::Each(values) => values
+                .into_iter()
+                .flat_map(|value| self.judge(value, read))
+                .collect(),
+            Value::Unreduced(why) => vec![Judgement::Unresolved(why)],
+            Value::Path {
+                base,
+                segments,
+                open,
+            } => vec![self.judge_path(base, &segments, open, read)],
+            Value::Text(_) | Value::Opaque => vec![Judgement::NotADocument],
+        }
+    }
+
+    fn judge_path(&self, base: Base, segments: &[String], open: bool, read: bool) -> Judgement {
         match base {
-            Base::Scratch => Judgement::NotADocument,
+            Base::Scratch | Base::Absolute => Judgement::NotADocument,
             Base::Relative if !read => Judgement::NotADocument,
             Base::Package | Base::Relative => {
                 let mut path = self.package.to_path_buf();
-                path.extend(&segments);
+                path.extend(segments);
                 let from = from_root(&normalized(&path), &normalized(self.root));
                 if from == "target" || from.starts_with("target/") {
                     Judgement::NotADocument
                 } else if open {
-                    Judgement::Unresolved
+                    Judgement::Unresolved(Why::Computed)
                 } else if self.committed.contains(&from) && is_document(&from) {
                     Judgement::Document(from)
                 } else {
@@ -1480,27 +1517,50 @@ enum Judgement {
     NotADocument,
     /// A committed document, from the workspace root.
     Document(String),
-    /// Rooted in the package directory, with a piece this reading cannot
-    /// reduce to a literal after the root.
-    Unresolved,
+    /// A path this reading had to give up on, and why.
+    Unresolved(Why),
 }
 
-/// A rooted read whose path this reading could not reduce to a committed
-/// file: a diagnostic, not a refusal.
+/// Why a path handed to a call could not be reduced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Why {
+    /// Rooted in the package directory, with a piece after the root this
+    /// reading cannot reduce to a literal: a parameter, a `format!`, another
+    /// crate's constant.
+    Computed,
+    /// A constant or a helper that reaches itself on its own resolution path.
+    Cycle,
+}
+
+impl Why {
+    fn said(self) -> &'static str {
+        match self {
+            Self::Computed => "a rooted path with a piece it cannot reduce",
+            Self::Cycle => "a constant or helper that reaches itself",
+        }
+    }
+}
+
+/// A path handed to a call that this reading could not reduce to a committed
+/// file or rule out: a diagnostic, not a refusal.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct UnresolvedRead {
     file: String,
     line: usize,
     owners: BTreeSet<String>,
+    callee: String,
+    why: Why,
 }
 
 impl UnresolvedRead {
     fn named(&self) -> String {
         format!(
-            "{}:{} {}",
+            "{}:{} {} — `{}`, {}",
             self.file,
             self.line,
-            self.owners.iter().cloned().collect::<Vec<_>>().join(" / ")
+            self.owners.iter().cloned().collect::<Vec<_>>().join(" / "),
+            self.callee,
+            self.why.said()
         )
     }
 }
@@ -1519,8 +1579,13 @@ enum Base {
     /// The machine's temporary directory or a test's scratch name
     /// (`temp_dir`, `temp_path`, `tempfile`).
     Scratch,
-    /// A base this reading cannot see: a parameter, a field, a loop variable,
-    /// a call into another file.
+    /// An absolute path spelled as a string (`C:\Users\alice`, `/srv`): fully
+    /// reduced, and outside the checkout — a committed absolute path into it
+    /// would be a machine path, which `scripts/check-machine-paths.ps1`
+    /// refuses.
+    Absolute,
+    /// A base this reading cannot see: a parameter, a field, a loop over
+    /// anything but a literal list, a call into another file.
     Unknown,
 }
 
@@ -1536,13 +1601,18 @@ enum Value {
         segments: Vec<String>,
         open: bool,
     },
-    /// Nothing this reading can reduce.
+    /// Nothing this reading can reduce, and nothing rooted in the checkout.
     Opaque,
+    /// One of several values: a loop variable over a literal list.
+    Each(Vec<Value>),
+    /// A path this reading gave up on, and why: a diagnostic wherever it is
+    /// handed.
+    Unreduced(Why),
 }
 
 impl Value {
     /// The value used as a path. A text is relative; an absolute one is
-    /// outside the checkout.
+    /// outside the checkout, and judged nothing until it is joined.
     fn into_path(self) -> Self {
         match self {
             Self::Text(text) => match segments_of(&text) {
@@ -1551,34 +1621,65 @@ impl Value {
                     segments,
                     open: false,
                 },
-                None => Self::Opaque,
+                None => Self::Path {
+                    base: Base::Absolute,
+                    segments: Vec::new(),
+                    open: false,
+                },
             },
             Self::Opaque => Self::Path {
                 base: Base::Unknown,
                 segments: Vec::new(),
                 open: false,
             },
-            path @ Self::Path { .. } => path,
+            Self::Each(values) => Self::Each(values.into_iter().map(Self::into_path).collect()),
+            path @ (Self::Path { .. } | Self::Unreduced(_)) => path,
         }
     }
 
     /// `self.join(other)`: a relative piece adds its segments, a rooted one
-    /// replaces the path, and one this reading cannot reduce leaves it open.
+    /// replaces the path, one this reading cannot reduce leaves it open, and
+    /// each of several values is joined in turn.
     fn join(self, other: Self) -> Self {
-        let Self::Path {
-            base,
-            mut segments,
-            mut open,
-        } = self.into_path()
-        else {
-            // An absolute text: a path outside the checkout, whatever follows.
-            return Self::Opaque;
+        if let Self::Each(values) = self {
+            return Self::Each(
+                values
+                    .into_iter()
+                    .map(|value| value.join(other.clone()))
+                    .collect(),
+            );
+        }
+        if let Self::Each(values) = other {
+            return Self::Each(
+                values
+                    .into_iter()
+                    .map(|value| self.clone().join(value))
+                    .collect(),
+            );
+        }
+        let (base, mut segments, mut open) = match self.into_path() {
+            Self::Path {
+                base,
+                segments,
+                open,
+            } => (base, segments, open),
+            Self::Unreduced(why) => return Self::Unreduced(why),
+            _ => unreachable!("into_path is a path, several, or unreduced"),
         };
         match other {
             Self::Text(text) => match segments_of(&text) {
                 Some(more) => segments.extend(more),
-                None => return Self::Opaque,
+                // Joining an absolute path replaces the path with it.
+                None => {
+                    return Self::Path {
+                        base: Base::Absolute,
+                        segments: Vec::new(),
+                        open: false,
+                    };
+                }
             },
+            Self::Unreduced(why) => return Self::Unreduced(why),
+            Self::Each(_) => unreachable!("several values are joined one by one above"),
             Self::Path {
                 base: Base::Unknown,
                 ..
@@ -1677,12 +1778,49 @@ fn converts(segments: &[String]) -> bool {
     )
 }
 
-/// One `let` binding of a single name.
+/// One binding of a single name: a `let`, or a `for` loop's variable.
 struct Binding {
     offset: usize,
     function: usize,
     name: String,
+    /// What a `let` binds, or what a `for` loop iterates.
     value: syn::Expr,
+    /// A loop variable: the name is, in turn, the part of each element of
+    /// `value` this path of tuple positions picks — empty for the whole
+    /// element (`for name in …`), `[0]` for `for (name, _) in …`.
+    each: Option<Vec<usize>>,
+}
+
+/// Every name a loop pattern binds, with the tuple positions that reach it.
+fn loop_names(pattern: &syn::Pat, at: &mut Vec<usize>, found: &mut Vec<(String, Vec<usize>)>) {
+    match pattern {
+        syn::Pat::Ident(name) => found.push((name.ident.to_string(), at.clone())),
+        syn::Pat::Type(typed) => loop_names(&typed.pat, at, found),
+        syn::Pat::Reference(reference) => loop_names(&reference.pat, at, found),
+        syn::Pat::Paren(inner) => loop_names(&inner.pat, at, found),
+        syn::Pat::Tuple(tuple) => {
+            for (position, element) in tuple.elems.iter().enumerate() {
+                at.push(position);
+                loop_names(element, at, found);
+                at.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The part of a list element a loop variable is: the element itself, or
+/// the tuple fields its positions pick.
+fn projected<'e>(element: &'e syn::Expr, positions: &[usize]) -> Option<&'e syn::Expr> {
+    let Some((first, rest)) = positions.split_first() else {
+        return Some(element);
+    };
+    match element {
+        syn::Expr::Tuple(tuple) => projected(tuple.elems.iter().nth(*first)?, rest),
+        syn::Expr::Paren(inner) => projected(&inner.expr, positions),
+        syn::Expr::Reference(reference) => projected(&reference.expr, positions),
+        _ => None,
+    }
 }
 
 /// A free function of the file: its parameters' names and its tail
@@ -1775,6 +1913,7 @@ fn bound_name(pattern: &syn::Pat) -> Option<String> {
     match pattern {
         syn::Pat::Ident(name) => Some(name.ident.to_string()),
         syn::Pat::Type(typed) => bound_name(&typed.pat),
+        syn::Pat::Reference(reference) => bound_name(&reference.pat),
         _ => None,
     }
 }
@@ -1847,9 +1986,25 @@ impl<'ast> syn::visit::Visit<'ast> for Collector<'_> {
                 function: self.function(),
                 name,
                 value: (*init.expr).clone(),
+                each: None,
             });
         }
         syn::visit::visit_local(self, local);
+    }
+
+    fn visit_expr_for_loop(&mut self, looped: &'ast syn::ExprForLoop) {
+        let mut names = Vec::new();
+        loop_names(&looped.pat, &mut Vec::new(), &mut names);
+        for (name, positions) in names {
+            self.syntax.bindings.push(Binding {
+                offset: self.offset(looped.span()),
+                function: self.function(),
+                name,
+                value: (*looped.expr).clone(),
+                each: Some(positions),
+            });
+        }
+        syn::visit::visit_expr_for_loop(self, looped);
     }
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
@@ -1910,12 +2065,34 @@ struct Evaluation<'a> {
     position: usize,
     /// A helper's parameters, bound to what its caller handed it.
     parameters: BTreeMap<String, Value>,
-    depth: usize,
+    /// The constants and helpers on the current resolution path. A chain is
+    /// followed as far as it goes; one that comes back to itself is a cycle.
+    visiting: Vec<String>,
 }
 
 impl Evaluation<'_> {
-    /// How deep a chain of helpers this reading follows.
-    const DEEPEST: usize = 8;
+    /// The same evaluation in another function's scope, one step further
+    /// along the resolution path.
+    fn entering(
+        &self,
+        identity: String,
+        function: usize,
+        position: usize,
+        parameters: BTreeMap<String, Value>,
+    ) -> Option<Evaluation<'_>> {
+        if self.visiting.contains(&identity) {
+            return None;
+        }
+        let mut visiting = self.visiting.clone();
+        visiting.push(identity);
+        Some(Evaluation {
+            syntax: self.syntax,
+            function,
+            position,
+            parameters,
+            visiting,
+        })
+    }
 
     fn of(&self, expression: &syn::Expr) -> Value {
         match expression {
@@ -1927,11 +2104,23 @@ impl Evaluation<'_> {
             syn::Expr::Paren(inner) => self.of(&inner.expr),
             syn::Expr::Group(inner) => self.of(&inner.expr),
             syn::Expr::Macro(mac) => self.of_macro(&mac.mac),
-            syn::Expr::Path(path) => match path.path.segments.last() {
-                Some(last) if path.path.segments.len() == 1 => self.named(&last.ident.to_string()),
-                Some(last) => self.constant(&last.ident.to_string()),
-                None => Value::Opaque,
-            },
+            // `self::NAME` is this module's constant; any other longer path
+            // names an item elsewhere (`bt_render::EASE`, `Curve::EASE`), which
+            // this reading cannot see, even when its last segment is the name
+            // of a constant here.
+            syn::Expr::Path(path) => {
+                let segments: Vec<String> = path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect();
+                match segments.as_slice() {
+                    [name] => self.named(name),
+                    [module, name] if module == "self" => self.constant(name),
+                    _ => Value::Opaque,
+                }
+            }
             syn::Expr::MethodCall(call) => {
                 let receiver = || self.of(&call.receiver);
                 match call.method.to_string().as_str() {
@@ -2026,18 +2215,20 @@ impl Evaluation<'_> {
                 let first = values.next().unwrap_or(Value::Text(String::new()));
                 let mut rest = String::new();
                 for value in values {
-                    let Value::Text(text) = value else {
-                        return Value::Opaque;
-                    };
-                    rest.push_str(&text);
+                    match value {
+                        Value::Text(text) => rest.push_str(&text),
+                        Value::Unreduced(why) => return Value::Unreduced(why),
+                        _ => return Value::Opaque,
+                    }
                 }
                 // `concat!(env!("CARGO_MANIFEST_DIR"), "/../x")` appends to the
                 // directory's text, so its leading separator is not a root.
                 match first {
                     Value::Text(text) => Value::Text(text + &rest),
-                    path @ Value::Path { .. } => {
+                    path @ (Value::Path { .. } | Value::Each(_)) => {
                         path.join(Value::Text(rest.trim_start_matches(['/', '\\']).to_owned()))
                     }
+                    unreduced @ Value::Unreduced(_) => unreduced,
                     Value::Opaque => Value::Opaque,
                 }
             }
@@ -2070,33 +2261,114 @@ impl Evaluation<'_> {
                     && binding.name == name
             })
             .max_by_key(|binding| binding.offset);
-        match binding {
-            Some(binding) => Evaluation {
-                syntax: self.syntax,
-                function: self.function,
-                position: binding.offset,
-                parameters: self.parameters.clone(),
-                depth: self.depth,
-            }
-            .of(&binding.value),
-            None => self.constant(name),
+        let Some(binding) = binding else {
+            return self.constant(name);
+        };
+        let scope = Evaluation {
+            syntax: self.syntax,
+            function: self.function,
+            position: binding.offset,
+            parameters: self.parameters.clone(),
+            visiting: self.visiting.clone(),
+        };
+        let Some(positions) = &binding.each else {
+            return scope.of(&binding.value);
+        };
+        match scope.elements(&binding.value) {
+            Some(elements) => Value::Each(
+                elements
+                    .iter()
+                    .map(|element| {
+                        projected(element, positions).map_or(Value::Opaque, |part| scope.of(part))
+                    })
+                    .collect(),
+            ),
+            None => Value::Opaque,
         }
     }
 
-    /// The file's constant of that name. A constant can name itself through
-    /// a longer path (`const A: &str = other::A;`), so the chain is bounded
-    /// like a helper's.
-    fn constant(&self, name: &str) -> Value {
-        match self.syntax.constants.get(name) {
-            Some(Some(expression)) if self.depth < Self::DEEPEST => Evaluation {
-                syntax: self.syntax,
-                function: usize::MAX,
-                position: 0,
-                parameters: BTreeMap::new(),
-                depth: self.depth + 1,
+    /// The elements of a literal list a loop iterates: an array, a reference
+    /// to one, `vec![…]`, `.iter()` and its kin over one, or a name bound to
+    /// one. `None` for anything else.
+    fn elements(&self, expression: &syn::Expr) -> Option<Vec<syn::Expr>> {
+        match expression {
+            syn::Expr::Array(array) => Some(array.elems.iter().cloned().collect()),
+            syn::Expr::Reference(reference) => self.elements(&reference.expr),
+            syn::Expr::Paren(inner) => self.elements(&inner.expr),
+            syn::Expr::Group(inner) => self.elements(&inner.expr),
+            syn::Expr::Macro(mac) if mac.mac.path.is_ident("vec") => {
+                let parser =
+                    syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+                mac.mac
+                    .parse_body_with(parser)
+                    .ok()
+                    .map(|elements| elements.into_iter().collect())
             }
-            .of(expression),
-            _ => Value::Opaque,
+            syn::Expr::MethodCall(call)
+                if call.args.is_empty()
+                    && matches!(
+                        call.method.to_string().as_str(),
+                        "iter" | "into_iter" | "copied" | "cloned"
+                    ) =>
+            {
+                self.elements(&call.receiver)
+            }
+            syn::Expr::Path(path) => {
+                let segments: Vec<String> = path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect();
+                let (name, local) = match segments.as_slice() {
+                    [name] => (name.clone(), true),
+                    [module, name] if module == "self" => (name.clone(), false),
+                    _ => return None,
+                };
+                let binding = self
+                    .syntax
+                    .bindings
+                    .iter()
+                    .filter(|binding| {
+                        local
+                            && binding.function == self.function
+                            && binding.offset < self.position
+                            && binding.name == name
+                            && binding.each.is_none()
+                    })
+                    .max_by_key(|binding| binding.offset);
+                match binding {
+                    Some(binding) => Evaluation {
+                        syntax: self.syntax,
+                        function: self.function,
+                        position: binding.offset,
+                        parameters: self.parameters.clone(),
+                        visiting: self.visiting.clone(),
+                    }
+                    .elements(&binding.value),
+                    None => {
+                        let Some(Some(expression)) = self.syntax.constants.get(&name) else {
+                            return None;
+                        };
+                        self.entering(format!("const {name}"), usize::MAX, 0, BTreeMap::new())?
+                            .elements(expression)
+                    }
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The file's constant of that name, followed as far as its chain goes. A
+    /// constant can name itself through a longer path
+    /// (`const A: &str = other::A;`): that is a cycle, and unreduced.
+    fn constant(&self, name: &str) -> Value {
+        let Some(Some(expression)) = self.syntax.constants.get(name) else {
+            return Value::Opaque;
+        };
+        match self.entering(format!("const {name}"), usize::MAX, 0, BTreeMap::new()) {
+            Some(scope) => scope.of(expression),
+            None => Value::Unreduced(Why::Cycle),
         }
     }
 
@@ -2109,9 +2381,6 @@ impl Evaluation<'_> {
         let Some(tail) = &helper.tail else {
             return Value::Opaque;
         };
-        if self.depth >= Self::DEEPEST {
-            return Value::Opaque;
-        }
         let parameters = helper
             .parameters
             .iter()
@@ -2122,14 +2391,15 @@ impl Evaluation<'_> {
                     .map(|parameter| (parameter.clone(), self.of(argument)))
             })
             .collect();
-        Evaluation {
-            syntax: self.syntax,
-            function: helper.function,
-            position: helper.end,
+        match self.entering(
+            format!("fn {name}"),
+            helper.function,
+            helper.end,
             parameters,
-            depth: self.depth + 1,
+        ) {
+            Some(scope) => scope.of(tail),
+            None => Value::Unreduced(Why::Cycle),
         }
-        .of(tail)
     }
 }
 
@@ -2214,8 +2484,9 @@ fn document_complaint(strays: &[&DocumentReader], unresolved: &[UnresolvedRead])
          file, owner, mechanism, subject, ticket, disturbed_by_2a and the reason.\n  * \
          {DEBT_LIST} — a reader waiting on a seam. It only shrinks: \
          scripts/ci/check-migration-debt.ps1 refuses an added row.\n\nA reader on both lists is \
-         refused as well.\n\n{} rooted read(s) whose path this scan cannot reduce to a literal \
-         file are not judged (a diagnostic, not a refusal).",
+         refused as well.\n\n{} path(s) handed to a call this scan could not reduce to a \
+         committed file or rule out are not judged (a diagnostic, not a refusal; the test prints \
+         each).",
         unresolved.len()
     );
     said
@@ -2249,8 +2520,8 @@ fn every_reader_of_a_committed_document_is_on_a_list() {
     let listed = listed_readers(&root);
     let strays = unlisted_documents(&readers, &listed);
     println!(
-        "{} committed documents; {} readers of them; {} rows on the two lists; {} rooted reads \
-         not reduced:",
+        "{} committed documents; {} readers of them; {} rows on the two lists; {} paths handed \
+         to a call not reduced (the diagnostic):",
         documents,
         readers.len(),
         listed.len(),
@@ -2287,9 +2558,18 @@ fn every_reader_of_a_committed_document_is_on_a_list() {
 /// gathered) and `tests::hands_a_fixture_to_a_method` and
 /// `tests::hands_a_fixture_to_a_wrapper` are not; search `read_` instead of
 /// `read` in [`READ_CALLS`] and `tests::reads_a_text_with_fs_read` is not;
-/// delete the `target` arm of
-/// `DocumentScan::judge` and `tests::reads_its_own_output_under_target` joins
-/// the diagnostic.
+/// delete the `target` arm of `DocumentScan::judge_path` and
+/// `tests::reads_its_own_output_under_target` joins the diagnostic; bind a
+/// loop variable to nothing (`elements` answers `None`) and
+/// `tests::hands_two_ledgers_in_a_loop` is not found; stop a constant chain
+/// after eight steps and `tests::reads_through_nine_constants` is not; drop
+/// the diagnostic from calls other than the three reads and
+/// `tests::hands_a_computed_ledger` leaves it.
+///
+/// It also reads through a chain of nine constants to a committed `.tsv`,
+/// hands two ledgers to a wrapper in a loop over a literal list of tuples,
+/// hands a wrapper a rooted path with a computed name, and reads a constant
+/// that names itself — the last two the diagnostic, with no overflow.
 #[test]
 fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
     let plot = temporary_directory("planted-documents");
@@ -2348,6 +2628,11 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
             "tests/assets/folio-pdf-test.pdf",
         ),
         (
+            "tests::hands_two_ledgers_in_a_loop",
+            Reading::HandedTo("read_fixture".to_owned()),
+            "docs/plans/MIGRATION-DEBT.tsv;docs/plans/POINTER-DEBT.tsv",
+        ),
+        (
             "tests::opens_a_json",
             Reading::AtRunTime,
             "packaging/scoop/folio.json",
@@ -2367,23 +2652,60 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
             Reading::AtRunTime,
             "docs/plans/structural-debt.md",
         ),
+        (
+            "tests::reads_through_nine_constants",
+            Reading::AtRunTime,
+            "docs/plans/TIMING-BOUND-TESTS.tsv",
+        ),
     ]
-    .map(|(owner, reading, subject)| (owner.to_owned(), vec![reading], vec![subject.to_owned()]));
+    .map(|(owner, reading, subjects)| {
+        (
+            owner.to_owned(),
+            vec![reading],
+            subjects.split(';').map(ToOwned::to_owned).collect(),
+        )
+    });
     assert_eq!(found, expected, "the scan found {readers:#?}");
+    let mut diagnosed: Vec<(String, String, Why)> = unresolved
+        .iter()
+        .map(|read| {
+            (
+                read.owners.iter().cloned().collect::<Vec<_>>().join(" / "),
+                read.callee.clone(),
+                read.why,
+            )
+        })
+        .collect();
+    diagnosed.sort();
     assert_eq!(
-        unresolved
-            .iter()
-            .map(|read| read.owners.iter().cloned().collect::<Vec<_>>().join(" / "))
-            .collect::<Vec<_>>(),
-        ["tests::reads_a_name_it_is_handed"],
-        "the one rooted read with a computed name is the diagnostic, and the computed reads under target/ and the temporary directory are not"
+        diagnosed,
+        [
+            (
+                "tests::hands_a_computed_ledger".to_owned(),
+                "read_fixture".to_owned(),
+                Why::Computed
+            ),
+            (
+                "tests::reads_a_name_it_is_handed".to_owned(),
+                "std::fs::read_to_string".to_owned(),
+                Why::Computed
+            ),
+            (
+                "tests::reads_a_self_named_constant".to_owned(),
+                "std::fs::read_to_string".to_owned(),
+                Why::Cycle
+            ),
+        ],
+        "the rooted reads with a computed name, handed to a read or to a wrapper, and the \
+         self-named constant are the diagnostic; the computed reads under target/ and the \
+         temporary directory are not"
     );
 
     let listed = listed_readers(&workspace_root());
     let strays = unlisted_documents(&readers, &listed);
     assert_eq!(
         strays.len(),
-        7,
+        9,
         "a planted reader was taken for a listed one"
     );
     let said = document_complaint(&strays, &unresolved);
@@ -2394,7 +2716,7 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
             && said.contains("tests::LIST")
             && said.contains(DEBT_LIST)
             && said.contains(SOURCE_LIST)
-            && said.contains("1 rooted read(s)"),
+            && said.contains("3 path(s) handed to a call"),
         "the refusal names each item, its file, both lists and the diagnostic; it said:\n{said}"
     );
     assert!(
@@ -2451,6 +2773,18 @@ fn planted_document_reader() -> String {
 #[cfg(test)]
 mod tests {
     const LIST: &str = include_str!("../../bt-app/src/window_waits.tsv");
+
+    const C1: &str = C2;
+    const C2: &str = C3;
+    const C3: &str = C4;
+    const C4: &str = C5;
+    const C5: &str = C6;
+    const C6: &str = C7;
+    const C7: &str = C8;
+    const C8: &str = C9;
+    const C9: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/plans/TIMING-BOUND-TESTS.tsv");
+
+    const SELF_NAMED: &str = self::SELF_NAMED;
 
     fn repository_root() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
@@ -2518,6 +2852,27 @@ mod tests {
     #[test]
     fn hands_a_fixture_to_a_method() {
         let _ = repository_root().join("packaging/macos/Info.plist.in").read_link();
+    }
+
+    #[test]
+    fn reads_through_nine_constants() {
+        let _ = std::fs::read_to_string(C1);
+    }
+
+    #[test]
+    fn reads_a_self_named_constant() {
+        let _ = std::fs::read_to_string(SELF_NAMED);
+    }
+
+    #[test]
+    fn hands_two_ledgers_in_a_loop() {
+        for (name, _rows) in [("POINTER-DEBT.tsv", 540), ("MIGRATION-DEBT.tsv", 7)] {
+            let _ = read_fixture(&repository_root().join("docs/plans").join(name));
+        }
+    }
+
+    fn hands_a_computed_ledger(name: &str) -> Vec<u8> {
+        read_fixture(&repository_root().join("docs").join(name))
     }
 
     #[test]
