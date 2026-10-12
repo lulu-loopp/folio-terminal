@@ -1703,8 +1703,10 @@ terminal answer is copied into the data directory's `recovered` folder by
 session write only behind them and only with what is left of that budget (none
 left: it is given up as a timed-out write, with no new flush on the way out). An update
 trial's receipt goes ahead of the documents and copies; the trial's write release waits
-for the quit's outcome (performed on a cancelled quit; on a quit that goes on, its session
-half is moot and the launch backup skipped). A document unanswered in time, or a copy refused
+for the quit's outcome, and every exit disposes of it: performed when the quit is abandoned
+(cancelled, or its final write refused); on a quit that goes on, the rest released behind the
+copies, the session's half pending through the write with the sentinel armed, then consumed
+and the launch backup skipped; on a stop that cannot ask, the sentinel armed. A document unanswered in time, or a copy refused
 or unanswered in time, cancels the quit: the windows stay and one card names the
 files with one choice, *Leave without this change*, which alone leaves without
 them; a quit asked again runs the transaction again. **The spare web controller shares the run's one
