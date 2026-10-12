@@ -156,6 +156,27 @@ had; a claim new to the suite brings the rows of the lanes that do not keep it
 yet. When red, repair the lane (a repair removes its row in the same change),
 or restore the behaviour the claim caught; do not add a row to quiet it.
 
+## Contained panics
+
+The rule: under the resident application's panic hook a panic ends the process
+before any unwinding unless the hook's one decision,
+`the_hook_lets_this_panic_unwind`, says it is contained, so the only catch of a
+panic in the product is the boundary that decision honours,
+`bt_platform::contained_panic::contain` (re-exported as `bt-app`'s
+`contained_panic`), or a catch inside a closure handed to it. A worker whose
+panic is meant to be a value runs its work inside `contain`; one whose panic is
+meant to end the process catches nothing, and its `# completions` row says so
+(`docs/ARCHITECTURE.md` §5.5; T-PANIC-ROWS-HONEST, 2026-10-12).
+
+Where and what to do: `crates/bt-source/tests/contained_panic.rs` reads every
+product occurrence of `catch_unwind` in `bt-app`, `bt-platform` and `bt-pty`
+through `bt_source` items — the innermost item must be the boundary itself, or
+the occurrence must lie inside the arguments of a `…contained_panic::contain(…)`
+call — and its fixture test plants three bare catches that must be refused by
+site. There is no allowlist. When red, run the work inside `contain` and give
+the panic its row's failure value, or take the catch out and say in the row
+that a panic ends the process; never wrap a catch to quiet the guard.
+
 ## Timing-bound tests
 
 The rule: a test that depends on wall-clock progress is exceptional, named, and
