@@ -18251,6 +18251,14 @@ mod windows_impl {
     /// how a program interrupts you, and a program that has drawn nothing has
     /// nothing to interrupt.
     ///
+    /// **And one case after the windows** (T-QUIT-DOCUMENTS; design note
+    /// 2026-10-11, revision (d)3): a controlled stop whose windows are being
+    /// taken down — the renderer may be what failed — says through this box,
+    /// once and before the windows close, every configuration change it could
+    /// keep neither in its file nor as a copy in the data directory's `recovered`
+    /// folder. It is the same situation: there is no window to put a card on, and
+    /// the box needs no file, no data directory and no renderer of Folio's.
+    ///
     /// `HWND::default()` is the ownerless box: the process has no window to be
     /// modal to, which is the whole situation. `MB_SETFOREGROUND` because the
     /// caller is a shell or Explorer that has just taken the focus back — a box

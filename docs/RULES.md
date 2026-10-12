@@ -1692,8 +1692,24 @@ advanced by `FolioApp::settle_quit`): ① one application-wide dirty gate over
 every dirty preview buffer and uncommitted editor, offering save-all, discard-all
 or cancel; ② a read-only photograph of every window; ③ the judged atomic write
 (`Runtime::quit_save` and the judged flush — **a refused disk means do not
-leave**); ④ retirement, with windows hidden and the loop still pumping only the
-browser-exit clock to its deadline. **The spare web controller shares the run's one
+leave, unless the person chooses to leave without the change the refusal names,
+on the card that names it**); ④ retirement, with windows hidden and the loop still pumping only the
+browser-exit clock to its deadline. **Between ① and ② the four hand-editable
+documents go to the disk first** (T-QUIT-DOCUMENTS; design note 2026-10-11,
+revisions (c)2, (d)2): each owed one is sent and every answer processed until each
+has landed or has a terminal answer, by `quit::QUIT_DOCUMENTS_BY`; each with a
+terminal answer is copied into the data directory's `recovered` folder by
+`quit::QUIT_RECOVERY_BY` — both inside the one `SESSION_SAVE_BUDGET`, and the
+session write only behind them and only with what is left of that budget (none
+left: it is given up as a timed-out write, with no new flush on the way out). An update
+trial's receipt goes ahead of the documents and copies; the trial's write release waits
+for the quit's outcome, and every exit disposes of it: performed when the quit is abandoned
+(cancelled, or its final write refused); on a quit that goes on, the rest released behind the
+copies, the session's half pending through the write with the sentinel armed, then consumed
+and the launch backup skipped; on a stop that cannot ask, the sentinel armed. A document unanswered in time, or a copy refused
+or unanswered in time, cancels the quit: the windows stay and one card names the
+files with one choice, *Leave without this change*, which alone leaves without
+them; a quit asked again runs the transaction again. **The spare web controller shares the run's one
 bounded retirement** (ticket 60): `App::run_retiring_until` is set once, when the last
 window closes or ④ begins, the spare retires in that same branch, and the run ends only
 when it has let go or the bound has run out (then it is abandoned with one line); the last closed window stays in the registry, hidden, until then, as it stays for its own pages. **The quit has a reason** (`quit::Reason`, 0.4.6 U-21): `Asked` — the chord, the menu bar's Quit, the system's quit — or `UpdateRestart`, the update's Restart, which runs the same four phases unchanged. For `UpdateRestart`, ③ is a named session generation the loop waits for across turns under `quit::UPDATE_RECEIPT_DEADLINE` (a clock, not a wait); a Cancel at ①, an incomplete save or a refused write abandons the update with the quit, and a receipt that does not come in time abandons the update and **not** the quit; from the photograph on no session change is admitted, no launch is taken and the restore card neither rises nor is answered; and only after the receipt, at the way out, is `Handoff` written durably and the applier started (`update_handoff`). **The two failure roads skip phases ① and ③**;
@@ -1707,7 +1723,10 @@ the quit's judged write (`PreviewBuffer::save`, its conflict check included), an
 where the file refuses or has changed on disk, copied into the data directory's
 `recovered` folder under the instant and the file's name, never over the file — each
 said in `diagnostics.log` with where its edit is; no card, no question, and the
-writes are done before the road goes on. **The next start says it** (T-RECOVERED-FOLDER,
+writes are done before the road goes on. **The four hand-editable documents' owed
+changes are copied into the same folder** (T-QUIT-DOCUMENTS), and every one no copy
+could be made of is said once, together, through the system's own message box before
+a window closes; a stop that lost nothing raises no box. **The next start says it** (T-RECOVERED-FOLDER,
 owner ruling 2026-10-09): after the first frame, the `bt-recovered` worker lists the
 `recovered` folder, and copies no start has said yet raise one toast — "An unsaved edit
 was kept at <folder>", "N unsaved edits were kept at …" — an error card, six seconds and held while the pointer is on it, whose one verb
