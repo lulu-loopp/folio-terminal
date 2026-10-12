@@ -298,9 +298,10 @@ names as `tests::<name>`; a new test does not go there.
 ### A test that is not limited to one platform asserts a fact of every platform (H1)
 
 Every test runs on Windows and on macOS (CI's `core-macos` runs the whole `bt-app` suite, `bt-term`,
-`bt-pty` and the portable crates). A test whose fixture is spelled the Windows way — a drive letter, a `\`, a shipped `pwsh` row,
-`Ctrl` as the command modifier — is red on the Mac for a reason that is not a defect, and a suite with
-reds nobody reads hides the one that is. Each test is exactly one of three things:
+`bt-pty` and the portable crates). A test whose fixture is spelled the Windows way — a drive letter,
+a `\`, a shipped `pwsh` row, `Ctrl` as the command modifier — is red on the Mac for a reason that is
+not a defect, and a suite with reds nobody reads hides the one that is. Each test is exactly one of
+three things:
 
 1. **Platform-neutral.** The fact holds everywhere once the fixture is spelled through the platform's
    own paths, shells and modifiers. Either the product's door takes the platform as a value
