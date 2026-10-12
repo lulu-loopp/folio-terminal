@@ -88,7 +88,7 @@
 //!   `tests/`, `examples/`, `benches/` and build script (`bt-source`'s
 //!   `tests/fixtures/` aside) whose bytes no build of the shipped program
 //!   contains ([`bt_source::Occurrence::in_the_product`]) — a bundled asset is
-//!   the product's, not a reader's — and that read in one of two ways:
+//!   the product's, not a reader's — and that read in one of three ways:
 //!   1. an `include_str!` or `include_bytes!` whose literal, taken from the
 //!      including file's directory, is a committed document;
 //!   2. a **call** of `read_to_string`, `fs::read` or `File::open` — each
@@ -118,6 +118,21 @@
 //!      (`root.join(name)` with `name` a loop variable, a `format!`, another
 //!      crate's constant) is not judged: it is counted and listed as a
 //!      diagnostic — printed by the test and in its refusal — and not refused.
+//!   3. **any other call or method handed a committed document**: every call
+//!      of a path (`read_session(…)`, `Engine::open(…)`, `std::fs::copy(…)`)
+//!      and every method call is judged by each of its arguments and by the
+//!      value it is called on, reduced the same way, and is a reader of the
+//!      committed documents they land on, named by its callee (the `mechanism`
+//!      column). A test that names a committed file and hands it to code
+//!      depends on that file, whatever the callee does with it. Two things are
+//!      not such a call: a macro (`assert_eq!(path, …)` compares; its own
+//!      arguments are walked, and a call inside them counts), and the calls
+//!      that build or describe a path rather than hand it on — `Path::new`,
+//!      `PathBuf::from`, `String::from`, and the methods in [`PATH_BUILDING`]
+//!      (`join`, `parent`, `display`, `to_str`, `file_name`…). Here a relative
+//!      string is a string, not a path into the checkout: only the three reads
+//!      resolve one from the package directory, and an unreduced rooted path
+//!      is no diagnostic.
 //! * **The item** is the innermost function holding the call; outside every
 //!   function it is the `const` or `static` the include initialises, or the
 //!   module itself. The name is the module path without `crate`, with an
@@ -130,12 +145,12 @@
 //! What it does not see, written down rather than discovered: a path handed in
 //! as a parameter (`bt-app`'s `build.rs` `release_manifest`, and `scan` above,
 //! which reads `.ps1` files); a root reached through a method, a closure or
-//! another file's function; a read through any other call than the three
-//! (`bt_persist::read_settings`, `OpenOptions::open`, a method
-//! `.read_to_string(&mut buffer)` on a reader); a read call renamed by
-//! `use … as …`, since bt-source does not resolve aliases; a read inside a
-//! macro whose arguments do not parse as expressions; and the rooted reads it
-//! lists as unreduced. Rows are not checked the other way: a row whose item no
+//! another file's function; a path a function hands on from its own
+//! parameter (`bt_persist::read_settings` is the reader of what it is
+//! handed; its caller, which names the fixture, is the row); a read call
+//! renamed by `use … as …`, since bt-source does not resolve aliases; a call
+//! inside a macro whose arguments do not parse as expressions; and the rooted
+//! reads it lists as unreduced. Rows are not checked the other way: a row whose item no
 //! longer reads is not refused.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -915,20 +930,25 @@ fn every_source_reader_names_a_reason_and_is_not_also_debt() {
 const INCLUDE_MACROS: [&str; 2] = ["include_str", "include_bytes"];
 
 /// What a document reader does with the file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Reading {
     /// `include_str!` or `include_bytes!` of a committed path.
     Included,
     /// `read_to_string`, `fs::read` or `File::open` on a path the item roots in
     /// the checkout or spells out.
     AtRunTime,
+    /// Any other call or method handed a path that resolves to a committed
+    /// document — a wrapper of this crate, a function of another, a method
+    /// called on the path — named by its callee.
+    HandedTo(String),
 }
 
 impl Reading {
-    fn said(self) -> &'static str {
+    fn said(&self) -> String {
         match self {
-            Self::Included => "includes a committed document",
-            Self::AtRunTime => "reads a committed document at run time",
+            Self::Included => "includes a committed document".to_owned(),
+            Self::AtRunTime => "reads a committed document at run time".to_owned(),
+            Self::HandedTo(callee) => format!("hands a committed document to `{callee}`"),
         }
     }
 }
@@ -962,7 +982,7 @@ impl DocumentReader {
             self.owners.iter().cloned().collect::<Vec<_>>().join(" / "),
             self.readings
                 .iter()
-                .map(|reading| reading.said())
+                .map(Reading::said)
                 .collect::<Vec<_>>()
                 .join(" and "),
             subjects
@@ -1320,27 +1340,21 @@ impl DocumentScan<'_> {
         found
     }
 
-    /// Every run-time read outside the product, judged one call at a time by
-    /// the path that call is handed: a committed document it reads, or a rooted
-    /// path this reading cannot reduce.
+    /// Every call outside the product that reads a committed document or is
+    /// handed one, judged one call at a time by the paths that call is handed:
+    /// the three run-time reads by their path argument, every other call and
+    /// method by each argument and by the value it is called on.
     fn read_at_run_time(&self) -> (Vec<DocumentReader>, Vec<UnresolvedRead>) {
-        let calls = self.read_calls();
+        let reads = self.read_calls();
         let mut readers = Vec::new();
         let mut unresolved = Vec::new();
         for file in self.index.files() {
             let span = file.span();
-            let first = calls.range(span.start()..span.end()).next();
-            if first.is_none() {
-                continue;
-            }
             let text = self.index.text(span);
             let syntax = FileSyntax::of(text, file.path());
             for call in &syntax.calls {
                 let at = span.start() + call.offset;
-                let Some(site) = calls.get(&at) else {
-                    continue;
-                };
-                let value = call.argument.as_ref().map_or(Value::Opaque, |argument| {
+                let evaluate = |expression: &syn::Expr| {
                     Evaluation {
                         syntax: &syntax,
                         function: call.function,
@@ -1348,30 +1362,63 @@ impl DocumentScan<'_> {
                         parameters: BTreeMap::new(),
                         depth: 0,
                     }
-                    .of(argument)
-                });
-                match self.judge(value) {
-                    Judgement::NotADocument => {}
-                    Judgement::Document(subject) => readers.push(DocumentReader {
-                        file: self.relative(file),
-                        line: self.line(site.start()),
-                        owners: self.owners_of(site.start()),
-                        readings: BTreeSet::from([Reading::AtRunTime]),
-                        subjects: BTreeSet::from([subject]),
-                    }),
-                    Judgement::Unresolved => unresolved.push(UnresolvedRead {
-                        file: self.relative(file),
-                        line: self.line(site.start()),
-                        owners: self.owners_of(site.start()),
-                    }),
+                    .of(expression)
+                };
+                if reads.contains_key(&at) {
+                    let value = call.arguments.first().map_or(Value::Opaque, evaluate);
+                    match self.judge(value, true) {
+                        Judgement::NotADocument => {}
+                        Judgement::Document(subject) => readers.push(DocumentReader {
+                            file: self.relative(file),
+                            line: self.line(at),
+                            owners: self.owners_of(at),
+                            readings: BTreeSet::from([Reading::AtRunTime]),
+                            subjects: BTreeSet::from([subject]),
+                        }),
+                        Judgement::Unresolved => unresolved.push(UnresolvedRead {
+                            file: self.relative(file),
+                            line: self.line(at),
+                            owners: self.owners_of(at),
+                        }),
+                    }
+                    continue;
                 }
+                let subjects: BTreeSet<String> = call
+                    .receiver
+                    .iter()
+                    .chain(&call.arguments)
+                    .filter_map(|expression| match self.judge(evaluate(expression), false) {
+                        Judgement::Document(subject) => Some(subject),
+                        Judgement::NotADocument | Judgement::Unresolved => None,
+                    })
+                    .collect();
+                if subjects.is_empty() || self.token_in_the_product(at) {
+                    continue;
+                }
+                readers.push(DocumentReader {
+                    file: self.relative(file),
+                    line: self.line(at),
+                    owners: self.owners_of(at),
+                    readings: BTreeSet::from([Reading::HandedTo(call.callee.clone())]),
+                    subjects,
+                });
             }
         }
         (readers, unresolved)
     }
 
-    /// What one read call's path is.
-    fn judge(&self, value: Value) -> Judgement {
+    /// Whether a build of the shipped program contains the name token that
+    /// starts at `at`.
+    fn token_in_the_product(&self, at: usize) -> bool {
+        let tokens = self.index.tokens();
+        let token = tokens[tokens.partition_point(|token| token.span().start() < at)];
+        self.in_the_product(token.span())
+    }
+
+    /// What one path handed to a call is. `read` says whether the call is one
+    /// of the three run-time reads, which resolve a relative path from the
+    /// package directory.
+    fn judge(&self, value: Value, read: bool) -> Judgement {
         let Value::Path {
             base,
             segments,
@@ -1382,7 +1429,8 @@ impl DocumentScan<'_> {
         };
         match base {
             Base::Scratch => Judgement::NotADocument,
-            Base::Package => {
+            Base::Relative if !read => Judgement::NotADocument,
+            Base::Package | Base::Relative => {
                 let mut path = self.package.to_path_buf();
                 path.extend(&segments);
                 let from = from_root(&normalized(&path), &normalized(self.root));
@@ -1462,9 +1510,12 @@ impl UnresolvedRead {
 /// Where a path starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Base {
-    /// The package directory: `CARGO_MANIFEST_DIR`, or a relative path, which
-    /// `cargo test` resolves from there.
+    /// The package directory: `CARGO_MANIFEST_DIR`.
     Package,
+    /// A relative path spelled as a string. A run-time read resolves it from
+    /// the package directory, where `cargo test` runs; handed to anything
+    /// else it is a string, not a path into the checkout.
+    Relative,
     /// The machine's temporary directory or a test's scratch name
     /// (`temp_dir`, `temp_path`, `tempfile`).
     Scratch,
@@ -1490,13 +1541,13 @@ enum Value {
 }
 
 impl Value {
-    /// The value used as a path. A text is relative, so from the package
-    /// directory; an absolute one is outside the checkout.
+    /// The value used as a path. A text is relative; an absolute one is
+    /// outside the checkout.
     fn into_path(self) -> Self {
         match self {
             Self::Text(text) => match segments_of(&text) {
                 Some(segments) => Self::Path {
-                    base: Base::Package,
+                    base: Base::Relative,
                     segments,
                     open: false,
                 },
@@ -1520,7 +1571,8 @@ impl Value {
             mut open,
         } = self.into_path()
         else {
-            unreachable!("into_path is always a path")
+            // An absolute text: a path outside the checkout, whatever follows.
+            return Self::Opaque;
         };
         match other {
             Self::Text(text) => match segments_of(&text) {
@@ -1564,11 +1616,65 @@ fn segments_of(text: &str) -> Option<Vec<String>> {
 
 /// One read call as the parser sees it.
 struct ReadCall {
-    /// The call's name token, from the start of the file.
+    /// The call's name token — the last segment of a called path, a method's
+    /// name — from the start of the file.
     offset: usize,
-    argument: Option<syn::Expr>,
+    /// The callee as written: `read_session`, `bt_persist::read_session`,
+    /// `read_link`.
+    callee: String,
+    arguments: Vec<syn::Expr>,
+    /// What a method is called on.
+    receiver: Option<syn::Expr>,
     /// The start of the function the call is written in.
     function: usize,
+}
+
+/// The methods that build or describe a path rather than hand it to anything:
+/// a path they are called on, or handed, is not consumed by them.
+const PATH_BUILDING: [&str; 29] = [
+    "join",
+    "parent",
+    "and_then",
+    "map",
+    "to_path_buf",
+    "as_path",
+    "clone",
+    "to_owned",
+    "into",
+    "as_ref",
+    "unwrap",
+    "expect",
+    "borrow",
+    "as_os_str",
+    "display",
+    "to_str",
+    "to_string_lossy",
+    "to_string",
+    "file_name",
+    "file_stem",
+    "extension",
+    "components",
+    "strip_prefix",
+    "starts_with",
+    "ends_with",
+    "with_extension",
+    "with_file_name",
+    "push",
+    "iter",
+];
+
+/// Whether a called path builds a path or a string out of its argument
+/// (`Path::new`, `PathBuf::from`, `String::from`) rather than consuming it.
+fn converts(segments: &[String]) -> bool {
+    let last = segments.last().map_or("", String::as_str);
+    let owner = segments
+        .len()
+        .checked_sub(2)
+        .map_or("", |at| segments[at].as_str());
+    matches!(
+        (owner, last),
+        ("Path" | "OsStr", "new") | ("PathBuf" | "String" | "OsString" | "From", "from")
+    )
 }
 
 /// One `let` binding of a single name.
@@ -1750,13 +1856,37 @@ impl<'ast> syn::visit::Visit<'ast> for Collector<'_> {
         if let syn::Expr::Path(path) = &*call.func
             && let Some(last) = path.path.segments.last()
         {
+            let segments: Vec<String> = path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect();
+            if !converts(&segments) {
+                self.syntax.calls.push(ReadCall {
+                    offset: self.offset(last.ident.span()),
+                    callee: segments.join("::"),
+                    arguments: call.args.iter().cloned().collect(),
+                    receiver: None,
+                    function: self.function(),
+                });
+            }
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        let method = call.method.to_string();
+        if !PATH_BUILDING.contains(&method.as_str()) {
             self.syntax.calls.push(ReadCall {
-                offset: self.offset(last.ident.span()),
-                argument: call.args.first().cloned(),
+                offset: self.offset(call.method.span()),
+                callee: method,
+                arguments: call.args.iter().cloned().collect(),
+                receiver: Some((*call.receiver).clone()),
                 function: self.function(),
             });
         }
-        syn::visit::visit_expr_call(self, call);
+        syn::visit::visit_expr_method_call(self, call);
     }
 
     /// A macro's arguments, where they parse as expressions — `assert!`,
@@ -1839,10 +1969,6 @@ impl Evaluation<'_> {
             .map(|segment| segment.ident.to_string())
             .collect();
         let last = segments.last().map_or("", String::as_str);
-        let owner = segments
-            .len()
-            .checked_sub(2)
-            .map_or("", |at| segments[at].as_str());
         let names_the_manifest_directory = call.args.iter().any(|argument| {
             matches!(argument, syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(text), .. })
                 if text.value() == MANIFEST_DIRECTORY)
@@ -1861,11 +1987,7 @@ impl Evaluation<'_> {
                 open: false,
             };
         }
-        let converts = matches!(
-            (owner, last),
-            ("Path" | "OsStr", "new") | ("PathBuf" | "String" | "OsString" | "From", "from")
-        );
-        if converts {
+        if converts(&segments) {
             return call
                 .args
                 .first()
@@ -1961,14 +2083,17 @@ impl Evaluation<'_> {
         }
     }
 
+    /// The file's constant of that name. A constant can name itself through
+    /// a longer path (`const A: &str = other::A;`), so the chain is bounded
+    /// like a helper's.
     fn constant(&self, name: &str) -> Value {
         match self.syntax.constants.get(name) {
-            Some(Some(expression)) => Evaluation {
+            Some(Some(expression)) if self.depth < Self::DEEPEST => Evaluation {
                 syntax: self.syntax,
                 function: usize::MAX,
                 position: 0,
                 parameters: BTreeMap::new(),
-                depth: self.depth,
+                depth: self.depth + 1,
             }
             .of(expression),
             _ => Value::Opaque,
@@ -2152,9 +2277,17 @@ fn every_reader_of_a_committed_document_is_on_a_list() {
 /// with the real repository's committed paths as the subject set; written
 /// whole, it would be readers in this file.
 ///
+/// It also hands a committed fixture to a same-file wrapper and calls a
+/// method on one — readers, named by their callee — and compares a committed
+/// path inside `assert_eq!`, which is not.
+///
 /// MUTATION: drop `"include_str"` from [`INCLUDE_MACROS`] and `tests::LIST` is
-/// not found; search `read_` instead of `read` in [`READ_CALLS`] and
-/// `tests::reads_a_text_with_fs_read` is not; delete the `target` arm of
+/// not found; skip every call that is not one of the three reads in
+/// `DocumentScan::read_at_run_time` (`continue` before its subjects are
+/// gathered) and `tests::hands_a_fixture_to_a_method` and
+/// `tests::hands_a_fixture_to_a_wrapper` are not; search `read_` instead of
+/// `read` in [`READ_CALLS`] and `tests::reads_a_text_with_fs_read` is not;
+/// delete the `target` arm of
 /// `DocumentScan::judge` and `tests::reads_its_own_output_under_target` joins
 /// the diagnostic.
 #[test]
@@ -2193,7 +2326,7 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
                     .cloned()
                     .collect::<Vec<_>>()
                     .join(" / "),
-                reader.readings.iter().copied().collect(),
+                reader.readings.iter().cloned().collect(),
                 reader.subjects.iter().cloned().collect(),
             )
         })
@@ -2203,6 +2336,16 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
             "tests::LIST",
             Reading::Included,
             "crates/bt-app/src/window_waits.tsv",
+        ),
+        (
+            "tests::hands_a_fixture_to_a_method",
+            Reading::HandedTo("read_link".to_owned()),
+            "packaging/macos/Info.plist.in",
+        ),
+        (
+            "tests::hands_a_fixture_to_a_wrapper",
+            Reading::HandedTo("read_fixture".to_owned()),
+            "tests/assets/folio-pdf-test.pdf",
         ),
         (
             "tests::opens_a_json",
@@ -2240,7 +2383,7 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
     let strays = unlisted_documents(&readers, &listed);
     assert_eq!(
         strays.len(),
-        5,
+        7,
         "a planted reader was taken for a listed one"
     );
     let said = document_complaint(&strays, &unresolved);
@@ -2361,6 +2504,25 @@ mod tests {
 
     fn reads_a_name_it_is_handed(name: &str) -> String {
         std::fs::read_to_string(repository_root().join("docs").join(name)).unwrap()
+    }
+
+    fn read_fixture(path: &std::path::Path) -> Vec<u8> {
+        std::fs::read(path).unwrap()
+    }
+
+    #[test]
+    fn hands_a_fixture_to_a_wrapper() {
+        let _ = read_fixture(&repository_root().join("tests/assets/folio-pdf-test.pdf"));
+    }
+
+    #[test]
+    fn hands_a_fixture_to_a_method() {
+        let _ = repository_root().join("packaging/macos/Info.plist.in").read_link();
+    }
+
+    #[test]
+    fn compares_a_fixture_path() {
+        assert_eq!(repository_root().join("docs/DESIGN.md"), std::path::PathBuf::new());
     }
 }
 "#
