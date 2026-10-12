@@ -4013,7 +4013,11 @@ impl<'a> Evaluation<'a> {
         let mut found = Vec::new();
         let mut missing = None;
         for (file, inline) in placements {
-            match self.held_in(&key, file, &inline, name, seen, viewer) {
+            // Files and glob imports are alternative routes to the name. A
+            // cycle on one route must not hide a later route to the same
+            // constant that has different visibility.
+            let mut route_seen = seen.clone();
+            match self.held_in(&key, file, &inline, name, &mut route_seen, viewer) {
                 Resolved::Found(more) => found.extend(more),
                 Resolved::Missing(Value::Unreduced(Why::Elsewhere(_))) => {}
                 Resolved::Missing(value) => missing = missing.or(Some(value)),
@@ -4072,9 +4076,10 @@ impl<'a> Evaluation<'a> {
         let mut candidates = Vec::new();
         let mut missing = None;
         for (glob, visibility) in syntax.globs.get(inline).into_iter().flatten() {
+            let mut route_seen = seen.clone();
             match self.world.walk(Some(key), glob) {
                 Walk::Module(next) => match through(
-                    self.constant_in(next, name, seen, viewer),
+                    self.constant_in(next, name, &mut route_seen, viewer),
                     visibility.admits(key, viewer),
                 ) {
                     Resolved::Missing(Value::Unreduced(Why::Elsewhere(_))) => {}
@@ -4121,7 +4126,11 @@ impl<'a> Evaluation<'a> {
                         .zip(&candidate)
                         .all(|((_, left), (_, right))| Rc::ptr_eq(left, right))
             };
-            if !distinct.iter().any(same) {
+            if let Some(existing) = distinct.iter_mut().find(|other| same(other)) {
+                for ((existing_scope, _), (scope, _)) in existing.iter_mut().zip(candidate) {
+                    existing_scope.admitted |= scope.admitted;
+                }
+            } else {
                 distinct.push(candidate);
             }
         }
@@ -4835,12 +4844,17 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
 /// Two `pub` constants of one name behind `pub(crate) use left::*` and
 /// `pub use right::*` are, to another crate, `right`'s alone: a candidate is
 /// visible only when every `use` on its way admits the reader too.
+/// A public constant reached first through a restricted glob and later
+/// through a public glob is admitted by the public route. A private
+/// same-named constant behind another public glob does not make it ambiguous.
 ///
 /// MUTATION: let `Evaluation::disambiguated` take the first candidate and
 /// `tests::reads_one_of_two_glob_constants` reads `structural-debt.md`; let
 /// it take every candidate and it reads both; let it ignore the `use`s'
 /// visibility (`scope.admitted`) and `tests::reads_through_the_public_glob`
-/// is a false ambiguity in the diagnostic.
+/// is a false ambiguity in the diagnostic. Share `seen` across sibling
+/// globs and keep the first identical candidate's admission, and
+/// `tests::reads_through_one_of_two_routes` is the same false ambiguity.
 #[test]
 fn a_name_two_globs_bring_in_is_the_constant_visible_to_the_reader() {
     let plot = temporary_directory("planted-crates");
@@ -4910,6 +4924,11 @@ fn a_name_two_globs_bring_in_is_the_constant_visible_to_the_reader() {
                 "crates/planted_user/src/lib.rs",
                 "tests::reads_one_of_two_glob_constants",
                 "docs/plans/SOURCE-READERS.tsv",
+            ),
+            (
+                "crates/planted_user/src/lib.rs",
+                "tests::reads_through_one_of_two_routes",
+                "docs/ARCHITECTURE-GUARDS.md",
             ),
             (
                 "crates/planted_user/src/lib.rs",
@@ -5238,6 +5257,27 @@ mod right {
 pub(crate) use left::*;
 pub use right::*;
 
+mod origin {
+    pub const ROUTED_DOC: &str = "docs/ARCHITECTURE-GUARDS.md";
+}
+
+mod hidden_route {
+    pub use super::origin::*;
+}
+
+mod open_route {
+    pub use super::origin::*;
+}
+
+mod private_route {
+    #[allow(dead_code)]
+    const ROUTED_DOC: &str = "docs/plans/structural-debt.md";
+}
+
+pub(crate) use hidden_route::*;
+pub use open_route::*;
+pub use private_route::*;
+
 #[cfg(test)]
 mod tests {
     fn root() -> std::path::PathBuf {
@@ -5265,6 +5305,11 @@ mod tests {
     #[test]
     fn reads_through_the_public_glob() {
         let _ = std::fs::read_to_string(root().join(planted_lib::PAIRED_DOC));
+    }
+
+    #[test]
+    fn reads_through_one_of_two_routes() {
+        let _ = std::fs::read_to_string(root().join(planted_lib::ROUTED_DOC));
     }
 
     #[test]
