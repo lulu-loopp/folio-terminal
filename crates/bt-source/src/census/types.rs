@@ -493,7 +493,7 @@ pub(crate) fn package_of(index: &Index, item: &ItemRecord) -> String {
     package_at(index, item.whole().start())
 }
 
-fn package_at(index: &Index, offset: usize) -> String {
+pub(crate) fn package_at(index: &Index, offset: usize) -> String {
     index
         .file_at(offset)
         .and_then(|file| file.owners().first())

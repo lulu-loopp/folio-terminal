@@ -297,7 +297,11 @@ impl Steward {
         let started = bt_platform::spawn_at_priority(
             "watch-steward",
             bt_platform::ThreadPriority::BelowNormal,
-            move |ctx| WatchSteward::for_lane(self).serve(ctx),
+            // Contained (`contained_panic::contain`), so under the resident panic hook a worker that
+            // panics ends through `WorkerGone`, and the next request starts another.
+            move |ctx| {
+                let _ = crate::contained_panic::contain(|| WatchSteward::for_lane(self).serve(ctx));
+            },
         );
         if let Err(error) = started {
             // The work stays marked and the next request tries the thread again; nothing on the
@@ -920,8 +924,13 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, mpsc};
 
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use bt_platform::DirChange;
+    use bt_platform::admission::WorkerCtx;
+
     use super::fake::FakeDoor;
-    use super::{Depth, EarHandle, MemberReport, Steward};
+    use super::{Depth, Door, EarHandle, Held, MemberReport, Steward};
     use crate::lane::wait_for_a_wake;
 
     /// A steward of the test's own over `door`, and the wakes it sends after each publication.
@@ -947,6 +956,72 @@ mod tests {
             .into_iter()
             .map(|(path, numbered)| (path, numbered.report))
             .collect()
+    }
+
+    /// RED (T-PANIC-ROWS-HONEST) — **a steward that panics under the resident panic hook ends
+    /// through `WorkerGone`, and the next request starts another that serves every open ear.**
+    /// The product's hook ends the process for a panic it is not told is contained; the worker's
+    /// body runs inside `contained_panic::contain`, so the hook's decision at the panic is yes.
+    ///
+    /// MUTATION: the worker's body without `contained_panic::contain` — the decision at the panic
+    /// is no (the process would end there).
+    #[test]
+    fn a_steward_that_panics_under_the_resident_hook_is_started_again() {
+        struct PanicsOnce(FakeDoor, AtomicBool, mpsc::Sender<bool>);
+        impl Door for PanicsOnce {
+            fn start(
+                &self,
+                ctx: &WorkerCtx,
+                path: &Path,
+                depth: Depth,
+                wake: Box<dyn Fn(DirChange<'_>) + Send>,
+            ) -> std::io::Result<Box<dyn Held>> {
+                if self.1.swap(false, Ordering::SeqCst) {
+                    let _ = self.2.send(crate::the_hook_lets_this_panic_unwind());
+                    panic!("scripted: 监视启动失败 the watch start fails");
+                }
+                self.0.start(ctx, path, depth, wake)
+            }
+        }
+        let (told, decision) = mpsc::channel();
+        let steward: &'static Steward = Box::leak(Box::new(Steward::new(
+            PanicsOnce(FakeDoor::default(), AtomicBool::new(true), told),
+            |_| {},
+        )));
+        let (woke, wakes) = mpsc::channel();
+        steward.install_wake(move || {
+            let _ = woke.send(());
+        });
+        let mut ear = quiet_ear(steward);
+        ear.want(&BTreeSet::from([folder("先")]), BTreeSet::new());
+        assert!(
+            crate::lane::receive(&decision, "the hook's decision inside the steward"),
+            "the steward runs where the resident hook lets its panic unwind"
+        );
+        until_the_worker_is_gone(steward);
+        ear.want(
+            &BTreeSet::from([folder("先"), folder("后")]),
+            BTreeSet::new(),
+        );
+        wait_for_a_wake(&wakes, "the new steward's arming");
+        let armed = states(&ear);
+        assert!(
+            armed.contains(&(folder("先"), MemberReport::Armed))
+                && armed.contains(&(folder("后"), MemberReport::Armed)),
+            "the new worker serves every open ear: {armed:?}"
+        );
+    }
+
+    /// Wait, within the lane suite's patience, until `steward` has no worker.
+    fn until_the_worker_is_gone(steward: &Steward) {
+        let since = std::time::Instant::now();
+        while steward.lock().worker {
+            assert!(
+                since.elapsed() < crate::lane::PATIENCE,
+                "the dead steward's end within the lane suite's patience"
+            );
+            std::thread::yield_now();
+        }
     }
 
     /// PIN (B5 design note, revision (c)3) — **a sync returns while a watch start is held**, and
