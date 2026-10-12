@@ -211,6 +211,7 @@ bt-platform	-	crate::deferred_removal::schedule	std::fs::create_dir_all 1, std::
 bt-platform	[windows]	crate::elevated_pipe::shell_execute_runas	windows::Win32::UI::Shell::ShellExecuteExW 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::stop_child	std::process::Child::wait 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::exchange::flush_directory	std::fs::File::sync_all 1	worker-door-body	WorkerCtx	
+bt-platform	-	crate::macos_update::flush_tree_with	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::exchange::replace_keeping_displaced	std::fs::File::sync_all 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::wait::sleep_within	std::thread::sleep 1	worker-door-body	WorkerCtx	
 bt-platform	[unix]	crate::instance::sweep_stale_claims_in	std::fs::read_dir 1	worker-door-body	WorkerCtx	
