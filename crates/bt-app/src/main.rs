@@ -20422,6 +20422,25 @@ fn text_field_holding(rung: ImeOwner, settings_field: bool) -> Option<TextFieldS
     }
 }
 
+/// **What the clipboard verbs read of the keyboard**, for the rung that holds it
+/// (`Runtime::clipboard_focus`): whether a surface above the clipboard rung
+/// swallows every key, the one-line field on the rung, whether the quick edit
+/// has the keyboard, and whether the rung is the shell's.
+#[must_use]
+fn clipboard_focus_of(
+    rung: ImeOwner,
+    swallowing: bool,
+    settings_field: bool,
+    preview_edit: bool,
+) -> menubar::ClipboardFocus {
+    menubar::ClipboardFocus {
+        swallowing,
+        field: text_field_holding(rung, settings_field),
+        preview_edit,
+        shell: rung == ImeOwner::Shell,
+    }
+}
+
 /// **Where the candidate window hangs**, as a function of the rung
 /// (user report, 2026-08-17).
 ///
@@ -53522,12 +53541,12 @@ impl Runtime<'_> {
     /// the two functions to.
     fn clipboard_focus(&mut self) -> menubar::ClipboardFocus {
         let rung = ime_owner(self.keyboard_owner());
-        menubar::ClipboardFocus {
-            swallowing: self.a_surface_above_the_clipboard_rung_holds_the_keyboard(),
-            field: text_field_holding(rung, self.settings_field_holds_the_keyboard()),
-            preview_edit: self.preview_edit_focus().is_some(),
-            shell: rung == ImeOwner::Shell,
-        }
+        clipboard_focus_of(
+            rung,
+            self.a_surface_above_the_clipboard_rung_holds_the_keyboard(),
+            self.settings_field_holds_the_keyboard(),
+            self.preview_edit_focus().is_some(),
+        )
     }
 
     /// Observe focus without changing IME, native focus, or composition state.
@@ -78282,27 +78301,51 @@ mod edit_menu_clipboard_tests {
     /// A second copy path would be a second answer to what a selection is worth
     /// on the pasteboard; a second paste path would be a second place for the
     /// sanitising, the bracketing and the multi-line policy to be decided. The
-    /// four doors named here are the four the two key handlers name.
+    /// four doors named here are the four the two key handlers name; the menu
+    /// reaches them through `menubar::ClipboardDoors`, which `Runtime` answers.
     ///
     /// MUTATION: read the pasteboard in `run_an_application_menu_verb` and
     /// write the bytes itself — the last two assertions go red.
     #[test]
     fn the_edit_menus_clipboard_verbs_go_through_the_keystrokes_own_doors() {
         let verb = method_body("Runtime", "run_an_application_menu_verb");
+        assert!(
+            verb.contains("menubar::run_clipboard_verb(copying, focus, self)"),
+            "the Edit menu decides its seat somewhere other than the one road"
+        );
         let editor = method_body("Runtime", "preview_key");
         let ladder = ladder();
-        for (door, other, whose) in [
+        let opened = |name: &str| {
+            item_body(&ItemQuery::method("Runtime", name).of_trait("menubar::ClipboardDoors"))
+        };
+        for (opened_by, door, other, whose) in [
             (
+                "copy_document_selection",
                 "self.copy_preview_selection()",
                 editor,
                 "the preview editor",
             ),
-            ("self.paste_into_preview()", editor, "the preview editor"),
-            ("self.copy_selection()", ladder, "the terminal"),
-            ("self.paste_from_clipboard()", ladder, "the terminal"),
+            (
+                "paste_into_document",
+                "self.paste_into_preview()",
+                editor,
+                "the preview editor",
+            ),
+            (
+                "copy_terminal_selection",
+                "self.copy_selection()",
+                ladder,
+                "the terminal",
+            ),
+            (
+                "paste_into_terminal",
+                "self.paste_from_clipboard()",
+                ladder,
+                "the terminal",
+            ),
         ] {
             assert!(
-                verb.contains(door),
+                opened(opened_by).contains(door),
                 "the Edit menu does not reach `{door}`, which is {whose}'s own door"
             );
             assert!(
@@ -78310,12 +78353,13 @@ mod edit_menu_clipboard_tests {
                 "`{door}` is no longer what {whose} answers its own chord with"
             );
         }
+        let road = item_body(&ItemQuery::function("run_clipboard_verb"));
         for its_own in [
             "write_terminal_clipboard_text",
             "bt_platform::clipboard_text",
         ] {
             assert!(
-                !verb.contains(its_own),
+                !verb.contains(its_own) && !road.contains(its_own),
                 "the Edit menu touches the pasteboard itself through `{its_own}` instead of \
                  going through the door the keystroke uses"
             );
@@ -78413,48 +78457,128 @@ mod edit_menu_clipboard_tests {
         );
     }
 
-    /// RED (H2-NITS, owner ruling 2026-10-11 on H2 Q2: keep) — **a copy over a
-    /// files column, a read-only preview or a switcher popup still takes the
-    /// terminal's selection**; only the quick edit and a surface above the
-    /// clipboard rung answer Edit ▸ Copy otherwise.
+    /// RED (H2-NITS, owner ruling 2026-10-11 on H2 Q2: keep; round 2) — **Edit ▸
+    /// Copy over a files column, a read-only preview or a switcher copies the
+    /// terminal's selection onto the clipboard**; only the quick edit and a
+    /// surface above the clipboard rung answer it otherwise.
     ///
-    /// Copy writes nothing into a child, so it is not held to the paste's rule
-    /// ([`a_paste_reaches_the_terminal_only_while_the_shell_holds_the_keyboard`]):
-    /// every rung that is not swallowing and not the quick edit copies the
-    /// terminal's selection, whatever holds the keyboard.
+    /// Driven down the menu verb's own road: the rung's focus
+    /// (`clipboard_focus_of`, what `Runtime::clipboard_focus` answers), then
+    /// `menubar::run_clipboard_verb`, then the terminal's copy door — here the
+    /// same `copy_selection` the window's door calls, over a real session holding
+    /// a real selection, writing into a test clipboard instead of the system's.
+    /// What reaches the clipboard is the selection's text, and the selection is
+    /// spent, as a keystroke's copy spends it.
     ///
-    /// MUTATION: give `menubar::clipboard_seat` the paste's `!focus.shell` arm
-    /// (`Nobody`), or let a read-only preview take it (`PreviewDocument` when
-    /// the shell does not hold the keyboard) — the `FilesTree` and `Preview`
-    /// rows go red.
+    /// MUTATIONS: (1) give `menubar::clipboard_seat` the paste's `!focus.shell`
+    /// arm (`Nobody`) — nothing is written; (2) let a read-only preview take the
+    /// copy (`PreviewDocument` while the shell does not hold the keyboard) — the
+    /// document's door is knocked on and the terminal's selection is not copied.
     #[test]
     fn a_copy_over_a_files_column_or_a_read_only_preview_takes_the_terminals_selection() {
-        use super::{ImeOwner, text_field_holding};
-        use crate::menubar::{ClipboardFocus, ClipboardSeat, clipboard_seat};
+        use super::{
+            Bias, DualPlaneSession, ImeOwner, TextFieldSeat, ViewSelection, ViewportProjection,
+            clipboard_focus_of, copy_selection,
+        };
+        use crate::menubar::{ClipboardDoors, run_clipboard_verb};
+        use std::num::NonZeroU32;
 
-        let mut asked = Vec::new();
-        // A one-line field's own copy is its own question; the rungs asked here
-        // are the ones with no caret of their own.
-        for rung in ImeOwner::ALL
-            .into_iter()
-            .filter(|rung| text_field_holding(*rung, false).is_none())
-        {
-            let seat = clipboard_seat(ClipboardFocus {
-                swallowing: false,
-                field: None,
-                preview_edit: false,
-                shell: rung == ImeOwner::Shell,
-            });
-            assert_eq!(
-                seat,
-                ClipboardSeat::Terminal,
-                "{rung:?} holds the keyboard and Edit ▸ Copy did not take the terminal's selection"
-            );
-            asked.push(rung);
+        /// The terminal's copy door over one real session, and a clipboard of
+        /// its own; every other door is a knock the test records.
+        struct Doors {
+            session: DualPlaneSession,
+            projection: ViewportProjection,
+            clipboard: Vec<String>,
+            knocked: Vec<&'static str>,
         }
+        impl ClipboardDoors for Doors {
+            fn copy_terminal_selection(&mut self) -> anyhow::Result<()> {
+                let Self {
+                    session,
+                    projection,
+                    clipboard,
+                    ..
+                } = self;
+                copy_selection(session, projection, |text| {
+                    clipboard.push(text.to_owned());
+                    Ok(())
+                });
+                Ok(())
+            }
+            fn paste_into_terminal(&mut self) -> anyhow::Result<()> {
+                self.knocked.push("paste_into_terminal");
+                Ok(())
+            }
+            fn copy_document_selection(&mut self) {
+                self.knocked.push("copy_document_selection");
+            }
+            fn paste_into_document(&mut self) -> anyhow::Result<()> {
+                self.knocked.push("paste_into_document");
+                Ok(())
+            }
+            fn paste_into_field(&mut self, _: TextFieldSeat) -> anyhow::Result<()> {
+                self.knocked.push("paste_into_field");
+                Ok(())
+            }
+        }
+        let selected = || {
+            let mut session =
+                DualPlaneSession::new(NonZeroU32::new(24).unwrap(), NonZeroU32::new(2).unwrap());
+            session.feed("echo 中文 ok".as_bytes()).unwrap();
+            let mut projection = session.new_projection(session.layout_key());
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            let selection = ViewSelection {
+                start: frame.anchor_at(0, 5, Bias::Before).unwrap().unwrap(),
+                end: frame.anchor_at(0, 8, Bias::After).unwrap().unwrap(),
+            };
+            session.set_view_selection(Some(selection.clone()));
+            projection.set_selection(Some(selection));
+            Doors {
+                session,
+                projection,
+                clipboard: Vec::new(),
+                knocked: Vec::new(),
+            }
+        };
         for rung in [ImeOwner::FilesTree, ImeOwner::Preview, ImeOwner::Modal] {
-            assert!(asked.contains(&rung), "{rung:?} was not asked");
+            let mut doors = selected();
+            let expected = doors.session.selection_text().expect("a selection");
+            run_clipboard_verb(
+                true,
+                clipboard_focus_of(rung, false, false, false),
+                &mut doors,
+            )
+            .expect("the copy runs");
+            assert_eq!(
+                doors.clipboard,
+                [expected],
+                "{rung:?} holds the keyboard and Edit ▸ Copy did not copy the terminal's selection"
+            );
+            assert!(doors.knocked.is_empty(), "{rung:?}: {:?}", doors.knocked);
+            assert!(
+                doors.session.view_selection().is_none(),
+                "the copy spends the selection, as the keystroke's does"
+            );
         }
+        // The quick edit takes its own copy, and a surface above the clipboard
+        // rung takes none — the two exceptions, on the same road.
+        let mut doors = selected();
+        run_clipboard_verb(
+            true,
+            clipboard_focus_of(ImeOwner::Preview, false, false, true),
+            &mut doors,
+        )
+        .expect("the copy runs");
+        assert_eq!(doors.knocked, ["copy_document_selection"]);
+        assert!(doors.clipboard.is_empty());
+        let mut doors = selected();
+        run_clipboard_verb(
+            true,
+            clipboard_focus_of(ImeOwner::Modal, true, false, false),
+            &mut doors,
+        )
+        .expect("the copy runs");
+        assert!(doors.clipboard.is_empty() && doors.knocked.is_empty());
     }
 
     /// RED (B-AUDIT-046 RT-1) — **a paste goes to the text field that holds the
@@ -78584,15 +78708,19 @@ mod edit_menu_clipboard_tests {
         );
         assert!(ladder.contains("self.paste_into_field(field)?;"));
         let menu = method_body("Runtime", "run_an_application_menu_verb");
+        let road = item_body(&ItemQuery::function("run_clipboard_verb"));
         assert!(
-            menu.contains("menubar::paste_seat(focus)")
-                && menu.contains("self.paste_into_field(field)"),
+            menu.contains("menubar::run_clipboard_verb(copying, focus, self)")
+                && road.contains("paste_seat(focus)")
+                && road.contains("doors.paste_into_field(field)"),
             "Edit ▸ Paste decides for itself instead of asking the seat"
         );
         let focus = method_body("Runtime", "clipboard_focus");
+        let of_rung = item_body(&ItemQuery::function("clipboard_focus_of"));
         assert!(
-            focus.contains("text_field_holding(")
-                && focus.contains("ime_owner(self.keyboard_owner())"),
+            focus.contains("clipboard_focus_of(")
+                && focus.contains("ime_owner(self.keyboard_owner())")
+                && of_rung.contains("text_field_holding("),
             "the field is read off the ladder, not listed"
         );
         // The fields whose rungs stand above the clipboard rung take the same
