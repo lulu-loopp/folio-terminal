@@ -15035,3 +15035,11 @@ Each completed program walk now publishes the exact `PATH` and `PATHEXT` values 
 **The rule.** On Windows the §7.30 table (2026-09-07) stands: a row that starts `wsl.exe` is `Wsl`, Windows directories behind a bash or zsh init-file door is `Msys`, every other row is `Windows`. On macOS and every other Unix every row — zsh, bash, sh and the account's own shell — is `Posix`. This corrects §7.30's "read off the pair the row carries", which held only on Windows: the macOS and Unix rows carry the same `(PathNamespace::Windows, init-file door)` pair Git Bash does, and the pair alone classed every Mac zsh and bash pane as MSYS.
 
 **Pinned by** `profiles::tests::a_macos_shell_prints_posix_paths_not_msys` (every row every platform ships and every `(paths, door)` pair, on each of the three platforms, driven on any host), beside the standing `profiles::tests::a_row_says_which_spelling_of_an_absolute_path_its_shell_prints`.
+
+### 2026-10-12 — A pane no shell has told yet reads this machine's own spelling (T-MAC-PRINTED-NAMESPACE round 2)
+
+**What is built.** `PrintedPathNamespace`'s `Default` is no longer `Windows` on every host: it is `PrintedPathNamespace::machine_own(windows)`, the platform an input, which answers `Windows` for a Windows machine and `Posix` for macOS and every other Unix, asked for the machine this build is. It reaches every session before its spawn pushes a namespace, every seat with no session (`seat_path_namespace`, `hovered_pane_path_namespace`), and `PrintedPathLinks::new`.
+
+**The rule.** The namespace of a pane with no shell is the same answer the (platform, shell) table gives a doorless row on that platform; a paste override never changes what a row prints.
+
+**Pinned by** `profiles::tests::a_pane_with_no_shell_reads_this_machines_own_spelling` (all three platforms as inputs, and the default against this build's platform), `profiles::paste_tests::a_paste_overridden_git_bash_row_still_prints_msys_paths`, and `profiles::paste_tests::every_seed_row_has_a_grammar_and_standing_namespace_pair`, which now asks the table rather than restating it.
