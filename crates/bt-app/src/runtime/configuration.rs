@@ -11,8 +11,9 @@
 //!
 //! **A hand edit of `settings.json` enters by the same doors** (R33; design note
 //! 2026-10-11 §3.3, §5.1; T-STORE-MERGE-SETTINGS): the storage pass's merge
-//! ([`Runtime::merge_documents`]) walks each changed row's own apply function
-//! with the store's writes held, exactly as an import's settings part does.
+//! ([`Runtime::merge_documents`], `settings_merge::run_pass` with this window
+//! as its `MergeWindow`) walks each changed row's own apply function with the
+//! store's writes held, exactly as an import's settings part does.
 
 use std::path::Path;
 
@@ -20,6 +21,7 @@ use anyhow::Result;
 use bt_persist::{ExportParts, FallbackReason, KeybindingsV1};
 
 use crate::settings_bundle::{self, ImportFault, SettingChange};
+use crate::settings_merge;
 use crate::{
     FilePick, Runtime, document_request, hang_watch, i18n, persist, profiles, schemes, settings,
     shortcuts, toast,
@@ -347,53 +349,17 @@ impl Runtime<'_> {
     }
 
     /// **The storage pass's merges, put in force** (design note 2026-10-11
-    /// §3.3, §3.6): what the files' merges replaced, for the pass's one card
-    /// (T-STORE-NOTICE raises it) — nothing for a clean hand edit.
-    pub(crate) fn merge_documents(&mut self) -> Result<document_request::MergeNotice> {
+    /// §3.3, §3.6): `settings.json`'s, through `settings_merge::run_pass` with
+    /// this window as its doors. Answers what the files' merges replaced and
+    /// could not apply, for the pass's one card (T-STORE-NOTICE raises it) —
+    /// nothing for a clean hand edit — and, beside it, whether the presentation
+    /// after the merge went through: the data is made first and a failed
+    /// presentation never takes it away.
+    pub(crate) fn merge_documents(&mut self) -> (document_request::MergeNotice, Result<()>) {
+        let outcome = settings_merge::run_pass(self);
         let mut notice = document_request::MergeNotice::default();
-        notice.files.extend(self.merge_settings_file()?);
-        Ok(notice)
-    }
-
-    /// **`settings.json`'s merge, in §3.3's order.** The store merges every
-    /// file stored for it field by field and folds the result into `desired`,
-    /// the revision becoming the file the merge read
-    /// (`SettingsStore::begin_merge`); then, with the writes held, every value
-    /// that differs between what is in force and the merged document goes
-    /// through its row's own door — the import's walk, and the import's batch
-    /// shape — while a store moves only what is in force. **Every door is
-    /// walked**: one that refuses is named and the walk goes on
-    /// (`SettingsPass::walk_doors`). A value no row on this platform shows is
-    /// stored as it came. Then the writes are released, and what kept Folio's
-    /// value is written, conditional on the file.
-    ///
-    /// Then `diagnostics.log` gets the pass's one line, always, the open
-    /// dialog re-derives and the chrome follows. Answers what the file replaced
-    /// and what was not applied, `None` for a clean hand edit or no merge.
-    fn merge_settings_file(&mut self) -> Result<Option<document_request::ReplacedInFile>> {
-        let Some(mut pass) = self
-            .app
-            .settings_store
-            .begin_merge(bt_platform::host_platform())
-        else {
-            return Ok(None);
-        };
-        pass.walk_doors(|change| self.apply_imported_setting(change.clone()));
-        for change in &pass.doors.elsewhere {
-            self.store_imported_value(change);
-        }
-        self.app.settings_store.end_merge();
-        eprintln!("{}", pass.diagnostics());
-        if !pass.doors.apply.is_empty() || !pass.doors.elsewhere.is_empty() {
-            let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
-            let content =
-                self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
-            self.window.settings.keep_focus_reachable(content);
-            if self.refresh_chrome() {
-                self.present_chrome_change()?;
-            }
-        }
-        Ok(pass.replaced())
+        notice.files.extend(outcome.replaced);
+        (notice, outcome.presented)
     }
 
     /// **A re-read that found `settings.json` or `keybindings.json` would not
@@ -616,6 +582,44 @@ impl Runtime<'_> {
             Some(i18n::Text::SettingsSkipped.text().to_owned()),
             names.join(", "),
         )
+    }
+}
+
+/// **This window is the settings merge's** (`settings_merge::run_pass`): the
+/// store's merge steps, what is in force, each row's own door — the import's
+/// `apply_imported_setting` — and the presentation after.
+impl settings_merge::MergeWindow for Runtime<'_> {
+    fn merge_begin(&mut self) -> Option<settings_merge::SettingsPass> {
+        self.app
+            .settings_store
+            .begin_merge(bt_platform::host_platform())
+    }
+
+    fn merge_in_force(&self) -> &bt_persist::SettingsV1 {
+        self.app.settings_store.loaded()
+    }
+
+    fn merge_door(&mut self, change: &SettingChange) -> Result<()> {
+        self.apply_imported_setting(change.clone())
+    }
+
+    fn merge_store_as_it_came(&mut self, change: &SettingChange) {
+        self.store_imported_value(change);
+    }
+
+    fn merge_end(&mut self) {
+        self.app.settings_store.end_merge();
+    }
+
+    fn merge_present(&mut self) -> Result<()> {
+        let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
+        let content =
+            self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
+        self.window.settings.keep_focus_reachable(content);
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 }
 

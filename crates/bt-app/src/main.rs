@@ -48967,8 +48967,10 @@ impl Runtime<'_> {
             )?;
         }
         self.take_kept_news(heard.settings, heard.keybindings)?;
-        // The data of the pass's one card; T-STORE-NOTICE raises it.
-        let _replaced = self.merge_documents()?;
+        // The data of the pass's one card, made whatever the presentation after
+        // the merge answers; T-STORE-NOTICE raises it.
+        let (_replaced, presented) = self.merge_documents();
+        presented?;
         self.take_profiles_news(heard.profiles)?;
         self.take_pins_news(heard.pins)
     }

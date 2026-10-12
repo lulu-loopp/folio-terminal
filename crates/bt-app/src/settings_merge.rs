@@ -387,9 +387,12 @@ pub(crate) struct SettingsPass {
     pub(crate) doors: SettingsPlan,
     /// Every merge of the pass, summed.
     pub(crate) account: Account,
-    /// The doors that refused their change, named by row, with the door's
-    /// error ([`Self::walk_doors`]).
+    /// The units a door did not put in force, named by row, with why
+    /// ([`run_pass`]).
     pub(crate) refused: Vec<(String, String)>,
+    /// The units a door put in force and then answered an error about (a
+    /// step after the store failed), named by row, with the error.
+    pub(crate) noted: Vec<(String, String)>,
 }
 
 impl SettingsPass {
@@ -399,32 +402,13 @@ impl SettingsPass {
             doors,
             account,
             refused: Vec::new(),
+            noted: Vec::new(),
         }
     }
 
-    /// **Every door of the pass, each one walked** (§3.3 step 3: every unit
-    /// that takes the file's value is put in force). A door that refuses does
-    /// not stop the pass: it is named, with its error, and the next door is
-    /// walked. What the refused unit is in `desired` stays as the file said it,
-    /// and what is in force keeps its value ((b)6): it is not written back as a
-    /// change.
-    pub(crate) fn walk_doors<E: std::fmt::Display>(
-        &mut self,
-        mut door: impl FnMut(&SettingChange) -> Result<(), E>,
-    ) {
-        for change in &self.doors.apply {
-            if let Err(error) = door(change) {
-                let name = change.row().map_or_else(
-                    || crate::persist::SETTINGS_FILE_NAME.to_owned(),
-                    |row| row.title().to_owned(),
-                );
-                self.refused.push((name, error.to_string()));
-            }
-        }
-    }
-
-    /// **The pass's one line for `diagnostics.log`** (§3.6), with the doors
-    /// that refused and why.
+    /// **The pass's one line for `diagnostics.log`** (§3.6): the counts, each
+    /// unit a door did not put in force and why, and each error a door
+    /// answered after putting its unit in force.
     pub(crate) fn diagnostics(&self) -> String {
         let mut line = format!(
             "BT_PERSIST {} merged: took {} from the file, kept {} from Folio, conflicts {}, \
@@ -435,8 +419,11 @@ impl SettingsPass {
             self.account.conflicted,
             self.refused.len()
         );
-        for (name, error) in &self.refused {
-            line.push_str(&format!("; {name}: {error}"));
+        for (name, why) in &self.refused {
+            line.push_str(&format!("; {name} not applied: {why}"));
+        }
+        for (name, error) in &self.noted {
+            line.push_str(&format!("; {name} applied, then: {error}"));
         }
         line
     }
@@ -457,6 +444,102 @@ impl SettingsPass {
             values: self.account.conflicts.clone(),
             not_applied,
         })
+    }
+}
+
+/// **What a settings merge needs from the window it runs in** — the product
+/// seam `Runtime` implements (`runtime/configuration.rs`), so the pass's order
+/// and its judgment of each door are [`run_pass`]'s and nobody else's.
+pub(crate) trait MergeWindow {
+    /// `SettingsStore::begin_merge`: the merges folded, the writes held, the
+    /// doors derived.
+    fn merge_begin(&mut self) -> Option<SettingsPass>;
+    /// What is in force: the settings store's projection.
+    fn merge_in_force(&self) -> &SettingsV1;
+    /// One change through its row's own door (`apply_imported_setting`).
+    fn merge_door(&mut self, change: &SettingChange) -> anyhow::Result<()>;
+    /// A change no row on this platform shows, stored as it came.
+    fn merge_store_as_it_came(&mut self, change: &SettingChange);
+    /// `SettingsStore::end_merge`: the writes released, the merged document
+    /// sent conditionally.
+    fn merge_end(&mut self);
+    /// The open dialog re-derived and the chrome presented.
+    fn merge_present(&mut self) -> anyhow::Result<()>;
+}
+
+/// **What one pass came to**: its line, its card's data, and whether the
+/// presentation after it went through.
+pub(crate) struct PassOutcome {
+    /// The line written to `diagnostics.log`; `None` when nothing was merged.
+    pub(crate) line: Option<String>,
+    pub(crate) replaced: Option<ReplacedInFile>,
+    pub(crate) presented: anyhow::Result<()>,
+}
+
+/// **Whether `change` is in force in `in_force`**: writing it in changes
+/// nothing. The import's own post-probe (`import_settings_part`).
+fn holds(in_force: &SettingsV1, change: &SettingChange) -> bool {
+    let mut probe = in_force.clone();
+    change.write_into(&mut probe);
+    &probe == in_force
+}
+
+/// **One storage pass's merge of `settings.json`, in §3.3's order**
+/// (T-STORE-MERGE-SETTINGS, review rounds 2 and 3).
+///
+/// The store merges and folds and holds the writes; then **every door is
+/// walked**, and whether a unit was applied is read from what is in force,
+/// before and after its door — never from the door's answer: a door that
+/// answers `Ok` and leaves the unit as it was refused it (`apply_acrylic` on a
+/// machine with no backdrop); a door that put the unit in force and then
+/// failed (`apply_block_max_height`'s frame) applied it, and its error is said
+/// beside it. A refused unit stays in `desired` as the file said it, and what
+/// is in force keeps its own value ((b)6). Then a value no row on this
+/// platform shows is stored as it came, the writes are released, and the
+/// pass's line and its card's data are made — before the presentation, which
+/// cannot take them away.
+pub(crate) fn run_pass(window: &mut impl MergeWindow) -> PassOutcome {
+    let Some(mut pass) = window.merge_begin() else {
+        return PassOutcome {
+            line: None,
+            replaced: None,
+            presented: Ok(()),
+        };
+    };
+    for change in pass.doors.apply.clone() {
+        let before = holds(window.merge_in_force(), &change);
+        let answer = window.merge_door(&change);
+        let after = holds(window.merge_in_force(), &change);
+        let name = change.row().map_or_else(
+            || crate::persist::SETTINGS_FILE_NAME.to_owned(),
+            |row| row.title().to_owned(),
+        );
+        match (before || after, answer) {
+            (true, Ok(())) => {}
+            (true, Err(error)) => pass.noted.push((name, error.to_string())),
+            (false, Ok(())) => {
+                pass.refused
+                    .push((name, "this machine did not take the value".to_owned()));
+            }
+            (false, Err(error)) => pass.refused.push((name, error.to_string())),
+        }
+    }
+    for change in &pass.doors.elsewhere {
+        window.merge_store_as_it_came(change);
+    }
+    window.merge_end();
+    let line = pass.diagnostics();
+    eprintln!("{line}");
+    let replaced = pass.replaced();
+    let presented = if pass.doors.apply.is_empty() && pass.doors.elsewhere.is_empty() {
+        Ok(())
+    } else {
+        window.merge_present()
+    };
+    PassOutcome {
+        line: Some(line),
+        replaced,
+        presented,
     }
 }
 
@@ -659,62 +742,175 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// RED (round 2, finding 3; §3.3 step 3, §3.6) — **a door that refuses does not stop the
-    /// pass.** The file changed the theme and the font size; the theme's door refuses. The font's
-    /// door is still walked, the pass's line says one door refused and why, and the card's data
-    /// names the theme as not applied. `desired` keeps the file's theme, and what is in force
-    /// keeps its own ((b)6).
+    /// **A window for the pass, with two doors shaped as the real ones are.** A
+    /// real `Runtime` needs a window, which a test may not open, so the seam is
+    /// driven here with doors that do what the two real doors do:
+    /// - `Acrylic`: `apply_acrylic` on a machine whose backdrop is unavailable
+    ///   answers `Ok(false)` before it stores anything, which
+    ///   `apply_imported_setting` answers as `Ok(())`;
+    /// - `BlockMaxHeight`: `apply_block_max_height` stores the value, then
+    ///   publishes a frame, which fails here.
     ///
-    /// MUTATION: in `SettingsPass::walk_doors`, stop at the first door that refuses — the font's
-    /// door is never walked.
-    #[test]
-    fn a_refused_door_is_named_and_every_other_door_is_walked() {
-        let (root, mut store, _jobs) = store("refused-door");
-        let base = SettingsV1::default();
-        let theirs = SettingsV1 {
-            theme_mode: ThemeModeV1::Light,
-            terminal_font_size: 20,
-            ..base.clone()
-        };
+    /// Every other change is stored, as a door that took it.
+    struct Window {
+        store: SettingsStore,
+        _jobs: crate::persist::UnservedJobs,
+        presentation_fails: bool,
+    }
+
+    impl MergeWindow for Window {
+        fn merge_begin(&mut self) -> Option<SettingsPass> {
+            self.store.begin_merge(PLATFORM)
+        }
+
+        fn merge_in_force(&self) -> &SettingsV1 {
+            self.store.loaded()
+        }
+
+        fn merge_door(&mut self, change: &SettingChange) -> anyhow::Result<()> {
+            match change {
+                SettingChange::Acrylic(_) => Ok(()),
+                SettingChange::BlockMaxHeight(height) => {
+                    let mut settings = self.store.loaded().clone();
+                    settings.block_max_height = *height;
+                    self.store.store(settings);
+                    Err(anyhow::anyhow!("画面没有发布 the frame was not published"))
+                }
+                other => {
+                    self.merge_store_as_it_came(other);
+                    Ok(())
+                }
+            }
+        }
+
+        fn merge_store_as_it_came(&mut self, change: &SettingChange) {
+            let mut settings = self.store.loaded().clone();
+            change.write_into(&mut settings);
+            self.store.store(settings);
+        }
+
+        fn merge_end(&mut self) {
+            self.store.end_merge();
+        }
+
+        fn merge_present(&mut self) -> anyhow::Result<()> {
+            if self.presentation_fails {
+                anyhow::bail!("呈现失败 the chrome could not be presented");
+            }
+            Ok(())
+        }
+    }
+
+    /// A window over a scratch store whose file has changed to `theirs`.
+    fn window(case: &str, theirs: &SettingsV1) -> (std::path::PathBuf, Window) {
+        let (root, mut store, jobs) = store(case);
         let _ = store
             .document()
-            .hear_read(bt_persist::StableRead::Bytes(bytes(&theirs)));
-        let mut pass = store.begin_merge(PLATFORM).expect("a merge ran");
-        let mut walked = Vec::new();
-        pass.walk_doors(|change| match change {
-            SettingChange::Theme(_) => Err("这台机器拒绝 refused"),
-            other => {
-                walked.push(other.clone());
-                Ok(())
-            }
-        });
-        store.end_merge();
+            .hear_read(bt_persist::StableRead::Bytes(bytes(theirs)));
+        (
+            root,
+            Window {
+                store,
+                _jobs: jobs,
+                presentation_fails: false,
+            },
+        )
+    }
+
+    /// RED (round 3 (a)) — **a door that answers `Ok` and leaves the unit as it
+    /// was refused it**, and the doors after it are walked. The file turns the
+    /// backdrop on, on a machine that has none, and turns always-on-top on.
+    ///
+    /// MUTATION: in `run_pass`, judge a door by its answer alone (count only
+    /// `Err` as refused) — the line says `doors refused: 0`.
+    #[test]
+    fn a_door_the_machine_refuses_is_named_refused_and_the_rest_are_walked() {
+        let theirs = SettingsV1 {
+            acrylic: true,
+            always_on_top: true,
+            ..SettingsV1::default()
+        };
+        let (root, mut window) = window("acrylic-refused", &theirs);
+        let outcome = run_pass(&mut window);
+        let acrylic = crate::settings::SettingsRow::Acrylic.title();
         assert_eq!(
-            walked,
-            vec![SettingChange::TerminalFont {
-                family: base.terminal_font_family.clone(),
-                cjk_family: base.terminal_cjk_font_family.clone(),
-                size: 20,
-            }],
-            "the second door is walked"
-        );
-        let theme = crate::settings::SettingsRow::Theme.title();
-        assert_eq!(
-            pass.diagnostics(),
-            format!(
-                "BT_PERSIST settings.json merged: took 2 from the file, kept 0 from Folio, \
-                 conflicts 0, doors refused: 1; {theme}: 这台机器拒绝 refused"
+            outcome.line.as_deref(),
+            Some(
+                format!(
+                    "BT_PERSIST settings.json merged: took 2 from the file, kept 0 from Folio, \
+                     conflicts 0, doors refused: 1; {acrylic} not applied: this machine did not \
+                     take the value"
+                )
+                .as_str()
             )
         );
-        let replaced = pass.replaced().expect("the refusal is the card's");
-        assert_eq!(replaced.not_applied, vec![theme.to_owned()]);
-        assert!(replaced.values.is_empty(), "no conflict");
-        assert_eq!(store.document().desired().theme_mode, ThemeModeV1::Light);
-        assert_eq!(
-            store.loaded().theme_mode,
-            base.theme_mode,
-            "in force: its own"
+        let replaced = outcome.replaced.expect("the refusal is the card's");
+        assert_eq!(replaced.not_applied, vec![acrylic.to_owned()]);
+        assert!(
+            window.store.loaded().always_on_top,
+            "the next door is walked"
         );
+        assert!(!window.store.loaded().acrylic, "in force: its own");
+        assert!(
+            window.store.document().desired().acrylic,
+            "desired: the file's"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (round 3 (b)) — **a door that put its unit in force and then failed
+    /// applied it**: the value is in force, and the line says the error beside
+    /// it, not as a refusal; the card has nothing to say.
+    ///
+    /// MUTATION: in `run_pass`, trust the answer's shape (an `Err` is a refusal
+    /// whatever is in force) — the line counts one refusal.
+    #[test]
+    fn a_door_that_stores_then_fails_applied_its_unit_and_says_the_error() {
+        let theirs = SettingsV1 {
+            block_max_height: 480,
+            ..SettingsV1::default()
+        };
+        let (root, mut window) = window("stored-then-failed", &theirs);
+        let outcome = run_pass(&mut window);
+        let row = crate::settings::SettingsRow::BlockMaxHeight.title();
+        assert_eq!(
+            outcome.line.as_deref(),
+            Some(
+                format!(
+                    "BT_PERSIST settings.json merged: took 1 from the file, kept 0 from Folio, \
+                     conflicts 0, doors refused: 0; {row} applied, then: 画面没有发布 the frame \
+                     was not published"
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(outcome.replaced, None, "nothing for the card");
+        assert_eq!(window.store.loaded().block_max_height, 480, "in force");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (round 3 (c)) — **a presentation that fails after the walk keeps the
+    /// card's data**: the line and the data are made before the chrome is
+    /// presented, and its failure is answered beside them.
+    ///
+    /// MUTATION: in `run_pass`, present first and return at its failure — the
+    /// card's data is gone.
+    #[test]
+    fn a_presentation_failure_after_the_walk_keeps_the_card_data() {
+        let theirs = SettingsV1 {
+            acrylic: true,
+            ..SettingsV1::default()
+        };
+        let (root, mut window) = window("presentation-failed", &theirs);
+        window.presentation_fails = true;
+        let outcome = run_pass(&mut window);
+        assert!(outcome.presented.is_err(), "the presentation failed");
+        let replaced = outcome.replaced.expect("and the card's data is kept");
+        assert_eq!(
+            replaced.not_applied,
+            vec![crate::settings::SettingsRow::Acrylic.title().to_owned()]
+        );
+        assert!(outcome.line.is_some());
         let _ = std::fs::remove_dir_all(&root);
     }
 
