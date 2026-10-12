@@ -37,6 +37,28 @@
 //! body is not followed, so a catch handed to the boundary that way is refused, never allowed; and
 //! `bt-math`'s render boundary, which the hook honours separately through
 //! `render_panic_is_contained`, is outside the three packages.
+//!
+//! # Joined threads (T-JOINED-PANIC-VALUES)
+//!
+//! The same hook decides what a `JoinHandle::join` can answer: a thread that panics outside
+//! `contain` ends the process before its joiner returns, so a join's `Err` is real only for a
+//! thread whose body is contained. [`no_product_join_makes_a_value_of_an_uncontained_panic`] reads
+//! every product occurrence of the identifier `join` in the seven product packages
+//! ([`JOIN_PACKAGES`]) that is a call `h.join()` or `JoinHandle::join(h)`, and judges what its
+//! result is made into: thrown away (`let _ =`, a statement, `drop`) or carried on as a panic
+//! (`unwrap`, `expect`) is not judged; anything else makes a value of the `Err` and is allowed
+//! only when the handle follows to a thread start whose closure is a **call edge** to the
+//! boundary — the closure's whole body one call that [`FunctionPaths::functions_named`] follows to
+//! exactly [`BOUNDARY`]. A handle is followed through `let` bindings, the values given to a `self`
+//! field anywhere in its package (struct literals and assignments), the tail of a free function
+//! the path names, and the receiver of a method; a thread start is `std`'s `thread::spawn` (by its
+//! path: `std` is not indexed), a `spawn` method (`Builder`, a scope), or the thread door
+//! ([`DOORS`], by identity). A call that names no free function of the workspace and starts no
+//! thread is not a thread's handle (WinRT's `IAsyncOperation::join` is one). A parameter, a match
+//! arm's or a tuple's part, a field of anything but `self` is not followed and is refused.
+//!
+//! What it does not see: a handle kept in a collection and taken out again reads as the
+//! collection's value, which no thread start is behind; and a join written in a macro's tokens.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
@@ -310,4 +332,909 @@ fn a_catch_is_allowed_by_a_call_edge_to_the_boundary_never_by_a_name() {
         reading.allowed, 2,
         "the alias and the path, each a call edge to the real item"
     );
+}
+
+// ── Joined threads ──────────────────────────────────────────────────────────────────────────────
+
+/// The packages whose product joins the join guard reads: the audit's (T-JOINED-PANIC-VALUES).
+const JOIN_PACKAGES: [&str; 7] = [
+    "bt-app",
+    "bt-platform",
+    "bt-pty",
+    "bt-term",
+    "bt-render",
+    "bt-corpus",
+    "bt-persist",
+];
+
+/// The thread door's two items (`bt_platform::spawn_at_priority`, `…_with_stack`), by identity:
+/// a call that follows to one of them starts a thread whose body is its last argument.
+const DOORS: [(&str, &str, &str); 2] = [
+    ("bt-platform", "crate::admission", "spawn_at_priority"),
+    (
+        "bt-platform",
+        "crate::admission",
+        "spawn_at_priority_with_stack",
+    ),
+];
+
+/// How many steps — a `let`, a field, a function's tail, a method's receiver — one handle is
+/// followed through.
+const ORIGIN_STEPS: usize = 12;
+
+fn is_door(item: &FunctionItem) -> bool {
+    DOORS.iter().any(|(package, module, name)| {
+        item.package == *package && item.module == *module && item.name == *name
+    })
+}
+
+/// What a join's result is made into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JoinUse {
+    /// Thrown away: `let _ = h.join();`, `h.join();`, `drop(h.join())`.
+    Discarded,
+    /// Carried on as a panic: `h.join().unwrap()`, `h.join().expect(…)`.
+    CarriedOn,
+    /// Anything else — a `match`, an `if let`, a `map_err`, an `unwrap_or_default`, a `?`: the
+    /// join's `Err` becomes a value.
+    Value,
+}
+
+/// A name bound in a function, the bytes it is in scope over, and what it was bound to — `None`
+/// for a binding whose value is not one expression (a parameter, a match arm, a tuple's part).
+struct Binding {
+    name: String,
+    at: usize,
+    scope: Range<usize>,
+    origin: Option<syn::Expr>,
+}
+
+/// One function body of a file: its bytes, the type of the `impl` it is in, its bindings, and —
+/// for a free function — its name with where it is written, and its tail expression.
+struct Function {
+    range: Range<usize>,
+    self_type: Option<String>,
+    free_name: Option<(String, usize)>,
+    tail: Option<syn::Expr>,
+    bindings: Vec<Binding>,
+}
+
+/// A value given to a field: a struct literal's field, or an assignment to `self.<field>`.
+struct FieldValue {
+    type_name: String,
+    field: String,
+    value: syn::Expr,
+}
+
+/// One join of a file: its receiver, and what its result is made into.
+struct Join {
+    receiver: syn::Expr,
+    used: JoinUse,
+}
+
+/// What one file holds for the join guard, at the file's own byte offsets.
+#[derive(Default)]
+struct FileJoins {
+    functions: Vec<Function>,
+    fields: Vec<FieldValue>,
+    /// By the offset of the `join` identifier.
+    joins: BTreeMap<usize, Join>,
+}
+
+impl FileJoins {
+    /// The innermost function holding byte `at`.
+    fn function_at(&self, at: usize) -> Option<&Function> {
+        self.functions
+            .iter()
+            .filter(|function| function.range.contains(&at))
+            .min_by_key(|function| function.range.len())
+    }
+}
+
+/// The visitor that fills a [`FileJoins`].
+#[derive(Default)]
+struct JoinVisitor {
+    found: FileJoins,
+    /// Joins whose result is thrown away or carried on, by their `join`'s offset.
+    uses: BTreeMap<usize, JoinUse>,
+    impl_types: Vec<String>,
+    functions: Vec<usize>,
+    blocks: Vec<Range<usize>>,
+}
+
+/// A path's last segment.
+fn last_segment(path: &syn::Path) -> Option<String> {
+    path.segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+}
+
+/// The path of a call written as a path, segment by segment.
+fn call_path(call: &syn::ExprCall) -> Option<Vec<String>> {
+    match &*call.func {
+        syn::Expr::Path(path) if path.qself.is_none() => Some(
+            path.path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// `expression` without the parentheses around it.
+fn unparenthesised(expression: &syn::Expr) -> &syn::Expr {
+    match expression {
+        syn::Expr::Paren(inner) => unparenthesised(&inner.expr),
+        other => other,
+    }
+}
+
+/// When `expression` is a join — `h.join()`, or `JoinHandle::join(h)` — the offset of its `join`
+/// identifier, and its receiver.
+fn as_join(expression: &syn::Expr) -> Option<(usize, &syn::Expr)> {
+    match unparenthesised(expression) {
+        syn::Expr::MethodCall(call) if call.method == "join" && call.args.is_empty() => {
+            Some((call.method.span().byte_range().start, &call.receiver))
+        }
+        syn::Expr::Call(call) if call.args.len() == 1 => {
+            let syn::Expr::Path(path) = &*call.func else {
+                return None;
+            };
+            let segments: Vec<&syn::PathSegment> = path.path.segments.iter().collect();
+            match segments.as_slice() {
+                [.., owner, join] if owner.ident == "JoinHandle" && join.ident == "join" => {
+                    Some((join.ident.span().byte_range().start, &call.args[0]))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Every name `pattern` binds, with where it is written and whether it is bound to the whole
+/// value (`x`, `mut x`, `Some(x)`, `Ok(x)`, `x: T`) — only then is the name the value's.
+fn bound_names(pattern: &syn::Pat, out: &mut Vec<(String, usize, bool)>, whole: bool) {
+    struct Names<'a>(&'a mut Vec<(String, usize, bool)>);
+    impl<'ast> syn::visit::Visit<'ast> for Names<'_> {
+        fn visit_pat_ident(&mut self, ident: &'ast syn::PatIdent) {
+            self.0.push((
+                ident.ident.to_string(),
+                ident.ident.span().byte_range().start,
+                false,
+            ));
+            syn::visit::visit_pat_ident(self, ident);
+        }
+    }
+    match pattern {
+        syn::Pat::Ident(ident) if ident.subpat.is_none() => out.push((
+            ident.ident.to_string(),
+            ident.ident.span().byte_range().start,
+            whole,
+        )),
+        syn::Pat::Type(typed) => bound_names(&typed.pat, out, whole),
+        syn::Pat::Paren(inner) => bound_names(&inner.pat, out, whole),
+        syn::Pat::TupleStruct(tuple)
+            if tuple.elems.len() == 1
+                && tuple
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "Some" || segment.ident == "Ok") =>
+        {
+            bound_names(&tuple.elems[0], out, whole);
+        }
+        other => syn::visit::Visit::visit_pat(&mut Names(out), other),
+    }
+}
+
+impl JoinVisitor {
+    fn bind(&mut self, pattern: &syn::Pat, scope: &Range<usize>, origin: Option<&syn::Expr>) {
+        let Some(&function) = self.functions.last() else {
+            return;
+        };
+        let mut names = Vec::new();
+        bound_names(pattern, &mut names, true);
+        for (name, at, whole) in names {
+            self.found.functions[function].bindings.push(Binding {
+                name,
+                at,
+                scope: scope.clone(),
+                origin: origin.filter(|_| whole).cloned(),
+            });
+        }
+    }
+
+    fn enter_function(
+        &mut self,
+        range: Range<usize>,
+        free_name: Option<(String, usize)>,
+        inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::Token![,]>,
+        body: &syn::Block,
+    ) {
+        let tail = match body.stmts.last() {
+            Some(syn::Stmt::Expr(tail, None)) => Some(tail.clone()),
+            _ => None,
+        };
+        self.found.functions.push(Function {
+            range: range.clone(),
+            self_type: self.impl_types.last().cloned(),
+            free_name,
+            tail,
+            bindings: Vec::new(),
+        });
+        self.functions.push(self.found.functions.len() - 1);
+        for input in inputs {
+            if let syn::FnArg::Typed(typed) = input {
+                self.bind(&typed.pat, &range, None);
+            }
+        }
+    }
+
+    /// The `let`s of a condition (a `let` chain's too), bound over `scope`.
+    fn bind_condition(&mut self, condition: &syn::Expr, scope: &Range<usize>) {
+        match condition {
+            syn::Expr::Let(binding) => self.bind(&binding.pat, scope, Some(&binding.expr)),
+            syn::Expr::Binary(binary) if matches!(binary.op, syn::BinOp::And(_)) => {
+                self.bind_condition(&binary.left, scope);
+                self.bind_condition(&binary.right, scope);
+            }
+            syn::Expr::Paren(inner) => self.bind_condition(&inner.expr, scope),
+            _ => {}
+        }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for JoinVisitor {
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        let name = match &*item.self_ty {
+            syn::Type::Path(path) => last_segment(&path.path).unwrap_or_default(),
+            _ => String::new(),
+        };
+        self.impl_types.push(name);
+        syn::visit::visit_item_impl(self, item);
+        self.impl_types.pop();
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        let name = (
+            item.sig.ident.to_string(),
+            item.sig.ident.span().byte_range().start,
+        );
+        // A function item written inside a method belongs to no `impl`.
+        let impl_types = std::mem::take(&mut self.impl_types);
+        self.enter_function(
+            item.span().byte_range(),
+            Some(name),
+            &item.sig.inputs,
+            &item.block,
+        );
+        syn::visit::visit_item_fn(self, item);
+        self.functions.pop();
+        self.impl_types = impl_types;
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        self.enter_function(
+            item.span().byte_range(),
+            None,
+            &item.sig.inputs,
+            &item.block,
+        );
+        syn::visit::visit_impl_item_fn(self, item);
+        self.functions.pop();
+    }
+
+    fn visit_trait_item_fn(&mut self, item: &'ast syn::TraitItemFn) {
+        if let Some(body) = &item.default {
+            self.enter_function(item.span().byte_range(), None, &item.sig.inputs, body);
+            syn::visit::visit_trait_item_fn(self, item);
+            self.functions.pop();
+        }
+    }
+
+    fn visit_block(&mut self, block: &'ast syn::Block) {
+        self.blocks.push(block.span().byte_range());
+        syn::visit::visit_block(self, block);
+        self.blocks.pop();
+    }
+
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        let start = local.span().byte_range().start;
+        let end = self.blocks.last().map_or(usize::MAX, |block| block.end);
+        let init = local.init.as_ref().map(|init| &*init.expr);
+        if let (syn::Pat::Wild(_), Some(init)) = (&local.pat, init)
+            && let Some((at, _)) = as_join(init)
+        {
+            self.uses.insert(at, JoinUse::Discarded);
+        }
+        self.bind(&local.pat, &(start..end), init);
+        syn::visit::visit_local(self, local);
+    }
+
+    fn visit_stmt(&mut self, statement: &'ast syn::Stmt) {
+        if let syn::Stmt::Expr(expression, Some(_)) = statement
+            && let Some((at, _)) = as_join(expression)
+        {
+            self.uses.insert(at, JoinUse::Discarded);
+        }
+        syn::visit::visit_stmt(self, statement);
+    }
+
+    fn visit_expr_if(&mut self, branch: &'ast syn::ExprIf) {
+        let scope = branch.then_branch.span().byte_range();
+        self.bind_condition(&branch.cond, &scope);
+        syn::visit::visit_expr_if(self, branch);
+    }
+
+    fn visit_expr_while(&mut self, looped: &'ast syn::ExprWhile) {
+        let scope = looped.body.span().byte_range();
+        self.bind_condition(&looped.cond, &scope);
+        syn::visit::visit_expr_while(self, looped);
+    }
+
+    fn visit_expr_for_loop(&mut self, looped: &'ast syn::ExprForLoop) {
+        self.bind(&looped.pat, &looped.body.span().byte_range(), None);
+        syn::visit::visit_expr_for_loop(self, looped);
+    }
+
+    fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+        self.bind(&arm.pat, &arm.span().byte_range(), None);
+        syn::visit::visit_arm(self, arm);
+    }
+
+    fn visit_expr_closure(&mut self, closure: &'ast syn::ExprClosure) {
+        let scope = closure.span().byte_range();
+        for input in &closure.inputs {
+            self.bind(input, &scope, None);
+        }
+        syn::visit::visit_expr_closure(self, closure);
+    }
+
+    fn visit_expr_struct(&mut self, literal: &'ast syn::ExprStruct) {
+        let named = last_segment(&literal.path);
+        let type_name = match named.as_deref() {
+            Some("Self") => self.impl_types.last().cloned(),
+            _ => named,
+        };
+        if let Some(type_name) = type_name {
+            for field in &literal.fields {
+                if let syn::Member::Named(name) = &field.member {
+                    self.found.fields.push(FieldValue {
+                        type_name: type_name.clone(),
+                        field: name.to_string(),
+                        value: field.expr.clone(),
+                    });
+                }
+            }
+        }
+        syn::visit::visit_expr_struct(self, literal);
+    }
+
+    fn visit_expr_assign(&mut self, assignment: &'ast syn::ExprAssign) {
+        if let syn::Expr::Field(field) = &*assignment.left
+            && let syn::Expr::Path(base) = &*field.base
+            && base.path.is_ident("self")
+            && let syn::Member::Named(name) = &field.member
+            && let Some(type_name) = self.impl_types.last()
+        {
+            self.found.fields.push(FieldValue {
+                type_name: type_name.clone(),
+                field: name.to_string(),
+                value: (*assignment.right).clone(),
+            });
+        }
+        syn::visit::visit_expr_assign(self, assignment);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if (call.method == "unwrap" || call.method == "expect")
+            && let Some((at, _)) = as_join(&call.receiver)
+        {
+            self.uses.insert(at, JoinUse::CarriedOn);
+        }
+        if call.method == "join" && call.args.is_empty() {
+            self.found.joins.insert(
+                call.method.span().byte_range().start,
+                Join {
+                    receiver: (*call.receiver).clone(),
+                    used: JoinUse::Value,
+                },
+            );
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if call_path(call).is_some_and(|path| path == ["drop"])
+            && let Some(argument) = call.args.first()
+            && let Some((at, _)) = as_join(argument)
+        {
+            self.uses.insert(at, JoinUse::Discarded);
+        }
+        if call.args.len() == 1
+            && let syn::Expr::Path(path) = &*call.func
+            && let [.., owner, join] = path.path.segments.iter().collect::<Vec<_>>().as_slice()
+            && owner.ident == "JoinHandle"
+            && join.ident == "join"
+        {
+            self.found.joins.insert(
+                join.ident.span().byte_range().start,
+                Join {
+                    receiver: call.args[0].clone(),
+                    used: JoinUse::Value,
+                },
+            );
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+}
+
+/// Where a joined handle came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Origin {
+    /// A thread whose closure is a call edge to the boundary: under the resident hook its panic
+    /// unwinds to the boundary, so the error its join is made into is real.
+    Contained,
+    /// A thread whose closure is not: its panic ends the process under the resident hook.
+    Bare(String),
+    /// A value no thread start is behind — an associated function's or a foreign API's (WinRT's
+    /// `IAsyncOperation::join` is such a `join`).
+    NotAThread,
+    /// A handle the reading cannot follow to where it was made.
+    Unfollowed(String),
+}
+
+/// The workspace the join guard reads: its indexes, the paths over them, and each file's reading.
+struct JoinReader<'a> {
+    indexes: Vec<&'a Index>,
+    paths: &'a FunctionPaths,
+    files: std::cell::RefCell<BTreeMap<(usize, usize), std::rc::Rc<FileJoins>>>,
+}
+
+/// A file of the reader: its index's position, and the file's first byte in that index.
+#[derive(Clone, Copy)]
+struct Place {
+    index: usize,
+    base: usize,
+}
+
+impl<'a> JoinReader<'a> {
+    fn new(indexes: Vec<&'a Index>, paths: &'a FunctionPaths) -> Self {
+        Self {
+            indexes,
+            paths,
+            files: std::cell::RefCell::default(),
+        }
+    }
+
+    /// The reading of the file at `place`.
+    fn file(&self, place: Place) -> std::rc::Rc<FileJoins> {
+        let mut files = self.files.borrow_mut();
+        let reading = files.entry((place.index, place.base)).or_insert_with(|| {
+            let index = self.indexes[place.index];
+            let file = index.file_at(place.base).expect("a file starts here");
+            let parsed = syn::parse_file(index.text(file.span()))
+                .unwrap_or_else(|error| panic!("{}: {error}", file.path().display()));
+            let mut visitor = JoinVisitor::default();
+            syn::visit::Visit::visit_file(&mut visitor, &parsed);
+            let mut found = visitor.found;
+            for (at, used) in visitor.uses {
+                if let Some(join) = found.joins.get_mut(&at) {
+                    join.used = used;
+                }
+            }
+            std::rc::Rc::new(found)
+        });
+        std::rc::Rc::clone(reading)
+    }
+
+    /// A site of the reader, `path:line:column` with the path relative to `root`.
+    fn site(&self, index: usize, offset: usize, root: &Path) -> String {
+        let location = self.indexes[index]
+            .locate(offset)
+            .expect("a site is in a file");
+        let relative = location
+            .file
+            .strip_prefix(root)
+            .unwrap_or(location.file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        format!("{relative}:{}:{}", location.line, location.column)
+    }
+
+    /// The thread whose body is `body`, an argument of the start at `start`: contained when
+    /// `body` is a closure whose whole body is a call that follows to the boundary.
+    fn judge_body(
+        &self,
+        place: Place,
+        start: usize,
+        body: Option<&syn::Expr>,
+        root: &Path,
+    ) -> Origin {
+        let refused = || {
+            Origin::Bare(format!(
+                "the thread started at {} does not run its body inside the boundary",
+                self.site(place.index, place.base + start, root)
+            ))
+        };
+        let Some(syn::Expr::Closure(closure)) = body.map(unparenthesised) else {
+            return refused();
+        };
+        let mut work = unparenthesised(&closure.body);
+        while let syn::Expr::Block(block) = work
+            && let [syn::Stmt::Expr(tail, None)] = block.block.stmts.as_slice()
+        {
+            work = unparenthesised(tail);
+        }
+        if let syn::Expr::Call(call) = work
+            && let Some(path) = call_path(call)
+            && self.paths.functions_named(
+                self.indexes[place.index],
+                place.base + call.span().byte_range().start,
+                &path,
+            ) == BTreeSet::from([boundary()])
+        {
+            return Origin::Contained;
+        }
+        refused()
+    }
+
+    /// The free function `item` of the reader's indexes: its file's place, the file's reading,
+    /// and its position there.
+    fn function_of(&self, item: &FunctionItem) -> Option<(Place, std::rc::Rc<FileJoins>, usize)> {
+        for (at, index) in self.indexes.iter().enumerate() {
+            for record in index.items() {
+                let file = index.file_of(record);
+                if record.kind() != ItemKind::Function
+                    || record.type_owner().is_some()
+                    || file.owners()[0].target.package != item.package
+                    || record.name() != item.name
+                    || !record.module_paths().contains(&item.module.as_str())
+                {
+                    continue;
+                }
+                let place = Place {
+                    index: at,
+                    base: file.span().start(),
+                };
+                let reading = self.file(place);
+                let whole = record.whole();
+                let found = reading.functions.iter().position(|function| {
+                    function.free_name.as_ref().is_some_and(|(name, written)| {
+                        *name == item.name
+                            && whole.start() <= place.base + written
+                            && place.base + written < whole.start() + whole.len()
+                    })
+                });
+                if let Some(function) = found {
+                    return Some((place, reading, function));
+                }
+            }
+        }
+        None
+    }
+
+    /// Every origin `expression`, written in the file at `place`, can have, followed at most
+    /// `steps` more steps.
+    fn origins(
+        &self,
+        place: Place,
+        expression: &syn::Expr,
+        steps: usize,
+        root: &Path,
+    ) -> Vec<Origin> {
+        let offset = expression.span().byte_range().start;
+        let unfollowed = |what: &str| {
+            vec![Origin::Unfollowed(format!(
+                "{what} at {}",
+                self.site(place.index, place.base + offset, root)
+            ))]
+        };
+        let Some(steps) = steps.checked_sub(1) else {
+            return unfollowed("a handle followed past the reading's steps");
+        };
+        match unparenthesised(expression) {
+            syn::Expr::Try(inner) => self.origins(place, &inner.expr, steps, root),
+            syn::Expr::Reference(inner) => self.origins(place, &inner.expr, steps, root),
+            syn::Expr::Block(block) => match block.block.stmts.last() {
+                Some(syn::Stmt::Expr(tail, None)) => self.origins(place, tail, steps, root),
+                _ => unfollowed("a block with no value"),
+            },
+            syn::Expr::MethodCall(call) if call.method == "spawn" => {
+                vec![self.judge_body(place, offset, call.args.last(), root)]
+            }
+            syn::Expr::MethodCall(call) => self.origins(place, &call.receiver, steps, root),
+            syn::Expr::Call(call) => {
+                let Some(path) = call_path(call) else {
+                    return unfollowed("a call of an expression");
+                };
+                let named = self.paths.functions_named(
+                    self.indexes[place.index],
+                    place.base + call.span().byte_range().start,
+                    &path,
+                );
+                if named.iter().any(is_door) {
+                    return vec![self.judge_body(place, offset, call.args.last(), root)];
+                }
+                if !named.is_empty() {
+                    return named
+                        .iter()
+                        .flat_map(|item| match self.function_of(item) {
+                            Some((there, reading, function)) => {
+                                match &reading.functions[function].tail {
+                                    Some(tail) => self.origins(there, tail, steps, root),
+                                    None => unfollowed("a function with no tail expression"),
+                                }
+                            }
+                            None => unfollowed("a function the reading does not hold"),
+                        })
+                        .collect();
+                }
+                // `std` is not indexed: its thread start is known by its path.
+                if path.ends_with(&["thread".to_owned(), "spawn".to_owned()]) {
+                    return vec![self.judge_body(place, offset, call.args.first(), root)];
+                }
+                if (path == ["Some"] || path == ["Ok"]) && call.args.len() == 1 {
+                    return self.origins(place, &call.args[0], steps, root);
+                }
+                vec![Origin::NotAThread]
+            }
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments[0].ident.to_string();
+                let reading = self.file(place);
+                let bound = reading.function_at(offset).and_then(|function| {
+                    function
+                        .bindings
+                        .iter()
+                        .filter(|binding| {
+                            binding.name == name
+                                && binding.at < offset
+                                && binding.scope.contains(&offset)
+                        })
+                        .max_by_key(|binding| binding.at)
+                });
+                match bound.and_then(|binding| binding.origin.as_ref()) {
+                    Some(origin) => self.origins(place, origin, steps, root),
+                    None => unfollowed(&format!("`{name}`, bound to no one expression,")),
+                }
+            }
+            syn::Expr::Field(field) => {
+                let reading = self.file(place);
+                let owner = reading
+                    .function_at(offset)
+                    .and_then(|function| function.self_type.clone());
+                let (syn::Expr::Path(base), syn::Member::Named(name), Some(owner)) =
+                    (&*field.base, &field.member, owner)
+                else {
+                    return unfollowed("a field not of `self`");
+                };
+                if !base.path.is_ident("self") {
+                    return unfollowed("a field not of `self`");
+                }
+                let index = self.indexes[place.index];
+                let mut origins = Vec::new();
+                for file in index.files() {
+                    let there = Place {
+                        index: place.index,
+                        base: file.span().start(),
+                    };
+                    for value in &self.file(there).fields {
+                        if value.type_name == owner && *name == value.field {
+                            origins.extend(self.origins(there, &value.value, steps, root));
+                        }
+                    }
+                }
+                if origins.is_empty() {
+                    return unfollowed(&format!(
+                        "`{owner}::{name}`, given no value in its package,"
+                    ));
+                }
+                origins
+            }
+            _ => unfollowed("an expression the reading does not follow"),
+        }
+    }
+}
+
+/// What the join guard answers for one index.
+#[derive(Default)]
+struct JoinReading {
+    /// Joins whose result is thrown away or carried on as a panic.
+    not_values: usize,
+    /// Joins whose `Err` is a value, of a contained thread.
+    contained: usize,
+    /// Joins of something that is not a thread.
+    not_threads: usize,
+    /// Every other join whose `Err` is a value: its site, and why.
+    refused: Vec<(String, String)>,
+}
+
+/// Every product join of the reader's index at `at`, judged; sites relative to `root`.
+fn read_joins(reader: &JoinReader<'_>, at: usize, root: &Path) -> JoinReading {
+    let index = reader.indexes[at];
+    let found = index
+        .search(&Search::new(
+            needle!(Pattern::identifier("join")),
+            View::Identifiers,
+        ))
+        .unwrap_or_else(|failure| panic!("{failure}"))
+        .in_the_product(index);
+    let mut reading = JoinReading::default();
+    for occurrence in found.occurrences() {
+        let start = occurrence.span.start();
+        let file = index.file_at(start).expect("an occurrence is in a file");
+        let place = Place {
+            index: at,
+            base: file.span().start(),
+        };
+        let joins = reader.file(place);
+        let Some(join) = joins.joins.get(&(start - place.base)) else {
+            continue;
+        };
+        if join.used != JoinUse::Value {
+            reading.not_values += 1;
+            continue;
+        }
+        let origins = reader.origins(place, &join.receiver, ORIGIN_STEPS, root);
+        let refusals: Vec<String> = origins
+            .iter()
+            .filter_map(|origin| match origin {
+                Origin::Bare(why) | Origin::Unfollowed(why) => Some(why.clone()),
+                Origin::Contained | Origin::NotAThread => None,
+            })
+            .collect();
+        if !refusals.is_empty() {
+            reading
+                .refused
+                .push((reader.site(at, start, root), refusals.join("; ")));
+        } else if origins.contains(&Origin::Contained) {
+            reading.contained += 1;
+        } else {
+            reading.not_threads += 1;
+        }
+    }
+    reading.refused.sort();
+    reading
+}
+
+/// RED (T-JOINED-PANIC-VALUES) — **a product join's `Err` is a value only where the joined
+/// thread's body is contained.**
+///
+/// Under the resident panic hook a panicking thread ends the process from inside the hook, before
+/// it unwinds, so `JoinHandle::join` answers `Err` only for a thread whose body runs inside
+/// `contained_panic::contain`; any other join whose `Err` is made into a value — a variant, an
+/// error, a default — names a behaviour Folio does not have. Such a join may throw its result
+/// away or carry the panic on (`unwrap`, `expect`); one that makes a value of it is refused unless
+/// its handle follows — through `let`s, values given to a `self` field in its package, free
+/// functions' tails and method receivers — to a thread start (`std`'s `thread::spawn`, a
+/// `spawn` method, the thread door by its identity) whose closure is a call edge to the boundary.
+///
+/// MUTATION: give `bt-pty`'s bounded join its value arm back (`match reader.join() { …,
+/// Err(_) => ReaderExit::Panicked }` in `join_within`) and this names that join: its handle is a
+/// parameter, which is no contained thread.
+#[test]
+fn no_product_join_makes_a_value_of_an_uncontained_panic() {
+    let workspace =
+        Workspace::read(&workspace_root()).unwrap_or_else(|rejection| panic!("{rejection}"));
+    let indexes: Vec<&Index> = JOIN_PACKAGES
+        .iter()
+        .map(|package| Index::of_package(package))
+        .collect();
+    let paths = FunctionPaths::read(&indexes);
+    let reader = JoinReader::new(indexes, &paths);
+    let mut refused = Vec::new();
+    let mut read = 0;
+    for (at, package) in JOIN_PACKAGES.iter().enumerate() {
+        let reading = read_joins(&reader, at, workspace.root());
+        println!(
+            "joined-panic guard: {package}: {} join(s) thrown away or carried on, {} of a \
+             contained thread, {} of no thread, {} refused",
+            reading.not_values,
+            reading.contained,
+            reading.not_threads,
+            reading.refused.len()
+        );
+        read += reading.not_values + reading.contained + reading.not_threads;
+        refused.extend(
+            reading
+                .refused
+                .into_iter()
+                .map(|(site, why)| format!("{site} ({why})")),
+        );
+    }
+    assert!(
+        read > 0,
+        "no product join was read — a guard that found nothing has proved nothing"
+    );
+    assert!(
+        refused.is_empty(),
+        "a join makes a value of a panic the resident hook never lets it see ({}): run the \
+         thread's body inside `contained_panic::contain`, or carry the panic on (`expect`) and \
+         say that the thread's panic ends the process:\n  {}",
+        refused.len(),
+        refused.join("\n  ")
+    );
+}
+
+/// The `joined_panic` fixture's directory.
+fn join_fixture_directory() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("joined_panic")
+}
+
+/// The `joined_panic` fixture, indexed as a crate called `joined`.
+fn join_fixture() -> Index {
+    let directory = join_fixture_directory();
+    let universe = Universe::declare(
+        "the joined-panic fixture",
+        vec![TargetRoot {
+            id: TargetId {
+                package: "joined".to_owned(),
+                kind: TargetKind::Library,
+                name: "joined".to_owned(),
+            },
+            file: directory.join("lib.rs"),
+        }],
+        vec![DiskScope::under(&directory)],
+        Vendor::Excluded,
+    )
+    .expect("the fixture is there");
+    Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
+}
+
+/// The fixture's refused joins, by the site of their `join`.
+const FIXTURE_REFUSED: [&str; 5] = [
+    "lib.rs:23:18",
+    "lib.rs:45:12",
+    "lib.rs:74:14",
+    "lib.rs:79:12",
+    "lib.rs:90:12",
+];
+
+/// RED (T-JOINED-PANIC-VALUES) — **a join's `Err` is a value by a call edge from its thread's
+/// closure to the real boundary, the handle followed to its thread by item, never by a name.**
+/// The fixture, read beside `bt-platform`, makes values of seven joins' errors. The guard allows
+/// two — a thread started through the thread door whose body is handed to the boundary by an
+/// alias, and a contained handle given to a `self` field and joined by a method — and refuses
+/// five: a bare thread joined with an `Err → Panicked` arm, a thread whose body is the lookalike
+/// `contained_panic::contain`, a free function's bare handle made a default, a handle handed in
+/// as a parameter, and a body that calls a helper that calls the boundary. A foreign operation's
+/// `join` is no thread's; two joins of bare threads are not judged, one thrown away and one
+/// carried on; a test's join is not read.
+///
+/// MUTATIONS: ① judge the thread's closure by its spelling (a call path ending
+/// `contained_panic::contain`) — the lookalike's thread is allowed; ② follow no `self` field —
+/// the drain's join is refused.
+#[test]
+fn a_join_is_a_value_by_a_call_edge_from_its_thread_to_the_boundary() {
+    let index = join_fixture();
+    let platform = Index::of_package(BOUNDARY.0);
+    let paths = FunctionPaths::read(&[&index, platform]);
+    let reader = JoinReader::new(vec![&index, platform], &paths);
+    let reading = read_joins(&reader, 0, &join_fixture_directory());
+    let sites: Vec<&str> = reading
+        .refused
+        .iter()
+        .map(|(site, _)| site.as_str())
+        .collect();
+    assert_eq!(
+        sites, FIXTURE_REFUSED,
+        "the bare thread's panic arm, the lookalike's thread, the free function's bare handle, \
+         the parameter and the helper's thread: {:#?}",
+        reading.refused
+    );
+    assert_eq!(
+        reading.contained, 2,
+        "the door's thread through the alias, and the drain's field"
+    );
+    assert_eq!(
+        reading.not_values, 2,
+        "one join thrown away, one carried on"
+    );
+    assert_eq!(reading.not_threads, 1, "the foreign operation's join");
 }
