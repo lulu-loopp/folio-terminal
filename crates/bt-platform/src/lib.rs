@@ -8962,8 +8962,9 @@ mod windows_impl {
                 KeyboardAndMouse::{
                     GetCapture, GetKeyState, GetKeyboardLayout, MAPVK_VK_TO_CHAR,
                     MAPVK_VSC_TO_VK_EX, MapVirtualKeyW, SetFocus, TME_LEAVE, TME_NONCLIENT,
-                    TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY, VK_CONTROL, VK_LBUTTON,
-                    VK_MBUTTON, VK_RBUTTON, VK_SHIFT, VK_XBUTTON1, VK_XBUTTON2, VkKeyScanW,
+                    TRACKMOUSEEVENT, TRACKMOUSEEVENT_FLAGS, TrackMouseEvent, VIRTUAL_KEY,
+                    VK_CONTROL, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_SHIFT, VK_XBUTTON1,
+                    VK_XBUTTON2, VkKeyScanW,
                 },
                 // One call that undoes one winit makes, and the four that answer
                 // the system's pan gesture — see
@@ -11044,7 +11045,86 @@ mod windows_impl {
         })
     }
 
-    /// Carry out [`window_button_passage`] for one message.
+    /// **Everything [`dispatch_window_button_message`] does to the world**, as
+    /// one seam: the subclass procedure's arm is [`FrameButtonEffects`], which
+    /// calls Win32; a test's arm records.
+    pub(super) trait WindowButtonEffects {
+        /// Where the frame's hit test puts a client point, or `None` when the
+        /// window cannot be measured.
+        fn hit_at(&mut self, client: POINT) -> Option<CustomFrameHit>;
+        /// A screen point in this window's client coordinates.
+        fn client_point(&mut self, screen: POINT) -> POINT;
+        /// The key-state word a client mouse message carries, as of now.
+        fn key_state(&mut self) -> MODIFIERKEYS_FLAGS;
+        /// Send the client message a non-client one stands for on to the next
+        /// procedure, at its client point and with its `wParam`.
+        fn send_client(&mut self, message: u32, wparam: WPARAM, client: POINT) -> LRESULT;
+        /// Send the client area's `WM_MOUSELEAVE` on to the next procedure.
+        fn send_leave(&mut self);
+        /// Ask the system to post a leave for this window, with these flags.
+        fn track_leave(&mut self, flags: TRACKMOUSEEVENT_FLAGS);
+        /// Hand the message, as it came, to `DefSubclassProc`.
+        fn pass_on(&mut self, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT;
+    }
+
+    /// The subclass procedure's arm of [`WindowButtonEffects`]: the live
+    /// window, its frame's state, and the Win32 calls.
+    struct FrameButtonEffects<'a> {
+        hwnd: HWND,
+        state: &'a CustomFrameState,
+    }
+
+    impl WindowButtonEffects for FrameButtonEffects<'_> {
+        fn hit_at(&mut self, client: POINT) -> Option<CustomFrameHit> {
+            // SAFETY: the subclass procedure's own window and its frame's state,
+            // on the window's thread.
+            unsafe { frame_hit_at(self.hwnd, self.state, client) }
+        }
+
+        fn client_point(&mut self, screen: POINT) -> POINT {
+            let mut point = screen;
+            // SAFETY: this thread's own window and a point on the stack.
+            let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(self.hwnd, &mut point) };
+            point
+        }
+
+        fn key_state(&mut self) -> MODIFIERKEYS_FLAGS {
+            mouse_key_state()
+        }
+
+        fn send_client(&mut self, message: u32, wparam: WPARAM, client: POINT) -> LRESULT {
+            let lparam =
+                LPARAM(((u32::from(client.y as u16) << 16) | u32::from(client.x as u16)) as isize);
+            // SAFETY: called from inside the subclass procedure for this window.
+            unsafe { DefSubclassProc(self.hwnd, message, wparam, lparam) }
+        }
+
+        fn send_leave(&mut self) {
+            // SAFETY: as above.
+            let _ = unsafe { DefSubclassProc(self.hwnd, WM_MOUSELEAVE, WPARAM(0), LPARAM(0)) };
+        }
+
+        fn track_leave(&mut self, flags: TRACKMOUSEEVENT_FLAGS) {
+            let mut track = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: flags,
+                hwndTrack: self.hwnd,
+                dwHoverTime: 0,
+            };
+            // SAFETY: a structure sized as the call asks, naming this thread's
+            // window. A refusal leaves the next move over another part of the
+            // frame, or the next client move, to say the pointer came off.
+            let _ = unsafe { TrackMouseEvent(&mut track) };
+        }
+
+        fn pass_on(&mut self, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+            // SAFETY: as above.
+            unsafe { DefSubclassProc(self.hwnd, message, wparam, lparam) }
+        }
+    }
+
+    /// Carry out [`window_button_passage`] for one message, from the subclass
+    /// procedure.
     ///
     /// # Safety
     ///
@@ -11057,62 +11137,60 @@ mod windows_impl {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
-        let was = state.on_window_button.get();
+        dispatch_window_button_message(
+            &state.on_window_button,
+            &mut FrameButtonEffects { hwnd, state },
+            message,
+            wparam,
+            lparam,
+        )
+    }
+
+    /// **Carry out [`window_button_passage`] for one message**, through
+    /// `effects`. `on_button` is the frame's [`CustomFrameState::on_window_button`].
+    pub(super) fn dispatch_window_button_message(
+        on_button: &Cell<bool>,
+        effects: &mut impl WindowButtonEffects,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        let was = on_button.get();
+        let point = POINT {
+            x: low_word_signed(lparam.0),
+            y: high_word_signed(lparam.0),
+        };
         let on = match message {
             WM_NCMOUSELEAVE => false,
             WM_MOUSELEAVE => was,
-            WM_MOUSEMOVE => {
-                was && {
-                    let point = POINT {
-                        x: low_word_signed(lparam.0),
-                        y: high_word_signed(lparam.0),
-                    };
-                    let hit = unsafe { frame_hit_at(hwnd, state, point) };
-                    hit == Some(CustomFrameHit::MaximizeButton)
-                }
-            }
+            // A client move carries a client point.
+            WM_MOUSEMOVE => was && effects.hit_at(point) == Some(CustomFrameHit::MaximizeButton),
             // Every non-client mouse message carries its hit code in the low word.
             _ => (wparam.0 & 0xFFFF) as u32 == HTMAXBUTTON,
         };
         let passage = window_button_passage(message, on, was);
         // Written before anything goes on, so a message sent while this one is
         // being handled reads where the pointer is now.
-        state.on_window_button.set(passage.on_button);
+        on_button.set(passage.on_button);
         if passage.leave_first {
-            let _ = unsafe { DefSubclassProc(hwnd, WM_MOUSELEAVE, WPARAM(0), LPARAM(0)) };
+            effects.send_leave();
         }
         let mut result = LRESULT(0);
         if let Some(client_message) = passage.as_client {
             // A non-client mouse message carries its point in screen
             // coordinates, a client one in client coordinates.
-            let mut point = POINT {
-                x: low_word_signed(lparam.0),
-                y: high_word_signed(lparam.0),
-            };
-            // SAFETY: this thread's own window and a point on the stack.
-            let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut point) };
-            let client_lparam =
-                LPARAM(((u32::from(point.y as u16) << 16) | u32::from(point.x as u16)) as isize);
-            let client_wparam = client_mouse_wparam(message, wparam, mouse_key_state());
-            result = unsafe { DefSubclassProc(hwnd, client_message, client_wparam, client_lparam) };
+            let client = effects.client_point(point);
+            let client_wparam = client_mouse_wparam(message, wparam, effects.key_state());
+            result = effects.send_client(client_message, client_wparam, client);
         }
         if passage.track_leave {
             // After the client move and not before it: the system tracks one
             // leave at a time, and winit asks for the client area's while it
             // handles that move.
-            let mut track = TRACKMOUSEEVENT {
-                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                dwFlags: TME_LEAVE | TME_NONCLIENT,
-                hwndTrack: hwnd,
-                dwHoverTime: 0,
-            };
-            // SAFETY: a structure sized as the call asks, naming this thread's
-            // window. A refusal leaves the next move over another part of the
-            // frame, or the next client move, to say the pointer came off.
-            let _ = unsafe { TrackMouseEvent(&mut track) };
+            effects.track_leave(TME_LEAVE | TME_NONCLIENT);
         }
         if passage.onward {
-            result = unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+            result = effects.pass_on(message, wparam, lparam);
         }
         result
     }
@@ -25577,11 +25655,18 @@ mod custom_frame_tests {
 mod window_button_message_tests {
     use super::CustomFrameHit;
     use super::windows_impl::{
-        ButtonPassage, client_mouse_wparam, hit_test_code, window_button_passage,
+        ButtonPassage, WindowButtonEffects, client_mouse_wparam, dispatch_window_button_message,
+        hit_test_code, window_button_passage,
     };
-    use windows::Win32::Foundation::WPARAM;
-    use windows::Win32::System::SystemServices::{MK_LBUTTON, MK_SHIFT, MODIFIERKEYS_FLAGS};
+    use std::cell::Cell;
+    use windows::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
+    use windows::Win32::System::SystemServices::{
+        MK_CONTROL, MK_LBUTTON, MK_SHIFT, MODIFIERKEYS_FLAGS,
+    };
     use windows::Win32::UI::Controls::WM_MOUSELEAVE;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT_FLAGS,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
         HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTMAXBUTTON, HTRIGHT,
         HTTOP, HTTOPLEFT, HTTOPRIGHT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
@@ -25786,6 +25871,157 @@ mod window_button_message_tests {
         assert_eq!(
             hover_after(&[(WM_NCMOUSEMOVE, true), (WM_MOUSEMOVE, true)]),
             [true, true]
+        );
+    }
+
+    /// One thing [`dispatch_window_button_message`] did to the world, as the
+    /// recording arm of its seam writes it down.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Effect {
+        /// A client message sent on: message, `wParam`, client point.
+        Client(u32, usize, (i32, i32)),
+        /// The client area's `WM_MOUSELEAVE` sent on.
+        Leave,
+        /// A leave asked of the system, with these flags.
+        Track(u32),
+        /// The message handed, as it came, to `DefSubclassProc`.
+        PassOn(u32),
+    }
+
+    /// The recording arm: a window whose client origin stands at `ORIGIN` on
+    /// the screen, whose hit test answers `hit`, and whose keys are `keys`.
+    struct Recorder {
+        seen: Vec<Effect>,
+        hit: Option<CustomFrameHit>,
+        keys: MODIFIERKEYS_FLAGS,
+    }
+
+    const ORIGIN: (i32, i32) = (100, 50);
+
+    impl WindowButtonEffects for Recorder {
+        fn hit_at(&mut self, _client: POINT) -> Option<CustomFrameHit> {
+            self.hit
+        }
+        fn client_point(&mut self, screen: POINT) -> POINT {
+            POINT {
+                x: screen.x - ORIGIN.0,
+                y: screen.y - ORIGIN.1,
+            }
+        }
+        fn key_state(&mut self) -> MODIFIERKEYS_FLAGS {
+            self.keys
+        }
+        fn send_client(&mut self, message: u32, wparam: WPARAM, client: POINT) -> LRESULT {
+            self.seen
+                .push(Effect::Client(message, wparam.0, (client.x, client.y)));
+            LRESULT(0)
+        }
+        fn send_leave(&mut self) {
+            self.seen.push(Effect::Leave);
+        }
+        fn track_leave(&mut self, flags: TRACKMOUSEEVENT_FLAGS) {
+            self.seen.push(Effect::Track(flags.0));
+        }
+        fn pass_on(&mut self, message: u32, _wparam: WPARAM, _lparam: LPARAM) -> LRESULT {
+            self.seen.push(Effect::PassOn(message));
+            LRESULT(0)
+        }
+    }
+
+    /// A mouse message's `lParam` for a point.
+    fn at(x: i32, y: i32) -> LPARAM {
+        LPARAM(((u32::from(y as u16) << 16) | u32::from(x as u16)) as isize)
+    }
+
+    /// RED (T-SNAP-LAYOUTS-MAXBUTTON, review nit) — **the dispatcher does what
+    /// the passage says, and nothing else**: driven through its effects seam with
+    /// a recording arm, one message at a time, over a window whose client
+    /// origin stands at (100, 50) on the screen and a pointer at (1000, 60) on
+    /// the maximize button.
+    ///
+    /// MUTATIONS: hand the non-client press to `DefSubclassProc` as well and the
+    /// press step goes red; forget the `TrackMouseEvent` and the move step goes
+    /// red; send the leave twice and the leave step goes red.
+    #[test]
+    fn the_dispatcher_carries_out_the_passage_through_its_effects() {
+        let on_button = Cell::new(false);
+        let mut recorder = Recorder {
+            seen: Vec::new(),
+            hit: Some(CustomFrameHit::MaximizeButton),
+            keys: MODIFIERKEYS_FLAGS(0),
+        };
+        let step = |recorder: &mut Recorder, message: u32, wparam: usize, keys| {
+            recorder.seen.clear();
+            recorder.keys = keys;
+            dispatch_window_button_message(
+                &on_button,
+                recorder,
+                message,
+                WPARAM(wparam),
+                at(1000, 60),
+            );
+            (recorder.seen.clone(), on_button.get())
+        };
+        let button = HTMAXBUTTON as usize;
+        let client = (1000 - ORIGIN.0, 60 - ORIGIN.1);
+
+        // Onto the button: the client move for the application, the leave the
+        // frame asks for, and the move itself for the system.
+        assert_eq!(
+            step(&mut recorder, WM_NCMOUSEMOVE, button, MK_CONTROL),
+            (
+                vec![
+                    Effect::Client(WM_MOUSEMOVE, MK_CONTROL.0 as usize, client),
+                    Effect::Track((TME_LEAVE | TME_NONCLIENT).0),
+                    Effect::PassOn(WM_NCMOUSEMOVE),
+                ],
+                true
+            ),
+            "the move"
+        );
+        // winit's client-area leave, answered at once over the button: kept back.
+        assert_eq!(
+            step(&mut recorder, WM_MOUSELEAVE, 0, MODIFIERKEYS_FLAGS(0)),
+            (vec![], true),
+            "the client area's leave"
+        );
+        // The press: exactly one client press, at the client point, with the
+        // key state, and nothing to `DefSubclassProc`.
+        assert_eq!(
+            step(&mut recorder, WM_NCLBUTTONDOWN, button, MK_LBUTTON),
+            (
+                vec![Effect::Client(
+                    WM_LBUTTONDOWN,
+                    MK_LBUTTON.0 as usize,
+                    client
+                )],
+                true
+            ),
+            "the press"
+        );
+        assert_eq!(
+            step(&mut recorder, WM_NCLBUTTONDBLCLK, button, MK_LBUTTON),
+            (
+                vec![Effect::Client(
+                    WM_LBUTTONDOWN,
+                    MK_LBUTTON.0 as usize,
+                    client
+                )],
+                true
+            ),
+            "the double click is one press"
+        );
+        // Off it: one client leave, the cell cleared, the leave itself on to
+        // the system.
+        assert_eq!(
+            step(&mut recorder, WM_NCMOUSELEAVE, 0, MODIFIERKEYS_FLAGS(0)),
+            (vec![Effect::Leave, Effect::PassOn(WM_NCMOUSELEAVE)], false),
+            "the leave"
+        );
+        // And a client leave after that is the client area's own again.
+        assert_eq!(
+            step(&mut recorder, WM_MOUSELEAVE, 0, MODIFIERKEYS_FLAGS(0)),
+            (vec![Effect::PassOn(WM_MOUSELEAVE)], false)
         );
     }
 }
