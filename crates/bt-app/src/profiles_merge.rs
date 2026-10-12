@@ -1,0 +1,615 @@
+//! **`profiles.json`, merged three ways** (`docs/plans/design/settings-reread-2026-10-11.md`
+//! §3.4 `profiles.json` as completed by (b)8; ticket T-STORE-MERGE-PROFILES-PINS).
+//!
+//! The three documents are the settings merge's (`settings_merge`): the base
+//! `B`, Folio's `desired` `O`, and the file's document `T`.
+//!
+//! - **Each side is read first-wins by id**, the installer's rule
+//!   (`profiles::merge_on`): the first row naming an id is that id's row. A
+//!   later row naming it again in `T` is **carried** — kept verbatim in the
+//!   file's position, never merged and never rewritten ((b)8's one rule).
+//! - **Rows are matched by id, never by position.** Within a row the unit is
+//!   the field, through the settings merge's table ([`unit`]); every field but
+//!   `id` is optional and absent is "the shipped value", so a field the file
+//!   removed is a change to absent.
+//! - **Added and deleted rows**: a row added on either side is kept; a row
+//!   deleted on one side and unchanged on the other is deleted; a row deleted
+//!   on one side and changed on the other is a conflict, and the file's side
+//!   stands, whichever side that was.
+//! - **The order is total** ((b)8): the rows all three hold keep `T`'s
+//!   relative order if `T` reordered them against `B`, else `O`'s if `O` did,
+//!   else `B`'s — the table of [`unit`] over the order itself; every other row
+//!   is placed immediately after its nearest predecessor in its own side's
+//!   sequence that is in the result (first when it has none), a row the file
+//!   holds by the file's sequence and a row only Folio holds by Folio's; two
+//!   rows anchored to the same predecessor stand `T`'s before `O`'s, each side's
+//!   in its own order.
+//! - **Shipped ids the file never names** are appended by the installer as
+//!   always; they are not units here.
+//!
+//! The merge is pure: nothing here puts anything in force.
+
+use std::collections::{HashMap, HashSet};
+
+use bt_persist::{PROFILES_SCHEMA_VERSION, ProfileEntryV1, ProfilesV1};
+
+use crate::settings_merge::{Account, Unit, unit};
+
+/// **One merge of `profiles.json`.**
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Merged {
+    /// The merged document `M`: what Folio now wants on disk.
+    pub(crate) document: ProfilesV1,
+    pub(crate) account: Account,
+}
+
+/// A place in the result: a row by its id, or a carried entry of `T` by its
+/// index in the file.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Slot {
+    Row(String),
+    Carried(usize),
+}
+
+/// One side's rows in force, first-wins by id, in the side's order.
+fn first_wins(document: &ProfilesV1) -> Vec<&ProfileEntryV1> {
+    let mut seen = HashSet::new();
+    document
+        .profiles
+        .iter()
+        .filter(|entry| seen.insert(entry.id.as_str()))
+        .collect()
+}
+
+fn by_id<'a>(rows: &[&'a ProfileEntryV1]) -> HashMap<&'a str, &'a ProfileEntryV1> {
+    rows.iter().map(|entry| (entry.id.as_str(), *entry)).collect()
+}
+
+/// Count one unit's row of the table into `account`, under `name`.
+fn count(account: &mut Account, row: Unit, name: impl FnOnce() -> String) {
+    match row {
+        Unit::Base => {}
+        Unit::Ours => account.kept += 1,
+        Unit::Theirs => {
+            account.took += 1;
+            push_once(&mut account.taken, name());
+        }
+        Unit::Conflict => {
+            account.conflicted += 1;
+            push_once(&mut account.conflicts, name());
+        }
+    }
+}
+
+pub(crate) fn push_once(names: &mut Vec<String>, name: String) {
+    if !names.contains(&name) {
+        names.push(name);
+    }
+}
+
+/// One row's fields, each through [`unit`].
+struct RowMerging<'a> {
+    base: &'a ProfileEntryV1,
+    ours: &'a ProfileEntryV1,
+    title: &'a str,
+    account: &'a mut Account,
+}
+
+impl RowMerging<'_> {
+    fn field<V: Clone + PartialEq>(
+        &mut self,
+        key: &'static str,
+        at: impl Fn(&ProfileEntryV1) -> &V,
+        theirs: V,
+    ) -> V {
+        let (value, row) = unit(at(self.base).clone(), at(self.ours).clone(), theirs);
+        count(self.account, row, || format!("{}: {key}", self.title));
+        value
+    }
+}
+
+/// **A row both sides hold, merged field by field** against `base` — the
+/// destructuring has no `..`, so a field added to `ProfileEntryV1` does not
+/// compile here until somebody has said how it merges.
+fn merge_row(
+    base: &ProfileEntryV1,
+    ours: &ProfileEntryV1,
+    theirs: &ProfileEntryV1,
+    title: &str,
+    account: &mut Account,
+) -> ProfileEntryV1 {
+    let mut m = RowMerging {
+        base,
+        ours,
+        title,
+        account,
+    };
+    let ProfileEntryV1 {
+        id,
+        display_title,
+        hidden,
+        program,
+        args,
+        env,
+        starting_dir,
+        start_at,
+        mark,
+        integration,
+        login,
+        paste_as,
+        paste_paths_as,
+    } = theirs.clone();
+    ProfileEntryV1 {
+        id,
+        display_title: m.field("display_title", |e| &e.display_title, display_title),
+        hidden: m.field("hidden", |e| &e.hidden, hidden),
+        program: m.field("program", |e| &e.program, program),
+        args: m.field("args", |e| &e.args, args),
+        env: m.field("env", |e| &e.env, env),
+        starting_dir: m.field("starting_dir", |e| &e.starting_dir, starting_dir),
+        start_at: m.field("start_at", |e| &e.start_at, start_at),
+        mark: m.field("mark", |e| &e.mark, mark),
+        integration: m.field("integration", |e| &e.integration, integration),
+        login: m.field("login", |e| &e.login, login),
+        paste_as: m.field("paste_as", |e| &e.paste_as, paste_as),
+        paste_paths_as: m.field("paste_paths_as", |e| &e.paste_paths_as, paste_paths_as),
+    }
+}
+
+/// **Merge `ours` and `theirs` against `base`** (§3.4, (b)8). `shipped_title`
+/// answers the title a built-in row draws when no side names one, for the
+/// names the account gives.
+pub(crate) fn merge(
+    base: &ProfilesV1,
+    ours: &ProfilesV1,
+    theirs: &ProfilesV1,
+    shipped_title: &dyn Fn(&str) -> Option<String>,
+) -> Merged {
+    let mut account = Account::default();
+    let (b_rows, o_rows) = (first_wins(base), first_wins(ours));
+    // The file's sequence: each id's first row, and every later one carried.
+    let mut seen = HashSet::new();
+    let t_sequence: Vec<Slot> = theirs
+        .profiles
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            if seen.insert(entry.id.as_str()) {
+                Slot::Row(entry.id.clone())
+            } else {
+                Slot::Carried(index)
+            }
+        })
+        .collect();
+    let t_rows = first_wins(theirs);
+    let (b, o, t) = (by_id(&b_rows), by_id(&o_rows), by_id(&t_rows));
+    let title = |id: &str| -> String {
+        [t.get(id), o.get(id), b.get(id)]
+            .into_iter()
+            .flatten()
+            .find_map(|entry| entry.display_title.clone())
+            .or_else(|| shipped_title(id))
+            .unwrap_or_else(|| id.to_owned())
+    };
+
+    // Each id's row in the result, or none.
+    let mut ids: Vec<&str> = Vec::new();
+    for entry in t_rows.iter().chain(&o_rows).chain(&b_rows) {
+        if !ids.contains(&entry.id.as_str()) {
+            ids.push(entry.id.as_str());
+        }
+    }
+    let mut result: HashMap<String, ProfileEntryV1> = HashMap::new();
+    for id in ids {
+        let name = || title(id);
+        let row = match (b.get(id), o.get(id), t.get(id)) {
+            (Some(base), Some(ours), Some(theirs)) => {
+                Some(merge_row(base, ours, theirs, &name(), &mut account))
+            }
+            // Deleted in the file: unchanged here, deleted; changed here, a
+            // conflict the file's side wins — deleted.
+            (Some(base), Some(ours), None) => {
+                let row = if ours == base {
+                    Unit::Theirs
+                } else {
+                    Unit::Conflict
+                };
+                count(&mut account, row, name);
+                None
+            }
+            // Deleted here: unchanged in the file, deleted; changed in the
+            // file, a conflict the file's side wins — kept as the file has it.
+            (Some(base), None, Some(theirs)) => {
+                if theirs == base {
+                    count(&mut account, Unit::Ours, name);
+                    None
+                } else {
+                    count(&mut account, Unit::Conflict, name);
+                    Some((*theirs).clone())
+                }
+            }
+            (Some(_), None, None) => {
+                count(&mut account, Unit::Theirs, name);
+                None
+            }
+            (None, Some(ours), None) => {
+                count(&mut account, Unit::Ours, name);
+                Some((*ours).clone())
+            }
+            (None, None, Some(theirs)) => {
+                count(&mut account, Unit::Theirs, name);
+                Some((*theirs).clone())
+            }
+            // Added on both sides: field by field, against the shipped value.
+            (None, Some(ours), Some(theirs)) => {
+                let shipped = ProfileEntryV1 {
+                    id: id.to_owned(),
+                    ..ProfileEntryV1::default()
+                };
+                Some(merge_row(&shipped, ours, theirs, &name(), &mut account))
+            }
+            (None, None, None) => None,
+        };
+        if let Some(row) = row {
+            result.insert(id.to_owned(), row);
+        }
+    }
+
+    let profiles = order(
+        &b_rows,
+        &o_rows,
+        &t_rows,
+        &t_sequence,
+        &result,
+        &mut account,
+    )
+    .into_iter()
+    .map(|slot| match slot {
+        Slot::Row(id) => result[&id].clone(),
+        Slot::Carried(index) => theirs.profiles[index].clone(),
+    })
+    .collect();
+    Merged {
+        document: ProfilesV1 {
+            // The envelope is this build's: a newer file is refused before any
+            // merge, and an older one was migrated forward when it was read.
+            schema_version: PROFILES_SCHEMA_VERSION,
+            profiles,
+        },
+        account,
+    }
+}
+
+/// **The result's total order** ((b)8 steps 1–3).
+fn order(
+    b_rows: &[&ProfileEntryV1],
+    o_rows: &[&ProfileEntryV1],
+    t_rows: &[&ProfileEntryV1],
+    t_sequence: &[Slot],
+    result: &HashMap<String, ProfileEntryV1>,
+    account: &mut Account,
+) -> Vec<Slot> {
+    let holds = |rows: &[&ProfileEntryV1], id: &str| rows.iter().any(|entry| entry.id == id);
+    let common = |id: &str| {
+        result.contains_key(id) && holds(b_rows, id) && holds(o_rows, id) && holds(t_rows, id)
+    };
+    let common_order = |rows: &[&ProfileEntryV1]| -> Vec<String> {
+        rows.iter()
+            .filter(|entry| common(&entry.id))
+            .map(|entry| entry.id.clone())
+            .collect()
+    };
+    // Step 1: the common rows' relative order is a unit of its own.
+    let (spine, row) = unit(
+        common_order(b_rows),
+        common_order(o_rows),
+        common_order(t_rows),
+    );
+    count(account, row, || "order".to_owned());
+
+    // Step 2: every other row, anchored to its nearest predecessor in its own
+    // side's sequence that is in the result. Step 3: `T`'s anchored rows before
+    // `O`'s, each side's in its own order — the order they are pushed in.
+    let in_result = |slot: &Slot| match slot {
+        Slot::Row(id) => result.contains_key(id),
+        Slot::Carried(_) => true,
+    };
+    let mut anchored: HashMap<Option<Slot>, Vec<Slot>> = HashMap::new();
+    for (at, slot) in t_sequence.iter().enumerate() {
+        let placed_here = match slot {
+            Slot::Row(id) => result.contains_key(id) && !common(id),
+            Slot::Carried(_) => true,
+        };
+        if !placed_here {
+            continue;
+        }
+        let anchor = t_sequence[..at]
+            .iter()
+            .rev()
+            .find(|earlier| in_result(earlier))
+            .cloned();
+        anchored.entry(anchor).or_default().push(slot.clone());
+    }
+    for (at, entry) in o_rows.iter().enumerate() {
+        let id = entry.id.as_str();
+        if !result.contains_key(id) || common(id) || holds(t_rows, id) {
+            continue;
+        }
+        let anchor = o_rows[..at]
+            .iter()
+            .rev()
+            .find(|earlier| result.contains_key(&earlier.id))
+            .map(|earlier| Slot::Row(earlier.id.clone()));
+        anchored
+            .entry(anchor)
+            .or_default()
+            .push(Slot::Row(id.to_owned()));
+    }
+
+    // Each slot, then what is anchored to it, depth first.
+    let mut placed = Vec::with_capacity(result.len());
+    let mut pending: Vec<Slot> = Vec::new();
+    let place = |pending: &mut Vec<Slot>, placed: &mut Vec<Slot>| {
+        while let Some(slot) = pending.pop() {
+            if let Some(children) = anchored.get(&Some(slot.clone())) {
+                pending.extend(children.iter().rev().cloned());
+            }
+            placed.push(slot);
+        }
+    };
+    if let Some(first) = anchored.get(&None) {
+        pending.extend(first.iter().rev().cloned());
+    }
+    place(&mut pending, &mut placed);
+    for id in spine {
+        pending.push(Slot::Row(id));
+        place(&mut pending, &mut placed);
+    }
+    placed
+}
+
+#[cfg(test)]
+mod tests {
+    use bt_persist::ProgramV1;
+
+    use super::*;
+
+    /// A row of the reader's own: an id, a title and a program.
+    fn own(id: &str, title: &str) -> ProfileEntryV1 {
+        ProfileEntryV1 {
+            id: id.to_owned(),
+            display_title: Some(title.to_owned()),
+            program: Some(ProgramV1::Path(format!("C:\\工具\\{id}.exe"))),
+            ..ProfileEntryV1::default()
+        }
+    }
+
+    /// A built-in row naming only its id.
+    fn shipped(id: &str) -> ProfileEntryV1 {
+        ProfileEntryV1 {
+            id: id.to_owned(),
+            ..ProfileEntryV1::default()
+        }
+    }
+
+    fn table(rows: &[ProfileEntryV1]) -> ProfilesV1 {
+        ProfilesV1 {
+            schema_version: PROFILES_SCHEMA_VERSION,
+            profiles: rows.to_vec(),
+        }
+    }
+
+    fn ids(document: &ProfilesV1) -> Vec<&str> {
+        document
+            .profiles
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect()
+    }
+
+    fn no_titles(_: &str) -> Option<String> {
+        None
+    }
+
+    fn titled(id: &str) -> Option<String> {
+        (id == "pwsh").then(|| "PowerShell 七".to_owned())
+    }
+
+    /// RED ((b)14-11, (b)8 step 2) — **a row only the file added is placed
+    /// after its predecessor in the file when only Folio reordered.**
+    ///
+    /// The base is `a b c`; Folio moved `c` first (`c a b`); the file added
+    /// `新` after `a` (`a 新 b c`). The common rows take Folio's order — the
+    /// file did not reorder them — and the file's row stands right after `a`.
+    ///
+    /// MUTATION: revision (a)'s order rule — the file's additions at the end
+    /// (in `order`, anchor every row the file added to the last common row) —
+    /// the row lands after `b`.
+    #[test]
+    fn a_file_only_row_is_placed_when_only_folio_reordered() {
+        let (a, b, c, new) = (
+            own("a", "甲 A"),
+            own("b", "乙 B"),
+            own("c", "丙 C"),
+            own("新", "新的 New"),
+        );
+        let base = table(&[a.clone(), b.clone(), c.clone()]);
+        let ours = table(&[c.clone(), a.clone(), b.clone()]);
+        let theirs = table(&[a.clone(), new.clone(), b.clone(), c.clone()]);
+        let merged = merge(&base, &ours, &theirs, &no_titles);
+        assert_eq!(
+            ids(&merged.document),
+            vec!["c", "a", "新", "b"],
+            "Folio's order of the common rows, the file's row after `a`"
+        );
+        assert_eq!(merged.account.kept, 1, "the order is Folio's");
+        assert_eq!(merged.account.conflicted, 0);
+    }
+
+    /// RED ((b)14-11, (b)8's one rule) — **a later row naming an id the file
+    /// already named is carried**, verbatim, in the file's position; the first
+    /// is the row the merge works on, as the installer's first-wins reading.
+    ///
+    /// MUTATION: drop the duplicate (in `merge`, map a later `T` row to no slot
+    /// instead of `Slot::Carried`) — the second `a` is gone.
+    #[test]
+    fn a_later_duplicate_id_is_carried() {
+        let a = own("a", "甲 A");
+        let b = own("b", "乙 B");
+        let duplicate = ProfileEntryV1 {
+            display_title: Some("重复 Duplicate".to_owned()),
+            ..own("a", "unused")
+        };
+        let base = table(&[a.clone(), b.clone()]);
+        let mut a_here = a.clone();
+        a_here.args = Some(vec!["-NoLogo".to_owned(), "参数".to_owned()]);
+        let ours = table(&[a_here.clone(), b.clone()]);
+        let theirs = table(&[a.clone(), duplicate.clone(), b.clone()]);
+        let merged = merge(&base, &ours, &theirs, &no_titles);
+        assert_eq!(
+            merged.document.profiles,
+            vec![a_here, duplicate, b],
+            "the first `a` merged (Folio's arguments), the second carried in its place"
+        );
+    }
+
+    /// RED (§8 test 12) — **rows merge by id, and a file that reordered keeps
+    /// its order.**
+    ///
+    /// The file moved `b` first and changed `a`'s title; Folio changed `b`'s
+    /// arguments. Matched by id, each change lands on its own row, in the
+    /// file's order.
+    ///
+    /// MUTATION: match rows by position (in `merge`, look each side's row up by
+    /// its index in `T` instead of by id) — `b`'s arguments land on `a`.
+    #[test]
+    fn rows_merge_by_id_and_a_reordered_file_keeps_its_order() {
+        let (a, b, c) = (own("a", "甲 A"), own("b", "乙 B"), own("c", "丙 C"));
+        let base = table(&[a.clone(), b.clone(), c.clone()]);
+        let mut b_here = b.clone();
+        b_here.args = Some(vec!["--登录".to_owned()]);
+        let ours = table(&[a.clone(), b_here.clone(), c.clone()]);
+        let mut a_there = a.clone();
+        a_there.display_title = Some("甲 renamed".to_owned());
+        let theirs = table(&[b.clone(), a_there.clone(), c.clone()]);
+        let merged = merge(&base, &ours, &theirs, &no_titles);
+        assert_eq!(
+            merged.document.profiles,
+            vec![b_here, a_there, c],
+            "each change on its own row, in the file's order"
+        );
+        assert_eq!(merged.account.conflicted, 0);
+        assert_eq!(merged.account.kept, 1, "`b`'s arguments");
+        assert_eq!(merged.account.took, 2, "`a`'s title and the order");
+    }
+
+    /// RED (§3.4) — **a row deleted on one side and changed on the other takes
+    /// the file's side**, in both directions, and is named.
+    ///
+    /// MUTATION: deletion always wins (in `merge`, the `(Some, None, Some)` arm
+    /// answers `None` whatever the file did) — the row the file changed and
+    /// Folio deleted is gone.
+    #[test]
+    fn a_row_deleted_on_one_side_and_changed_on_the_other_takes_the_files_side() {
+        let (a, b) = (own("a", "甲 A"), own("b", "乙 B"));
+        let base = table(&[a.clone(), b.clone()]);
+
+        // Deleted in the file, changed here: deleted.
+        let mut a_here = a.clone();
+        a_here.hidden = true;
+        let merged = merge(
+            &base,
+            &table(&[a_here, b.clone()]),
+            &table(std::slice::from_ref(&b)),
+            &no_titles,
+        );
+        assert_eq!(ids(&merged.document), vec!["b"], "the file deleted it");
+        assert_eq!(merged.account.conflicts, vec!["甲 A".to_owned()]);
+
+        // Deleted here, changed in the file: kept as the file has it.
+        let mut a_there = a.clone();
+        a_there.display_title = Some("甲 改名 renamed".to_owned());
+        let merged = merge(
+            &base,
+            &table(std::slice::from_ref(&b)),
+            &table(&[a_there.clone(), b.clone()]),
+            &no_titles,
+        );
+        assert_eq!(
+            merged.document.profiles,
+            vec![a_there, b.clone()],
+            "the file changed it: it stands, not resurrected from Folio, but kept from the file"
+        );
+        assert_eq!(merged.account.conflicts, vec!["甲 改名 renamed".to_owned()]);
+
+        // Deleted on one side, unchanged on the other: deleted, no conflict.
+        let merged = merge(
+            &base,
+            &table(std::slice::from_ref(&b)),
+            &table(&[a.clone(), b.clone()]),
+            &no_titles,
+        );
+        assert_eq!(ids(&merged.document), vec!["b"]);
+        assert_eq!(merged.account.conflicted, 0);
+    }
+
+    /// RED (§3.3's table, §3.4) — **fields merge per the unit table, and an
+    /// absent field is the shipped value**: a field the file removed is a
+    /// change to absent; both sides changing one field to two values is a
+    /// conflict the file wins, named by the row's title and the field.
+    ///
+    /// MUTATION: the conflict takes `O` (in `settings_merge::unit`, answer
+    /// `ours` for the last row) — the program is Folio's.
+    #[test]
+    fn fields_merge_per_the_unit_table_and_an_absent_field_is_the_shipped_value() {
+        let mut base_row = shipped("pwsh");
+        base_row.args = Some(vec!["-NoLogo".to_owned()]);
+        base_row.program = Some(ProgramV1::Path("C:\\旧\\pwsh.exe".to_owned()));
+        let base = table(std::slice::from_ref(&base_row));
+
+        let mut ours_row = base_row.clone();
+        ours_row.hidden = true;
+        ours_row.program = Some(ProgramV1::Path("C:\\我们\\pwsh.exe".to_owned()));
+        let mut theirs_row = base_row.clone();
+        theirs_row.args = None;
+        theirs_row.program = Some(ProgramV1::Path("D:\\他们\\pwsh.exe".to_owned()));
+        let merged = merge(&base, &table(&[ours_row]), &table(&[theirs_row]), &titled);
+
+        let row = &merged.document.profiles[0];
+        assert!(row.hidden, "changed here only: Folio's");
+        assert_eq!(
+            row.args, None,
+            "the file removed the arguments: the shipped value, not the base's"
+        );
+        assert_eq!(
+            row.program,
+            Some(ProgramV1::Path("D:\\他们\\pwsh.exe".to_owned())),
+            "changed on both: the file's"
+        );
+        assert_eq!(
+            merged.account.conflicts,
+            vec!["PowerShell 七: program".to_owned()],
+            "named by the shipped title and the field"
+        );
+        assert_eq!(merged.account.kept, 1);
+        assert_eq!(merged.account.took, 1);
+    }
+
+    /// (b)8 steps 2–3 — **two rows anchored to one predecessor stand the file's
+    /// before Folio's**, and a row only Folio added follows its own
+    /// predecessor; with nothing owed here the result is the file itself.
+    #[test]
+    fn rows_anchored_together_stand_the_files_first_and_a_clean_edit_is_the_file() {
+        let (a, b) = (own("a", "甲 A"), own("b", "乙 B"));
+        let (mine, theirs_new) = (own("我的", "我的 Mine"), own("他的", "他的 Theirs"));
+        let base = table(&[a.clone(), b.clone()]);
+        let ours = table(&[a.clone(), mine.clone(), b.clone()]);
+        let theirs = table(&[a.clone(), theirs_new.clone(), b.clone()]);
+        let merged = merge(&base, &ours, &theirs, &no_titles);
+        assert_eq!(ids(&merged.document), vec!["a", "他的", "我的", "b"]);
+
+        let clean = merge(&base, &base, &theirs, &no_titles);
+        assert_eq!(clean.document, theirs, "a clean hand edit is the file");
+        assert_eq!(clean.account.conflicted, 0);
+    }
+}

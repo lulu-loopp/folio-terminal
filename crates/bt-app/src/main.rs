@@ -141,6 +141,7 @@ mod preview_viewport;
 mod preview_watch;
 mod preview_wrap;
 mod profiles;
+mod profiles_merge;
 mod programs_ear;
 mod programs_lane;
 mod psreadline;
