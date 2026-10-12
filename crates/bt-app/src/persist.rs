@@ -854,7 +854,7 @@ impl StorageLane {
     /// [`Self::of_its_own`], with `wake` as its wake, so a test hears what the
     /// loop would.
     #[cfg(test)]
-    fn with_a_worker_and_wake(wake: impl Fn() + Send + Sync + 'static) -> Self {
+    pub(crate) fn with_a_worker_and_wake(wake: impl Fn() + Send + Sync + 'static) -> Self {
         let (mut lane, _receipts) = Self::fresh();
         Arc::get_mut(&mut lane.shared)
             .expect("a lane just made has one owner")
@@ -1064,67 +1064,74 @@ impl SessionWriter {
                     wake: Arc::clone(&wake),
                     ahead,
                 };
-                'serving: while let Ok(next) = end.ends.incoming.recv() {
-                    // **Every job admitted ahead is served before the one the queue gave**
-                    // ([`StorageLane::submit_ahead`]): the worker drains them at each job it
-                    // takes, and the `Ahead` token wakes it for them when it is idle.
-                    let ahead: Vec<StorageJob> = lane_lock(&end.ahead).drain(..).collect();
-                    for job in ahead.into_iter().chain(std::iter::once(next)) {
-                        let request = match job {
-                            StorageJob::Session(request) => request,
-                            // The answer is in its channel before the wake: the steward's order.
-                            StorageJob::Document(job) => {
-                                crate::document_request::serve_document(ctx, job);
-                                wake();
-                                continue;
-                            }
-                            StorageJob::Read(job) => {
-                                crate::document_request::serve_read(ctx, job);
-                                wake();
-                                continue;
-                            }
-                            StorageJob::Recovered(job) => {
-                                crate::document_request::serve_recovered(ctx, job);
-                                wake();
-                                continue;
-                            }
-                            StorageJob::SessionBackup(request) => {
-                                if let Err(error) = bt_persist::atomic_write_carrying_from(
-                                    &request.path,
-                                    &request.bytes,
-                                    &request.source,
-                                ) {
-                                    crate::diagnostics::note(&format!(
-                                        "BT_PERSIST {PREVIOUS_SESSION_FILE_NAME} backup failed: {error}"
-                                    ));
+                // **A panic is the worker's end** (T-PANIC-ROWS-HONEST): the loop runs inside
+                // `contained_panic::contain`, which the resident panic hook lets unwind, so the job
+                // being served drops its answer (its terminal: the worker gone) and `end` then
+                // ends every job still queued and wakes the loop, as on any other end. The panic's
+                // report is in the panic log.
+                let _ = crate::contained_panic::contain(|| {
+                    'serving: while let Ok(next) = end.ends.incoming.recv() {
+                        // **Every job admitted ahead is served before the one the queue gave**
+                        // ([`StorageLane::submit_ahead`]): the worker drains them at each job it
+                        // takes, and the `Ahead` token wakes it for them when it is idle.
+                        let ahead: Vec<StorageJob> = lane_lock(&end.ahead).drain(..).collect();
+                        for job in ahead.into_iter().chain(std::iter::once(next)) {
+                            let request = match job {
+                                StorageJob::Session(request) => request,
+                                // The answer is in its channel before the wake: the steward's order.
+                                StorageJob::Document(job) => {
+                                    crate::document_request::serve_document(ctx, job);
+                                    wake();
+                                    continue;
                                 }
-                                continue;
+                                StorageJob::Read(job) => {
+                                    crate::document_request::serve_read(ctx, job);
+                                    wake();
+                                    continue;
+                                }
+                                StorageJob::Recovered(job) => {
+                                    crate::document_request::serve_recovered(ctx, job);
+                                    wake();
+                                    continue;
+                                }
+                                StorageJob::SessionBackup(request) => {
+                                    if let Err(error) = bt_persist::atomic_write_carrying_from(
+                                        &request.path,
+                                        &request.bytes,
+                                        &request.source,
+                                    ) {
+                                        crate::diagnostics::note(&format!(
+                                            "BT_PERSIST {PREVIOUS_SESSION_FILE_NAME} backup failed: {error}"
+                                        ));
+                                    }
+                                    continue;
+                                }
+                                StorageJob::Receipt { job, answer } => {
+                                    let _ = answer.send(write_receipt(&job));
+                                    continue;
+                                }
+                                StorageJob::Handoff { job, answer } => {
+                                    let _ = answer.send(crate::update_handoff::perform(job));
+                                    continue;
+                                }
+                                StorageJob::Ahead => continue,
+                            };
+                            let result = bt_persist::atomic_write(&request.path, &request.bytes)
+                                .map_err(|error| error.to_string());
+                            if end
+                                .ends
+                                .outgoing
+                                .send(SessionWriteReceipt {
+                                    generation: request.generation,
+                                    result,
+                                })
+                                .is_err()
+                            {
+                                break 'serving;
                             }
-                            StorageJob::Receipt { job, answer } => {
-                                let _ = answer.send(write_receipt(&job));
-                                continue;
-                            }
-                            StorageJob::Handoff { job, answer } => {
-                                let _ = answer.send(crate::update_handoff::perform(job));
-                                continue;
-                            }
-                            StorageJob::Ahead => continue,
-                        };
-                        let result = bt_persist::atomic_write(&request.path, &request.bytes)
-                            .map_err(|error| error.to_string());
-                        if end
-                            .ends
-                            .outgoing
-                            .send(SessionWriteReceipt {
-                                generation: request.generation,
-                                result,
-                            })
-                            .is_err()
-                        {
-                            break 'serving;
                         }
                     }
-                }
+                });
             },
         );
         match started {

@@ -2076,3 +2076,121 @@ fn within_patience<A>(answer: &mpsc::Receiver<A>, file: &str) -> Result<A, ()> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::{Arc, Mutex, mpsc};
+
+    use super::{DocumentAnswer, DocumentJob, LinkPolicy, Mode, ReadJob};
+    use crate::persist::StorageLane;
+
+    /// Whether `answer` has been given its terminal by the worker's end: the channel closed with
+    /// nothing in it, which a store reads as `Refused(NoWorker(STORAGE_WORKER_GONE))` for a write
+    /// and as "not read again" for a read.
+    fn ended_by_the_workers_end<A>(answer: &Mutex<mpsc::Receiver<A>>) -> bool {
+        matches!(
+            answer.lock().expect("the answer").try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        )
+    }
+
+    /// A write of `bytes` to `which`, answered on `answer`.
+    fn write(which: &Path, answer: mpsc::Sender<DocumentAnswer>) -> DocumentJob {
+        DocumentJob {
+            which: which.to_path_buf(),
+            generation: 2,
+            version: 1,
+            expected: None,
+            bytes: Arc::from(&b"{\"\xe5\x86\x99\": 1}"[..]),
+            mode: Mode::Restore,
+            link_policy: LinkPolicy::Refuse,
+            asker: 0,
+            kept: Vec::new(),
+            answer,
+        }
+    }
+
+    /// RED (T-PANIC-ROWS-HONEST) — **a storage worker that panics ends every request it owes with
+    /// its terminal, each once, and then wakes the loop; a later request is refused at the door.**
+    ///
+    /// Two requests are admitted: a re-read, whose answer (the store's parse, on the worker)
+    /// panics, and behind it a write. The product's panic hook ends the process for a panic it is
+    /// not told is contained, so the worker's loop runs inside `contained_panic::contain`: the
+    /// hook's decision at the panic is yes, the read's answer is dropped by the unwind (its
+    /// terminal: not read again), the worker's end drops the queued write (its terminal:
+    /// `Refused(NoWorker(STORAGE_WORKER_GONE))`), and only then wakes the loop — once. A request
+    /// made after it is refused where it is handed over.
+    ///
+    /// MUTATIONS: ① the worker's loop without `contained_panic::contain` — the decision at the
+    /// panic is no (the process would end there); ② `WorkerEnd::drop` without its drain (the
+    /// queued jobs dropped only after the wake) — the write has no terminal when the loop is woken.
+    #[test]
+    fn a_storage_worker_panic_ends_every_owed_request_with_its_terminal() {
+        let which = bt_testpath::temp_path("panic-rows-存储");
+        let (read_answer, read_answered) = mpsc::channel::<u64>();
+        let read_answered = Arc::new(Mutex::new(read_answered));
+        let (write_answer, write_answered) = mpsc::channel::<DocumentAnswer>();
+        let write_answered = Arc::new(Mutex::new(write_answered));
+        let (woke, wakes) = mpsc::channel::<bool>();
+        let (read_seen, write_seen) = (Arc::clone(&read_answered), Arc::clone(&write_answered));
+        let lane = StorageLane::with_a_worker_and_wake(move || {
+            // At the wake: has every request the worker owed been given its terminal?
+            let _ = woke.send(
+                ended_by_the_workers_end(&read_seen) && ended_by_the_workers_end(&write_seen),
+            );
+        });
+
+        let (told, decision) = mpsc::channel();
+        let (open, gate) = mpsc::channel::<bool>();
+        let admitted = lane.send_read(ReadJob {
+            which: which.clone(),
+            generation: 1,
+            answer: Box::new(move |generation, _read| {
+                let _ = told.send(crate::the_hook_lets_this_panic_unwind());
+                if crate::lane::receive(&gate, "the test's word to fail the parse") {
+                    panic!("scripted: the document would not parse 解析失败");
+                }
+                let _ = read_answer.send(generation);
+            }),
+        });
+        assert!(admitted, "the read is admitted");
+        assert!(
+            crate::lane::receive(&decision, "the hook's decision inside the read's answer"),
+            "the worker serves where the resident hook lets a panic unwind"
+        );
+        assert!(
+            lane.send_document(write(&which, write_answer)),
+            "the write is admitted behind it"
+        );
+        open.send(true).expect("the worker waits at the gate");
+
+        assert!(
+            crate::lane::receive(&wakes, "the worker's end"),
+            "every owed request had its terminal when the loop was woken"
+        );
+        assert!(
+            ended_by_the_workers_end(&read_answered),
+            "the read ended once"
+        );
+        assert!(
+            ended_by_the_workers_end(&write_answered),
+            "the write ended once"
+        );
+
+        let (late, late_answered) = mpsc::channel::<DocumentAnswer>();
+        assert!(
+            !lane.send_document(write(&which, late)),
+            "a request after the worker's end is refused at the door"
+        );
+        assert!(
+            matches!(
+                late_answered.try_recv(),
+                Err(mpsc::TryRecvError::Disconnected)
+            ),
+            "and the job is not kept"
+        );
+        assert!(wakes.try_recv().is_err(), "the end woke the loop once");
+        assert!(!which.exists(), "nothing was written");
+    }
+}
