@@ -1151,6 +1151,14 @@ pub(crate) fn write_receipt(job: &ReceiptJob) -> Result<(), String> {
 /// that is absent, names another transaction, or cannot be read whole grants
 /// nothing: that role never accepts what it cannot read.
 ///
+/// The phase granted is the one this read sees — the authorization's moment,
+/// not the moment the receipt reaches the disk: the read and
+/// `install_txn::durable_create` are not one atomic step, so a lock holder may
+/// record `RollbackIntent` between them. A receipt that lands after that is
+/// never accepted: `next` takes a receipt only from `Trial` or a `Stuck` with
+/// its retrial (and U-35's own commit only from `TrialStarting`), and refuses
+/// one in `RollbackIntent` by name.
+///
 /// # Errors
 /// What the journal said instead, as a sentence.
 fn receipt_granted(job: &ReceiptJob) -> Result<(), String> {
