@@ -71,12 +71,12 @@ they answer "what does this machine do" — not by debt.
 | 0.4.5 | 8 | 0 | 8 |
 | 0.4.6 | 4 | 0 | 4 |
 | 0.4.7 | 0 | 0 | 0 |
-| 0.4.8 (plan ticket on the row) | 39 | 26 | 13 |
+| 0.4.8 (plan ticket on the row) | 40 | 26 | 14 |
 | 0.5 (reason on the row; D-1, D-16 and D-33 are its preconditions) | 13 | 13 | 0 |
 | deferred (reason on the row) | 4 | 4 | 0 |
-| unassigned (no 0.4.8 plan ticket; listed for the coordinator) | 26 | 26 | 0 |
+| unassigned (no 0.4.8 plan ticket; listed for the coordinator) | 25 | 25 | 0 |
 | already repaid | 2 | 0 | 2 |
-| **total** | **96** | **69** | **27** |
+| **total** | **96** | **68** | **28** |
 
 (2026-09-25, A5: D-33 moved from 0.4.5 to 0.4.6 — the owner deferred the
 presentation lane, its second client, and revision (b) R8 of
@@ -143,6 +143,10 @@ open, and S-5's D-70 and D-71 moved to 0.4.8 and repaid: 0.4.8 39/27/12, unassig
 
 (2026-10-12, the merge of T-PANIC-ROWS-HONEST with S-5: recounted from the rows — S-5's D-70 and
 D-71 on 0.4.8, repaid, and D-96 on 0.4.8, repaid: 0.4.8 39/26/13, unassigned 26/26/0, total 96/69/27.)
+
+(2026-10-12, T-LEDGER-CLOSEOUTS-1012: D-39 repaid on `f7218b36` by T-OS-SIGNALS-MAC (2026-10-11),
+whose commits left the cell open; it names that ticket and moves from unassigned to 0.4.8. Recounted from the
+rows: 0.4.8 40/26/14, unassigned 25/25/0, total 96/68/28, from 96/69/27.)
 
 Parts already repaid inside open rows, by the 0.4.4 tickets: ticket 10
 (`2657e5e3`) — §5.3 row 1, the OS hand-off lane, and the first instance of the
@@ -364,7 +368,7 @@ ledger's.
 | D-36 | §5.3 row 4 — `psreadline::installed_copy`'s recursive walk | §5.3 | none yet | 0.4.8 — G6 (T-INTEGRATION-INJECT-2) retires the installed module this row walks | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
 | D-37 | §5.3 row 5 — the machine's whole font collection enumerated inline | §5.3 | 50 | 0.4.5 — the traced frozen gear | repaid (ticket 50) |
 | D-38 | §5.3 row 6 — the find box re-scans every frozen line per keystroke | §5.3 | 51 | 0.4.5 — a per-keystroke cost | repaid (ticket 51) |
-| D-39 | §5.3 row 7 — macOS locale children on the pane-birth road | §5.3 | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** touched, not narrowed: both commands now lead a contained process group (`probe_output`, T-PROBE-CHILD) but still have no deadline and stay on the pane-birth road; was 0.4.6 |
+| D-39 | §5.3 row 7 — macOS locale children on the pane-birth road | §5.3 | T-OS-SIGNALS-MAC | 0.4.8 — T-OS-SIGNALS-MAC (2026-10-11) | **repaid on `f7218b36` (T-OS-SIGNALS-MAC, 2026-10-11; marked 2026-10-12 by T-LEDGER-CLOSEOUTS-1012)**: the locale a new pane is told is read on the locale cell's own worker (`locale_declaration::LocaleCell::serve`), both children within one ten-second budget (`bt_platform::probe_outputs_within`), and a birth reads what the cell holds (`locale_declaration::held`); `window_waits.tsv` row 7 is `done`, held by `locale_declaration::tests::row_7_no_birth_reads_the_locale_itself`; the repaying commit left this cell open; before it: open; **2026-10-08 (J4):** touched, not narrowed: both commands now lead a contained process group (`probe_output`, T-PROBE-CHILD) but still have no deadline and stay on the pane-birth road; was 0.4.6 |
 | D-40 | §5.3 row 8 — macOS `DirWatch` start and drop wait without a bound | §5.3 | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — B7 was never cut | open — both platforms' `DirWatch::drop` are rows of the closed `Drop` inventory the source guard holds (A1e, 2026-09-27); B7 repays them; **2026-10-08 (J4):** untouched; 0.4.8 B1 (T-WINDOWS-ALL) gives every window the git watch and the document re-reads, which multiplies this row's start and drop sites unless B1 repays them; was 0.4.6; **2026-10-11 (T-DIRWATCH-LIFECYCLE):** §5.3 row 8 is done — every start and drop runs on the `watch-steward` worker, the starts take a `WorkerCtx`, and the window thread holds no watch; what stays open is the unbounded join in both `Drop`s (TD-1, TD-2), now waited on by that worker |
 | D-41 | §5.3 row 9 — presentation on the window thread; the present mode has no owner | §5.3; §5.4 step 4 | none yet | deferred → unassigned — construction awaits the owner's measurement-based decision after the self-inflicted waits are fixed and measured (owner, 2026-09-24; `docs/plans/design/window-thread-budget-2026-09-25.md` §R-E, replacing §4); a release is assigned only after that ruling, and this deferral does not repay D-41 | open — since ticket 37 a presented picture is a pair (frame and metrics: `SeatSignature::metrics`, `LeafSession::presented_metrics`), and the lane must carry both; **2026-10-08 (J4):** untouched |
 | D-42 | §5.3 row 10 — device recovery blocks and sleeps on the window thread | §5.3; §5.4 step 4 | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — B9 was never cut | open; **2026-10-08 (J4):** untouched; was 0.4.6; **2026-10-11 (S-1):** tracked by `# completions` row `device recovery` (through §5.3 row 10) |
