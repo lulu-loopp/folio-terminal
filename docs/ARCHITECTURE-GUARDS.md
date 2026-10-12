@@ -37,14 +37,20 @@ such a path** — a wrapper of the same crate (`read_session(&fixture_path(…))
 a function of another crate, a method called on the path — which is a reader
 named by its callee in the `mechanism` column. Each call is judged by its own
 argument: a literal, a `Path`/`.join` chain, `env!`, `concat!` and `format!`
-spliced piece by piece (a string that spells a path into other text names that
-path), the innermost binding in scope at the call (a `let` over the rest of its
-block, a `for` variable over the loop's body; a loop over a literal list is
-each element in turn), a constant by bare name or through `self::`, `super::`
-and `crate::` along bt-source's module tree (following `use` and `use …::*`),
-and a same-file helper with its parameters bound. A macro is not a call
-(`assert_eq!(path, …)` compares), nor are the calls that only build or
-describe a path (`Path::new`, `PathBuf::from`, `.join`, `.display()` and the
+spliced piece by piece (placeholders take their arguments as `std` does; a
+string that spells a path into other text names that path), the innermost
+binding in scope at the call (a `let` from the end of its statement, so `let
+path = read(path)` reads the earlier one; an `if let`, `match` arm or `for`
+variable over its body; a loop over a literal list is each element in turn),
+a constant through bt-source's module trees across every first-party package
+(bare, `self::`, `super::`, `crate::`, a crate's name, `use` and `use …::*`,
+every file a module is written in, `impl` blocks' constants), and a same-file
+helper with its parameters bound. A constant name is SCREAMING_SNAKE_CASE:
+CI's workspace-wide `clippy -D warnings` makes `non_upper_case_globals` (not in
+the workspace's `Cargo.toml`: rustc's default warn) refuse any other, and a
+snake_case constant that is there is found by its name all the same. A macro is
+not a call (`assert_eq!(path, …)` compares), nor are the calls that only build
+or describe a path (`Path::new`, `PathBuf::from`, `.join`, `.display()` and the
 rest of the test's `PATH_BUILDING`). A path under `target/` or a temporary
 directory, or an absolute path, is not a document, and does not make another
 call in the same function a reader.
@@ -63,13 +69,16 @@ both. When red, a reader whose subject really is the document gets a
 subject, ticket, `no`, reason); a reader that pins a fact about the code by
 reading text is migrated to a `bt-source` query instead, and a debt row is never
 added. The scan never drops a path it gives up on in silence: a rooted path
-handed to any call that it cannot reduce to a literal (a parameter, a `format!`
-hole it cannot fill, another crate's constant), a constant or helper that
-reaches itself again (cycles are detected; acyclic chains are followed to their
-end), and a `self::`/`super::`/`crate::` constant the module tree does not
-hold are counted and listed by the test as a diagnostic — file, line, item,
-callee, why — not refused. The method exclusion is a list of names, so a
-reading method that shares an excluded name is a blind spot, and a new
+handed to any call that it cannot reduce to a literal (a parameter, a constant
+it cannot read), a `concat!`/`format!` holding a rooted piece and an
+unreducible piece anywhere, a constant that reaches itself again (cycles are
+detected; acyclic chains are followed to their end), and a constant-spelled
+name the module trees hold no constant, `use`, glob or `thread_local!` of are
+counted and listed by the test as a diagnostic — file, line, item, callee,
+why — not refused. Every place the evaluator answers "nothing" says beside it
+why that is a resolution, a diagnostic or no path into the checkout. The method
+exclusion is a list of names, so a reading method that shares an excluded name
+is a blind spot, and a new
 path-describing method is a false positive until it is added to
 `PATH_BUILDING`. Not covered, and said in the test's header: a path handed in
 as a parameter (the function that hands it on is not the reader; its caller
