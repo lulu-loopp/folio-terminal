@@ -30,9 +30,13 @@ T-SOURCE-READERS-TSV-TRIPWIRE (2026-10-12) every item of test or build-support
 code that reads a **committed non-Rust file** has a row on
 `SOURCE-READERS.tsv` or `MIGRATION-DEBT.tsv`, keyed by its file and its item
 (the `owner` column), and never on both: an `include_str!`/`include_bytes!` of
-a committed path, or a `read_to_string`/`fs::read`/`File::open` in a function
-whose path is rooted at `CARGO_MANIFEST_DIR` (directly or through a helper of
-its own file) or spelled out from the workspace root or the package directory.
+a committed path, or a **call** of `read_to_string`, `fs::read` or `File::open`
+(through bt-source's call pattern; a bare mention is no call) whose own
+argument reduces to a committed document — judged one call at a time, from a
+literal, a `Path`/`.join` chain, `env!`/`concat!`, a binding before the call, a
+same-file constant, or a same-file helper rooted at `CARGO_MANIFEST_DIR`. A
+call whose path is under `target/` or a temporary directory is not a read of a
+document, and does not make another call in the same function one.
 The subject set is what `git ls-files` names minus `.rs` files; generated files
 under `target/` and bytes the shipped program embeds are not subjects.
 
@@ -47,9 +51,12 @@ both. When red, a reader whose subject really is the document gets a
 `SOURCE-READERS.tsv` row (file, owner as the message spells it, mechanism,
 subject, ticket, `no`, reason); a reader that pins a fact about the code by
 reading text is migrated to a `bt-source` query instead, and a debt row is never
-added. Not covered, and said in the test's header: a path handed in as a
-parameter, a root helper in another file or reached through a method, a bare
-file name in an unrooted body, other read calls, and stale rows (a row whose
+added. A rooted call whose path this reading cannot reduce to a literal (a
+loop variable, a `format!`, another crate's constant) is counted and listed by
+the test as a diagnostic, not refused. Not covered, and said in the test's
+header: a path handed in as a parameter, a root reached through a method, a
+closure or another file's function, other read calls, a read call renamed by
+`use … as …` (bt-source does not resolve aliases), and stale rows (a row whose
 item no longer reads is not refused).
 
 ## Platform cfg boundaries
