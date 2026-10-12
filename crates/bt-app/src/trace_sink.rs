@@ -521,7 +521,7 @@ impl Drop for StalledWriter {
         if !crate::lane::within_patience(|| self.queue.close()) {
             assert!(
                 std::thread::panicking(),
-                "the stalled writer was released and never left its write within the lane                  suite's patience"
+                "the stalled writer was released and never left its write within the lane suite's patience"
             );
             return;
         }

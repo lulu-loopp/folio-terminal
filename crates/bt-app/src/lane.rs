@@ -1733,6 +1733,11 @@ pub(crate) fn wait_until(what: &str, done: impl FnMut() -> bool) {
 /// **A hold a fake puts its work behind**: the suite holds it; the fake passes it where its work
 /// begins and stands there while it is held; the suite waits, within [`PATIENCE`], until a worker
 /// is standing in it — the signal that the work has been taken and has not ended.
+///
+/// Its limit: a worker woken by [`Hold::release`] is counted as standing until it has run again,
+/// so a `hold` straight after a `release` can let the next [`Hold::wait_standing`] return on that
+/// worker rather than on the next one. Every test that holds twice awaits the held work's end
+/// (its answer, through the lane's wake) between the two holds, which is when the count is zero.
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct Hold {

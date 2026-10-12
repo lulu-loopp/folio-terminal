@@ -1998,9 +1998,11 @@ mod tests {
     /// RED (T-UPDATE-LOCK-RACE round 3, R2-2) — **a transient owner-mark
     /// read failure is asked again under the same election lock and budget;
     /// only the successful second read is allowed to decide the duty.** The
-    /// injected pause returns immediately and the mark's write is injected
-    /// too, so neither a clock nor a scanner holding the new mark chooses the
-    /// result.
+    /// injected pause returns immediately, and the journal's phase and the
+    /// mark's write are injected too, so neither a clock nor a scanner holding
+    /// the journal or the new mark chooses the result. The election lock is the
+    /// one real file left: a lock file of this test's own, which nobody else
+    /// holds.
     ///
     /// MUTATION: return `Mine` on the first read error, or remove the read
     /// retry in `take_the_window_within_using` (one attempt is observed).
@@ -2028,6 +2030,7 @@ mod tests {
                     Ok(None)
                 }
             },
+            || Ok(crate::update_txn::PhaseKind::Prepared),
             |mark, bytes| {
                 written.push((mark.to_path_buf(), bytes.to_vec()));
                 Ok(())
