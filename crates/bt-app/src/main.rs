@@ -18918,6 +18918,53 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
     }
 }
 
+/// **Carry out what [`quit::Quit::settle_held_release`] says of an update trial's held
+/// release** (T-QUIT-DOCUMENTS rounds 3–4) — the one place each disposition is done.
+/// Performed: the launch backup goes ahead again and every writer runs through its own
+/// arm. Proceeding to the write: the rest runs; with the session's release pending, this
+/// run's sentinel is armed (what `release_trial` does first) and the launch backup held
+/// back, so the final write goes alone. Consumed: the launch backup is skipped for the run.
+fn settle_the_held_release(quit: &mut quit::Quit, stores: &mut TrialStores<'_>) {
+    match quit.settle_held_release() {
+        quit::HeldRelease::Nothing => {}
+        quit::HeldRelease::Perform(writers) => {
+            stores.session.resume_launch_backup();
+            for writer in writers {
+                release_trial_writer(writer, stores);
+            }
+        }
+        quit::HeldRelease::Proceed {
+            rest,
+            session_pending,
+        } => {
+            if session_pending {
+                stores.session.arm_sentinel();
+                stores.session.pause_launch_backup();
+            }
+            for writer in rest {
+                release_trial_writer(writer, stores);
+            }
+        }
+        quit::HeldRelease::Consumed => stores.session.forgo_launch_backup(),
+    }
+}
+
+/// **A stop that cannot ask disposes of a quit's held trial release** (T-QUIT-DOCUMENTS
+/// round 4; [`quit::Quit::release_on_a_stop`]): with the session's half held, this run's
+/// sentinel is armed and the launch backup held back — the way out's close writes the
+/// session as it does on every stop, and `session.lock` says whether it landed. The
+/// document writers are moot (the stores' step kept their changes in `recovered`); the
+/// rest is window-thread work the process is not staying for.
+fn dispose_of_a_held_release_on_a_stop(
+    quit: Option<&mut quit::Quit>,
+    session: &mut persist::SessionStore,
+) {
+    if quit.is_some_and(quit::Quit::release_on_a_stop) {
+        session.arm_sentinel();
+        session.pause_launch_backup();
+    }
+}
+
 /// **The cancelled quit's card, raised on `toasts`** (T-QUIT-DOCUMENTS; design note
 /// 2026-10-11, revision (d)2): an Error card anchored to the window, its statement the
 /// files that could not be saved — at most three named, then how many more — and its
@@ -54453,6 +54500,24 @@ impl App {
         ])
     }
 
+    /// **Dispose of an update trial's held release as the quit's step says**
+    /// ([`settle_the_held_release`]), if a quit is under way.
+    fn settle_the_held_release(&mut self) {
+        let Some(quit) = self.quit.as_mut() else {
+            return;
+        };
+        settle_the_held_release(
+            quit,
+            &mut TrialStores {
+                session: &mut self.session_store,
+                settings: &mut self.settings_store,
+                keybindings: &mut self.keybindings_store,
+                profiles: &mut self.profiles_store,
+                pins: &mut self.pins_store,
+            },
+        );
+    }
+
     /// **One turn of the quit's documents phase** over the four stores
     /// ([`quit::Quit::documents_turn`]); `None` without a quit.
     fn quit_documents_turn(&mut self, now: Instant) -> Option<quit::QuitStep> {
@@ -66672,16 +66737,11 @@ impl FolioApp {
                     // photographs in the turn it began, and an update's quit then goes on turning
                     // while it waits for its receipt.
                     launch_wire::set_admitting(false);
-                    // **A trial release held through the two phases is settled now**
-                    // (T-QUIT-DOCUMENTS round 3): its session half is moot — this quit's own
-                    // final session write is the document of record, with no launch backup
-                    // ahead of it — and the rest of it is released.
-                    if let Some(app) = self.app.as_mut()
-                        && let Some(quit::HeldRelease::Proceed(rest)) =
-                            app.quit.as_mut().map(quit::Quit::settle_held_release)
-                    {
-                        app.session_store.forgo_launch_backup();
-                        app.release_trial_writes(rest);
+                    // **A trial release held through the two phases, settled for the write**
+                    // (T-QUIT-DOCUMENTS rounds 3–4): the rest of it released, the session's
+                    // half pending through the write's verdict (`Quit::settle_held_release`).
+                    if let Some(app) = self.app.as_mut() {
+                        app.settle_the_held_release();
                     }
                     self.for_each_window(|runtime| runtime.photograph_for_quit())?;
                     self.report_to_quit(quit::Quit::photographed);
@@ -66760,6 +66820,11 @@ impl FolioApp {
                     self.report_to_quit(|quit| quit.written(verdict));
                 }
                 quit::QuitStep::Retire => {
+                    // **The write left: a session release still pending is consumed**
+                    // (T-QUIT-DOCUMENTS round 4).
+                    if let Some(app) = self.app.as_mut() {
+                        app.settle_the_held_release();
+                    }
                     // **Not `for_each_window`**, and this is the one place in the
                     // loop where that matters: it stops at the first failure, and
                     // here every window has to be told whatever the one before it
@@ -66859,13 +66924,11 @@ impl FolioApp {
                     let mut cancelled = None;
                     if let Some(app) = self.app.as_mut() {
                         cancelled = app.quit.as_mut().and_then(quit::Quit::take_cancelled);
-                        // **A trial release held through the phases runs now** (round 3): the
-                        // window stays, so the backup and the session go as they would have.
-                        let held = app.quit.as_mut().map(quit::Quit::settle_held_release);
+                        // **A trial release still held runs now** (rounds 3–4): cancelled in the
+                        // phases or its final write refused, the window stays, so the backup and
+                        // the session go as they would have.
+                        app.settle_the_held_release();
                         app.quit = None;
-                        if let Some(quit::HeldRelease::Perform(writers)) = held {
-                            app.release_trial_writes(writers);
-                        }
                     }
                     if let Some(cancelled) = cancelled {
                         self.say_the_cancelled_quit(cancelled)?;
@@ -67327,6 +67390,8 @@ impl FolioApp {
                     &mut SystemBox,
                 )
             });
+            // **And a trial release a quit held, disposed of** (T-QUIT-DOCUMENTS round 4).
+            dispose_of_a_held_release_on_a_stop(app.quit.as_mut(), &mut app.session_store);
         }
         self.for_each_window(|runtime| runtime.close_window(true))
     }

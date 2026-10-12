@@ -375,3 +375,47 @@ fn a_landed_recovery_copy_raises_no_native_message() {
     assert!(heard.0.is_empty(), "no box: {:?}", heard.0);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// RED (T-QUIT-DOCUMENTS round 4, item 3) — **a forced stop during the documents phase
+/// disposes of the held trial release.** `take_released` is one-shot: once a quit holds the
+/// release, the stop is its only owner. The document writers are moot (the stores' step kept
+/// their changes in `recovered`), the toast identity is window-thread work the process is not
+/// staying for, and the session's half arms this run's sentinel, so the next start is told
+/// truthfully whether the stop's session write landed. Nothing stays held.
+///
+/// MUTATION: finish without disposing (`dispose_of_a_held_release_on_a_stop` does nothing) —
+/// no sentinel is armed.
+#[test]
+fn a_forced_stop_during_the_documents_phase_disposes_of_the_held_release() {
+    use crate::update_trial::Writer;
+    let root = bt_testpath::temp_path("bt-app-forced-stop-held-release");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a private storage folder for this test");
+    let mut session =
+        persist::SessionStore::at(root.join("session.json"), root.join("session.lock"));
+    let mut quit = quit::Quit::begin(Vec::new());
+    assert_eq!(
+        quit.documents(
+            &[(persist::SETTINGS_FILE_NAME, quit::Standing::Waiting)],
+            Instant::now()
+        ),
+        quit::QuitStep::Documents
+    );
+    assert!(
+        quit.trial_release(vec![
+            Writer::Session,
+            Writer::Settings,
+            Writer::ToastIdentity
+        ])
+        .is_empty(),
+        "held while the phase holds the worker"
+    );
+    assert!(!session.sentinel_is_armed());
+    dispose_of_a_held_release_on_a_stop(Some(&mut quit), &mut session);
+    assert!(
+        session.sentinel_is_armed(),
+        "the session's half arms the sentinel"
+    );
+    assert!(!quit.release_on_a_stop(), "and nothing is held any more");
+    let _ = std::fs::remove_dir_all(&root);
+}

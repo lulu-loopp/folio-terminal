@@ -1376,6 +1376,10 @@ pub struct SessionStore {
     /// **The sentinel went because the system was ending the session** (B-ENDSESSION), so a
     /// shutdown taken back puts it back — [`Self::rearm_after_the_systems_end`].
     sentinel_dropped_for_the_systems_end: bool,
+    /// **The launch backup waits** (T-QUIT-DOCUMENTS round 4): a quit that goes on with an
+    /// update trial's session release still pending holds it back from its final write
+    /// until the write's verdict says whether the release is performed or consumed.
+    launch_backup_paused: bool,
     /// **Whether this process writes the session at all** (review row R4-5).
     ///
     /// False in the second Folio over one data directory: its window works, its
@@ -1495,6 +1499,7 @@ impl SessionStore {
             launch_backup,
             armed,
             sentinel_dropped_for_the_systems_end: false,
+            launch_backup_paused: false,
             writer_of_record,
             fault,
         };
@@ -1547,6 +1552,7 @@ impl SessionStore {
             launch_backup: None,
             armed: false,
             sentinel_dropped_for_the_systems_end: false,
+            launch_backup_paused: false,
             writer_of_record,
             fault: None,
         }
@@ -1594,6 +1600,7 @@ impl SessionStore {
             launch_backup,
             armed: false,
             sentinel_dropped_for_the_systems_end: false,
+            launch_backup_paused: false,
             writer_of_record,
             fault: None,
         };
@@ -1682,17 +1689,45 @@ impl SessionStore {
         if !self.writer_of_record {
             return;
         }
-        if !self.armed {
-            self.armed = create_sentinel(&self.sentinel_path).is_ok();
-        }
+        self.arm_sentinel();
         self.queue_launch_backup();
         self.hand_over(Instant::now());
+    }
+
+    /// **Arm this run's sentinel, if it is not armed** — what [`Self::release_trial`] does
+    /// first, on its own (T-QUIT-DOCUMENTS round 4): a quit or a stop that disposes of an
+    /// update trial's held session release without performing it still owes the next start
+    /// a truthful `session.lock`, so a final write that does not land is said there.
+    pub(crate) fn arm_sentinel(&mut self) {
+        if self.writer_of_record && !self.armed {
+            self.armed = create_sentinel(&self.sentinel_path).is_ok();
+        }
+    }
+
+    /// **Hold the launch backup back from the writes that follow** until
+    /// [`Self::resume_launch_backup`] or [`Self::forgo_launch_backup`] (round 4).
+    pub(crate) fn pause_launch_backup(&mut self) {
+        self.launch_backup_paused = true;
+    }
+
+    /// Let the launch backup go ahead of the next session write again (round 4).
+    pub(crate) fn resume_launch_backup(&mut self) {
+        self.launch_backup_paused = false;
+    }
+
+    /// Whether this run's sentinel is armed — for a test.
+    #[cfg(test)]
+    pub(crate) fn sentinel_is_armed(&self) -> bool {
+        self.armed && self.sentinel_path.is_file()
     }
 
     /// Put the launch backup on the session writer exactly once. FIFO ordering
     /// makes it land before this run's first session write without a wait on the
     /// window thread.
     fn queue_launch_backup(&mut self) {
+        if self.launch_backup_paused {
+            return;
+        }
         let Some(request) = self.launch_backup.take() else {
             return;
         };
@@ -1913,6 +1948,7 @@ impl SessionStore {
     /// to its way out with an update trial's write release still held makes its own final
     /// session write the session document of record, and nothing goes ahead of it. Said once.
     pub(crate) fn forgo_launch_backup(&mut self) {
+        self.launch_backup_paused = false;
         if self.launch_backup.take().is_some() {
             crate::diagnostics::note(&format!(
                 "BT_PERSIST {PREVIOUS_SESSION_FILE_NAME} backup skipped: the quit's own session \

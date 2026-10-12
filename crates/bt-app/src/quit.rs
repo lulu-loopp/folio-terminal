@@ -232,12 +232,17 @@ struct Receipt {
 pub(crate) enum HeldRelease {
     /// Nothing is held, or the phases still run.
     Nothing,
-    /// The quit was cancelled: perform these, as `App::release_trial_writes` does.
+    /// The quit was abandoned: perform these, as `App::release_trial_writes` does.
     Perform(Vec<crate::update_trial::Writer>),
-    /// The quit goes on to its way out: the session's release is moot and the launch
-    /// backup is skipped (`persist::SessionStore::forgo_launch_backup`); these, the rest,
-    /// are released.
-    Proceed(Vec<crate::update_trial::Writer>),
+    /// The quit goes on to its write: release `rest` now; with the session's release
+    /// pending, arm the sentinel and hold the launch backup back until the verdict.
+    Proceed {
+        rest: Vec<crate::update_trial::Writer>,
+        session_pending: bool,
+    },
+    /// The write left: the pending session release is consumed and the launch backup
+    /// skipped (`persist::SessionStore::forgo_launch_backup`).
+    Consumed,
 }
 
 /// **Why a document the documents phase sent had no answer by
@@ -1043,28 +1048,68 @@ impl Quit {
         writers
     }
 
-    /// **What becomes of a held release, once the quit's outcome is known** (round 3):
-    /// cancelled — the window stays, and the release is performed as it would have been;
-    /// past the two phases toward the way out — its session half is moot, because the
-    /// quit's own final session write is the session document of record and the launch
-    /// backup is skipped for this run, and the rest of it (a document a commit in the
-    /// recovery phase made owed, the toast identity, …) is released then, behind the
-    /// copies and before the session write. Nothing while the phases run, or with
-    /// nothing held.
+    /// **What becomes of a held release at this step** (T-QUIT-DOCUMENTS rounds 3–4).
+    ///
+    /// **The one rule: the held release is a value with an owner at every moment of the
+    /// quit, and every exit from the quit disposes of it explicitly.** While the two phases
+    /// hold the storage worker, the quit holds it ([`Self::trial_release`]), and this says
+    /// nothing. Then, by the quit's step:
+    /// - **abandoned** (cancelled in the phases, or the final write refused): everything
+    ///   still held is performed, as it would have been — the window stays;
+    /// - **past the phases, before the write** (`Photograph`): every writer but the session's
+    ///   is released now, behind the landed copies; the session's stays **pending** through
+    ///   the write's verdict, this run's sentinel is armed and its launch backup held back
+    ///   (`Proceed`);
+    /// - **after a write that leaves** (`Landed` or `TimedOut`): the pending session release
+    ///   is consumed — the quit's own final write is the session document of record, and the
+    ///   launch backup is skipped for the run (`Consumed`).
+    ///
+    /// A stop that cannot ask disposes of it through [`Self::release_on_a_stop`].
     pub(crate) fn settle_held_release(&mut self) -> HeldRelease {
+        use crate::update_trial::Writer;
         if self.held_release.is_empty() || self.holds_the_storage_worker() {
             return HeldRelease::Nothing;
         }
-        let held = std::mem::take(&mut self.held_release);
-        if self.phase == Phase::Abandoned {
-            HeldRelease::Perform(held)
-        } else {
-            HeldRelease::Proceed(
-                held.into_iter()
-                    .filter(|writer| *writer != crate::update_trial::Writer::Session)
-                    .collect(),
-            )
+        match self.phase {
+            Phase::Abandoned => HeldRelease::Perform(std::mem::take(&mut self.held_release)),
+            Phase::Photographing => {
+                let session_pending = self.held_release.contains(&Writer::Session);
+                let rest = std::mem::take(&mut self.held_release)
+                    .into_iter()
+                    .filter(|writer| *writer != Writer::Session)
+                    .collect();
+                if session_pending {
+                    self.held_release.push(Writer::Session);
+                }
+                HeldRelease::Proceed {
+                    rest,
+                    session_pending,
+                }
+            }
+            Phase::Retiring | Phase::Waiting { .. } | Phase::Leaving { .. } => {
+                self.held_release.clear();
+                HeldRelease::Consumed
+            }
+            Phase::Asking
+            | Phase::Saving
+            | Phase::Discarding
+            | Phase::Documents
+            | Phase::Recovery
+            | Phase::Writing { .. } => HeldRelease::Nothing,
         }
+    }
+
+    /// **A stop that cannot ask disposes of the held release** (round 4): the document
+    /// writers are moot — their owed changes are kept in `recovered` by the stores' own step
+    /// of the stop — and every other writer but the session's is window-thread work the
+    /// process is no longer there for; the session's half, if held, owes the next start a
+    /// truthful sentinel. Answers whether it was held; nothing is held afterwards.
+    pub(crate) fn release_on_a_stop(&mut self) -> bool {
+        let session = self
+            .held_release
+            .contains(&crate::update_trial::Writer::Session);
+        self.held_release.clear();
+        session
     }
 
     /// **The cancellation this quit ended in**, taken once, for its card and its

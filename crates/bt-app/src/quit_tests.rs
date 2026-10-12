@@ -1038,7 +1038,9 @@ fn first_text_during_the_documents_phase_writes_the_trial_receipt_ahead_of_the_c
 }
 
 /// The five stores a trial's release writes through, over one scripted lane, in a
-/// private folder; the session owes the launch backup a trial holds and a document.
+/// private folder; the session owes the launch backup a trial holds and a document, and
+/// `pins.json` owes a change whose write the disk refused before the quit — a store the
+/// quit's documents phase is not asked about here, so only the release can send it.
 struct TrialRun {
     root: PathBuf,
     session: SessionStore,
@@ -1062,7 +1064,7 @@ fn a_trial_run(case: &str) -> TrialRun {
         crate::test_support::shells_document(&root, 1),
         Instant::now(),
     );
-    TrialRun {
+    let mut run = TrialRun {
         settings: SettingsStore::at_on(root.join(persist::SETTINGS_FILE_NAME), lane.clone()),
         keybindings: KeybindingsStore::at_on(
             root.join(persist::KEYBINDINGS_FILE_NAME),
@@ -1076,50 +1078,101 @@ fn a_trial_run(case: &str) -> TrialRun {
         session,
         root,
         disk: Disk::new(jobs),
-    }
+    };
+    assert!(run.pins.toggle(PinKind::Folder, "试用/固定 trial pin"));
+    run.disk.answer_write(refused);
+    let _ = run.pins.take_answers();
+    run.disk.seen.clear();
+    run
 }
 
 impl TrialRun {
-    /// `TrialWritesReleased` handled as `FolioApp` handles it: the quit says what is released
-    /// now ([`Quit::trial_release`]), and each writer runs through the product's own arm
-    /// (`release_trial_writer`).
-    fn released(&mut self, quit: &mut Quit, writers: Vec<crate::update_trial::Writer>) {
-        self.release(quit.trial_release(writers));
-    }
-
-    fn release(&mut self, writers: Vec<crate::update_trial::Writer>) {
-        let mut stores = crate::TrialStores {
+    fn stores(&mut self) -> crate::TrialStores<'_> {
+        crate::TrialStores {
             session: &mut self.session,
             settings: &mut self.settings,
             keybindings: &mut self.keybindings,
             profiles: &mut self.profiles,
             pins: &mut self.pins,
-        };
-        for writer in writers {
+        }
+    }
+
+    /// `TrialWritesReleased` handled as `FolioApp` handles it: the quit says what is released
+    /// now ([`Quit::trial_release`]), and each writer runs through the product's own arm.
+    fn released(&mut self, quit: &mut Quit, writers: Vec<crate::update_trial::Writer>) {
+        let now = quit.trial_release(writers);
+        let mut stores = self.stores();
+        for writer in now {
             crate::release_trial_writer(writer, &mut stores);
         }
         self.disk.look();
     }
 
-    /// How the session's two jobs stand on the lane so far.
-    fn session_jobs(&self) -> (usize, usize) {
-        let backups = self
-            .disk
-            .seen
-            .iter()
-            .filter(|seen| **seen == Seen::Backup)
-            .count();
-        (backups, self.disk.sessions())
+    /// The quit's step settles the held release, as `settle_quit` settles it.
+    fn settle(&mut self, quit: &mut Quit) {
+        let mut stores = self.stores();
+        crate::settle_the_held_release(quit, &mut stores);
+        self.disk.look();
+    }
+
+    /// The backups, the session documents and the pin writes on the lane so far.
+    fn jobs(&self) -> (usize, usize, usize) {
+        let count = |wanted: &Seen| self.disk.seen.iter().filter(|seen| *seen == wanted).count();
+        (
+            count(&Seen::Backup),
+            self.disk.sessions(),
+            count(&Seen::Write(crate::pins::PINS_FILE_NAME.to_owned())),
+        )
+    }
+
+    /// A quit whose documents phase has ended with `settings.json`'s copy on the worker, and
+    /// the trial's release — the session's and the pins' — arriving meanwhile.
+    fn quit_holding_a_release(&mut self, start: Instant) -> Quit {
+        use crate::update_trial::Writer;
+        let folder = self.root.join(preview::RECOVERED_FOLDER);
+        assert!(self.settings.store(settings("试用 Trial Mono")));
+        let mut quit = Quit::begin(Vec::new());
+        {
+            let mut documents: [&mut dyn QuitDocument; 1] = [&mut self.settings];
+            to_a_copy_on_the_worker(
+                &mut quit,
+                &mut documents,
+                &mut self.disk,
+                &folder,
+                start,
+                start,
+            );
+        }
+        self.released(&mut quit, vec![Writer::Session, Writer::Pins]);
+        assert_eq!(
+            self.jobs(),
+            (0, 0, 0),
+            "nothing while the phases hold the worker: {:?}",
+            self.disk.seen
+        );
+        quit
+    }
+
+    /// The copy answered, and the recovery phase decided at `now`.
+    fn copy_answered(
+        &mut self,
+        quit: &mut Quit,
+        kept: Result<PathBuf, String>,
+        now: Instant,
+    ) -> QuitStep {
+        let folder = self.root.join(preview::RECOVERED_FOLDER);
+        self.disk.answer_copy(kept);
+        let mut documents: [&mut dyn QuitDocument; 1] = [&mut self.settings];
+        quit.recovery_turn(&mut documents, &folder, SystemTime::UNIX_EPOCH, now)
     }
 }
 
-/// RED (T-QUIT-DOCUMENTS round 3, the re-check's regression) — **a trial committed during
-/// the documents phase does not queue its release until the quit ends.** The receipt went
-/// ahead; the commit it leads to wakes the window thread with `TrialWritesReleased`, and the
-/// release — the launch backup and the session's hand-over — is held while the two phases
-/// hold the storage worker. (a) The quit is cancelled: the release runs then, the backup and
-/// the session queued as they would have been. (b) The quit goes on: the session's release
-/// is moot, the launch backup skipped, and only the quit's own final session write is queued.
+/// RED (T-QUIT-DOCUMENTS rounds 3–4) — **a trial committed during the documents phase does
+/// not queue its release until the quit ends**, for the session's writer and for a document
+/// writer alike. (a) The quit is cancelled: the release runs then — the backup, the session,
+/// the pin. (b) The quit goes on: the pin is released before the photograph, behind the landed
+/// copy; the session's release stays pending through the write and is consumed when it
+/// lands, the launch backup skipped — only the quit's own final session write is queued.
 ///
 /// MUTATIONS: run the release immediately (`Quit::trial_release` answers the writers whatever
 /// the phase) — a backup appears among the copies; never perform the held release on cancel
@@ -1127,98 +1180,125 @@ impl TrialRun {
 /// never queues it.
 #[test]
 fn a_trial_committed_during_the_documents_phase_does_not_queue_its_release_until_the_quit_ends() {
-    use crate::update_trial::Writer;
     let start = Instant::now();
 
     // (a) Cancelled.
     let mut run = a_trial_run("trial-release-cancelled");
-    let folder = run.root.join(preview::RECOVERED_FOLDER);
-    assert!(run.settings.store(settings("试用 Trial Mono")));
-    let mut quit = Quit::begin(Vec::new());
-    {
-        let mut documents: [&mut dyn QuitDocument; 1] = [&mut run.settings];
-        to_a_copy_on_the_worker(
-            &mut quit,
-            &mut documents,
-            &mut run.disk,
-            &folder,
-            start,
-            start,
-        );
-    }
-    run.released(&mut quit, vec![Writer::Session]);
+    let mut quit = run.quit_holding_a_release(start);
     assert_eq!(
-        run.session_jobs(),
-        (0, 0),
-        "nothing while the phases hold the worker: {:?}",
-        run.disk.seen
+        run.copy_answered(&mut quit, Err("拒绝 refused".to_owned()), start),
+        QuitStep::Abandon
     );
-    run.disk.answer_copy(Err("拒绝 refused".to_owned()));
-    {
-        let mut documents: [&mut dyn QuitDocument; 1] = [&mut run.settings];
-        assert_eq!(
-            quit.recovery_turn(&mut documents, &folder, SystemTime::UNIX_EPOCH, start),
-            QuitStep::Abandon
-        );
-    }
-    match quit.settle_held_release() {
-        HeldRelease::Perform(writers) => run.release(writers),
-        other => panic!("the cancelled quit performs the held release: {other:?}"),
-    }
+    run.settle(&mut quit);
     assert_eq!(
-        run.session_jobs(),
-        (1, 1),
-        "the backup and the session, as they would have gone"
+        run.jobs(),
+        (1, 1, 1),
+        "backup, session and pin, as they would have gone"
     );
     let _ = std::fs::remove_dir_all(&run.root);
 
     // (b) Proceeding.
     let mut run = a_trial_run("trial-release-proceeds");
+    let mut quit = run.quit_holding_a_release(start);
     let folder = run.root.join(preview::RECOVERED_FOLDER);
-    assert!(run.settings.store(settings("继续 Proceeds Mono")));
-    let mut quit = Quit::begin(Vec::new());
-    {
-        let mut documents: [&mut dyn QuitDocument; 1] = [&mut run.settings];
-        to_a_copy_on_the_worker(
-            &mut quit,
-            &mut documents,
-            &mut run.disk,
-            &folder,
-            start,
-            start,
-        );
-    }
-    run.released(&mut quit, vec![Writer::Session]);
     assert_eq!(
-        run.session_jobs(),
-        (0, 0),
-        "nothing while the phases hold the worker"
+        run.copy_answered(
+            &mut quit,
+            Ok(folder.join("1970-01-01T000000Z settings.json")),
+            start
+        ),
+        QuitStep::Photograph
     );
-    run.disk
-        .answer_copy(Ok(folder.join("1970-01-01T000000Z settings.json")));
-    {
-        let mut documents: [&mut dyn QuitDocument; 1] = [&mut run.settings];
-        assert_eq!(
-            quit.recovery_turn(&mut documents, &folder, SystemTime::UNIX_EPOCH, start),
-            QuitStep::Photograph
-        );
-    }
-    match quit.settle_held_release() {
-        HeldRelease::Proceed(rest) => {
-            assert!(rest.is_empty(), "the session's release is moot: {rest:?}");
-            run.session.forgo_launch_backup();
-        }
-        other => panic!("a quit that goes on settles the held release as moot: {other:?}"),
-    }
+    run.settle(&mut quit);
+    assert_eq!(
+        run.jobs(),
+        (0, 0, 1),
+        "the pin goes now, behind the copy: {:?}",
+        run.disk.seen
+    );
     assert_eq!(quit.photographed(), QuitStep::Write);
     run.session
         .hand_over_final(start)
         .expect("the quit's final session write");
-    run.disk.look();
+    assert_eq!(quit.written(WriteVerdict::Landed), QuitStep::Retire);
+    run.settle(&mut quit);
     assert_eq!(
-        run.session_jobs(),
-        (0, 1),
+        run.jobs(),
+        (0, 1, 1),
         "only the quit's own final session write: {:?}",
+        run.disk.seen
+    );
+    let _ = std::fs::remove_dir_all(&run.root);
+}
+
+/// RED (T-QUIT-DOCUMENTS round 4, item 1) — **a quit that goes on past a held session release
+/// leaves `session.lock` when its final write times out.** A trial-deferred store starts
+/// unarmed, and `release_trial` arms the sentinel before anything else; the held release's
+/// proceed-side disposition does that arming, without the backup or an extra write, so a
+/// write that does not land is said to the next start.
+///
+/// MUTATION: skip arming (in `settle_the_held_release`, leave the sentinel for a pending
+/// session release) — no `session.lock` after the timed-out write.
+#[test]
+fn a_proceeding_quit_after_a_held_release_leaves_session_lock_when_the_write_times_out() {
+    let start = Instant::now();
+    let mut run = a_trial_run("trial-release-timeout");
+    let mut quit = run.quit_holding_a_release(start);
+    let folder = run.root.join(preview::RECOVERED_FOLDER);
+    let spent = start + persist::SESSION_SAVE_BUDGET;
+    assert_eq!(
+        run.copy_answered(
+            &mut quit,
+            Ok(folder.join("1970-01-01T000000Z settings.json")),
+            spent
+        ),
+        QuitStep::Photograph
+    );
+    run.settle(&mut quit);
+    assert_eq!(quit.photographed(), QuitStep::Write);
+    let verdict = run
+        .session
+        .flush_for_quit(quit.session_write_until(spent), spent);
+    assert!(verdict.is_err_and(|refusal| refusal.quit_may_proceed()));
+    assert_eq!(quit.written(WriteVerdict::TimedOut), QuitStep::Retire);
+    run.settle(&mut quit);
+    run.session.close();
+    assert!(
+        run.root.join("session.lock").is_file(),
+        "the next start is told this run did not see its session land"
+    );
+    let _ = std::fs::remove_dir_all(&run.root);
+}
+
+/// RED (T-QUIT-DOCUMENTS round 4, item 2) — **a refused final write after a held release
+/// still performs the release.** The session's half stays pending through the write's
+/// verdict; the write is refused, the quit is abandoned and the window stays, so the
+/// backup and the session hand-over go as a cancellation's do.
+///
+/// MUTATION: consume at the photograph (in `Quit::settle_held_release`, drop the session's
+/// writer when the quit proceeds to its write) — the abandoned quit performs nothing.
+#[test]
+fn a_refused_final_write_after_a_held_release_still_performs_it() {
+    let start = Instant::now();
+    let mut run = a_trial_run("trial-release-refused");
+    let mut quit = run.quit_holding_a_release(start);
+    let folder = run.root.join(preview::RECOVERED_FOLDER);
+    assert_eq!(
+        run.copy_answered(
+            &mut quit,
+            Ok(folder.join("1970-01-01T000000Z settings.json")),
+            start
+        ),
+        QuitStep::Photograph
+    );
+    run.settle(&mut quit);
+    assert_eq!(quit.photographed(), QuitStep::Write);
+    assert_eq!(quit.written(WriteVerdict::Refused), QuitStep::Abandon);
+    run.settle(&mut quit);
+    assert_eq!(
+        run.jobs(),
+        (1, 1, 1),
+        "the backup and the session go as a cancellation's do: {:?}",
         run.disk.seen
     );
     let _ = std::fs::remove_dir_all(&run.root);
