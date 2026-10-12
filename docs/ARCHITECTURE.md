@@ -787,9 +787,10 @@ Fifty-three production thread-spawn sites exist across three crates (`bt-app` 35
 All but `bt-pty`'s four go through the thread door (0.4.6, A1c). T-PROBE-CHILD
 adds the probe-output reader site.
 **The thread count is not the defect; the absence of a contract
-is.** `MathWorker::spawn` starts path verification and image scaling as well as
-math and returns all three through one `MathWorkerResult` — a historical hosting
-decision wearing a subsystem's name. `Runtime::apply_psreadline` performs an
+is.** The computation lane hosts path verification and image scaling as well as
+math and returns all three as one `MathWorkerResult` — a historical hosting
+decision wearing a subsystem's name; since S-8 each is a share with its own ledger,
+bound and death (`computation_lane`). `Runtime::apply_psreadline` performs an
 installation synchronously while `profile_runtime::begin_enable` spawns a
 worker for the same kind of work.
 
@@ -818,6 +819,8 @@ time through `bt_compose::pump`.
 
 The seams that already implement this shape: `bt-app::main::run_path_verify_worker`
 (*one question, one call, one answer, and nothing else runs here*),
+`bt-app::computation_lane` (formulas, decodes, glances, resamples and printed paths, on the
+completion seam since S-8: three FIFO shares, each with its own ledger, bound and death),
 `bt-app::handoff_lane` (the OS hand-off lane, on the completion seam since S-5:
 a ledger-minted request id, the asking window's `Pending` holding the request as
 the target incarnation, press order, 32 waiting behind the one running with no
@@ -1171,8 +1174,8 @@ declared bound — a bounded queue refuses the rest with a terminal answer, a
 latest-value lane runs at most its declared rounds and answers the newest
 request; **(2)** every request carries an identity its answer carries back;
 **(3)** execution order and delivery order follow the declared policy, stated
-separately (`Fifo`, `LatestValue` where "latest" means newest requested and
-older-than-adopted is dropped, or `PerQuestion`); **(4)** an answer whose target
+separately (`Fifo`, or `LatestValue` where "latest" means newest requested and
+older-than-adopted is dropped); **(4)** an answer whose target
 incarnation has gone is raised in no other target, and an answer older than the
 one adopted is not raised; **(5)** every admitted request ends exactly once;
 **(6)** the answer is published before the wake, and an answer whose wake was
@@ -1187,9 +1190,9 @@ lane that fails a claim is not declared conformant**: the failure is a row of
 it, and the suite is red on an unexpected pass, a different failure, a skipped
 lane and a claim that exercised no request. The hand-off lane is the reference:
 since S-5 it passes every claim (D-70 and D-71 repaid), and since S-4 so do the font, taskbar and
-program-walk lanes (D-72, D-73 and D-85 repaid); the computation lane fails bounds, identity and death
-(D-74…D-76). Path verification, the ten probes (D-3) and the files, preview,
-index and git workers have no adapter yet. **The completion seam** (S-3,
+program-walk lanes (D-72, D-73 and D-85 repaid), and since S-8 the computation lane (D-74…D-76
+repaid): `EXPECTED_FAILURES` is empty. The ten probes (D-3) and the files, preview, index and git
+workers have no adapter yet. **The completion seam** (S-3,
 2026-10-11; the side-effects contract, revision (b)7) is `bt-app::lane`'s
 product half: a lane takes its worker from an `Executor` and keeps its requests
 in a `Ledger<Id, Owed>`, which mints each identity or refuses it at the door and
@@ -1212,10 +1215,17 @@ program-walk lanes are built on it too (S-4, 2026-10-12), each a latest-value la
 one waiting, a request asked while one waits `Joined` to it when it is the same operation (the
 font and taskbar questions always are; the program walk when it asks about the same table) and
 `Superseded { by }` the newer when it is not, every terminal taken by the application in mint
-order, a failure said once per streak and never retried on its own. The rows the new claims
-add for the computation lane name D-75 and D-76, and S-6a and S-7 move the storage worker and
-the clipboard onto the seam (`docs/ARCHITECTURE-GUARDS.md`, *Lane
-contract and the completion seam*).
+order, a failure said once per streak and never retried on its own. The computation lane is
+built on it (S-8, 2026-10-12) as three shares of `bt-app::computation_lane`, each a
+first-in-first-out `lane::Queue` with a ledger of its own — formulas, decodes and glances on
+`bt-math-worker` (bound 196), resamples on `bt-image-scale-worker` (68, a newer size for the same
+picture superseding the one waiting and the same size joining it), printed paths on
+`bt-path-verify-worker` (512) — each bound one pane's whole hand-out of that work as `bt-term`
+holds it, a refused pane task given back to its pane, every request owed to the tab or window
+that asked and a gone asker's request let go by the drain into the lane's ignoring sink, one
+thread's death ending its own share's requests `WorkerGone` while the other two live. S-6a and
+S-7 move the storage worker and the clipboard onto the seam (`docs/ARCHITECTURE-GUARDS.md`,
+*Lane contract and the completion seam*).
 **The return rule:** a lane whose
 answer is the latest value of one fact publishes into a slot the window reads
 (3) and wakes the loop through (1) or (2); a lane whose every request is owed
@@ -1511,9 +1521,9 @@ product code of `bt-app`, `bt-platform` or `bt-pty` catches a panic outside it
 | git questions | `GitWorker::request` | bt-git-worker | GitReady | a fault answer per question; a panic ends the process under the resident hook (a dead worker disables the lane, said once, only where no fatal hook is installed) | reads coalesce newest per target; a replaced read ends with no outcome | dropped for a closed tab | D-33 |
 | git mutations | `GitWorker::request` | bt-git-worker | GitReady | a fault answer; a panic ends the process under the resident hook | never coalesced; each its own answer | a closed tab drops the answer after the effect | D-92 |
 | palette file index | `IndexWorker::request` | bt-index-worker | FileIndexReady | a walk always answers; a panic ends the process under the resident hook (a dead worker's disconnection is discarded only where no fatal hook is installed) | an epoch per root; a reopen joins the walk out | dropped for a removed root | D-33 |
-| formula, decode and video glance | `dispatch_decoration_task` | bt-math-worker | MathReady | errors are values; a failed send disables the lane; a formula's render that panics is contained by `bt_math` and is that formula's error; any other panic ends the process under the resident hook | in order; no request identity | an answer for a stale or closed pane is ignored | D-74, D-75, D-76 |
-| image scale | `dispatch_decoration_task` | bt-image-scale-worker | MathReady | errors are values; a failed send disables the lane; a panic ends the process under the resident hook | newest per target; no request identity | an answer for a stale or closed pane is ignored | D-74, D-75, D-76 |
-| path verification | `dispatch_decoration_task` | bt-path-verify-worker | MathReady | errors are values; a failed send disables the lane; a panic ends the process under the resident hook | in order; no request identity | an answer for a stale or closed pane is ignored | D-74, D-75, D-76 |
+| formula, decode and video glance | `dispatch_decoration_task` | bt-math-worker | MathReady | on the completion seam (S-8): its own share of `computation_lane`, a `lane::Queue` with its own `lane::Ledger`, its worker started by `lane::Executor::start_worker` on the share's first request, each request's work in `lane::task` (the task and the worker's body inside `contained_panic::contain`, which the resident panic hook lets unwind); errors are values: a decode the decoder refuses and a formula the engine refuses are the answer, and a formula's render that panics is contained by `bt_math`'s own boundary and is that formula's error, never the task's `Failed`; any other panic in one request's work is its `Failed`, said once per streak by the share's ledger, and the worker goes on; a thread the door refuses to start refuses the request that would have started it, at the door with no id (`Refused::NotStarted`), said once per streak, and leaves the share unfaulted: the next new request starts the worker again (revision (b)5, rule 1); the end of a worker that ran leaves every request of its share still owed `WorkerGone`, announced by the wake, faults that share alone while the other two live, and the window thread turns the lane off once, with its notice; a request past the share's ledger's bound (196: one pane's whole hand-out of formula and decode work, `bt_term::DECORATION_TASKS_HELD`, an answer not yet taken holding its place) or after its worker's end is refused at the door, synchronously, and handed back: a pane's task to the head of its queue, handed out again by the next hand-out; a window surface's request recorded as not asked | an id per request, minted by the share's ledger; run and ended in the order minted; none coalesced: one question asked twice is two requests and two terminals | the drain lets go of a request whose asker (its tab, or its window) no open window holds, by its id, and its terminal reaches the lane's sink, which ignores it; the rest are taken in mint order below the share's drain mark (`ComputationLane::ended`, on the window thread) and each answer claimed by its asker's window | conforms |
+| image scale | `dispatch_decoration_task` | bt-image-scale-worker | MathReady | on the completion seam (S-8): its own share of `computation_lane`, a `lane::Queue` with its own `lane::Ledger`, its worker started by `lane::Executor::start_worker` on the share's first request, each request's work in `lane::task` (the task and the worker's body inside `contained_panic::contain`, which the resident panic hook lets unwind); errors are values; any other panic in one request's work is its `Failed`, said once per streak by the share's ledger, and the worker goes on; a thread the door refuses to start refuses the request that would have started it, at the door with no id (`Refused::NotStarted`), said once per streak, and leaves the share unfaulted: the next new request starts the worker again (revision (b)5, rule 1); the end of a worker that ran leaves every request of its share still owed `WorkerGone`, announced by the wake, faults that share alone while the other two live, and the window thread turns the lane off once, with its notice; a request past the share's ledger's bound (68: a resample for each picture one pane's hand-out can have decoded, `bt_term::DECODE_TASKS_HELD`, an answer not yet taken holding its place) or after its worker's end is refused at the door, synchronously, and handed back: a pane's task to the head of its queue, handed out again by the next hand-out; a window surface's request recorded as not asked | an id per request, minted by the share's ledger; run and ended in the order minted; a newer request for the same picture on the same pane and surface supersedes the one waiting (`Superseded { by }`, the newer size run) or joins it at the same size (`Joined { with }`, carrying its answer); a superseded or joined terminal settles its asker's bookkeeping and draws nothing | as the formula share's: a gone asker's request ends in the lane's sink, which ignores it; the rest taken in mint order below the share's drain mark | conforms |
+| path verification | `dispatch_decoration_task` | bt-path-verify-worker | MathReady | on the completion seam (S-8): its own share of `computation_lane`, a `lane::Queue` with its own `lane::Ledger`, its worker started by `lane::Executor::start_worker` on the share's first request, each request's work in `lane::task` (the task and the worker's body inside `contained_panic::contain`, which the resident panic hook lets unwind); errors are values (the disk's verdict); any other panic in one request's work is its `Failed`, said once per streak by the share's ledger, and the worker goes on; a thread the door refuses to start refuses the request that would have started it, at the door with no id (`Refused::NotStarted`), said once per streak, and leaves the share unfaulted: the next new request starts the worker again (revision (b)5, rule 1); the end of a worker that ran leaves every request of its share still owed `WorkerGone`, announced by the wake, faults that share alone while the other two live, and the window thread turns the lane off once, with its notice; a request past the share's ledger's bound (512: one pane's whole queue of printed paths, `bt_term::PATH_TASKS_HELD`, an answer not yet taken holding its place) or after its worker's end is refused at the door, synchronously, and handed back: a pane's task to the head of its queue, handed out again by the next hand-out; a window surface's request recorded as not asked | an id per request, minted by the share's ledger; run and ended in the order minted; none coalesced | as the formula share's: a gone asker's request ends in the lane's sink, which ignores it; the rest taken in mint order below the share's drain mark | conforms |
 | background picture decode | `Runtime::reload_background_picture` | background-picture | BackgroundPictureReady | a refused spawn is discarded; a decode error is a card; a panic ends the process under the resident hook | a generation per window; an older decode can overwrite a newer answer in the slot | the window's slot, orphaned when it closes | D-86, D-87, D-90 |
 | folder chooser | `bt_platform::FolderPicker::request` | window | polled | the dialog's error is one line; a cancel is silent | a second ask while one is open is refused synchronously | the window's subclass; never collected if the window closes | D-88 |
 | OS hand-off | `Runtime::hand_off` | bt-os-handoff | HandoffAnswered | on the completion seam (S-5): the worker started by `lane::Executor::start_worker`, each hand-off in `lane::task`; `Done` carries the door's own `Result`; a panic in one hand-off is that request's `Failed`, said once by the ledger, and the worker goes on, and the worker's end leaves every owed request `WorkerGone`, announced by the wake, and faults the lane, both inside `contained_panic::contain`, which the resident panic hook lets unwind; a press past the ledger's bound (33: one running, 32 waiting, an answer not yet taken holding its place) or after the worker's end is refused at the door, synchronously, and answered by the window at once | an id per request, minted by the ledger; none coalesced | a closed window's requests end in the lane's sink for the abandoned: a success let go, a refusal said once in `diagnostics.log` | conforms |

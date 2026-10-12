@@ -5,6 +5,10 @@
 use super::*;
 use crate::test_support::{pane_box_of, pane_rects_of, probe_leaf, scale_task, split_window};
 
+/// A formula worker that has ended turns the lane off once, and the pane goes on. The worker ends
+/// with a glance owed (its share's ledger ends it `WorkerGone`); the pane's next hand-out is
+/// refused at the share's door, its task given back to the pane, and the lane is turned off with
+/// one notice — the terminal itself keeps running.
 #[test]
 fn disconnected_math_dispatch_downgrades_once_and_leaves_the_real_session_usable() {
     let start = Instant::now();
@@ -15,24 +19,44 @@ fn disconnected_math_dispatch_downgrades_once_and_leaves_the_real_session_usable
         session.advance_live_stability(start + bt_term::LIVE_MATH_STABLE_INTERVAL),
         1
     );
-    let (tasks, receiver) = mpsc::channel();
-    drop(receiver);
-    let (scale_tasks, _scale_receiver) = mpsc::channel();
-    let (path_tasks, _path_receiver) = mpsc::channel();
+    let gate = Arc::new(lane::Gate::default());
+    let mut watched =
+        computation_lane::fixtures::watched(lane::Executor::scripted(Arc::clone(&gate)));
+    gate.kill();
+    let owed = watched
+        .lane
+        .decorate(MathWorkerRequest::PeekImage {
+            leaf: probe_leaf(),
+            path: PathBuf::from("不在这里/截图.png"),
+        })
+        .ok()
+        .expect("admitted");
+    assert!(matches!(
+        watched.terminal(
+            computation_lane::Share::Decoration,
+            owed,
+            computation_lane::fixtures::nobody
+        ),
+        lane::Terminal::WorkerGone
+    ));
+    let outstanding = session.outstanding_decoration_work();
     let mut running = true;
     let mut notice_pending = false;
 
     assert!(dispatch_pending_math_tasks(
         probe_leaf(),
         &mut session,
-        &tasks,
-        &scale_tasks,
-        &path_tasks,
+        &watched.lane,
         &mut running,
         &mut notice_pending,
     ));
     assert!(!running);
     assert!(notice_pending);
+    assert_eq!(
+        session.outstanding_decoration_work(),
+        outstanding,
+        "the refused formula is given back to the pane, not lost"
+    );
     session.feed(b"\r\nterminal-still-running").unwrap();
     assert!(
         session
@@ -51,9 +75,7 @@ fn disconnected_math_dispatch_downgrades_once_and_leaves_the_real_session_usable
     assert!(!dispatch_pending_math_tasks(
         probe_leaf(),
         &mut session,
-        &tasks,
-        &scale_tasks,
-        &path_tasks,
+        &watched.lane,
         &mut running,
         &mut notice_pending,
     ));
@@ -64,67 +86,56 @@ fn disconnected_math_dispatch_downgrades_once_and_leaves_the_real_session_usable
 }
 
 /// A scale worker may spend arbitrarily long inside Lanczos3; validation still reaches the
-/// independent decoration receiver instead of sitting behind that raster in one FIFO.
+/// independent decoration share instead of sitting behind that raster in one FIFO.
 #[test]
 fn local_path_validation_and_resampling_are_dispatched_to_independent_lanes() {
-    let (tasks, task_receiver) = mpsc::channel();
-    let (scale_tasks, scale_receiver) = mpsc::channel();
-    // The third lane, since audit 3 C-2: a path question is not the decoration queue's.
-    let (path_tasks, path_receiver) = mpsc::channel();
-    assert!(dispatch_decoration_task(
-        probe_leaf(),
-        SessionDecorationTask::ScaleInlineImage(scale_task("same-path", 128)),
-        &tasks,
-        &scale_tasks,
-        &path_tasks,
-    ));
-    assert!(dispatch_decoration_task(
-        probe_leaf(),
-        SessionDecorationTask::InlineImage(bt_term::InlineImageTask {
-            occurrence_id: 7,
-            source: bt_term::InlineImageSource::LocalPath(PathBuf::from("same-path.png")),
-        }),
-        &tasks,
-        &scale_tasks,
-        &path_tasks,
-    ));
-
-    assert!(matches!(
-        scale_receiver.try_recv(),
-        Ok(ScaleWorkerRequest::InlineImage { .. })
-    ));
-    assert!(matches!(
-        task_receiver.try_recv(),
-        Ok(MathWorkerRequest::InlineImage {
-            task: bt_term::InlineImageTask {
-                occurrence_id: 7,
-                ..
-            },
-            ..
-        })
-    ));
-
-    // **And a path question goes down a third lane** (audit 3 C-2). It rode the decoration queue
-    // until a printed name turned out to be able to name a mapped drive whose server is gone: a
-    // `GetFileAttributesW` inside the SMB redirector takes about twenty-one seconds to give up,
-    // and twenty-one seconds at the head of *this* queue is every formula and every picture in
-    // the window waiting behind one hostile line of output. Nobody waits on the path lane — an
-    // unanswered name is simply not a link yet — so it is the one that may be slow.
-    assert!(dispatch_decoration_task(
-        probe_leaf(),
-        SessionDecorationTask::VerifyPath(PathBuf::from(r"Z:\work\notes.md")),
-        &tasks,
-        &scale_tasks,
-        &path_tasks,
-    ));
-    assert!(matches!(
-        path_receiver.try_recv(),
-        Ok(PathWorkerRequest { .. })
-    ));
+    let gate = Arc::new(lane::Gate::default());
+    let watched = computation_lane::fixtures::watched(lane::Executor::scripted(Arc::clone(&gate)));
+    gate.hold();
+    let lane = &watched.lane;
     assert!(
-        task_receiver.try_recv().is_err(),
+        dispatch_decoration_task(
+            probe_leaf(),
+            SessionDecorationTask::ScaleInlineImage(scale_task("same-path", 128)),
+            lane,
+        )
+        .is_ok()
+    );
+    assert!(
+        dispatch_decoration_task(
+            probe_leaf(),
+            SessionDecorationTask::InlineImage(bt_term::InlineImageTask {
+                occurrence_id: 7,
+                source: bt_term::InlineImageSource::LocalPath(PathBuf::from("same-path.png")),
+            }),
+            lane,
+        )
+        .is_ok()
+    );
+    assert_eq!(lane.held(computation_lane::Share::Scale), 1);
+    assert_eq!(lane.held(computation_lane::Share::Decoration), 1);
+
+    // **And a path question goes down a third share** (audit 3 C-2). It rode the decoration
+    // queue until a printed name turned out to be able to name a mapped drive whose server is
+    // gone: a `GetFileAttributesW` inside the SMB redirector takes about twenty-one seconds to
+    // give up, and twenty-one seconds at the head of *this* queue is every formula and every
+    // picture in the window waiting behind one hostile line of output. Nobody waits on the path
+    // share — an unanswered name is simply not a link yet — so it is the one that may be slow.
+    assert!(
+        dispatch_decoration_task(
+            probe_leaf(),
+            SessionDecorationTask::VerifyPath(PathBuf::from(r"Z:\work\notes 笔记.md")),
+            lane,
+        )
+        .is_ok()
+    );
+    assert_eq!(lane.held(computation_lane::Share::Path), 1);
+    assert_eq!(
+        lane.held(computation_lane::Share::Decoration),
+        1,
         "a path question must not be able to stand in front of a formula"
     );
+    gate.release();
 }
 
 /// PIN — U8, R3. The counter-scale, stated as the three things it composes

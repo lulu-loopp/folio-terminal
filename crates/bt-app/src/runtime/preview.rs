@@ -1,6 +1,7 @@
 //! `preview` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::peek::PeekAsk;
 use crate::{
     ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD, AnimationEntry, AnimationWork, AppEvent, AttentionDelivery,
     BackgroundDecode, BlockScrollPaint, ClipboardPictureAnswer, ClipboardPictureJob,
@@ -8844,7 +8845,13 @@ impl Runtime<'_> {
                 if !needs_pixels {
                     return answer;
                 }
-                if self.request_peek_pixels(path) {
+                let asked = self.request_peek_pixels(path);
+                // The lane was full, or its thread not started: nothing is out, and the page's
+                // next resolve asks again.
+                if asked == PeekAsk::NotNow {
+                    return answer;
+                }
+                if asked == PeekAsk::Asked {
                     preview_trace::picture_read(preview_trace::global(), path);
                     self.window.peek_cache.insert(
                         bt_term::normalized_local_image_path_key(path),
@@ -8899,8 +8906,7 @@ impl Runtime<'_> {
             if self
                 .app
                 .math_worker
-                .scale_tasks
-                .send(ScaleWorkerRequest::MarkdownImage { leaf, task })
+                .scale(ScaleWorkerRequest::MarkdownImage { leaf, task })
                 .is_ok()
             {
                 self.window
@@ -10360,8 +10366,7 @@ impl Runtime<'_> {
             if self
                 .app
                 .math_worker
-                .tasks
-                .send(MathWorkerRequest::PeekAnimation {
+                .decorate(MathWorkerRequest::PeekAnimation {
                     leaf,
                     path: path.clone(),
                 })
@@ -10422,23 +10427,18 @@ impl Runtime<'_> {
             let sent = self
                 .app
                 .math_worker
-                .tasks
-                .send(MathWorkerRequest::AnimationFill {
+                .decorate(MathWorkerRequest::AnimationFill {
                     leaf,
                     path: path.to_owned(),
                     serial,
                     cursor,
                     want,
                 });
-            // **A request that could not be posted brings the cursor home.** The
-            // lane is gone, so no completion is coming, and an animation whose
-            // decoder went with the request would stand on its last frame for as
-            // long as this window is open.
-            if let Err(std::sync::mpsc::SendError(MathWorkerRequest::AnimationFill {
-                cursor,
-                ..
-            })) = sent
-            {
+            // **A request the lane refused at its door brings the cursor home.** No
+            // completion is coming for it, and an animation whose decoder went with
+            // the request would stand on its last frame for as long as this window
+            // is open; parked, the next frame that draws it asks again.
+            if let Err((_, MathWorkerRequest::AnimationFill { cursor, .. })) = sent {
                 animation.park_cursor(cursor, Vec::new());
             }
         }
@@ -10800,16 +10800,21 @@ impl Runtime<'_> {
                     if asked {
                         return None;
                     }
-                    if self.request_peek_pixels(&path) {
-                        self.window
-                            .peek_cache
-                            .insert(cache_key, PeekCacheEntry::Pending);
-                    } else {
-                        self.preview_pane_mut(surface).refuse_picture(Some(
-                            PictureRefusal::this_window_cannot(
-                                i18n::Text::PreviewFailedImageWorker.text(),
-                            ),
-                        ));
+                    match self.request_peek_pixels(&path) {
+                        PeekAsk::Asked => {
+                            self.window
+                                .peek_cache
+                                .insert(cache_key, PeekCacheEntry::Pending);
+                        }
+                        // Nothing is out, and the pane's next resolve asks again.
+                        PeekAsk::NotNow => {}
+                        PeekAsk::Refused => {
+                            self.preview_pane_mut(surface).refuse_picture(Some(
+                                PictureRefusal::this_window_cannot(
+                                    i18n::Text::PreviewFailedImageWorker.text(),
+                                ),
+                            ));
+                        }
                     }
                     return None;
                 }
@@ -10990,7 +10995,7 @@ impl Runtime<'_> {
             // on the glass while it travels; the store's own `Pending` is what
             // keeps it to one. This is [`answer_one_picture`]'s own arm, said for
             // a pane instead of for a page.
-            if self.request_peek_pixels(&path) {
+            if self.request_peek_pixels(&path) == PeekAsk::Asked {
                 self.window
                     .peek_cache
                     .insert(cache_key, PeekCacheEntry::Pending);
@@ -11015,21 +11020,19 @@ impl Runtime<'_> {
             ));
         }
         let task = peek_scale_task(&target, rgba, native_width, native_height);
-        if self
-            .app
-            .math_worker
-            .scale_tasks
-            .send(ScaleWorkerRequest::Preview {
-                leaf: self.focused_shell_address(),
-                task,
-            })
-            .is_ok()
-        {
-            self.preview_pane_mut(surface).ask_picture_scale(target);
-        } else {
-            self.preview_pane_mut(surface).refuse_picture(Some(
-                PictureRefusal::this_window_cannot(i18n::Text::PreviewFailedImageWorker.text()),
-            ));
+        match self.app.math_worker.scale(ScaleWorkerRequest::Preview {
+            leaf: self.focused_shell_address(),
+            task,
+        }) {
+            Ok(_) => self.preview_pane_mut(surface).ask_picture_scale(target),
+            // Full, or its thread not started: nothing is out, and the pane's next
+            // resolve asks again.
+            Err((crate::lane::Refused::Full { .. } | crate::lane::Refused::NotStarted(_), _)) => {}
+            Err(_) => {
+                self.preview_pane_mut(surface).refuse_picture(Some(
+                    PictureRefusal::this_window_cannot(i18n::Text::PreviewFailedImageWorker.text()),
+                ));
+            }
         }
         produced
     }

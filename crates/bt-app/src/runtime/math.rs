@@ -872,8 +872,7 @@ impl Runtime<'_> {
         if self
             .app
             .math_worker
-            .tasks
-            .send(MathWorkerRequest::PreviewMath {
+            .decorate(MathWorkerRequest::PreviewMath {
                 leaf,
                 key: Box::new(key.clone()),
             })

@@ -53,6 +53,7 @@ mod cli;
 mod clipboard_picture;
 mod cmdrail;
 mod coalesce;
+mod computation_lane;
 mod context_menu;
 mod diagnostics;
 mod dir_news;
@@ -1859,6 +1860,33 @@ struct PathWorkerRequest {
     path: PathBuf,
 }
 
+impl PathWorkerRequest {
+    /// **Who asked** — the tab whose pane printed the path, as its answer's
+    /// [`MathWorkerResult::owner`] says.
+    fn owner(&self) -> AnswerOwner {
+        AnswerOwner::Tab(self.leaf.leaf.tab)
+    }
+}
+
+impl MathWorkerRequest {
+    /// **Who asked**: the owner its answer will name ([`MathWorkerResult::owner`]) — a pane's
+    /// formula and decode are its tab's; every glance, animation, page and preview formula is the
+    /// window's.
+    fn owner(&self) -> AnswerOwner {
+        match self {
+            Self::Math { leaf, .. } | Self::InlineImage { leaf, .. } => {
+                AnswerOwner::Tab(leaf.leaf.tab)
+            }
+            Self::PeekImage { leaf, .. }
+            | Self::PeekVideoFrame { leaf, .. }
+            | Self::PeekAnimation { leaf, .. }
+            | Self::AnimationFill { leaf, .. }
+            | Self::PeekPage { leaf, .. }
+            | Self::PreviewMath { leaf, .. } => AnswerOwner::Window(leaf.window),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ScalePurpose {
     InlineImage(u64),
@@ -1918,6 +1946,25 @@ impl ScaleWorkerRequest {
         }
     }
 
+    /// **Who asked**: the owner its answer will name ([`MathWorkerResult::owner`]) — a pane's
+    /// picture and a preview's are their tab's; the glance and a markdown page's are the window's.
+    fn owner(&self) -> AnswerOwner {
+        match self {
+            Self::InlineImage { leaf, .. } | Self::Preview { leaf, .. } => {
+                AnswerOwner::Tab(leaf.leaf.tab)
+            }
+            Self::Peek { leaf, .. } | Self::MarkdownImage { leaf, .. } => {
+                AnswerOwner::Window(leaf.window)
+            }
+        }
+    }
+
+    /// The size it asks the picture to be drawn at.
+    fn size(&self) -> (u32, u32) {
+        let task = self.task();
+        (task.display_width_px, task.display_height_px)
+    }
+
     /// Coalescing is per leaf: two panes asking for the same picture at the same size are two
     /// answers owed, and letting one stand in for the other is how a pane ends up waiting forever
     /// for a raster that was delivered next door.
@@ -1953,61 +2000,6 @@ impl ScaleWorkerRequest {
                     scaled: bt_term::scale_inline_image(&task),
                 },
             ),
-        }
-    }
-}
-
-#[derive(Default)]
-struct PendingScaleRequests {
-    requests: std::collections::VecDeque<ScaleWorkerRequest>,
-}
-
-impl PendingScaleRequests {
-    fn push_latest(&mut self, request: ScaleWorkerRequest) {
-        if let Some(index) = self
-            .requests
-            .iter()
-            .position(|queued| queued.same_target(&request))
-        {
-            self.requests.remove(index);
-        }
-        self.requests.push_back(request);
-    }
-
-    fn pop_front(&mut self) -> Option<ScaleWorkerRequest> {
-        self.requests.pop_front()
-    }
-
-    fn contains_target(&self, request: &ScaleWorkerRequest) -> bool {
-        self.requests
-            .iter()
-            .any(|queued| queued.same_target(request))
-    }
-
-    fn drain_channel(&mut self, receiver: &mpsc::Receiver<ScaleWorkerRequest>) {
-        while let Ok(request) = receiver.try_recv() {
-            self.push_latest(request);
-        }
-    }
-}
-
-/// Run the CPU-heavy resample lane. Before each Lanczos3 pass, absorb every request already in the
-/// channel and discard a dequeued question if a newer size for the same content/purpose exists.
-/// A request that arrives after the pass begins is a new question and will be serviced next.
-fn run_scale_worker(
-    receiver: mpsc::Receiver<ScaleWorkerRequest>,
-    mut execute: impl FnMut(ScaleWorkerRequest),
-) {
-    let mut pending = PendingScaleRequests::default();
-    while let Ok(request) = receiver.recv() {
-        pending.push_latest(request);
-        pending.drain_channel(&receiver);
-        while let Some(request) = pending.pop_front() {
-            pending.drain_channel(&receiver);
-            if pending.contains_target(&request) {
-                continue;
-            }
-            execute(request);
         }
     }
 }
@@ -2283,233 +2275,161 @@ fn peek_pixels(
     )
 }
 
-struct MathWorker {
-    tasks: mpsc::Sender<MathWorkerRequest>,
-    scale_tasks: mpsc::Sender<ScaleWorkerRequest>,
-    /// The path-verification lane — see [`PathWorkerRequest`] for why it is not the queue above.
-    path_tasks: mpsc::Sender<PathWorkerRequest>,
-    results: mpsc::Receiver<MathWorkerResult>,
+/// **The resample share's door** (`computation_lane`, `bt-image-scale-worker`): one Lanczos3 pass
+/// per request. A newer size for the same picture on the same pane and surface replaces one still
+/// waiting at the lane's door (`ComputationLane::scale`), so a divider drag runs the size it ends
+/// at, not every size it passed through.
+fn scale_door(
+    _ctx: &bt_platform::admission::WorkerCtx,
+) -> computation_lane::Door<ScaleWorkerRequest> {
+    // Read here rather than handed down: the lane is made before there is a `Runtime` to own the
+    // flag, and this is the same question [`Runtime::trace_perf`] asks of the same variable.
+    let trace_perf = diagnostics::switched_on(std::env::var_os("BT_PERF_TRACE"));
+    Box::new(
+        move |_ctx: &bt_platform::admission::WorkerCtx, request: ScaleWorkerRequest| {
+            // **What a Lanczos3 pass actually costs on this machine**, beside the size that provoked
+            // it. The lane is the one suspect in a sticky zoom that the event thread cannot time for
+            // itself, because it runs on another thread and answers whenever it answers.
+            let started = trace_perf.then(Instant::now);
+            let purpose = request.purpose();
+            let (width, height) = request.size();
+            let (leaf, completion) = request.completion();
+            if let Some(started) = started {
+                trace_sink::stderr_line(format!(
+                    "BT_PERF_TRACE image_scale purpose={purpose:?} size={width}x{height} lanczos_us={}",
+                    started.elapsed().as_micros(),
+                ));
+            }
+            MathWorkerResult { leaf, completion }
+        },
+    )
 }
 
-impl MathWorker {
-    /// **Start the three threads** and return their senders and the one answer channel.
-    ///
-    /// `wake` brings the event loop round after an answer is published; the product's sends
-    /// `AppEvent::MathReady`. It is a parameter rather than the proxy so that the lane contract's
-    /// computation adapter (`lane_contract_tests`) runs these very threads, with the answer sender
-    /// shared the way the product shares it.
-    fn spawn(wake: impl Fn() + Clone + Send + 'static) -> Result<Self> {
-        let (task_tx, task_rx) = mpsc::channel::<MathWorkerRequest>();
-        let (scale_tx, scale_rx) = mpsc::channel::<ScaleWorkerRequest>();
-        let (path_tx, path_rx) = mpsc::channel::<PathWorkerRequest>();
-        let (result_tx, result_rx) = mpsc::channel::<MathWorkerResult>();
-        let scale_result_tx = result_tx.clone();
-        let scale_wake = wake.clone();
-        let path_result_tx = result_tx.clone();
-        let path_wake = wake.clone();
-        bt_platform::spawn_at_priority(
-            "bt-path-verify-worker",
-            bt_platform::ThreadPriority::BelowNormal,
-            move |_ctx| {
-                run_path_verify_worker(path_rx, path_result_tx, path_wake);
-            },
-        )
-        .context("spawn path verification worker")?;
-        // Read here rather than handed down: the lane is spawned before there is
-        // a `Runtime` to own the flag, and this is the same question
-        // [`Runtime::trace_perf`] asks of the same variable.
-        let trace_perf = diagnostics::switched_on(std::env::var_os("BT_PERF_TRACE"));
-        bt_platform::spawn_at_priority(
-            "bt-image-scale-worker",
-            bt_platform::ThreadPriority::BelowNormal,
-            move |_ctx| {
-                run_scale_worker(scale_rx, |request| {
-                    // **What a Lanczos3 pass actually costs on this machine**,
-                    // beside the size that provoked it. The lane is the one
-                    // suspect in a sticky zoom that the event thread cannot time
-                    // for itself, because it runs on another thread and answers
-                    // whenever it answers.
-                    let started = trace_perf.then(Instant::now);
-                    let purpose = request.purpose();
-                    let (width, height) = {
-                        let task = request.task();
-                        (task.display_width_px, task.display_height_px)
-                    };
-                    let (leaf, completion) = request.completion();
-                    if let Some(started) = started {
-                        trace_sink::stderr_line(format!(
-                            "BT_PERF_TRACE image_scale purpose={purpose:?} size={width}x{height} lanczos_us={}",
-                            started.elapsed().as_micros(),
-                        ));
-                    }
-                    if scale_result_tx
-                        .send(MathWorkerResult { leaf, completion })
-                        .is_ok()
-                    {
-                        scale_wake();
-                    }
-                });
-            },
-        )
-        .context("spawn image resampling worker")?;
-        // **This thread says how much stack it wants** (`bt_math::MATH_WORKER_STACK_BYTES`). One
-        // formula's render descends through a LaTeX parser, then a LaTeX-to-Typst converter, then
-        // Typst's parser, math layout and SVG writer, all over text a program printed into a
-        // terminal; a stack overflow is not a panic and would take the window with it, so the depth
-        // that is refused and the stack it is refused against are chosen together, in `bt-math`, and
-        // this is where the second half of that pair is spent.
-        bt_platform::spawn_at_priority_with_stack(
-            "bt-math-worker",
-            bt_platform::ThreadPriority::BelowNormal,
-            Some(bt_math::MATH_WORKER_STACK_BYTES),
-            move |ctx| {
-                run_decoration_worker(ctx, task_rx, result_tx, wake);
-            },
-        )
-        .context("spawn math rendering worker")?;
-        Ok(Self {
-            tasks: task_tx,
-            scale_tasks: scale_tx,
-            path_tasks: path_tx,
-            results: result_rx,
-        })
-    }
-}
-
-/// **The path-verification lane** (audit 3 C-2).
+/// **The path-verification share's door** (audit 3 C-2; `computation_lane`,
+/// `bt-path-verify-worker`).
 ///
-/// One question, one call, one answer, and nothing else runs here — which is the whole of the
-/// design: a `verify_path` that blocks inside the SMB redirector holds up nothing but the next
-/// path question, and the window thread was never waiting on either.
+/// One question, one call, one answer, and nothing else runs on its thread — which is the whole
+/// of the design: a `verify_path` that blocks inside the SMB redirector holds up nothing but the
+/// next path question, and the window thread was never waiting on either.
+fn path_door(
+    _ctx: &bt_platform::admission::WorkerCtx,
+) -> computation_lane::Door<PathWorkerRequest> {
+    Box::new(run_path_verify_worker)
+}
+
+/// One path question, answered.
 fn run_path_verify_worker(
-    task_rx: mpsc::Receiver<PathWorkerRequest>,
-    result_tx: mpsc::Sender<MathWorkerResult>,
-    mut wake: impl FnMut(),
-) {
-    while let Ok(PathWorkerRequest { leaf, path }) = task_rx.recv() {
-        let verdict = bt_term::verify_path(&path, &bt_platform::resolved_for_a_door);
-        if result_tx
-            .send(MathWorkerResult {
-                leaf,
-                completion: DecorationWorkerCompletion::VerifiedPath { path, verdict },
-            })
-            .is_err()
-        {
-            return;
-        }
-        wake();
+    _ctx: &bt_platform::admission::WorkerCtx,
+    PathWorkerRequest { leaf, path }: PathWorkerRequest,
+) -> MathWorkerResult {
+    let verdict = bt_term::verify_path(&path, &bt_platform::resolved_for_a_door);
+    MathWorkerResult {
+        leaf,
+        completion: DecorationWorkerCompletion::VerifiedPath { path, verdict },
     }
 }
 
-/// The production decoration queue, also exercised without a window by regression tests.
+/// **The formula and picture worker** (`computation_lane`, `bt-math-worker`): the engine and the
+/// decoder are made once, on the worker, and the door it returns answers each request — the
+/// production decoration work, also exercised without a window by regression tests.
 fn run_decoration_worker(
     worker: &bt_platform::admission::WorkerCtx,
-    task_rx: mpsc::Receiver<MathWorkerRequest>,
-    result_tx: mpsc::Sender<MathWorkerResult>,
-    mut wake: impl FnMut(),
-) {
+) -> computation_lane::Door<MathWorkerRequest> {
+    // The door is made on the worker; each request is handed the same capability again.
+    let _ = worker;
     let engine = MathEngine::new();
     let mut image_decoder = InlineImageDecoder::default();
-    while let Ok(work) = task_rx.recv() {
-        let completion = match work {
-            MathWorkerRequest::Math {
-                leaf,
-                mut task,
-                foreground_rgb,
-            } => {
-                let result = bt_compose::typeset(&engine, &mut task, foreground_rgb);
-                (leaf, DecorationWorkerCompletion::Math { task, result })
-            }
-            MathWorkerRequest::InlineImage { leaf, task } => {
-                let result = image_decoder.decode(task.clone());
-                (
+    Box::new(
+        move |worker: &bt_platform::admission::WorkerCtx, work: MathWorkerRequest| {
+            let (leaf, completion) = match work {
+                MathWorkerRequest::Math {
                     leaf,
-                    DecorationWorkerCompletion::InlineImage { task, result },
-                )
-            }
-            MathWorkerRequest::PreviewMath { leaf, key } => {
-                let result = bt_math::key_for_em_px(
-                    key.em_milli_px as f32 / 1000.0,
-                    key.foreground_rgb,
-                    key.mode,
-                )
-                .ok_or(MathRenderError::InvalidDimensions)
-                .and_then(|render_key| engine.render(&key.source, render_key));
-                (
+                    mut task,
+                    foreground_rgb,
+                } => {
+                    let result = bt_compose::typeset(&engine, &mut task, foreground_rgb);
+                    (leaf, DecorationWorkerCompletion::Math { task, result })
+                }
+                MathWorkerRequest::InlineImage { leaf, task } => {
+                    let result = image_decoder.decode(task.clone());
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::InlineImage { task, result },
+                    )
+                }
+                MathWorkerRequest::PreviewMath { leaf, key } => {
+                    let result = bt_math::key_for_em_px(
+                        key.em_milli_px as f32 / 1000.0,
+                        key.foreground_rgb,
+                        key.mode,
+                    )
+                    .ok_or(MathRenderError::InvalidDimensions)
+                    .and_then(|render_key| engine.render(&key.source, render_key));
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::PreviewMath { key, result },
+                    )
+                }
+                MathWorkerRequest::PeekImage { leaf, path } => {
+                    let result = peek_pixels(&mut image_decoder, &path);
+                    (leaf, DecorationWorkerCompletion::PeekImage { path, result })
+                }
+                MathWorkerRequest::PeekVideoFrame { leaf, path } => {
+                    let glance = read_video_glance(worker, &path);
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::PeekVideoFrame { path, glance },
+                    )
+                }
+                MathWorkerRequest::PeekAnimation { leaf, path } => {
+                    let frames = animation::decode(&path);
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::PeekAnimation { path, frames },
+                    )
+                }
+                // **This is the thread `AnimationCursor::next_frames` exists for.** Composing a frame is
+                // the whole logical screen, and the window has one thread that must not spend that.
+                MathWorkerRequest::AnimationFill {
                     leaf,
-                    DecorationWorkerCompletion::PreviewMath { key, result },
-                )
-            }
-            MathWorkerRequest::PeekImage { leaf, path } => {
-                let result = peek_pixels(&mut image_decoder, &path);
-                (leaf, DecorationWorkerCompletion::PeekImage { path, result })
-            }
-            MathWorkerRequest::PeekVideoFrame { leaf, path } => {
-                let glance = read_video_glance(worker, &path);
-                (
+                    path,
+                    serial,
+                    mut cursor,
+                    want,
+                } => {
+                    let frames = cursor.next_frames(want);
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::AnimationFill {
+                            path,
+                            serial,
+                            cursor,
+                            frames,
+                        },
+                    )
+                }
+                MathWorkerRequest::PeekPage {
                     leaf,
-                    DecorationWorkerCompletion::PeekVideoFrame { path, glance },
-                )
-            }
-            MathWorkerRequest::PeekAnimation { leaf, path } => {
-                let frames = animation::decode(&path);
-                (
-                    leaf,
-                    DecorationWorkerCompletion::PeekAnimation { path, frames },
-                )
-            }
-            // **This is the thread `AnimationCursor::next_frames`
-            // exists for.** Composing a frame is the whole logical
-            // screen, and the window has one thread that must not
-            // spend that.
-            MathWorkerRequest::AnimationFill {
-                leaf,
-                path,
-                serial,
-                mut cursor,
-                want,
-            } => {
-                let frames = cursor.next_frames(want);
-                (
-                    leaf,
-                    DecorationWorkerCompletion::AnimationFill {
-                        path,
-                        serial,
-                        cursor,
-                        frames,
-                    },
-                )
-            }
-            MathWorkerRequest::PeekPage {
-                leaf,
-                path,
-                page,
-                fit,
-                known,
-            } => {
-                let outcome = raster_peek_page(&path, page, fit, known);
-                (
-                    leaf,
-                    DecorationWorkerCompletion::PeekPage {
-                        path,
-                        page,
-                        fit,
-                        outcome,
-                    },
-                )
-            }
-        };
-        if result_tx
-            .send(MathWorkerResult {
-                leaf: completion.0,
-                completion: completion.1,
-            })
-            .is_err()
-        {
-            break;
-        }
-        wake();
-    }
+                    path,
+                    page,
+                    fit,
+                    known,
+                } => {
+                    let outcome = raster_peek_page(&path, page, fit, known);
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::PeekPage {
+                            path,
+                            page,
+                            fit,
+                            outcome,
+                        },
+                    )
+                }
+            };
+            MathWorkerResult { leaf, completion }
+        },
+    )
 }
 
 /// What a press on one node of a files tree does to that column's durable state.
@@ -11748,43 +11668,68 @@ fn take_math_worker_notice(notice_pending: &mut bool) -> Option<&'static str> {
     }
 }
 
+/// **The computation lane's request door for a pane's decoration work** (C1): the task goes to
+/// the share that runs its kind — a formula or a decode to `bt-math-worker`, a resample to
+/// `bt-image-scale-worker`, a printed path to `bt-path-verify-worker` — and is admitted there, or
+/// refused at that share's door and handed back as the task it was.
 fn dispatch_decoration_task(
     leaf: ShellAddress,
     task: SessionDecorationTask,
-    tasks: &mpsc::Sender<MathWorkerRequest>,
-    scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
-    path_tasks: &mpsc::Sender<PathWorkerRequest>,
-) -> bool {
+    lane: &computation_lane::ComputationLane,
+) -> std::result::Result<(), (lane::Refused, SessionDecorationTask)> {
     match task {
-        SessionDecorationTask::Math(task) => tasks
-            .send(MathWorkerRequest::Math {
+        SessionDecorationTask::Math(task) => lane
+            .decorate(MathWorkerRequest::Math {
                 leaf,
                 task,
                 foreground_rgb: foreground_rgb(),
             })
-            .is_ok(),
-        SessionDecorationTask::InlineImage(task) => tasks
-            .send(MathWorkerRequest::InlineImage { leaf, task })
-            .is_ok(),
-        SessionDecorationTask::ScaleInlineImage(task) => scale_tasks
-            .send(ScaleWorkerRequest::InlineImage { leaf, task })
-            .is_ok(),
-        // **Its own lane** — see [`PathWorkerRequest`]. A stat that blocks for the redirector's
+            .map(|_| ())
+            .map_err(|(refused, request)| (refused, session_task_of(request))),
+        SessionDecorationTask::InlineImage(task) => lane
+            .decorate(MathWorkerRequest::InlineImage { leaf, task })
+            .map(|_| ())
+            .map_err(|(refused, request)| (refused, session_task_of(request))),
+        SessionDecorationTask::ScaleInlineImage(task) => lane
+            .scale(ScaleWorkerRequest::InlineImage { leaf, task })
+            .map(|_| ())
+            .map_err(|(refused, request)| match request {
+                ScaleWorkerRequest::InlineImage { task, .. } => {
+                    (refused, SessionDecorationTask::ScaleInlineImage(task))
+                }
+                _ => unreachable!("the door hands back the request it was given"),
+            }),
+        // **Its own share** — see [`PathWorkerRequest`]. A stat that blocks for the redirector's
         // timeout must not stand in front of a formula the reader is waiting on.
-        SessionDecorationTask::VerifyPath(path) => {
-            path_tasks.send(PathWorkerRequest { leaf, path }).is_ok()
-        }
+        SessionDecorationTask::VerifyPath(path) => lane
+            .verify(PathWorkerRequest { leaf, path })
+            .map(|_| ())
+            .map_err(|(refused, request)| {
+                (refused, SessionDecorationTask::VerifyPath(request.path))
+            }),
     }
 }
 
-/// Drain the real session queue into the renderer channel. A dead optional-decoration worker is
-/// a one-way feature downgrade, never a terminal/runtime error.
+/// The session's task a pane's formula or decode request was made of, handed back.
+fn session_task_of(request: MathWorkerRequest) -> SessionDecorationTask {
+    match request {
+        MathWorkerRequest::Math { task, .. } => SessionDecorationTask::Math(task),
+        MathWorkerRequest::InlineImage { task, .. } => SessionDecorationTask::InlineImage(task),
+        _ => unreachable!("the door hands back the request it was given"),
+    }
+}
+
+/// **Hand a pane's queued decoration work to the computation lane.** A dead worker is a one-way
+/// feature downgrade, never a terminal/runtime error: a share whose worker has ended refuses at its
+/// door, the task is given back to the pane, and the lane is turned off once, with its notice.
+/// A share that is full, or whose thread could not be started, refuses the task the same way: it
+/// is given back to the head of the pane's queue, and this hand-out stops — the pane's work waits
+/// in the pane, undecorated, until the next hand-out (the next output, frame or answer), and
+/// nothing is asked again on a clock.
 fn dispatch_pending_math_tasks(
     leaf: ShellAddress,
     session: &mut DualPlaneSession,
-    tasks: &mpsc::Sender<MathWorkerRequest>,
-    scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
-    path_tasks: &mpsc::Sender<PathWorkerRequest>,
+    lane: &computation_lane::ComputationLane,
     running: &mut bool,
     notice_pending: &mut bool,
 ) -> bool {
@@ -11792,8 +11737,12 @@ fn dispatch_pending_math_tasks(
         return false;
     }
     while let Some(task) = session.take_decoration_worker_task() {
-        if !dispatch_decoration_task(leaf, task, tasks, scale_tasks, path_tasks) {
-            return disable_math_worker_state(running, notice_pending);
+        if let Err((refused, task)) = dispatch_decoration_task(leaf, task, lane) {
+            session.give_back_decoration_worker_task(task);
+            if matches!(refused, lane::Refused::Faulted(_)) {
+                return disable_math_worker_state(running, notice_pending);
+            }
+            break;
         }
     }
     false
@@ -11814,9 +11763,7 @@ fn leaf_session_mut(
 /// The worker lanes a tab's decoration dispatch hands work to, cloned out of [`App`] so the
 /// dispatch can borrow the tab and the worker flags mutably at the same time.
 struct DecorationSenders {
-    math: mpsc::Sender<MathWorkerRequest>,
-    scale: mpsc::Sender<ScaleWorkerRequest>,
-    path: mpsc::Sender<PathWorkerRequest>,
+    computation: Arc<computation_lane::ComputationLane>,
     foreground: mpsc::Sender<foreground_program::Request>,
 }
 
@@ -11850,9 +11797,7 @@ fn dispatch_tab_decoration_tasks(
         disabled |= dispatch_pending_math_tasks(
             address,
             &mut leaf.session,
-            &senders.math,
-            &senders.scale,
-            &senders.path,
+            &senders.computation,
             running,
             notice_pending,
         );
@@ -12964,7 +12909,9 @@ struct App {
     /// Registry reads and layout-DLL loads happen only on that worker; key
     /// events read this map and never wait.
     layout_tables: layout_tables::LayoutTables,
-    math_worker: MathWorker,
+    /// The computation lane (`computation_lane`): formulas, decodes, glances, resamples and
+    /// printed paths.
+    math_worker: Arc<computation_lane::ComputationLane>,
     foreground_program_worker: foreground_program::Worker,
     math_worker_running: bool,
     math_worker_notice_pending: bool,
@@ -45482,12 +45429,12 @@ impl Runtime<'_> {
             trace_sink::stderr_line(format!("BT_CONPTY_SOURCE sources={conpty_sources:?}"));
         }
         let pty_time = phase_started.elapsed();
-        let math_worker = MathWorker::spawn({
+        let math_worker = Arc::new(computation_lane::ComputationLane::new({
             let proxy = proxy.clone();
             move || {
                 let _ = proxy.send_event(AppEvent::MathReady);
             }
-        })?;
+        }));
         let foreground_program_worker = foreground_program::Worker::spawn({
             let proxy = proxy.clone();
             move || {
@@ -54309,9 +54256,7 @@ impl App {
 
     fn decoration_senders(&self) -> DecorationSenders {
         DecorationSenders {
-            math: self.math_worker.tasks.clone(),
-            scale: self.math_worker.scale_tasks.clone(),
-            path: self.math_worker.path_tasks.clone(),
+            computation: Arc::clone(&self.math_worker),
             foreground: self.foreground_program_worker.requests.clone(),
         }
     }
@@ -64187,27 +64132,52 @@ impl FolioApp {
         (batch, gone)
     }
 
-    /// [`Self::drain_preview_answers`] for the decoration lane — the formulas,
+    /// [`Self::drain_preview_answers`] for the computation lane — the formulas,
     /// the decoded pictures, the resampled rasters and the verified paths.
+    ///
+    /// **Every request the lane admitted ends here, by its identity**
+    /// (`computation_lane`). A request whose asker no open window holds — a
+    /// closed tab, a closed window — is let go first, and its terminal reaches
+    /// the lane's sink, which ignores it. Of the rest, each share's terminals
+    /// below its drain mark are taken: an answer joins the batch the windows
+    /// take theirs from; a superseded or joined request leaves the answer to the
+    /// request that ended it; a failure was said by the lane and leaves the
+    /// decoration as it stands; and a worker that has ended turns the lane off,
+    /// once, with its notice.
     fn drain_math_answers(&mut self) -> (Vec<MathWorkerResult>, bool) {
         let mut batch = Vec::new();
+        let mut windows = BTreeSet::new();
+        let mut tabs = BTreeSet::new();
+        for window in self.windows.values() {
+            if window.leaving.is_none() {
+                windows.insert(window.window.id());
+                tabs.extend(window.tabs.iter().map(|tab| tab.id));
+            }
+        }
         let Some(app) = self.app.as_mut() else {
             return (batch, false);
         };
-        let mut gone = false;
-        loop {
-            match app.math_worker.results.try_recv() {
-                Ok(result) => batch.push(result),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    gone = disable_math_worker_state(
-                        &mut app.math_worker_running,
-                        &mut app.math_worker_notice_pending,
-                    );
-                    break;
+        let mut worker_gone = false;
+        for (_, _, terminal) in app.math_worker.ended(|owner| match owner {
+            AnswerOwner::Tab(tab) => !tabs.contains(&tab),
+            AnswerOwner::Window(window) => !windows.contains(&window),
+        }) {
+            match terminal {
+                lane::Terminal::Done(answer) => batch.extend(answer.take()),
+                lane::Terminal::WorkerGone => worker_gone = true,
+                lane::Terminal::Failed(_)
+                | lane::Terminal::Superseded { .. }
+                | lane::Terminal::Joined { .. } => {}
+                lane::Terminal::Cancelled => {
+                    unreachable!("the computation lane cancels nothing")
                 }
             }
         }
+        let gone = worker_gone
+            && disable_math_worker_state(
+                &mut app.math_worker_running,
+                &mut app.math_worker_notice_pending,
+            );
         (batch, gone)
     }
 
@@ -75971,7 +75941,7 @@ fn main() -> Result<()> {
     //
     // **The same question `Runtime::trace_perf` asks, asked here** because the
     // watchdog starts before there is an `App` to hold the answer — the reading
-    // `MathWorker::spawn` takes for the same reason one lane over. What it
+    // the resampling share's door (`scale_door`) takes for the same reason one lane over. What it
     // decides is the silence a report is written for: a run somebody started in
     // order to measure it is worth suspending at two seconds, and a run nobody
     // asked anything of is not. See `hang_watch::TRACED_HANG_THRESHOLD`.

@@ -117,14 +117,42 @@ fn every_pane_of_a_tab_hands_its_decoration_work_to_the_worker() {
             .advance_live_stability(settled + Duration::from_secs(1));
     }
 
-    let (math, requests) = mpsc::channel();
-    let (scale, _scale_requests) = mpsc::channel();
-    let (path, _path_requests) = mpsc::channel();
+    let (heard, requests) = mpsc::channel();
+    let mut watched = crate::computation_lane::fixtures::watched(
+        crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
+    );
+    // The formula worker started with a door that says whom each request is for: a glance from
+    // another window, heard and answered before the tab is dispatched.
+    let elsewhere = ShellAddress {
+        window: WindowId::from(2_u64),
+        leaf: LeafId {
+            tab: TabId(99),
+            seat: SeatId(1),
+        },
+    };
+    let glance = watched
+        .lane
+        .decorate_through(
+            MathWorkerRequest::PeekImage {
+                leaf: elsewhere,
+                path: directory.join("截图 elsewhere.png"),
+            },
+            crate::computation_lane::fixtures::recording(heard),
+        )
+        .ok()
+        .expect("admitted");
+    assert_eq!(
+        crate::lane::receive(&requests, "the formula worker running the glance"),
+        elsewhere
+    );
+    watched.terminal(
+        crate::computation_lane::Share::Decoration,
+        glance,
+        crate::computation_lane::fixtures::nobody,
+    );
     let (foreground, _foreground_requests) = mpsc::channel();
     let senders = DecorationSenders {
-        math,
-        scale,
-        path,
+        computation: Arc::new(watched.lane),
         foreground,
     };
     let mut running = true;
@@ -141,18 +169,11 @@ fn every_pane_of_a_tab_hands_its_decoration_work_to_the_worker() {
         "a live worker is not downgraded by an ordinary dispatch"
     );
 
-    let addressed = requests
-        .try_iter()
-        .map(|request| match request {
-            MathWorkerRequest::Math { leaf, .. }
-            | MathWorkerRequest::InlineImage { leaf, .. }
-            | MathWorkerRequest::PeekImage { leaf, .. }
-            | MathWorkerRequest::PeekVideoFrame { leaf, .. }
-            | MathWorkerRequest::PeekAnimation { leaf, .. }
-            | MathWorkerRequest::AnimationFill { leaf, .. }
-            | MathWorkerRequest::PeekPage { leaf, .. }
-            | MathWorkerRequest::PreviewMath { leaf, .. } => leaf,
-        })
+    let asked = senders
+        .computation
+        .held(crate::computation_lane::Share::Decoration);
+    let addressed = (0..asked)
+        .map(|_| crate::lane::receive(&requests, "the formula worker running a pane's request"))
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         addressed,
