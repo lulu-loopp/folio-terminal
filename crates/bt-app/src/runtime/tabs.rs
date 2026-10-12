@@ -4059,7 +4059,7 @@ mod birth_death_tests {
             at_shell_home: false,
             named: false,
             program: Some(PathBuf::from("fresh-shell")),
-            shell: crate::profiles::ShellProgram::Native,
+            program_kind: crate::profiles::ShellProgram::Native,
             unless_gone: None,
         };
         let seed = crate::LeafSeed {

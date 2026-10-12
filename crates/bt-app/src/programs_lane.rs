@@ -1126,12 +1126,16 @@ pub(crate) mod tests {
         let rows = [row("cygbash", "bash.exe")];
         machine.install(&bin("bash.exe"));
 
-        let first = lane.request(request(&rows, Trigger::Launch));
+        let first = lane
+            .request(request(&rows, Trigger::Launch))
+            .expect("admitted");
         let answers = answers_through(lane, &wakes, first);
         assert_eq!(answers.verdicts[0].shell, profiles::ShellProgram::Native);
 
         machine.install(&bin("cygwin1.dll"));
-        let second = lane.request(request(&rows, Trigger::Environment));
+        let second = lane
+            .request(request(&rows, Trigger::Environment))
+            .expect("admitted");
         let answers = answers_through(lane, &wakes, second);
         assert_eq!(
             answers.verdicts[0].shell,
