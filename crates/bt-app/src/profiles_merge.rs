@@ -268,11 +268,7 @@ pub(crate) fn merge(
     usable: &dyn Fn(&ProfileEntryV1) -> bool,
 ) -> Merged {
     let mut account = Account::default();
-    let (b_read, o_read, t_read) = (
-        read(base, usable),
-        read(ours, usable),
-        read(theirs, usable),
-    );
+    let (b_read, o_read, t_read) = (read(base, usable), read(ours, usable), read(theirs, usable));
     let (b_rows, o_rows) = (rows_in_force(base, &b_read), rows_in_force(ours, &o_read));
     // The file's sequence: each id's row in force, and every row after it
     // carried as its duplicate. Refused rows are units of their own.
@@ -373,10 +369,15 @@ pub(crate) fn merge(
     );
     let mut refused: Vec<KeptRefused<'_>> = Vec::new();
     for id in refused_ids {
-        let of = |rows: &HashMap<&str, Vec<ProfileEntryV1>>| rows.get(id).cloned().unwrap_or_default();
+        let of =
+            |rows: &HashMap<&str, Vec<ProfileEntryV1>>| rows.get(id).cloned().unwrap_or_default();
         let (b_rows_refused, o_rows_refused, t_rows_refused) =
             (of(&b_refused), of(&o_refused), of(&t_refused));
-        let (rows, row) = unit(b_rows_refused, o_rows_refused.clone(), t_rows_refused.clone());
+        let (rows, row) = unit(
+            b_rows_refused,
+            o_rows_refused.clone(),
+            t_rows_refused.clone(),
+        );
         account.count(row, || title(id));
         if rows.is_empty() {
             continue;
@@ -530,7 +531,10 @@ fn order(
     // before them, in the sequence of the side they came from.
     for (k, kept) in refused.iter().enumerate() {
         let slots = (0..kept.rows.len()).map(|l| Slot::Refused(k, l, kept.id.clone()));
-        let at = match placed.iter().position(|placed| *placed == Slot::Row(kept.id.clone())) {
+        let at = match placed
+            .iter()
+            .position(|placed| *placed == Slot::Row(kept.id.clone()))
+        {
             Some(row) => row,
             None => {
                 let first = kept
@@ -1082,7 +1086,10 @@ mod tests {
         let merged = merge(&base, &ours, &theirs, &no_titles);
         assert_eq!(merged.document.profiles, vec![edited]);
         assert_eq!(merged.account.conflicted, 0, "no card");
-        assert_eq!(in_force(&merged.document, "a").0, Some("活的 live".to_owned()));
+        assert_eq!(
+            in_force(&merged.document, "a").0,
+            Some("活的 live".to_owned())
+        );
     }
 
     /// RED (review round 4, coordinator's ruling) — **a Delete takes the row in
@@ -1102,7 +1109,11 @@ mod tests {
         let (live, later) = (own("a", "活的 live"), own("a", "后来的 later"));
         let b = own("b", "乙 B");
         let mut desired = table(&[refused.clone(), live.clone(), b.clone(), later]);
-        ProfilesV1::apply_press(&mut desired, &table(&[live, b.clone()]), &table(&[b.clone()]));
+        ProfilesV1::apply_press(
+            &mut desired,
+            &table(&[live, b.clone()]),
+            &table(&[b.clone()]),
+        );
         assert_eq!(desired.profiles, vec![refused, b]);
         assert_eq!(
             in_force(&desired, "a"),
