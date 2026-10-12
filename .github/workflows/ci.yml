@@ -468,6 +468,36 @@ jobs:
           }
           exit 0
 
+      # `lane::EXPECTED_FAILURES` only shrinks: a lane does not gain a declared
+      # failure for a claim the merge base already had. Planting one proves the
+      # comparison against the merge base is one.
+      - name: the expected-failures gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "crates/bt-app/src/lane.rs"
+          $original = [IO.File]::ReadAllText((Resolve-Path $file))
+          $opening = "pub(crate) const EXPECTED_FAILURES: &[ExpectedFailure] = &[`n"
+          $row = "    ExpectedFailure {`n        lane: LaneName::Handoff,`n        claim: Claim::OrderIsAsDeclared,`n        failure: FailureKind::OrderBroken,`n        repair: `"D-70`",`n        why: `"planted`",`n    },`n"
+          try {
+            $planted = $original.Replace($opening, $opening + $row)
+            if ($planted -eq $original) {
+              throw "the expected-failures block was not found to plant a row in"
+            }
+            [IO.File]::WriteAllText((Resolve-Path $file), $planted)
+            $failed = $false
+            try {
+              & ./scripts/ci/check-expected-failures.ps1
+            } catch {
+              $failed = $true
+            }
+            if (-not $failed) {
+              throw "the expected failures accepted a row that is not at the merge base"
+            }
+          } finally {
+            [IO.File]::WriteAllText((Resolve-Path $file), $original)
+          }
+          exit 0
+
       # The timing-bound inventory is the same whole-row, merge-base rule. Its
       # scratch-repository suite plants growth and a duplicate and requires both
       # to fail, while no-base, unchanged and shrink cases pass.
@@ -804,6 +834,13 @@ jobs:
       - name: the timing-bound test list only shrinks
         shell: pwsh
         run: ./scripts/ci/check-timing-bound.ps1
+
+      # The lane contract's declared failures (`lane::EXPECTED_FAILURES`): no
+      # lane gains one against the merge base; a claim new to the suite brings
+      # the rows of the lanes that do not keep it yet (S-3).
+      - name: the lane contract's expected failures only shrink
+        shell: pwsh
+        run: ./scripts/ci/check-expected-failures.ps1
 
       # "Built, not wired" (0.4.7 U-44): every `allow`/`expect(dead_code)` in
       # product code is on `docs/plans/DEAD-CODE.tsv`, which only shrinks
