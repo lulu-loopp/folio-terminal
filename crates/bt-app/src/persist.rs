@@ -2760,8 +2760,18 @@ impl KeybindingsStore {
     /// is measured against. The lines the table refused stay in the document
     /// and out of this ([`DocumentState::project`]).
     pub(crate) fn project(&mut self, overrides: Vec<BindingOverrideV1>) {
+        self.project_on(overrides, keybindings_platform());
+    }
+
+    /// [`Self::project`], in `writing_platform`'s dialect — the store's
+    /// ([`Self::store_on`]).
+    pub(crate) fn project_on(
+        &mut self,
+        overrides: Vec<BindingOverrideV1>,
+        writing_platform: KeybindingsPlatformV1,
+    ) {
         self.document
-            .project(keybindings_document(overrides, keybindings_platform()));
+            .project(keybindings_document(overrides, writing_platform));
     }
 
     /// Record the new set of departures and hand them to the storage worker.
@@ -7526,6 +7536,194 @@ mod owed_tests {
             written.bindings,
             vec![unknown, binding("new-tab", "Ctrl+Shift+U")],
             "the refused line is carried, and only the pressed row changed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A keybindings store over `lines` written in `written_in`'s dialect, opened as a launch on
+    /// `here` opens it, on a held lane: the store, the table in force, the launch's refusals.
+    fn opened_on(
+        root: &std::path::Path,
+        lines: Vec<BindingOverrideV1>,
+        written_in: bt_platform::HostPlatform,
+        here: bt_platform::HostPlatform,
+    ) -> (
+        KeybindingsStore,
+        std::sync::mpsc::Receiver<super::StorageJob>,
+        crate::shortcuts::Shortcuts,
+        Vec<crate::shortcuts::OverrideFault>,
+    ) {
+        let path = root.join(KEYBINDINGS_FILE_NAME);
+        let file = keybindings_document(lines, super::keybindings_platform_on(written_in));
+        std::fs::write(&path, bt_persist::serialize_keybindings(&file).unwrap()).unwrap();
+        let (lane, jobs) = StorageLane::held();
+        let mut store = KeybindingsStore::at_on(path, lane);
+        let (table, faults) = crate::settings_bundle::shortcuts_at_start(&mut store, here);
+        (store, jobs, table, faults)
+    }
+
+    /// The table's departures, as a press stores them.
+    fn departures_of(table: &crate::shortcuts::Shortcuts) -> Vec<BindingOverrideV1> {
+        table
+            .overrides()
+            .into_iter()
+            .map(|entry| BindingOverrideV1 {
+                action: entry.id,
+                chord: entry.chord,
+            })
+            .collect()
+    }
+
+    /// The chord `action` holds in `table`, as `platform` spells it.
+    fn chord_in(
+        table: &crate::shortcuts::Shortcuts,
+        action: &str,
+        platform: bt_platform::HostPlatform,
+    ) -> Option<String> {
+        table
+            .row(action)
+            .and_then(|row| row.chord.as_ref())
+            .map(|chord| crate::shortcuts::format_chord_on(chord, platform))
+    }
+
+    /// RED (T-STORE-MERGE-KEYBINDINGS round 6, the review's blocker) — **a press on a file
+    /// written on the other platform keeps what the projection lacks.** A Mac's file — a line
+    /// naming an action this build has no row for, a shadowed New tab line, New tab's line in
+    /// force and Close pane's — is opened on Windows before any merge, and one press binds Quit.
+    /// The document written is Windows': the line this build cannot name and the shadowed line
+    /// stay verbatim in their places, New tab's and Close pane's lines are carried into Windows'
+    /// spelling, and Quit's is the press. Read again on Windows and on a Mac, the table is one
+    /// table, each in its own keys.
+    ///
+    /// MUTATION: the whole-replace road (in `KeybindingsV1::apply_press`, a press in another
+    /// dialect than `desired` takes the press's document whole) — the two carried lines are lost.
+    #[test]
+    fn a_press_on_a_file_from_the_other_platform_keeps_what_the_projection_lacks() {
+        use bt_platform::HostPlatform::{MacOs, Windows};
+        let root = scratch("press-other-dialect");
+        let unknown = binding("未来动作-future-action", "Cmd+Shift+F");
+        let shadowed = binding("new-tab", "Cmd+Shift+J");
+        let (mut store, jobs, mut table, faults) = opened_on(
+            &root,
+            vec![
+                unknown.clone(),
+                shadowed.clone(),
+                binding("new-tab", "Cmd+Shift+Y"),
+                binding("close-pane", "Cmd+Shift+O"),
+            ],
+            MacOs,
+            Windows,
+        );
+        assert_eq!(
+            faults
+                .iter()
+                .map(|fault| fault.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![unknown.action.as_str()],
+            "the launch refuses only the action it cannot name"
+        );
+        table.set("quit", crate::shortcuts::parse_chord("Ctrl+u"));
+        assert!(store.store_on(
+            departures_of(&table),
+            super::keybindings_platform_on(Windows)
+        ));
+
+        let written: KeybindingsV1 = bt_persist::parse_keybindings(&next_write(&jobs).bytes)
+            .expect("the written document parses");
+        assert_eq!(
+            written.writing_platform,
+            super::keybindings_platform_on(Windows)
+        );
+        assert_eq!(
+            &written.bindings[..2],
+            &[unknown.clone(), shadowed][..],
+            "verbatim, in place"
+        );
+        assert_eq!(written.bindings[2], binding("new-tab", "Ctrl+Shift+y"));
+        assert!(
+            written
+                .bindings
+                .contains(&binding("close-pane", "Ctrl+Shift+o"))
+        );
+        assert!(written.bindings.contains(&binding("quit", "Ctrl+u")));
+        assert_eq!(written.bindings.len(), 5, "{:?}", written.bindings);
+
+        let mut read = Vec::new();
+        for platform in [Windows, MacOs] {
+            let (table, faults) = crate::settings_bundle::read_keybindings(&written, platform);
+            assert_eq!(
+                faults
+                    .iter()
+                    .map(|fault| fault.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec![unknown.action.as_str()],
+                "{platform:?}"
+            );
+            read.push(
+                ["new-tab", "close-pane", "quit"].map(|action| chord_in(&table, action, platform)),
+            );
+        }
+        assert_eq!(
+            read,
+            vec![
+                [
+                    Some("Ctrl+Shift+y".to_owned()),
+                    Some("Ctrl+Shift+o".to_owned()),
+                    Some("Ctrl+u".to_owned())
+                ],
+                [
+                    Some("Cmd+Shift+y".to_owned()),
+                    Some("Cmd+Shift+o".to_owned()),
+                    Some("Cmd+u".to_owned())
+                ],
+            ],
+            "one table, each platform's keys"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-STORE-MERGE-KEYBINDINGS round 6, review nit) — **a press on an action whose only
+    /// line is refused goes after it**, so the refused line is shadowed and silent: the file's
+    /// New tab line is not a chord here; a press binds New tab; the next start reads the press's
+    /// chord and refuses nothing.
+    ///
+    /// MUTATION: no `last_under` (the press's line goes after its nearest predecessor in the
+    /// table, here first) — the refused line is the last about New tab and is refused again.
+    #[test]
+    fn a_press_on_an_action_whose_only_line_is_refused_goes_after_it() {
+        use bt_platform::HostPlatform::Windows;
+        let root = scratch("press-after-refused");
+        let refused = binding("new-tab", "Cmd+Win+K");
+        let (mut store, jobs, mut table, faults) = opened_on(
+            &root,
+            vec![refused.clone(), binding("quit", "Ctrl+u")],
+            Windows,
+            Windows,
+        );
+        assert_eq!(faults.len(), 1, "the launch refuses the line: {faults:?}");
+        table.set("new-tab", crate::shortcuts::parse_chord("Ctrl+k"));
+        assert!(store.store_on(
+            departures_of(&table),
+            super::keybindings_platform_on(Windows)
+        ));
+        let written: KeybindingsV1 = bt_persist::parse_keybindings(&next_write(&jobs).bytes)
+            .expect("the written document parses");
+        assert_eq!(
+            written.bindings,
+            vec![
+                refused,
+                binding("new-tab", "Ctrl+k"),
+                binding("quit", "Ctrl+u")
+            ]
+        );
+        let (table, faults) = crate::settings_bundle::read_keybindings(&written, Windows);
+        assert!(
+            faults.is_empty(),
+            "the next start refuses nothing: {faults:?}"
+        );
+        assert_eq!(
+            chord_in(&table, "new-tab", Windows).as_deref(),
+            Some("Ctrl+k")
         );
         let _ = std::fs::remove_dir_all(&root);
     }

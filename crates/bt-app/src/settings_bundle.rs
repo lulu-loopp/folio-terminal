@@ -621,7 +621,7 @@ pub(crate) fn shortcuts_at_start(
     platform: bt_platform::HostPlatform,
 ) -> (Shortcuts, Vec<OverrideFault>) {
     let (table, faults) = read_keybindings(store.file_document(), platform);
-    store.project(
+    store.project_on(
         table
             .overrides()
             .into_iter()
@@ -630,6 +630,7 @@ pub(crate) fn shortcuts_at_start(
                 chord: entry.chord,
             })
             .collect(),
+        crate::persist::keybindings_platform_on(platform),
     );
     (table, faults)
 }

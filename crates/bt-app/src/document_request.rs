@@ -765,6 +765,11 @@ trait InForce<E, K> {
     fn in_force(&self, list: &[E], key: &K) -> Option<usize>;
     /// The entries that go with it when it goes.
     fn alongside(&self, list: &[E], key: &K) -> Vec<usize>;
+    /// **Where an entry the press adds under `key` goes, when the list already
+    /// holds entries under it that are not in force**: after the last of them,
+    /// so the reader's rule makes the new entry the one in force. `None`: no
+    /// such entries, and the entry goes after its nearest predecessor.
+    fn last_under(&self, list: &[E], key: &K) -> Option<usize>;
 }
 
 /// **The first entry under a key is the one in force** (the installer's rule for
@@ -778,6 +783,12 @@ impl<E, K: PartialEq, F: Fn(&E) -> K> InForce<E, K> for First<F> {
 
     fn alongside(&self, _: &[E], _: &K) -> Vec<usize> {
         Vec::new()
+    }
+
+    /// An entry not in force under a key is one after the first; a new key has
+    /// none.
+    fn last_under(&self, _: &[E], _: &K) -> Option<usize> {
+        None
     }
 }
 
@@ -814,6 +825,12 @@ impl InForce<BindingOverrideV1, String> for ShortcutLines {
 
     fn alongside(&self, list: &[BindingOverrideV1], action: &String) -> Vec<usize> {
         self.lines(list, action, |read| *read == LineRead::Shadowed)
+    }
+
+    /// An action whose only lines do not read: the line a press adds goes after
+    /// them, so the later readable line shadows them and they are silent.
+    fn last_under(&self, list: &[BindingOverrideV1], action: &String) -> Option<usize> {
+        list.iter().rposition(|line| line.action == *action)
     }
 }
 
@@ -871,10 +888,12 @@ fn apply_keyed_press<E, K>(
             }
             (None, Some(entry)) => {
                 let at = position(after, name).unwrap_or(0);
-                let anchor = after[..at]
-                    .iter()
-                    .rev()
-                    .find_map(|earlier| position(desired, &key(earlier)));
+                let anchor = reader.last_under(desired, name).or_else(|| {
+                    after[..at]
+                        .iter()
+                        .rev()
+                        .find_map(|earlier| position(desired, &key(earlier)))
+                });
                 desired.insert(anchor.map_or(0, |index| index + 1), entry.clone());
             }
             (None, None) => {}
@@ -926,14 +945,30 @@ impl StoredDocument for KeybindingsV1 {
     /// launch, an import and the merge): the last line about the action that
     /// reads. A press that takes an action's departure away removes that line
     /// and the earlier lines it shadows, which would otherwise be the last about
-    /// the action at the next start. A press in another platform's dialect than
-    /// `desired`'s is the whole document: its lines cannot share one
-    /// `writing_platform`. A merge leaves `desired` in this platform's dialect
-    /// (`keybindings_merge`), so a press after one is a delta again.
+    /// the action at the next start.
+    ///
+    /// **A press is laid in the press's dialect** — the one the store writes in
+    /// (`KeybindingsStore::store_on`), which every press records. `desired` in
+    /// another dialect (a file written on the other platform, before any merge
+    /// carried it here) is first carried into it the way the merge carries a
+    /// side (`keybindings_merge::in_dialect`): each line read in its own dialect
+    /// and spelled in this one, what is not in force — an action this build has
+    /// no row for, a shadowed line, a line this dialect cannot read — kept
+    /// verbatim in place. Then the press is a delta, so nothing the projection
+    /// lacks is lost to a dialect difference.
     fn apply_press(desired: &mut Self, before: &Self, after: &Self) {
-        if desired == before || desired.writing_platform != after.writing_platform {
+        // A press always records the dialect it is written in; a document that
+        // records none is a v1 file, never a press.
+        let Some(here) = crate::settings_bundle::dialect_of(after.writing_platform) else {
             *desired = after.clone();
             return;
+        };
+        if desired == before {
+            *desired = after.clone();
+            return;
+        }
+        if desired.writing_platform != after.writing_platform {
+            *desired = crate::keybindings_merge::in_dialect(desired, here);
         }
         desired.schema_version = after.schema_version;
         apply_keyed_press(
@@ -943,7 +978,7 @@ impl StoredDocument for KeybindingsV1 {
             |binding| binding.action.clone(),
             &ShortcutLines {
                 dialect: desired.writing_platform,
-                platform: bt_platform::host_platform(),
+                platform: here,
             },
         );
     }

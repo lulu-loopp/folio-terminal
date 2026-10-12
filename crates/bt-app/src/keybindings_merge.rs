@@ -22,7 +22,7 @@
 //!   or a press takes it away;
 //! - a line naming an action this build has no row for is **carried** — every such line,
 //!   where the launch's reader reports each one no later parsing line about the same id
-//!   shadows (the last, when it parses; every one that does not, when none after it does):
+//!   shadows — the last line about the id that parses, and every line after it:
 //!   neither road puts any of them in force, so the difference is only what the launch
 //!   says, never what is in force.
 //!
@@ -180,6 +180,37 @@ fn side_of(
         lines,
         units,
         untranslatable,
+    }
+}
+
+/// **`document` carried into `platform`'s dialect** the way the merge carries a side
+/// ([`side_of`]): each line in force spelled as `platform` reads it — its own spelling
+/// when that reads as the same chord there — and every other line (an action this build
+/// has no row for, a shadowed line, a line this dialect cannot read) kept verbatim in its
+/// place. What a press is laid over when `desired` was written in another dialect
+/// (`KeybindingsV1::apply_press`).
+pub(crate) fn in_dialect(
+    document: &KeybindingsV1,
+    platform: bt_platform::HostPlatform,
+) -> KeybindingsV1 {
+    let table = Shortcuts::defaults_for(platform);
+    let side = side_of(document, &table, platform);
+    let bindings = side
+        .lines
+        .iter()
+        .zip(&document.bindings)
+        .map(|(line, original)| match line {
+            Line::InForce(action) => BindingOverrideV1 {
+                action: action.clone(),
+                chord: side.units[action].text.clone(),
+            },
+            Line::Carried(_) | Line::Shadowed(..) => original.clone(),
+        })
+        .collect();
+    KeybindingsV1 {
+        schema_version: KEYBINDINGS_SCHEMA_VERSION,
+        writing_platform: crate::persist::keybindings_platform_on(platform),
+        bindings,
     }
 }
 
