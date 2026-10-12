@@ -16,13 +16,20 @@
 //!
 //! Every run leaves all renderings in `target/ownership-census/`. Only the
 //! unknown list is copied, and only when it has not grown.
+//!
+//! The runtime dependency map (J3, the ownership contract's §3.1) is taken
+//! from the same census of the same structs, so its guard is here too: the
+//! committed files under `docs/plans/design/runtime-dep-map/` are the map of
+//! this tree, and `scripts/generate-runtime-dep-map.ps1` copies its renderings
+//! from `target/depmap/`.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use bt_source::{
-    Column, Committed, CommittedFile, Difference, DiskScope, FieldCensus, Index, ItemKind, SiteRow,
-    TargetId, TargetKind, TargetRoot, Universe, Vendor, Workspace, is_vendored, report, universes,
+    Column, Committed, CommittedFile, DependencyMap, Difference, DiskScope, FieldCensus, Index,
+    ItemKind, MEASURED_AT, SiteRow, TargetId, TargetKind, TargetRoot, Universe, Vendor, Workspace,
+    is_vendored, report, universes,
 };
 
 /// The census note's four structs, as its §1 names them — the fixtures declare
@@ -656,4 +663,83 @@ fn every_field_of_the_four_structs_has_an_inventory_row() {
         .collect();
     facts.sort();
     assert_eq!(facts, declared);
+}
+
+// ── the runtime dependency map (J3) ───────────────────────────────────────
+
+/// The lines the map's guard compares: all of them but the commit line the
+/// generating script writes.
+fn compared(text: &str) -> Vec<&str> {
+    text.lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .filter(|line| !line.starts_with(MEASURED_AT))
+        .collect()
+}
+
+/// What differs between a committed file of the map and its rendering,
+/// named by row.
+fn map_differences(name: &str, committed: &str, rendered: &str) -> Vec<String> {
+    let committed = compared(committed);
+    let rendered = compared(rendered);
+    let then: std::collections::BTreeSet<&str> = committed.iter().copied().collect();
+    let now: std::collections::BTreeSet<&str> = rendered.iter().copied().collect();
+    let mut out: Vec<String> = rendered
+        .iter()
+        .filter(|line| !then.contains(*line))
+        .map(|line| format!("{name}: the code says a row the committed file does not: {line}"))
+        .collect();
+    out.extend(
+        committed
+            .iter()
+            .filter(|line| !now.contains(*line))
+            .map(|line| format!("{name}: the committed file says a row the code does not: {line}")),
+    );
+    if out.is_empty() && committed != rendered {
+        out.push(format!("{name}: the same rows in another order"));
+    }
+    out
+}
+
+/// RED (J3) — **the committed runtime dependency map is the code's map**:
+/// each of the four files under `docs/plans/design/runtime-dep-map/` equals
+/// the rendering of `bt-app` at this tree, line for line, but for the line
+/// naming the commit it was measured at. The renderings are left in
+/// `target/depmap/` for `scripts/generate-runtime-dep-map.ps1` to copy.
+///
+/// MUTATION: change a count in one committed row of `doors.tsv` (or delete a
+/// row), and this names the row on both sides.
+#[test]
+fn the_committed_runtime_dep_map_is_the_code() {
+    let census = the_census();
+    assert!(
+        census.unparsed().is_empty(),
+        "every declaration parses: {:#?}",
+        census.unparsed()
+    );
+    let map = DependencyMap::of(census, Index::of_package("bt-app"));
+    let out = workspace_root().join("target").join("depmap");
+    std::fs::create_dir_all(&out).expect("target is writable");
+    let committed_dir = workspace_root()
+        .join("docs")
+        .join("plans")
+        .join("design")
+        .join("runtime-dep-map");
+    let mut found = Vec::new();
+    for (name, rendered) in map.render() {
+        std::fs::write(out.join(name), &rendered).expect("written");
+        let committed = std::fs::read_to_string(committed_dir.join(name)).unwrap_or_default();
+        found.extend(map_differences(name, &committed, &rendered));
+    }
+    assert!(
+        found.is_empty(),
+        "{} difference(s) between the committed runtime dependency map and the code; \
+         regenerate it with scripts/generate-runtime-dep-map.ps1 (never edit a row by hand):\n{}",
+        found.len(),
+        found
+            .iter()
+            .take(40)
+            .map(|line| format!("  {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }

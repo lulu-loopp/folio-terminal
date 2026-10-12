@@ -130,6 +130,7 @@
 mod cache;
 mod census;
 mod declarations;
+mod dep_map;
 mod enumerate;
 mod index;
 mod lower;
@@ -142,10 +143,11 @@ mod universe;
 pub mod universes;
 
 pub use census::{
-    CensusFailure, Column, Committed, CommittedFile, Difference, FactRow, FieldCensus, SiteRow,
-    UnknownRow,
+    CallRow, Callable, CensusFailure, Column, Committed, CommittedFile, Difference, FactRow,
+    FieldCensus, SiteRow, UnfollowedRow, UnknownRow,
 };
 pub use declarations::{Compilation, DeclarationStep, ModuleBody, ReachedModule};
+pub use dep_map::{DependencyMap, Door, FieldUse, MEASURED_AT, TopicEdge, Unclassified};
 pub use enumerate::{Enumeration, FileFacts, FileOwner, FileSetDiff, Unreached, enumerate};
 pub use index::{
     Certainty, CommentKind, CommentRecord, ConditionalVariant, DeclarationPath, FileRecord,

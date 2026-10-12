@@ -4,8 +4,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::Callable;
 use super::types::{
-    Class, Declarations, Method, Named, Place, Receiver, Std, Ty, TypeDecl, builds_itself,
+    Class, Declarations, FnDecl, Method, Named, Place, Receiver, Std, Ty, TypeDecl, builds_itself,
     closures_by_position, entry_method, external_method, iterator_method, prelude_method, std_kind,
     std_method,
 };
@@ -37,6 +38,10 @@ pub(crate) struct Subject {
     /// Every field name of the four: a site spelling one of these through a
     /// receiver that does not resolve is an unknown, never a guess.
     pub(crate) names: BTreeSet<String>,
+    /// The names of the package's own product free functions and methods: a
+    /// call spelling one that does not resolve is listed as not followed.
+    pub(crate) functions: BTreeSet<String>,
+    pub(crate) methods: BTreeSet<String>,
 }
 
 /// What a type resolves to.
@@ -519,11 +524,35 @@ impl<'d> Resolver<'d> {
                     ret,
                     closure: Vec::new(),
                     by_position,
+                    callees: BTreeSet::new(),
                 }
             })
             .collect();
+        // What a call reaches: the product declarations of the type's own
+        // packages, whichever of them the answer stands on — and, as the
+        // language picks, an inherent method before a trait's of the same
+        // name.
+        let callees: BTreeSet<Callable> = all
+            .iter()
+            .filter(|decl| packages.is_none_or(|packages| packages.contains(&decl.package)))
+            .filter_map(|decl| decl.callable.clone())
+            .collect();
+        let inherent: BTreeSet<Callable> = callees
+            .iter()
+            .filter(|callable| !callable.function.starts_with('<'))
+            .cloned()
+            .collect();
+        let callees = if inherent.is_empty() {
+            callees
+        } else {
+            inherent
+        };
+        let reaching = |method: Method| Method {
+            callees: callees.clone(),
+            ..method
+        };
         if let Some(agreed) = agreement(&answers) {
-            return Ok(Some(agreed));
+            return Ok(Some(reaching(agreed)));
         }
         // They disagree: the ones declared where the type is.
         if let Some(packages) = packages {
@@ -534,7 +563,7 @@ impl<'d> Resolver<'d> {
                 .map(|(_, answer)| answer)
                 .collect();
             if let Some(agreed) = agreement(&narrowed) {
-                return Ok(Some(agreed));
+                return Ok(Some(reaching(agreed)));
             }
         }
         Err(format!(
@@ -746,13 +775,15 @@ impl<'d> Resolver<'d> {
         }
     }
 
-    /// `Type::function(..)`: what it returns and what closures in each
-    /// argument position receive. `owner` is the type the path names.
-    pub(crate) fn associated(&self, owner: &Ty, function: &str) -> (Ty, Vec<Option<Vec<Ty>>>) {
+    /// `Type::function(..)`: what it returns, what closures in each
+    /// argument position receive, and the product items the call reaches.
+    /// `owner` is the type the path names.
+    pub(crate) fn associated(&self, owner: &Ty, function: &str) -> Associated {
         let Ty::Named(named) = self.expand(owner.clone()) else {
             return (
                 Ty::unknown(format!("`{function}` on a type that is not a path")),
                 Vec::new(),
+                BTreeSet::new(),
             );
         };
         let packages = match self.kind(&named) {
@@ -761,9 +792,13 @@ impl<'d> Resolver<'d> {
             Kind::Std(_) => None,
             Kind::External(name) | Kind::Ambiguous(name) => {
                 if builds_itself(function) {
-                    return (Ty::Named(named), Vec::new());
+                    return (Ty::Named(named), Vec::new(), BTreeSet::new());
                 }
-                return (Ty::unknown(format!("`{name}::{function}`")), Vec::new());
+                return (
+                    Ty::unknown(format!("`{name}::{function}`")),
+                    Vec::new(),
+                    BTreeSet::new(),
+                );
             }
         };
         let found = match packages {
@@ -778,17 +813,198 @@ impl<'d> Resolver<'d> {
                 if self.has_receiver(&named.name, function) {
                     by_position.insert(0, None);
                 }
-                (found.ret, by_position)
+                (found.ret, by_position, found.callees)
             }
-            Ok(None) if builds_itself(function) => (Ty::Named(named), Vec::new()),
+            Ok(None) if builds_itself(function) => (Ty::Named(named), Vec::new(), BTreeSet::new()),
             Ok(None) => (
                 Ty::unknown(format!("`{}::{function}` is not declared", named.name)),
                 Vec::new(),
+                BTreeSet::new(),
             ),
-            Err(why) => (Ty::unknown(why), Vec::new()),
+            Err(why) => (Ty::unknown(why), Vec::new(), BTreeSet::new()),
+        }
+    }
+
+    // ── a free function's path, to the items it names ─────────────────────
+
+    /// Whether `package` has a module at the absolute path `module`.
+    fn is_module(&self, package: &str, module: &str) -> bool {
+        self.declarations
+            .imports
+            .contains_key(&(package.to_owned(), module.to_owned()))
+    }
+
+    /// A path written in `module` of `package` (`seats::f`, `crate::a::f`,
+    /// `super::f`, `self::f`) as the absolute path it names inside that
+    /// package — `crate`, the modules, the last segment. The first segment is
+    /// `crate`, `self` or `super`; or a name a `use` item of the module brings
+    /// in; or a child module; or a module a glob of the module brings in.
+    /// `None` for a path that leaves the package: another crate, the
+    /// standard library, or a first segment that is no module of the package
+    /// (a type the census did not place, an external crate).
+    pub(crate) fn absolute(
+        &self,
+        package: &str,
+        module: &str,
+        path: &[String],
+    ) -> Option<Vec<String>> {
+        self.absolute_at(package, module, path, 0)
+    }
+
+    fn absolute_at(
+        &self,
+        package: &str,
+        module: &str,
+        path: &[String],
+        depth: usize,
+    ) -> Option<Vec<String>> {
+        if depth > PATH_STEPS {
+            return None;
+        }
+        let (first, rest) = path.split_first()?;
+        let mut here: Vec<String> = module.split("::").map(str::to_owned).collect();
+        match first.as_str() {
+            "crate" => Some(path.to_vec()),
+            "self" => {
+                here.extend(rest.iter().cloned());
+                Some(here)
+            }
+            "super" => {
+                let mut rest = path;
+                while let Some((first, after)) = rest.split_first()
+                    && first == "super"
+                {
+                    here.pop();
+                    rest = after;
+                }
+                if here.is_empty() {
+                    return None;
+                }
+                here.extend(rest.iter().cloned());
+                Some(here)
+            }
+            _ => {
+                let imports = self
+                    .declarations
+                    .imports
+                    .get(&(package.to_owned(), module.to_owned()));
+                if let Some(imported) = imports.and_then(|imports| imports.names.get(first)) {
+                    let mut expanded = self.absolute_at(package, module, imported, depth + 1)?;
+                    expanded.extend(rest.iter().cloned());
+                    return Some(expanded);
+                }
+                if self.declarations.crates.contains_key(first)
+                    || matches!(first.as_str(), "std" | "core" | "alloc")
+                {
+                    return None;
+                }
+                let child = format!("{module}::{first}");
+                if self.is_module(package, &child) {
+                    here.extend(path.iter().cloned());
+                    return Some(here);
+                }
+                for glob in imports
+                    .map(|imports| imports.globs.as_slice())
+                    .unwrap_or_default()
+                {
+                    let Some(mut opened) = self.absolute_at(package, module, glob, depth + 1)
+                    else {
+                        continue;
+                    };
+                    opened.push(first.clone());
+                    if self.is_module(package, &opened.join("::")) {
+                        opened.extend(rest.iter().cloned());
+                        return Some(opened);
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// What the absolute path `module::name` names among `package`'s free
+    /// functions: the product items declared in that module, or brought into
+    /// it by a `use` item or a glob, followed to the declaration.
+    pub(crate) fn functions_at(&self, package: &str, module: &str, name: &str) -> Reach {
+        let mut reach = Reach::default();
+        self.functions_into(package, module, name, 0, &mut reach);
+        reach
+    }
+
+    fn functions_into(
+        &self,
+        package: &str,
+        module: &str,
+        name: &str,
+        depth: usize,
+        reach: &mut Reach,
+    ) {
+        if depth > PATH_STEPS {
+            return;
+        }
+        let declared: Vec<&FnDecl> = self
+            .declarations
+            .functions
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter(|decl| decl.place.0 == package && decl.place.1 == module)
+            .collect();
+        if !declared.is_empty() {
+            let items: Vec<&Callable> = declared
+                .iter()
+                .filter_map(|decl| decl.callable.as_ref())
+                .collect();
+            if items.is_empty() {
+                reach.test_only = true;
+            }
+            reach.items.extend(items.into_iter().cloned());
+            return;
+        }
+        let Some(imports) = self
+            .declarations
+            .imports
+            .get(&(package.to_owned(), module.to_owned()))
+        else {
+            return;
+        };
+        if let Some(path) = imports.names.get(name) {
+            match self.absolute_at(package, module, path, depth + 1) {
+                Some(absolute) => {
+                    if let Some((last, at)) = absolute.split_last() {
+                        self.functions_into(package, &at.join("::"), last, depth + 1, reach);
+                    }
+                }
+                None => reach.outside = true,
+            }
+            return;
+        }
+        for glob in &imports.globs {
+            if let Some(absolute) = self.absolute_at(package, module, glob, depth + 1) {
+                self.functions_into(package, &absolute.join("::"), name, depth + 1, reach);
+            }
         }
     }
 }
+
+/// What a free function's path reaches.
+#[derive(Debug, Default)]
+pub(crate) struct Reach {
+    /// The product items it names.
+    pub(crate) items: BTreeSet<Callable>,
+    /// A `use` item takes the name out of the package.
+    pub(crate) outside: bool,
+    /// It names a declaration only a test build has.
+    pub(crate) test_only: bool,
+}
+
+/// How many `use` steps a path is followed through before the rules stop:
+/// a re-export of a re-export is real, a cycle of globs is not followed.
+const PATH_STEPS: usize = 8;
+
+/// What `Type::function(..)` returns, what closures in each argument
+/// position receive, and the product items a call of it reaches.
+pub(crate) type Associated = (Ty, Vec<Option<Vec<Ty>>>, BTreeSet<Callable>);
 
 pub(crate) fn first_arg(named: &Named) -> Ty {
     named

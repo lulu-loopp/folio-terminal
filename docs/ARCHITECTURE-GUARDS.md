@@ -57,6 +57,29 @@ fix the routing or regenerate with `scripts/generate-ownership-census.ps1` and
 justify each real multi-writer or unknown row; do not edit generated census rows
 as a substitute for changing the code.
 
+## Runtime dependency map
+
+The rule: the measured dependency graph inside `bt-app` that the field moves
+and the topic moves are ordered by (the ownership contract's §3.1, J3 on
+2026-10-11) is a generated artefact of the census family, never hand-kept.
+Four files under `docs/plans/design/runtime-dep-map/` — `fields.tsv` (reads and
+writes by item, per field of the census's structs), `topics.tsv` (file-to-file
+call edges), `doors.tsv` (an outside writer of at most two) and
+`unclassified.tsv` (the free functions and `Runtime` methods still in
+`main.rs`) — are `bt_source::DependencyMap`'s rendering of the census the
+ownership census gate takes; the `README.md` beside them is the route map read
+off them. No script reads Rust for them: `bt-source` is the reader.
+
+Where and what to do: `crates/bt-source/tests/census.rs`
+`the_committed_runtime_dep_map_is_the_code` compares each file with the
+rendering at the tree, line for line but for its `# measured at` line, and
+names a differing row on both sides; `crates/bt-source/tests/dep_map.rs` holds
+the rules on a fixture. When red, regenerate with
+`scripts/generate-runtime-dep-map.ps1` (it runs that test and copies
+`target/depmap/`) and commit the files with the change that moved them; never
+edit a row. A header count that grows (reads not attributed, calls not
+followed) means the map sees less; the change that regenerates it says why.
+
 ## Window-wait registry and effects
 
 The rule: work reachable from the window thread does not block, and every
