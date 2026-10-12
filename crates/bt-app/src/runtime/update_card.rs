@@ -207,7 +207,7 @@ impl Runtime<'_> {
                 if let Some(folder) =
                     update_card::paint_of(&self.app.update_job).and_then(|paint| paint.folder)
                 {
-                    self.reveal_in_explorer(&folder);
+                    self.reveal_in_explorer(&folder)?;
                 }
             }
         }
