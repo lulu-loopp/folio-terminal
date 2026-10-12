@@ -212,8 +212,8 @@ impl TaskbarLane {
     /// **The lane's one admission**: the request's identity minted by the ledger — joined to the
     /// waiting ask, or waiting for the next — or the ledger's refusal, at once. The first request
     /// starts the worker; a thread the door refuses refuses that request at the door
-    /// (`Refused::NotStarted`, said once) and leaves the lane as it was, so the next request starts
-    /// the worker again.
+    /// (`Refused::NotStarted`, said once per streak) and leaves the lane as it was, so the next
+    /// request starts the worker again.
     fn ask(&'static self, now: Instant) -> Result<TaskbarId, Refused> {
         *self
             .last_request

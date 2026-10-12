@@ -174,7 +174,10 @@ pub(crate) enum Saying {
     /// One line per failed request.
     PerRequest,
     /// One line per streak of the same failure: a failure said like the last one said, with no
-    /// answer delivered between them, is not said again.
+    /// answer delivered between them, is not said again. A worker start the thread door refused
+    /// ([`Refused::NotStarted`]) is a streak of its own kind: refused again in the same words, with
+    /// nothing else said between, it is not said again; a delivered failure and a refused start
+    /// never continue each other's streak.
     PerStreak,
 }
 
@@ -417,8 +420,10 @@ where
     /// **Say a worker start the thread door refused** (C3): the refusal is the terminal of the
     /// request that asked for the start, given at the door, and the lane is not in fault. Said like
     /// any failure — once per request, or once per streak where the lane declares
-    /// [`Saying::PerStreak`], so a door that keeps refusing is said once until a start succeeds
-    /// ([`Ledger::started`]). Said after the ledger's lock is let go.
+    /// [`Saying::PerStreak`], so a door that keeps refusing in the same words is said once. A start
+    /// that succeeds is the lane's last: its worker is never started again, and after its end every
+    /// request is refused `Faulted` before any start, so no refused-start streak outlives it to be
+    /// ended. Said after the ledger's lock is let go.
     fn say_not_started(&self, end: &WorkerEnd) {
         let said = end.to_string();
         let line = {
@@ -436,15 +441,6 @@ where
         };
         if let Some(line) = line {
             (self.say)(&line);
-        }
-    }
-
-    /// **A worker start succeeded**: a streak of refused starts ends with it, so a later refusal is
-    /// said again. A streak of delivered failures is not one a start ends.
-    fn started(&self) {
-        let mut book = lock(&self.book);
-        if matches!(book.streak, Some(Streak::NotStarted(_))) {
-            book.streak = None;
         }
     }
 
@@ -745,16 +741,23 @@ pub(crate) struct Waiting<Id, Op> {
     pub(crate) operation: Id,
     pub(crate) newest: Id,
     pub(crate) op: Op,
-    /// How many requests this run represents: the operation and every request joined to it.
-    pub(crate) requests: usize,
+    /// How many of the requests this run stands for — the operation and every request joined to
+    /// it — no [`Coalescing::count_arrivals`] has counted yet.
+    uncounted: usize,
 }
 
-/// What [`Coalescing::ask`] admitted: the request's identity, and how many requests it displaced
-/// — the run that was waiting and every request joined to it, each now ended `Superseded { by }`
-/// this one (`0` when it displaced none).
+/// What [`Coalescing::ask`] admitted: the request's identity.
 pub(crate) struct Admitted<Id> {
     pub(crate) id: Id,
-    pub(crate) displaced: usize,
+}
+
+/// **What [`Coalescing::count_arrivals`] counted**: of the requests made since the count before
+/// it and not taken by the worker as the run it does, how many the run waiting now stands for —
+/// the next run answers them — and how many a newer, different request displaced, each ended
+/// `Superseded { by }`.
+pub(crate) struct Arrivals {
+    pub(crate) waiting: usize,
+    pub(crate) superseded: usize,
 }
 
 /// **A latest-value lane on the seam** (the side-effects contract's C2 and C4, revision (b)4):
@@ -793,6 +796,10 @@ where
     O: Owed<Id>,
 {
     waiting: Option<Waiting<Id, Op>>,
+    /// How many requests a newer, different one has displaced that no
+    /// [`Coalescing::count_arrivals`] has counted yet — kept here, in the lock every admission
+    /// and every take holds, so a displacement is counted whenever it happens.
+    superseded: usize,
     /// Every request the application made and has not taken the terminal of, by identity.
     held: BTreeMap<Id, Request<Id, O>>,
     /// Whether the lane's worker has been started — by the first request whose start the thread
@@ -828,6 +835,7 @@ where
             ledger,
             book: Mutex::new(Standing {
                 waiting: None,
+                superseded: 0,
                 held: BTreeMap::new(),
                 started: false,
             }),
@@ -848,7 +856,8 @@ where
     /// **The lane's worker is started by the first request that finds it not started**, through
     /// `start` — the lane's own `Executor::start_worker` call, handed the ledger as a started
     /// worker reports to it ([`Ran`]) — before anything is minted. A start the thread door refuses
-    /// refuses this request at the door, [`Refused::NotStarted`], said once; the lane is not in
+    /// refuses this request at the door, [`Refused::NotStarted`], said once per streak where the
+    /// lane declares streaks ([`Saying::PerStreak`]); the lane is not in
     /// fault, and the next request starts the worker again (revision (b)5, rule 1: a new request
     /// tries again, and nothing is retried on its own).
     pub(crate) fn ask(
@@ -871,20 +880,19 @@ where
                 self.ledger.say_not_started(&end);
                 return Err(Refused::NotStarted(end.to_string()));
             }
-            self.ledger.started();
             book.started = true;
         }
-        let (request, waiting, displaced) = match book.waiting.take() {
+        let (request, waiting) = match book.waiting.take() {
             Some(waiting) if same(&waiting.op, &op) => {
                 match self.ledger.admit_joined(waiting.operation, owed) {
                     Ok(request) => {
                         let waiting = Waiting {
                             newest: request.id(),
                             op: fold(waiting.op, op),
-                            requests: waiting.requests + 1,
+                            uncounted: waiting.uncounted + 1,
                             ..waiting
                         };
-                        (request, waiting, 0)
+                        (request, waiting)
                     }
                     Err(refused) => {
                         book.waiting = Some(waiting);
@@ -897,14 +905,14 @@ where
                     let by = request.id();
                     self.ledger
                         .publish(waiting.operation, Terminal::Superseded { by });
-                    let displaced = waiting.requests;
+                    book.superseded += waiting.uncounted;
                     let waiting = Waiting {
                         operation: by,
                         newest: by,
                         op: fold(waiting.op, op),
-                        requests: 1,
+                        uncounted: 1,
                     };
-                    (request, waiting, displaced)
+                    (request, waiting)
                 }
                 Err(refused) => {
                     book.waiting = Some(waiting);
@@ -918,9 +926,9 @@ where
                     operation: id,
                     newest: id,
                     op,
-                    requests: 1,
+                    uncounted: 1,
                 };
-                (request, waiting, 0)
+                (request, waiting)
             }
         };
         let id = request.id();
@@ -928,7 +936,7 @@ where
         book.held.insert(id, request);
         drop(book);
         self.asked.notify_one();
-        Ok(Admitted { id, displaced })
+        Ok(Admitted { id })
     }
 
     /// **The worker's: the next run**, waiting on the lane's condition variable until a request
@@ -945,6 +953,24 @@ where
                 .asked
                 .wait(book)
                 .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// **Count the requests made since the count before this one, and not taken as a run** (the
+    /// worker's, when a run ends): those the run waiting now stands for, and those a newer,
+    /// different request displaced — whenever the displacement happened, during the run or before
+    /// the worker took it. Each request is counted once: by the count after it is made, or never
+    /// when the worker takes it as the run it does. One lock; never waits for the worker.
+    pub(crate) fn count_arrivals(&self) -> Arrivals {
+        let mut book = lock(&self.book);
+        let waiting = book
+            .waiting
+            .as_mut()
+            .map_or(0, |waiting| std::mem::take(&mut waiting.uncounted));
+        let superseded = std::mem::take(&mut book.superseded);
+        Arrivals {
+            waiting,
+            superseded,
         }
     }
 

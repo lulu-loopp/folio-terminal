@@ -2084,8 +2084,9 @@ impl FontLane {
     /// **Number a request and see that a walk serves it** — the lane's one
     /// admission, returning at once with the request's identity or the ledger's
     /// refusal. The first request starts the worker; a thread the door refuses
-    /// refuses that request at the door (`Refused::NotStarted`, said once) and
-    /// leaves the lane as it was, so the next request starts the worker again.
+    /// refuses that request at the door (`Refused::NotStarted`, said once per
+    /// streak) and leaves the lane as it was, so the next request starts the
+    /// worker again.
     fn request_walk(&'static self) -> Result<FontId, crate::lane::Refused> {
         self.requests
             .ask(

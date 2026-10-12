@@ -436,9 +436,8 @@ fn ordered<'a>(rows: &'a [Profile], first: &[String]) -> Vec<&'a Profile> {
 /// What the lane counts beside its requests: the panes waiting on a walk, and the walk out.
 #[derive(Default)]
 struct Asks {
-    /// The walk out now: its number, why, and how many requests made while it was out a request
-    /// for a newer table has superseded.
-    out: Option<(u64, Trigger, usize)>,
+    /// The walk out now: its number and why.
+    out: Option<(u64, Trigger)>,
     /// How many panes are in birth, each waiting on a walk's answer ([`PaneWaits`]).
     panes_waiting: usize,
 }
@@ -581,25 +580,23 @@ impl ProgramsLane {
     /// waits for a walk: a lock, a ledger entry and a condition-variable signal or — the first
     /// time — a thread start. Answers the request's number, or the ledger's refusal at the door:
     /// it already owes [`BOUND`], or the worker ran and has ended; or the thread door refused to
-    /// start the worker for this request (`Refused::NotStarted`, said once), which leaves the lane
-    /// as it was, so the next request starts the worker again.
+    /// start the worker for this request (`Refused::NotStarted`, said once per streak), which
+    /// leaves the lane as it was, so the next request starts the worker again.
     pub(crate) fn request(&'static self, request: WalkRequest) -> Result<u64, Refused> {
-        let mut asks = self.lock();
+        let asks = self.lock();
         let urgent = request.trigger.urgent() || asks.panes_waiting > 0;
-        let admitted = self.requests.ask(
-            Walk { request, urgent },
-            ProgramsOwed::owed(),
-            Walk::same,
-            Walk::fold,
-            |ran| {
-                self.executor
-                    .start_worker("program-walk", ran, move |ctx| run_program_walk(ctx, self))
-            },
-        )?;
-        if let Some((_, _, superseded)) = asks.out.as_mut() {
-            *superseded += admitted.displaced;
-        }
-        Ok(admitted.id.0)
+        self.requests
+            .ask(
+                Walk { request, urgent },
+                ProgramsOwed::owed(),
+                Walk::same,
+                Walk::fold,
+                |ran| {
+                    self.executor
+                        .start_worker("program-walk", ran, move |ctx| run_program_walk(ctx, self))
+                },
+            )
+            .map(|admitted| admitted.id.0)
     }
 
     /// **Count a pane in birth until the answer is dropped.** One lock; never waits for the worker.
@@ -699,7 +696,7 @@ fn run_program_walk(ctx: &WorkerCtx, lane: &ProgramsLane) {
             ..
         } = lane.requests.next(ctx);
         let generation = newest.0;
-        lane.lock().out = Some((generation, request.trigger, 0));
+        lane.lock().out = Some((generation, request.trigger));
         // The walk's band is its request's. Off Windows a band is requested, not enforced
         // (RULES 53), and the answer is not consulted.
         let _ = bt_platform::set_current_thread_priority(band(urgent));
@@ -723,18 +720,15 @@ fn run_program_walk(ctx: &WorkerCtx, lane: &ProgramsLane) {
             ))
         });
         let elapsed = started.elapsed();
-        // Every request takes the lane lock across admission. Under that same lock, count the
-        // requests the waiting run stands for — the next walk answers them, its operation `Done`
-        // and the rest `Joined` to it — separately from those a newer table displaced while this
-        // walk was out.
-        let (waiting, superseded) = {
-            let mut asks = lane.lock();
-            let superseded = asks.out.take().map_or(0, |(_, _, superseded)| superseded);
-            let waiting = lane
-                .requests
-                .waiting(|waiting| waiting.map_or(0, |waiting| waiting.requests));
-            (waiting, superseded)
-        };
+        // The requests made since the last walk ended and not walked by this one, counted by the
+        // coalescing under the lock every admission and the worker's take hold: those the waiting
+        // run stands for — the next walk answers them, its operation `Done` and the rest `Joined`
+        // to it — and those a newer table displaced, whenever that happened (S-4 round 4).
+        lane.lock().out = None;
+        let lane::Arrivals {
+            waiting,
+            superseded,
+        } = lane.requests.count_arrivals();
         let terminal = match walked {
             Ok((path_entries, file_questions)) => {
                 if std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty()) {
@@ -768,9 +762,10 @@ fn run_program_walk(ctx: &WorkerCtx, lane: &ProgramsLane) {
     }
 }
 
-/// **The line for requests made while a walk was out** — those the waiting run stands for wait
-/// for the next walk, which answers them (its operation `Done`, the rest `Joined` to it); those
-/// displaced by a different table ended `Superseded` and are not described as answered by it.
+/// **The line for the requests made since the last walk ended that this walk did not answer**
+/// ([`lane::Coalescing::count_arrivals`]) — those the waiting run stands for wait for the next
+/// walk, which answers them (its operation `Done`, the rest `Joined` to it); those displaced by a
+/// different table ended `Superseded` and are not described as answered by it.
 fn arrivals_line(
     generation: u64,
     trigger: Trigger,
@@ -779,8 +774,9 @@ fn arrivals_line(
     superseded: usize,
 ) -> String {
     format!(
-        "program walk {generation} ({}) took {} ms; of the requests made while it was out, \
-         {waiting} wait for the next walk, {superseded} superseded by a newer table",
+        "program walk {generation} ({}) took {} ms; of the requests made since the last walk \
+         ended that this walk did not answer, {waiting} wait for the next walk, \
+         {superseded} superseded by a newer table",
         trigger.name(),
         elapsed.as_millis()
     )
@@ -1564,6 +1560,85 @@ pub(crate) mod tests {
         assert!(
             said[0].contains("1 wait for the next walk, 2 superseded by a newer table"),
             "{said:?}"
+        );
+    }
+
+    /// RED (S-4 round 4) — **A request displaced between two walks is counted in the next walk's
+    /// line.**
+    ///
+    /// The first walk ends with one request waiting behind it and says so. While the worker is
+    /// between that walk's count and its take of the next run (stopped here inside the line's
+    /// saying), a request for a different table displaces the waiting one, and a request for the
+    /// first table again displaces it in turn. Round 3 counted displacements only on the walk out
+    /// (`out`, set after the worker took its run and taken at the walk's end), so the middle
+    /// request — displaced while no walk was out — was in no line, and the next walk said nothing.
+    ///
+    /// MUTATION: the old placement — `Coalescing::next` zeroing the superseded count as it takes
+    /// the run, so only what is displaced after the take is counted — the next walk's line is
+    /// never said.
+    #[test]
+    fn a_request_displaced_between_walks_is_counted_in_the_next_walks_line() {
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let gate = Arc::new(Gate::default());
+        let (noted, notes) = mpsc::channel();
+        let (go, going) = mpsc::channel::<()>();
+        let noted = Mutex::new(noted);
+        let going = Mutex::new(going);
+        let first = AtomicBool::new(true);
+        let note: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |line: &str| {
+            let _ = noted.lock().unwrap().send(line.to_owned());
+            if first.swap(false, Ordering::SeqCst) {
+                crate::lane::receive(&going.lock().unwrap(), "the test's go-ahead");
+            }
+        });
+        let said = Arc::clone(&note);
+        let lane: &'static ProgramsLane = Box::leak(Box::new(ProgramsLane::start_with(
+            Executor::scripted(Arc::clone(&gate)),
+            FakeMachine::with_path(&[bin_dir()]),
+            note,
+            move |line: &str| said(line),
+        )));
+        let (wake, wakes) = wake_channel();
+        lane.install_wake(wake);
+        let one = [row("rg", "rg.exe")];
+        let two = [row("rg", "rg.exe"), row("fd", "fd.exe")];
+        gate.hold();
+        let out = lane
+            .request(request(&one, Trigger::Launch))
+            .expect("admitted");
+        assert!(gate.wait_entered(1), "the walk is out");
+        lane.request(request(&one, Trigger::ProgramMenu))
+            .expect("admitted behind the walk out");
+        gate.release();
+        let line = crate::lane::receive(&notes, "the first walk's line");
+        assert!(
+            line.starts_with(&format!("program walk {out} (launch) took "))
+                && line.contains("1 wait for the next walk, 0 superseded by a newer table"),
+            "{line}"
+        );
+        let displaced = lane
+            .request(request(&two, Trigger::TableChanged))
+            .expect("a different table, displacing the waiting request");
+        let newest = lane
+            .request(request(&one, Trigger::Environment))
+            .expect("the first table again, displacing that one");
+        go.send(()).expect("the worker waits in the line");
+        let ended = ends_through(lane, &wakes, newest);
+        assert!(
+            ended.contains(&(
+                displaced,
+                Terminal::Superseded {
+                    by: ProgramsId(newest)
+                }
+            )),
+            "{ended:?}"
+        );
+        let line = crate::lane::receive(&notes, "the next walk's line");
+        assert!(
+            line.starts_with(&format!("program walk {newest} ("))
+                && line.contains("0 wait for the next walk, 1 superseded by a newer table"),
+            "{line}"
         );
     }
 
