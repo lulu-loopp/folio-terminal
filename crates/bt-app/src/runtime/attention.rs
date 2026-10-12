@@ -241,17 +241,18 @@ impl Runtime<'_> {
     /// **The verb on the card that says where kept edits are**: the folder, handed to the
     /// system's file manager through the window's one reveal. A verb pressed on another card
     /// leaves the offer standing.
-    fn take_recovered_folder(&mut self, card: toast::ToastId) {
+    fn take_recovered_folder(&mut self, card: toast::ToastId) -> Result<()> {
         let Some(raised) = self.window.recovered_card.take() else {
-            return;
+            return Ok(());
         };
         match raised.press(toast::ToastHit::Action(card)) {
             Some(folder) => {
                 let folder = folder.to_path_buf();
-                self.reveal_in_explorer(&folder);
+                self.reveal_in_explorer(&folder)?;
             }
             None => self.window.recovered_card = Some(raised),
         }
+        Ok(())
     }
 
     /// Which card, which `×` and which verb the pointer is on, for the reveal
@@ -370,7 +371,7 @@ impl Runtime<'_> {
             self.take_profile_undo(id)?;
             self.take_powershell_profile_undo(id);
             self.take_checkout_undo(id)?;
-            self.take_recovered_folder(id);
+            self.take_recovered_folder(id)?;
             self.take_quit_choice(id);
             if self
                 .window

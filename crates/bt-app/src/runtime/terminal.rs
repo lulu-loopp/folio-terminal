@@ -1661,7 +1661,7 @@ impl Runtime<'_> {
             match activation {
                 LocalImageActivation::None => {}
                 LocalImageActivation::Preview(path) => self.open_preview_image(path)?,
-                LocalImageActivation::External(path) => self.activate_local_image_path(&path),
+                LocalImageActivation::External(path) => self.activate_local_image_path(&path)?,
             }
         }
         Ok(())

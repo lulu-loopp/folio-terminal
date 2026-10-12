@@ -2083,11 +2083,11 @@ impl Runtime<'_> {
                 self.locate_folder_in_files_column(&folder, Some(&file))?;
             }
             PeekFootPress::Reveal(path) => {
-                self.reveal_in_explorer(&path);
+                self.reveal_in_explorer(&path)?;
             }
             PeekFootPress::RevealVerified(seat, path) => {
                 let facts = self.verified_target(seat, &path);
-                self.reveal_verified(&path, facts);
+                self.reveal_verified(&path, facts)?;
             }
         }
         self.apply_pointer_cursor();
