@@ -202,14 +202,14 @@ impl Runtime<'_> {
     /// taken down first: the newest cancellation is the one its choice is about.
     pub(crate) fn raise_cancelled_quit_card(&mut self, cancelled: quit::Cancelled) -> Result<()> {
         let now = Instant::now();
-        if let Some(earlier) = self.window.quit_card.take() {
+        if let Some(earlier) = self.swap_quit_card(None) {
             self.window
                 .toasts
                 .dismiss(earlier.card, now, self.app.motion);
         }
         let card =
             raise_cancelled_quit_card_on(&mut self.window.toasts, &cancelled, self.app.motion, now);
-        self.window.quit_card = Some(quit::Raised { card, cancelled });
+        self.swap_quit_card(Some(quit::Raised { card, cancelled }));
         if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -220,13 +220,22 @@ impl Runtime<'_> {
     /// for the quit again, carrying the documents the card named. A verb pressed on another
     /// card leaves the offer standing; the card's `×` is not a choice and never reaches here.
     fn take_quit_choice(&mut self, card: toast::ToastId) {
-        let Some(raised) = self.window.quit_card.take() else {
+        let Some(raised) = self.swap_quit_card(None) else {
             return;
         };
         match raised.press(toast::ToastHit::Action(card)) {
             Some(chosen) => self.app.leave_without(chosen),
-            None => self.window.quit_card = Some(raised),
+            None => {
+                self.swap_quit_card(Some(raised));
+            }
         }
+    }
+
+    /// **The one writer of this window's `quit_card`**: put `next` there and answer what
+    /// was — the card raised ([`Self::raise_cancelled_quit_card`]) and the card its verb
+    /// spends ([`Self::take_quit_choice`]).
+    fn swap_quit_card(&mut self, next: Option<quit::Raised>) -> Option<quit::Raised> {
+        std::mem::replace(&mut self.window.quit_card, next)
     }
 
     /// **The verb on the card that says where kept edits are**: the folder, handed to the

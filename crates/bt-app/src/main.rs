@@ -54374,8 +54374,15 @@ impl App {
             return;
         }
         self.quit_reason = cancelled.resumed_reason();
-        self.leave_without = Some(cancelled);
+        self.swap_leave_without(Some(cancelled));
         self.ask_to_quit();
+    }
+
+    /// **The one writer of [`Self::leave_without`]**: put `next` there and answer what
+    /// was. The card's choice puts its cancellation ([`Self::leave_without`]); the quit
+    /// that choice asks for takes it when it begins ([`FolioApp::begin_quit_if_asked`]).
+    fn swap_leave_without(&mut self, next: Option<quit::Cancelled>) -> Option<quit::Cancelled> {
+        std::mem::replace(&mut self.leave_without, next)
     }
 
     /// **The four hand-editable documents' stores, as a quit and a stop ask them**
@@ -66822,7 +66829,7 @@ impl FolioApp {
         // **Only the card's choice leaves without a change** (revision (d)2): the documents
         // it named are dropped for this run, each named in `diagnostics.log` before the way
         // out; a quit asked any other way drops nothing and runs the transaction again.
-        let dropped = quit::dropped_on_begin(app.leave_without.take());
+        let dropped = quit::dropped_on_begin(app.swap_leave_without(None));
         if !dropped.is_empty() {
             for line in app.with_documents(|documents| quit::drop_documents(documents, &dropped)) {
                 diagnostics::note(&line);
