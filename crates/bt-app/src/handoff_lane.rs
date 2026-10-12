@@ -276,6 +276,11 @@ impl HandoffLane {
                 Refused::Full { .. } => Declined::LaneFull,
                 Refused::Faulted(_) => Declined::LaneGone,
                 Refused::TwinEnded => unreachable!("the hand-off lane joins nothing"),
+                Refused::NotStarted(_) => {
+                    unreachable!(
+                        "the hand-off lane's worker is started with the lane, not by a press"
+                    )
+                }
             })?;
         // A worker that has ended and not yet told the ledger has dropped the queue's receiving
         // end; its end is on its way to the ledger, which ends this request `WorkerGone` with the

@@ -563,8 +563,11 @@ impl ItemRecord {
 /// is `cfg`-blind and every arm is in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImplRecord {
+    /// One per owning declaration path of the file, as [`ItemRecord`]'s.
+    pub(crate) declared: Vec<DeclarationPath>,
     pub(crate) type_owner: String,
     pub(crate) trait_name: Option<String>,
+    pub(crate) trait_path: Option<Vec<String>>,
     pub(crate) variant: ConditionalVariant,
     pub(crate) whole: Span,
     pub(crate) body: Span,
@@ -587,6 +590,25 @@ impl ImplRecord {
         self.trait_name.as_deref()
     }
 
+    /// The trait's path as the block writes it, segment by segment and without
+    /// arguments — `crate::update_job::Driver` is `["crate", "update_job",
+    /// "Driver"]`, `Owed<Id>` is `["Owed"]` — or `None` for an inherent block.
+    /// It is the path a [`crate::TraitResolver`] resolves in the block's module.
+    #[must_use]
+    pub fn trait_path(&self) -> Option<&[String]> {
+        self.trait_path.as_deref()
+    }
+
+    /// The module paths the block is written in, one per declaration path that
+    /// reaches its file (inline ancestry included), as [`ItemRecord::module_paths`].
+    #[must_use]
+    pub fn module_paths(&self) -> Vec<&str> {
+        self.declared
+            .iter()
+            .map(|path| path.module_path.as_str())
+            .collect()
+    }
+
     /// The arm the block stands on, as it is written in its file.
     #[must_use]
     pub const fn variant(&self) -> &ConditionalVariant {
@@ -605,6 +627,118 @@ impl ImplRecord {
     #[must_use]
     pub const fn body(&self) -> Span {
         self.body
+    }
+}
+
+/// **One `trait` declaration**, and the bytes it is written in.
+///
+/// A trait declares a name, but no [`ItemKind`] stands for it: its methods are
+/// [`ItemRecord`]s (`type_owner` `None`, `trait_name` the trait's), and this is
+/// the declaration they are written in — its module, its name, the supertraits
+/// it names, and its arm. Two traits of one name in two modules are two records
+/// and two identities ([`crate::TraitId`]); one trait written on two exclusive
+/// arms is two records of one identity, as the eleven conditional callables are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TraitRecord {
+    pub(crate) declared: Vec<DeclarationPath>,
+    pub(crate) name: String,
+    /// Each supertrait's path, without arguments: the bounds written after the
+    /// name and those its `where` clause puts on `Self`; a relaxed `?Sized` is
+    /// none.
+    pub(crate) supertraits: Vec<Vec<String>>,
+    pub(crate) variant: ConditionalVariant,
+    pub(crate) whole: Span,
+    pub(crate) body: Span,
+}
+
+impl TraitRecord {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The module paths the trait is declared in, one per declaration path that
+    /// reaches its file (inline ancestry included).
+    #[must_use]
+    pub fn module_paths(&self) -> Vec<&str> {
+        self.declared
+            .iter()
+            .map(|path| path.module_path.as_str())
+            .collect()
+    }
+
+    /// The supertraits' paths as the declaration writes them, each without
+    /// arguments, to be resolved in the trait's own module.
+    #[must_use]
+    pub fn supertraits(&self) -> &[Vec<String>] {
+        &self.supertraits
+    }
+
+    /// The arm the declaration stands on, as it is written in its file.
+    #[must_use]
+    pub const fn variant(&self) -> &ConditionalVariant {
+        &self.variant
+    }
+
+    /// The whole declaration: its attributes, the `trait` keyword, its header and
+    /// its braces.
+    #[must_use]
+    pub const fn whole(&self) -> Span {
+        self.whole
+    }
+
+    /// The braces and everything between them: where its methods are written.
+    #[must_use]
+    pub const fn body(&self) -> Span {
+        self.body
+    }
+}
+
+/// **One `use` item written directly in a module** (not one inside a function
+/// body, which brings a name into that body alone), flattened: each name it
+/// brings in with the path it was written as, and each glob's path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UseRecord {
+    pub(crate) declared: Vec<DeclarationPath>,
+    pub(crate) names: Vec<(String, Vec<String>)>,
+    pub(crate) globs: Vec<Vec<String>>,
+    pub(crate) variant: ConditionalVariant,
+    pub(crate) whole: Span,
+}
+
+impl UseRecord {
+    /// The module paths the item is written in, one per declaration path that
+    /// reaches its file (inline ancestry included).
+    #[must_use]
+    pub fn module_paths(&self) -> Vec<&str> {
+        self.declared
+            .iter()
+            .map(|path| path.module_path.as_str())
+            .collect()
+    }
+
+    /// Each name the item brings in, with the path it names: `use a::b::{c, d
+    /// as e, self}` brings `c` (`a::b::c`), `e` (`a::b::d`) and `b` (`a::b`).
+    #[must_use]
+    pub fn names(&self) -> &[(String, Vec<String>)] {
+        &self.names
+    }
+
+    /// Each glob's path: `use a::b::*` opens `a::b`.
+    #[must_use]
+    pub fn globs(&self) -> &[Vec<String>] {
+        &self.globs
+    }
+
+    /// The arm the item stands on, as it is written in its file.
+    #[must_use]
+    pub const fn variant(&self) -> &ConditionalVariant {
+        &self.variant
+    }
+
+    #[must_use]
+    pub const fn whole(&self) -> Span {
+        self.whole
     }
 }
 
@@ -906,6 +1040,8 @@ pub struct Index {
     pub(crate) by_path: BTreeMap<PathBuf, usize>,
     pub(crate) items: Vec<ItemRecord>,
     pub(crate) impls: Vec<ImplRecord>,
+    pub(crate) traits: Vec<TraitRecord>,
+    pub(crate) uses: Vec<UseRecord>,
     pub(crate) modules: Vec<ModuleRecord>,
     pub(crate) tokens: Vec<TokenRecord>,
     pub(crate) literals: Vec<LiteralRecord>,
@@ -926,6 +1062,8 @@ impl fmt::Debug for Index {
             .field("files", &self.files.len())
             .field("items", &self.items.len())
             .field("impls", &self.impls.len())
+            .field("traits", &self.traits.len())
+            .field("uses", &self.uses.len())
             .field("tokens", &self.tokens.len())
             .field("literals", &self.literals.len())
             .field("comments", &self.comments.len())
@@ -1011,6 +1149,18 @@ impl Index {
     #[must_use]
     pub fn impls(&self) -> &[ImplRecord] {
         &self.impls
+    }
+
+    /// Every `trait` declaration reached, in union order.
+    #[must_use]
+    pub fn traits(&self) -> &[TraitRecord] {
+        &self.traits
+    }
+
+    /// Every module-level `use` item reached, in union order.
+    #[must_use]
+    pub fn uses(&self) -> &[UseRecord] {
+        &self.uses
     }
 
     /// Every identifier-view token, in union order.
@@ -1159,15 +1309,36 @@ impl Index {
         }
         total += self.impls.capacity() * size_of::<ImplRecord>();
         for block in &self.impls {
+            total += declared_bytes(&block.declared);
             total += block.type_owner.capacity();
             total += block.trait_name.as_ref().map_or(0, String::capacity);
-            total += block.variant.predicates.capacity() * size_of::<String>();
-            total += block
-                .variant
-                .predicates
+            total += block.trait_path.as_ref().map_or(0, path_bytes);
+            total += predicate_bytes(&block.variant);
+        }
+        total += self.traits.capacity() * size_of::<TraitRecord>();
+        for declaration in &self.traits {
+            total += declared_bytes(&declaration.declared);
+            total += declaration.name.capacity();
+            total += declaration.supertraits.capacity() * size_of::<Vec<String>>();
+            total += declaration
+                .supertraits
                 .iter()
-                .map(String::capacity)
+                .map(path_bytes)
                 .sum::<usize>();
+            total += predicate_bytes(&declaration.variant);
+        }
+        total += self.uses.capacity() * size_of::<UseRecord>();
+        for used in &self.uses {
+            total += declared_bytes(&used.declared);
+            total += used.names.capacity() * size_of::<(String, Vec<String>)>();
+            total += used
+                .names
+                .iter()
+                .map(|(name, path)| name.capacity() + path_bytes(path))
+                .sum::<usize>();
+            total += used.globs.capacity() * size_of::<Vec<String>>();
+            total += used.globs.iter().map(path_bytes).sum::<usize>();
+            total += predicate_bytes(&used.variant);
         }
         total += self.modules.capacity() * size_of::<ModuleRecord>();
         for module in &self.modules {
@@ -1275,4 +1446,32 @@ impl Index {
     pub fn of_package(package: &str) -> &'static Self {
         crate::cache::of_package(package)
     }
+}
+
+/// The bytes a record's declaration paths own.
+fn declared_bytes(declared: &Vec<DeclarationPath>) -> usize {
+    declared.capacity() * size_of::<DeclarationPath>()
+        + declared
+            .iter()
+            .map(|path| {
+                path.module_path.capacity()
+                    + path.predicates.capacity() * size_of::<String>()
+                    + path.predicates.iter().map(String::capacity).sum::<usize>()
+            })
+            .sum::<usize>()
+}
+
+/// The bytes a path's segments own.
+fn path_bytes(path: &Vec<String>) -> usize {
+    path.capacity() * size_of::<String>() + path.iter().map(String::capacity).sum::<usize>()
+}
+
+/// The bytes a variant's predicate spellings own.
+fn predicate_bytes(variant: &ConditionalVariant) -> usize {
+    variant.predicates.capacity() * size_of::<String>()
+        + variant
+            .predicates
+            .iter()
+            .map(String::capacity)
+            .sum::<usize>()
 }
