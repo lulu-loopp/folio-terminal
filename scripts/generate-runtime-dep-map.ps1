@@ -3,7 +3,7 @@
 #
 # The query is not in this file. It is bt_source::DependencyMap, taken from
 # bt_source::FieldCensus, and the test `the_committed_runtime_dep_map_is_the_code`
-# in bt-source's `dep_map` test target runs it over bt-app, compares it with
+# in bt-source's `census` test target runs it over bt-app, compares it with
 # the committed files, and leaves its four renderings in target/depmap/. A copy
 # written in PowerShell would have to parse Rust, and a script that reads Rust
 # source is what the tripwire refuses: bt-source is the one sanctioned reader.
@@ -34,7 +34,7 @@ foreach ($name in $names) {
 
 Push-Location $repo
 try {
-    & cargo test -p bt-source --locked --test dep_map -- --exact `
+    & cargo test -p bt-source --locked --test census -- --exact `
         the_committed_runtime_dep_map_is_the_code | Out-Host
     $commit = (& git rev-parse --short=8 HEAD).Trim()
     $dirty = [bool](& git status --porcelain --untracked-files=no)
