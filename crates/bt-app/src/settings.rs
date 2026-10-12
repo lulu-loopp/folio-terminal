@@ -17827,9 +17827,13 @@ mod tests {
         let gate = std::sync::Arc::new(crate::lane::Gate::default());
         let (lane, wakes, _) = font_lane(&gate, |_| Ok((vec![family("Consolas")], Vec::new())));
         gate.hold();
-        let first = lane.request_walk().expect("the first ask starts the worker");
+        let first = lane
+            .request_walk()
+            .expect("the first ask starts the worker");
         assert!(gate.wait_entered(1), "and its walk");
-        let second = lane.request_walk().expect("the second waits for the next walk");
+        let second = lane
+            .request_walk()
+            .expect("the second waits for the next walk");
         let third = lane.request_walk().expect("and so does the third");
         gate.release();
         let ended = terminals_through(lane, &wakes, third);
