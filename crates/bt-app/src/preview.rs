@@ -5091,6 +5091,11 @@ impl PreviewBuffer {
         &self.source
     }
 
+    /// **This buffer's name, as a view may hold it** — see [`Held`].
+    pub fn held(&self) -> Held {
+        Held(self.source.clone())
+    }
+
     /// What the header and the switcher call it.
     pub fn name(&self) -> &str {
         &self.name
@@ -6346,6 +6351,24 @@ pub enum ReadLanded {
     Kept { said: bool },
 }
 
+/// **A source some buffer answers to** — the only name a pane's document view
+/// can be built from (the ownership contract's §2.2 invariant 2: a view without
+/// a document is impossible).
+///
+/// Minted in this module and nowhere else: by [`PreviewBuffer::held`], from a
+/// buffer in hand, and by [`PreviewPool::held`], which asks the pool. So a
+/// view is put on a source only where its buffer was found, and the pool's
+/// eviction law, which never evicts a buffer a pane is reading, keeps it there.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Held(PreviewSource);
+
+impl Held {
+    /// The source the buffer answers to.
+    pub fn into_source(self) -> PreviewSource {
+        self.0
+    }
+}
+
 /// One tab's shared pool of live buffers.
 ///
 /// A `Vec` and not a map, because the order *is* the history the filename
@@ -6366,6 +6389,13 @@ impl PreviewPool {
 
     pub fn get(&self, source: &PreviewSource) -> Option<&PreviewBuffer> {
         self.buffers.iter().find(|buffer| &buffer.source == source)
+    }
+
+    /// **The name a view may stand on**, if this pool holds that buffer — and
+    /// nothing when it does not, which is what makes a document view on a
+    /// source the pool has never heard of unbuildable.
+    pub fn held(&self, source: &PreviewSource) -> Option<Held> {
+        self.get(source).map(PreviewBuffer::held)
     }
 
     pub fn get_mut(&mut self, source: &PreviewSource) -> Option<&mut PreviewBuffer> {
@@ -6467,7 +6497,7 @@ impl PreviewPool {
     ///
     /// Panes need no redirecting afterwards, and that falls out of the port
     /// rather than being arranged: a surface names its buffer **by source**
-    /// ([`crate::PreviewPane::buffer`] is a [`PreviewSource`]), so "one buffer
+    /// ([`crate::PreviewPane::source`] is a [`PreviewSource`]), so "one buffer
     /// per file" and "every pane showing the loser now reads the winner" are the
     /// same sentence here. The mock-up needed a redirect pass because its panes
     /// held object references.

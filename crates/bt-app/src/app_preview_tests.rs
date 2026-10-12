@@ -83,8 +83,10 @@ fn the_content_section_writes_a_file_exactly_as_it_always_did() {
         .expect("a preview lands");
     let focused = seats.identity();
     let mut panes = PreviewPanes::default();
-    panes.entry(seat_of(TAB_ONE, seat)).buffer =
-        Some(preview::PreviewSource::file(r"D:\notes\README.md"));
+    panes.entry(seat_of(TAB_ONE, seat)).show_source(
+        pool.held(&preview::PreviewSource::file(r"D:\notes\README.md"))
+            .expect("the pool holds the file the pane is on"),
+    );
     let (layout, overflow) = cross_solve(&seats);
     let tab = assemble_tab_state(
         TabId(1),
@@ -1653,8 +1655,10 @@ fn a_picture_torn_off_into_a_window_still_takes_delivery_of_its_resample() {
     let float = 3_u64;
     let target: PeekThumbnailTarget = ("push-pin".to_owned(), 320, 180);
     let mut panes = PreviewPanes::default();
-    panes.entry(seat_of(TAB_ONE, seat)).image =
-        Some(pending_picture("push-pin.png", target.clone()));
+    crate::test_support::show_picture_state(
+        panes.entry(seat_of(TAB_ONE, seat)),
+        pending_picture("push-pin.png", target.clone()),
+    );
 
     assert_eq!(
         panes.awaiting_scale(&target),
@@ -1686,8 +1690,7 @@ fn a_picture_torn_off_into_a_window_still_takes_delivery_of_its_resample() {
     let surface = panes.awaiting_scale(&target).expect("an asker");
     let picture = panes
         .entry(surface)
-        .image
-        .as_mut()
+        .image_mut()
         .expect("the picture that asked");
     assert!(
         picture.accept_scaled(bt_term::scale_inline_image(
@@ -1717,7 +1720,10 @@ fn an_in_flight_resample_cannot_outlive_the_surface_that_asked_for_it() {
     let seat = seat_of(TAB_ONE, SeatId(9));
     let target: PeekThumbnailTarget = ("push-pin".to_owned(), 64, 64);
     let mut panes = PreviewPanes::default();
-    panes.entry(seat).image = Some(pending_picture("push-pin.png", target.clone()));
+    crate::test_support::show_picture_state(
+        panes.entry(seat),
+        pending_picture("push-pin.png", target.clone()),
+    );
     assert_eq!(panes.awaiting_scale(&target), Some(seat));
 
     panes.remove(seat);
@@ -1728,8 +1734,11 @@ fn an_in_flight_resample_cannot_outlive_the_surface_that_asked_for_it() {
     );
 
     // And the same when the surface stays but stops showing a picture.
-    panes.entry(seat).image = Some(pending_picture("push-pin.png", target.clone()));
-    panes.entry(seat).image = None;
+    crate::test_support::show_picture_state(
+        panes.entry(seat),
+        pending_picture("push-pin.png", target.clone()),
+    );
+    panes.entry(seat).take_picture_down();
     assert_eq!(
         panes.awaiting_scale(&target),
         None,
@@ -2566,22 +2575,25 @@ fn the_glance_card_mirrors_at_fit_and_cannot_be_zoomed() {
 fn two_surfaces_of_one_buffer_hold_their_own_zoom() {
     let mut panes = PreviewPanes::default();
     let (left, right) = (seat_of(TAB_ONE, SeatId(4)), seat_of(TAB_ONE, SeatId(5)));
-    panes.entry(left).zoom = ImageZoom {
+    for surface in [left, right] {
+        panes.entry(surface).show_picture(PathBuf::from("shot.png"));
+    }
+    panes.entry(left).zoom_to(ImageZoom {
         mode: ImageZoomMode::Scale(2.5),
         pan: [30.0, -12.0],
-    };
+    });
     assert_eq!(
-        panes.entry(right).zoom,
+        panes.entry(right).zoom(),
         ImageZoom::FIT,
         "the zoom is the surface's, exactly as the scroll is (ruling 8⑧)"
     );
     assert_eq!(
-        panes.get(left).map(|pane| pane.zoom.mode),
+        panes.get(left).map(|pane| pane.zoom().mode),
         Some(ImageZoomMode::Scale(2.5)),
         "and the one that was set kept it"
     );
     assert_eq!(
-        PreviewPane::default().zoom,
+        PreviewPane::default().zoom(),
         ImageZoom::FIT,
         "a surface that has never been looked at is looking at Fit"
     );
@@ -3422,20 +3434,22 @@ fn a_decode_that_lands_for_a_picture_the_page_holds_owes_it_no_reflow() {
 
 /// One surface holding a markdown page whose pictures are these.
 fn a_page_holding(pictures: DocumentPictures) -> PreviewPane {
-    PreviewPane {
-        doc: PreviewDocument::Markdown {
-            blocks: Vec::new(),
-            ranges: Vec::new(),
-            maps: Vec::new(),
-            source: SourceBlocks::default(),
-            intrinsic: Vec::new(),
-            layout: preview_viewport::Layout::default(),
-            math: DocumentMath::default(),
-            pictures,
-            wrap: Arc::default(),
-        },
-        ..PreviewPane::default()
-    }
+    let mut pane = PreviewPane::default();
+    pane.show_source(crate::test_support::held_alone(
+        preview::PreviewSource::file("page.md"),
+    ));
+    pane.reflow_document(PreviewDocument::Markdown {
+        blocks: Vec::new(),
+        ranges: Vec::new(),
+        maps: Vec::new(),
+        source: SourceBlocks::default(),
+        intrinsic: Vec::new(),
+        layout: preview_viewport::Layout::default(),
+        math: DocumentMath::default(),
+        pictures,
+        wrap: Arc::default(),
+    });
+    pane
 }
 
 /// RED — **a decode that changes no intrinsic re-flows nothing** (adversarial
@@ -3612,11 +3626,9 @@ fn a_watched_file_moving_clears_the_glance_cards_standing_answer() {
         .insert("shots/one.png".to_owned(), MarkdownPicture::Loading);
     let mut card = a_page_holding(pictures);
     // And a picture pane in a tab, standing on the same file.
-    let mut pane = PreviewPane {
-        image: Some(PreviewImageState::new(file.clone())),
-        ..PreviewPane::default()
-    };
-    if let Some(picture) = pane.image.as_mut() {
+    let mut pane = PreviewPane::default();
+    pane.show_picture(file.clone());
+    if let Some(picture) = pane.image_mut() {
         picture.raster = Some(a_held_raster("content-a", (500, 375)));
         picture.native = Some((1024, 768));
     }
@@ -3627,14 +3639,14 @@ fn a_watched_file_moving_clears_the_glance_cards_standing_answer() {
         &file,
     );
 
-    let PreviewDocument::Markdown { pictures, .. } = &card.doc else {
+    let PreviewDocument::Markdown { pictures, .. } = card.doc() else {
         panic!("the card is still holding a page");
     };
     assert!(
         pictures.files.is_empty() && pictures.by_source.is_empty(),
         "the card kept what it was told about a file that has moved: {pictures:?}"
     );
-    let picture = pane.image.as_ref().expect("the pane still shows the file");
+    let picture = pane.image().expect("the pane still shows the file");
     assert!(
         picture.raster.is_none() && picture.native.is_none(),
         "and so did the pane, which would go on drawing the old picture and \
@@ -5486,14 +5498,13 @@ fn the_window_holds_the_span_a_gesture_starts_on_and_frees_it_on_a_blur() {
     );
     let standing = squeezed_body("Runtime", "standing_source_span");
     assert!(
-        standing.contains("preview_live::selection_span(")
-            && standing.contains("pane.md_select.as_ref()"),
+        standing.contains("preview_live::selection_span(") && standing.contains("pane.md_select()"),
         "with the page's rendered selection, mapped back to the file",
     );
     let keeps = squeezed_body("Runtime", "preview_press_keeps_the_span");
     assert!(
         keeps.contains("preview_press::keeps_the_span(")
-            && keeps.contains("pane.doc_key.as_ref().and_then(|key|key.source.as_ref())"),
+            && keeps.contains("pane.doc_key().and_then(|key|key.source.as_ref())"),
         "the press asks about the span on the glass",
     );
     let dispatch =
@@ -5528,7 +5539,7 @@ fn the_window_holds_the_span_a_gesture_starts_on_and_frees_it_on_a_blur() {
 fn the_source_blocks_band_is_wired_through_one_function_in_both_faces() {
     let paint = squeezed_body("Runtime", "preview_markdown_caret");
     assert!(
-        paint.contains("band:preview_live::source_band(caret.range(),pane.md_select.as_ref(),")
+        paint.contains("band:preview_live::source_band(caret.range(),pane.md_select(),")
             && paint.contains(".and_then(|drag|drag.reached)"),
         "the caret's paint asks source_band with md_select and the drag's reach",
     );
@@ -6092,21 +6103,26 @@ fn two_surfaces_on_one_markdown_buffer_flip_independently() {
     let source = preview::PreviewSource::file(r"C:\w\notes.md");
     let pane = seat_of(TAB_ONE, SeatId(1));
     let float = PreviewSurface::Float(7);
-    for surface in [pane, float] {
-        panes.entry(surface).buffer = Some(source.clone());
-    }
     let mut pool = preview::PreviewPool::default();
     pool.insert(text_buffer("notes.md", "# Title\n\nbody\n"));
+    for surface in [pane, float] {
+        panes
+            .entry(surface)
+            .show_source(pool.held(&source).expect("the one buffer"));
+    }
 
     // Both start on the render, which is what never having been flipped is.
-    assert!(!panes.entry(pane).md_source);
-    assert!(!panes.entry(float).md_source);
+    assert!(!panes.entry(pane).md_source());
+    assert!(!panes.entry(float).md_source());
 
     // The pane is turned over. The float is not.
-    panes.entry(pane).md_source = true;
-    assert!(panes.entry(pane).md_source, "the surface that was flipped");
+    panes.entry(pane).show_face(true);
     assert!(
-        !panes.entry(float).md_source,
+        panes.entry(pane).md_source(),
+        "the surface that was flipped"
+    );
+    assert!(
+        !panes.entry(float).md_source(),
         "and only that one — a float reading the page keeps reading the page"
     );
 
@@ -6114,8 +6130,8 @@ fn two_surfaces_on_one_markdown_buffer_flip_independently() {
     let buffer = pool.get(&source).expect("the one buffer");
     assert_eq!(
         (
-            buffer.view(panes.entry(pane).md_source),
-            buffer.view(panes.entry(float).md_source)
+            buffer.view(panes.entry(pane).md_source()),
+            buffer.view(panes.entry(float).md_source())
         ),
         (preview::PreviewView::Text, preview::PreviewView::Markdown),
         "one file, two faces, at the same instant"
@@ -6405,7 +6421,7 @@ fn a_preview_seat_is_found_in_the_tab_that_owns_it() {
         let index = preview_tab_index_among(&tabs, leaf.tab)?;
         let tab = &tabs[index];
         tab.preview_pool
-            .get(tab.preview_panes.get(surface)?.buffer.as_ref()?)
+            .get(tab.preview_panes.get(surface)?.source()?)
             .map(|buffer| buffer.name().to_owned())
     };
     assert_eq!(read(here).as_deref(), Some("todo.txt"));
@@ -6565,7 +6581,7 @@ fn an_animation_crosses_a_tab_boundary_because_it_is_keyed_by_its_file() {
         origin
             .preview_panes
             .get(seat_of(TabId(1), moved.landed))
-            .and_then(|pane| pane.image.as_ref())
+            .and_then(|pane| pane.image())
             .map(|picture| picture.path.as_path()),
         Some(Path::new(r"D:\shots\folio-anim-test.gif")),
         "and the surface the animation is asked about names the same file, \
@@ -6589,10 +6605,17 @@ fn a_seat_and_a_float_that_share_a_number_are_still_two_surfaces() {
     let float = PreviewSurface::Float(1);
     assert_ne!(seat, float);
     let mut panes = PreviewPanes::default();
-    panes.entry(seat).scroll = [0.0, 10.0];
-    panes.entry(float).scroll = [0.0, 20.0];
-    assert_eq!(panes.get(seat).expect("a view").scroll, [0.0, 10.0]);
-    assert_eq!(panes.get(float).expect("a view").scroll, [0.0, 20.0]);
+    for surface in [seat, float] {
+        panes
+            .entry(surface)
+            .show_source(crate::test_support::held_alone(
+                preview::PreviewSource::file("notes.md"),
+            ));
+    }
+    panes.entry(seat).scroll_to([0.0, 10.0]);
+    panes.entry(float).scroll_to([0.0, 20.0]);
+    assert_eq!(panes.get(seat).expect("a view").scroll(), [0.0, 10.0]);
+    assert_eq!(panes.get(float).expect("a view").scroll(), [0.0, 20.0]);
 }
 
 /// **A fence is highlighted by its info string, and only by it** (#49).
@@ -7128,9 +7151,10 @@ fn a_seat_that_changes_content_drops_its_video() {
 
     // A pane playing the recording, filled the way `open_preview_image_on`
     // fills it.
-    let playing = |path: &std::path::Path| PreviewPane {
-        image: Some(PreviewImageState::new(path.to_path_buf())),
-        ..PreviewPane::default()
+    let playing = |path: &std::path::Path| {
+        let mut pane = PreviewPane::default();
+        pane.show_picture(path.to_path_buf());
+        pane
     };
     let pane = playing(&recording);
     assert_eq!(
@@ -7144,21 +7168,21 @@ fn a_seat_that_changes_content_drops_its_video() {
     //
     // A document, landed the way `land_preview_source_on` lands one: the
     // picture is cleared and a buffer takes its place.
-    let after_a_document = PreviewPane {
-        buffer: Some(preview::PreviewSource::file(document.clone())),
-        ..PreviewPane::default()
-    };
+    let mut after_a_document = PreviewPane::default();
+    after_a_document.show_source(crate::test_support::held_alone(
+        preview::PreviewSource::file(document.clone()),
+    ));
     // Another picture and another recording both come down the picture
     // lane, which is the one case the old reading did catch.
     let after_a_picture = playing(&picture);
     let after_another = playing(&another);
     // A commit graph: content with no path of its own.
-    let after_a_graph = PreviewPane {
-        buffer: Some(preview::PreviewSource::GitGraph {
+    let mut after_a_graph = PreviewPane::default();
+    after_a_graph.show_source(crate::test_support::held_alone(
+        preview::PreviewSource::GitGraph {
             root: assets.clone(),
-        }),
-        ..PreviewPane::default()
-    };
+        },
+    ));
     for (what, pane, page) in [
         ("a markdown document", &after_a_document, false),
         ("another picture", &after_a_picture, false),

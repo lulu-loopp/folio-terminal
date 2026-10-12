@@ -176,15 +176,15 @@ impl Runtime<'_> {
         let MarkdownCaretSeat::Gap { after, line_height } = caret.seat else {
             return None;
         };
-        let offset = self.preview_pane(surface)?.caret.caret;
+        let offset = self.preview_pane(surface)?.caret().caret;
         let body = self.preview_surface_body_rect(surface, scale)?;
         let metrics = seats::preview_markdown_metrics(scale);
         let (left, right) = preview::markdown_measure_box(body, metrics);
         let pane = self.preview_pane(surface)?;
-        let PreviewDocument::Markdown { layout, .. } = &pane.doc else {
+        let PreviewDocument::Markdown { layout, .. } = pane.doc() else {
             return None;
         };
-        let top = body[1] + metrics.padding_y - pane.scroll[1]
+        let top = body[1] + metrics.padding_y - pane.scroll()[1]
             + after
                 .and_then(|index| layout.get(index))
                 .map_or(0.0, |placed| placed.top + placed.height);

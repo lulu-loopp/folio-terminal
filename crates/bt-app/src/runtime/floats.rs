@@ -315,10 +315,7 @@ impl Runtime<'_> {
             .into_iter()
             .filter_map(|seat| {
                 let surface = self.preview_here(seat);
-                let title = match self
-                    .preview_pane(surface)
-                    .and_then(|pane| pane.image.as_ref())
-                {
+                let title = match self.preview_pane(surface).and_then(|pane| pane.image()) {
                     Some(image) => image.title(),
                     None => self.preview_buffer_on(surface)?.name().to_owned(),
                 };
@@ -474,8 +471,7 @@ impl Runtime<'_> {
             .filter_map(|seat| {
                 let surface = self.preview_here(seat);
                 let message = match (
-                    self.preview_pane(surface)
-                        .and_then(|pane| pane.image.as_ref()),
+                    self.preview_pane(surface).and_then(|pane| pane.image()),
                     self.preview_buffer_on(surface),
                 ) {
                     (Some(preview), _) => preview.message(),
@@ -1795,7 +1791,7 @@ impl Runtime<'_> {
                     Ok(())
                 }
                 profiles::TermMenuRow::SelectAll => {
-                    let selection = match &self.preview_pane(surface).map(|pane| &pane.doc) {
+                    let selection = match &self.preview_pane(surface).map(|pane| pane.doc()) {
                         Some(PreviewDocument::Markdown { blocks, .. }) => {
                             preview_select::select_all(&preview_select::pieces(blocks))
                         }
@@ -2858,7 +2854,7 @@ impl Runtime<'_> {
             .and_then(|buffer| revealable_preview_file(buffer.source()))
             .or_else(|| {
                 self.preview_pane(surface)
-                    .and_then(|pane| pane.image.as_ref())
+                    .and_then(|pane| pane.image())
                     .map(|image| image.path.clone())
             })
         else {
