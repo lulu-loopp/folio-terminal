@@ -32833,7 +32833,7 @@ mod tests {
                     } else {
                         SettingsTarget::Panel
                     },
-                    "the whole line is the target, because there is nothing to                      edit in a ghost until it is the reader's — and a value each                      pane has its own of is nothing to adopt"
+                    "the whole line is the target, because there is nothing to edit in a ghost until it is the reader's — and a value each pane has its own of is nothing to adopt"
                 );
             }
             let cross = (

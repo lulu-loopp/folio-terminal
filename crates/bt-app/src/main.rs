@@ -46136,13 +46136,18 @@ impl Runtime<'_> {
             // `TERM` away, and a name the reader has a row for is no longer the
             // terminal's to say — which is what makes adopting a ghost a move and
             // not a duplication.
+            //
+            // Composed from the environment the next pane would be born from — the account's
+            // current one, read by the page's open edge on the observation worker — and empty
+            // until that read has answered (`shell_integration::page_environment`).
             ghosts: settings::held_ghosts(
                 &profiles::row_of(&profiles::id(index))
-                    .map(|row| {
+                    .zip(shell_integration::page_environment())
+                    .map(|(row, before_folio)| {
                         shell_integration::declared_environment(
                             &row,
                             shell_integration::Scripts::installed(),
-                            &bt_pty::SystemShellEnvironment,
+                            &before_folio,
                             attention_wire::endpoint_name(),
                         )
                     })

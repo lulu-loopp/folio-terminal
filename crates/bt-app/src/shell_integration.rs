@@ -2072,51 +2072,110 @@ pub enum DeclaredValue {
 /// SET-26) — the rows the editor's environment table draws on the reader's
 /// behalf (plan §1.7, user ruling 2026-08-17 Q7), above the profile's own.
 ///
-/// Read off the launch's own composition rather than kept as a list: the
-/// command [`shell_command`] makes for the profile, the attention wire's
-/// variables ([`crate::attention_wire::pane_environment`]), and
+/// Composed the way a pane is born, step for step: the command [`shell_command`]
+/// makes for the profile and the attention wire's variables
+/// ([`crate::attention_wire::pane_environment`]), then the declarations that
+/// depend on the environment re-derived from `before_folio`
+/// ([`derive_environment_for_birth`], the birth worker's own call), then
 /// [`bt_pty::terminal_declarations`], which adds the identity declarations
 /// (`TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, and `COLORTERM`/`TERM` unless a
 /// layer names `NO_COLOR`) and takes away every name the profile's own layer
 /// sets. That is the layer rule (`profiles::Profile::env`): the profile's rows
-/// are written last and win, so a name the reader has a row for is not a
-/// declaration of this terminal's.
+/// are written last and win.
 ///
-/// `environment` is this process's own; a pane's birth re-derives the
-/// declarations that depend on it from the account's current environment
-/// ([`derive_environment_for_birth`]) with the same functions, so a value the
-/// account changed since this process started shows the launch-time answer.
+/// `before_folio` is the environment the next pane's declarations are derived
+/// from — the account's current logon environment where the platform has one,
+/// this process's own where it has not or the read failed (2026-10-05 ruling;
+/// [`page_environment`] holds the one the Profiles page read when it opened).
 #[must_use]
 pub fn declared_environment(
     profile: &Profile,
     scripts: Scripts<'_>,
-    environment: &dyn ShellEnvironment,
+    before_folio: &[(OsString, OsString)],
     endpoint: Option<&'static str>,
 ) -> Vec<(String, DeclaredValue)> {
-    let command = shell_command(profile, &[], scripts, environment);
-    let said = |value: &OsStr| DeclaredValue::Said(value.to_string_lossy().into_owned());
-    let mut declared: Vec<(String, DeclaredValue)> =
-        bt_pty::terminal_declarations(&command.environment, &command.profile_environment)
-            .into_iter()
-            .map(|(name, value)| (name.to_string_lossy().into_owned(), said(&value)))
-            .collect();
-    declared.extend(
-        crate::attention_wire::pane_environment(
-            endpoint,
-            DeclaredValue::PerPane,
-            DeclaredValue::PerPane,
-            |name| said(OsStr::new(name)),
-        )
-        .into_iter()
-        .filter(|(name, _)| {
-            !command
-                .profile_environment
-                .iter()
-                .any(|(mine, _)| bt_pty::same_environment_name(mine, OsStr::new(name)))
-        })
-        .map(|(name, value)| (name.to_owned(), value)),
+    let mut command = shell_command(profile, &[], scripts, &ComposedEnvironment(before_folio));
+    // The wire's three go into the terminal's layer where the spawn puts them;
+    // the two a pane has its own of travel as empty values and are named per
+    // pane below.
+    let wire = crate::attention_wire::pane_environment(
+        endpoint,
+        DeclaredValue::PerPane,
+        DeclaredValue::PerPane,
+        |name| DeclaredValue::Said(name.to_owned()),
     );
-    declared
+    command.environment.extend(wire.iter().map(|(name, value)| {
+        let value = match value {
+            DeclaredValue::Said(value) => OsString::from(value),
+            DeclaredValue::PerPane => OsString::new(),
+        };
+        (OsString::from(*name), value)
+    }));
+    derive_environment_for_birth(
+        command.environment_derivation,
+        before_folio,
+        &mut command.environment,
+        &command.profile_environment,
+    );
+    bt_pty::terminal_declarations(&command.environment, &command.profile_environment)
+        .into_iter()
+        .map(|(name, value)| {
+            let per_pane = wire.iter().any(|(wired, value)| {
+                *value == DeclaredValue::PerPane
+                    && bt_pty::same_environment_name(OsStr::new(wired), &name)
+            });
+            let value = if per_pane {
+                DeclaredValue::PerPane
+            } else {
+                DeclaredValue::Said(value.to_string_lossy().into_owned())
+            };
+            (name.to_string_lossy().into_owned(), value)
+        })
+        .collect()
+}
+
+/// **The environment the Profiles page composes its rows from**: the block the
+/// page's open edge read on the observation worker
+/// ([`ProbeEnvironment::before_folio`]), numbered so an older read never files
+/// over a newer ask. `None` from the ask until the answer lands.
+struct PageEnvironment {
+    asked: u64,
+    block: Option<Vec<(OsString, OsString)>>,
+}
+
+static PAGE_ENVIRONMENT: Mutex<PageEnvironment> = Mutex::new(PageEnvironment {
+    asked: 0,
+    block: None,
+});
+
+fn page_environment_cell() -> std::sync::MutexGuard<'static, PageEnvironment> {
+    PAGE_ENVIRONMENT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A new read is asked for: the block held so far is the previous visit's and
+/// is dropped. Answers the number the read files its block under.
+fn ask_page_environment() -> u64 {
+    let mut cell = page_environment_cell();
+    cell.asked += 1;
+    cell.block = None;
+    cell.asked
+}
+
+/// The read numbered `asked` files `block`, unless a newer read has been asked.
+fn answer_page_environment(asked: u64, block: Vec<(OsString, OsString)>) {
+    let mut cell = page_environment_cell();
+    if cell.asked == asked {
+        cell.block = Some(block);
+    }
+}
+
+/// **The environment the next pane's declarations would be derived from**, as
+/// the Profiles page last read it — `None` until that read has answered.
+#[must_use]
+pub fn page_environment() -> Option<Vec<(OsString, OsString)>> {
+    page_environment_cell().block.clone()
 }
 
 /// `existing` — whatever `PROMPT` this process inherited — with the command
@@ -3641,6 +3700,16 @@ impl ProbeEnvironment {
                 ));
                 Self::Inherited
             }
+        }
+    }
+
+    /// **The environment a pane's derived declarations read** in this environment — the
+    /// account's block, or this process's own where there is none (`pty_door::before_folio`'s
+    /// rule, with no launch layer: a profile's page has no tab).
+    pub(crate) fn before_folio(&self) -> Vec<(OsString, OsString)> {
+        match self {
+            Self::Logon(block) => block.clone(),
+            Self::Inherited => std::env::vars_os().collect(),
         }
     }
 
@@ -9767,22 +9836,22 @@ mod tests {
             said("COLORTERM", "truecolor"),
             said("TERM", "xterm-256color"),
             said(INSTALLED_MARKER, MODE_LOGIN),
-            said(FORCE_HYPERLINK, "1"),
-        ];
-        expected.extend(locale.iter().cloned());
-        expected.extend([
             per_pane(crate::attention_wire::PANE_VARIABLE),
             said(
                 crate::attention_wire::ENDPOINT_VARIABLE,
                 "folio-attention-pipe",
             ),
             per_pane(crate::attention_wire::CAPABILITY_VARIABLE),
-        ]);
+            // Re-derived at birth from the environment, so laid down after the
+            // wire's three, as the birth worker lays them.
+            said(FORCE_HYPERLINK, "1"),
+        ];
+        expected.extend(locale.iter().cloned());
         assert_eq!(
             declared_environment(
                 &row("gitbash"),
                 bash_only(script),
-                &bare(),
+                &[],
                 Some("folio-attention-pipe")
             ),
             expected
@@ -9796,9 +9865,9 @@ mod tests {
         ];
         expected.extend(locale.iter().cloned());
         assert_eq!(
-            declared_environment(&row("pwsh"), Scripts::default(), &bare(), None),
+            declared_environment(&row("pwsh"), Scripts::default(), &[], None),
             expected,
-            "folio.ps1 is the half that says FORCE_HYPERLINK, and with no wire open              no pane is given its three"
+            "folio.ps1 is the half that says FORCE_HYPERLINK, and with no wire open no pane is given its three"
         );
 
         // The profile's own rows are written last and win: their names are not
@@ -9814,22 +9883,16 @@ mod tests {
         );
         let mut expected = vec![
             said("TERM_PROGRAM_VERSION", version),
-            said(FORCE_HYPERLINK, "1"),
-        ];
-        expected.extend(locale.iter().cloned());
-        expected.extend([
             said(
                 crate::attention_wire::ENDPOINT_VARIABLE,
                 "folio-attention-pipe",
             ),
             per_pane(crate::attention_wire::CAPABILITY_VARIABLE),
-        ]);
-        let page = declared_environment(
-            &mine,
-            Scripts::default(),
-            &bare(),
-            Some("folio-attention-pipe"),
-        );
+            said(FORCE_HYPERLINK, "1"),
+        ];
+        expected.extend(locale.iter().cloned());
+        let page =
+            declared_environment(&mine, Scripts::default(), &[], Some("folio-attention-pipe"));
         // `Term_Program` is `TERM_PROGRAM` only where names are case-blind.
         if bt_pty::same_environment_name(OsStr::new("Term_Program"), OsStr::new("TERM_PROGRAM")) {
             assert_eq!(page, expected);
@@ -9837,6 +9900,72 @@ mod tests {
             expected.insert(0, said("TERM_PROGRAM", bt_pty::TERM_PROGRAM));
             assert_eq!(page, expected);
         }
+    }
+
+    /// RED (H2-NITS round 2) - **the page reads the environment the next pane is
+    /// born from, not Folio's own.** A `PROMPT` and a `FORCE_HYPERLINK` the
+    /// account set after Folio started (the block handed in stands for the
+    /// account's current logon environment, which this process never saw) are
+    /// what the page shows: `cmd`'s prompt is prefixed onto the account's, and
+    /// the account's own hyperlink answer leaves no `FORCE_HYPERLINK` row.
+    ///
+    /// MUTATION: compose from this process's environment
+    /// (`bt_pty::SystemShellEnvironment` / `std::env::vars_os()` in
+    /// `declared_environment`) - the prompt is the process's (and, where this
+    /// process has no `FORCE_HYPERLINK`, that row comes back).
+    #[test]
+    fn the_ghosts_read_the_environment_the_next_pane_is_born_from() {
+        let account: Vec<(OsString, OsString)> = vec![
+            (OsString::from(CMD_PROMPT), OsString::from("新 $P$G")),
+            (OsString::from(FORCE_HYPERLINK), OsString::from("0")),
+        ];
+        assert_ne!(
+            std::env::var_os(CMD_PROMPT).as_deref(),
+            Some(OsStr::new("新 $P$G")),
+            "the fixture's prompt is one this process does not have"
+        );
+        let page = declared_environment(&row("cmd"), Scripts::default(), &account, None);
+        let value = |wanted: &str| {
+            page.iter()
+                .find(|(name, _)| name == wanted)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(
+            value(CMD_PROMPT),
+            Some(DeclaredValue::Said(
+                cmd_prompt(Some(OsString::from("新 $P$G")))
+                    .to_string_lossy()
+                    .into_owned()
+            ))
+        );
+        assert_eq!(value(FORCE_HYPERLINK), None, "{page:?}");
+    }
+
+    /// PIN (H2-NITS round 2) - **the page's environment is the newest read's**: an
+    /// ask drops the previous visit's block, an older read answering after a newer
+    /// ask files nothing, and the newest read is what the page composes from.
+    ///
+    /// MUTATION: file every answer whatever its number - the stale block wins.
+    #[test]
+    fn the_pages_environment_is_the_newest_reads() {
+        let block =
+            |value: &str| vec![(OsString::from("FOLIO_H2_NITS_PIN"), OsString::from(value))];
+        let first = ask_page_environment();
+        let second = ask_page_environment();
+        assert_eq!(
+            page_environment(),
+            None,
+            "nothing is held between an ask and its answer"
+        );
+        answer_page_environment(second, block("新"));
+        answer_page_environment(first, block("旧"));
+        assert_eq!(page_environment(), Some(block("新")));
+        ask_page_environment();
+        assert_eq!(
+            page_environment(),
+            None,
+            "a new visit drops the last one's block"
+        );
     }
 
     /// PIN - a profile of the reader's own reaches the spawn path whole, which

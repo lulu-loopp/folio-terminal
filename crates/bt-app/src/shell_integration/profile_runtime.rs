@@ -77,7 +77,7 @@ pub fn begin_startup_migration() {
     if STARTED.swap(true, std::sync::atomic::Ordering::AcqRel) {
         return;
     }
-    spawn_profile_observation(persist::storage_dir(), Vec::new(), Vec::new());
+    spawn_profile_observation(persist::storage_dir(), Vec::new(), Vec::new(), None);
 }
 
 /// Refresh the two edition facts when the Profiles page opens. This is an edge
@@ -98,18 +98,34 @@ pub fn begin_profile_observation_for(programs: &profiles::ProfilePrograms) {
         persist::storage_dir(),
         resolved,
         parse_questions(profiles::table().profiles(), programs),
+        Some(ask_page_environment()),
     );
 }
 
 /// **The observation's worker**: the installed PowerShells — looked up in the environment it reads,
 /// so on the worker and never on the window thread — and `rows` (the profile rows' own programs,
 /// as the program walk answered them), each observed; then the parse questions that got no answer.
-fn spawn_profile_observation(data: PathBuf, rows: Vec<PathBuf>, questions: Vec<ParseQuestion>) {
+///
+/// `page` is the Profiles page's ask for the environment its rows are composed from
+/// ([`page_environment`]): the block this worker reads is filed under it and the window woken
+/// before any PowerShell is asked, so the page does not wait on the probes.
+fn spawn_profile_observation(
+    data: PathBuf,
+    rows: Vec<PathBuf>,
+    questions: Vec<ParseQuestion>,
+    page: Option<u64>,
+) {
     let _ = bt_platform::spawn_at_priority(
         "powershell-profile-observation",
         bt_platform::ThreadPriority::BelowNormal,
         move |worker| {
             let environment = ProbeEnvironment::current(worker, "PowerShell profile observation");
+            if let Some(asked) = page {
+                answer_page_environment(asked, environment.before_folio());
+                if let Some(wake) = WAKE.get() {
+                    wake();
+                }
+            }
             let mut programs = installed_powershells(&environment);
             for program in rows {
                 if !programs.contains(&program) {
