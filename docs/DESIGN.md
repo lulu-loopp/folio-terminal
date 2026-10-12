@@ -14963,3 +14963,11 @@ Each completed program walk now publishes the exact `PATH` and `PATHEXT` values 
 **The rule.** One `# completions` row per request protocol: "the Profiles page's environment" (`request_page_environment`, `profiles-page-environment`, `PowerShellProfileProbed`, the process cell), `conforms` — exactly one end per request including a refused start, supersession with an end of its own, a panic as a failure value. The Edit menu's `Runtime` wiring into `menubar::run_clipboard_verb` is unpinned (the D-95 class); the round-2 source-text matches over it are removed.
 
 **Pinned by** `shell_integration::tests::{every_page_environment_request_ends_once_and_the_newest_wins, the_ghosts_read_the_environment_the_next_pane_is_born_from}` and the window-waits ledger tests.
+
+### 2026-10-12 — The Profiles page files only its newest request's answer; a worker panic is the resident hook's (H2-NITS round 4)
+
+**What is built.** `shell_integration::page_environment` files a taken end only when its request is the newest minted; an end that completed and was not yet taken when a newer request was minted counts as `Superseded { by }` that request, so the page stays empty until the newest answers instead of showing the previous visit's environment. The `catch_unwind` around the worker's read is removed: under the resident application's panic hook (`install_panic_log_hook`) a panic ends the process from inside the hook before any unwinding, the convention the other workers under that hook (the storage worker's document rows) live by, so no request is left owed. This supersedes the round-3 entry's "a panic as a failure value".
+
+**The rule.** The `# completions` row "the Profiles page's environment" says both in its failure and supersession cells and stays `conforms`, as the document rows do, which say nothing of a panic because the process ends with it.
+
+**Pinned by** `shell_integration::tests::every_page_environment_request_ends_once_and_the_newest_wins` (the completed-then-superseded sequence added).

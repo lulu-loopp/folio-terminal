@@ -2199,17 +2199,21 @@ fn complete_page_environment(asked: u64, end: PageEnvironmentEnd) {
     }
 }
 
-/// The read a request's worker makes: the account's current logon environment
-/// (`fresh_logon_environment`, pane birth's read), or this process's own where
-/// the platform has none. A panic is a failure value, never a lost answer (C3).
+/// The end a request's read makes: the account's current logon environment
+/// (`fresh_logon_environment`, pane birth's read), this process's own where the
+/// platform has none, or the read's error.
+///
+/// No unwind boundary: under the resident application's panic hook
+/// (`install_panic_log_hook`) a panic on this worker ends the process from
+/// inside the hook, before any unwinding, so no request is left owed — the
+/// convention of the other workers that run under that hook.
 fn read_page_environment(
-    read: impl FnOnce() -> std::io::Result<Option<Vec<(OsString, OsString)>>>,
+    read: std::io::Result<Option<Vec<(OsString, OsString)>>>,
 ) -> PageEnvironmentEnd {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)) {
-        Ok(Ok(Some(block))) => PageEnvironmentEnd::Done(block),
-        Ok(Ok(None)) => PageEnvironmentEnd::Done(std::env::vars_os().collect()),
-        Ok(Err(error)) => PageEnvironmentEnd::Failed(error.to_string()),
-        Err(_) => PageEnvironmentEnd::Failed("the read panicked".to_owned()),
+    match read {
+        Ok(Some(block)) => PageEnvironmentEnd::Done(block),
+        Ok(None) => PageEnvironmentEnd::Done(std::env::vars_os().collect()),
+        Err(error) => PageEnvironmentEnd::Failed(error.to_string()),
     }
 }
 
@@ -2226,7 +2230,7 @@ pub fn request_page_environment() {
         move |worker| {
             complete_page_environment(
                 asked,
-                read_page_environment(|| bt_platform::environment::fresh_logon_environment(worker)),
+                read_page_environment(bt_platform::environment::fresh_logon_environment(worker)),
             );
             if let Some(wake) = WAKE.get() {
                 wake();
@@ -2245,12 +2249,23 @@ pub fn request_page_environment() {
 /// the Profiles page's last request answered it — `None` while it is out.
 ///
 /// The consumer: takes every completion once, says each failure once in the
-/// diagnostics, and keeps the newest answer. A failure composes over this
-/// process's environment, as a birth whose read failed does.
+/// diagnostics, and keeps the newest request's answer. A failure composes over
+/// this process's environment, as a birth whose read failed does.
+///
+/// **Only the newest request's end is filed.** One that completed and was not
+/// yet taken when a newer request was minted is the newer one's to replace: it
+/// counts as `Superseded { by: minted }`, and the page stays empty until the
+/// newest answers rather than showing the previous visit's environment.
 #[must_use]
 pub fn page_environment() -> Option<Vec<(OsString, OsString)>> {
     let mut cell = page_environment_cell();
+    let newest = cell.minted;
     for (asked, end) in std::mem::take(&mut cell.ended) {
+        let end = if asked == newest {
+            end
+        } else {
+            PageEnvironmentEnd::Superseded { by: newest }
+        };
         match end {
             PageEnvironmentEnd::Done(block) => cell.current = Some(block),
             PageEnvironmentEnd::Failed(reason) => {
@@ -10019,16 +10034,20 @@ mod tests {
         assert_eq!(value(FORCE_HYPERLINK), None, "{page:?}");
     }
 
-    /// RED (H2-NITS round 3) - **every request for the page's environment ends
-    /// exactly once, and the newest answer is what the page composes from.** A
-    /// request made while another is out completes the older one `Superseded`;
-    /// the older read landing afterwards files nothing; a failed read is said and
-    /// composes over this process's environment; a panicking read is a failure.
+    /// RED (H2-NITS rounds 3 and 4) - **every request for the page's environment
+    /// ends exactly once, and only the newest request's answer is what the page
+    /// composes from.** A request made while another is out completes the older
+    /// one `Superseded`; the older read landing afterwards files nothing; an older
+    /// request that completed and was not yet taken when a newer one was minted is
+    /// superseded by it, and the page stays empty until the newest answers; a
+    /// failed read is said and composes over this process's environment.
     ///
     /// MUTATIONS: (1) let `complete_page_environment` file a request that is no
     /// longer owed - the older read's block replaces the newer one; (2) drop the
     /// `Superseded` completion in `mint_page_environment` - the older request has
-    /// no end.
+    /// no end; (3) file every taken end in `page_environment` without comparing
+    /// its number with the newest minted - the previous visit's block shows while
+    /// the newest request is out.
     #[test]
     fn every_page_environment_request_ends_once_and_the_newest_wins() {
         let block =
@@ -10052,22 +10071,31 @@ mod tests {
             "each end is taken once"
         );
 
+        // Completed, not yet taken, then a newer request: the older answer is
+        // superseded, not shown.
         let third = mint_page_environment();
+        complete_page_environment(third, PageEnvironmentEnd::Done(block("上次")));
+        let fourth = mint_page_environment();
+        assert_eq!(
+            page_environment(),
+            None,
+            "request {third}'s answer is the previous visit's while {fourth} is out"
+        );
+        complete_page_environment(fourth, PageEnvironmentEnd::Done(block("这次")));
+        assert_eq!(page_environment(), Some(block("这次")));
+
+        let fifth = mint_page_environment();
         complete_page_environment(
-            third,
-            read_page_environment(|| Err(std::io::Error::other("拒绝"))),
+            fifth,
+            read_page_environment(Err(std::io::Error::other("拒绝"))),
         );
         assert_eq!(
             page_environment(),
             Some(std::env::vars_os().collect()),
             "a failed read composes over this process's environment"
         );
-        assert!(matches!(
-            read_page_environment(|| panic!("read")),
-            PageEnvironmentEnd::Failed(_)
-        ));
         assert_eq!(
-            read_page_environment(|| Ok(Some(block("账户")))),
+            read_page_environment(Ok(Some(block("账户")))),
             PageEnvironmentEnd::Done(block("账户"))
         );
     }
