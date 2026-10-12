@@ -3,7 +3,8 @@
 //! reader of a committed document is on neither list**
 //! (T-SOURCE-READERS-TSV-TRIPWIRE,
 //! `every_reader_of_a_committed_document_is_on_a_list`; see *The document
-//! readers*).
+//! readers*), **and no row of either list is a reader of nothing**
+//! (T-SOURCE-READERS-STALE; see *Every row, the other way*).
 //!
 //! Three lists classify every reader bound to a file.
 //! `docs/plans/MIGRATION-DEBT.tsv` is the temporary one: every reader blocked on
@@ -231,8 +232,39 @@
 //! reads under a name [`PATH_BUILDING`] excludes, since that list is of names
 //! (and a new path-describing method is a reader until it is added there); a
 //! loop over anything but a literal list; and the paths it lists as
-//! unreduced. Rows are not checked the other way: a row whose item no longer
-//! reads is not refused.
+//! unreduced.
+//!
+//! # Every row, the other way
+//!
+//! The two lists are an equality, not an allowlist
+//! (T-SOURCE-READERS-STALE, `every_row_is_a_reader_or_a_categorised_exception`):
+//! every reader is a row, and **every row is a reader or a categorised
+//! exception**. A row's `(file, owner)` resolves first — a Rust file's owner
+//! to an item bt-source finds in that file, spelled as a reader is spelled
+//! above (gone, or an item of another file, is refused); a
+//! `ledger key naming a file` to a line of its ledger; any other file to a
+//! committed file, which only an `exception` may name. Its `category` column
+//! then holds it, and a row with none, or with another value, is refused:
+//!
+//! * `read` — the document scan finds the item reading every document the
+//!   subject names, and a Rust-source shape the lexical scan reports on a
+//!   line of the item names every `.rs` name in it. The subject is spelled as
+//!   the mechanism resolves it: an include's literal from the row's file's
+//!   directory, any other path from the workspace root; `;` separates
+//!   several and `*` stands for any run inside one segment.
+//! * `unreduced` — the diagnostic names the item: the read exists and the
+//!   evaluator cannot reduce its path, so its subject is not checked. The row
+//!   stays while the diagnostic entry does; when the entry goes, the row is a
+//!   `read` row or stale.
+//! * `rust-source` — every name the subject gives is a `.rs` name a shape
+//!   on a line of the item reports (the shapes match by file; bt-source says
+//!   which item a line is in).
+//! * `exception` — a reader no scan here sees, with the blind spot or the
+//!   reason in its row (SOURCE-READERS' `reason`, MIGRATION-DEBT's
+//!   `needed_seam`).
+//!
+//! The evaluator above is not widened for it: a row whose reader it cannot
+//! see is an `exception` that names the blind spot.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -254,25 +286,27 @@ const DEBT_LIST: &str = "docs/plans/MIGRATION-DEBT.tsv";
 const SOURCE_LIST: &str = "docs/plans/SOURCE-READERS.tsv";
 
 /// The columns the list is written in, in order.
-const DEBT_COLUMNS: [&str; 8] = [
+const DEBT_COLUMNS: [&str; 9] = [
     "file",
     "owner",
     "mechanism",
     "subject",
     "ticket",
     "disturbed_by_2a",
+    "category",
     "needed_seam",
     "verdict",
 ];
 
 /// The columns of the intentional-reader list, in order.
-const SOURCE_COLUMNS: [&str; 7] = [
+const SOURCE_COLUMNS: [&str; 8] = [
     "file",
     "owner",
     "mechanism",
     "subject",
     "ticket",
     "disturbed_by_2a",
+    "category",
     "reason",
 ];
 
@@ -935,13 +969,15 @@ fn each_allowlist_entry_names_one_file_a_reason_and_a_reader() {
 }
 
 /// PIN — **the debt list is machine-readable in the shape the CI check reads
-/// it**: eight tab-separated fields a row, a known ticket, a yes-or-no answer
-/// about Step 2a, a needed seam, and the DEBT verdict.
+/// it**: nine tab-separated fields a row, a known ticket, a yes-or-no answer
+/// about Step 2a, a category, a needed seam, and the DEBT verdict.
 ///
 /// `debt_rows` does the splitting and the arity, so what is left here is the
-/// vocabulary. The CI check compares whole rows as text and never parses a
-/// field, which is why a malformed row would otherwise go unnoticed until a
-/// ticket tried to use the list.
+/// vocabulary (the category's is
+/// `every_row_is_a_reader_or_a_categorised_exception`'s). The CI check
+/// compares the six identity columns, found by name, as text and parses no
+/// other field, which is why a malformed row would otherwise go unnoticed
+/// until a ticket tried to use the list.
 ///
 /// MUTATION: write a ticket the plan does not have, or a third answer in the
 /// last column, and this names the row.
@@ -1333,6 +1369,63 @@ impl DocumentScan<'_> {
 
     fn line(&self, at: usize) -> usize {
         self.index.locate(at).expect("a byte of the index").line
+    }
+
+    /// The owners of the first byte written on line `line` (1-based) of
+    /// `file`, as [`Self::owners_of`] names them: the item a Rust-source
+    /// shape the lexical scan reports on that line is written in. `None` when
+    /// this index does not hold the file.
+    fn owners_on_line(&self, file: &str, line: usize) -> Option<BTreeSet<String>> {
+        let record = self
+            .index
+            .files()
+            .iter()
+            .find(|record| self.relative(record) == file)?;
+        let span = record.span();
+        let text = self.index.text(span);
+        let start: usize = text
+            .split_inclusive('\n')
+            .take(line - 1)
+            .map(str::len)
+            .sum();
+        let indent = text[start..].len() - text[start..].trim_start().len();
+        Some(self.owners_of(span.start() + start + indent))
+    }
+
+    /// Every name an item of this index answers to as an `owner`, by the
+    /// file it is written in: each function's, each `const`'s and `static`'s
+    /// outside a function, and each module's — the spellings
+    /// [`Self::owners_of`] gives a reader, so a row's owner is one of them or
+    /// names nothing.
+    fn spelled_owners(&self) -> BTreeMap<String, BTreeSet<String>> {
+        let mut found: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for item in self.index.items() {
+            if item.kind().is_callable() {
+                found
+                    .entry(self.relative(self.index.file_of(item)))
+                    .or_default()
+                    .extend(self.item_names(item));
+            }
+        }
+        for file in self.index.files() {
+            let names = found.entry(self.relative(file)).or_default();
+            for (_, start, _) in self.value_statements(file) {
+                names.extend(self.owners_of(start));
+            }
+        }
+        for module in self.index.modules() {
+            let file = self
+                .index
+                .file_at(module.span().start())
+                .expect("a byte of the index");
+            found.entry(self.relative(file)).or_default().extend(
+                module
+                    .module_paths()
+                    .iter()
+                    .map(|path| Self::qualified(file, path)),
+            );
+        }
+        found
     }
 
     fn relative(&self, file: &FileRecord) -> String {
@@ -4576,33 +4669,833 @@ fn document_complaint(strays: &[&DocumentReader], unresolved: &[UnresolvedRead])
 #[test]
 fn every_reader_of_a_committed_document_is_on_a_list() {
     let root = workspace_root();
-    let committed = committed_files(&root);
-    let documents = committed
-        .iter()
-        .filter(|path| is_document(path.as_str()))
-        .count();
+    let Code {
+        documents,
+        readers,
+        unresolved,
+        ..
+    } = the_code();
     // The floor is on what git names, not on the readers: a `git` that ran in
     // the wrong place names nothing, and an empty subject set finds no reader.
     assert!(
-        documents > 500,
+        *documents > 500,
         "git names {documents} committed documents under {}, which is not this repository",
         root.display()
     );
-    let (readers, unresolved) = document_readers(&first_party_indices(&root), &root, &committed);
     let listed = listed_readers(&root);
-    let strays = unlisted_documents(&readers, &listed);
+    let strays = unlisted_documents(readers, &listed);
     println!(
         "{} committed documents; {} readers of them; {} rows on the two lists; {}",
         documents,
         readers.len(),
         listed.len(),
-        diagnostic_summary(&unresolved)
+        diagnostic_summary(unresolved)
     );
     assert!(
         strays.is_empty(),
         "{}",
-        document_complaint(&strays, &unresolved)
+        document_complaint(&strays, unresolved)
     );
+}
+
+// ──────────────────────────────────────────────── every row, the other way ──
+
+/// The `category` column of both lists: how a row is held to the code. A
+/// row with no category, or with a value that is none of these, is refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Category {
+    /// A reader the scans find: every document its `subject` names is one
+    /// the document scan detects its item reading, and every `.rs` name in it
+    /// is one a Rust-source shape written in its item reports.
+    Read,
+    /// An item the document scan's diagnostic names: it hands a call a rooted
+    /// path the evaluator cannot reduce, so the read exists and its subject
+    /// cannot be checked. The row stays while the diagnostic entry does; when
+    /// the entry goes, the row is a `read` row or stale.
+    Unreduced,
+    /// A reader of Rust source alone, held by the four lexical shapes of
+    /// `no_source_reader_names_a_file_outside_the_two_lists`: every name in
+    /// its `subject` is a `.rs` name a shape written in its item reports.
+    RustSource,
+    /// Review-owned: a reader no scan here sees, kept for the reason its row
+    /// gives (SOURCE-READERS' `reason`, MIGRATION-DEBT's `needed_seam`).
+    Exception,
+}
+
+impl Category {
+    const ALL: [(&'static str, Self); 4] = [
+        ("read", Self::Read),
+        ("unreduced", Self::Unreduced),
+        ("rust-source", Self::RustSource),
+        ("exception", Self::Exception),
+    ];
+
+    fn named(value: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .find(|(name, _)| *name == value)
+            .map(|(_, category)| *category)
+    }
+}
+
+/// The mechanism of a MIGRATION-DEBT row whose owner is a key of the ledger
+/// its `file` names (`file_reads_doors.txt`'s file keys): the key is a line of
+/// that file.
+const LEDGER_KEY: &str = "ledger key naming a file";
+
+/// One row of either list, as the check of rows reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ListedRow {
+    list: &'static str,
+    file: String,
+    owner: String,
+    mechanism: String,
+    subject: String,
+    category: String,
+    /// SOURCE-READERS' `reason`, MIGRATION-DEBT's `needed_seam`.
+    reason: String,
+}
+
+impl ListedRow {
+    fn of(list: &'static str, row: &BTreeMap<&'static str, String>, reason: &str) -> Self {
+        Self {
+            list,
+            file: row["file"].clone(),
+            owner: row["owner"].clone(),
+            mechanism: row["mechanism"].clone(),
+            subject: row["subject"].clone(),
+            category: row["category"].clone(),
+            reason: row[reason].clone(),
+        }
+    }
+
+    fn named(&self) -> String {
+        let category = if self.category.is_empty() {
+            "no category"
+        } else {
+            self.category.as_str()
+        };
+        format!("{}: {} {} [{category}]", self.list, self.file, self.owner)
+    }
+
+    /// Each name the `subject` gives, as written and from the workspace root,
+    /// the way the row's mechanism spells it: an include's literal from the
+    /// including file's directory, which is where the macro resolves it; any
+    /// other path from the workspace root. `;` separates several; a `*`
+    /// stands for any run of characters inside one segment
+    /// (`tests/corpus/*.btcr`).
+    fn subjects(&self) -> Vec<(String, String)> {
+        let included = self
+            .mechanism
+            .split(';')
+            .all(|part| INCLUDE_MACROS.iter().any(|name| part == format!("{name}!")));
+        let directory = match self.file.rsplit_once('/') {
+            Some((directory, _)) if included => directory,
+            _ => "",
+        };
+        self.subject
+            .split(';')
+            .map(|written| (written.to_owned(), lexically_joined(directory, written)))
+            .collect()
+    }
+}
+
+/// Both lists' rows.
+fn listed_rows(root: &Path) -> Vec<ListedRow> {
+    let debt = debt_rows(root);
+    let sources = source_rows(root);
+    sources
+        .iter()
+        .map(|row| ListedRow::of(SOURCE_LIST, row, "reason"))
+        .chain(
+            debt.iter()
+                .map(|row| ListedRow::of(DEBT_LIST, row, "needed_seam")),
+        )
+        .collect()
+}
+
+/// `written` from `directory`, both forward-slashed and relative to the
+/// workspace root, with `.` and `..` taken out as written.
+fn lexically_joined(directory: &str, written: &str) -> String {
+    let mut segments: Vec<&str> = directory
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    for segment in written.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            name => segments.push(name),
+        }
+    }
+    segments.join("/")
+}
+
+/// Whether `path` is what `pattern` names: as many segments, each matching,
+/// a `*` standing for any run of characters inside its segment.
+fn names(pattern: &str, path: &str) -> bool {
+    let patterns: Vec<&str> = pattern.split('/').collect();
+    let segments: Vec<&str> = path.split('/').collect();
+    patterns.len() == segments.len()
+        && patterns
+            .iter()
+            .zip(&segments)
+            .all(|(pattern, segment)| segment_matches(pattern, segment))
+}
+
+fn segment_matches(pattern: &str, segment: &str) -> bool {
+    let mut pieces = pattern.split('*');
+    let first = pieces.next().unwrap_or_default();
+    let Some(mut rest) = segment.strip_prefix(first) else {
+        return false;
+    };
+    let pieces: Vec<&str> = pieces.collect();
+    let Some((last, middle)) = pieces.split_last() else {
+        return rest.is_empty();
+    };
+    for piece in middle {
+        match rest.find(piece) {
+            Some(at) => rest = &rest[at + piece.len()..],
+            None => return false,
+        }
+    }
+    rest.ends_with(last)
+}
+
+/// A Rust-source shape the lexical scan reports, with the names of the item
+/// bt-source places its line in (none for a file no index holds: a script).
+#[derive(Clone, Debug)]
+struct OwnedHit {
+    hit: Hit,
+    owners: BTreeSet<String>,
+}
+
+/// What the code holds the rows to.
+struct Evidence<'a> {
+    /// Every name an item answers to as an owner, by its file.
+    spelled: &'a BTreeMap<String, BTreeSet<String>>,
+    readers: &'a [DocumentReader],
+    unresolved: &'a [UnresolvedRead],
+    hits: &'a [OwnedHit],
+    committed: &'a BTreeSet<String>,
+    /// The lines of each ledger a row keys into, by its file.
+    ledgers: &'a BTreeMap<String, BTreeSet<String>>,
+}
+
+/// Why a row is refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Stale {
+    /// The `category` column holds nothing, or a value that is no category.
+    Uncategorised,
+    /// No item of any first-party file answers to the owner.
+    ItemGone,
+    /// The owner is an item of these other files: the row names a file.
+    ItemMoved(BTreeSet<String>),
+    /// A row whose file is not Rust names no item a scan here reads: its file
+    /// is not committed, or the row is not an `exception`.
+    NotAnItemFile,
+    /// A ledger-key row whose owner is no line of its ledger.
+    KeyGone,
+    /// A `read` or `rust-source` row whose item is not found reading what it
+    /// names: what it is found reading (documents, and the `.rs` names of the
+    /// shapes written in it; possibly nothing), what the row names that it
+    /// does not, and whether the diagnostic names the item.
+    ReadsOtherwise {
+        found: BTreeSet<String>,
+        missing: Vec<String>,
+        diagnosed: bool,
+    },
+    /// A `read` row that names no document (it is `rust-source`), or a
+    /// `rust-source` row that names one (it is `read`).
+    Miscategorised(&'static str),
+    /// An `unreduced` row whose item the diagnostic no longer names, and the
+    /// documents it is found reading instead (possibly none).
+    NoLongerUnreduced(BTreeSet<String>),
+    /// An `exception` without its reason.
+    NoReason,
+}
+
+impl Stale {
+    fn said(&self) -> String {
+        let listed = |set: &BTreeSet<String>| {
+            if set.is_empty() {
+                "nothing".to_owned()
+            } else {
+                set.iter().cloned().collect::<Vec<_>>().join(", ")
+            }
+        };
+        match self {
+            Self::Uncategorised => format!(
+                "its category is none of {}",
+                Category::ALL.map(|(name, _)| name).join(", ")
+            ),
+            Self::ItemGone => "no item of any first-party file answers to its owner".to_owned(),
+            Self::ItemMoved(files) => format!(
+                "its owner is an item of {}, not of the file the row names",
+                listed(files)
+            ),
+            Self::NotAnItemFile => "its file is not Rust, so it names no item a scan here \
+                                    reads; such a row is an `exception` of a committed file"
+                .to_owned(),
+            Self::KeyGone => "its owner is no line of the ledger it keys into".to_owned(),
+            Self::ReadsOtherwise {
+                found,
+                missing,
+                diagnosed,
+            } => format!(
+                "its item is found reading {}, and not {}{}",
+                listed(found),
+                missing.join(", "),
+                if *diagnosed {
+                    "; the diagnostic names the item, and a read the evaluator cannot reduce \
+                     is `unreduced`"
+                } else {
+                    ""
+                }
+            ),
+            Self::Miscategorised(category) => {
+                format!("what its subject names makes it a `{category}` row")
+            }
+            Self::NoLongerUnreduced(found) => format!(
+                "the diagnostic no longer names its item, which is found reading {}{}",
+                listed(found),
+                if found.is_empty() {
+                    ""
+                } else {
+                    ": a `read` row"
+                }
+            ),
+            Self::NoReason => "it is an `exception` without its reason".to_owned(),
+        }
+    }
+}
+
+/// Every row of either list that no reader of the code accounts for, with
+/// why: the other half of the equality whose first half is
+/// `every_reader_of_a_committed_document_is_on_a_list`.
+///
+/// A row first resolves its `(file, owner)`: a Rust file's to an item that
+/// file declares, spelled as the document scan spells a reader; a ledger key
+/// to a line of its ledger; any other file to a committed file. Then its
+/// category holds it: a `read` row to the readers the scans find, an
+/// `unreduced` one to the diagnostic, a `rust-source` one to the four shapes,
+/// an `exception` to its reason.
+fn stale_rows<'r>(rows: &'r [ListedRow], evidence: &Evidence<'_>) -> Vec<(&'r ListedRow, Stale)> {
+    rows.iter()
+        .filter_map(|row| staleness(row, evidence).map(|stale| (row, stale)))
+        .collect()
+}
+
+fn staleness(row: &ListedRow, evidence: &Evidence<'_>) -> Option<Stale> {
+    let Some(category) = Category::named(&row.category) else {
+        return Some(Stale::Uncategorised);
+    };
+    if let Some(stale) = unresolved_row(row, category, evidence) {
+        return Some(stale);
+    }
+    let answers =
+        |file: &str, owners: &BTreeSet<String>| file == row.file && owners.contains(&row.owner);
+    let documents: BTreeSet<String> = evidence
+        .readers
+        .iter()
+        .filter(|reader| answers(&reader.file, &reader.owners))
+        .flat_map(|reader| reader.subjects.iter().cloned())
+        .collect();
+    let shapes: BTreeSet<String> = evidence
+        .hits
+        .iter()
+        .filter(|owned| answers(&owned.hit.file, &owned.owners))
+        .map(|owned| owned.hit.subject.clone())
+        .collect();
+    let diagnosed = evidence
+        .unresolved
+        .iter()
+        .any(|read| answers(&read.file, &read.owners));
+    match category {
+        Category::Read | Category::RustSource => {
+            let mut named_documents = false;
+            let mut missing = Vec::new();
+            for (written, resolved) in row.subjects() {
+                if written.ends_with(".rs") {
+                    if !shapes.contains(&written) {
+                        missing.push(written);
+                    }
+                } else {
+                    named_documents = true;
+                    if !documents.iter().any(|path| names(&resolved, path)) {
+                        missing.push(resolved);
+                    }
+                }
+            }
+            if !missing.is_empty() {
+                Some(Stale::ReadsOtherwise {
+                    found: documents.union(&shapes).cloned().collect(),
+                    missing,
+                    diagnosed,
+                })
+            } else if category == Category::Read && !named_documents {
+                Some(Stale::Miscategorised("rust-source"))
+            } else if category == Category::RustSource && named_documents {
+                Some(Stale::Miscategorised("read"))
+            } else {
+                None
+            }
+        }
+        Category::Unreduced => (!diagnosed).then_some(Stale::NoLongerUnreduced(documents)),
+        Category::Exception => row.reason.trim().is_empty().then_some(Stale::NoReason),
+    }
+}
+
+/// The row-side half: why the row's `(file, owner)` names nothing, if it
+/// does not.
+fn unresolved_row(row: &ListedRow, category: Category, evidence: &Evidence<'_>) -> Option<Stale> {
+    if !row.file.ends_with(".rs") {
+        if category != Category::Exception || !evidence.committed.contains(&row.file) {
+            return Some(Stale::NotAnItemFile);
+        }
+        let keyed = row.mechanism != LEDGER_KEY
+            || evidence
+                .ledgers
+                .get(&row.file)
+                .is_some_and(|keys| keys.contains(&row.owner));
+        return (!keyed).then_some(Stale::KeyGone);
+    }
+    let declared = |names: &BTreeSet<String>| names.contains(&row.owner);
+    if evidence.spelled.get(&row.file).is_some_and(declared) {
+        return None;
+    }
+    let elsewhere: BTreeSet<String> = evidence
+        .spelled
+        .iter()
+        .filter(|(_, names)| declared(names))
+        .map(|(file, _)| file.clone())
+        .collect();
+    Some(if elsewhere.is_empty() {
+        Stale::ItemGone
+    } else {
+        Stale::ItemMoved(elsewhere)
+    })
+}
+
+/// What the check of rows says when it fires: each row, its list, its item
+/// and why, and what each category means.
+fn stale_complaint(stale: &[(&ListedRow, Stale)]) -> String {
+    let mut said = String::new();
+    let _ = writeln!(
+        said,
+        "{} row(s) of the two lists are accounted for by no reader:\n",
+        stale.len()
+    );
+    for (row, why) in stale {
+        let _ = writeln!(said, "    {} — {}", row.named(), why.said());
+    }
+    let _ = write!(
+        said,
+        "\nThe lists are an equality: every reader is a row, and every row is a reader or a \
+         categorised exception. The `category` column says how a row is held: `read` (the \
+         document scan finds its item reading every document its subject names, and a \
+         Rust-source shape written in its item reports every `.rs` name in it), `unreduced` (the \
+         scan's diagnostic names its item: the read exists and the evaluator cannot reduce its \
+         path, so the row stays while the diagnostic entry does), `rust-source` (the four \
+         shapes of no_source_reader_names_a_file_outside_the_two_lists report every name its \
+         subject gives, in its item), or `exception` (a reader no scan here sees, kept for the \
+         reason its row gives). A row whose item is gone, or reads nothing, is removed; a row \
+         whose item reads something else says what it reads; a row that names a reader the \
+         scans cannot see is an `exception` that names the blind spot."
+    );
+    said
+}
+
+/// Everything the scans find in this workspace, found once for every test
+/// that holds the lists to it.
+struct Code {
+    documents: usize,
+    readers: Vec<DocumentReader>,
+    unresolved: Vec<UnresolvedRead>,
+    spelled: BTreeMap<String, BTreeSet<String>>,
+    hits: Vec<OwnedHit>,
+    committed: BTreeSet<String>,
+}
+
+fn the_code() -> &'static Code {
+    static CODE: std::sync::OnceLock<Code> = std::sync::OnceLock::new();
+    CODE.get_or_init(|| {
+        let root = workspace_root();
+        let committed = committed_files(&root);
+        let documents = committed
+            .iter()
+            .filter(|path| is_document(path.as_str()))
+            .count();
+        let indices = first_party_indices(&root);
+        let (readers, unresolved) = document_readers(&indices, &root, &committed);
+        let (spelled, hits) = items_and_shapes(&indices, &root, &committed, scan(&root));
+        Code {
+            documents,
+            readers,
+            unresolved,
+            spelled,
+            hits,
+            committed,
+        }
+    })
+}
+
+/// Every owner spelling each file's items answer to, and each Rust-source
+/// shape with the item its line is written in.
+fn items_and_shapes(
+    indices: &[(PathBuf, Index)],
+    root: &Path,
+    committed: &BTreeSet<String>,
+    hits: Vec<Hit>,
+) -> (BTreeMap<String, BTreeSet<String>>, Vec<OwnedHit>) {
+    let world = World::of(indices);
+    let scans: Vec<DocumentScan<'_>> = indices
+        .iter()
+        .enumerate()
+        .map(|(number, (package, index))| DocumentScan {
+            index,
+            number,
+            world: &world,
+            root,
+            package,
+            committed,
+        })
+        .collect();
+    let mut spelled: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for scan in &scans {
+        for (file, names) in scan.spelled_owners() {
+            spelled.entry(file).or_default().extend(names);
+        }
+    }
+    let owned = hits
+        .into_iter()
+        .map(|hit| {
+            let owners = scans
+                .iter()
+                .filter_map(|scan| scan.owners_on_line(&hit.file, hit.line))
+                .flatten()
+                .collect();
+            OwnedHit { hit, owners }
+        })
+        .collect();
+    (spelled, owned)
+}
+
+/// The lines of every ledger a row keys into.
+fn ledger_keys(root: &Path, rows: &[ListedRow]) -> BTreeMap<String, BTreeSet<String>> {
+    rows.iter()
+        .filter(|row| row.mechanism == LEDGER_KEY)
+        .map(|row| row.file.clone())
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .map(|ledger| {
+            let text = std::fs::read_to_string(root.join(&ledger))
+                .unwrap_or_else(|error| panic!("{ledger} is a ledger a row keys into: {error}"));
+            let keys = text.lines().map(ToOwned::to_owned).collect();
+            (ledger, keys)
+        })
+        .collect()
+}
+/// RED (T-SOURCE-READERS-STALE) — **every row of the two lists is a reader
+/// of the code or a categorised exception**: the other half of
+/// `every_reader_of_a_committed_document_is_on_a_list`, so the lists are an
+/// equality and not an allowlist. Each row's `(file, owner)` resolves to an
+/// item bt-source finds in that file (a ledger key to a line of its ledger),
+/// and its `category` holds it: `read` to the readers the scans find,
+/// `unreduced` to the diagnostic, `rust-source` to the four shapes,
+/// `exception` to its reason.
+///
+/// MUTATION: `a_row_no_reader_accounts_for_is_refused` below is this test's
+/// mutation, on a tree of its own; on this one, add a row whose owner reads
+/// nothing, or take a `read` row's item away, and this names the row.
+#[test]
+fn every_row_is_a_reader_or_a_categorised_exception() {
+    let root = workspace_root();
+    let code = the_code();
+    let rows = listed_rows(&root);
+    let ledgers = ledger_keys(&root, &rows);
+    let evidence = Evidence {
+        spelled: &code.spelled,
+        readers: &code.readers,
+        unresolved: &code.unresolved,
+        hits: &code.hits,
+        committed: &code.committed,
+        ledgers: &ledgers,
+    };
+    let stale = stale_rows(&rows, &evidence);
+    let mut census: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    for row in &rows {
+        *census.entry((row.list, row.category.as_str())).or_default() += 1;
+    }
+    println!("{} rows by list and category: {census:?}", rows.len());
+    assert!(stale.is_empty(), "{}", stale_complaint(&stale));
+}
+
+/// RED (T-SOURCE-READERS-STALE) — **a row no reader accounts for is
+/// refused, naming the row and why**: a row whose owner is no item, one
+/// whose owner is an item of another file, one whose item reads a different
+/// document, one with no category, a `rust-source` row whose item no shape
+/// is written in, an `exception` without a reason, a ledger key its ledger
+/// does not hold, and a non-Rust row that is not an `exception`; an
+/// `unreduced` row is accepted while the diagnostic names its item and
+/// refused once the entry is gone and no read is found.
+///
+/// The plant is the crate of
+/// `a_planted_document_reader_on_neither_list_makes_the_tripwire_fire` with
+/// the four Rust-source shapes of
+/// `a_planted_reader_that_is_on_neither_list_makes_the_tripwire_fire` as its
+/// module `shapes`, under the machine's temporary directory, with the real
+/// repository's committed paths as the subject set.
+///
+/// MUTATION: skip the row-side resolution (drop the `unresolved_row` call in
+/// `staleness`) and the rows naming no item, an item of another file, a
+/// ledger key that is gone and a non-Rust `read` row are judged by what they
+/// read instead; skip the subject match (the `Read | RustSource` arm answers
+/// `None`) and the rows naming what their item does not read are accepted;
+/// take an uncategorised row for a `read` one (`Category::named(…)
+/// .unwrap_or(Category::Read)`) and the row with no category is accepted.
+#[test]
+fn a_row_no_reader_accounts_for_is_refused() {
+    let plot = temporary_directory("planted-rows");
+    let package = plot.join("crates").join("planted");
+    let module = package.join("src");
+    std::fs::create_dir_all(&module).expect("a tree of our own");
+    std::fs::write(
+        module.join("lib.rs"),
+        format!("{}\nmod shapes;\n", planted_document_reader()),
+    )
+    .expect("the plant");
+    std::fs::write(module.join("shapes.rs"), planted_reader()).expect("the shapes");
+    let universe = Universe::declare(
+        "the planted rows",
+        vec![TargetRoot {
+            id: TargetId {
+                package: "planted".to_owned(),
+                kind: TargetKind::Library,
+                name: "planted".to_owned(),
+            },
+            file: module.join("lib.rs"),
+        }],
+        vec![DiskScope::under(&module)],
+        Vendor::Excluded,
+    )
+    .expect("the plant is there");
+    let index =
+        Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+    let committed = committed_files(&workspace_root());
+    let indices = [(package, index)];
+    let (readers, unresolved) = document_readers(&indices, &plot, &committed);
+    let (spelled, hits) = items_and_shapes(&indices, &plot, &committed, scan(&plot));
+
+    const LIB: &str = "crates/planted/src/lib.rs";
+    const SHAPES: &str = "crates/planted/src/shapes.rs";
+    const LEDGER: &str = "crates/bt-app/src/file_reads_doors.txt";
+    const KEY: &str = "animation.rs: read_head: .read";
+    let row = |file: &str, owner: &str, mechanism: &str, subject: &str, category: &str| ListedRow {
+        list: SOURCE_LIST,
+        file: file.to_owned(),
+        owner: owner.to_owned(),
+        mechanism: mechanism.to_owned(),
+        subject: subject.to_owned(),
+        category: category.to_owned(),
+        reason: "the planted reason".to_owned(),
+    };
+    let read = "std::fs::read_to_string(path)";
+    let mut reasonless = row(LIB, "tests::opens_a_json", read, "-", "exception");
+    reasonless.reason.clear();
+    let rows = [
+        // Accounted for.
+        row(
+            LIB,
+            "tests::reads_the_ledger",
+            read,
+            "docs/plans/structural-debt.md",
+            "read",
+        ),
+        row(
+            LIB,
+            "tests::LIST",
+            "include_str!",
+            "../../bt-app/src/window_waits.tsv",
+            "read",
+        ),
+        row(
+            LIB,
+            "tests::reads_a_name_it_is_handed",
+            read,
+            "docs/(a name)",
+            "unreduced",
+        ),
+        row(
+            SHAPES,
+            "shapes::TEXT",
+            "include_str!",
+            "neighbour.rs",
+            "rust-source",
+        ),
+        row(LEDGER, KEY, LEDGER_KEY, "read_head", "exception"),
+        // Not.
+        row(
+            LIB,
+            "tests::a_reader_that_does_not_exist",
+            read,
+            "docs/RULES.md",
+            "read",
+        ),
+        row(
+            SHAPES,
+            "tests::reads_the_ledger",
+            read,
+            "docs/plans/structural-debt.md",
+            "read",
+        ),
+        row(
+            LIB,
+            "tests::reads_the_ledger",
+            read,
+            "docs/RULES.md",
+            "read",
+        ),
+        row(
+            LIB,
+            "tests::reads_the_ledger",
+            read,
+            "docs/plans/structural-debt.md",
+            "",
+        ),
+        row(
+            LIB,
+            "tests::reads_the_ledger",
+            read,
+            "neighbour.rs",
+            "rust-source",
+        ),
+        reasonless,
+        row(
+            LEDGER,
+            "gone.rs: nothing: .read",
+            LEDGER_KEY,
+            "nothing",
+            "exception",
+        ),
+        row(
+            "docs/plans/structural-debt.md",
+            "a script",
+            "script",
+            "-",
+            "read",
+        ),
+    ];
+    let ledgers = BTreeMap::from([(LEDGER.to_owned(), BTreeSet::from([KEY.to_owned()]))]);
+    let judged = |unresolved: &[UnresolvedRead]| -> Vec<(String, Stale)> {
+        let evidence = Evidence {
+            spelled: &spelled,
+            readers: &readers,
+            unresolved,
+            hits: &hits,
+            committed: &committed,
+            ledgers: &ledgers,
+        };
+        stale_rows(&rows, &evidence)
+            .into_iter()
+            .map(|(row, why)| {
+                (
+                    format!("{} {} [{}]", row.file, row.owner, row.category),
+                    why,
+                )
+            })
+            .collect()
+    };
+    let ledger = BTreeSet::from(["docs/plans/structural-debt.md".to_owned()]);
+    let expected = vec![
+        (
+            format!("{LIB} tests::a_reader_that_does_not_exist [read]"),
+            Stale::ItemGone,
+        ),
+        (
+            format!("{SHAPES} tests::reads_the_ledger [read]"),
+            Stale::ItemMoved(BTreeSet::from([LIB.to_owned()])),
+        ),
+        (
+            format!("{LIB} tests::reads_the_ledger [read]"),
+            Stale::ReadsOtherwise {
+                found: ledger.clone(),
+                missing: vec!["docs/RULES.md".to_owned()],
+                diagnosed: false,
+            },
+        ),
+        (
+            format!("{LIB} tests::reads_the_ledger []"),
+            Stale::Uncategorised,
+        ),
+        (
+            format!("{LIB} tests::reads_the_ledger [rust-source]"),
+            Stale::ReadsOtherwise {
+                found: ledger,
+                missing: vec!["neighbour.rs".to_owned()],
+                diagnosed: false,
+            },
+        ),
+        (
+            format!("{LIB} tests::opens_a_json [exception]"),
+            Stale::NoReason,
+        ),
+        (
+            format!("{LEDGER} gone.rs: nothing: .read [exception]"),
+            Stale::KeyGone,
+        ),
+        (
+            "docs/plans/structural-debt.md a script [read]".to_owned(),
+            Stale::NotAnItemFile,
+        ),
+    ];
+    assert_eq!(judged(&unresolved), expected);
+
+    // The diagnostic entry gone, and no read found: the `unreduced` row is
+    // stale too.
+    let handed: Vec<UnresolvedRead> = unresolved
+        .iter()
+        .filter(|read| !read.owners.contains("tests::reads_a_name_it_is_handed"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        handed.len() + 1,
+        unresolved.len(),
+        "the planted entry is one"
+    );
+    let mut without = expected.clone();
+    without.insert(
+        0,
+        (
+            format!("{LIB} tests::reads_a_name_it_is_handed [unreduced]"),
+            Stale::NoLongerUnreduced(BTreeSet::new()),
+        ),
+    );
+    assert_eq!(judged(&handed), without);
+
+    let said = stale_complaint(&stale_rows(
+        &rows,
+        &Evidence {
+            spelled: &spelled,
+            readers: &readers,
+            unresolved: &unresolved,
+            hits: &hits,
+            committed: &committed,
+            ledgers: &ledgers,
+        },
+    ));
+    assert!(
+        said.contains(SOURCE_LIST)
+            && said.contains("tests::a_reader_that_does_not_exist")
+            && said.contains("found reading docs/plans/structural-debt.md, and not docs/RULES.md")
+            && said.contains("`unreduced`"),
+        "the refusal names the list, the row, what its item reads and what unreduced means; it \
+         said:\n{said}"
+    );
+
+    std::fs::remove_dir_all(&plot).expect("the plant is taken away again");
 }
 
 /// RED — **each read call is judged by its own path**: a planted crate's

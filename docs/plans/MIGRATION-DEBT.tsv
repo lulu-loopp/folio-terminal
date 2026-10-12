@@ -5,14 +5,23 @@
 # which bt-source has a sufficient identity were migrated. Every remaining row
 # is DEBT and names the seam required to remove it.
 #
-# scripts/ci/check-migration-debt.ps1 compares the six legacy identity fields
-# with the merge base, so explanatory columns may improve without weakening the
-# no-growth rule. The verdict is last by design.
-file	owner	mechanism	subject	ticket	disturbed_by_2a	needed_seam	verdict
-crates/bt-app/src/file_reads_doors.txt	animation.rs: read_head: .read	ledger key naming a file	read_head (1 site(s), .read)	P16	no	collision-safe free-function owner identity independent of the file that holds it	DEBT
-crates/bt-app/src/file_reads_doors.txt	attention_ownership.rs: record: Marks::read	ledger key naming a file	record (1 site(s), Marks::read)	P16	no	collision-safe free-function owner identity independent of the file that holds it (the second `record` declaration is test-only, so the item key collides with a test item)	DEBT
-crates/bt-app/src/file_reads_doors.txt	psreadline.rs: install_recorded: Marks::read	ledger key naming a file	install_recorded (1 site(s), Marks::read)	P16	no	collision-safe free-function owner identity independent of the file that holds it	DEBT
-crates/bt-app/src/file_reads_doors.txt	psreadline.rs: read: .read	ledger key naming a file	read (1 site(s), .read)	P16	no	collision-safe free-function owner identity independent of the file that holds it	DEBT
-crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_marks.rs: lock: .open	ledger key naming a file	lock (1 site(s), .open)	P16	no	collision-safe free-function owner identity independent of the file that holds it	DEBT
-crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_marks.rs: lock: .read	ledger key naming a file	lock (1 site(s), .read)	P16	no	collision-safe free-function owner identity independent of the file that holds it	DEBT
-scripts/dev/bt-app-split-freshness.py	manifest() and reference_maps()	script: named files out of git blobs	the two impl Runtime blocks in main.rs	P0	no	bt-source index over an arbitrary git tree or blob snapshot with declared module identities	DEBT
+# scripts/ci/check-migration-debt.ps1 compares the six legacy identity fields,
+# found by their names in the header, with the merge base, so explanatory
+# columns may improve without weakening the no-growth rule. The verdict is last
+# by design.
+#
+# `category` is the column crates/bt-source/tests/tripwire.rs holds every row
+# to, as SOURCE-READERS.tsv's header says (read, unreduced, rust-source,
+# exception). Every row here today is an `exception`: a key of
+# file_reads_doors.txt (mechanism `ledger key naming a file`: the owner must be
+# a line of that ledger, and file_reads_source_tests holds the ledger equal to
+# the doors) or a Python script, which bt-source does not read; needed_seam is
+# the reason.
+file	owner	mechanism	subject	ticket	disturbed_by_2a	category	needed_seam	verdict
+crates/bt-app/src/file_reads_doors.txt	animation.rs: read_head: .read	ledger key naming a file	read_head (1 site(s), .read)	P16	no	exception	collision-safe free-function owner identity independent of the file that holds it	DEBT
+crates/bt-app/src/file_reads_doors.txt	attention_ownership.rs: record: Marks::read	ledger key naming a file	record (1 site(s), Marks::read)	P16	no	exception	collision-safe free-function owner identity independent of the file that holds it (the second `record` declaration is test-only, so the item key collides with a test item)	DEBT
+crates/bt-app/src/file_reads_doors.txt	psreadline.rs: install_recorded: Marks::read	ledger key naming a file	install_recorded (1 site(s), Marks::read)	P16	no	exception	collision-safe free-function owner identity independent of the file that holds it	DEBT
+crates/bt-app/src/file_reads_doors.txt	psreadline.rs: read: .read	ledger key naming a file	read (1 site(s), .read)	P16	no	exception	collision-safe free-function owner identity independent of the file that holds it	DEBT
+crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_marks.rs: lock: .open	ledger key naming a file	lock (1 site(s), .open)	P16	no	exception	collision-safe free-function owner identity independent of the file that holds it	DEBT
+crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_marks.rs: lock: .read	ledger key naming a file	lock (1 site(s), .read)	P16	no	exception	collision-safe free-function owner identity independent of the file that holds it	DEBT
+scripts/dev/bt-app-split-freshness.py	manifest() and reference_maps()	script: named files out of git blobs	the two impl Runtime blocks in main.rs	P0	no	exception	bt-source index over an arbitrary git tree or blob snapshot with declared module identities	DEBT
