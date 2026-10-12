@@ -117,7 +117,11 @@ pub(crate) const UPDATE_RECEIPT_DEADLINE: Duration = crate::persist::SESSION_SAV
 /// **The budget is the session store's own, shared and not added to.** One
 /// `SESSION_SAVE_BUDGET` from the start of [`QuitStep::Documents`] covers the four
 /// hand-editable documents, the copies of the ones that could not be written
-/// ([`QuitStep::Recovery`]), and the session write queued after them. Each owed
+/// ([`QuitStep::Recovery`]), and the session write queued after them: that write
+/// waits only until [`Quit::session_write_until`], the same instant for an ordinary
+/// quit's judged flush and an update's receipt, and a quit that reaches it with
+/// nothing left leaves without a new flush
+/// (`persist::SessionStore::flush_for_quit`). Each owed
 /// document is sent once more — a quit is one of the triggers an owed edit is retried
 /// on — and every answer is processed as the running window processes it, a `Moved`
 /// or `Displaced` merged (purely: no door runs) and the merged document sent again.
@@ -817,7 +821,9 @@ impl Quit {
     /// copies** ([`QuitStep::Documents`], [`QuitStep::Recovery`]): nothing but what
     /// those phases send is queued on it meanwhile — no autosave of the session and
     /// no re-read for the storage watch — so the session write is queued behind the
-    /// documents and their copies, and behind nothing else of this run's.
+    /// documents and their copies, and behind nothing else of this run's. An update
+    /// trial's receipt, written at its first pane text, is the one exception, and it goes
+    /// *ahead* of them (`persist::StorageLane::submit_ahead`).
     #[must_use]
     pub(crate) fn holds_the_storage_worker(&self) -> bool {
         matches!(self.phase, Phase::Documents | Phase::Recovery)
@@ -1038,17 +1044,32 @@ impl Quit {
     }
 
     /// The final document went to the writer as `generation`: wait for its
-    /// receipt until [`UPDATE_RECEIPT_DEADLINE`] from `now`.
+    /// receipt until [`UPDATE_RECEIPT_DEADLINE`] from `now`, and never past
+    /// [`Self::session_write_until`].
     pub(crate) fn requested(&mut self, generation: u64, now: Instant) -> QuitStep {
         if self.phase == (Phase::Writing { receipt: None }) {
             self.phase = Phase::Writing {
                 receipt: Some(Receipt {
                     generation,
-                    until: now + UPDATE_RECEIPT_DEADLINE,
+                    until: (now + UPDATE_RECEIPT_DEADLINE).min(self.session_write_until(now)),
                 }),
             };
         }
         self.step()
+    }
+
+    /// **When the session write's wait ends, at the latest** (design note 2026-10-11,
+    /// revision (c)2): what is left of the one [`crate::persist::SESSION_SAVE_BUDGET`]
+    /// the documents phase started — `documents_from + SESSION_SAVE_BUDGET` — and never
+    /// later than the write's own bound from `now` (row 16). Both write roads take it:
+    /// the ordinary quit's judged flush and an update's receipt. At or before `now` the
+    /// budget is spent, and the write is not handed over at all.
+    #[must_use]
+    pub(crate) fn session_write_until(&self, now: Instant) -> Instant {
+        let own = now + crate::persist::SESSION_SAVE_BUDGET;
+        self.documents_from.map_or(own, |start| {
+            (start + crate::persist::SESSION_SAVE_BUDGET).min(own)
+        })
     }
 
     /// Whether the receipt's bound has run out — the clock read on the turn.

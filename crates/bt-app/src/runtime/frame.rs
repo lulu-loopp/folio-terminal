@@ -1748,6 +1748,7 @@ impl Runtime<'_> {
         // and their copies are on it, nothing else of this run's is queued there — no
         // re-read for the storage watch and no autosave — so the session write goes behind
         // them and behind nothing else. The watch keeps its stamps and the store its debt.
+        // An update trial's receipt (first text, below) goes ahead of them, not behind.
         let quit_holds_the_worker = self
             .app
             .quit

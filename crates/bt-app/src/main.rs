@@ -61380,7 +61380,7 @@ mod quit_transaction_tests {
     fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
         let settle = method_body("FolioApp", "settle_quit");
         assert!(
-            settle.contains("app.session_store.flush_judged()"),
+            settle.contains("app.session_store.flush_for_quit(until, now)"),
             "the quit's write is the judged one"
         );
         assert!(
@@ -66625,10 +66625,20 @@ impl FolioApp {
                         landed
                     } else {
                         // The way out begins with the write (§5.3 rows 15–17 are admitted from
-                        // here); a refused write comes back at `Abandon`.
+                        // here); a refused write comes back at `Abandon`. **Inside what is left
+                        // of the quit's one budget** (T-QUIT-DOCUMENTS): the judged wait ends at
+                        // `Quit::session_write_until`, and a quit with none left hands nothing
+                        // over and leaves without a new flush.
                         bt_platform::admission::exiting();
+                        let now = Instant::now();
                         match self.app.as_mut() {
-                            Some(app) => app.session_store.flush_judged(),
+                            Some(app) => {
+                                let until = app
+                                    .quit
+                                    .as_ref()
+                                    .map_or(now, |quit| quit.session_write_until(now));
+                                app.session_store.flush_for_quit(until, now)
+                            }
                             None => return Ok(()),
                         }
                     };
@@ -66908,6 +66918,12 @@ impl FolioApp {
         let app = self.app.as_mut()?;
         let quit = app.quit.as_mut()?;
         let Some(generation) = quit.awaited_generation() else {
+            // **Not handed over once the quit's one budget is spent** (T-QUIT-DOCUMENTS): the
+            // store gives the write up without a new flush, and the update with it.
+            let until = quit.session_write_until(now);
+            if until <= now {
+                return Some(app.session_store.flush_for_quit(until, now));
+            }
             return match app.session_store.hand_over_final(now) {
                 Ok(Some(generation)) => {
                     quit.requested(generation, now);

@@ -51,6 +51,8 @@ enum Seen {
     /// A document's copy into `recovered`, by file name.
     Copy(String),
     Session,
+    /// An update trial's receipt.
+    Receipt,
     Note(String),
     Step(QuitStep),
 }
@@ -87,6 +89,7 @@ impl Disk {
                     self.copies.push(job);
                 }
                 ScriptedJob::Session => self.seen.push(Seen::Session),
+                ScriptedJob::Receipt => self.seen.push(Seen::Receipt),
                 ScriptedJob::Read | ScriptedJob::Other => {}
             }
         }
@@ -866,6 +869,167 @@ fn a_held_document_is_copied_not_sent_at_quit() {
             now
         ),
         QuitStep::Exit
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Walk a quit whose `settings.json` write is refused to the copy on the worker, the copy
+/// unanswered: the documents phase at `start`, its end at `phase_two`.
+fn to_a_copy_on_the_worker(
+    quit: &mut Quit,
+    documents: &mut [&mut dyn QuitDocument],
+    disk: &mut Disk,
+    folder: &Path,
+    start: Instant,
+    phase_two: Instant,
+) {
+    assert_eq!(quit.documents_turn(documents, start), QuitStep::Documents);
+    disk.answer_write(refused);
+    assert_eq!(
+        quit.documents_turn(documents, phase_two),
+        QuitStep::Recovery
+    );
+    assert_eq!(
+        quit.recovery_turn(documents, folder, SystemTime::UNIX_EPOCH, phase_two),
+        QuitStep::Recovery,
+        "the copy is on the worker"
+    );
+}
+
+/// RED (T-QUIT-DOCUMENTS round 2, review blocker 1) — **the session write spends only what
+/// is left of the quit's one budget.** The recovery phase ends at 2.4 s; the session write's
+/// wait then ends at the documents phase's start plus `SESSION_SAVE_BUDGET` — 0.6 s later,
+/// not a fresh 3 s — for the ordinary quit's judged flush and an update's receipt alike.
+///
+/// MUTATION: a fresh budget (`Quit::session_write_until` answers `now +
+/// SESSION_SAVE_BUDGET`) — the bound is 3 s from the end of the recovery phase.
+#[test]
+fn the_session_write_spends_only_what_remains_of_the_one_budget() {
+    let (root, mut settings_store, _session, mut disk) = settings_and_session("one-budget");
+    let folder = root.join(preview::RECOVERED_FOLDER);
+    assert!(settings_store.store(settings("预算 Budget Mono")));
+    let start = Instant::now();
+    let late = start + std::time::Duration::from_millis(2_400);
+    let mut quit = Quit::begin(Vec::new());
+    let mut documents: [&mut dyn QuitDocument; 1] = [&mut settings_store];
+    to_a_copy_on_the_worker(
+        &mut quit,
+        &mut documents,
+        &mut disk,
+        &folder,
+        start,
+        start + std::time::Duration::from_millis(1_000),
+    );
+    disk.answer_copy(Ok(folder.join("1970-01-01T000000Z settings.json")));
+    assert_eq!(
+        quit.recovery_turn(&mut documents, &folder, SystemTime::UNIX_EPOCH, late),
+        QuitStep::Photograph
+    );
+    assert_eq!(quit.photographed(), QuitStep::Write);
+    assert_eq!(
+        quit.session_write_until(late) - late,
+        std::time::Duration::from_millis(600),
+        "what is left of the one budget, and no more"
+    );
+
+    // An update's quit: its receipt is held to the same instant.
+    let txn = crate::update_txn::TxnId::new([0x21; 16]);
+    let mut update = Quit::begin_for(Vec::new(), Reason::UpdateRestart { txn });
+    assert_eq!(update.documents(&[], start), QuitStep::Photograph);
+    assert_eq!(update.photographed(), QuitStep::Write);
+    update.requested(1, late);
+    assert_eq!(
+        update.deadline(),
+        Some(start + persist::SESSION_SAVE_BUDGET),
+        "the receipt's bound is the budget's end"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// RED (T-QUIT-DOCUMENTS round 2, review blocker 1) — **a quit with no budget left leaves
+/// without a new flush**: the session is not handed over, nothing is waited for, and the way
+/// out's close does not flush it either; the write is given up as a timed-out one, so the
+/// quit goes on and `session.lock` stays.
+///
+/// MUTATION: flush anew (in `SessionStore::flush_for_quit`, judge a fresh flush when the
+/// budget is spent) — a session document is handed to the worker.
+#[test]
+fn a_quit_with_no_budget_left_closes_without_a_new_flush() {
+    let (root, mut settings_store, mut session, mut disk) = settings_and_session("no-budget");
+    let folder = root.join(preview::RECOVERED_FOLDER);
+    assert!(settings_store.store(settings("耗尽 Spent Mono")));
+    session.record(
+        crate::test_support::shells_document(&root, 1),
+        Instant::now(),
+    );
+    let start = Instant::now();
+    let spent = start + persist::SESSION_SAVE_BUDGET;
+    let mut quit = Quit::begin(Vec::new());
+    let mut documents: [&mut dyn QuitDocument; 1] = [&mut settings_store];
+    to_a_copy_on_the_worker(&mut quit, &mut documents, &mut disk, &folder, start, start);
+    disk.answer_copy(Ok(folder.join("1970-01-01T000000Z settings.json")));
+    // The copy's receipt read on a turn that came late, with nothing of the budget left.
+    assert_eq!(
+        quit.recovery_turn(&mut documents, &folder, SystemTime::UNIX_EPOCH, spent),
+        QuitStep::Photograph
+    );
+    assert_eq!(quit.photographed(), QuitStep::Write);
+    let until = quit.session_write_until(spent);
+    assert!(until <= spent, "no budget is left");
+    let verdict = session.flush_for_quit(until, spent);
+    assert!(
+        verdict
+            .as_ref()
+            .is_err_and(persist::SaveRefusal::quit_may_proceed),
+        "given up as a write whose budget ran out, which leaves: {verdict:?}"
+    );
+    assert_eq!(quit.written(WriteVerdict::TimedOut), QuitStep::Retire);
+    session.close();
+    disk.look();
+    assert_eq!(
+        disk.sessions(),
+        0,
+        "no session was handed over: {:?}",
+        disk.seen
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// RED (T-QUIT-DOCUMENTS round 2, review blocker 2) — **an update trial's receipt, written at
+/// its first text while a quit holds the storage worker, goes ahead of the copies.** It is the
+/// one job admitted while the documents and recovery phases hold the worker: a small
+/// create-new write the trial is rolled back without, served before every job still queued.
+///
+/// MUTATION: the receipt queued behind (`SessionWriter::send_receipt` through
+/// `submit_storage_job`, the queue's own order) — the copy is served first.
+#[test]
+fn first_text_during_the_documents_phase_writes_the_trial_receipt_ahead_of_the_copies() {
+    let (root, mut settings_store, mut session, mut disk) = settings_and_session("receipt");
+    let folder = root.join(preview::RECOVERED_FOLDER);
+    assert!(settings_store.store(settings("收据 Receipt Mono")));
+    let start = Instant::now();
+    let mut quit = Quit::begin(Vec::new());
+    {
+        let mut documents: [&mut dyn QuitDocument; 1] = [&mut settings_store];
+        to_a_copy_on_the_worker(&mut quit, &mut documents, &mut disk, &folder, start, start);
+    }
+    assert!(quit.holds_the_storage_worker());
+    // The first pane text of an update's trial, presented now.
+    let answer = session.write_receipt(crate::update_trial::ReceiptJob {
+        path: root.join("trial-receipt 试用.json"),
+        bytes: b"{\"trial\":\"receipt\"}".to_vec(),
+    });
+    assert!(answer.is_some(), "a worker takes it");
+    disk.look();
+    let receipt_at = disk.seen.iter().position(|seen| *seen == Seen::Receipt);
+    let copy_at = disk
+        .seen
+        .iter()
+        .position(|seen| *seen == Seen::Copy(persist::SETTINGS_FILE_NAME.to_owned()));
+    assert!(
+        matches!((receipt_at, copy_at), (Some(receipt), Some(copy)) if receipt < copy),
+        "the receipt is served ahead of the copy: {:?}",
+        disk.seen
     );
     let _ = std::fs::remove_dir_all(&root);
 }
