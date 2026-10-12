@@ -16,6 +16,12 @@
 //!   task) is reported by the executor through [`Ends::worker_ended`]. Both the task and the
 //!   worker's body run inside `contained_panic::contain`, so under the resident panic hook, which
 //!   ends the process for any other panic, a panic in either reaches the seam (S-5 round 3);
+//!   a thread-door refusal is returned synchronously as `WorkerEnd::NotStarted` and also reported
+//!   through `Ends`; a lane started before its request door may treat that as its failed start,
+//!   while [`Coalescing`] interposes before minting, refuses only that request — said like a
+//!   failure, once per streak where the lane declares one, after the lane's lock is let go — and
+//!   lets the next new request try the start again without faulting the lane (revision (b)5,
+//!   rule 1);
 //! - a [`Ledger`], which mints each request's identity or refuses it at the door (C1's admission),
 //!   records what each identity is owed — the sink its terminal goes to when its requester has
 //!   gone (C6) — and turns every identity into exactly one [`Terminal`]: `Done`, `Failed`,
@@ -50,19 +56,10 @@
 //! a row of `EXPECTED_FAILURES`, with the exact kind of failure and the ledger row that repairs it
 //! (`docs/plans/structural-debt.md`). `judge` is red on an unexpected pass, on a failure of a
 //! different kind, on a lane or claim that was not run, and on a claim that exercised no request.
-//! The OS hand-off lane (`handoff_lane`) is built on the seam (S-5), and its adapter hands the
-//! real lane a scripted [`Executor`]; S-4 (the font, taskbar and program-walk lanes), S-6a (the
-//! storage worker) and S-7 (the clipboard) each move one more onto it, the same way.
-
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "S-4 until 2026-11-30: the hand-off lane uses none of the seam's joins, \
-                  cancels, supersessions or streaks; S-4 builds the font, taskbar and program-walk \
-                  lanes on it with them"
-    )
-)]
+//! The OS hand-off lane (`handoff_lane`, S-5) is built on the seam, and so are the font, taskbar
+//! and program-walk lanes (`settings::FontLane`, `taskbar_lane`, `programs_lane`; S-4), each a
+//! latest-value lane on [`Coalescing`]; each adapter hands its real lane a scripted [`Executor`].
+//! S-6a (the storage worker) and S-7 (the clipboard) each move one more onto it, the same way.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -94,6 +91,16 @@ pub(crate) enum Terminal<Id, T, E> {
     /// The work failed, or panicked inside its task.
     Failed(TaskFailure<E>),
     /// The lane dropped the request before its work was done, at its requester's word.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T-DOCUMENT-SAVE-LANE until 2026-11-30: no lane on the seam cancels a \
+                      request yet; the contract's terminal set keeps it (C2), and the storage \
+                      worker's document saves (S-6a) are the first lane that may drop one at its \
+                      requester's word"
+        )
+    )]
     Cancelled,
     /// A newer, different request displaced this one (C4), and `by` is that request.
     Superseded { by: Id },
@@ -154,6 +161,11 @@ pub(crate) enum Refused {
     Faulted(WorkerEnd),
     /// The request asked to join one that has already ended.
     TwinEnded,
+    /// The lane's worker could not be started for this request, in the thread door's words: the
+    /// request is refused, and the lane is not in fault — its worker never ran — so the next
+    /// request starts it again (revision (b)5, rule 1: a new request, not a retry). Answered only
+    /// by a lane that starts its worker on a request ([`Coalescing`]).
+    NotStarted(String),
 }
 
 /// How often the ledger says a failure (C3).
@@ -162,7 +174,10 @@ pub(crate) enum Saying {
     /// One line per failed request.
     PerRequest,
     /// One line per streak of the same failure: a failure said like the last one said, with no
-    /// answer delivered between them, is not said again.
+    /// answer delivered between them, is not said again. A worker start the thread door refused
+    /// ([`Refused::NotStarted`]) is a streak of its own kind: refused again in the same words, with
+    /// nothing else said between, it is not said again; a delivered failure and a refused start
+    /// never continue each other's streak.
     PerStreak,
 }
 
@@ -204,7 +219,16 @@ struct Book<Id, O: Owed<Id>> {
     entries: BTreeMap<Id, Entry<Id, O>>,
     fault: Option<WorkerEnd>,
     /// The last failure said, while no answer has been delivered since ([`Saying::PerStreak`]).
-    streak: Option<String>,
+    streak: Option<Streak>,
+}
+
+/// **What the current streak is a streak of** ([`Saying::PerStreak`]): a delivered failure, in its
+/// words, or a worker start the thread door refused, in the door's. The two never continue each
+/// other's streak.
+#[derive(PartialEq)]
+enum Streak {
+    Failed(String),
+    NotStarted(String),
 }
 
 struct Entry<Id, O: Owed<Id>> {
@@ -393,6 +417,33 @@ where
         self.end(book, id, terminal, out);
     }
 
+    /// **Say a worker start the thread door refused** (C3): the refusal is the terminal of the
+    /// request that asked for the start, given at the door, and the lane is not in fault. Said like
+    /// any failure — once per request, or once per streak where the lane declares
+    /// [`Saying::PerStreak`], so a door that keeps refusing in the same words is said once. A start
+    /// that succeeds is the lane's last: its worker is never started again, and after its end every
+    /// request is refused `Faulted` before any start, so no refused-start streak outlives it to be
+    /// ended. Said after the ledger's lock is let go.
+    fn say_not_started(&self, end: &WorkerEnd) {
+        let said = end.to_string();
+        let line = {
+            let mut book = lock(&self.book);
+            let again = matches!(&book.streak, Some(Streak::NotStarted(last)) if *last == said);
+            let line = (self.saying == Saying::PerRequest || !again).then(|| {
+                format!(
+                    "{}: the worker was not started — {said}; the request is refused, and the \
+                     next request starts it again",
+                    self.lane
+                )
+            });
+            book.streak = Some(Streak::NotStarted(said));
+            line
+        };
+        if let Some(line) = line {
+            (self.say)(&line);
+        }
+    }
+
     /// **The earliest identity still owed a terminal**, or `None` when every identity minted and
     /// not yet delivered has one. On a lane that ends its identities in the order it minted them
     /// (one worker, first in first out, its end ending the rest), every identity below this one
@@ -406,7 +457,9 @@ where
             .map(|(id, _)| *id)
     }
 
-    /// The fault the lane is in: how its worker ended, once it has.
+    /// The fault the lane is in: how its worker ended, once it has. A lane's consumer learns it
+    /// from the terminals and the refusals; the proof reads it here.
+    #[cfg(test)]
     pub(crate) fn fault(&self) -> Option<WorkerEnd> {
         lock(&self.book).fault.clone()
     }
@@ -451,7 +504,7 @@ where
         match outcome {
             Terminal::Failed(failure) => {
                 let said = failure.to_string();
-                let again = book.streak.as_deref() == Some(said.as_str());
+                let again = matches!(&book.streak, Some(Streak::Failed(last)) if *last == said);
                 if self.saying == Saying::PerRequest || !again {
                     out.lines.push(match joined {
                         Some(with) => format!(
@@ -461,7 +514,7 @@ where
                         None => format!("{}: request {id:?} failed: {said}", self.lane),
                     });
                 }
-                book.streak = Some(said);
+                book.streak = Some(Streak::Failed(said));
             }
             Terminal::Done(_) => book.streak = None,
             Terminal::Cancelled
@@ -603,6 +656,17 @@ impl Executor {
     ) -> Result<(), WorkerEnd> {
         #[cfg(test)]
         let script = self.script.clone();
+        // The suite's gate can have the thread door refuse this start, as a machine out of
+        // threads would (`Gate::refuse_next_start`); the refusal is reported as the door's is.
+        #[cfg(test)]
+        if script
+            .as_ref()
+            .is_some_and(|gate| gate.take_refused_start())
+        {
+            let cause = WorkerEnd::NotStarted(REFUSED_START.to_owned());
+            ends.worker_ended(cause.clone());
+            return Err(cause);
+        }
         let ended = Arc::clone(&ends);
         let started = bt_platform::spawn_at_priority(name, self.band, move |ctx| {
             #[cfg(test)]
@@ -643,6 +707,307 @@ pub(crate) fn task<T, E>(
         Err(panic) => Err(TaskFailure::Panicked(
             crate::pty_door::panic_message(panic.as_ref()).to_owned(),
         )),
+    }
+}
+
+/// **What a request is owed on a lane whose requester is the application** (C6): the application
+/// asks, holds every request it made ([`Coalescing`]) for the life of the process, and does not
+/// go, so it is both the requester and the sink. A request reaches this sink only when the lane
+/// itself is dropped with the request untaken, at the process's end; its terminal is let go there
+/// — a success with nobody left to tell, a failure said already by the ledger as it was delivered.
+pub(crate) struct ToTheApplication<A, E>(std::marker::PhantomData<fn() -> (A, E)>);
+
+impl<A, E> ToTheApplication<A, E> {
+    pub(crate) const fn owed() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl<Id, A, E> Owed<Id> for ToTheApplication<A, E>
+where
+    A: Clone + Send + 'static,
+    E: Clone + fmt::Display + Send + 'static,
+{
+    type Answer = A;
+    type Error = E;
+
+    fn sink(self, _id: Id, _terminal: Terminal<Id, A, E>) {}
+}
+
+/// **The run a latest-value lane's worker does next**: the operation it ends (`Done` or `Failed`,
+/// and with it every request joined to it), the newest request that run answers — the operation
+/// or the last request joined to it — and what the run is asked to do.
+pub(crate) struct Waiting<Id, Op> {
+    pub(crate) operation: Id,
+    pub(crate) newest: Id,
+    pub(crate) op: Op,
+    /// How many of the requests this run stands for — the operation and every request joined to
+    /// it — no [`Coalescing::count_arrivals`] has counted yet.
+    uncounted: usize,
+}
+
+/// What [`Coalescing::ask`] admitted: the request's identity.
+pub(crate) struct Admitted<Id> {
+    pub(crate) id: Id,
+}
+
+/// **What [`Coalescing::count_arrivals`] counted**: of the requests made since the count before
+/// it and not taken by the worker as the run it does, how many the run waiting now stands for —
+/// the next run answers them — and how many a newer, different request displaced, each ended
+/// `Superseded { by }`.
+pub(crate) struct Arrivals {
+    pub(crate) waiting: usize,
+    pub(crate) superseded: usize,
+}
+
+/// **A latest-value lane on the seam** (the side-effects contract's C2 and C4, revision (b)4):
+/// coalescing kept as the policy — one run out, at most one waiting, and a newer answer serves
+/// every request standing — with every request its own terminal.
+///
+/// - A request asked while one is waiting and **the same operation** as it (`same`) joins it
+///   ([`Ledger::admit_joined`]): it ends `Joined { with }` carrying the waiting request's own
+///   terminal, and one run answers both.
+/// - A request asked while one is waiting and **a different operation** displaces it: the
+///   waiting one ends `Superseded { by }` the new one (its joins carrying that), and the new one
+///   waits in its place.
+/// - A request asked while a run is out and none is waiting waits for the next run, because the
+///   run out may have read the world before the change the request is about.
+///
+/// `fold` makes the waiting operation from the one it joins or replaces and the newer: what the
+/// newer asks, plus whatever of the older's the lane keeps (the program walk's rows asked first
+/// and its urgency).
+///
+/// The application holds every request it made here and takes their terminals in the order the
+/// ledger minted them ([`Self::ended`]) — below the earliest request still owed, so a request a
+/// supersession ended early is taken after the run that was out before it.
+pub(crate) struct Coalescing<Id, O, Op>
+where
+    Id: Copy + Ord + fmt::Debug + From<u64> + Send + 'static,
+    O: Owed<Id>,
+{
+    ledger: Arc<Ledger<Id, O>>,
+    book: Mutex<Standing<Id, O, Op>>,
+    asked: std::sync::Condvar,
+}
+
+struct Standing<Id, O, Op>
+where
+    Id: Copy + Ord + fmt::Debug + From<u64> + Send + 'static,
+    O: Owed<Id>,
+{
+    waiting: Option<Waiting<Id, Op>>,
+    /// How many requests a newer, different one has displaced that no
+    /// [`Coalescing::count_arrivals`] has counted yet — kept here, in the lock every admission
+    /// and every take holds, so a displacement is counted whenever it happens.
+    superseded: usize,
+    /// Every request the application made and has not taken the terminal of, by identity.
+    held: BTreeMap<Id, Request<Id, O>>,
+    /// Whether the lane's worker has been started — by the first request whose start the thread
+    /// door did not refuse.
+    started: bool,
+}
+
+/// **The ledger as a started worker reports its end to it** — what [`Coalescing::ask`] hands the
+/// executor. A worker that ran and ended faults the lane ([`Ledger::worker_ended`]); a start the
+/// thread door refused is not such an end — the worker never ran, and nothing is owed on it — and
+/// is answered at the door instead, as the refusal of the request that would have started it.
+pub(crate) struct Ran<Id, O: Owed<Id>>(Arc<Ledger<Id, O>>);
+
+impl<Id, O> Ends for Ran<Id, O>
+where
+    Id: Copy + Ord + fmt::Debug + From<u64> + Send + 'static,
+    O: Owed<Id>,
+{
+    fn worker_ended(&self, cause: WorkerEnd) {
+        if !matches!(cause, WorkerEnd::NotStarted(_)) {
+            self.0.worker_ended(cause);
+        }
+    }
+}
+
+impl<Id, O, Op> Coalescing<Id, O, Op>
+where
+    Id: Copy + Ord + fmt::Debug + From<u64> + Send + 'static,
+    O: Owed<Id>,
+{
+    pub(crate) fn new(ledger: Arc<Ledger<Id, O>>) -> Self {
+        Self {
+            ledger,
+            book: Mutex::new(Standing {
+                waiting: None,
+                superseded: 0,
+                held: BTreeMap::new(),
+                started: false,
+            }),
+            asked: std::sync::Condvar::new(),
+        }
+    }
+
+    /// The lane's ledger: what its worker publishes through and the executor reports the
+    /// worker's end to.
+    pub(crate) fn ledger(&self) -> &Arc<Ledger<Id, O>> {
+        &self.ledger
+    }
+
+    /// **Admit one request (C1): mint its identity, join it to the waiting run or displace that
+    /// run, and hold it for the application** — or refuse it at once, minting nothing, with the
+    /// ledger's refusal (revision (b)3). Never waits for the worker.
+    ///
+    /// **The lane's worker is started by the first request that finds it not started**, through
+    /// `start` — the lane's own `Executor::start_worker` call, handed the ledger as a started
+    /// worker reports to it ([`Ran`]) — before anything is minted. A start the thread door refuses
+    /// refuses this request at the door, [`Refused::NotStarted`], said once per streak where the
+    /// lane declares streaks ([`Saying::PerStreak`]); the lane is not in
+    /// fault, and the next request starts the worker again (revision (b)5, rule 1: a new request
+    /// tries again, and nothing is retried on its own).
+    pub(crate) fn ask(
+        &self,
+        op: Op,
+        owed: O,
+        same: impl Fn(&Op, &Op) -> bool,
+        fold: impl FnOnce(Op, Op) -> Op,
+        start: impl FnOnce(Arc<Ran<Id, O>>) -> Result<(), WorkerEnd>,
+    ) -> Result<Admitted<Id>, Refused> {
+        let mut book = lock(&self.book);
+        if !book.started {
+            if let Err(end) = start(Arc::new(Ran(Arc::clone(&self.ledger)))) {
+                // Said after the lane's lock is let go. A lock of the calling lane's own may still
+                // be held (the program walk's, across its admission); that is harmless: a refused
+                // start means the lane has no worker to wait on it, and a requester or consumer
+                // waiting on it waits only for one diagnostics line's write — the door answered
+                // without waiting for a thread, and nothing here waits for one either.
+                drop(book);
+                self.ledger.say_not_started(&end);
+                return Err(Refused::NotStarted(end.to_string()));
+            }
+            book.started = true;
+        }
+        let (request, waiting) = match book.waiting.take() {
+            Some(waiting) if same(&waiting.op, &op) => {
+                match self.ledger.admit_joined(waiting.operation, owed) {
+                    Ok(request) => {
+                        let waiting = Waiting {
+                            newest: request.id(),
+                            op: fold(waiting.op, op),
+                            uncounted: waiting.uncounted + 1,
+                            ..waiting
+                        };
+                        (request, waiting)
+                    }
+                    Err(refused) => {
+                        book.waiting = Some(waiting);
+                        return Err(refused);
+                    }
+                }
+            }
+            Some(waiting) => match self.ledger.admit(owed) {
+                Ok(request) => {
+                    let by = request.id();
+                    self.ledger
+                        .publish(waiting.operation, Terminal::Superseded { by });
+                    book.superseded += waiting.uncounted;
+                    let waiting = Waiting {
+                        operation: by,
+                        newest: by,
+                        op: fold(waiting.op, op),
+                        uncounted: 1,
+                    };
+                    (request, waiting)
+                }
+                Err(refused) => {
+                    book.waiting = Some(waiting);
+                    return Err(refused);
+                }
+            },
+            None => {
+                let request = self.ledger.admit(owed)?;
+                let id = request.id();
+                let waiting = Waiting {
+                    operation: id,
+                    newest: id,
+                    op,
+                    uncounted: 1,
+                };
+                (request, waiting)
+            }
+        };
+        let id = request.id();
+        book.waiting = Some(waiting);
+        book.held.insert(id, request);
+        drop(book);
+        self.asked.notify_one();
+        Ok(Admitted { id })
+    }
+
+    /// **The worker's: the next run**, waiting on the lane's condition variable until a request
+    /// stands. The run is taken out, so a request asked from here on waits for the run after it.
+    /// Called only on the lane's worker (`ctx`, the capability the thread door lent its body).
+    pub(crate) fn next(&self, ctx: &WorkerCtx) -> Waiting<Id, Op> {
+        let _ = ctx;
+        let mut book = lock(&self.book);
+        loop {
+            if let Some(waiting) = book.waiting.take() {
+                return waiting;
+            }
+            book = self
+                .asked
+                .wait(book)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// **Count the requests made since the count before this one, and not taken as a run** (the
+    /// worker's, when a run ends): those the run waiting now stands for, and those a newer,
+    /// different request displaced — whenever the displacement happened, during the run or before
+    /// the worker took it. Each request is counted once: by the count after it is made, or never
+    /// when the worker takes it as the run it does. One lock; never waits for the worker.
+    pub(crate) fn count_arrivals(&self) -> Arrivals {
+        let mut book = lock(&self.book);
+        let waiting = book
+            .waiting
+            .as_mut()
+            .map_or(0, |waiting| std::mem::take(&mut waiting.uncounted));
+        let superseded = std::mem::take(&mut book.superseded);
+        Arrivals {
+            waiting,
+            superseded,
+        }
+    }
+
+    /// What `look` makes of the run waiting now, if one is. One lock; never waits for the worker.
+    pub(crate) fn waiting<R>(&self, look: impl FnOnce(Option<&Waiting<Id, Op>>) -> R) -> R {
+        look(lock(&self.book).waiting.as_ref())
+    }
+
+    /// **The application takes every terminal it is owed below the earliest request still owed**
+    /// ([`Ledger::earliest_owed`], read once, before the requests are looked at), in the order the
+    /// ledger minted them, each once. A request at or past the mark waits for the next take even
+    /// when it has ended since. One lock; never waits for the worker.
+    pub(crate) fn ended(&self) -> Vec<(Id, TerminalOf<Id, O>)> {
+        let owed = self.ledger.earliest_owed();
+        let mut book = lock(&self.book);
+        let ended: Vec<(Id, TerminalOf<Id, O>)> = book
+            .held
+            .iter_mut()
+            .take_while(|(id, _)| owed.is_none_or(|owed| **id < owed))
+            .filter_map(|(id, request)| Some((*id, request.take()?)))
+            .collect();
+        for (id, _) in &ended {
+            book.held.remove(id);
+        }
+        ended
+    }
+}
+
+/// The answer a terminal carries, its own or — for a request that joined another — its twin's.
+pub(crate) fn answer_of<Id, T, E>(terminal: Terminal<Id, T, E>) -> Option<T> {
+    match terminal {
+        Terminal::Done(answer) => Some(answer),
+        Terminal::Joined { outcome, .. } => answer_of(*outcome),
+        Terminal::Failed(_)
+        | Terminal::Cancelled
+        | Terminal::Superseded { .. }
+        | Terminal::WorkerGone => None,
     }
 }
 
@@ -806,9 +1171,12 @@ pub(crate) const HANDOFF: Contract = Contract {
     saying: Saying::PerRequest,
 };
 
-/// `settings::FontLane`: numbered requests (`ScanState::requested`); one walk out and one `again`
-/// round; the answer offered in a one-answer mailbox and adopted only if not older than the adopted
-/// generation; the target is the application-wide slot.
+/// `settings::FontLane`, on the seam (S-4): one `font-families` worker; ids minted by the lane's
+/// `Ledger`; one walk out and one waiting, every request asked while one waits joined to it (the
+/// same question: the machine's families now); the application holds every request and takes
+/// their terminals in mint order (`adopt_scanned_families`), adopting a walk's lists only when
+/// not older than the list on screen; the ledger owes 16 at once — a terminal not yet taken
+/// holding its place — and refuses the rest at the door; a failed walk is said once per streak.
 #[cfg(test)]
 pub(crate) const FONT: Contract = Contract {
     lane: Some(LaneName::Font),
@@ -818,15 +1186,21 @@ pub(crate) const FONT: Contract = Contract {
     bounds: Bounds {
         waiting: Bound::At(1),
         executing: 1,
-        answers_held: Bound::At(1),
+        // `settings::FONT_BOUND`, written out rather than read, so that a change to either the
+        // declaration or the lane is a disagreement the suite reports.
+        answers_held: Bound::At(16),
     },
     cancellation: Cancellation::Never,
-    saying: Saying::PerRequest,
+    saying: Saying::PerStreak,
 };
 
-/// `taskbar_lane`: numbered requests (`Asks::requested`); one worker that serves the newest
-/// request standing; the answer in a `bt_platform::TaskbarState` slot that takes only newer
-/// numbers; the target is the application.
+/// `taskbar_lane`, on the seam (S-4): one `taskbar-state` worker; ids minted by the lane's
+/// `Ledger`; one ask out and one waiting, every request made while one waits joined to it (the
+/// same question: does the bar hide itself now); the application holds every request, and the
+/// window's reading takes their terminals in mint order and offers each answer to a
+/// `bt_platform::TaskbarState` slot that takes only newer numbers; the ledger owes 16 at once — a
+/// terminal not yet taken holding its place — and refuses the rest at the door; a failure (a
+/// panic in the ask: the question has no error form) is said once per streak.
 #[cfg(test)]
 pub(crate) const TASKBAR: Contract = Contract {
     lane: Some(LaneName::Taskbar),
@@ -836,10 +1210,11 @@ pub(crate) const TASKBAR: Contract = Contract {
     bounds: Bounds {
         waiting: Bound::At(1),
         executing: 1,
-        answers_held: Bound::At(1),
+        // `taskbar_lane::BOUND`, written out rather than read.
+        answers_held: Bound::At(16),
     },
     cancellation: Cancellation::Never,
-    saying: Saying::PerRequest,
+    saying: Saying::PerStreak,
 };
 
 /// `MathWorker`'s decoration thread (`bt-math-worker`): one question, one answer, keyed by the
@@ -861,11 +1236,14 @@ pub(crate) const COMPUTATION: Contract = Contract {
     saying: Saying::PerRequest,
 };
 
-/// `programs_lane`: numbered requests (`Asks::requested`); one `program-walk` worker that serves
-/// the newest request standing, the requests made while a walk is out answered by the next walk;
-/// answers published per row into a mailbox that keeps the newest per row, and adopted by
-/// `ProfilePrograms::adopt` only when not older than the answer held for the row; the target is
-/// the application. A walk's end answers every request numbered up to it.
+/// `programs_lane`, on the seam (S-4): one `program-walk` worker; ids minted by the lane's
+/// `Ledger`; one walk out and one waiting — a request made while one waits joins it when it asks
+/// about the same table and supersedes it when it asks about a different one; the walk's rows
+/// published into a mailbox that keeps the newest per row and adopted by `ProfilePrograms::adopt`
+/// only when not older than the answer held for the row; the application holds every request and
+/// takes their terminals in mint order (`ProgramsLane::take`); the ledger owes 64 at once — a
+/// terminal not yet taken holding its place — and refuses the rest at the door; a failed walk is
+/// said once per streak and not walked again on its own.
 #[cfg(test)]
 pub(crate) const PROGRAMS: Contract = Contract {
     lane: Some(LaneName::Programs),
@@ -875,10 +1253,11 @@ pub(crate) const PROGRAMS: Contract = Contract {
     bounds: Bounds {
         waiting: Bound::At(1),
         executing: 1,
-        answers_held: Bound::At(1),
+        // `programs_lane::BOUND`, written out rather than read.
+        answers_held: Bound::At(64),
     },
     cancellation: Cancellation::Never,
-    saying: Saying::PerRequest,
+    saying: Saying::PerStreak,
 };
 
 /// The obligations of §R-D, one each.
@@ -1123,42 +1502,6 @@ pub(crate) struct ExpectedFailure {
 #[cfg(test)]
 pub(crate) const EXPECTED_FAILURES: &[ExpectedFailure] = &[
     ExpectedFailure {
-        lane: LaneName::Font,
-        claim: Claim::EveryRequestEndsExactlyOnce,
-        failure: FailureKind::NoTerminal,
-        repair: "D-72",
-        why: "a request coalesced into the again round, or superseded, gets no outcome of its own",
-    },
-    ExpectedFailure {
-        lane: LaneName::Font,
-        claim: Claim::ADeadWorkerIsObservable,
-        failure: FailureKind::DeathUnobservable,
-        repair: "D-72",
-        why: "a walk that dies leaves ScanState running for ever: no fault, and no later walk",
-    },
-    ExpectedFailure {
-        lane: LaneName::Taskbar,
-        claim: Claim::EveryRequestEndsExactlyOnce,
-        failure: FailureKind::NoTerminal,
-        repair: "D-73",
-        why: "the worker serves the newest request standing; the ones between get no outcome",
-    },
-    ExpectedFailure {
-        lane: LaneName::Taskbar,
-        claim: Claim::ADeadWorkerIsObservable,
-        failure: FailureKind::DeathUnobservable,
-        repair: "D-73",
-        why: "a worker that dies leaves Asks::worker set: requests are counted and never served",
-    },
-    ExpectedFailure {
-        lane: LaneName::Programs,
-        claim: Claim::EveryRequestEndsExactlyOnce,
-        failure: FailureKind::NoTerminal,
-        repair: "D-85",
-        why: "the worker serves the newest request standing; the ones made while a walk was out \
-              get no outcome of their own (the next walk answers them, said in diagnostics)",
-    },
-    ExpectedFailure {
         lane: LaneName::Computation,
         claim: Claim::FullLaneAnswersWithoutWaiting,
         failure: FailureKind::AdmissionUnbounded,
@@ -1188,75 +1531,8 @@ pub(crate) const EXPECTED_FAILURES: &[ExpectedFailure] = &[
               drain never sees the decoration thread's death as a disconnection",
     },
     // S-3 (2026-10-11): the four claims of the side-effects contract, run on lanes not yet built
-    // on the seam. Each lane's repair ticket (S-4) moves it onto the seam and removes its rows.
-    ExpectedFailure {
-        lane: LaneName::Font,
-        claim: Claim::ASupersededRequestSaysSo,
-        failure: FailureKind::SupersededInSilence,
-        repair: "D-72",
-        why: "the requests folded into the again round get no outcome of their own",
-    },
-    ExpectedFailure {
-        lane: LaneName::Font,
-        claim: Claim::AJoinedRequestCarriesItsTwin,
-        failure: FailureKind::JoinedInSilence,
-        repair: "D-72",
-        why: "a second ask for the walk is folded into the round that answers the newest, and \
-              gets no outcome of its own",
-    },
-    ExpectedFailure {
-        lane: LaneName::Font,
-        claim: Claim::AFailureIsSaidOnce,
-        failure: FailureKind::NoFailedTerminal,
-        repair: "D-72",
-        why: "a walk has no failure form, and a panic in one ends the walk with no answer",
-    },
-    ExpectedFailure {
-        lane: LaneName::Taskbar,
-        claim: Claim::ASupersededRequestSaysSo,
-        failure: FailureKind::SupersededInSilence,
-        repair: "D-73",
-        why: "the worker serves the newest request standing; the ones between get no outcome",
-    },
-    ExpectedFailure {
-        lane: LaneName::Taskbar,
-        claim: Claim::AJoinedRequestCarriesItsTwin,
-        failure: FailureKind::JoinedInSilence,
-        repair: "D-73",
-        why: "the same question asked again is served only as the newest number; the older ask \
-              gets no outcome",
-    },
-    ExpectedFailure {
-        lane: LaneName::Taskbar,
-        claim: Claim::AFailureIsSaidOnce,
-        failure: FailureKind::NoFailedTerminal,
-        repair: "D-73",
-        why: "the question has no failure form, and a panic in the worker ends it with no answer",
-    },
-    ExpectedFailure {
-        lane: LaneName::Programs,
-        claim: Claim::ASupersededRequestSaysSo,
-        failure: FailureKind::SupersededInSilence,
-        repair: "D-85",
-        why: "the requests made while a walk is out are answered by the next walk and get no \
-              outcome of their own",
-    },
-    ExpectedFailure {
-        lane: LaneName::Programs,
-        claim: Claim::AJoinedRequestCarriesItsTwin,
-        failure: FailureKind::JoinedInSilence,
-        repair: "D-85",
-        why: "a second ask for the same walk is served only as the newest number; the older ask \
-              gets no outcome",
-    },
-    ExpectedFailure {
-        lane: LaneName::Programs,
-        claim: Claim::AFailureIsSaidOnce,
-        failure: FailureKind::NoFailedTerminal,
-        repair: "D-85",
-        why: "no panic is caught around a walk: one ends the program-walk worker, and the \
-              request never ends Failed",
-    },
+    // on the seam. Each lane's repair ticket moves it onto the seam and removes its rows (S-5 the
+    // hand-off lane's, S-4 the font, taskbar and program-walk lanes').
     ExpectedFailure {
         lane: LaneName::Computation,
         claim: Claim::AFailureIsSaidOnce,
@@ -1450,6 +1726,8 @@ pub(crate) struct Gate {
 #[derive(Default)]
 struct GateState {
     held: bool,
+    /// How many of the next worker starts the thread door refuses.
+    refused_starts: usize,
     kill: bool,
     killed: bool,
     entered: usize,
@@ -1462,6 +1740,10 @@ struct GateState {
 /// row are one streak.
 #[cfg(test)]
 pub(crate) const PLANTED_PANIC: &str = "the lane contract suite fails this request on purpose";
+
+/// What the thread door says when the suite has it refuse a worker's start.
+#[cfg(test)]
+pub(crate) const REFUSED_START: &str = "the lane contract suite refuses this thread on purpose";
 
 #[cfg(test)]
 impl Gate {
@@ -1489,6 +1771,19 @@ impl Gate {
         lock(&self.state).executed.push(question);
         self.changed.notify_all();
         self.fire(question);
+    }
+
+    /// The next worker start the suite's executor is asked for is refused by the thread door,
+    /// with [`REFUSED_START`].
+    pub(crate) fn refuse_next_start(&self) {
+        lock(&self.state).refused_starts += 1;
+    }
+
+    fn take_refused_start(&self) -> bool {
+        let mut state = lock(&self.state);
+        let refused = state.refused_starts > 0;
+        state.refused_starts = state.refused_starts.saturating_sub(1);
+        refused
     }
 
     /// Every later execution of `question` panics with [`PLANTED_PANIC`].
@@ -1533,11 +1828,11 @@ impl Gate {
     }
 
     /// The next request to pass (or the one held now) ends the worker.
-    fn kill(&self) {
+    pub(crate) fn kill(&self) {
         lock(&self.state).kill = true;
     }
 
-    fn entered(&self) -> usize {
+    pub(crate) fn entered(&self) -> usize {
         lock(&self.state).entered
     }
 
@@ -1925,12 +2220,15 @@ fn order_is_as_declared(run: &mut Run<'_>) -> Result<(), Failure> {
                     actual: delivered,
                 });
             }
+            // The gate records the question each run executes, as it does on every lane: the
+            // last run executes the newest question asked.
+            let newest_question = admissions.last().map_or(0, |admission| admission.question);
             let executed = run.lane.gate().executed();
             let newest_last = executed.windows(2).all(|pair| pair[0] < pair[1])
-                && executed.last().is_none_or(|last| *last == newest);
+                && executed.last().is_none_or(|last| *last == newest_question);
             if contract.execution != Order::NewestRequested || !newest_last {
                 return Err(Failure::OrderBroken {
-                    expected: vec![newest],
+                    expected: vec![newest_question],
                     actual: executed,
                 });
             }
