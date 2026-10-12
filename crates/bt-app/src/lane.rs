@@ -1880,7 +1880,13 @@ fn order_is_as_declared(run: &mut Run<'_>) -> Result<(), Failure> {
     };
     let mut admissions = vec![first];
     for question in 1..=more as u64 {
-        admissions.push(run.submit(0, question).0);
+        // A lane that answers every request is asked from two targets in turn, so a consumer
+        // that takes one target's answers and then the other's is out of the declared order.
+        let target = match contract.replacement {
+            Replacement::LatestValue => 0,
+            Replacement::Fifo | Replacement::PerQuestion => (question % 2) as u32,
+        };
+        admissions.push(run.submit(target, question).0);
     }
     run.lane.gate().release();
     let mut found = Vec::new();

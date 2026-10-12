@@ -24085,7 +24085,7 @@ fn printable_address(uri: &str) -> String {
         .collect()
 }
 
-/// **Why a link was not followed** — the three things the hover line can truly say about it
+/// **Why a link was not followed** — the things the hover line can truly say about it
 /// (owner ruling 2026-10-06: 「已拦截」/"blocked" is never said of an address that is not one).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LinkRefusal {
@@ -24096,10 +24096,14 @@ enum LinkRefusal {
     NoProgram,
     /// An address the door will not go to: a scheme, userinfo, a page asking for a window.
     Door,
+    /// The hand-off failed on the OS hand-off lane: nothing declined it (S-5).
+    CouldNotRun,
+    /// The OS hand-off lane's worker stopped with the hand-off owed (S-5).
+    WorkerStopped,
 }
 
 impl LinkRefusal {
-    /// What the address door says about `address`, as one of the three.
+    /// What the address door says about `address`, as the refusal it is.
     ///
     /// An address the door admits was refused by a door after it (the gesture rule of a page's
     /// new window), so it is the door's refusal; text the door would search for is not an
@@ -24118,6 +24122,8 @@ impl LinkRefusal {
             Self::Invalid => i18n::Text::HyperlinkInvalidSuffix.in_lang(lang),
             Self::NoProgram => i18n::Text::HyperlinkNoProgramSuffix.in_lang(lang),
             Self::Door => i18n::Text::HyperlinkBlockedSuffix.in_lang(lang),
+            Self::CouldNotRun => i18n::Text::HandoffCouldNotRunSuffix.in_lang(lang),
+            Self::WorkerStopped => i18n::Text::HandoffsStoppedSuffix.in_lang(lang),
         }
     }
 
@@ -24127,6 +24133,8 @@ impl LinkRefusal {
             Self::Invalid => i18n::Text::HyperlinkInvalid.in_lang(lang),
             Self::NoProgram => i18n::Text::HyperlinkNoProgram.in_lang(lang),
             Self::Door => i18n::Text::HyperlinkBlocked.in_lang(lang),
+            Self::CouldNotRun => i18n::Text::HandoffCouldNotRun.in_lang(lang),
+            Self::WorkerStopped => i18n::Text::HandoffsStopped.in_lang(lang),
         }
     }
 }
@@ -63829,9 +63837,24 @@ impl FolioApp {
     /// Each open window takes the answers its own requests hold — an answer is held by the one
     /// window that asked, because the request is. A window on its way out is not asked, and one
     /// that has closed holds nothing: its requests went with it, and their answers to the lane's
-    /// sink for the abandoned rather than to another window.
+    /// sink for the abandoned rather than to another window. Every window's answers are taken
+    /// first and then answered in press order across the windows
+    /// (`handoff_lane::in_press_order`), as the one worker ran them.
     fn answer_handoffs(&mut self) -> Result<()> {
-        self.for_each_window(|runtime| runtime.answer_handoffs())
+        let mut held = Vec::new();
+        for index in 0..self.windows.len() {
+            if let Some(runtime) = self.runtime_at(index)
+                && runtime.window.leaving.is_none()
+            {
+                held.push((index, runtime.window.handoffs.answered()));
+            }
+        }
+        for (index, _, answer, duty) in handoff_lane::in_press_order(held) {
+            if let Some(mut runtime) = self.runtime_at(index) {
+                runtime.answer_handoff(answer, duty)?;
+            }
+        }
+        Ok(())
     }
 
     /// Answer every toast clicked since the last turn.

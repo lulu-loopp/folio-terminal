@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 
-use crate::handoff_lane::{Answer, Ask, Duty, LANE_GONE, OnAccepted, OnRefused};
+use crate::handoff_lane::{Answer, Ask, Duty, FollowUp, OnAccepted, RefusalWords, Reply};
 use crate::{RevealedFoot, Runtime, i18n, native_window, toast};
 
 impl Runtime<'_> {
@@ -44,51 +44,35 @@ impl Runtime<'_> {
         }
     }
 
-    /// **Answer every hand-off of this window's that has ended**, in the order they were asked.
-    pub(crate) fn answer_handoffs(&mut self) -> Result<()> {
-        for (_, answer, duty) in self.window.handoffs.answered() {
-            self.answer_handoff(answer, duty)?;
-        }
-        Ok(())
-    }
-
-    /// **Answer one hand-off.**
+    /// **Answer one hand-off** of this window's, as [`Duty::reply`] says.
     ///
     /// Success is silent unless the surface named a confirmation; a refusal says what that
     /// surface said on the window thread before the lane existed ([`crate::handoff_lane::Refusal::
-    /// words`]) and what the surface asked for beyond it. A hand-off that failed, or that the
-    /// lane's end took with it, says the surface's refusal words with what happened — and nothing
-    /// a surface draws for a system that declined, because no system declined it.
-    fn answer_handoff(&mut self, answer: Answer, duty: Duty) -> Result<()> {
-        let reason = match answer {
-            Answer::HandedOver => return self.handed_over(duty.accepted),
-            Answer::Refused(reason) => reason,
-            Answer::Failed(words) => return self.say_refusal(&duty, &words),
-            Answer::WorkerGone => return self.say_refusal(&duty, LANE_GONE),
-        };
-        self.say_refusal(&duty, &reason)?;
-        match duty.refused {
-            // The system took the hand-off and had nothing to open it with.
-            Some(OnRefused::HyperlinkRefused(hyperlink)) => {
-                self.window
-                    .hyperlink_hover
-                    .show_refused(hyperlink, crate::LinkRefusal::NoProgram);
-                self.publish_interaction_frame()?;
+    /// words`]) and what the surface asked for beyond it; a hand-off that failed or was lost with
+    /// the lane's worker is said through the same follow-up, in words of its own.
+    pub(crate) fn answer_handoff(&mut self, answer: Answer, duty: Duty) -> Result<()> {
+        match duty.reply(answer) {
+            Reply::HandedOver(accepted) => self.handed_over(accepted),
+            Reply::Refused { words, then } => {
+                self.say_refusal(words)?;
+                match then {
+                    Some(FollowUp::Hover(hyperlink, refusal)) => {
+                        self.window.hyperlink_hover.show_refused(hyperlink, refusal);
+                        self.publish_interaction_frame()
+                    }
+                    Some(FollowUp::Address(surface, address, refusal)) => {
+                        self.say_address_refused(surface, &address, refusal)
+                    }
+                    Some(FollowUp::FontsToast(words)) => self.toast(
+                        toast::ToastKind::Error,
+                        toast::ToastAnchor::Window,
+                        Some(i18n::Text::InstallFonts.text().to_owned()),
+                        words,
+                    ),
+                    None => Ok(()),
+                }
             }
-            Some(OnRefused::PreviewAddressRefused(surface, address)) => {
-                self.say_address_refused(surface, &address, crate::LinkRefusal::NoProgram)?;
-            }
-            Some(OnRefused::FontsToast) => {
-                self.toast(
-                    toast::ToastKind::Error,
-                    toast::ToastAnchor::Window,
-                    Some(i18n::Text::InstallFonts.text().to_owned()),
-                    reason,
-                )?;
-            }
-            None => {}
         }
-        Ok(())
     }
 
     /// The confirmation a surface named for a hand-off the system took, drawn.
@@ -117,9 +101,8 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// The surface's own refusal words for `reason`: its stderr line, and the files notice.
-    fn say_refusal(&mut self, duty: &Duty, reason: &str) -> Result<()> {
-        let words = duty.refusal.words(reason);
+    /// The surface's own refusal words: its stderr line, and the files notice.
+    fn say_refusal(&mut self, words: RefusalWords) -> Result<()> {
         if let Some(line) = words.line {
             eprintln!("{line}");
         }
