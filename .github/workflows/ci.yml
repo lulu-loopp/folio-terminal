@@ -1140,10 +1140,13 @@ jobs:
   # platform asserts a fact of every platform"). Measured on the owner's Mac mini
   # on 2026-10-08: the whole `cargo test -p bt-term` is about 40 s once its
   # dependencies are built, which the steps above have already built.
-  # **`bt-app`'s whole suite is still not a step here.** H1 took it from 288
-  # reds to the few that are real macOS defects (ledger, "H1"), and the
-  # ignored-tests gate cannot yet hold a macOS-only ignore for them; a longer
-  # command would only be a red one until those tickets land.
+  # **`bt-app`'s whole suite runs here since H7.** H1 took it from 288 reds to
+  # the few that were real macOS defects, M-SWEEP fixed those four, and the
+  # whole `cargo test -p bt-app` has been green on the owner's Mac mini since
+  # (5534 tests on 75b7c671). What the suite does not run here is decided by
+  # `#[cfg]` in the tests themselves — a fact that exists only on Windows is
+  # `#[cfg(windows)]` — and by one named skip, the test that launches a real
+  # bundle through `/usr/bin/open` (the step's own comment says why).
   core-macos:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: macos-latest
@@ -1203,49 +1206,33 @@ jobs:
       - name: check the application, every target of it
         run: cargo check --locked --all-targets -p bt-app
 
-      # The application suite still contains Windows-fact fixtures, but these updater modules are
-      # macOS product code and must not wait for a manual re-entry run to compile and execute. Each
-      # filter is required to select at least one test so a renamed module cannot turn this step
-      # green by running nothing. E-12 is the one test that deliberately launches `/usr/bin/open`;
-      # CI keeps the deterministic fake-launch coverage and leaves that real launch to the owner.
-      # The uninstall door runs here too: its bundle, LaunchAgents and Application Support rows are
-      # macOS product code, and its per-platform labels were red here with nothing running them.
-      # The launch wire runs here too (0.4.8 D3): its two-copy tests start two copies of the test
-      # binary over one data directory, and the refusal they pin was a macOS-only defect.
-      - name: test the macOS updater modules
+      # **The application's whole suite** (H7), invoked as `logic` invokes it on Windows — every
+      # test target of the package, `--locked` — rather than the eight module filters this step
+      # used to run (the updater modules, `uninstall::`, `launch_wire`). Those filters existed
+      # because the rest of the suite was red here for reasons that were not defects; H1 and
+      # M-SWEEP removed the reasons, so a filter now only hides tests. What does not run here is
+      # what `#[cfg(windows)]` leaves out (docs/CONVENTIONS.md, "A test that is not limited to one
+      # platform asserts a fact of every platform"), plus one skip by name: E-12's
+      # `the_trial_is_launched_through_launch_services_and_found_by_its_image` deliberately
+      # launches a real bundle through `/usr/bin/open`; CI keeps the deterministic fake-launch
+      # coverage beside it and leaves that real launch to the owner's Mac. libtest's `--skip`
+      # matches a substring, so the step requires the name to match exactly one listed test: a
+      # rename cannot turn it into a skip of nothing, and a new test whose name contains it
+      # cannot be skipped with it unread.
+      # `bt-platform`'s `install_flip`, which this step also used to run by filter, runs in the
+      # portable crates' step below with the rest of that crate's suite.
+      - name: test the application
         run: |
           set -euo pipefail
           skip=the_trial_is_launched_through_launch_services_and_found_by_its_image
-          skip_log="$RUNNER_TEMP/macos-updater-skip-list.log"
-          cargo test --locked -p bt-app --bin folio -- --list | tee "$skip_log"
-          grep -Eq "(^|::)${skip}: test$" "$skip_log" || {
-            echo "the macOS updater skip '$skip' names no test"
+          list_log="$RUNNER_TEMP/macos-app-list.log"
+          cargo test --locked -p bt-app -- --list | tee "$list_log"
+          matches=$(grep -c -F "$skip" "$list_log" || true)
+          grep -Eq "(^|::)${skip}: test$" "$list_log" && [ "$matches" -eq 1 ] || {
+            echo "the macOS application skip '$skip' must match exactly one listed test; it matches $matches"
             exit 1
           }
-          run_app_filter() {
-            filter="$1"
-            log="$RUNNER_TEMP/macos-updater-${filter//[^a-zA-Z0-9]/-}.log"
-            cargo test --locked -p bt-app --bin folio "$filter" -- \
-              --skip "$skip" | tee "$log"
-            grep -Eq '^running [1-9][0-9]* tests?$' "$log" || {
-              echo "the macOS updater filter '$filter' selected no tests"
-              exit 1
-            }
-          }
-          run_app_filter update_apply_macos
-          run_app_filter update_apply::
-          run_app_filter update_recover
-          run_app_filter update_handoff
-          run_app_filter update_trial
-          run_app_filter update_startup
-          run_app_filter uninstall::
-          run_app_filter launch_wire
-          log="$RUNNER_TEMP/macos-updater-install-flip.log"
-          cargo test --locked -p bt-platform install_flip | tee "$log"
-          grep -Eq '^running [1-9][0-9]* tests?$' "$log" || {
-            echo "the macOS updater filter 'install_flip' selected no tests"
-            exit 1
-          }
+          cargo test --locked -p bt-app -- --skip "$skip"
 
       # The eight suites the spike's own table records as green here, plus the
       # two M1-1's branch made green — `bt-transcript` and `bt-viewport`, whose

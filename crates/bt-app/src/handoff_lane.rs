@@ -34,9 +34,10 @@
 //!   [`LANE_FULL`] as its terminal outcome, and no identity is minted for it (revision (b)3); a
 //!   press after the worker has ended is refused the same way with [`LANE_GONE`].
 //! * **Completion.** Every admitted request ends exactly once: `Done` with the door's own
-//!   `Result` — `Ok(())`, the operating system accepted it, or `Err(reason)`, the door's own
-//!   refusal or the system's, byte for byte what the door returned (never "the other program
-//!   finished": the lane returns when `ShellExecuteW` or `NSWorkspace` does); `Failed` when the
+//!   `Result` — `Ok(())`, the operating system accepted it, or `Err(refusal)`, the door's own
+//!   [`HandOffRefusal`] as the door returned it — no handler, not found, access denied, or another
+//!   refusal in the door's or the system's words (never "the other program finished": the lane
+//!   returns when `ShellExecuteW` or `NSWorkspace` does); `Failed` when the
 //!   hand-off panicked, which its task catches — the worker goes on, and the ledger says the
 //!   failure in `diagnostics.log` once; or `WorkerGone` for every request still owed when the
 //!   worker's thread ends, which leaves the lane faulted.
@@ -58,7 +59,7 @@ use std::sync::{Arc, mpsc};
 
 use anyhow::{Context, Result};
 use bt_platform::admission::WorkerCtx;
-use bt_platform::{Handoff, NativeWindow};
+use bt_platform::{HandOffRefusal, Handoff, NativeWindow};
 
 use crate::lane::{self, Executor, Ledger, Owed, Refused, Saying, Terminal};
 
@@ -93,7 +94,7 @@ impl From<u64> for HandoffId {
 }
 
 /// How one hand-off ended: the door's own `Result` when it was done; a panic in it is `Failed`.
-pub(crate) type HandoffTerminal = Terminal<HandoffId, Result<(), String>, Infallible>;
+pub(crate) type HandoffTerminal = Terminal<HandoffId, Result<(), HandOffRefusal>, Infallible>;
 
 /// The lane's sink for the abandoned, shared by every request it admits.
 type Sink = Arc<dyn Fn(HandoffId, HandoffTerminal) + Send + Sync>;
@@ -103,7 +104,7 @@ type Sink = Arc<dyn Fn(HandoffId, HandoffTerminal) + Send + Sync>;
 pub(crate) struct Abandoned(Sink);
 
 impl Owed<HandoffId> for Abandoned {
-    type Answer = Result<(), String>;
+    type Answer = Result<(), HandOffRefusal>;
     type Error = Infallible;
 
     fn sink(self, id: HandoffId, terminal: HandoffTerminal) {
@@ -137,10 +138,10 @@ struct Job {
 /// **Why a hand-off was refused**, as a value: by whom, and in which words.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Declined {
-    /// The hand-off door refused it, or the system did — the door's own `Err`, byte for byte.
-    /// The door's answer does not say more: `ShellExecuteW`'s code and `NSWorkspace`'s `NO` are
-    /// both read by the door into this one sentence.
-    System(String),
+    /// The hand-off door refused it, or the system did — the door's own `Err`, as the kind of
+    /// refusal it is (T-HANDOFF-DOOR-REASON): `ShellExecuteW`'s code, or LaunchServices and the
+    /// disk asked before anything opened, read by the door.
+    System(HandOffRefusal),
     /// The lane's ledger already owed [`BOUND`] hand-offs (said [`LANE_FULL`]).
     LaneFull,
     /// The lane's worker had ended (said [`LANE_GONE`]).
@@ -153,7 +154,8 @@ impl Declined {
     /// The refusal's own words: the stderr line's reason and the diagnostics a refusal leaves.
     pub(crate) fn reason(&self) -> &str {
         match self {
-            Self::System(reason) | Self::NoWindow(reason) => reason,
+            Self::System(refusal) => refusal.reason(),
+            Self::NoWindow(reason) => reason,
             Self::LaneFull => LANE_FULL,
             Self::LaneGone => LANE_GONE,
         }
@@ -230,7 +232,7 @@ impl HandoffLane {
     ) -> Result<Self>
     where
         M: FnOnce(&WorkerCtx) -> D + Send + 'static,
-        D: FnMut(NativeWindow, &Handoff) -> Result<(), String>,
+        D: FnMut(NativeWindow, &Handoff) -> Result<(), HandOffRefusal>,
     {
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         let ledger_wake = Arc::clone(&wake);
@@ -298,7 +300,7 @@ fn run_handoff_lane(
     worker: &WorkerCtx,
     jobs: mpsc::Receiver<Job>,
     ledger: &Ledger<HandoffId, Abandoned>,
-    mut execute: impl FnMut(NativeWindow, &Handoff) -> Result<(), String>,
+    mut execute: impl FnMut(NativeWindow, &Handoff) -> Result<(), HandOffRefusal>,
     wake: &dyn Fn(),
 ) {
     while let Ok(Job {
@@ -398,12 +400,15 @@ impl Duty {
     /// and the tests both read.
     ///
     /// Every refusal says the surface's own words with its reason (the stderr line, the files
-    /// notice), and then what the surface asked for beyond them, in the words of who refused:
-    /// only the door's or the system's refusal says there is nothing to open it with (the fonts
-    /// card holding the door's own sentence); a full lane says so; a lane whose worker has
-    /// stopped — at the door, or with the hand-off owed — says hand-offs have stopped; a hand-off
-    /// that failed, or whose window could not be named, says it could not run. None claims the
-    /// system declined what it was never asked.
+    /// notice), and then what the surface asked for beyond them, in the words of who refused.
+    /// The door's or the system's refusal is said by its kind (T-HANDOFF-DOOR-REASON): only
+    /// [`HandOffRefusal::NoHandler`] says there is no program to open it; a target that is not
+    /// there says not found; one the system kept from this process says access denied; any other
+    /// says it was not opened; every kind's own detail (the code, the path, the system's error) is
+    /// left to the stderr line. A full lane says so; a lane
+    /// whose worker has stopped — at the door, or with the hand-off owed — says hand-offs have
+    /// stopped; a hand-off that failed, or whose window could not be named, says it could not
+    /// run. None claims the system declined what it was never asked.
     pub(crate) fn reply(self, answer: Answer) -> Reply {
         let could_not_run = || {
             (
@@ -422,7 +427,10 @@ impl Duty {
             Answer::Refused(declined) => {
                 let reason = declined.reason().to_owned();
                 let said = match declined {
-                    Declined::System(reason) => (reason, crate::LinkRefusal::NoProgram),
+                    Declined::System(refusal) => {
+                        let link = crate::LinkRefusal::of_door(&refusal);
+                        (link.word(crate::i18n::current()).to_owned(), link)
+                    }
                     Declined::LaneFull => (
                         crate::i18n::Text::HandoffsTooMany.text().to_owned(),
                         crate::LinkRefusal::TooMany,
@@ -520,7 +528,7 @@ pub(crate) enum OnAccepted {
 pub(crate) enum OnRefused {
     /// The hover line under the address a `Ctrl`+click was on.
     HyperlinkRefused(bt_viewport::HyperlinkHit),
-    /// The settings dialog's card under `Install fonts…`, holding the door's words.
+    /// The settings dialog's card under `Install fonts…`, holding the refusal's words.
     FontsToast,
     /// The notice a refused address raises on the preview surface a link was pressed on — a
     /// document's link to a scheme the machine has no handler for (ticket 14).
@@ -580,7 +588,7 @@ mod tests {
     /// is a stand-in; its wakes come back on a channel, and what its sink is handed is kept.
     fn recording_lane(
         executor: &Executor,
-        answer: impl Fn(&Handoff) -> Result<(), String> + Send + 'static,
+        answer: impl Fn(&Handoff) -> Result<(), HandOffRefusal> + Send + 'static,
     ) -> (
         HandoffLane,
         Arc<Mutex<Vec<Handoff>>>,
@@ -801,15 +809,19 @@ mod tests {
             "so does one the stopped worker took"
         );
         assert_eq!(
-            fonts().reply(Answer::Refused(Declined::System("no handler".to_owned()))),
+            fonts().reply(Answer::Refused(Declined::System(
+                HandOffRefusal::NoHandler("this machine has no Font Book".to_owned())
+            ))),
             Reply::Refused {
                 words: RefusalWords {
                     line: None,
                     notice: None,
                 },
-                then: Some(FollowUp::FontsToast("no handler".to_owned())),
+                then: Some(FollowUp::FontsToast(
+                    crate::i18n::Text::HyperlinkNoProgram.text().to_owned()
+                )),
             },
-            "and a refusal still raises it in the system's words"
+            "and a refusal still raises it, in the words of its kind"
         );
 
         let surface = crate::PreviewSurface::Seat(crate::LeafId {
@@ -925,7 +937,9 @@ mod tests {
         abandoned(asked_id, &Terminal::Done(Ok(())), &say);
         abandoned(
             asked_id,
-            &Terminal::Done(Err("no program is registered for it".to_owned())),
+            &Terminal::Done(Err(HandOffRefusal::Other(
+                "no program is registered for it".to_owned(),
+            ))),
             &say,
         );
         let said = said.into_inner().expect("the lines");
@@ -1059,15 +1073,17 @@ mod tests {
             ),
             "a window that could not be named: the hand-off could not run"
         );
-        let system = surfaces(&Declined::System("no handler".to_owned()));
+        let no_handler =
+            HandOffRefusal::NoHandler("ShellExecuteW failed with code 31 (SE_ERR_NOASSOC)".into());
+        let system = surfaces(&Declined::System(no_handler.clone()));
         assert_eq!(
             system[0],
             Reply::Refused {
                 words: RefusalWords {
-                    line: Some(
-                        "recoverable link hand-off failure: hand a link over: no handler"
-                            .to_owned()
-                    ),
+                    line: Some(format!(
+                        "recoverable link hand-off failure: hand a link over: {}",
+                        no_handler.reason()
+                    )),
                     notice: None,
                 },
                 then: Some(FollowUp::Hover(
@@ -1077,6 +1093,136 @@ mod tests {
             },
             "and only the system's refusal says nothing can open it"
         );
+    }
+
+    /// RED (T-HANDOFF-DOOR-REASON) — **the door's refusal is said by its kind on every
+    /// surface**, and "no program to open it" only when no program is registered.
+    ///
+    /// The door answers a [`HandOffRefusal`]; the real lane carries it, as the door returned it,
+    /// to the window that asked, where [`Duty::reply`] says it on the link's hover line, the
+    /// address's notice and the fonts card: no handler — "no program to open it"; not found —
+    /// "not found"; access denied — "access denied"; any other — "not opened", with the door's
+    /// or the system's own detail of every kind on the stderr line only.
+    ///
+    /// MUTATION: map every `Declined::System` to `LinkRefusal::NoProgram` in [`Duty::reply`] (as
+    /// it was before the door said which), and the three other kinds say "no program".
+    #[test]
+    fn the_doors_refusal_is_said_by_its_kind_on_every_surface() {
+        let kinds = [
+            HandOffRefusal::NoHandler("ShellExecuteW failed with code 31 (SE_ERR_NOASSOC)".into()),
+            HandOffRefusal::NotFound("\"/Users/a/文档.md\": not there".to_owned()),
+            HandOffRefusal::AccessDenied(
+                "ShellExecuteW failed with code 5 (SE_ERR_ACCESSDENIED)".to_owned(),
+            ),
+            HandOffRefusal::Other("ShellExecuteW failed with code 26 (SE_ERR_SHARE)".to_owned()),
+        ];
+        // Through the real lane: each address's door answers one kind, and the window that
+        // asked hears that kind, unchanged.
+        let answering = kinds.clone();
+        let (lane, _, wakes, _) = recording_lane(
+            &Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
+            move |handoff| match handoff {
+                Handoff::Address(address) => Err(answering[address
+                    .strip_prefix("https://例子.invalid/")
+                    .and_then(|at| at.parse::<usize>().ok())
+                    .expect("one of the test's addresses")]
+                .clone()),
+                other => panic!("only addresses are handed over here: {other:?}"),
+            },
+        );
+        let mut pending: Pending<()> = Pending::default();
+        for at in 0..kinds.len() {
+            pending.owe(
+                lane.submit(
+                    window(),
+                    Handoff::Address(format!("https://例子.invalid/{at}")),
+                )
+                .expect("the lane admits it"),
+                (),
+            );
+        }
+        let heard: Vec<Answer> = answers(&lane, &mut pending, &wakes, kinds.len())
+            .into_iter()
+            .map(|(_, answer, ())| answer)
+            .collect();
+        assert_eq!(
+            heard,
+            kinds
+                .iter()
+                .map(|kind| Answer::Refused(Declined::System(kind.clone())))
+                .collect::<Vec<_>>(),
+            "the lane carries the door's refusal as the door returned it"
+        );
+
+        let hyperlink = crate::test_support::hyperlink_hit("https://例子.invalid/文档");
+        let surface = crate::PreviewSurface::Seat(crate::LeafId {
+            tab: crate::TabId(1),
+            seat: bt_layout::SeatId(2),
+        });
+        let duty = |refused: OnRefused| Duty {
+            refusal: Refusal {
+                stderr: Some(("recoverable link hand-off failure", "hand a link over")),
+                program_notice: false,
+            },
+            accepted: None,
+            refused: Some(refused),
+        };
+        let expected = [
+            (crate::LinkRefusal::NoProgram, "no program to open it"),
+            (crate::LinkRefusal::NotFound, "not found"),
+            (crate::LinkRefusal::AccessDenied, "access denied"),
+            (crate::LinkRefusal::NotOpened, "not opened"),
+        ];
+        let lang = crate::i18n::current();
+        for ((answer, kind), (link, english)) in heard.into_iter().zip(&kinds).zip(expected) {
+            let line = Some(format!(
+                "recoverable link hand-off failure: hand a link over: {}",
+                kind.reason()
+            ));
+            let words = RefusalWords { line, notice: None };
+            assert_eq!(
+                duty(OnRefused::HyperlinkRefused(hyperlink.clone())).reply(answer.clone()),
+                Reply::Refused {
+                    words: words.clone(),
+                    then: Some(FollowUp::Hover(hyperlink.clone(), link)),
+                },
+                "the hover line, for {kind:?}"
+            );
+            assert_eq!(
+                duty(OnRefused::PreviewAddressRefused(
+                    surface,
+                    "https://例子.invalid/文档".to_owned()
+                ))
+                .reply(answer.clone()),
+                Reply::Refused {
+                    words: words.clone(),
+                    then: Some(FollowUp::Address(
+                        surface,
+                        "https://例子.invalid/文档".to_owned(),
+                        link
+                    )),
+                },
+                "the address's notice, for {kind:?}"
+            );
+            assert_eq!(
+                duty(OnRefused::FontsToast).reply(answer),
+                Reply::Refused {
+                    words,
+                    then: Some(FollowUp::FontsToast(link.word(lang).to_owned())),
+                },
+                "the fonts card, for {kind:?}"
+            );
+            assert_eq!(
+                link.word(crate::i18n::Lang::English),
+                english,
+                "{kind:?} says its own words"
+            );
+            assert_eq!(
+                link.word(crate::i18n::Lang::English) == "no program to open it",
+                matches!(kind, HandOffRefusal::NoHandler(_)),
+                "only no handler says there is no program: {kind:?}"
+            );
+        }
     }
 
     /// RED (S-5 round 3; D-70) — **a hand-off's panic is contained under the resident panic
@@ -1281,9 +1427,9 @@ mod tests {
             )),
             program_notice: true,
         };
-        let before = |door: Result<(), String>| {
+        let before = |door: Result<(), HandOffRefusal>| {
             let error = door
-                .map_err(|error| anyhow::anyhow!(error))
+                .map_err(|error| anyhow::anyhow!(error.reason().to_owned()))
                 .context("open a printed reference with its default handler")
                 .expect_err("the door refuses this");
             let text = format!("{error:#}");
@@ -1309,7 +1455,7 @@ mod tests {
         let reasons: Vec<String> = answered
             .iter()
             .map(|(_, answer, ())| match answer {
-                Answer::Refused(Declined::System(reason)) => reason.clone(),
+                Answer::Refused(Declined::System(refusal)) => refusal.reason().to_owned(),
                 other => panic!("the lane carried the door's refusal, not {other:?}"),
             })
             .collect();
