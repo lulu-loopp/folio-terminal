@@ -822,7 +822,11 @@ The seams that already implement this shape: `bt-app::main::run_path_verify_work
 a ledger-minted request id, the asking window's `Pending` holding the request as
 the target incarnation, press order, 32 waiting behind the one running with no
 coalescing and the press past them refused at the door, completion as the door's
-own `Result`, a closed window's request ending in the lane's sink),
+own `Result` — its refusal a `bt_platform::HandOffRefusal`: no handler, not found,
+access denied, or another in the door's or the system's words, read on Windows off
+`ShellExecuteW`'s return value and on macOS off the disk and
+`URLForApplicationToOpenURL:` before anything opens (T-HANDOFF-DOOR-REASON) —
+a closed window's request ending in the lane's sink),
 `bt-pty::PtySession`, `bt-app::persist::SessionWriter`,
 `bt-app::trace_sink::Queue`, `bt-app::main::Runtime::present_seats_and_commit`.
 
