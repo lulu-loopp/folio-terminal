@@ -297,8 +297,8 @@ names as `tests::<name>`; a new test does not go there.
 
 ### A test that is not limited to one platform asserts a fact of every platform (H1)
 
-Every test runs on Windows and on macOS (CI's `core-macos` runs `bt-term`, `bt-pty` and the portable
-crates). A test whose fixture is spelled the Windows way — a drive letter, a `\`, a shipped `pwsh` row,
+Every test runs on Windows and on macOS (CI's `core-macos` runs the whole `bt-app` suite, `bt-term`,
+`bt-pty` and the portable crates). A test whose fixture is spelled the Windows way — a drive letter, a `\`, a shipped `pwsh` row,
 `Ctrl` as the command modifier — is red on the Mac for a reason that is not a defect, and a suite with
 reds nobody reads hides the one that is. Each test is exactly one of three things:
 
@@ -318,7 +318,14 @@ reds nobody reads hides the one that is. Each test is exactly one of three thing
    values and the ticket. The ignored-tests gate (`scripts/ci/check-ignored-tests.ps1`) asks the
    harness on Windows only, so a `#[cfg_attr(target_os = "macos", ignore = "T-<NAME>: …")]` cannot
    stand on its list today; until the gate learns a platform column such a test stays red on
-   macOS, which is why `bt-app`'s suite is not yet a `core-macos` step.
+   macOS — and since H7 `core-macos` runs `bt-app`'s whole suite, so that red is CI's red until its
+   ticket lands.
+
+What `core-macos` leaves out of `bt-app`'s suite is said by `#[cfg]` on the tests (rule 2 above), not
+by a filter on the CI line. The one exception is named in the step and checked to match exactly one
+test: `update_apply_macos::tests::the_trial_is_launched_through_launch_services_and_found_by_its_image`
+launches a real bundle through `/usr/bin/open`, so CI runs its fake-launch siblings and the real launch
+is run on the owner's Mac.
 
 A test whose subject refuses links among a path's ancestors (the uninstall door, the profile writer)
 stands under `bt_testpath::link_free_temp_dir()`: on macOS the temporary directory itself is reached
