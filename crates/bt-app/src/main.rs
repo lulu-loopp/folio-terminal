@@ -45858,6 +45858,9 @@ impl Runtime<'_> {
         );
         if profiles_opened {
             shell_integration::begin_profile_observation_for(&self.app.profile_programs);
+            // The environment the next pane is born from, which the editor's rows are
+            // composed over (`shell_integration::page_environment`).
+            shell_integration::request_page_environment();
             // Every row's program, and WSL's distributions, asked again as the page opens.
             self.ask_the_program_walk(programs_lane::Trigger::ProfilesPage);
         }
@@ -46157,8 +46160,8 @@ impl Runtime<'_> {
             // not a duplication.
             //
             // Composed from the environment the next pane would be born from — the account's
-            // current one, read by the page's open edge on the observation worker — and empty
-            // until that read has answered (`shell_integration::page_environment`).
+            // current one, asked for as the page opens — and empty while that request is out
+            // (`shell_integration::page_environment`).
             ghosts: settings::held_ghosts(
                 &profiles::row_of(&profiles::id(index))
                     .zip(shell_integration::page_environment())

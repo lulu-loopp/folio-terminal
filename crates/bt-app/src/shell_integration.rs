@@ -2134,48 +2134,136 @@ pub fn declared_environment(
         .collect()
 }
 
-/// **The environment the Profiles page composes its rows from**: the block the
-/// page's open edge read on the observation worker
-/// ([`ProbeEnvironment::before_folio`]), numbered so an older read never files
-/// over a newer ask. `None` from the ask until the answer lands.
+/// **How one request for the next pane's environment ended** — the side-effects
+/// contract's terminals (C2, revision (b)4) this protocol has.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PageEnvironmentEnd {
+    /// The block a birth would derive its declarations from now: the account's
+    /// current logon environment, or this process's own where the platform has
+    /// none.
+    Done(Vec<(OsString, OsString)>),
+    /// The read failed or its worker could not start; the page composes over
+    /// this process's environment, as a birth does when its read fails.
+    Failed(String),
+    /// A newer request was made while this one was out (C4).
+    Superseded { by: u64 },
+}
+
+/// **The Profiles page's environment request, its owed answer and its sink**
+/// (`# completions` row "the Profiles page's environment"): the numbers minted,
+/// the one request still out, the completions not yet taken, and the block the
+/// page composes from — process statics, so an answer that lands after the
+/// page closed waits for the next visit's consumer (C6).
 struct PageEnvironment {
-    asked: u64,
-    block: Option<Vec<(OsString, OsString)>>,
+    minted: u64,
+    owed: Option<u64>,
+    ended: Vec<(u64, PageEnvironmentEnd)>,
+    current: Option<Vec<(OsString, OsString)>>,
 }
 
 static PAGE_ENVIRONMENT: Mutex<PageEnvironment> = Mutex::new(PageEnvironment {
-    asked: 0,
-    block: None,
+    minted: 0,
+    owed: None,
+    ended: Vec::new(),
+    current: None,
 });
 
+/// The cell's lock: held only across a queue operation on either side.
 fn page_environment_cell() -> std::sync::MutexGuard<'static, PageEnvironment> {
     PAGE_ENVIRONMENT
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// A new read is asked for: the block held so far is the previous visit's and
-/// is dropped. Answers the number the read files its block under.
-fn ask_page_environment() -> u64 {
+/// Mint a request: the one still out completes `Superseded`, and the block held
+/// so far — the previous visit's — is dropped. Answers the new number.
+fn mint_page_environment() -> u64 {
     let mut cell = page_environment_cell();
-    cell.asked += 1;
-    cell.block = None;
-    cell.asked
+    cell.minted += 1;
+    let minted = cell.minted;
+    if let Some(older) = cell.owed.replace(minted) {
+        cell.ended
+            .push((older, PageEnvironmentEnd::Superseded { by: minted }));
+    }
+    cell.current = None;
+    minted
 }
 
-/// The read numbered `asked` files `block`, unless a newer read has been asked.
-fn answer_page_environment(asked: u64, block: Vec<(OsString, OsString)>) {
+/// Request `asked` ends with `end` — exactly once: a request already completed
+/// as `Superseded` files nothing more.
+fn complete_page_environment(asked: u64, end: PageEnvironmentEnd) {
     let mut cell = page_environment_cell();
-    if cell.asked == asked {
-        cell.block = Some(block);
+    if cell.owed == Some(asked) {
+        cell.owed = None;
+        cell.ended.push((asked, end));
+    }
+}
+
+/// The read a request's worker makes: the account's current logon environment
+/// (`fresh_logon_environment`, pane birth's read), or this process's own where
+/// the platform has none. A panic is a failure value, never a lost answer (C3).
+fn read_page_environment(
+    read: impl FnOnce() -> std::io::Result<Option<Vec<(OsString, OsString)>>>,
+) -> PageEnvironmentEnd {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)) {
+        Ok(Ok(Some(block))) => PageEnvironmentEnd::Done(block),
+        Ok(Ok(None)) => PageEnvironmentEnd::Done(std::env::vars_os().collect()),
+        Ok(Err(error)) => PageEnvironmentEnd::Failed(error.to_string()),
+        Err(_) => PageEnvironmentEnd::Failed("the read panicked".to_owned()),
+    }
+}
+
+/// **The Profiles page asks for the environment the next pane is born from**
+/// (owner ruling 2026-10-05; H2-NITS round 2): one request per opening of the
+/// page, answered on a `profiles-page-environment` worker and announced by the
+/// window's wake. The door mints the request and starts its worker; a worker
+/// that cannot start is the request's synchronous `Failed` (C2).
+pub fn request_page_environment() {
+    let asked = mint_page_environment();
+    let started = bt_platform::spawn_at_priority(
+        "profiles-page-environment",
+        bt_platform::ThreadPriority::BelowNormal,
+        move |worker| {
+            complete_page_environment(
+                asked,
+                read_page_environment(|| bt_platform::environment::fresh_logon_environment(worker)),
+            );
+            if let Some(wake) = WAKE.get() {
+                wake();
+            }
+        },
+    );
+    if let Err(error) = started {
+        complete_page_environment(
+            asked,
+            PageEnvironmentEnd::Failed(format!("its worker could not start: {error}")),
+        );
     }
 }
 
 /// **The environment the next pane's declarations would be derived from**, as
-/// the Profiles page last read it — `None` until that read has answered.
+/// the Profiles page's last request answered it — `None` while it is out.
+///
+/// The consumer: takes every completion once, says each failure once in the
+/// diagnostics, and keeps the newest answer. A failure composes over this
+/// process's environment, as a birth whose read failed does.
 #[must_use]
 pub fn page_environment() -> Option<Vec<(OsString, OsString)>> {
-    page_environment_cell().block.clone()
+    let mut cell = page_environment_cell();
+    for (asked, end) in std::mem::take(&mut cell.ended) {
+        match end {
+            PageEnvironmentEnd::Done(block) => cell.current = Some(block),
+            PageEnvironmentEnd::Failed(reason) => {
+                eprintln!(
+                    "Profiles page: the current environment could not be read ({reason}); \
+                     its rows are composed over Folio's own (request {asked})"
+                );
+                cell.current = Some(std::env::vars_os().collect());
+            }
+            PageEnvironmentEnd::Superseded { .. } => {}
+        }
+    }
+    cell.current.clone()
 }
 
 /// `existing` — whatever `PROMPT` this process inherited — with the command
@@ -3700,16 +3788,6 @@ impl ProbeEnvironment {
                 ));
                 Self::Inherited
             }
-        }
-    }
-
-    /// **The environment a pane's derived declarations read** in this environment — the
-    /// account's block, or this process's own where there is none (`pty_door::before_folio`'s
-    /// rule, with no launch layer: a profile's page has no tab).
-    pub(crate) fn before_folio(&self) -> Vec<(OsString, OsString)> {
-        match self {
-            Self::Logon(block) => block.clone(),
-            Self::Inherited => std::env::vars_os().collect(),
         }
     }
 
@@ -9941,30 +10019,56 @@ mod tests {
         assert_eq!(value(FORCE_HYPERLINK), None, "{page:?}");
     }
 
-    /// PIN (H2-NITS round 2) - **the page's environment is the newest read's**: an
-    /// ask drops the previous visit's block, an older read answering after a newer
-    /// ask files nothing, and the newest read is what the page composes from.
+    /// RED (H2-NITS round 3) - **every request for the page's environment ends
+    /// exactly once, and the newest answer is what the page composes from.** A
+    /// request made while another is out completes the older one `Superseded`;
+    /// the older read landing afterwards files nothing; a failed read is said and
+    /// composes over this process's environment; a panicking read is a failure.
     ///
-    /// MUTATION: file every answer whatever its number - the stale block wins.
+    /// MUTATIONS: (1) let `complete_page_environment` file a request that is no
+    /// longer owed - the older read's block replaces the newer one; (2) drop the
+    /// `Superseded` completion in `mint_page_environment` - the older request has
+    /// no end.
     #[test]
-    fn the_pages_environment_is_the_newest_reads() {
+    fn every_page_environment_request_ends_once_and_the_newest_wins() {
         let block =
             |value: &str| vec![(OsString::from("FOLIO_H2_NITS_PIN"), OsString::from(value))];
-        let first = ask_page_environment();
-        let second = ask_page_environment();
+        let first = mint_page_environment();
+        let second = mint_page_environment();
         assert_eq!(
-            page_environment(),
-            None,
-            "nothing is held between an ask and its answer"
+            page_environment_cell().ended,
+            [(first, PageEnvironmentEnd::Superseded { by: second })]
         );
-        answer_page_environment(second, block("新"));
-        answer_page_environment(first, block("旧"));
-        assert_eq!(page_environment(), Some(block("新")));
-        ask_page_environment();
         assert_eq!(
             page_environment(),
             None,
-            "a new visit drops the last one's block"
+            "nothing is held while a request is out"
+        );
+        complete_page_environment(second, PageEnvironmentEnd::Done(block("新")));
+        complete_page_environment(first, PageEnvironmentEnd::Done(block("旧")));
+        assert_eq!(page_environment(), Some(block("新")));
+        assert!(
+            page_environment_cell().ended.is_empty(),
+            "each end is taken once"
+        );
+
+        let third = mint_page_environment();
+        complete_page_environment(
+            third,
+            read_page_environment(|| Err(std::io::Error::other("拒绝"))),
+        );
+        assert_eq!(
+            page_environment(),
+            Some(std::env::vars_os().collect()),
+            "a failed read composes over this process's environment"
+        );
+        assert!(matches!(
+            read_page_environment(|| panic!("read")),
+            PageEnvironmentEnd::Failed(_)
+        ));
+        assert_eq!(
+            read_page_environment(|| Ok(Some(block("账户")))),
+            PageEnvironmentEnd::Done(block("账户"))
         );
     }
 
