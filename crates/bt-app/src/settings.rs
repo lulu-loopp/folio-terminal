@@ -1552,15 +1552,15 @@ const FONT_SIZE_LABELS: [&str; FONT_SIZE_OPTIONS.len()] = [
 ///   [`begin_monospace_scan`] publishes so the button can read the family in
 ///   force from the very first frame — see there for why a seed and not an
 ///   empty list.
-/// - `offered` is where a finished walk leaves its answer, **with the number of
-///   the request it answers** (ticket 50), and `answered` is the number of the
-///   answer on screen. A request is numbered when it is made
-///   ([`ScanState::requested`]); the walk reads the number it is serving when it
-///   starts. [`Self::adopt`] takes an answer only if it is at least as new as the
-///   one on screen, so a list can never be replaced by an older one.
+/// - A finished walk's answer is the terminal of the request it answers, held
+///   by the lane's ledger (`FontLane`, on the completion seam), **with the
+///   identity the ledger minted for that request** (ticket 50; S-4), and
+///   `answered` is the identity of the answer on screen. [`Self::adopt`] takes
+///   an answer only if it is at least as new as the one on screen, so a list can
+///   never be replaced by an older one.
 ///
-/// **The rule is that only the window thread publishes.** The worker fills
-/// `offered` and asks for a wake; [`adopt_scanned_families`] moves it across,
+/// **The rule is that only the window thread publishes.** The worker publishes
+/// its terminal and asks for a wake; [`adopt_scanned_families`] moves it across,
 /// and its one caller is the `FontsScanned` arm of `user_event` — between two
 /// frames. That is not fastidiousness: `Runtime::settings_layout` is called
 /// several times within one frame (the hover, the hit test, the draw) and each
@@ -1578,50 +1578,16 @@ const FONT_SIZE_LABELS: [&str; FONT_SIZE_OPTIONS.len()] = [
 struct MonospaceFamilySlot {
     /// `(came from the machine, what a frame draws)`.
     published: std::sync::RwLock<(bool, &'static [bt_platform::MonospaceFamily])>,
-    /// What a finished walk is holding out to the window thread, and the
-    /// number of the request it answers.
-    offered: std::sync::Mutex<Option<(u64, Vec<bt_platform::MonospaceFamily>)>>,
-    /// The number of the answer on screen; `0` while the seed is. Written by
+    /// The identity of the answer on screen; `0` while the seed is. Written by
     /// [`Self::adopt`] alone, on the window thread.
     answered: std::sync::atomic::AtomicU64,
-    scan: std::sync::Mutex<ScanState>,
-}
-
-/// Whether a walk is out, and whether another was asked for while it was.
-///
-/// The second field is the whole of the coalescing: the dialog can be opened
-/// twice in the time one walk takes, and a second thread walking the same
-/// collection would answer the same question twice while the first answer was
-/// still in the post. A request made while a walk is out is not dropped either
-/// — a font may have been installed since that walk started, which is exactly
-/// the gesture `Install fonts…` invites — so it is remembered and the worker
-/// goes round once more.
-///
-/// **`requested` numbers the requests** (ticket 50; `ARCHITECTURE` §5.1's
-/// observation lane: *versioned requests … latest-result replacement only where
-/// the semantics permit*). Every ask bumps it, whether it starts a thread or
-/// rides on the one out; a walk serves the number standing when it starts, so
-/// an ask made during a walk is served by the next round with a larger number.
-/// The bounds are the ones this struct already had: one walk out, one answer
-/// held.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct ScanState {
-    running: bool,
-    again: bool,
-    requested: u64,
 }
 
 impl MonospaceFamilySlot {
     const fn new() -> Self {
         Self {
             published: std::sync::RwLock::new((false, &[])),
-            offered: std::sync::Mutex::new(None),
             answered: std::sync::atomic::AtomicU64::new(0),
-            scan: std::sync::Mutex::new(ScanState {
-                running: false,
-                again: false,
-                requested: 0,
-            }),
         }
     }
 
@@ -1721,80 +1687,19 @@ impl MonospaceFamilySlot {
         self.publish(bt_platform::order_monospace_families(named), false);
     }
 
-    /// Hold the answer to request `generation` out to the window thread.
-    /// **Worker thread.**
-    fn offer(&self, generation: u64, families: Vec<bt_platform::MonospaceFamily>) {
-        *self
-            .offered
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((generation, families));
-    }
-
-    fn take_offer(&self) -> Option<(u64, Vec<bt_platform::MonospaceFamily>)> {
-        self.offered
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-    }
-
-    /// **Take the answer a walk left, if it is not older than the one on
-    /// screen. Window thread only.**
+    /// **Put the answer to request `generation` on screen, if it is not older
+    /// than the one there. Window thread only** ([`FontLane::adopt`]).
     ///
     /// `true` when what the picker draws moved and a frame is owed. An answer
     /// older than the adopted one is dropped and changes nothing — not the
     /// list, not the number, and no frame (ticket 50).
-    fn adopt(&self) -> bool {
-        let Some((generation, families)) = self.take_offer() else {
-            return false;
-        };
+    fn adopt(&self, generation: u64, families: Vec<bt_platform::MonospaceFamily>) -> bool {
         let order = std::sync::atomic::Ordering::Relaxed;
         if generation < self.answered.load(order) {
             return false;
         }
         self.answered.store(generation, order);
         self.publish(families, true)
-    }
-
-    /// Ask for a walk, numbering the request. `true` when this call is the one
-    /// that has to start the thread; `false` when one is already out and has
-    /// been told to go round again.
-    fn claim_scan(&self) -> bool {
-        let mut held = self
-            .scan
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        held.requested += 1;
-        if held.running {
-            held.again = true;
-            return false;
-        }
-        held.running = true;
-        held.again = false;
-        true
-    }
-
-    /// The number of the newest request, which is the one a walk starting now
-    /// serves. **Worker thread**, at the top of every round.
-    fn serving(&self) -> u64 {
-        self.scan
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .requested
-    }
-
-    /// A walk is done. `true` when it has to be walked once more, because a
-    /// rescan was asked for while it was out.
-    fn finish_scan(&self) -> bool {
-        let mut held = self
-            .scan
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if held.again {
-            held.again = false;
-            return true;
-        }
-        held.running = false;
-        false
     }
 }
 
@@ -1803,13 +1708,11 @@ static MONOSPACE_FAMILIES: MonospaceFamilySlot = MonospaceFamilySlot::new();
 // selects an already sorted list; it never opens a font collection.
 struct CjkFamilySlot {
     published: std::sync::RwLock<(bool, [&'static [bt_platform::CjkFamily]; 2])>,
-    offered: std::sync::Mutex<Option<Vec<bt_platform::CjkFamily>>>,
 }
 impl CjkFamilySlot {
     const fn new() -> Self {
         Self {
             published: std::sync::RwLock::new((false, [&[], &[]])),
-            offered: std::sync::Mutex::new(None),
         }
     }
     fn adopted(&self) -> &'static [bt_platform::CjkFamily] {
@@ -1843,18 +1746,6 @@ impl CjkFamilySlot {
             Box::leak(zh.into_boxed_slice()),
         ];
         true
-    }
-    fn offer(&self, families: Vec<bt_platform::CjkFamily>) {
-        *self
-            .offered
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(families);
-    }
-    fn take_offer(&self) -> Option<Vec<bt_platform::CjkFamily>> {
-        self.offered
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
     }
 }
 static CJK_FAMILIES: CjkFamilySlot = CjkFamilySlot::new();
@@ -2046,100 +1937,216 @@ pub fn begin_monospace_scan(in_force: &str, cjk_in_force: &str) {
 /// ([`begin_monospace_scan`]) and a family named before any walk has landed
 /// ([`monospace_family_files`]).
 ///
-/// Coalesced by [`MonospaceFamilySlot::claim_scan`]: one walk out at a time,
-/// and one more round for every request made while it was.
+/// Coalesced by the lane ([`FontLane::request_walk`]): one walk out at a time, at
+/// most one waiting, and every request asked while one waits joined to it. A
+/// request the lane refuses at its door has that refusal as its outcome and is
+/// asked by nobody who waits. Past [`FONT_BOUND`], the walks already owed answer
+/// what it would have asked; after the worker's end, that end was said once, by
+/// the ledger; and when the thread door refused to start the worker, the ledger
+/// said so (once per streak), no walk stands, and the next request — the next
+/// opening of the dialog, or the next family named before a list lands — starts
+/// the worker again.
 fn request_font_walk() {
-    FONT_LANE.request();
+    let _ = FONT_LANE.request_walk();
 }
 
-/// **The font lane's parts**: the two slots a round fills, the round itself, and
-/// the wake.
+/// **How many requests the font lane's ledger owes at once**: the walk out, the
+/// one waiting and every request joined to it, and every answer the window
+/// thread has not taken yet. Far beyond a person — each request is an open of
+/// the dialog or a face applied; the bound makes a walk stuck inside the
+/// system's font collection an accounted-for set of requests, not an unbounded
+/// one. A request past it is refused at the door.
+const FONT_BOUND: usize = 16;
+
+/// The lane's name in the lines its ledger says.
+const FONT_LANE_NAME: &str = "the font lane";
+
+/// **One request for the machine's families**, its identity minted by the font
+/// lane's ledger and rising with every request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct FontId(u64);
+
+impl From<u64> for FontId {
+    fn from(minted: u64) -> Self {
+        Self(minted)
+    }
+}
+
+/// One walk's answer: the monospaced families and the CJK-capable ones.
+type FontAnswer = (
+    Vec<bt_platform::MonospaceFamily>,
+    Vec<bt_platform::CjkFamily>,
+);
+
+/// What a font request is owed: the application asked it and holds it.
+type FontOwed = crate::lane::ToTheApplication<FontAnswer, String>;
+
+/// How one font request ended.
+type FontTerminal = crate::lane::Terminal<FontId, FontAnswer, String>;
+
+/// One round of the font lane, for the newest request it answers: both lists,
+/// or the sentence that says why the machine's collection could not be read.
+type FontRound = dyn Fn(u64) -> Result<FontAnswer, String> + Send + Sync;
+
+/// **The font lane** — on the completion seam (`crate::lane`; the side-effects
+/// contract's C1–C7, S-4): the two slots a walk's answer is put into, the round
+/// itself, the worker's executor, the wake, and the requests.
+///
+/// - **Admission** ([`Self::request_walk`]): every request gets an identity minted by
+///   the lane's ledger, or is refused at the door with the ledger's refusal. The
+///   first request starts the one `font-families` worker through the executor
+///   (the thread door's in the product), which runs for the life of the lane.
+/// - **Coalescing**, kept: one walk out, at most one waiting. Every request is
+///   the same question — the machine's families now — so one asked while another
+///   waits **joins** it (`Joined { with }`, carrying its answer; revision (b)4):
+///   the walk that answers the waiting one answers both. Nothing is ever
+///   `Superseded`. A request asked while a walk is out waits for the next walk,
+///   because a font may have been installed since that walk read the collection
+///   — the gesture `Install fonts…` invites.
+/// - **Completion**: the walk runs inside its task (`lane::task`); its lists are
+///   the request's `Done`; a collection that cannot be read, or a panic in the
+///   walk, is its `Failed`, said once per streak of the same failure by the
+///   ledger (`diagnostics.log`), and the worker goes on; the worker's end ends
+///   every request still owed `WorkerGone`, faults the lane — every later
+///   request refused at the door — and wakes the loop.
+/// - **Acceptance** ([`Self::adopt`], the window thread's): the application
+///   takes every terminal in the order the ledger minted them and puts a walk's
+///   lists on screen only when they are not older than the list there.
 ///
 /// The product runs one, [`FONT_LANE`], over the process's statics. The lane
-/// contract's adapter (`settings::font_lane_adapter`, `crate::lane`) runs
-/// another over slots of its own and a round it can hold, through these same
-/// three functions — which is what lets the contract's suite speak about the
-/// product's admission ([`Self::request`]), publication ([`Self::serve`]) and
-/// acceptance ([`Self::adopt`]) rather than about a copy of them.
+/// contract's adapter (`settings::font_lane_adapter`, `crate::lane`) runs another
+/// over slots of its own, the suite's executor and a round it can hold, through
+/// these same functions — which is what lets the contract's suite speak about
+/// the product's admission, publication and acceptance rather than about a copy
+/// of them.
 struct FontLane {
     monospace: &'static MonospaceFamilySlot,
     cjk: &'static CjkFamilySlot,
-    /// One round: both lists, asked of the machine for request `generation`.
-    /// The product's is [`walk_the_machine`].
+    /// One round: both lists, asked of the machine for the newest request it
+    /// answers. The product's is [`walk_the_machine`].
     walk: &'static FontRound,
-    wake: &'static std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
+    executor: crate::lane::Executor,
+    /// The lane's wake, shared with its ledger: after a walk's terminal, and
+    /// after the worker's end.
+    wake: std::sync::Arc<dyn Fn() + Send + Sync>,
+    requests: crate::lane::Coalescing<FontId, FontOwed, ()>,
 }
 
-/// One round of the font lane, for the request it is handed: the monospaced
-/// families and the CJK-capable ones.
-type FontRound = dyn Fn(
-        u64,
-    ) -> (
-        Vec<bt_platform::MonospaceFamily>,
-        Vec<bt_platform::CjkFamily>,
-    ) + Sync;
-
-/// The lane the product runs.
-static FONT_LANE: FontLane = FontLane {
-    monospace: &MONOSPACE_FAMILIES,
-    cjk: &CJK_FAMILIES,
-    walk: &walk_the_machine,
-    wake: &MONOSPACE_WAKE,
-};
-
-impl FontLane {
-    /// **Number a request and see that a walk serves it** — the lane's one
-    /// admission. Coalesced by [`MonospaceFamilySlot::claim_scan`].
-    fn request(&'static self) {
-        if !self.monospace.claim_scan() {
-            return;
-        }
-        if bt_platform::spawn_at_priority(
-            "font-families",
-            bt_platform::ThreadPriority::BelowNormal,
-            move |_ctx| self.serve(),
-        )
-        .is_err()
-        {
-            // A machine that will not give this process a thread keeps the seed and
-            // may be asked again at the next open. Releasing the claim is the whole
-            // of the handling: nothing in this file waits for an answer.
-            let _ = self.monospace.finish_scan();
-        }
-    }
-
-    /// The worker's whole body: walk, hold the answer out, wake, and go round again
-    /// if somebody asked while this one was out.
-    fn serve(&self) {
-        loop {
-            // The number is read before the walk, so a request made while it runs
-            // has a larger one and is served by the next round.
-            let generation = self.monospace.serving();
-            let (monospace, cjk) = (self.walk)(generation);
-            self.monospace.offer(generation, monospace);
-            self.cjk.offer(cjk);
-            // After the answer is in the mailbox and never before: a wake that
-            // raced the offer would send the loop to adopt nothing, and the frame
-            // the reader is waiting for would then be owed to a wake that is not
-            // coming.
-            if let Some(wake) = self.wake.get() {
+/// The lane the product runs: the machine's collection walked on the thread
+/// door's worker, its ledger's lines said in `diagnostics.log`, its wake the one
+/// [`install_font_scan_wake`] teaches it.
+static FONT_LANE: std::sync::LazyLock<FontLane> = std::sync::LazyLock::new(|| {
+    FontLane::new(
+        crate::lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
+        &MONOSPACE_FAMILIES,
+        &CJK_FAMILIES,
+        &walk_the_machine,
+        || {
+            if let Some(wake) = MONOSPACE_WAKE.get() {
                 wake();
             }
-            if !self.monospace.finish_scan() {
-                return;
-            }
+        },
+        crate::diagnostics::note,
+    )
+});
+
+impl FontLane {
+    /// A lane whose worker `executor` starts, putting its answers into
+    /// `monospace` and `cjk`, walking with `walk`, waking the loop with `wake`
+    /// and saying its ledger's lines through `say`.
+    fn new(
+        executor: crate::lane::Executor,
+        monospace: &'static MonospaceFamilySlot,
+        cjk: &'static CjkFamilySlot,
+        walk: &'static FontRound,
+        wake: impl Fn() + Send + Sync + 'static,
+        say: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Self {
+        let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(wake);
+        let heard = std::sync::Arc::clone(&wake);
+        let ledger = crate::lane::Ledger::new(
+            FONT_LANE_NAME,
+            Some(FONT_BOUND),
+            crate::lane::Saying::PerStreak,
+            say,
+            move || heard(),
+        );
+        Self {
+            monospace,
+            cjk,
+            walk,
+            executor,
+            wake,
+            requests: crate::lane::Coalescing::new(ledger),
         }
     }
 
-    /// **Take the answers a finished walk left** — the window thread's half of
-    /// [`MonospaceFamilySlot`]'s rule; see [`adopt_scanned_families`].
+    /// **Number a request and see that a walk serves it** — the lane's one
+    /// admission, returning at once with the request's identity or the ledger's
+    /// refusal. The first request starts the worker; a thread the door refuses
+    /// refuses that request at the door (`Refused::NotStarted`, said once per
+    /// streak) and leaves the lane as it was, so the next request starts the
+    /// worker again.
+    fn request_walk(&'static self) -> Result<FontId, crate::lane::Refused> {
+        self.requests
+            .ask(
+                (),
+                FontOwed::owed(),
+                |(), ()| true,
+                |(), ()| (),
+                |ran| {
+                    self.executor
+                        .start_worker("font-families", ran, move |ctx| run_font_lane(ctx, self))
+                },
+            )
+            .map(|admitted| admitted.id)
+    }
+
+    /// **Take every terminal the lane has ended, in the order its requests were
+    /// made, and put a walk's lists on screen** — the window thread's half of
+    /// [`MonospaceFamilySlot`]'s rule; see [`adopt_scanned_families`]. A request
+    /// that joined another carries that walk's lists; one that failed, or was
+    /// owed when the worker ended, changes nothing on screen (the ledger has said
+    /// it).
     fn adopt(&self) -> bool {
-        let monospace_changed = self.monospace.adopt();
-        let cjk_changed = self
-            .cjk
-            .take_offer()
-            .is_some_and(|families| self.cjk.publish(families, true));
-        monospace_changed || cjk_changed
+        self.requests
+            .ended()
+            .into_iter()
+            .fold(false, |changed, (id, terminal)| {
+                self.take(id, terminal) | changed
+            })
+    }
+
+    /// **One terminal, taken**: a walk's lists — its own, or the walk's it
+    /// joined — put on screen when they are not older than the list there.
+    /// `true` when what the picker draws moved.
+    fn take(&self, id: FontId, terminal: FontTerminal) -> bool {
+        let Some((monospace, cjk)) = crate::lane::answer_of(terminal) else {
+            return false;
+        };
+        let monospace = self.monospace.adopt(id.0, monospace);
+        let cjk = self.cjk.publish(cjk, true);
+        monospace || cjk
+    }
+}
+
+/// **The font lane's worker body**: the next walk standing, walked inside its
+/// task for the newest request it answers, its terminal published, then the
+/// wake — and round again, for the life of the lane.
+fn run_font_lane(ctx: &bt_platform::admission::WorkerCtx, lane: &FontLane) {
+    loop {
+        let crate::lane::Waiting {
+            operation, newest, ..
+        } = lane.requests.next(ctx);
+        let terminal = match crate::lane::task(ctx, |_| (lane.walk)(newest.0)) {
+            Ok(answer) => crate::lane::Terminal::Done(answer),
+            Err(failure) => crate::lane::Terminal::Failed(failure),
+        };
+        lane.requests.ledger().publish(operation, terminal);
+        // After the terminal is published and never before: a wake that raced
+        // the publication would send the loop to adopt nothing, and the frame the
+        // reader is waiting for would then be owed to a wake that is not coming.
+        (lane.wake)();
     }
 }
 
@@ -2150,18 +2157,20 @@ impl FontLane {
 /// never reached the Chinese-font list, however often the dialog was
 /// reopened; the platform walks now also ask the system collection for
 /// updates (`bt_platform`'s `collection_for_walk`). The round is the lane's,
-/// never the window thread's: its only product caller is [`FontLane::serve`],
+/// never the window thread's: its only product caller is [`run_font_lane`],
 /// on [`FONT_LANE`].
-fn walk_the_machine(
-    generation: u64,
-) -> (
-    Vec<bt_platform::MonospaceFamily>,
-    Vec<bt_platform::CjkFamily>,
-) {
+///
+/// **A family the system cannot describe is left out and the round still
+/// answers**: the shorter list is the request's `Done`, because the system
+/// answered. **A collection that cannot be read at all fails the round**, in
+/// the platform's words: the request ends `Failed`, the ledger says it once per
+/// streak, and the list on screen stays what it was.
+fn walk_the_machine(generation: u64) -> Result<FontAnswer, String> {
     let traced = std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty());
     count_walk();
     let start = std::time::Instant::now();
-    let monospace = bt_platform::monospace_font_families();
+    let monospace = bt_platform::monospace_font_families()
+        .map_err(|error| format!("the monospaced families could not be listed: {error}"))?;
     if traced {
         crate::trace_sink::stderr_line(format!(
             "BT_PERF_TRACE monospace_enumeration_us={} families={} generation={generation}",
@@ -2171,7 +2180,8 @@ fn walk_the_machine(
     }
     count_walk();
     let start = std::time::Instant::now();
-    let cjk = bt_platform::cjk_font_families();
+    let cjk = bt_platform::cjk_font_families()
+        .map_err(|error| format!("the CJK families could not be listed: {error}"))?;
     if traced {
         crate::trace_sink::stderr_line(format!(
             "BT_PERF_TRACE cjk_enumeration_us={} families={}",
@@ -2179,7 +2189,7 @@ fn walk_the_machine(
             cjk.len()
         ));
     }
-    (monospace, cjk)
+    Ok((monospace, cjk))
 }
 
 /// **Take the answer a finished walk left** — the window thread's half of
@@ -17479,9 +17489,8 @@ mod tests {
             coverage: bt_platform::CjkCoverage::from_code_pages(1 << 17),
             ..Default::default()
         };
-        slot.offer(vec![chinese, japanese]);
         assert!(slot.adopted().is_empty());
-        assert!(slot.publish(slot.take_offer().unwrap(), true));
+        assert!(slot.publish(vec![chinese, japanese], true));
         assert!(slot.scanned());
         let held = slot.published.read().unwrap();
         assert_eq!(
@@ -17509,7 +17518,8 @@ mod tests {
     fn cjk_settings_layout_timing_probe() {
         let families = std::thread::spawn(bt_platform::cjk_font_families)
             .join()
-            .unwrap();
+            .unwrap()
+            .expect("the machine answers");
         CJK_FAMILIES.publish(families, true);
         let mut fonts = bt_render::preview_measure_font_system();
         let rows = every_row_of_the_dialog(TabLayoutMode::Horizontal);
@@ -17684,17 +17694,63 @@ mod tests {
         );
     }
 
+    /// What a font lane of a test's own has said, line by line, through its
+    /// ledger's `say`.
+    type Said = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// **A font lane of the test's own**: slots of its own, the suite's executor
+    /// over `gate`, the round `walk`, its wake heard on a channel and its
+    /// ledger's lines kept. Leaked, for the `'static` its worker needs.
+    fn font_lane(
+        gate: &std::sync::Arc<crate::lane::Gate>,
+        walk: impl Fn(u64) -> Result<FontAnswer, String> + Send + Sync + 'static,
+    ) -> (&'static FontLane, std::sync::mpsc::Receiver<()>, Said) {
+        let said: Said = std::sync::Arc::default();
+        let kept = std::sync::Arc::clone(&said);
+        let (wake, wakes) = crate::lane::wake_channel();
+        let walk: &'static FontRound = Box::leak(Box::new(walk));
+        let lane: &'static FontLane = Box::leak(Box::new(FontLane::new(
+            crate::lane::Executor::scripted(std::sync::Arc::clone(gate)),
+            Box::leak(Box::new(MonospaceFamilySlot::new())),
+            Box::leak(Box::new(CjkFamilySlot::new())),
+            walk,
+            wake,
+            move |line: &str| kept.lock().unwrap().push(line.to_owned()),
+        )));
+        (lane, wakes, said)
+    }
+
+    /// Every terminal the lane ends, taken through its acceptance's own take,
+    /// until `last` has ended — each wake waited for within the lane suite's
+    /// patience.
+    fn terminals_through(
+        lane: &FontLane,
+        wakes: &std::sync::mpsc::Receiver<()>,
+        last: FontId,
+    ) -> Vec<(FontId, crate::lane::Terminal<FontId, FontAnswer, String>)> {
+        let mut ended = Vec::new();
+        loop {
+            ended.extend(lane.requests.ended());
+            if ended.iter().any(|(id, _)| *id == last) {
+                return ended;
+            }
+            crate::lane::wait_for_a_wake(wakes, &format!("font request {last:?}'s terminal"));
+        }
+    }
+
     /// PIN (GitHub issue #3, and the 2026-08-19 ruling it inherits) — **the
     /// answer lands on the window thread, and a walk that finds nothing new
     /// costs nothing.**
     ///
     /// Three claims in one sitting because they are three readings of the same
-    /// handover:
+    /// handover, through the real lane (its worker started by the suite's
+    /// executor):
     ///
-    /// 1. A finished walk *offers*; it does not publish. Until the window thread
-    ///    takes the answer, every frame still reads the seed — which is what
-    ///    stops a swap landing between the hover, the hit test and the draw of
-    ///    one frame, all three of which build their own layout.
+    /// 1. A finished walk *publishes its terminal*; it does not put the list on
+    ///    screen. Until the window thread takes the answer, every frame still
+    ///    reads the seed — which is what stops a swap landing between the hover,
+    ///    the hit test and the draw of one frame, all three of which build their
+    ///    own layout.
     /// 2. Taking it replaces the seed, and the list is then the machine's.
     /// 3. **A second open reuses what is already there.** The walk after it
     ///    finds the families the machine already had, the slot keeps the slice
@@ -17702,29 +17758,38 @@ mod tests {
     ///    "a rescan that finds nothing new costs nothing" means now that the
     ///    rescan itself is free.
     ///
-    /// Red gate: publish from `offer` and the first assertion goes red; leak a
-    /// fresh slice on every adopt and the last pointer comparison does.
+    /// MUTATION: put the list on screen from the worker (`lane.adopt()` in
+    /// `run_font_lane` after the publication) — the first assertion goes red;
+    /// leak a fresh slice on every adopt and the last pointer comparison does.
     #[test]
     fn the_machines_answer_lands_on_the_window_thread_and_a_second_walk_costs_nothing() {
-        let slot = MonospaceFamilySlot::new();
-        slot.seed("Cascadia Mono");
-        let seeded = slot.published();
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        let (lane, wakes, _) = font_lane(&gate, |_| {
+            Ok((
+                vec![family("Cascadia Mono"), family("Consolas")],
+                Vec::new(),
+            ))
+        });
+        lane.monospace.seed("Cascadia Mono");
+        let seeded = lane.monospace.published();
 
-        assert!(slot.claim_scan(), "the open asks for a walk");
-        let first = slot.serving();
-        slot.offer(first, vec![family("Cascadia Mono"), family("Consolas")]);
+        lane.request_walk().expect("the open asks for a walk");
+        crate::lane::wait_for_a_wake(&wakes, "the first walk's terminal");
         assert_eq!(
-            slot.published().as_ptr(),
+            lane.monospace.published().as_ptr(),
             seeded.as_ptr(),
-            "an offer nobody has taken changes no frame"
+            "a terminal nobody has taken changes no frame"
         );
 
         assert!(
-            slot.adopt(),
+            lane.adopt(),
             "the machine's list is not the seed, so a frame is owed"
         );
-        assert!(slot.scanned(), "and it is the machine's from here on");
-        let adopted = slot.published();
+        assert!(
+            lane.monospace.scanned(),
+            "and it is the machine's from here on"
+        );
+        let adopted = lane.monospace.published();
         assert_eq!(adopted.len(), 2, "both families are drawn");
         assert_eq!(
             adopted[0].files,
@@ -17733,22 +17798,18 @@ mod tests {
         );
 
         // The next open: another walk, the same machine.
-        assert!(!slot.finish_scan(), "the first walk is done");
-        assert!(slot.claim_scan(), "and the next open starts another");
-        slot.offer(
-            slot.serving(),
-            vec![family("Cascadia Mono"), family("Consolas")],
-        );
-        assert!(!slot.adopt(), "a walk that found nothing new owes no frame");
+        lane.request_walk().expect("the next open asks again");
+        crate::lane::wait_for_a_wake(&wakes, "the second walk's terminal");
+        assert!(!lane.adopt(), "a walk that found nothing new owes no frame");
         assert_eq!(
-            slot.published().as_ptr(),
+            lane.monospace.published().as_ptr(),
             adopted.as_ptr(),
             "and keeps the slice it already leaked, so the reopen costs a \
              comparison and no memory"
         );
         assert!(
-            slot.take_offer().is_none(),
-            "and the mailbox is empty, so the next wake adopts nothing twice"
+            lane.requests.ended().is_empty(),
+            "and every terminal is taken, so the next wake adopts nothing twice"
         );
     }
 
@@ -17759,63 +17820,284 @@ mod tests {
     /// list, and the ask is not droppable either: `Install fonts…` invites the
     /// reader to leave, install a family and come back, so a request made while
     /// a walk is out is about a machine that walk may not have seen. One walk at
-    /// a time, and one more round for everybody who asked during it.
+    /// a time, on the one worker, and one more walk for everybody who asked
+    /// during it.
     ///
-    /// Red gate: drop `again` and the fourth assertion goes red — the font a
-    /// reader just installed would not appear until the open after the one they
-    /// made; let `claim_scan` answer `true` while a walk is out and the second
-    /// does, which is a second thread on the same collection.
+    /// MUTATION: `run_font_lane` returning after its first walk (the shape that
+    /// walked once and stopped) — the two opens are never walked: they end
+    /// `WorkerGone`, and the walk count stays at one.
     #[test]
     fn two_opens_inside_one_walk_are_one_more_walk() {
-        let slot = MonospaceFamilySlot::new();
-        assert!(slot.claim_scan(), "the first ask starts the thread");
-        assert!(!slot.claim_scan(), "the second rides on it");
-        assert!(!slot.claim_scan(), "and so does the third");
-        assert!(
-            slot.finish_scan(),
-            "so the walk goes round once more, for the machine those two may \
-             have changed"
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        let (lane, wakes, _) = font_lane(&gate, |_| Ok((vec![family("Consolas")], Vec::new())));
+        gate.hold();
+        let first = lane
+            .request_walk()
+            .expect("the first ask starts the worker");
+        assert!(gate.wait_entered(1), "and its walk");
+        let second = lane
+            .request_walk()
+            .expect("the second waits for the next walk");
+        let third = lane.request_walk().expect("and so does the third");
+        gate.release();
+        let ended = terminals_through(lane, &wakes, third);
+        assert_eq!(
+            ended.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            [first, second, third],
+            "every ask ends, in the order asked"
         );
         assert!(
-            !slot.finish_scan(),
-            "and stops, because nobody asked during the second round"
+            ended
+                .iter()
+                .all(|(_, terminal)| crate::lane::answer_of(terminal.clone()).is_some()),
+            "and each is answered by a walk: {ended:?}"
+        );
+        assert_eq!(gate.entered(), 2, "two walks for three asks");
+
+        let fourth = lane.request_walk().expect("the next open asks again");
+        let ended = terminals_through(lane, &wakes, fourth);
+        assert!(matches!(ended[..], [(_, crate::lane::Terminal::Done(_))]));
+        assert_eq!(
+            gate.entered(),
+            3,
+            "the next open is walked by the same worker, rather than waiting for one that has gone"
+        );
+    }
+
+    /// RED (S-4) — **The requests made during a walk end `Joined` to the one the
+    /// next walk serves, which ends `Done`** (revision (b)4: every font request
+    /// is the same question — the machine's families now — so the requests
+    /// standing for the next walk are one operation, and nothing is ever
+    /// `Superseded`).
+    ///
+    /// A walk is held out; three opens are asked behind it. The walk out ends
+    /// `Done` with its own lists; the first open behind it is the next walk's
+    /// operation and ends `Done` with that walk's lists — walked for the newest
+    /// request standing when it started; the two after it end
+    /// `Joined { with: that open }`, carrying exactly its answer.
+    ///
+    /// MUTATION: the old silence — `Coalescing::ask` answering a request asked
+    /// while one waits with the waiting request's identity and minting none —
+    /// the third and fourth opens have no identity, and no terminal, of their
+    /// own.
+    #[test]
+    fn requests_made_during_a_walk_end_superseded_or_joined_and_the_served_one_done() {
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        let (lane, wakes, _) = font_lane(&gate, |generation| {
+            Ok((vec![family(&format!("等宽 Mono {generation}"))], Vec::new()))
+        });
+        gate.hold();
+        let out = lane.request_walk().expect("admitted");
+        assert!(gate.wait_entered(1), "the walk is out");
+        let asked: Vec<FontId> = (0..3)
+            .map(|_| lane.request_walk().expect("admitted behind the walk out"))
+            .collect();
+        gate.release();
+        let ended = terminals_through(lane, &wakes, asked[2]);
+        let names = |answer: &FontAnswer| -> Vec<String> {
+            answer.0.iter().map(|family| family.name.clone()).collect()
+        };
+        let [
+            (first, crate::lane::Terminal::Done(walked)),
+            (served, crate::lane::Terminal::Done(next)),
+            joined @ ..,
+        ] = &ended[..]
+        else {
+            panic!("the walk out and the next walk's operation end Done: {ended:?}");
+        };
+        assert_eq!(*first, out);
+        assert_eq!(names(walked), [format!("等宽 Mono {}", out.0)]);
+        assert_eq!(*served, asked[0]);
+        assert_eq!(
+            names(next),
+            [format!("等宽 Mono {}", asked[2].0)],
+            "the next walk is walked for the newest request standing when it starts"
+        );
+        assert_eq!(joined.len(), 2, "{ended:?}");
+        for ((id, terminal), expected) in joined.iter().zip(&asked[1..]) {
+            assert_eq!(id, expected);
+            assert_eq!(
+                terminal,
+                &crate::lane::Terminal::Joined {
+                    with: asked[0],
+                    outcome: Box::new(crate::lane::Terminal::Done(next.clone())),
+                },
+                "a request asked while one waited joined it and carries its answer"
+            );
+        }
+    }
+
+    /// RED (S-4; D-72) — **A worker that dies ends every request it owes
+    /// `WorkerGone`, wakes the loop, says so once, and the next request is
+    /// refused at the door.**
+    ///
+    /// Until S-4 a walk that died left `ScanState::running` set for ever: no
+    /// fault, no outcome, and no later walk. The suite's gate ends the worker
+    /// while it holds one walk out and two opens stand behind it.
+    ///
+    /// MUTATION: `Ledger::worker_ended` returning at once (the death leaves the
+    /// lane as it was, the old `running` left set) — no wake comes, and the
+    /// wait for it runs out of patience.
+    #[test]
+    fn a_dead_walk_ends_every_owed_request_worker_gone_and_the_next_request_is_refused() {
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        let (lane, wakes, said) = font_lane(&gate, |_| Ok((vec![family("Consolas")], Vec::new())));
+        gate.hold();
+        let out = lane.request_walk().expect("admitted");
+        assert!(gate.wait_entered(1), "the walk is out");
+        let waiting = lane.request_walk().expect("admitted behind it");
+        let joined = lane.request_walk().expect("and joined to that");
+        gate.kill();
+        gate.release();
+        crate::lane::wait_for_a_wake(&wakes, "the worker's end");
+        assert_eq!(
+            lane.requests.ended(),
+            [
+                (out, crate::lane::Terminal::WorkerGone),
+                (waiting, crate::lane::Terminal::WorkerGone),
+                (
+                    joined,
+                    crate::lane::Terminal::Joined {
+                        with: waiting,
+                        outcome: Box::new(crate::lane::Terminal::WorkerGone),
+                    }
+                ),
+            ]
         );
         assert!(
-            slot.claim_scan(),
-            "the next open starts a thread again, rather than waiting for one \
-             that has gone"
+            matches!(
+                lane.request_walk(),
+                Err(crate::lane::Refused::Faulted(
+                    crate::lane::WorkerEnd::Panicked(_)
+                ))
+            ),
+            "a request after the worker's end is refused at the door, minting nothing"
+        );
+        let said = said.lock().unwrap().clone();
+        assert_eq!(said.len(), 1, "the end is said once: {said:?}");
+        assert!(
+            said[0].contains("3 request(s) owed end as WorkerGone"),
+            "{said:?}"
+        );
+    }
+
+    /// RED (S-4 round 2) — **A start the thread door refuses refuses that request at the door,
+    /// says so once, and the next request starts the worker.**
+    ///
+    /// The worker is started by the first request that finds it not started. A machine that will
+    /// not give this process a thread refuses that request (`Refused::NotStarted`, no identity
+    /// minted, one line said); the lane is not in fault — its worker never ran — so the next
+    /// request, new input, starts it again and is walked (revision (b)5, rule 1). A door that
+    /// refuses twice in a row is one streak, said once (C3, round 3).
+    ///
+    /// MUTATION: fault the lane on a refused start (`lane::Ran::worker_ended` handing
+    /// `NotStarted` to the ledger) — the ledger says the worker's end beside the refusal (two
+    /// lines, observed red at "said once"), and the next request would be refused `Faulted`.
+    /// MUTATION: say every refused start (`Ledger::say_not_started` ignoring the streak) — the two
+    /// refusals are two lines.
+    #[test]
+    fn a_refused_spawn_refuses_this_request_and_the_next_request_starts_the_worker() {
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        let (lane, wakes, said) =
+            font_lane(&gate, |_| Ok((vec![family("等宽 Consolas")], Vec::new())));
+        gate.refuse_next_start();
+        gate.refuse_next_start();
+        for _ in 0..2 {
+            assert!(
+                matches!(
+                    lane.request_walk(),
+                    Err(crate::lane::Refused::NotStarted(_))
+                ),
+                "the request whose start was refused is refused at the door"
+            );
+        }
+        assert_eq!(
+            lane.requests.ledger().earliest_owed(),
+            None,
+            "minting nothing"
+        );
+        let lines = said.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1, "said once: {lines:?}");
+        assert!(lines[0].contains(crate::lane::REFUSED_START), "{lines:?}");
+        let next = lane
+            .request_walk()
+            .expect("the next request starts the worker");
+        assert_eq!(next, FontId(1), "the refused requests took no identity");
+        let ended = terminals_through(lane, &wakes, next);
+        assert!(
+            matches!(ended[..], [(id, crate::lane::Terminal::Done(_))] if id == next),
+            "and the worker it started walks: {ended:?}"
+        );
+    }
+
+    /// RED (S-4; D-72) — **A walk that fails is a `Failed` terminal, said once
+    /// per streak, and the list on screen stays.**
+    ///
+    /// Until S-4 a failed walk was a shorter list: the machine's refusal reached
+    /// the picker as the one default row, adopted as if it were the machine's
+    /// answer, and nobody heard why. Two opens in a row meet a collection that
+    /// cannot be read: each ends `Failed`, the window thread's acceptance finds
+    /// nothing to put on screen, and `diagnostics.log` hears the failure once,
+    /// in the platform's words.
+    ///
+    /// MUTATION: a silent shorter list — `run_font_lane` answering a failed
+    /// round with `Done` of the default row
+    /// (`bt_platform::order_monospace_families(Vec::new())`) — the
+    /// acceptance puts that row on screen and nothing is said.
+    #[test]
+    fn a_failed_font_walk_is_a_failed_terminal_said_once() {
+        const REFUSED: &str = "字体集合打不开 — the system font collection could not be read";
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        let (lane, wakes, said) = font_lane(&gate, |_| Err(REFUSED.to_owned()));
+        lane.monospace.seed("Cascadia Mono");
+        let seeded = lane.monospace.published();
+        for open in 1..=2 {
+            lane.request_walk().expect("admitted");
+            crate::lane::wait_for_a_wake(&wakes, &format!("open {open}'s failed walk"));
+            assert!(!lane.adopt(), "a failed walk puts nothing on screen");
+        }
+        assert_eq!(lane.monospace.published().as_ptr(), seeded.as_ptr());
+        assert!(
+            !lane.monospace.scanned(),
+            "the seed is not the machine's answer"
+        );
+        let said = said.lock().unwrap().clone();
+        assert_eq!(
+            said.len(),
+            1,
+            "one streak of one failure, said once: {said:?}"
+        );
+        assert!(said[0].contains("failed"), "{said:?}");
+        assert!(
+            said[0].contains(REFUSED),
+            "in the platform's words: {said:?}"
         );
     }
 
     /// RED (50) — **An answer older than the one on screen is never adopted.**
     ///
-    /// The lane numbers every request and every answer carries the number of
-    /// the request it was walked for (`ARCHITECTURE` §5.1: versioned requests,
-    /// latest-result replacement). One walk out at a time means the numbers
-    /// normally arrive in order; the number is what makes that a checked fact
-    /// rather than a property of today's scheduling, so a list the window
-    /// thread has put on screen is never replaced by one the machine gave
-    /// before it — and the arm that adopts reads "older" as "nothing changed",
-    /// asking for no frame.
+    /// The lane's ledger mints every request an identity that rises with every
+    /// request, and every answer carries the identity of the request it was
+    /// walked for (`ARCHITECTURE` §5.1: versioned requests, latest-result
+    /// replacement). The acceptance takes terminals in the order they were
+    /// minted, so the numbers normally arrive in order; the number is what makes
+    /// that a checked fact rather than a property of today's scheduling, so a
+    /// list the window thread has put on screen is never replaced by one the
+    /// machine gave before it — and the arm that adopts reads "older" as
+    /// "nothing changed", asking for no frame.
     ///
     /// MUTATION: drop the generation comparison in `MonospaceFamilySlot::adopt`
-    /// (the one `adopt_scanned_families` calls) and the older list is drawn.
+    /// (the one `FontLane::adopt` calls) and the older list is drawn.
     #[test]
     fn an_answer_older_than_the_one_on_screen_is_never_adopted() {
         let slot = MonospaceFamilySlot::new();
-        assert!(slot.claim_scan(), "the first request starts a walk");
-        let g1 = slot.serving();
-        assert!(!slot.claim_scan(), "the second rides on it");
-        let g2 = slot.serving();
-        assert!(g2 > g1, "and carries a larger number: {g1} then {g2}");
-
-        slot.offer(g2, vec![family("Newer Mono"), family("Consolas")]);
-        assert!(slot.adopt(), "the newer answer is put on screen");
-        let on_screen = slot.published();
-
-        slot.offer(g1, vec![family("Older Mono"), family("Consolas")]);
         assert!(
-            !slot.adopt(),
+            slot.adopt(2, vec![family("Newer Mono"), family("Consolas")]),
+            "the newer answer is put on screen"
+        );
+        let on_screen = slot.published();
+        assert!(
+            !slot.adopt(1, vec![family("Older Mono"), family("Consolas")]),
             "an older answer changes nothing, so it owes no frame"
         );
         assert_eq!(
@@ -17827,10 +18109,6 @@ mod tests {
             "the list on screen is still the newer answer's"
         );
         assert_eq!(slot.published().as_ptr(), on_screen.as_ptr());
-        assert!(
-            slot.take_offer().is_none(),
-            "and the older answer is gone, not waiting to be adopted later"
-        );
     }
 
     /// RED (50) — **Launching with a stored font family walks no font
@@ -17945,7 +18223,7 @@ mod tests {
         CJK_FAMILIES.publish(Vec::new(), true);
         assert!(CJK_FAMILIES.scanned(), "a CJK list has landed");
         let before = monospace_scans();
-        let (_, cjk) = walk_the_machine(0);
+        let (_, cjk) = walk_the_machine(0).expect("the machine answers");
         assert_eq!(
             monospace_scans() - before,
             2,
@@ -17953,7 +18231,7 @@ mod tests {
         );
         assert_eq!(
             cjk,
-            bt_platform::cjk_font_families(),
+            bt_platform::cjk_font_families().expect("the machine answers"),
             "and its CJK answer is the machine's, asked now"
         );
     }
@@ -34792,25 +35070,32 @@ mod tests {
 }
 
 /// **The lane contract's adapter** (`crate::lane`, `lane_contract_tests`): a [`FontLane`] of its
-/// own — slots of its own, the real [`FontLane::request`], [`FontLane::serve`] and
-/// [`FontLane::adopt`] — whose round the suite's [`crate::lane::Gate`] can hold and whose answer
-/// names the generation it was walked for.
+/// own — slots of its own, the real [`FontLane::request_walk`], worker body and [`FontLane::adopt`]'s
+/// take — its worker started by the suite's executor, its walk executing the question of the
+/// newest request it answers so the suite's [`crate::lane::Gate`] can hold it, count it and plant
+/// a panic in it, and its ledger's lines counted.
 #[cfg(test)]
 pub(crate) mod font_lane_adapter {
-    use std::sync::atomic::Ordering;
-    use std::sync::{Arc, OnceLock};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, PoisonError};
 
-    use super::{CjkFamilySlot, FontLane, FontRound, MonospaceFamilySlot};
+    use super::{CjkFamilySlot, FontId, FontLane, FontRound, FontTerminal, MonospaceFamilySlot};
     use crate::lane::{
-        Admission, Contract, Delivered, FONT, Gate, LaneUnderTest, Outcome, WakeProbe,
+        Admission, Contract, Delivered, Executor, FONT, Gate, LaneUnderTest, Outcome, Terminal,
+        WakeProbe,
     };
 
     struct FontAdapter {
         lane: &'static FontLane,
         gate: Arc<Gate>,
         probe: Arc<WakeProbe>,
-        /// The generation on screen when the consumer last looked.
-        seen: u64,
+        /// The suite's own record of which question each identity carried, read by the walk.
+        questions: Arc<Mutex<HashMap<u64, u64>>>,
+        /// The lines the ledger said, counted through its `say`.
+        said: Arc<AtomicUsize>,
+        /// A late answer the acceptance took, raised at the next drain.
+        raised: Vec<Delivered>,
     }
 
     fn answer(name: String) -> Vec<bt_platform::MonospaceFamily> {
@@ -34820,33 +35105,62 @@ pub(crate) mod font_lane_adapter {
         }]
     }
 
+    fn outcome(terminal: FontTerminal) -> Outcome {
+        match terminal {
+            Terminal::Done(_) => Outcome::Answered,
+            Terminal::Failed(failure) => Outcome::Failed(failure.to_string()),
+            Terminal::Cancelled => Outcome::Cancelled,
+            Terminal::Superseded { by } => Outcome::Superseded { by: by.0 },
+            Terminal::Joined {
+                with,
+                outcome: carried,
+            } => Outcome::Joined {
+                with: with.0,
+                carried: Box::new(self::outcome(*carried)),
+            },
+            Terminal::WorkerGone => Outcome::WorkerGone,
+        }
+    }
+
     /// A fresh lane over leaked slots, for the `'static` its worker needs.
     pub(crate) fn make() -> Box<dyn LaneUnderTest> {
         let gate = Arc::new(Gate::default());
         let probe = Arc::new(WakeProbe::default());
-        let door = Arc::clone(&gate);
+        let questions: Arc<Mutex<HashMap<u64, u64>>> = Arc::default();
+        let said = Arc::new(AtomicUsize::new(0));
+        let (door, asked) = (Arc::clone(&gate), Arc::clone(&questions));
         let walk: Box<FontRound> = Box::new(move |generation: u64| {
-            door.pass(Some(generation));
-            (
+            let question = asked
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&generation)
+                .copied();
+            if let Some(question) = question {
+                door.execute(question);
+            }
+            Ok((
                 answer(format!("Lane Contract Mono {generation}")),
                 Vec::new(),
-            )
+            ))
         });
-        let wake: &'static OnceLock<Box<dyn Fn() + Send + Sync>> =
-            Box::leak(Box::new(OnceLock::new()));
-        let heard = Arc::clone(&probe);
-        let _ = wake.set(Box::new(move || heard.woke()));
-        let lane: &'static FontLane = Box::leak(Box::new(FontLane {
-            monospace: Box::leak(Box::new(MonospaceFamilySlot::new())),
-            cjk: Box::leak(Box::new(CjkFamilySlot::new())),
-            walk: Box::leak(walk),
-            wake,
-        }));
+        let (heard, counted) = (Arc::clone(&probe), Arc::clone(&said));
+        let lane: &'static FontLane = Box::leak(Box::new(FontLane::new(
+            Executor::scripted(Arc::clone(&gate)),
+            Box::leak(Box::new(MonospaceFamilySlot::new())),
+            Box::leak(Box::new(CjkFamilySlot::new())),
+            Box::leak(walk),
+            move || heard.woke(),
+            move |_line: &str| {
+                counted.fetch_add(1, Ordering::SeqCst);
+            },
+        )));
         Box::new(FontAdapter {
             lane,
             gate,
             probe,
-            seen: 0,
+            questions,
+            said,
+            raised: Vec::new(),
         })
     }
 
@@ -34863,12 +35177,38 @@ pub(crate) mod font_lane_adapter {
             &self.probe
         }
 
+        /// `request_font_walk`, on this lane: the lane's own admission, or its refusal at the
+        /// door as the request's terminal.
         fn submit(&mut self, _target: u32, question: u64) -> Admission {
-            self.lane.request();
-            Admission {
-                ticket: Some(self.lane.monospace.serving()),
-                question,
-                refused: None,
+            // The question is recorded under the identity the next admission mints, before the
+            // worker can read it: the lane mints identities in order, one per admission.
+            let mut questions = self
+                .questions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let next = questions.keys().max().map_or(1, |last| last + 1);
+            questions.insert(next, question);
+            drop(questions);
+            match self.lane.request_walk() {
+                Ok(id) => {
+                    assert_eq!(id.0, next, "the font lane mints its identities in order");
+                    Admission {
+                        ticket: Some(id.0),
+                        question,
+                        refused: None,
+                    }
+                }
+                Err(refused) => {
+                    self.questions
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&next);
+                    Admission {
+                        ticket: None,
+                        question,
+                        refused: Some(format!("{refused:?}")),
+                    }
+                }
             }
         }
 
@@ -34878,28 +35218,48 @@ pub(crate) mod font_lane_adapter {
             );
         }
 
-        /// `adopt_scanned_families`, on this lane: an answer is raised when the adopted
-        /// generation moves.
+        /// `adopt_scanned_families`, on this lane: the terminals taken in the order they were
+        /// minted, each a delivery, and a walk's lists put on screen as the product's acceptance
+        /// puts them.
         fn drain(&mut self) -> Vec<Delivered> {
-            self.lane.adopt();
-            let adopted = self.lane.monospace.answered.load(Ordering::Relaxed);
-            if adopted == self.seen {
-                return Vec::new();
+            let mut delivered = std::mem::take(&mut self.raised);
+            let questions = self
+                .questions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            for (id, terminal) in self.lane.requests.ended() {
+                self.lane.take(id, terminal.clone());
+                delivered.push(Delivered {
+                    target: Some(0),
+                    ticket: Some(id.0),
+                    question: questions.get(&id.0).copied(),
+                    outcome: outcome(terminal),
+                });
             }
-            self.seen = adopted;
-            vec![Delivered {
-                target: Some(0),
-                ticket: Some(adopted),
-                question: None,
-                outcome: Outcome::Answered,
-            }]
+            delivered
         }
 
-        /// A late walk's answer, through the slot's own `offer`.
+        /// A late answer to the older request `ticket`, through the lane's own publication — which
+        /// refuses a second terminal — and through the acceptance's adoption, which refuses an
+        /// answer older than the one on screen. Either taking it is an answer raised.
         fn offer_stale(&mut self, ticket: u64) {
+            let late = answer(format!("Lane Contract Mono {ticket}, late"));
             self.lane
-                .monospace
-                .offer(ticket, answer(format!("Lane Contract Mono {ticket}, late")));
+                .requests
+                .ledger()
+                .publish(FontId(ticket), Terminal::Done((late.clone(), Vec::new())));
+            if self.lane.monospace.adopt(ticket, late) {
+                self.raised.push(Delivered {
+                    target: Some(0),
+                    ticket: Some(ticket),
+                    question: None,
+                    outcome: Outcome::Answered,
+                });
+            }
+        }
+
+        fn said(&self) -> Option<usize> {
+            Some(self.said.load(Ordering::SeqCst))
         }
     }
 }
