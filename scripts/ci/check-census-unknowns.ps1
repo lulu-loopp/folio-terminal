@@ -16,7 +16,12 @@
 # the row count and the summed `sites` stay level. A key that disappeared or
 # whose `sites` went down is the list shrinking, which is what regenerating it
 # with `scripts/generate-ownership-census.ps1` after a fix writes. A key is
-# never added or grown by hand to let a new unknown past the test.
+# never added or grown by hand to let a new unknown past the test. Keys compare
+# ordinally, case and all, as FieldCensus's `BTreeMap` of `String`s does: two
+# keys that differ only in case are two unknowns. It is a shrink-only tripwire
+# over aggregated counts: FieldCensus counts every site sharing a key as one
+# `sites`, so a same-key swap (one site resolved, another added in the same
+# function for the same reason) is invisible to it, by design.
 #
 # The baseline is the list committed at `git merge-base HEAD origin/main`. When
 # the merge base has no list (the branch that introduces it), the baseline is
@@ -58,11 +63,12 @@ $annotations = Join-Path $repo $annotationsRelative
 $seed = "7a53d4294eab7726813ca000119a496c27883708"
 
 # A row is a data line: not blank, not a comment, not the column header. Each
-# row is one unknown: its key (the first four columns, tab-joined) and its
-# `sites`. The list carries a key once — FieldCensus renders one row per key —
-# and a second row with the same key is refused rather than read as either.
+# row is one unknown: its key (the first four columns, tab-joined, compared
+# ordinally) and its `sites`. The list carries a key once — FieldCensus
+# renders one row per key — and a second row with the same key is refused
+# rather than read as either.
 function Read-CensusUnknowns([string[]]$lines, [string]$where) {
-    $unknowns = [ordered]@{}
+    $unknowns = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::Ordinal)
     $header = $false
     foreach ($line in $lines) {
         if ($line.Length -eq 0 -or $line.StartsWith("#")) { continue }
@@ -80,7 +86,7 @@ function Read-CensusUnknowns([string[]]$lines, [string]$where) {
             throw "$where has a row whose sites column is not a positive integer: $line"
         }
         $key = $columns[0..3] -join "`t"
-        if ($unknowns.Contains($key)) {
+        if ($unknowns.ContainsKey($key)) {
             throw "$where carries the unknown $(Format-UnknownKey $key) on two rows; each key has one row"
         }
         $unknowns[$key] = $sites
@@ -116,9 +122,10 @@ function Read-AnnotationRows([string[]]$lines, [string]$where) {
 }
 
 # The annotation rows of $now that are not in $before, whole rows with
-# multiplicity: an annotation has no measurement, so a rewritten row is added.
+# multiplicity and compared ordinally: an annotation has no measurement, so a
+# rewritten row, a change of case included, is added.
 function Get-AddedRows([string[]]$before, [string[]]$now) {
-    $allowed = @{}
+    $allowed = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::Ordinal)
     foreach ($row in $before) {
         if ($allowed.ContainsKey($row)) { $allowed[$row] += 1 } else { $allowed[$row] = 1 }
     }
@@ -185,7 +192,7 @@ $added = @()
 $grown = @()
 $shrunk = 0
 foreach ($key in $now.Keys) {
-    if (-not $before.Contains($key)) {
+    if (-not $before.ContainsKey($key)) {
         $added += "    $(Format-UnknownKey $key): $($now[$key]) site(s), not at $from"
     } elseif ($now[$key] -gt $before[$key]) {
         $grown += "    $(Format-UnknownKey $key): $($now[$key]) site(s), $($before[$key]) at $from"
@@ -193,7 +200,7 @@ foreach ($key in $now.Keys) {
         $shrunk += 1
     }
 }
-$removed = @($before.Keys | Where-Object { -not $now.Contains($_) }).Count
+$removed = @($before.Keys | Where-Object { -not $now.ContainsKey($_) }).Count
 Write-Host ("$relative against ${from}: $($before.Count) unknowns -> $($now.Count), " +
     "$($added.Count) added, $($grown.Count) grown, $shrunk shrunk, $removed removed.")
 

@@ -48,7 +48,10 @@ Where and what to do: `crates/bt-source/tests/census.rs` compares against
 merge base: the unknown list is keyed by identity (`site`, `module`,
 `function`, `reason`) and measurements may only shrink — a key the merge base
 does not carry, or a key whose `sites` count is larger, is refused by key; a key
-that disappears or whose `sites` count drops is the list shrinking. When red,
+that disappears or whose `sites` count drops is the list shrinking. Keys compare
+case-sensitively, as `FieldCensus` keys them. It is a shrink-only tripwire over
+aggregated counts; a same-key swap (one site resolved and another added under
+the same site, module, function and reason) is invisible to it, by design. When red,
 fix the routing or regenerate with `scripts/generate-ownership-census.ps1` and
 justify each real multi-writer or unknown row; do not edit generated census rows
 as a substitute for changing the code.
