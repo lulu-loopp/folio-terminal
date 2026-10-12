@@ -55,20 +55,23 @@
 //!   allowed only when the handle follows to a thread start whose closure is a **call edge** to
 //!   the boundary — the closure's whole body one call that [`FunctionPaths::functions_named`]
 //!   follows to exactly [`BOUNDARY`].
-//! * A `join` that takes arguments other than one handle (`Path::join`, a slice's `join`):
-//!   `JoinHandle::join` takes none, so no thread's. A function named `join`, where it is
-//!   declared, is no join either.
-//! * `T::join(x)` through a type path that is not `JoinHandle`'s: a foreign crate's operation only
-//!   when the path is written **in full from that crate's root** — its first segment is no
-//!   keyword root, no `std`/`core`/`alloc`, no workspace crate, no name a `use` brings into scope
-//!   there (and no glob `use` is in scope there), no item or module of the package; the tree compiling,
-//!   that leaves a crate of the extern prelude. Any other path-called `join` is refused.
-//!   (`bt-platform`'s WinRT deployment waits are written so:
-//!   `windows_future::IAsyncOperationWithProgress::join(&operation)`.)
-//! * A `join` in a macro's tokens, which no parser reads: with a non-empty argument group, no
-//!   thread's; any other is refused.
-//! * Any other occurrence — `JoinHandle::join` handed on as a value, a binding named `join` — is
-//!   refused.
+//! * A method `join` that takes arguments (`Path::join`, a slice's `join`): `JoinHandle::join`
+//!   takes none, so no thread's. A function named `join`, where it is declared, is no join either;
+//!   nor is a name that is not called — a binding, a field, a member, a single-segment path value
+//!   (`let (join, run) = …`, `layout.join`).
+//! * `T::join(x)` through a type path that is not `JoinHandle`'s: allowed only when the path is
+//!   exactly one of [`FOREIGN_JOINS`] — the four WinRT async types of `windows-future`, whose
+//!   `join` waits for an operation, not a thread — and its first segment is that crate there (no
+//!   workspace crate, no name a `use` brings into scope there, no glob `use` in scope, no item or
+//!   module of the package takes the name). A closed list: any other path-called `join` — a
+//!   generic parameter's associated type (`T::Handle::join(h)`), a dependency's own thread handle
+//!   (`ScopedJoinHandle::join(h)`), an imported alias — is refused. (`bt-platform`'s WinRT
+//!   deployment waits are written so: `windows_future::IAsyncOperationWithProgress::join(&op)`.)
+//! * A `join` in a macro's tokens, which no parser reads: written after `::` (a path-called
+//!   `join`, `JoinHandle::join(h)`, `$crate::…::join(h)`), refused whatever its arguments;
+//!   otherwise, followed by a non-empty argument group, a method `join` with arguments and no
+//!   thread's; followed by no group, a name; `join()`, refused.
+//! * Any other occurrence — `JoinHandle::join` handed on as a value — is refused.
 //!
 //! A handle is followed through `let` bindings (whose pattern is the whole value, `Some(x)` or
 //! `Ok(x)`), the values given to a `self` field anywhere in its package (struct literals and
@@ -80,6 +83,11 @@
 //! field of anything but `self`, any other method's value (a collection's `pop`), a call that
 //! follows to no workspace free function and starts no thread (an associated function, a renamed
 //! `use` of `spawn`, a foreign crate's call).
+//!
+//! What it does not see: a bare `join` identifier handed to a macro that calls `$recv.$m()` with
+//! it is read as a name (the call is made only by the expansion, which no parser here reads); and
+//! an identifier a `paste!`-style macro builds is never found (no first-party crate depends on
+//! `paste` today).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
@@ -379,6 +387,17 @@ const DOORS: [(&str, &str, &str); 2] = [
     ),
 ];
 
+/// The foreign operations whose `join` the product may call by its type's full path: the WinRT
+/// async types of `windows-future` (`src/join.rs`: `join(&self)` on exactly these four), whose
+/// `join` waits for an operation, not a thread. A closed list: any other path-called `join` is
+/// refused.
+const FOREIGN_JOINS: [[&str; 3]; 4] = [
+    ["windows_future", "IAsyncAction", "join"],
+    ["windows_future", "IAsyncOperation", "join"],
+    ["windows_future", "IAsyncActionWithProgress", "join"],
+    ["windows_future", "IAsyncOperationWithProgress", "join"],
+];
+
 /// How many steps — a `let`, a field, a function's tail, a method's receiver — one handle is
 /// followed through.
 const ORIGIN_STEPS: usize = 12;
@@ -603,9 +622,11 @@ fn bound_names(pattern: &syn::Pat, out: &mut Vec<(String, usize, bool)>, whole: 
     }
 }
 
-/// Every `join` in a macro's tokens, which no parser reads: one followed by a non-empty
-/// parenthesised group takes arguments and is no thread's; any other — `.join()` above all — is
-/// refused, since the reading cannot judge what its result is made into.
+/// Every `join` in a macro's tokens, which no parser reads. One written after `::` is a
+/// path-called `join` (`JoinHandle::join(h)`, `$crate::…::join(h)`) and is refused whatever its
+/// arguments; otherwise one followed by a non-empty parenthesised group takes arguments and is no
+/// thread's, one followed by no group is a name, and `join()` is refused — the reading cannot
+/// judge what its result is made into.
 fn macro_joins(tokens: proc_macro2::TokenStream, shapes: &mut BTreeMap<usize, Shape>) {
     let trees: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
     for (at, tree) in trees.iter().enumerate() {
@@ -624,9 +645,14 @@ fn macro_joins(tokens: proc_macro2::TokenStream, shapes: &mut BTreeMap<usize, Sh
                     && matches!((&trees[at - 2], &trees[at - 1]),
                         (proc_macro2::TokenTree::Punct(a), proc_macro2::TokenTree::Punct(b))
                             if a.as_char() == ':' && b.as_char() == ':');
-                let shape = if arguments == Some(true) {
+                let shape = if after_a_path {
+                    Shape::Refused(
+                        "a path-called `join` in a macro's tokens, which the reading does not parse"
+                            .to_owned(),
+                    )
+                } else if arguments == Some(true) {
                     Shape::Arguments
-                } else if arguments.is_none() && !after_a_path {
+                } else if arguments.is_none() {
                     Shape::Name
                 } else {
                     Shape::Refused(
@@ -1029,20 +1055,22 @@ impl<'a> JoinReader<'a> {
         }
     }
 
-    /// Whether `path`, a `join` called through a type path in the file at `place`, is written in
-    /// full from a foreign crate's root: its first segment is none of `crate`, `self`, `super`,
-    /// `Self`, `std`, `core`, `alloc`, a workspace crate, a name a `use` brings into scope there (and
-    /// no glob `use` is in scope there), or an item or module of the package — which, the tree
-    /// compiling, leaves only a crate of the extern prelude: a dependency's type, named.
+    /// Whether `path`, a `join` called through a type path at byte `at` of the file at `place`,
+    /// is one of [`FOREIGN_JOINS`] written in full — and its first segment really is that crate
+    /// there: no workspace crate, no name a `use` brings into scope at `at` (and no glob `use` in
+    /// scope), no item or module of the package takes the name.
     fn is_foreign_path(&self, place: Place, at: usize, path: &[String]) -> bool {
-        let [first, _, .., _] = path else {
+        if !FOREIGN_JOINS
+            .iter()
+            .any(|foreign| foreign.iter().copied().eq(path.iter().map(String::as_str)))
+        {
             return false;
-        };
+        }
+        let first = &path[0];
         let reading = self.file(place);
         let index = self.indexes[place.index];
         let in_scope = reading.names_in_scope(at);
-        !["crate", "self", "super", "Self", "std", "core", "alloc"].contains(&first.as_str())
-            && !self.crates.contains(first)
+        !self.crates.contains(first)
             && !in_scope.contains("*")
             && !in_scope.contains(first.as_str())
             && !index.items().iter().any(|item| item.name() == first)
@@ -1483,13 +1511,16 @@ fn join_fixture() -> Index {
 }
 
 /// The fixture's refused joins and shapes, by the site of their `join`.
-const FIXTURE_REFUSED: [&str; 11] = [
+const FIXTURE_REFUSED: [&str; 14] = [
     "lib.rs:118:15",
     "lib.rs:125:12",
     "lib.rs:132:47",
     "lib.rs:138:27",
     "lib.rs:143:41",
     "lib.rs:154:15",
+    "lib.rs:159:34",
+    "lib.rs:169:16",
+    "lib.rs:175:48",
     "lib.rs:24:18",
     "lib.rs:46:12",
     "lib.rs:75:14",
@@ -1502,13 +1533,15 @@ const FIXTURE_REFUSED: [&str; 11] = [
 /// a name; and what the reading cannot follow is refused, never passed.** The fixture, read beside
 /// `bt-platform`, allows two joins — a thread started through the thread door whose body is
 /// handed to the boundary by an alias, and a contained handle given to a `self` field and joined
-/// by a method — and refuses eleven: a bare thread joined with an `Err → Panicked` arm, a thread
+/// by a method — and refuses fourteen: a bare thread joined with an `Err → Panicked` arm, a thread
 /// whose body is the lookalike `contained_panic::contain`, a free function's bare handle made a
 /// default, a handle handed in as a parameter, a body that calls a helper that calls the boundary,
 /// a handle an associated function returns, a contained body started through a renamed `use` of
 /// `spawn`, a handle taken out of a collection, a `join()` in a macro's tokens and
-/// `JoinHandle::join` handed on as a value, and a foreign type's `join` called through an imported
-/// name. A foreign crate's `join` named by its full type path is no thread's; two joins of bare
+/// `JoinHandle::join` handed on as a value, a foreign type's `join` called through an imported
+/// name, `JoinHandle::join(h)` inside a macro's tokens, a generic parameter's associated type's
+/// `join` (`T::Handle::join(h)`) and a dependency's own thread handle written in full from its
+/// crate's root — neither of the last two on the closed foreign list. A foreign crate's `join` named by its full type path is no thread's; two joins of bare
 /// threads are not judged (one thrown away, one carried on); five occurrences are no join by their
 /// shape (a declaration, a binding and its value, two `join`s with arguments); a test's join is
 /// not read.
@@ -1518,7 +1551,9 @@ const FIXTURE_REFUSED: [&str; 11] = [
 /// the drain's join is refused; ③ allow a call that follows to nothing (round 1's "not a
 /// thread") — the associated function's and the renamed spawn's joins pass; ④ skip an occurrence
 /// the reading did not parse (round 1's `continue`) — the macro's join and the join handed on
-/// pass.
+/// pass; ⑤ judge a macro's `join` by its arguments before its path (round 2's order) — the
+/// macro's `JoinHandle::join(h)` passes; ⑥ judge a path-called `join` foreign by elimination
+/// (round 2's rule) — the generic parameter's and the dependency's handles pass.
 #[test]
 fn a_join_is_a_value_by_a_call_edge_from_its_thread_to_the_boundary() {
     let index = join_fixture();
@@ -1535,7 +1570,7 @@ fn a_join_is_a_value_by_a_call_edge_from_its_thread_to_the_boundary() {
         .collect();
     assert_eq!(
         sites, FIXTURE_REFUSED,
-        "the associated function's handle, the renamed spawn, the collection, the macro's join, the join handed on as a value, the foreign type's join through an imported name, the bare thread's panic arm, the lookalike's thread, the free function's bare handle, \
+        "the associated function's handle, the renamed spawn, the collection, the macro's join, the join handed on as a value, the foreign type's join through an imported name, the path-called join in a macro, the generic parameter's handle, the dependency's thread handle, the bare thread's panic arm, the lookalike's thread, the free function's bare handle, \
          the parameter and the helper's thread: {:#?}",
         reading.refused
     );

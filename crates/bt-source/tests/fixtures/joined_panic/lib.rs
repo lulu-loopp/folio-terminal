@@ -154,6 +154,27 @@ pub fn a_foreign_operation_imported(operation: &u8) -> Result<u8, String> {
     Operated::join(operation).map_err(|error| error.message())
 }
 
+/// A path-called `join` in a macro's tokens, with its one argument: refused.
+pub fn a_path_join_in_a_macro(thread: JoinHandle<()>) {
+    assert!(matches!(JoinHandle::join(thread), Err(_)));
+}
+
+/// A trait whose associated type is a thread's handle.
+pub trait Started {
+    type Handle;
+}
+
+/// A generic parameter's associated type's `join`: refused (no foreign operation on the list).
+pub fn a_generic_handle<T: Started<Handle = JoinHandle<()>>>(handle: T::Handle) -> bool {
+    T::Handle::join(handle).is_err()
+}
+
+/// A dependency's own thread handle, written in full from its crate's root: refused (not on the
+/// list).
+pub fn a_dependencys_thread_handle(handle: u8) -> bool {
+    crossbeam_utils::thread::ScopedJoinHandle::join(handle).is_err()
+}
+
 /// A binding named `join` and its value: names, no join.
 pub fn a_binding_named_join() -> u8 {
     let (join, run) = (1, 2);
