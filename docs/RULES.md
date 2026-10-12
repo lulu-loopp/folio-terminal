@@ -589,30 +589,45 @@ bounded time*.
 Entries: §13.22 *glyphs on the Metal road are measured*; §7.1.3l and §7.1.3m.
 There is no font charter; the rules are per-decision.
 
-**The font list and the stored face, folded 2026-09-24 (0.4.5 ticket 50).**
+**The font list and the stored face, folded 2026-09-24 (0.4.5 ticket 50); the
+lane's half reworded 2026-10-12 (S-4), on the completion seam.**
 Entries read: §7.1.6c-8 ruling four (2026-08-19), *the picker ends in
 `Install fonts…`* and the list rescans when the dialog reopens; §13.18 *the real list in the font picker*;
 §13.52 *the gear asked the machine for its fonts* (GitHub issue #3); DESIGN
 2026-09-24 *The font list is walked only on its lane*.
 
 - **The machine's font collection is walked only on the font lane**
-  (`settings::FontLane::serve` on `FONT_LANE`, a `BelowNormal` thread named
-  `font-families`, started through `spawn_at_priority`), never on the window
-  thread. `bt_platform::monospace_font_families` and `cjk_font_families` have no
-  other product caller.
+  (`settings::FONT_LANE`, its one `BelowNormal` worker `font-families`, started
+  by the lane's first request through `lane::Executor::start_worker` and run in
+  `run_font_lane`), never on the window thread.
+  `bt_platform::monospace_font_families` and `cjk_font_families` have no other
+  product caller. A start the thread door refuses refuses the request that
+  asked for it, at the door, said once per streak; the lane is not in fault,
+  and the next request starts the worker again (S-4, 2026-10-12).
 - **The list rescans when the dialog opens, not while it is up** (2026-08-19):
-  `Runtime::toggle_settings_panel` calls `settings::begin_monospace_scan`. A
-  request made while a walk is out is served by one more round; one walk is out
-  at a time and one answer is held.
-- **Requests and answers are numbered.** Every request bumps
-  `ScanState::requested`; a walk serves the number standing when it starts; the
-  answer carries it. `adopt_scanned_families`, called only by the `FontsScanned`
-  arm between two frames, puts an answer on screen only if it is at least as new
-  as the one there. An older answer is dropped and asks for no frame.
-- **Only the window thread publishes**; the lane offers. Every reader of the
-  list in a frame (`monospace_families`, `family_index`) reads what was last
-  adopted and cannot walk or block. Before an answer lands the list is a seed:
-  the family in force and `DEFAULT_MONOSPACE_FAMILY` beside it, never empty.
+  `Runtime::toggle_settings_panel` calls `settings::begin_monospace_scan`. One
+  walk is out at a time and at most one waits. A request made while a walk is
+  out waits for the next walk; a request made while one waits is the same
+  question and is `Joined` to it, ending with that walk's answer.
+- **Every request is numbered, and ends once** (S-4, 2026-10-12). Each request
+  (`FontLane::request_walk`) is minted an identity by the lane's
+  `lane::Ledger`, which owes at most 16 at once — the walk out, the one waiting
+  with its joins, and the answers the window thread has not taken — and refuses
+  a request past that at the door. A request ends `Done` with its walk's lists,
+  `Joined` to the request it repeated, `Failed` — a font collection the platform cannot
+  read, or a panic in the walk — said once per streak in `diagnostics.log`, or
+  `WorkerGone` when the worker ends, which faults the lane and refuses every
+  later request. A family the platform cannot describe is left out, and that
+  shorter list is still the walk's answer. `adopt_scanned_families`, called
+  only by the `FontsScanned` arm between two frames, takes the answers in the
+  order the requests were made and puts a list on screen only if it is at
+  least as new as the one there; a failed walk leaves the list on screen as it
+  was. An older answer is dropped and asks for no frame.
+- **Only the window thread publishes the adopted list**; the lane holds the
+  answers. Every reader of the list in a frame (`monospace_families`,
+  `family_index`) reads what was last adopted and cannot walk or block. Before
+  an answer lands the list is a seed: the family in force and
+  `DEFAULT_MONOSPACE_FAMILY` beside it, never empty.
 - **The face `settings.json` names is loaded from the first frame, found by its
   name.** `apply_stored_terminal_font` asks `settings::monospace_family_files`,
   which answers from the adopted list when there is one and otherwise from
