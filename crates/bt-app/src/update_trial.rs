@@ -107,7 +107,9 @@ use bt_platform::install_flip::Running;
 use crate::persist;
 use crate::update_apply::LastTrialCommit;
 use crate::update_startup;
-use crate::update_txn::{Home, Receipt, TrialSight, TxnId, trial_sight};
+use crate::update_txn::{
+    Actor, Effect, Home, Receipt, Role, Sight, TrialSight, TxnId, may, trial_sight,
+};
 
 /// **Every durable writer a start makes, each held back by the gate while the
 /// start is a trial** — the inventory, one variant per writer and its site.
@@ -1051,12 +1053,15 @@ pub(crate) fn take_the_claim_within(
     }
 }
 
-/// **The trial's receipt, to be written by the storage worker**: where, and
-/// the bytes (v1, frozen).
+/// **The trial's receipt, to be written by the storage worker**: where, the
+/// bytes (v1, frozen), and the transaction's journal and id, whose phase at
+/// the write is held to the rights table ([`write_receipt`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ReceiptJob {
     pub(crate) path: PathBuf,
     pub(crate) bytes: Vec<u8>,
+    pub(crate) journal: PathBuf,
+    pub(crate) txn: TxnId,
 }
 
 /// **What a receipt already at a trial's own name is to that trial** (U-35
@@ -1115,9 +1120,16 @@ pub(crate) fn names_a_running_process(receipt: &Receipt) -> bool {
 /// and left byte for byte. Two attempts of one trial can never both be ready:
 /// each must first hold the data directory's claim (§C.7).
 ///
+/// **Only where the rights table grants it** (`update_txn::EFFECT_RIGHTS`,
+/// 0.4.8 E6): the journal is read at the write, and nothing is written unless
+/// it is this transaction's, read whole, in a phase where `Actor::Trial` may
+/// `WriteReceipt` ([`receipt_granted`]).
+///
 /// # Errors
-/// The write failed, or the name holds a receipt that is kept.
+/// The rights table does not grant it, the write failed, or the name holds a
+/// receipt that is kept.
 pub(crate) fn write_receipt(job: &ReceiptJob) -> Result<(), String> {
+    receipt_granted(job)?;
     let failure = match bt_platform::install_txn::durable_create(&job.path, &job.bytes) {
         Ok(()) => return Ok(()),
         Err(failure) if failure.error.kind() == io::ErrorKind::AlreadyExists => failure,
@@ -1130,6 +1142,51 @@ pub(crate) fn write_receipt(job: &ReceiptJob) -> Result<(), String> {
         Some(AtItsName::Earlier) => bt_platform::install_txn::durable_write(&job.path, &job.bytes)
             .map_err(|failure| failure.to_string()),
         Some(AtItsName::Kept) | None => Err(format!("{failure}; the receipt there is kept")),
+    }
+}
+
+/// **Whether the rights table grants this receipt now**: the journal at
+/// `job.journal`, read as [`Role::ReceiptWrite`], is `job.txn`'s, read whole,
+/// and its phase is one where `Actor::Trial` may `WriteReceipt`. A journal
+/// that is absent, names another transaction, or cannot be read whole grants
+/// nothing: that role never accepts what it cannot read.
+///
+/// The phase granted is the one this read sees — the authorization's moment,
+/// not the moment the receipt reaches the disk: the read and
+/// `install_txn::durable_create` are not one atomic step, so a lock holder may
+/// record `RollbackIntent` between them. A receipt that lands after that is
+/// never accepted: `next` takes a receipt only from `Trial` or a `Stuck` with
+/// its retrial (and U-35's own commit only from `TrialStarting`), and refuses
+/// one in `RollbackIntent` by name.
+///
+/// # Errors
+/// What the journal said instead, as a sentence.
+fn receipt_granted(job: &ReceiptJob) -> Result<(), String> {
+    let Some(seen) =
+        Role::ReceiptWrite.sight_of_read(file_reads::read(Lane::UpdateJournal, &job.journal))
+    else {
+        return Err(format!(
+            "no journal at {}, so no receipt of transaction {} is granted",
+            job.journal.display(),
+            job.txn
+        ));
+    };
+    let Sight::Known(journal) = seen else {
+        return Err(seen.said(Role::ReceiptWrite));
+    };
+    let phase = journal.body.phase.kind();
+    if journal.txn != job.txn {
+        Err(format!(
+            "the journal is transaction {}'s, not {}'s; no receipt is granted",
+            journal.txn, job.txn
+        ))
+    } else if may(Actor::Trial, Effect::WriteReceipt, phase) {
+        Ok(())
+    } else {
+        Err(format!(
+            "transaction {} is {phase:?}, where a trial writes no receipt",
+            job.txn
+        ))
     }
 }
 
@@ -1149,6 +1206,8 @@ pub(crate) fn receipt_due() -> Option<ReceiptJob> {
     GATE.hand_receipt().then(|| {
         let job = ReceiptJob {
             path: home.receipt_path(txn, &nonce),
+            journal: home.journal(),
+            txn,
             bytes: Receipt {
                 txn,
                 nonce,
@@ -1355,6 +1414,15 @@ mod tests {
         crate::update_txn::Header::parse(&bytes)
             .expect("a journal's header")
             .encode()
+    }
+
+    /// `home`'s journal of [`TXN`] in its recorded `Trial`: where the rights
+    /// table grants the trial its receipt.
+    fn granting(home: &Home) -> PathBuf {
+        std::fs::create_dir_all(home.root()).expect("the home");
+        let journal = home.journal();
+        std::fs::write(&journal, journal_bytes(TXN, trial_phase())).expect("the journal");
+        journal
     }
 
     fn trial_phase() -> Phase {
@@ -1886,6 +1954,8 @@ mod tests {
         let job = ReceiptJob {
             path: home.receipt_path(TXN, &nonce()),
             bytes: b"{\"v\":1}".to_vec(),
+            journal: granting(&home),
+            txn: TXN,
         };
         let gate: &'static Gate = Box::leak(Box::new(Gate::new()));
         gate.adopt_claim();
@@ -2090,6 +2160,8 @@ mod tests {
                 started: None,
             }
             .encode(),
+            journal: journal.clone(),
+            txn: TXN,
         };
         let gate: &'static Gate = Box::leak(Box::new(Gate::new()));
         gate.adopt_claim();
@@ -2177,6 +2249,8 @@ mod tests {
             .write_receipt(ReceiptJob {
                 path: path.clone(),
                 bytes: receipt.encode(),
+                journal: granting(&home),
+                txn: TXN,
             })
             .expect("the store has a writer");
         let written = answer
@@ -2210,6 +2284,7 @@ mod tests {
         let root = scratch("receipt-once");
         let home = Home::at(root.join("home"));
         std::fs::create_dir_all(home.transaction(TXN)).unwrap();
+        granting(&home);
         let path = home.receipt_path(TXN, &nonce());
         let mut store = persist::SessionStore::at(
             root.join("data").join("session.json"),
@@ -2230,6 +2305,8 @@ mod tests {
                 .write_receipt(ReceiptJob {
                     path: path.clone(),
                     bytes,
+                    journal: home.journal(),
+                    txn: TXN,
                 })
                 .unwrap()
                 .recv_timeout(Duration::from_secs(10))
@@ -2257,6 +2334,7 @@ mod tests {
     #[test]
     fn a_receipt_this_build_cannot_read_is_never_written_over() {
         let root = scratch("beyond-receipt");
+        let home = Home::at(root.join("home"));
         let path = root.join("health");
         let me = std::process::id();
         let mine = Receipt {
@@ -2269,6 +2347,8 @@ mod tests {
         let job = ReceiptJob {
             path: path.clone(),
             bytes: mine.encode(),
+            journal: granting(&home),
+            txn: TXN,
         };
         let earlier = Receipt {
             pid: 2,
@@ -2282,6 +2362,61 @@ mod tests {
             assert!(written.is_err(), "{what}: {written:?}");
             assert_eq!(std::fs::read(&path).unwrap(), there, "{what}: kept");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (0.4.8 E6) — **a receipt is written only over a journal its
+    /// writer reads whole** ([`Role::ReceiptWrite`], which never accepts what
+    /// it cannot read): over an unknown header word, an unknown body word,
+    /// bytes that are no journal, a journal that cannot be read, no journal,
+    /// and another transaction's journal, the write is refused and nothing
+    /// is at the receipt's name; over this transaction's `Trial` it is
+    /// written.
+    ///
+    /// MUTATION: in `receipt_granted`, grant a journal that is not read whole
+    /// (answer `Ok` for every `Sight` but `Known`).
+    #[test]
+    fn no_receipt_is_written_over_a_journal_the_writer_cannot_read_whole() {
+        let root = scratch("receipt-beyond-journal");
+        let home = Home::at(root.join("home"));
+        std::fs::create_dir_all(home.transaction(TXN)).unwrap();
+        let job = ReceiptJob {
+            path: home.receipt_path(TXN, &nonce()),
+            bytes: Receipt {
+                txn: TXN,
+                nonce: nonce(),
+                pid: std::process::id(),
+                version: crate::version::VERSION.to_owned(),
+                started: None,
+            }
+            .encode(),
+            journal: home.journal(),
+            txn: TXN,
+        };
+        let refused = |what: &str| {
+            let written = write_receipt(&job);
+            assert!(written.is_err(), "{what}: {written:?}");
+            assert!(!job.path.exists(), "{what}: no receipt");
+        };
+        let known = journal_bytes(TXN, trial_phase());
+        for (what, bytes) in crate::update_txn::beyond_inputs(&known) {
+            std::fs::write(home.journal(), &bytes).unwrap();
+            refused(what);
+        }
+        std::fs::write(
+            home.journal(),
+            journal_bytes(TxnId::new([0x11; 16]), trial_phase()),
+        )
+        .unwrap();
+        refused("another transaction's journal");
+        std::fs::remove_file(home.journal()).unwrap();
+        refused("no journal");
+        crate::update_txn::a_journal_that_cannot_be_read(&home.journal());
+        refused("a journal that cannot be read");
+        std::fs::remove_dir_all(home.journal()).unwrap();
+        std::fs::write(home.journal(), &known).unwrap();
+        assert_eq!(write_receipt(&job), Ok(()));
+        assert_eq!(std::fs::read(&job.path).unwrap(), job.bytes);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2316,6 +2451,8 @@ mod tests {
         let job = ReceiptJob {
             path: path.clone(),
             bytes: mine.encode(),
+            journal: granting(&home),
+            txn: TXN,
         };
         assert!(now.is_some(), "this process reads its own start instant");
         let other_txn = TxnId::new([0x11; 16]);

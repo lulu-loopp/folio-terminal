@@ -3351,3 +3351,26 @@ fn uninstall_removes_the_folder_of_the_trial_its_journal_names() {
     );
     fs::remove_dir_all(root).unwrap();
 }
+
+/// RED (T-JOINED-PANIC-VALUES round 2) — **a panic in the update image detach is the step's
+/// refusal**: the detach runs inside `contained_panic::contain` on its worker, so at the panic the
+/// resident hook's decision (`the_hook_lets_this_panic_unwind`) is to let it unwind, and the join
+/// answers the refusal — the same answer whether or not the process has the resident hook (the
+/// uninstall cleanup runs before it is installed).
+///
+/// MUTATION: the worker's body without `contained_panic::contain` in `detach_on_a_worker`
+/// (`move |worker| Ok(detach(worker))`) — the decision at the panic is no, and the first assert
+/// goes red.
+#[test]
+fn a_panicking_image_detach_is_the_steps_refusal() {
+    let (told, decision) = std::sync::mpsc::channel();
+    let answer = detach_on_a_worker(move |_worker| {
+        let _ = told.send(crate::the_hook_lets_this_panic_unwind());
+        std::panic::panic_any("scripted: 卸载镜像失败 panicked");
+    });
+    assert!(
+        decision.recv().expect("the detach was reached"),
+        "the hook's decision at the detach's panic is to let it unwind"
+    );
+    assert_eq!(answer, Err("the detach's worker stopped".to_owned()));
+}

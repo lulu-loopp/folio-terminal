@@ -964,6 +964,12 @@ webview2-com = "0.39.1"
 # names `::windows_core` directly, so the crate has to be in the dependency list
 # even though every path this crate writes goes through `windows::core`.
 windows-core = "0.62.2"
+# The deployment calls' WinRT operations (`src/msix.rs`) are `windows_future` types, and they are
+# waited on by naming the type in full — `windows_future::IAsyncOperationWithProgress::join` — so
+# that every `.join()` the product writes is a thread's (`crates/bt-source/tests/contained_panic.rs`
+# reads the two kinds apart by that). Already in the graph at this version as a dependency of
+# `windows`: no new package.
+windows-future = "0.3.2"
 windows = { version = "0.62.2", features = [
     # `Package.Id.FullName` and `Package.EffectiveExternalPath`: what a
     # registration of `packaging/msix/AppxManifest.xml` is called, and which

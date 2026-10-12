@@ -446,6 +446,14 @@ struct TestTools {
     /// Between `Allocated` and the carry: the running bundle's marker is
     /// written over with other bytes (managed-update M2).
     remark: bool,
+    /// The journal whose phase each flush is recorded against.
+    journal: Option<PathBuf>,
+    /// Each bundle made durable: its path, the journal's phase at that
+    /// moment, and whether the bundle stood there.
+    durable: Mutex<Vec<(PathBuf, Option<PhaseKind>, bool)>>,
+    /// While the staged bundle is made durable, one of its folders cannot be
+    /// listed (`Contents/Resources`, its permissions taken away).
+    unlistable: bool,
 }
 
 impl TestTools {
@@ -458,6 +466,9 @@ impl TestTools {
             alter_copy: false,
             fail_rescue: false,
             remark: false,
+            journal: None,
+            durable: Mutex::new(Vec::new()),
+            unlistable: false,
         }
     }
 
@@ -526,6 +537,34 @@ impl Tools for TestTools {
         std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
         made.push(folder.clone());
         Ok(folder)
+    }
+
+    fn make_durable(&self, worker: &WorkerCtx, bundle: &Path) -> Result<(), String> {
+        let phase = self.journal.as_ref().and_then(|journal| {
+            Journal::parse(&std::fs::read(journal).ok()?)
+                .ok()
+                .map(|journal| journal.body.phase.kind())
+        });
+        self.durable
+            .lock()
+            .unwrap()
+            .push((bundle.to_path_buf(), phase, bundle.is_dir()));
+        let folder = bundle.join("Contents").join("Resources");
+        let hide = self.unlistable
+            && bundle
+                .parent()
+                .is_some_and(|parent| parent.ends_with("stage"));
+        let mode = |bits: &str| {
+            fixture::run("/bin/chmod", &[OsStr::new(bits), folder.as_os_str()]);
+        };
+        if hide {
+            mode("000");
+        }
+        let made = System.make_durable(worker, bundle);
+        if hide {
+            mode("755");
+        }
+        made
     }
 }
 
@@ -1104,6 +1143,78 @@ fn the_copy_is_verified_twice() {
     assert!(!home.transaction(TxnId::new([0x2a; 16])).exists());
     assert!(!home.journal().exists());
     assert!(mounted(home.root()).is_empty());
+}
+
+/// RED (0.4.8 E6, the release read's F6) — **what `Prepared` vouches for is
+/// on the medium before `Prepared` is written**: the Prepare makes the staged
+/// bundle and the rescue clone durable after the copy and the clone stand in
+/// their places and while the journal still says `Allocated`, and only then
+/// records `Prepared`.
+///
+/// MUTATION: in `prepare_on`, drop the `make_durable` loop before the
+/// `Prepared` write — nothing is recorded.
+#[test]
+fn the_staged_set_is_made_durable_before_prepared_vouches_for_it() {
+    if !on_macos() {
+        return;
+    }
+    let scene = Scene::new("durable", "Folio.app", |_| {});
+    let home = scene.home();
+    let tools = Arc::new(TestTools {
+        journal: Some(home.journal()),
+        ..TestTools::new(&scene.scratch)
+    });
+    let job = press(&driver(&scene, &tools), scene.release(), 0x2e);
+    assert!(
+        matches!(job.state(), State::Verified(_)),
+        "{:?}",
+        job.state()
+    );
+    let txn = TxnId::new([0x2e; 16]);
+    let (stage, rescue) = (
+        home.stage_bundle(txn).expect("the staged bundle's place"),
+        home.rescue_bundle(txn).expect("the rescue clone's place"),
+    );
+    assert_eq!(
+        *tools.durable.lock().unwrap(),
+        vec![
+            (stage, Some(PhaseKind::Allocated), true),
+            (rescue, Some(PhaseKind::Allocated), true),
+        ]
+    );
+    assert!(matches!(
+        journal_on_disk(&home).body.phase,
+        Phase::Prepared { .. }
+    ));
+}
+
+/// RED (0.4.8 E6 round 2, plant (i)) — **a staged bundle that cannot be made
+/// durable whole is the Prepare's refusal**: one folder of the staged bundle
+/// cannot be listed while it is flushed, and the press fails with
+/// `Stop::Copy`; `Prepared` is never written — the transaction is abandoned
+/// and cleared as a failed copy is.
+///
+/// MUTATION: in `macos_update::flush_tree_with`, treat a folder `read_dir`
+/// refuses as empty — the press reaches `Verified`.
+#[test]
+fn a_staged_bundle_that_cannot_be_flushed_whole_is_refused() {
+    if !on_macos() {
+        return;
+    }
+    let scene = Scene::new("unflushable", "Folio.app", |_| {});
+    let tools = Arc::new(TestTools {
+        unlistable: true,
+        ..TestTools::new(&scene.scratch)
+    });
+    let job = press(&driver(&scene, &tools), scene.release(), 0x2f);
+    assert!(
+        matches!(job.state(), State::Failed(_, Failure::Stopped(Stop::Copy))),
+        "{:?}",
+        job.state()
+    );
+    let home = scene.home();
+    assert!(!home.journal().exists(), "no Prepared, no journal left");
+    assert!(!home.transaction(TxnId::new([0x2f; 16])).exists());
 }
 
 /// RED (U-27) — **every refusal after the journal exists detaches the image

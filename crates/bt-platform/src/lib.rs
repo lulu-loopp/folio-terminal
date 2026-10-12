@@ -3439,8 +3439,14 @@ impl ProbeChild {
     }
 }
 
+/// One output stream of a probe, read to its end on a thread of its own.
+///
+/// **The reader's body runs inside [`contained_panic::contain`]** (T-JOINED-PANIC-VALUES): the
+/// resident panic hook lets a panic there unwind to the boundary, so the thread ends with its
+/// answer slot still empty, and that — and only that — is what [`Self::finish`] reads as the
+/// reader having panicked: the probe's refusal, an `io::Error` its caller already answers for.
 struct ProbePipeDrain {
-    thread: std::thread::JoinHandle<()>,
+    thread: std::thread::JoinHandle<std::thread::Result<()>>,
     answer: std::sync::Arc<std::sync::Mutex<Option<std::io::Result<Vec<u8>>>>>,
 }
 
@@ -3470,14 +3476,16 @@ fn drain_probe_pipe<R: std::io::Read + Send + 'static>(
     let answer = std::sync::Arc::new(std::sync::Mutex::new(None));
     let worker_answer = answer.clone();
     let thread = spawn_at_priority(name, ThreadPriority::BelowNormal, move |_worker| {
-        let mut bytes = Vec::new();
-        let result = match pipe {
-            Some(mut pipe) => pipe.read_to_end(&mut bytes).map(|_| bytes),
-            None => Ok(bytes),
-        };
-        *worker_answer
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+        contained_panic::contain(move || {
+            let mut bytes = Vec::new();
+            let result = match pipe {
+                Some(mut pipe) => pipe.read_to_end(&mut bytes).map(|_| bytes),
+                None => Ok(bytes),
+            };
+            *worker_answer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+        })
     })?;
     Ok(ProbePipeDrain { thread, answer })
 }
@@ -4173,6 +4181,11 @@ pub(crate) fn end_probe_children_for_process_exit() {
 }
 
 impl ProbeChildGuard {
+    /// A guard that holds nothing — the state an ended guard is in: what a
+    /// Unix probe whose group could not be registered is held by while it is
+    /// ended, and what the Windows tests of the arms that answer for it start
+    /// a probe with.
+    #[cfg(any(test, not(windows)))]
     fn uncontained() -> Self {
         Self {
             #[cfg(windows)]
@@ -4412,10 +4425,11 @@ impl ProbeStdio {
 /// 1703; Folio's minimum is 1809): no process object of the probe exists
 /// outside its job at any moment, so a termination of this process, however it
 /// ends and however long `CreateProcess` takes, leaves no probe behind. The job
-/// handle is not inheritable. If the job cannot be created or limited, the
-/// probe runs uncontained after one process-wide diagnostic (standard error,
-/// which in a resident run is `diagnostics.log`); its deadline still ends its
-/// immediate child.
+/// handle is not inheritable. **A probe that cannot be contained is refused,
+/// never run uncontained** (0.4.8 E6): if the job cannot be created or
+/// limited, no process is created and the start fails with that refusal
+/// ([`uncontainable`]), which the caller's road says as its own step's
+/// failure.
 ///
 /// One kind of program cannot be born in a job: Windows refuses the job list
 /// for a packaged app's executable (PowerShell 7 from the Microsoft Store) when
@@ -4460,7 +4474,8 @@ impl ProbeStdio {
 /// child has exited and not when every holder of its write end has let go.
 ///
 /// On Unix the command enters a new process group before `exec`, so there is no
-/// interval in which a descendant can escape its guard.
+/// interval in which a descendant can escape its guard; a group that cannot be
+/// registered for its guard is ended at once and the start refused.
 pub fn spawn_probe(
     command: &mut std::process::Command,
     stdio: ProbeStdio,
@@ -4475,12 +4490,34 @@ pub fn spawn_probe(
     }
 }
 
-/// Say once per process that probes run uncontained, and why.
-fn containment_unavailable(error: &std::io::Error) {
-    static SAID: std::sync::Once = std::sync::Once::new();
-    SAID.call_once(|| {
-        eprintln!("Folio probe containment unavailable; probes will still run: {error}");
-    });
+/// **The refusal of a probe that cannot be contained** (0.4.8 E6): the
+/// containment's own error, named as such, of the same kind. The first one of
+/// the process is also said once on standard error, which in a resident run
+/// is `diagnostics.log`, with its reason ([`say_containment_refusal_once`]):
+/// a caller that answers the failed start as an unknown (the `$PROFILE` and
+/// PSReadLine probes) keeps no reason of its own.
+fn uncontainable(error: &std::io::Error) -> std::io::Error {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    say_containment_refusal_once(&SAID, error, &mut |line| eprintln!("{line}"));
+    std::io::Error::new(
+        error.kind(),
+        format!("the probe could not be contained, so it was not run: {error}"),
+    )
+}
+
+/// Say `error` through `say` if `said` has not been set, and set it: one line
+/// per process however many probes are refused, each start still failing
+/// with its own error.
+fn say_containment_refusal_once(
+    said: &std::sync::atomic::AtomicBool,
+    error: &std::io::Error,
+    say: &mut dyn FnMut(&str),
+) {
+    if !said.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        say(&format!(
+            "Folio: a probe could not be contained, so it was not run (said once per process): {error}"
+        ));
+    }
 }
 
 #[cfg(not(windows))]
@@ -4497,11 +4534,11 @@ fn spawn_probe_with(
     }
 
     let mut child = command.spawn()?;
-    let held = guard(&child).unwrap_or_else(|error| {
-        containment_unavailable(&error);
-        ProbeChildGuard::uncontained()
-    });
-    Ok(ProbeChild {
+    let (held, refused) = match guard(&child) {
+        Ok(held) => (held, None),
+        Err(error) => (ProbeChildGuard::uncontained(), Some(error)),
+    };
+    let mut probe = ProbeChild {
         stdin: child.stdin.take(),
         stdout: child
             .stdout
@@ -4514,7 +4551,14 @@ fn spawn_probe_with(
         leader: child,
         guard: held,
         settled: None,
-    })
+    };
+    if let Some(error) = refused {
+        // No guard holds the child: it is ended and reaped through the probe's
+        // own settlement, and the start refused.
+        let _ = probe.kill();
+        return Err(uncontainable(&error));
+    }
+    Ok(probe)
 }
 
 /// What a test may change about one Windows probe birth; nothing in the
@@ -4535,6 +4579,9 @@ struct ProbeBirthSeam {
     /// Treat the assignment after a refused job list as refused.
     #[cfg(test)]
     refuse_the_assignment: bool,
+    /// Treat the fresh job a refused job list needs as refused.
+    #[cfg(test)]
+    refuse_the_fresh_job: bool,
     /// How many `CreateProcess` calls this birth made.
     #[cfg(test)]
     attempts: std::rc::Rc<std::cell::Cell<u32>>,
@@ -4598,8 +4645,8 @@ fn probe_job() -> std::io::Result<ProbeChildGuard> {
     Ok(ProbeChildGuard { job: Some(job) })
 }
 
-/// Create the probe inside `job` (uncontained when the job was refused), with
-/// `raw_tail` appended unquoted to its command line.
+/// Create the probe inside `job` — refused, with nothing created, when the job
+/// was refused — with `raw_tail` appended unquoted to its command line.
 #[cfg(windows)]
 fn spawn_probe_born(
     command: &std::process::Command,
@@ -4637,10 +4684,7 @@ fn spawn_probe_born(
         .map(|directory| wide_with_nul(directory.as_os_str()))
         .transpose()?;
 
-    let mut guard = job.unwrap_or_else(|error| {
-        containment_unavailable(&error);
-        ProbeChildGuard::uncontained()
-    });
+    let mut guard = job.map_err(|error| uncontainable(&error))?;
 
     let (stdin_ours, stdin_theirs) = match stdio.stdin {
         ProbeStream::Null => (None, probe_null_end(false)?),
@@ -4679,8 +4723,11 @@ fn spawn_probe_born(
         flags |= CREATE_SUSPENDED;
     }
     #[cfg(test)]
-    let (refuse_the_job_list, refuse_the_assignment) =
-        (seam.refuse_the_job_list, seam.refuse_the_assignment);
+    let (refuse_the_job_list, refuse_the_assignment, refuse_the_fresh_job) = (
+        seam.refuse_the_job_list,
+        seam.refuse_the_assignment,
+        seam.refuse_the_fresh_job,
+    );
     #[cfg(not(test))]
     let (refuse_the_job_list, refuse_the_assignment) = (false, false);
     #[cfg(test)]
@@ -4778,10 +4825,15 @@ fn spawn_probe_born(
                     // Windows then refuses to assign any process to that job
                     // (`ERROR_ACCESS_DENIED`, measured): the child goes into a
                     // fresh one.
-                    guard = probe_job().unwrap_or_else(|error| {
-                        containment_unavailable(&error);
-                        ProbeChildGuard::uncontained()
-                    });
+                    #[cfg(test)]
+                    let fresh_job = if refuse_the_fresh_job {
+                        Err(std::io::Error::other("injected fresh job refusal"))
+                    } else {
+                        probe_job()
+                    };
+                    #[cfg(not(test))]
+                    let fresh_job = probe_job();
+                    guard = fresh_job.map_err(|error| uncontainable(&error))?;
                     let fresh = guard.job.as_ref().map(|job| HANDLE(job.as_raw_handle()));
                     let (process, thread, id) = create(None, flags | CREATE_SUSPENDED)?;
                     #[cfg(test)]
@@ -5351,6 +5403,27 @@ mod probe_run_tests {
     use super::*;
     use bt_pty::test_shell::Hygiene;
 
+    /// RED (0.4.8 E6 round 2) — **a refused containment is said once per
+    /// process, with its reason**: the first refusal's line names its error,
+    /// and a second refusal — another probe, another reason — says nothing,
+    /// so a page that asks again at every visit does not fill the log.
+    ///
+    /// MUTATION: in `say_containment_refusal_once`, drop the latch (say every
+    /// time) — two lines.
+    #[test]
+    fn a_refused_containment_is_said_once_per_process_with_its_reason() {
+        let said = std::sync::atomic::AtomicBool::new(false);
+        let mut lines = Vec::new();
+        let first = "the job was refused \u{2014} \u{4f5c}\u{4e1a}";
+        for reason in [first, "a second refusal"] {
+            say_containment_refusal_once(&said, &std::io::Error::other(reason), &mut |line| {
+                lines.push(line.to_owned());
+            });
+        }
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains(first), "{lines:?}");
+    }
+
     /// The run's budget in the tests below, and how long each child of the shared-budget test
     /// runs: 70 % of it, so the first child ends inside the budget with 30 % of it to spare and the
     /// second cannot — and with a budget of its own each, both would end.
@@ -5483,6 +5556,41 @@ mod probe_run_tests {
         assert_eq!(said(&answers[0]), "first-第一");
         assert!(answers[1].is_err(), "{:?}", answers[1]);
         assert_eq!(said(&answers[2]), "third-第三");
+    }
+
+    /// A probe's output pipe whose read panics, after saying whether the panic is contained —
+    /// the half of the resident hook's decision (`the_hook_lets_this_panic_unwind`) that a worker
+    /// of `bt-platform` decides.
+    struct PanickingPipe(std::sync::mpsc::Sender<bool>);
+
+    impl std::io::Read for PanickingPipe {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            let _ = self.0.send(contained_panic::is_contained());
+            std::panic::panic_any("scripted: 探针的输出读取 panicked");
+        }
+    }
+
+    /// RED (T-JOINED-PANIC-VALUES) — **a probe stream reader's panic is the probe's refusal**:
+    /// the reader's body runs inside `contained_panic::contain`, so at the panic the resident
+    /// hook's decision is "unwind", the reader ends with no answer, and `finish` answers the
+    /// stream's `io::Error` — which every probe's caller already answers for — instead of the
+    /// process ending in the hook.
+    ///
+    /// MUTATION: the reader's body without `contained_panic::contain` (in `drain_probe_pipe`) —
+    /// the decision at the panic is no, and the first assert goes red.
+    #[test]
+    fn a_probe_stream_readers_panic_is_the_probes_refusal() {
+        let (told, decision) = std::sync::mpsc::channel();
+        let drain = drain_probe_pipe("bt-probe-panic-test", Some(PanickingPipe(told)))
+            .expect("a reader thread");
+        let refusal = drain
+            .finish("stdout")
+            .expect_err("a reader that panicked has no answer");
+        assert!(
+            decision.recv().expect("the read was reached"),
+            "the hook's decision at the reader's panic is to let it unwind"
+        );
+        assert_eq!(refusal.to_string(), "probe stdout reader panicked");
     }
 }
 
@@ -5885,14 +5993,6 @@ mod probe_child_tests {
                 "the owned helper process did not end"
             );
         }
-
-        fn end(&self) {
-            // SAFETY: every witness in these tests names only a process printed
-            // by the test's own helper tree.
-            unsafe {
-                let _ = TerminateProcess(self.0, 1);
-            }
-        }
     }
 
     impl Drop for Witness {
@@ -6144,7 +6244,7 @@ mod probe_child_tests {
         )
         .expect("start a contained helper");
         let _contained_tree = HelperTree::of(contained.id());
-        let uncontained = spawn_with_a_refused_job(&command);
+        let uncontained = spawn_holding_nothing(&command);
         let _uncontained_tree = HelperTree::of(uncontained.id());
         for (mut child, how) in [(contained, "contained"), (uncontained, "uncontained")] {
             let pids = announced(child.take_stdout().expect("helper stdout"), "worked");
@@ -6193,7 +6293,7 @@ mod probe_child_tests {
         };
         let contained = born(probe_job());
         let _contained_tree = HelperTree::of(contained.id());
-        let uncontained = born(Err(std::io::Error::other("injected job refusal")));
+        let uncontained = born(Ok(ProbeChildGuard::uncontained()));
         let _uncontained_tree = HelperTree::of(uncontained.id());
         for (mut child, how) in [(contained, "contained"), (uncontained, "uncontained")] {
             let helper = Witness::of(child.id());
@@ -6445,24 +6545,25 @@ mod probe_child_tests {
         }
     }
 
-    /// A probe whose job could not be made, started through the real birth
-    /// with that refusal injected.
-    fn spawn_with_a_refused_job(command: &std::process::Command) -> ProbeChild {
+    /// A probe started through the real birth with a guard that holds no job
+    /// — the state a guard is in once ended, which no product birth makes
+    /// (a refused job refuses the probe) — for the arms that answer for it.
+    fn spawn_holding_nothing(command: &std::process::Command) -> ProbeChild {
         spawn_probe_born(
             command,
             HELPER_STDIO,
             None,
-            Err(std::io::Error::other("injected job refusal")),
+            Ok(ProbeChildGuard::uncontained()),
             ProbeBirthSeam::default(),
         )
-        .expect("a refused job degrades to an uncontained probe")
+        .expect("start a probe whose guard holds nothing")
     }
 
     /// RED mutation: in `ProbeChild::kill`, drop the `end_probe_leader` call
     /// the uncontained arm makes; the direct child outlives its deadline.
     #[test]
     fn an_uncontained_probe_still_ends_its_direct_child_at_the_deadline() {
-        let mut child = spawn_with_a_refused_job(&helper_command());
+        let mut child = spawn_holding_nothing(&helper_command());
         let _child_tree = HelperTree::of(child.id());
         let (direct, grandchild) = ready_probe(&mut child);
         // `kill` settles by waiting for the direct child, so it runs beside the
@@ -6479,19 +6580,57 @@ mod probe_child_tests {
         assert!(grandchild.alive(), "nothing contains an uncontained probe");
     }
 
-    /// RED mutation: in `spawn_probe_born`, return the job's error instead of
-    /// running uncontained; the probe would be refused instead of running.
+    /// RED (0.4.8 E6, the release read's F7(b)) — **a probe that cannot be
+    /// contained is refused, never run uncontained**: a refused job, and a
+    /// refused fresh job after Windows refused the job list, each answer the
+    /// start with an error naming the containment, and no process is created.
+    ///
+    /// MUTATION: in `spawn_probe_born`, run the probe with an empty guard when
+    /// its job is refused (the 0.4.7 degradation) — the start answers `Ok` and
+    /// `CreateProcess` is called.
     #[test]
-    fn a_refused_job_runs_the_probe_uncontained_and_its_owner_can_clean_up() {
-        let mut child = spawn_with_a_refused_job(&helper_command());
-        let _child_tree = HelperTree::of(child.id());
-        let (direct, grandchild) = ready_probe(&mut child);
-        drop(child);
-        assert!(direct.alive() && grandchild.alive());
-        direct.end();
-        grandchild.end();
-        direct.wait_gone();
-        grandchild.wait_gone();
+    fn a_probe_that_cannot_be_contained_is_refused_and_never_created() {
+        let attempts = std::rc::Rc::new(std::cell::Cell::new(0));
+        let refused = spawn_probe_born(
+            &helper_command(),
+            HELPER_STDIO,
+            None,
+            Err(std::io::Error::other("injected job refusal")),
+            ProbeBirthSeam {
+                attempts: attempts.clone(),
+                ..ProbeBirthSeam::default()
+            },
+        );
+        let Err(error) = refused else {
+            panic!("a refused job refuses the probe");
+        };
+        assert!(
+            error.to_string().contains("could not be contained"),
+            "{error}"
+        );
+        assert_eq!(attempts.get(), 0, "no process was created");
+
+        let attempts = std::rc::Rc::new(std::cell::Cell::new(0));
+        let refused = spawn_probe_born(
+            &helper_command(),
+            HELPER_STDIO,
+            None,
+            probe_job(),
+            ProbeBirthSeam {
+                refuse_the_job_list: true,
+                refuse_the_fresh_job: true,
+                attempts: attempts.clone(),
+                ..ProbeBirthSeam::default()
+            },
+        );
+        let Err(error) = refused else {
+            panic!("a refused fresh job refuses the probe");
+        };
+        assert!(
+            error.to_string().contains("could not be contained"),
+            "{error}"
+        );
+        assert_eq!(attempts.get(), 0, "no suspended process was created");
     }
 
     /// RED — **a test that panics with its helpers up leaves none of them running**: an
@@ -6504,7 +6643,7 @@ mod probe_child_tests {
     /// end them, so the red run leaves nothing behind either).
     #[test]
     fn a_test_that_panics_with_its_helpers_up_leaves_none_running() {
-        let mut child = spawn_with_a_refused_job(&helper_command());
+        let mut child = spawn_holding_nothing(&helper_command());
         let tree = HelperTree::of(child.id());
         let (direct, grandchild) = ready_probe(&mut child);
         assert!(direct.alive() && grandchild.alive());
@@ -7429,6 +7568,28 @@ mod probe_child_unix_tests {
             self.0.read_to_string(&mut rest).expect("read to the end");
             assert_eq!(rest, "", "the grandchild outlived the probe");
         }
+    }
+
+    /// RED (0.4.8 E6, the release read's F7(b)) — **a probe whose group
+    /// cannot be registered for its guard is refused, and the child it started
+    /// is ended and reaped**, never left running uncontained.
+    ///
+    /// MUTATION: in `spawn_probe_with`, keep the child with an empty guard
+    /// when the guard is refused (the 0.4.7 degradation) — the start answers
+    /// `Ok`.
+    #[test]
+    fn a_probe_whose_group_cannot_be_guarded_is_refused() {
+        let (_hygiene, mut command) = shell("exec sleep 30");
+        let refused = spawn_probe_with(&mut command, ProbeStdio::ANSWER, |_| {
+            Err(std::io::Error::other("injected guard refusal"))
+        });
+        let Err(error) = refused else {
+            panic!("an unguarded group refuses the probe");
+        };
+        assert!(
+            error.to_string().contains("could not be contained"),
+            "{error}"
+        );
     }
 
     /// Block until the immediate child has exited, without reaping it: the
@@ -16985,9 +17146,9 @@ mod windows_impl {
             };
             // A `RecvError` is the thread ending without a word, which is a
             // panic between the spawn and the read — there is no return path
-            // there that does not send. It is still an answer and not an
-            // unreachable: this is a terminal, and a panic taken as a panic
-            // takes somebody's scrollback with it.
+            // there that does not send. The watcher is not contained, so under the
+            // resident panic hook that panic ends the process before the channel
+            // closes: this arm is reached only where no fatal hook is installed.
             let refused = match listening.recv() {
                 Ok(Ok(())) => {
                     return Ok(Self {
