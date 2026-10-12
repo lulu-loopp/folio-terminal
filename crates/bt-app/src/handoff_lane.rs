@@ -804,9 +804,9 @@ mod tests {
             "so does one the stopped worker took"
         );
         assert_eq!(
-            fonts().reply(Answer::Refused(Declined::System(HandOffRefusal::NoHandler(
-                "this machine has no Font Book".to_owned()
-            )))),
+            fonts().reply(Answer::Refused(Declined::System(
+                HandOffRefusal::NoHandler("this machine has no Font Book".to_owned())
+            ))),
             Reply::Refused {
                 words: RefusalWords {
                     line: None,

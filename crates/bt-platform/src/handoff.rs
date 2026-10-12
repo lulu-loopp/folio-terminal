@@ -1451,8 +1451,8 @@ mod macos_handoff {
     /// `NSWorkspace`.
     fn open_folder_in_finder(url: Retained<NSURL>, what: &str) -> Result<(), HandOffRefusal> {
         let workspace = NSWorkspace::sharedWorkspace();
-        let finder = workspace
-            .URLForApplicationWithBundleIdentifier(ns_string!("com.apple.finder"));
+        let finder =
+            workspace.URLForApplicationWithBundleIdentifier(ns_string!("com.apple.finder"));
         let finder = the_application(finder, || {
             format!("this machine has no Finder to open {what} in")
         })?;
@@ -1510,8 +1510,7 @@ mod macos_handoff {
     pub fn open_system_fonts_page(window: NativeWindow) -> Result<(), HandOffRefusal> {
         let _ = window;
         let workspace = NSWorkspace::sharedWorkspace();
-        let url = workspace
-            .URLForApplicationWithBundleIdentifier(ns_string!("com.apple.FontBook"));
+        let url = workspace.URLForApplicationWithBundleIdentifier(ns_string!("com.apple.FontBook"));
         let url = the_application(url, || "this machine has no Font Book".to_owned())?;
         launched(workspace.openURL(&url), "the system font settings")
     }
@@ -3199,19 +3198,46 @@ mod tests {
                     format!("ShellExecuteW failed with code {code} ({name})")
                 };
                 let table: [(isize, Result<(), HandOffRefusal>); 16] = [
-                    (31, Err(HandOffRefusal::NoHandler(named(31, "SE_ERR_NOASSOC")))),
+                    (
+                        31,
+                        Err(HandOffRefusal::NoHandler(named(31, "SE_ERR_NOASSOC"))),
+                    ),
                     (2, Err(HandOffRefusal::NotFound(named(2, "SE_ERR_FNF")))),
                     (3, Err(HandOffRefusal::NotFound(named(3, "SE_ERR_PNF")))),
-                    (5, Err(HandOffRefusal::AccessDenied(named(5, "SE_ERR_ACCESSDENIED")))),
-                    (0, Err(HandOffRefusal::Other(named(0, "out of memory or resources")))),
+                    (
+                        5,
+                        Err(HandOffRefusal::AccessDenied(named(
+                            5,
+                            "SE_ERR_ACCESSDENIED",
+                        ))),
+                    ),
+                    (
+                        0,
+                        Err(HandOffRefusal::Other(named(
+                            0,
+                            "out of memory or resources",
+                        ))),
+                    ),
                     (8, Err(HandOffRefusal::Other(named(8, "SE_ERR_OOM")))),
-                    (11, Err(HandOffRefusal::Other(named(11, "ERROR_BAD_FORMAT")))),
+                    (
+                        11,
+                        Err(HandOffRefusal::Other(named(11, "ERROR_BAD_FORMAT"))),
+                    ),
                     (26, Err(HandOffRefusal::Other(named(26, "SE_ERR_SHARE")))),
-                    (27, Err(HandOffRefusal::Other(named(27, "SE_ERR_ASSOCINCOMPLETE")))),
-                    (28, Err(HandOffRefusal::Other(named(28, "SE_ERR_DDETIMEOUT")))),
+                    (
+                        27,
+                        Err(HandOffRefusal::Other(named(27, "SE_ERR_ASSOCINCOMPLETE"))),
+                    ),
+                    (
+                        28,
+                        Err(HandOffRefusal::Other(named(28, "SE_ERR_DDETIMEOUT"))),
+                    ),
                     (29, Err(HandOffRefusal::Other(named(29, "SE_ERR_DDEFAIL")))),
                     (30, Err(HandOffRefusal::Other(named(30, "SE_ERR_DDEBUSY")))),
-                    (32, Err(HandOffRefusal::Other(named(32, "SE_ERR_DLLNOTFOUND")))),
+                    (
+                        32,
+                        Err(HandOffRefusal::Other(named(32, "SE_ERR_DLLNOTFOUND"))),
+                    ),
                     (1, Err(HandOffRefusal::Other(named(1, "undocumented")))),
                     (7, Err(HandOffRefusal::Other(named(7, "undocumented")))),
                     (33, Ok(())),
