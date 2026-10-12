@@ -16,6 +16,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- A line a link asked to jump to, still waiting for its file, is no longer applied to a different file opened onto the same pane. <!-- zh: pending O-8 -->
 - On macOS the window buttons stay on Folio's bar after a tab switch or a title change. <!-- zh: pending T-MAC-LIGHTS-TITLE -->
 - Pasting while the files column, a read-only preview or a switcher menu has the keyboard no longer types the clipboard into the shell behind it. <!-- zh: pending H2 -->
 - Renaming a file can no longer replace another file that takes the new name at the same moment. <!-- zh: pending H2 -->
