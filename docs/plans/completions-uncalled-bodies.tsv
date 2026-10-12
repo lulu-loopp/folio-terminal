@@ -7,5 +7,3 @@
 # this list only shrinks (side-effects contract 2026-10-11, S-1).
 body	ticket	reason
 bt-platform [windows] crate::elevated_pipe::shell_execute_runas	the admin terminal's parent side (design note admin-terminal-2026-10-04)	the elevated host's launch (`launch_elevated_host`) has no product caller yet
-bt-platform - crate::exchange::flush_directory	T-STORAGE-WORKER-REQUEST (B6 ticket 4)	called by T-STORAGE-WORKER-REQUEST (B6 ticket 4): the storage worker's conditional write is its door
-bt-platform - crate::exchange::replace_keeping_displaced	T-STORAGE-WORKER-REQUEST (B6 ticket 4)	called by T-STORAGE-WORKER-REQUEST (B6 ticket 4): the storage worker's conditional write is its door

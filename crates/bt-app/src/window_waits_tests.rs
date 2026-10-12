@@ -8426,3 +8426,66 @@ fn every_conforming_request_door_holds_no_wait_of_its_own() {
         failures.join("\n  ")
     );
 }
+
+/// The four hand-editable documents' stores and their shared half, as `# effects` and the
+/// bare-site inventory key an item.
+const DOCUMENT_STORE_ITEMS: [&str; 5] = [
+    "crate::persist::SettingsStore::",
+    "crate::persist::KeybindingsStore::",
+    "crate::persist::ProfilesStore::",
+    "crate::pins::PinsStore::",
+    "crate::document_request::",
+];
+
+/// RED (T-STORAGE-WORKER-REQUEST; design note 2026-10-11 §5.3) — **the window thread reads and
+/// writes no hand-editable document.**
+///
+/// The four documents' writes and the two re-reads moved to the storage worker: row 20's call
+/// and where cells name none of them, every `# completions` row whose door is a document store's
+/// request door runs on `session-writer` and is answered by `DocumentsAnswered`, and no bare
+/// vocabulary site — a file-system call, a wait — stands in a store's items or in the request
+/// protocol's module. The bare-site inventory only lost rows to this move
+/// (`every_bare_site_is_a_row_and_every_row_a_site` holds it to the code).
+///
+/// MUTATION: put `let _ = std::fs::metadata(&self.path);` back in `DocumentState::ask_read`
+/// (a read on the window thread) — the bare site is named.
+#[test]
+fn the_window_thread_reads_no_document() {
+    let row = section("rows", &ROW_COLUMNS)
+        .into_iter()
+        .find(|cells| cells[0] == "20")
+        .expect("row 20 stands for the preview save, the renames and the diagnostics");
+    for cell in [row[2], row[3]] {
+        for word in ["settings", "keybindings", "profiles", "pins", "persist.rs"] {
+            assert!(!cell.contains(word), "row 20 still names `{word}`: {cell}");
+        }
+    }
+    let documents: Vec<Completion> = completions()
+        .into_iter()
+        .filter(|row| row.door.starts_with("DocumentState::"))
+        .collect();
+    assert_eq!(
+        documents.len(),
+        2,
+        "the write and the re-read are each a row"
+    );
+    for row in documents {
+        assert_eq!(row.threads, vec!["session-writer"], "`{}`", row.class);
+        assert_eq!(row.signal, "DocumentsAnswered", "`{}`", row.class);
+    }
+    let world = World::new();
+    let (bare, _) = vocabulary_sites(&world);
+    let on_the_window: Vec<String> = bare
+        .keys()
+        .filter(|(_, _, item, _)| {
+            DOCUMENT_STORE_ITEMS
+                .iter()
+                .any(|prefix| item.starts_with(prefix))
+        })
+        .map(|(package, arm, item, entry)| format!("{package} {arm} {item} {entry}"))
+        .collect();
+    assert!(
+        on_the_window.is_empty(),
+        "a document store waits or reads on the window thread: {on_the_window:?}"
+    );
+}
