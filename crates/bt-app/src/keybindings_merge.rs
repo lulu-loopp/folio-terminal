@@ -104,7 +104,11 @@ struct Side {
 }
 
 /// **Read `document` in `platform`'s dialect** against this build's `table`.
-fn read(document: &KeybindingsV1, table: &Shortcuts, platform: bt_platform::HostPlatform) -> Side {
+fn side_of(
+    document: &KeybindingsV1,
+    table: &Shortcuts,
+    platform: bt_platform::HostPlatform,
+) -> Side {
     // A side spelled in this dialect, or in none recorded, is read as it is spelled
     // (`import_shortcuts`' rule); another platform's is carried across.
     let from = dialect_of(document.writing_platform).filter(|source| *source != platform);
@@ -229,9 +233,9 @@ pub(crate) fn merge(
 ) -> Merged {
     let table = Shortcuts::defaults_for(platform);
     let (b, o, t) = (
-        read(base, &table, platform),
-        read(ours, &table, platform),
-        read(theirs, &table, platform),
+        side_of(base, &table, platform),
+        side_of(ours, &table, platform),
+        side_of(theirs, &table, platform),
     );
     let mut about = About::default();
 
@@ -426,7 +430,7 @@ pub(crate) fn rebuild(
             .collect(),
         ..document.clone()
     };
-    let side = read(&dealt_lines, &table, platform);
+    let side = side_of(&dealt_lines, &table, platform);
     let dealt: Vec<Override> = side
         .lines
         .iter()
@@ -604,7 +608,7 @@ mod tests {
             .map(|chord| format_chord_on(chord, platform))
     }
 
-    fn title(action: &str) -> String {
+    fn action_title(action: &str) -> String {
         Shortcuts::defaults_for(PLATFORM)
             .row(action)
             .expect("a row of this build")
@@ -617,7 +621,7 @@ mod tests {
     /// dialect**, meaning kept: a Mac's `Cmd` is this Windows' `Ctrl`, and a Windows
     /// file's `Ctrl` is a Mac's `Cmd`; the result says it is this platform's.
     ///
-    /// MUTATION: skip the translation (in `read`, read every side as it is spelled) —
+    /// MUTATION: skip the translation (in `side_of`, read every side as it is spelled) —
     /// the Windows result says `Cmd+Shift+Y`, a `Win` chord here.
     #[test]
     fn a_file_written_on_another_platform_merges_in_this_dialect() {
@@ -697,7 +701,7 @@ mod tests {
         assert_eq!(
             merged.about.untranslatable,
             vec![(
-                title("zoom-pane"),
+                action_title("zoom-pane"),
                 "the source command modifier collides with a destination modifier".to_owned()
             )],
             "named"
@@ -755,7 +759,10 @@ mod tests {
             chord_of(&Shortcuts::defaults_for(PLATFORM), "new-tab", PLATFORM),
             "its default"
         );
-        assert_eq!(merged.about.account.conflicts, vec![title("new-tab")]);
+        assert_eq!(
+            merged.about.account.conflicts,
+            vec![action_title("new-tab")]
+        );
         assert_eq!(
             (merged.about.account.kept, merged.about.account.conflicted),
             (0, 1)
@@ -766,13 +773,13 @@ mod tests {
             format!(
                 "BT_PERSIST keybindings.json merged: took 1 from the file, kept 0 from Folio, \
                  conflicts 1; {} gave Ctrl+k to {}",
-                title("new-tab"),
-                title("close-pane")
+                action_title("new-tab"),
+                action_title("close-pane")
             )
         );
         assert_eq!(
             pass.replaced().map(|replaced| replaced.values),
-            Some(vec![title("new-tab")]),
+            Some(vec![action_title("new-tab")]),
             "the card names it"
         );
 
@@ -838,7 +845,7 @@ mod tests {
         );
         let account = &merged.about.account;
         assert_eq!((account.took, account.kept, account.conflicted), (2, 1, 1));
-        assert_eq!(account.conflicts, vec![title("files-pane")]);
+        assert_eq!(account.conflicts, vec![action_title("files-pane")]);
         let (_, faults) = rebuild(&merged.document, &merged.about.carried, PLATFORM);
         assert!(faults.is_empty(), "{faults:?}");
     }
