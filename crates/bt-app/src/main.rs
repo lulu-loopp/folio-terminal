@@ -78315,6 +78315,50 @@ mod edit_menu_clipboard_tests {
         );
     }
 
+    /// RED (H2-NITS, owner ruling 2026-10-11 on H2 Q2: keep) — **a copy over a
+    /// files column, a read-only preview or a switcher popup still takes the
+    /// terminal's selection**; only the quick edit and a surface above the
+    /// clipboard rung answer Edit ▸ Copy otherwise.
+    ///
+    /// Copy writes nothing into a child, so it is not held to the paste's rule
+    /// ([`a_paste_reaches_the_terminal_only_while_the_shell_holds_the_keyboard`]):
+    /// every rung that is not swallowing and not the quick edit copies the
+    /// terminal's selection, whatever holds the keyboard.
+    ///
+    /// MUTATION: give `menubar::clipboard_seat` the paste's `!focus.shell` arm
+    /// (`Nobody`), or let a read-only preview take it (`PreviewDocument` when
+    /// the shell does not hold the keyboard) — the `FilesTree` and `Preview`
+    /// rows go red.
+    #[test]
+    fn a_copy_over_a_files_column_or_a_read_only_preview_takes_the_terminals_selection() {
+        use super::{ImeOwner, text_field_holding};
+        use crate::menubar::{ClipboardFocus, ClipboardSeat, clipboard_seat};
+
+        let mut asked = Vec::new();
+        // A one-line field's own copy is its own question; the rungs asked here
+        // are the ones with no caret of their own.
+        for rung in ImeOwner::ALL
+            .into_iter()
+            .filter(|rung| text_field_holding(*rung, false).is_none())
+        {
+            let seat = clipboard_seat(ClipboardFocus {
+                swallowing: false,
+                field: None,
+                preview_edit: false,
+                shell: rung == ImeOwner::Shell,
+            });
+            assert_eq!(
+                seat,
+                ClipboardSeat::Terminal,
+                "{rung:?} holds the keyboard and Edit ▸ Copy did not take the terminal's selection"
+            );
+            asked.push(rung);
+        }
+        for rung in [ImeOwner::FilesTree, ImeOwner::Preview, ImeOwner::Modal] {
+            assert!(asked.contains(&rung), "{rung:?} was not asked");
+        }
+    }
+
     /// RED (B-AUDIT-046 RT-1) — **a paste goes to the text field that holds the
     /// keyboard, by either shortcut and by Edit ▸ Paste, and never to the shell
     /// behind it.**
