@@ -946,7 +946,14 @@ fn a_moved_profiles_or_pins_answer_at_quit_is_merged_purely_and_landed_before_th
     let mut quit = Quit::begin(Vec::new());
     let mut documents: [&mut dyn QuitDocument; 2] = [&mut profiles, &mut pins];
     assert_eq!(
-        drive(&mut quit, &mut documents, &mut session, &mut disk, &folder, now),
+        drive(
+            &mut quit,
+            &mut documents,
+            &mut session,
+            &mut disk,
+            &folder,
+            now
+        ),
         QuitStep::Documents
     );
     disk.answer_write(|_| Outcome::Moved {
@@ -956,7 +963,14 @@ fn a_moved_profiles_or_pins_answer_at_quit_is_merged_purely_and_landed_before_th
         bytes: Some(Arc::clone(&pins_there_bytes)),
     });
     assert_eq!(
-        drive(&mut quit, &mut documents, &mut session, &mut disk, &folder, now),
+        drive(
+            &mut quit,
+            &mut documents,
+            &mut session,
+            &mut disk,
+            &folder,
+            now
+        ),
         QuitStep::Documents,
         "the merged documents are sent again"
     );
@@ -972,7 +986,14 @@ fn a_moved_profiles_or_pins_answer_at_quit_is_merged_purely_and_landed_before_th
     disk.answer_write(landed);
     disk.answer_write(landed);
     assert_eq!(
-        drive(&mut quit, &mut documents, &mut session, &mut disk, &folder, now),
+        drive(
+            &mut quit,
+            &mut documents,
+            &mut session,
+            &mut disk,
+            &folder,
+            now
+        ),
         QuitStep::Exit
     );
     assert!(disk.copies.is_empty(), "nothing went to `recovered`");

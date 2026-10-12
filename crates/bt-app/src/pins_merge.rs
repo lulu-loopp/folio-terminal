@@ -252,7 +252,11 @@ mod tests {
     }
 
     fn targets(document: &PinsV1) -> Vec<&str> {
-        document.pins.iter().map(|pin| pin.target.as_str()).collect()
+        document
+            .pins
+            .iter()
+            .map(|pin| pin.target.as_str())
+            .collect()
     }
 
     /// RED (§3.4, §8 test 11) — **the union is of the additions, not of the

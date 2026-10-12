@@ -107,8 +107,8 @@ mod tests {
     use std::sync::Arc;
 
     use bt_persist::{
-        PINS_SCHEMA_VERSION, PROFILES_SCHEMA_VERSION, PinEntryV1, PinKind, PinsV1,
-        ProfileEntryV1, ProfilesV1, ProgramV1, StableRead,
+        PINS_SCHEMA_VERSION, PROFILES_SCHEMA_VERSION, PinEntryV1, PinKind, PinsV1, ProfileEntryV1,
+        ProfilesV1, ProgramV1, StableRead,
     };
 
     use super::*;
@@ -184,7 +184,8 @@ mod tests {
             match table {
                 Table::Profiles => {
                     let waits = self.profiles.merge_waits();
-                    self.log.push(format!("Profiles door, a merge waits: {waits}"));
+                    self.log
+                        .push(format!("Profiles door, a merge waits: {waits}"));
                     let editing = self.editor.as_ref().and_then(|(index, _)| {
                         self.table.get(*index).map(|profile| profile.id.clone())
                     });
@@ -266,19 +267,28 @@ mod tests {
 
         let mut b_here = b.clone();
         b_here.args = Some(vec!["--登录".to_owned()]);
-        assert!(window.profiles.store(profiles(&[a.clone(), b_here.clone()])));
+        assert!(
+            window
+                .profiles
+                .store(profiles(&[a.clone(), b_here.clone()]))
+        );
         assert!(window.pins.toggle(PinKind::Folder, "D:\\我的"));
 
         let mut a_there = a.clone();
         a_there.display_title = Some("甲 改名 renamed".to_owned());
-        let _ = window.profiles.hear_read(StableRead::Bytes(bytes(&profiles(&[
-            b.clone(),
-            a_there.clone(),
-        ]))));
-        let _ = window.pins.document().hear_read(StableRead::Bytes(bytes(&pins(&[
-            folder.clone(),
-            PinEntryV1::new(PinKind::Folder, "E:\\他的"),
-        ]))));
+        let _ = window
+            .profiles
+            .hear_read(StableRead::Bytes(bytes(&profiles(&[
+                b.clone(),
+                a_there.clone(),
+            ]))));
+        let _ = window
+            .pins
+            .document()
+            .hear_read(StableRead::Bytes(bytes(&pins(&[
+                folder.clone(),
+                PinEntryV1::new(PinKind::Folder, "E:\\他的"),
+            ]))));
 
         let outcome = run_pass(&mut window, Table::Profiles);
         assert!(outcome.presented.is_ok());
@@ -337,7 +347,11 @@ mod tests {
         );
         assert_eq!(
             window.pinned,
-            vec!["C:\\甲".to_owned(), "E:\\他的".to_owned(), "D:\\我的".to_owned()],
+            vec![
+                "C:\\甲".to_owned(),
+                "E:\\他的".to_owned(),
+                "D:\\我的".to_owned()
+            ],
             "the file's pins, then Folio's"
         );
         let _ = std::fs::remove_dir_all(&root);

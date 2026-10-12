@@ -697,17 +697,16 @@ mod tests {
     fn merging_store(
         case: &str,
         file: &PinsV1,
-    ) -> (
-        std::path::PathBuf,
-        PinsStore,
-        crate::persist::UnservedJobs,
-    ) {
+    ) -> (std::path::PathBuf, PinsStore, crate::persist::UnservedJobs) {
         let root = bt_testpath::temp_path(&format!("bt-app-pins-merge-{case}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a private storage folder for this test");
         let path = root.join(PINS_FILE_NAME);
-        std::fs::write(&path, bt_persist::serialize_pins(file).expect("it serializes"))
-            .expect("the pins file");
+        std::fs::write(
+            &path,
+            bt_persist::serialize_pins(file).expect("it serializes"),
+        )
+        .expect("the pins file");
         let (lane, jobs) = crate::persist::StorageLane::unserved();
         let store = PinsStore::at_on(path, lane);
         (root, store, jobs)
@@ -803,7 +802,10 @@ mod tests {
             ..PinsV1::default()
         };
         let (root, mut store, _jobs) = merging_store("remove-change", &base);
-        assert!(!store.toggle(PinKind::Folder, r"C:\甲"), "Folio unpinned it");
+        assert!(
+            !store.toggle(PinKind::Folder, r"C:\甲"),
+            "Folio unpinned it"
+        );
         let mut ours = store.document().projection().clone();
         ours.pins[0] = with_extra(file.clone(), "行", serde_json::json!(42));
         assert!(store.store(ours));

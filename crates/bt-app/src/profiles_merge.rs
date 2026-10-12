@@ -62,7 +62,9 @@ fn first_wins(document: &ProfilesV1) -> Vec<&ProfileEntryV1> {
 }
 
 fn by_id<'a>(rows: &[&'a ProfileEntryV1]) -> HashMap<&'a str, &'a ProfileEntryV1> {
-    rows.iter().map(|entry| (entry.id.as_str(), *entry)).collect()
+    rows.iter()
+        .map(|entry| (entry.id.as_str(), *entry))
+        .collect()
 }
 
 /// The ids `rows` names, each once, after those already in `ids`.
