@@ -1994,7 +1994,8 @@ from the one `persist::SESSION_SAVE_BUDGET`; each is a clock read on the turn,
 never a wait, and while the quit holds the worker nothing else of the run's is
 queued behind the documents and their copies — except an update trial's receipt,
 which goes ahead of them (`StorageLane::submit_ahead`: a small create-new write the
-trial is rolled back without) — so the session write goes behind them. **The session
+trial is rolled back without); the receipt goes ahead; the trial's write release waits for the quit's outcome — held while the two phases hold the worker, performed if the quit is cancelled, and on a quit that goes on its session half moot (the quit's own final session write is the document of record, the launch backup skipped for the run) and the rest released behind the copies (`Quit::trial_release`,
+`Quit::settle_held_release`) — so the session write goes behind them. **The session
 write spends only what is left of that one budget**: its wait, the ordinary quit's
 judged flush and an update's receipt alike, ends at `Quit::session_write_until`
 (the documents phase's start plus `SESSION_SAVE_BUDGET`), and a quit that reaches
