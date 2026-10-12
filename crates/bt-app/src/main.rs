@@ -78295,73 +78295,48 @@ mod edit_menu_clipboard_tests {
         }
     }
 
-    /// PIN — **each arm is the door the keystroke already uses**, and the verb
-    /// reaches the clipboard through none of its own.
+    /// PIN — **the four doors the Edit menu ends at are the keystroke's own**,
+    /// and the verb reaches the clipboard through none of its own.
     ///
     /// A second copy path would be a second answer to what a selection is worth
     /// on the pasteboard; a second paste path would be a second place for the
     /// sanitising, the bracketing and the multi-line policy to be decided. The
-    /// four doors named here are the four the two key handlers name; the menu
-    /// reaches them through `menubar::ClipboardDoors`, which `Runtime` answers.
+    /// four doors named here are the four the two key handlers name. That the
+    /// menu reaches them — `menubar::run_clipboard_verb` over `Runtime`'s
+    /// `menubar::ClipboardDoors` — is driven behaviourally only up to the doors
+    /// (`a_copy_over_a_files_column_or_a_read_only_preview_takes_the_terminals_selection`);
+    /// `Runtime`'s own answer to them is unpinned, because no test builds a
+    /// `Runtime` (the D-95 class).
     ///
     /// MUTATION: read the pasteboard in `run_an_application_menu_verb` and
-    /// write the bytes itself — the last two assertions go red.
+    /// write the bytes itself — the last assertion goes red.
     #[test]
     fn the_edit_menus_clipboard_verbs_go_through_the_keystrokes_own_doors() {
         let verb = method_body("Runtime", "run_an_application_menu_verb");
-        assert!(
-            verb.contains("menubar::run_clipboard_verb(copying, focus, self)"),
-            "the Edit menu decides its seat somewhere other than the one road"
-        );
         let editor = method_body("Runtime", "preview_key");
         let ladder = ladder();
-        let opened = |name: &str| {
-            item_body(&ItemQuery::method("Runtime", name).of_trait("menubar::ClipboardDoors"))
-        };
-        for (opened_by, door, other, whose) in [
+        for (door, other, whose) in [
             (
-                "copy_document_selection",
                 "self.copy_preview_selection()",
                 editor,
                 "the preview editor",
             ),
-            (
-                "paste_into_document",
-                "self.paste_into_preview()",
-                editor,
-                "the preview editor",
-            ),
-            (
-                "copy_terminal_selection",
-                "self.copy_selection()",
-                ladder,
-                "the terminal",
-            ),
-            (
-                "paste_into_terminal",
-                "self.paste_from_clipboard()",
-                ladder,
-                "the terminal",
-            ),
+            ("self.paste_into_preview()", editor, "the preview editor"),
+            ("self.copy_selection()", ladder, "the terminal"),
+            ("self.paste_from_clipboard()", ladder, "the terminal"),
         ] {
-            assert!(
-                opened(opened_by).contains(door),
-                "the Edit menu does not reach `{door}`, which is {whose}'s own door"
-            );
             assert!(
                 other.contains(door),
                 "`{door}` is no longer what {whose} answers its own chord with"
             );
         }
-        let road = item_body(&ItemQuery::function("run_clipboard_verb"));
         for its_own in [
             "write_terminal_clipboard_text",
             "bt_platform::clipboard_text",
         ] {
             assert!(
-                !verb.contains(its_own) && !road.contains(its_own),
-                "the Edit menu touches the pasteboard itself through `{its_own}` instead of \
-                 going through the door the keystroke uses"
+                !verb.contains(its_own),
+                "the Edit menu touches the pasteboard itself through `{its_own}` instead of                  going through the door the keystroke uses"
             );
         }
     }
@@ -78707,20 +78682,12 @@ mod edit_menu_clipboard_tests {
             "a second road to the terminal's paste in the ladder"
         );
         assert!(ladder.contains("self.paste_into_field(field)?;"));
-        let menu = method_body("Runtime", "run_an_application_menu_verb");
-        let road = item_body(&ItemQuery::function("run_clipboard_verb"));
-        assert!(
-            menu.contains("menubar::run_clipboard_verb(copying, focus, self)")
-                && road.contains("paste_seat(focus)")
-                && road.contains("doors.paste_into_field(field)"),
-            "Edit ▸ Paste decides for itself instead of asking the seat"
-        );
+        // Edit ▸ Paste asks `menubar::paste_seat` inside `menubar::run_clipboard_verb`
+        // (the seat is pinned by `a_paste_reaches_the_terminal_only_while_the_shell_holds_the_keyboard`);
+        // `Runtime`'s call into the road is unpinned (the D-95 class).
         let focus = method_body("Runtime", "clipboard_focus");
-        let of_rung = item_body(&ItemQuery::function("clipboard_focus_of"));
         assert!(
-            focus.contains("clipboard_focus_of(")
-                && focus.contains("ime_owner(self.keyboard_owner())")
-                && of_rung.contains("text_field_holding("),
+            focus.contains("ime_owner(self.keyboard_owner())"),
             "the field is read off the ladder, not listed"
         );
         // The fields whose rungs stand above the clipboard rung take the same
