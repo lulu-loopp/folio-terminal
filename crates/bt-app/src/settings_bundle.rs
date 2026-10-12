@@ -538,7 +538,11 @@ pub(crate) fn read_keybindings(
 ) -> (Shortcuts, Vec<OverrideFault>) {
     let mut faults = Vec::new();
     let mut overrides: Vec<Override> = Vec::new();
-    for (entry, line) in file.bindings.iter().zip(read_lines(file, platform)) {
+    for (entry, line) in
+        file.bindings
+            .iter()
+            .zip(read_lines(&file.bindings, file.writing_platform, platform))
+    {
         match line {
             LineRead::Shadowed => {}
             LineRead::Reads(chord) => overrides.push(Override {
@@ -574,26 +578,28 @@ pub(crate) enum LineRead {
 /// ([`read_chord_in`]); **a line with a later line about the same action that
 /// reads is shadowed**, whether it reads itself or not. "Reads" means the chord
 /// parses here — a later line the table then refuses (a chord another row
-/// holds) still shadows the earlier one, and leaves its action at its default.
+/// holds) still shadows the earlier one, and leaves its action at its default —
+/// or with no chord, when another row already holds that default. A press finds
+/// an action's line in force through this too (`KeybindingsV1::apply_press`).
 pub(crate) fn read_lines(
-    file: &KeybindingsV1,
+    bindings: &[bt_persist::BindingOverrideV1],
+    writing_platform: KeybindingsPlatformV1,
     platform: bt_platform::HostPlatform,
 ) -> Vec<LineRead> {
-    let source = dialect_of(file.writing_platform);
-    let read: Vec<Result<Option<Chord>, &'static str>> = file
-        .bindings
+    let source = dialect_of(writing_platform);
+    let read: Vec<Result<Option<Chord>, &'static str>> = bindings
         .iter()
         .map(|entry| match entry.chord.as_deref() {
             Some(chord) => read_chord_in(chord, source, platform).map(Some),
             None => Ok(None),
         })
         .collect();
-    file.bindings
+    bindings
         .iter()
         .zip(&read)
         .enumerate()
         .map(|(index, (entry, line))| {
-            let shadowed = file.bindings[index + 1..]
+            let shadowed = bindings[index + 1..]
                 .iter()
                 .zip(&read[index + 1..])
                 .any(|(later, read)| later.action == entry.action && read.is_ok());

@@ -81,12 +81,14 @@ use std::sync::{Arc, mpsc};
 use std::time::SystemTime;
 
 use bt_persist::{
-    FallbackReason, KeybindingsV1, PinsV1, ProfilesV1, SettingsV1, StableRead, Staging,
+    BindingOverrideV1, FallbackReason, KeybindingsV1, PinsV1, ProfilesV1, SettingsV1, StableRead,
+    Staging,
 };
 use bt_platform::admission::WorkerCtx;
 
 use crate::persist::{DocumentWrites, Revision, StorageLane};
 use crate::quit::{CopyStanding, Standing};
+use crate::settings_bundle::{LineRead, read_lines};
 
 /// **Which semantic policy a request asks for** ((c)3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -755,11 +757,64 @@ where
     serde_json::from_value(Value::Object(desired)).ok()
 }
 
-/// Which of several entries under one key a reader puts in force.
-#[derive(Clone, Copy)]
-enum InForce {
-    First,
-    Last,
+/// **A document's own reader, as a press needs it**: which entry under a key is
+/// in force, and which entries go with it when a press takes it away — the one
+/// rule the document's readers use, never a second one in the press.
+trait InForce<E, K> {
+    /// The entry under `key` its readers put in force.
+    fn in_force(&self, list: &[E], key: &K) -> Option<usize>;
+    /// The entries that go with it when it goes.
+    fn alongside(&self, list: &[E], key: &K) -> Vec<usize>;
+}
+
+/// **The first entry under a key is the one in force** (the installer's rule for
+/// profiles, the menus' for pins), and nothing goes with it when it goes.
+struct First<F>(F);
+
+impl<E, K: PartialEq, F: Fn(&E) -> K> InForce<E, K> for First<F> {
+    fn in_force(&self, list: &[E], key: &K) -> Option<usize> {
+        list.iter().position(|entry| (self.0)(entry) == *key)
+    }
+
+    fn alongside(&self, _: &[E], _: &K) -> Vec<usize> {
+        Vec::new()
+    }
+}
+
+/// **A shortcut document's lines as its readers take them**
+/// (`settings_bundle::read_lines`): an action's line in force is the one that
+/// `Reads`, and its `Shadowed` lines go with it.
+struct ShortcutLines {
+    dialect: bt_persist::KeybindingsPlatformV1,
+    platform: bt_platform::HostPlatform,
+}
+
+impl ShortcutLines {
+    fn lines(
+        &self,
+        list: &[BindingOverrideV1],
+        action: &str,
+        wanted: fn(&LineRead) -> bool,
+    ) -> Vec<usize> {
+        list.iter()
+            .zip(read_lines(list, self.dialect, self.platform))
+            .enumerate()
+            .filter(|(_, (line, read))| line.action == action && wanted(read))
+            .map(|(index, _)| index)
+            .collect()
+    }
+}
+
+impl InForce<BindingOverrideV1, String> for ShortcutLines {
+    fn in_force(&self, list: &[BindingOverrideV1], action: &String) -> Option<usize> {
+        self.lines(list, action, |read| matches!(read, LineRead::Reads(_)))
+            .into_iter()
+            .next()
+    }
+
+    fn alongside(&self, list: &[BindingOverrideV1], action: &String) -> Vec<usize> {
+        self.lines(list, action, |read| *read == LineRead::Shadowed)
+    }
 }
 
 /// **A press's delta over a list of entries named by a key** ((b)6, (b)8's
@@ -769,13 +824,18 @@ enum InForce {
 /// `after` has none — and, when the press reordered the keys both sides hold,
 /// those entries take `after`'s order in the places they hold in `desired`.
 /// Entries `desired` carries that the projection never had (a line a reader
-/// refused, a shadowed duplicate) keep their place.
+/// refused, a shadowed duplicate) keep their place — except what the reader
+/// says goes with an entry in force (`alongside`: a keybindings line's earlier
+/// lines about its action), which is removed with it.
+///
+/// `in_force` is the document's own reader's answer to "which entry under this
+/// key is in force": the one rule its readers use, never a second one here.
 fn apply_keyed_press<E, K>(
     desired: &mut Vec<E>,
     before: &[E],
     after: &[E],
     key: impl Fn(&E) -> K,
-    in_force: InForce,
+    reader: &impl InForce<E, K>,
 ) where
     E: Clone + PartialEq,
     K: PartialEq + Clone,
@@ -784,17 +844,7 @@ fn apply_keyed_press<E, K>(
         *desired = after.to_vec();
         return;
     }
-    let position = |list: &[E], wanted: &K| -> Option<usize> {
-        let mut found = list
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| key(entry) == *wanted);
-        match in_force {
-            InForce::First => found.next(),
-            InForce::Last => found.last(),
-        }
-        .map(|(index, _)| index)
-    };
+    let position = |list: &[E], wanted: &K| -> Option<usize> { reader.in_force(list, wanted) };
     let mut keys: Vec<K> = Vec::new();
     for entry in before.iter().chain(after) {
         let name = key(entry);
@@ -811,7 +861,13 @@ fn apply_keyed_press<E, K>(
         match (position(desired, name), is) {
             (Some(at), Some(entry)) => desired[at] = entry.clone(),
             (Some(at), None) => {
-                desired.remove(at);
+                let mut gone = reader.alongside(desired, name);
+                gone.push(at);
+                gone.sort_unstable();
+                gone.dedup();
+                for index in gone.into_iter().rev() {
+                    desired.remove(index);
+                }
             }
             (None, Some(entry)) => {
                 let at = position(after, name).unwrap_or(0);
@@ -865,11 +921,15 @@ impl StoredDocument for KeybindingsV1 {
         bt_persist::parse_keybindings(bytes)
     }
 
-    /// The unit is the action, the last line about it in force (the reader's
-    /// rule). A press in another platform's dialect than `desired`'s is the
-    /// whole document: its lines cannot share one `writing_platform`. A merge
-    /// leaves `desired` in this platform's dialect (`keybindings_merge`), so a
-    /// press after one is a delta again.
+    /// The unit is the action, and the line in force is the one the readers
+    /// put in force (`settings_bundle::read_lines`, the one selection of the
+    /// launch, an import and the merge): the last line about the action that
+    /// reads. A press that takes an action's departure away removes that line
+    /// and the earlier lines it shadows, which would otherwise be the last about
+    /// the action at the next start. A press in another platform's dialect than
+    /// `desired`'s is the whole document: its lines cannot share one
+    /// `writing_platform`. A merge leaves `desired` in this platform's dialect
+    /// (`keybindings_merge`), so a press after one is a delta again.
     fn apply_press(desired: &mut Self, before: &Self, after: &Self) {
         if desired == before || desired.writing_platform != after.writing_platform {
             *desired = after.clone();
@@ -881,7 +941,10 @@ impl StoredDocument for KeybindingsV1 {
             &before.bindings,
             &after.bindings,
             |binding| binding.action.clone(),
-            InForce::Last,
+            &ShortcutLines {
+                dialect: desired.writing_platform,
+                platform: bt_platform::host_platform(),
+            },
         );
     }
 
@@ -914,7 +977,7 @@ impl StoredDocument for ProfilesV1 {
             &before.profiles,
             &after.profiles,
             |row| row.id.clone(),
-            InForce::First,
+            &First(|row: &bt_persist::ProfileEntryV1| row.id.clone()),
         );
     }
 
@@ -957,7 +1020,7 @@ impl StoredDocument for PinsV1 {
             &before.pins,
             &after.pins,
             |pin| (pin.kind.clone(), pin.target.clone()),
-            InForce::First,
+            &First(|pin: &bt_persist::PinEntryV1| (pin.kind.clone(), pin.target.clone())),
         );
     }
 

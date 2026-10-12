@@ -17,11 +17,14 @@
 //! - one departure per action: **the last line about an action that reads is the one in
 //!   force, and an earlier line about it — readable or not — is neither dealt nor
 //!   reported** — one function, `settings_bundle::read_lines`, makes that selection on
-//!   every road (launch, import, this merge's sides and its door); the earlier lines are
-//!   **carried** while the action keeps that line;
+//!   every road (launch, import, a press, this merge's sides and its door); the earlier
+//!   lines are **carried** while the action keeps that line, and go with it when a merge
+//!   or a press takes it away;
 //! - a line naming an action this build has no row for is **carried** — every such line,
-//!   where the launch's reader reports only the last about one id: both put none of them
-//!   in force, so the difference is only what the launch says, never what is in force.
+//!   where the launch's reader reports each one no later parsing line about the same id
+//!   shadows (the last, when it parses; every one that does not, when none after it does):
+//!   neither road puts any of them in force, so the difference is only what the launch
+//!   says, never what is in force.
 //!
 //! **The one rule for what is carried** ((b)8): it is in the merged document verbatim,
 //! in the file's position, and never rewritten, applied or owed — in this run and at the
@@ -149,7 +152,11 @@ fn side_of(
     let mut untranslatable = Vec::new();
     let mut units = BTreeMap::new();
     let mut lines = Vec::with_capacity(document.bindings.len());
-    for (line, read) in document.bindings.iter().zip(read_lines(document, platform)) {
+    for (line, read) in document.bindings.iter().zip(read_lines(
+        &document.bindings,
+        document.writing_platform,
+        platform,
+    )) {
         if table.row(&line.action).is_none() {
             lines.push(Line::Carried(line.clone()));
             continue;
@@ -937,11 +944,18 @@ mod tests {
         root
     }
 
-    /// A press on the window: one row's chord, the table's departures stored.
+    /// A press on the window: one row's chord, the table's departures stored — written in
+    /// `PLATFORM`'s dialect, the dialect the window's merge reads in. In the product both are
+    /// the host's; a test that pinned one and not the other would merge a Mac's presses as
+    /// Windows', and `apply_press`, which lays a press over a merged document only within one
+    /// dialect, would take the press's document whole.
     fn press(window: &mut Window, action: &str, chord: &str) {
         let chord: Chord = parse_chord(chord).expect("a chord");
         window.table.set(action, Some(chord));
-        assert!(window.store.store(departures(&window.table)));
+        assert!(window.store.store_on(
+            departures(&window.table),
+            crate::persist::keybindings_platform_on(PLATFORM)
+        ));
     }
 
     /// RED (§3.3, carry-forward 2) — **the door rebuilds the shortcuts after
@@ -1230,10 +1244,19 @@ mod tests {
             line("new-tab", Some("Ctrl+k")),
         ]);
         let base = windows(Vec::new());
+        let (table, faults) = next_start("unreadable-edited", &edited);
+        assert!(faults.is_empty(), "the launch says nothing: {faults:?}");
+        assert_eq!(
+            chord_of(&table, "new-tab", PLATFORM).as_deref(),
+            Some("Ctrl+k")
+        );
         let merged = merge(&base, &base, &edited, PLATFORM);
         let pass = KeybindingsPass::new(merged.document.clone(), PLATFORM, merged.about.clone());
         assert_eq!(pass.replaced(), None, "a clean hand edit says nothing");
         assert_eq!(merged.document.bindings, edited.bindings);
+        let (door, faults) = read_keybindings(&merged.document, PLATFORM);
+        assert!(faults.is_empty(), "the door says nothing: {faults:?}");
+        assert_eq!(door, table, "the door reads what the launch reads");
 
         let reset = merge(&edited, &base, &edited, PLATFORM);
         assert_eq!(

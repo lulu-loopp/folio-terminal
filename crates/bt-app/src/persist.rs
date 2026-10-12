@@ -2775,7 +2775,7 @@ impl KeybindingsStore {
     }
 
     /// [`Self::store`], written in `writing_platform`'s dialect.
-    fn store_on(
+    pub(crate) fn store_on(
         &mut self,
         overrides: Vec<BindingOverrideV1>,
         writing_platform: KeybindingsPlatformV1,
@@ -7528,6 +7528,78 @@ mod owed_tests {
             "the refused line is carried, and only the pressed row changed"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-STORE-MERGE-KEYBINDINGS round 5) — **a press that takes an action's departure away
+    /// takes its shadowed lines with it.** The file holds two lines about New tab, the later one in
+    /// force — the earlier one not a chord here, or a chord. The launch reads `Ctrl+K` and says
+    /// nothing; New tab is reset with a press; the document written holds no line about New tab,
+    /// and the next start reads it at its default with nothing to refuse.
+    ///
+    /// MUTATION: the press's own selection (in `KeybindingsV1::apply_press`, the last line about
+    /// the action, read or not, and nothing removed with it — `InForce::Last`) — an earlier line
+    /// outlives the reset: refused at every start, or put in force.
+    #[test]
+    fn a_reset_by_a_press_takes_the_actions_shadowed_lines_with_it() {
+        let platform = bt_platform::host_platform();
+        let chord_of = |table: &crate::shortcuts::Shortcuts| {
+            table
+                .row("new-tab")
+                .and_then(|row| row.chord.as_ref())
+                .map(|chord| crate::shortcuts::format_chord_on(chord, platform))
+        };
+        let defaults = crate::shortcuts::Shortcuts::defaults_for(platform);
+        for (case, earlier) in [
+            ("press-unreadable", "Cmd+Win+K"),
+            ("press-readable", "Ctrl+j"),
+        ] {
+            let root = scratch(case);
+            let path = root.join(KEYBINDINGS_FILE_NAME);
+            let file = keybindings_document(
+                vec![binding("new-tab", earlier), binding("new-tab", "Ctrl+k")],
+                keybindings_platform(),
+            );
+            std::fs::write(&path, bt_persist::serialize_keybindings(&file).unwrap()).unwrap();
+            let (lane, jobs) = StorageLane::held();
+            let mut store = KeybindingsStore::at_on(path.clone(), lane);
+            let (mut table, faults) =
+                crate::settings_bundle::shortcuts_at_start(&mut store, platform);
+            assert!(
+                faults.is_empty(),
+                "{case}: the launch says nothing: {faults:?}"
+            );
+            assert_eq!(chord_of(&table).as_deref(), Some("Ctrl+k"), "{case}");
+
+            table.restore("new-tab");
+            let departures: Vec<BindingOverrideV1> = table
+                .overrides()
+                .into_iter()
+                .map(|entry| BindingOverrideV1 {
+                    action: entry.id,
+                    chord: entry.chord,
+                })
+                .collect();
+            assert!(store.store(departures));
+            let written: KeybindingsV1 = bt_persist::parse_keybindings(&next_write(&jobs).bytes)
+                .expect("the written document parses");
+            assert!(
+                !written.bindings.iter().any(|line| line.action == "new-tab"),
+                "{case}: no line about New tab is left: {:?}",
+                written.bindings
+            );
+
+            let next = root.join("next-start.json");
+            std::fs::write(&next, bt_persist::serialize_keybindings(&written).unwrap()).unwrap();
+            let (lane, _jobs) = StorageLane::held();
+            let mut again = KeybindingsStore::at_on(next, lane);
+            let (table, faults) = crate::settings_bundle::shortcuts_at_start(&mut again, platform);
+            assert!(
+                faults.is_empty(),
+                "{case}: the next start says nothing: {faults:?}"
+            );
+            assert_eq!(chord_of(&table), chord_of(&defaults), "{case}: its default");
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     /// RED (carry-forward 1) — **a process that is not the folder's writer queues no write, and a

@@ -1080,7 +1080,8 @@ an import and in the merge each line is read in the dialect its file records and
 to this one (`shortcuts::read_chord_in`), and what that refuses is refused by all three;
 the last line about an action that reads is the one in force, and an earlier line about it,
 readable or not, is neither dealt nor reported (`settings_bundle::read_lines`, the one
-selection of all three and of the merge's sides). A part the file does
+selection of all three, of the merge's sides and of a press, which removes an action's
+shadowed lines with the line it takes away). A part the file does
 not carry is left alone. Three keys are receipts about this machine and are not
 imported (`first_run_card`, `cards_gesture_hint_offer`, `web_pages_used`);
 `Focus mode` and `Shell integration` are

@@ -15084,3 +15084,13 @@ Each completed program walk now publishes the exact `PATH` and `PATHEXT` values 
 **What it supersedes.** The round-3 entry's selection as the merge applied it (by readable lines only).
 
 **Pinned by** `keybindings_merge::tests::an_unreadable_earlier_line_is_shadowed_and_goes_with_its_action`, and `shortcuts::tests::each_dialect_reads_its_own_command_word_and_carries_the_rest` (now also a macOS file's bare `Ctrl+K`, and a file's with no recorded dialect).
+
+### 2026-10-12 — A press finds an action's line by the readers' selection, and takes its shadowed lines with it (T-STORE-MERGE-KEYBINDINGS round 5)
+
+**What is built.** `KeybindingsV1::apply_press` — a press laid on `desired`, and the press laid back over a displaced merge — no longer has a selection of its own (the last line about the action, read or not). It finds the action's line in force through `settings_bundle::read_lines`, the selection of the launch, an import and the merge, and when the press takes the action's departure away it removes that line and the earlier lines it shadows. `apply_keyed_press` takes each document's own "which entry is in force, and what goes with it" (profiles and pins: the first, nothing with it). So a hand edit `[new-tab: Cmd+K, new-tab: Ctrl+K]` in a Windows file, reset with a press, leaves no line about New tab — not a `Cmd+K` refused at every start — and `[new-tab: Ctrl+J, new-tab: Ctrl+K]` reset leaves no `Ctrl+J` for the next start to put in force. There is one selection in the crate.
+
+**Two corrections to the round-4 entry.** A later line that parses and that the table refuses leaves its action at its default — or with no chord, when another row already holds that default. The launch reports each unknown-id line that no later parsing line about the same id shadows: the last one when it parses, and every one that does not parse when none after it does.
+
+**A test pinned by platform.** `keybindings_merge_rebuilds_the_shortcuts_after_merge_stored_not_inside_it` pinned the merge's dialect but wrote its presses in the host's; on a Mac the press laid back over the merged document was in another dialect than it, and `apply_press` takes such a press whole, so the file's line was lost. The product merges and presses in one dialect (the host's); the test now writes its presses in the dialect it merges in (`KeybindingsStore::store_on`).
+
+**Pinned by** `persist::owed_tests::a_reset_by_a_press_takes_the_actions_shadowed_lines_with_it` and `keybindings_merge::tests::an_unreadable_earlier_line_is_shadowed_and_goes_with_its_action` (now also the launch and the door on the edited document).
