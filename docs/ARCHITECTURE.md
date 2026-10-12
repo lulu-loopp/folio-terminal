@@ -239,7 +239,8 @@ have been supported since Windows 8. **A probe that cannot be contained is
 refused, never run uncontained** (0.4.8 E6): a job creation or configuration
 refusal — for the first job or for the fresh one a refused job list needs —
 fails the start before any process is created, and the caller's road says it as
-that step's failure. macOS and Linux put the
+that step's failure; the first refusal of a process is also said once in
+`diagnostics.log` with its reason. macOS and Linux put the
 child in a new process group before `exec`; a group that cannot be registered
 for its guard is ended and reaped at once, and the start refused. Their guard observes the leader with
 `waitid(WNOWAIT)`, signals and unregisters the group under the registry's one

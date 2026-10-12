@@ -4480,12 +4480,33 @@ pub fn spawn_probe(
 }
 
 /// **The refusal of a probe that cannot be contained** (0.4.8 E6): the
-/// containment's own error, named as such, of the same kind.
+/// containment's own error, named as such, of the same kind. The first one of
+/// the process is also said once on standard error, which in a resident run
+/// is `diagnostics.log`, with its reason ([`say_containment_refusal_once`]):
+/// a caller that answers the failed start as an unknown (the `$PROFILE` and
+/// PSReadLine probes) keeps no reason of its own.
 fn uncontainable(error: &std::io::Error) -> std::io::Error {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    say_containment_refusal_once(&SAID, error, &mut |line| eprintln!("{line}"));
     std::io::Error::new(
         error.kind(),
         format!("the probe could not be contained, so it was not run: {error}"),
     )
+}
+
+/// Say `error` through `say` if `said` has not been set, and set it: one line
+/// per process however many probes are refused, each start still failing
+/// with its own error.
+fn say_containment_refusal_once(
+    said: &std::sync::atomic::AtomicBool,
+    error: &std::io::Error,
+    say: &mut dyn FnMut(&str),
+) {
+    if !said.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        say(&format!(
+            "Folio: a probe could not be contained, so it was not run (said once per process): {error}"
+        ));
+    }
 }
 
 #[cfg(not(windows))]
@@ -5370,6 +5391,27 @@ fn probe_output_held_to(
 mod probe_run_tests {
     use super::*;
     use bt_pty::test_shell::Hygiene;
+
+    /// RED (0.4.8 E6 round 2) — **a refused containment is said once per
+    /// process, with its reason**: the first refusal's line names its error,
+    /// and a second refusal — another probe, another reason — says nothing,
+    /// so a page that asks again at every visit does not fill the log.
+    ///
+    /// MUTATION: in `say_containment_refusal_once`, drop the latch (say every
+    /// time) — two lines.
+    #[test]
+    fn a_refused_containment_is_said_once_per_process_with_its_reason() {
+        let said = std::sync::atomic::AtomicBool::new(false);
+        let mut lines = Vec::new();
+        let first = "the job was refused \u{2014} \u{4f5c}\u{4e1a}";
+        for reason in [first, "a second refusal"] {
+            say_containment_refusal_once(&said, &std::io::Error::other(reason), &mut |line| {
+                lines.push(line.to_owned());
+            });
+        }
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains(first), "{lines:?}");
+    }
 
     /// The run's budget in the tests below, and how long each child of the shared-budget test
     /// runs: 70 % of it, so the first child ends inside the budget with 30 % of it to spare and the
