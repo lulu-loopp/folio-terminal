@@ -4,10 +4,14 @@
 //! The three documents are the settings merge's (`settings_merge`): the base
 //! `B`, Folio's `desired` `O`, and the file's document `T`.
 //!
-//! - **Each side is read first-wins by id**, the installer's rule
-//!   (`profiles::merge_on`): the first row naming an id is that id's row. A
-//!   later row naming it again in `T` is **carried** — kept verbatim in the
-//!   file's position, never merged and never rewritten ((b)8's one rule).
+//! - **Each side is read the installer's way** (`profiles::merge_on`,
+//!   `profiles::installable`; coordinator's ruling, review round 4): an id's
+//!   row **in force** is the first row naming it that the installer can use;
+//!   an unusable row before it is **refused** — it stays in the file and stays
+//!   reported; every row after it is its **duplicate**. A duplicate in `T` is
+//!   **carried**: kept verbatim, never merged and never rewritten ((b)8's one
+//!   rule). An id's refused rows are one unit of their own, through the
+//!   settings merge's table: a side that removed or changed them changed them.
 //! - **Rows are matched by id, never by position.** Within a row the unit is
 //!   the field, through the settings merge's table ([`unit`]); every field but
 //!   `id` is optional and absent is "the shipped value", so a field the file
@@ -28,21 +32,21 @@
 //!   in its own order.
 //! - **A carried row never stands before its id's row.** It is placed last,
 //!   in the file's order, immediately after the last row of its own id placed
-//!   so far — the id's row or an earlier carried row naming it — so the rows of
-//!   one id stand together in the file's order, the installer's first-wins
-//!   reading puts in force the row the merge kept, and each carried row stays
-//!   the shadowed one it was in the file (an unusable first row and the later
-//!   one the installer then takes keep their order too). A
-//!   carried row goes with its id's row: when the merge removes that row, the
-//!   carried rows naming it go too (`document_request::remove_key`'s rule, the
-//!   one the press road follows), so a row that was never in force never
-//!   becomes the live one, and the id meets its shipped value or none.
+//!   so far — the id's row in force or an earlier carried row naming it — so
+//!   the rows of one id stand together in the file's order and the installer's
+//!   reading puts in force the row the merge kept. A carried row goes with its
+//!   id's row: when the merge removes that row, the carried rows naming it go
+//!   too — the rule a press's removal follows
+//!   (`document_request::remove_in_force_and_its_duplicates`) — so a row that
+//!   was never in force never becomes the live one, and the id meets its
+//!   shipped value or none. The refused rows an id kept stand right before its
+//!   row in force, where the installer meets and refuses them today.
 //! - **Shipped ids the file never names** are appended by the installer as
 //!   always; they are not units here.
 //!
 //! The merge is pure: nothing here puts anything in force.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use bt_persist::{PROFILES_SCHEMA_VERSION, ProfileEntryV1, ProfilesV1};
 
@@ -57,22 +61,98 @@ pub(crate) struct Merged {
     pub(crate) account: Account,
 }
 
-/// A place in the result: a row by its id, or a carried entry of `T` by its
-/// index in the file and the id it names.
+/// A place in the result: an id's row in force, a carried entry of `T` by its
+/// index in the file and the id it names, or a refused row — the `l`th of the
+/// `k`th id's refused rows the merge kept, and that id.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Slot {
     Row(String),
     Carried(usize, String),
+    Refused(usize, usize, String),
 }
 
-/// One side's rows in force, first-wins by id, in the side's order.
-fn first_wins(document: &ProfilesV1) -> Vec<&ProfileEntryV1> {
-    let mut seen = HashSet::new();
-    document
-        .profiles
-        .iter()
-        .filter(|entry| seen.insert(entry.id.as_str()))
-        .collect()
+impl Slot {
+    fn id(&self) -> &str {
+        match self {
+            Self::Row(id) | Self::Carried(_, id) | Self::Refused(_, _, id) => id,
+        }
+    }
+}
+
+/// **What the installer makes of one row** (`profiles::merge_on`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reading {
+    /// The first row naming its id that can be used: the id's row in force.
+    InForce,
+    /// A row that cannot be used, before its id's row in force (or of an id
+    /// with none): refused, and it stays in the file and stays reported.
+    Refused,
+    /// A row after its id's row in force: its duplicate, which goes with it.
+    Duplicate,
+}
+
+/// **One side read the installer's way**: each row's [`Reading`], in order.
+fn read(document: &ProfilesV1, usable: &dyn Fn(&ProfileEntryV1) -> bool) -> Vec<Reading> {
+    let mut in_force: HashMap<&str, usize> = HashMap::new();
+    for (at, entry) in document.profiles.iter().enumerate() {
+        if usable(entry) {
+            in_force.entry(entry.id.as_str()).or_insert(at);
+        }
+    }
+    let mut reading = Vec::with_capacity(document.profiles.len());
+    for (at, entry) in document.profiles.iter().enumerate() {
+        reading.push(match in_force.get(entry.id.as_str()) {
+            Some(&row) if at == row => Reading::InForce,
+            Some(&row) if at > row => Reading::Duplicate,
+            _ => Reading::Refused,
+        });
+    }
+    reading
+}
+
+/// One side's rows in force, in the side's order.
+fn rows_in_force<'a>(document: &'a ProfilesV1, reading: &[Reading]) -> Vec<&'a ProfileEntryV1> {
+    let mut rows = Vec::new();
+    for (entry, read) in document.profiles.iter().zip(reading) {
+        if *read == Reading::InForce {
+            rows.push(entry);
+        }
+    }
+    rows
+}
+
+/// One side's refused rows, by id, each id's in the side's order.
+fn refused_rows<'a>(
+    document: &'a ProfilesV1,
+    reading: &[Reading],
+) -> HashMap<&'a str, Vec<ProfileEntryV1>> {
+    let mut refused: HashMap<&'a str, Vec<ProfileEntryV1>> = HashMap::new();
+    for (entry, read) in document.profiles.iter().zip(reading) {
+        if *read == Reading::Refused {
+            refused
+                .entry(entry.id.as_str())
+                .or_default()
+                .push(entry.clone());
+        }
+    }
+    refused
+}
+
+/// The ids of a side's refused rows, each once, after those in `ids`.
+fn push_refused_ids<'a>(ids: &mut Vec<&'a str>, document: &'a ProfilesV1, reading: &[Reading]) {
+    for (entry, read) in document.profiles.iter().zip(reading) {
+        if *read == Reading::Refused && !ids.contains(&entry.id.as_str()) {
+            ids.push(entry.id.as_str());
+        }
+    }
+}
+
+/// **An id's refused rows the merge kept**, and the side whose sequence
+/// places them when the id has no row in force in the result.
+struct KeptRefused<'a> {
+    id: String,
+    rows: Vec<ProfileEntryV1>,
+    source: &'a ProfilesV1,
 }
 
 fn by_id<'a>(rows: &[&'a ProfileEntryV1]) -> HashMap<&'a str, &'a ProfileEntryV1> {
@@ -185,24 +265,26 @@ pub(crate) fn merge(
     ours: &ProfilesV1,
     theirs: &ProfilesV1,
     shipped_title: &dyn Fn(&str) -> Option<String>,
+    usable: &dyn Fn(&ProfileEntryV1) -> bool,
 ) -> Merged {
     let mut account = Account::default();
-    let (b_rows, o_rows) = (first_wins(base), first_wins(ours));
-    // The file's sequence: each id's first row, and every later one carried.
-    let mut seen = HashSet::new();
-    let t_sequence: Vec<Slot> = theirs
-        .profiles
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| {
-            if seen.insert(entry.id.as_str()) {
-                Slot::Row(entry.id.clone())
-            } else {
-                Slot::Carried(index, entry.id.clone())
-            }
-        })
-        .collect();
-    let t_rows = first_wins(theirs);
+    let (b_read, o_read, t_read) = (
+        read(base, usable),
+        read(ours, usable),
+        read(theirs, usable),
+    );
+    let (b_rows, o_rows) = (rows_in_force(base, &b_read), rows_in_force(ours, &o_read));
+    // The file's sequence: each id's row in force, and every row after it
+    // carried as its duplicate. Refused rows are units of their own.
+    let mut t_sequence: Vec<Slot> = Vec::new();
+    for (index, (entry, reading)) in theirs.profiles.iter().zip(&t_read).enumerate() {
+        match reading {
+            Reading::InForce => t_sequence.push(Slot::Row(entry.id.clone())),
+            Reading::Duplicate => t_sequence.push(Slot::Carried(index, entry.id.clone())),
+            Reading::Refused => {}
+        }
+    }
+    let t_rows = rows_in_force(theirs, &t_read);
     let (b, o, t) = (by_id(&b_rows), by_id(&o_rows), by_id(&t_rows));
     let title = |id: &str| -> String {
         [t.get(id), o.get(id), b.get(id)]
@@ -277,18 +359,56 @@ pub(crate) fn merge(
         }
     }
 
+    // Each id's refused rows, one unit through the table: rows a reader can
+    // fix by hand stay in the file and stay reported; a side that removed or
+    // changed them changed them.
+    let mut refused_ids: Vec<&str> = Vec::new();
+    push_refused_ids(&mut refused_ids, theirs, &t_read);
+    push_refused_ids(&mut refused_ids, ours, &o_read);
+    push_refused_ids(&mut refused_ids, base, &b_read);
+    let (b_refused, o_refused, t_refused) = (
+        refused_rows(base, &b_read),
+        refused_rows(ours, &o_read),
+        refused_rows(theirs, &t_read),
+    );
+    let mut refused: Vec<KeptRefused<'_>> = Vec::new();
+    for id in refused_ids {
+        let of = |rows: &HashMap<&str, Vec<ProfileEntryV1>>| rows.get(id).cloned().unwrap_or_default();
+        let (b_rows_refused, o_rows_refused, t_rows_refused) =
+            (of(&b_refused), of(&o_refused), of(&t_refused));
+        let (rows, row) = unit(b_rows_refused, o_rows_refused.clone(), t_rows_refused.clone());
+        account.count(row, || title(id));
+        if rows.is_empty() {
+            continue;
+        }
+        let source = if rows == t_rows_refused {
+            theirs
+        } else if rows == o_rows_refused {
+            ours
+        } else {
+            base
+        };
+        refused.push(KeptRefused {
+            id: id.to_owned(),
+            rows,
+            source,
+        });
+    }
+
     let profiles = order(
         &b_rows,
         &o_rows,
         &t_rows,
         &t_sequence,
         &result,
+        &refused,
         &mut account,
     )
     .into_iter()
     .map(|slot| match slot {
         Slot::Row(id) => result[&id].clone(),
         Slot::Carried(index, _) => theirs.profiles[index].clone(),
+        Slot::Refused(k, l, _) => refused[k].rows[l].clone(),
     })
     .collect();
     Merged {
@@ -309,6 +429,7 @@ fn order(
     t_rows: &[&ProfileEntryV1],
     t_sequence: &[Slot],
     result: &HashMap<String, ProfileEntryV1>,
+    refused: &[KeptRefused<'_>],
     account: &mut Account,
 ) -> Vec<Slot> {
     let holds = |rows: &[&ProfileEntryV1], id: &str| rows.iter().any(|entry| entry.id == id);
@@ -393,15 +514,39 @@ fn order(
         let Slot::Carried(_, id) = slot else {
             continue;
         };
-        // A carried row goes with its id's row (`document_request::remove_key`'s
-        // rule): one the merge removed takes it along.
+        // A carried row goes with its id's row (the rule of
+        // `document_request::remove_in_force_and_its_duplicates`): one the merge
+        // removed takes it along.
         if !result.contains_key(id) {
             continue;
         }
-        let last_of_its_id = placed.iter().rposition(
-            |placed| matches!(placed, Slot::Row(named) | Slot::Carried(_, named) if named == id),
-        );
+        let last_of_its_id = placed.iter().rposition(|placed| placed.id() == id);
         placed.insert(last_of_its_id.map_or(0, |at| at + 1), slot.clone());
+    }
+
+    // The refused rows each id kept: right before its row in force, in their
+    // order — where the installer reads them, and refuses them, today; an id
+    // with no row in force in the result keeps them after the nearest row
+    // before them, in the sequence of the side they came from.
+    for (k, kept) in refused.iter().enumerate() {
+        let slots = (0..kept.rows.len()).map(|l| Slot::Refused(k, l, kept.id.clone()));
+        let at = match placed.iter().position(|placed| *placed == Slot::Row(kept.id.clone())) {
+            Some(row) => row,
+            None => {
+                let first = kept
+                    .source
+                    .profiles
+                    .iter()
+                    .position(|entry| entry.id == kept.id)
+                    .unwrap_or(0);
+                kept.source.profiles[..first]
+                    .iter()
+                    .rev()
+                    .find_map(|earlier| placed.iter().rposition(|placed| placed.id() == earlier.id))
+                    .map_or(0, |at| at + 1)
+            }
+        };
+        placed.splice(at..at, slots);
     }
     placed
 }
@@ -447,6 +592,22 @@ mod tests {
 
     fn no_titles(_: &str) -> Option<String> {
         None
+    }
+
+    /// The merge, reading each side as the installer of this build does.
+    fn merge(
+        base: &ProfilesV1,
+        ours: &ProfilesV1,
+        theirs: &ProfilesV1,
+        shipped_title: &dyn Fn(&str) -> Option<String>,
+    ) -> Merged {
+        super::merge(
+            base,
+            ours,
+            theirs,
+            shipped_title,
+            &crate::profiles::installable(),
+        )
     }
 
     fn titled(id: &str) -> Option<String> {
@@ -818,13 +979,14 @@ mod tests {
     }
 
     /// RED (review round 3, coordinator's ruling) — **a press that removes a
-    /// row takes its carried duplicates with it** (`document_request::remove_key`,
-    /// the merge road's rule): `desired` holds the row and a later duplicate the
+    /// row takes its carried duplicates with it**
+    /// (`document_request::remove_in_force_and_its_duplicates`, the merge road's
+    /// rule): `desired` holds the row and a later duplicate the
     /// installer refused; the projection, the table in force, has only the row;
     /// the press removes it. The next start shows the id at its shipped value.
     ///
-    /// MUTATION: keep the duplicate (in `remove_key`, remove only the first
-    /// entry naming the key — today's Delete) — the duplicate is the row in
+    /// MUTATION: keep the duplicate (in `remove_in_force_and_its_duplicates`,
+    /// remove only the entry in force — the Delete before round 3) — the duplicate is the row in
     /// force at the next start.
     #[test]
     fn a_press_that_removes_a_row_takes_its_carried_duplicates() {
@@ -868,6 +1030,87 @@ mod tests {
             in_force(&merged.document, "a"),
             in_force(&file, "a"),
             "read back first-wins: `a′` in force, the same refusals"
+        );
+    }
+
+    /// An id of the reader's own with no program: the installer refuses it.
+    fn cannot_start(id: &str, title: &str) -> ProfileEntryV1 {
+        ProfileEntryV1 {
+            program: None,
+            ..own(id, title)
+        }
+    }
+
+    /// PIN (review round 4) — **`installable` is the installer's own test**:
+    /// an entry it answers `true` for is put in force, one it answers `false`
+    /// for is refused as unusable.
+    #[test]
+    fn installable_is_the_installers_own_test() {
+        let usable = crate::profiles::installable();
+        let built_in = shipped(crate::profiles::shipped_order()[0]);
+        for entry in [
+            built_in,
+            own("自己的 own", "我的 Mine"),
+            cannot_start("不能 cannot", "不能启动"),
+        ] {
+            let (_, faults) = crate::profiles::table_from(&table(std::slice::from_ref(&entry)));
+            let refused = faults.contains(&crate::profiles::ProfileFault::Unusable {
+                id: entry.id.clone(),
+            });
+            assert_eq!(usable(&entry), !refused, "{}", entry.id);
+        }
+    }
+
+    /// RED (review round 4, coordinator's ruling) — **an id's row is its first
+    /// usable row**: the file holds `a` (refused: no program) and then `a′`,
+    /// the row in force; the file edits `a′`, and Folio dropped the refused
+    /// `a`. The file's edit to the live row is the file's change — kept, no
+    /// conflict — and Folio's removal of the refused row is Folio's.
+    ///
+    /// MUTATION: read the first row of an id as its row whatever the installer
+    /// makes of it (in `merge`, every row usable — round 3's reading) — `a′`
+    /// is merged against the refused `a` and the file's edit is lost.
+    #[test]
+    fn the_files_edit_to_the_live_row_stands_when_folio_dropped_a_refused_row() {
+        let refused = cannot_start("a", "不能启动 cannot start");
+        let live = own("a", "活的 live");
+        let mut edited = live.clone();
+        edited.args = Some(vec!["--编辑".to_owned()]);
+        let base = table(&[refused.clone(), live.clone()]);
+        let ours = table(std::slice::from_ref(&live));
+        let theirs = table(&[refused, edited.clone()]);
+        let merged = merge(&base, &ours, &theirs, &no_titles);
+        assert_eq!(merged.document.profiles, vec![edited]);
+        assert_eq!(merged.account.conflicted, 0, "no card");
+        assert_eq!(in_force(&merged.document, "a").0, Some("活的 live".to_owned()));
+    }
+
+    /// RED (review round 4, coordinator's ruling) — **a Delete takes the row in
+    /// force and its duplicates, and leaves a refused row before it**:
+    /// `desired` holds `a` (refused), `a′` (in force) and `a″` (its duplicate);
+    /// the table in force has `a′`; the press removes it. What stays is the
+    /// refused `a`, which the next start refuses as before.
+    ///
+    /// MUTATION: the first row is the row in force whatever the installer
+    /// makes of it (in `ProfilesV1::apply_press`, `InForce::First(&|_| true)`)
+    /// — the refused `a` is removed with the rest.
+    #[test]
+    fn a_delete_takes_the_live_row_and_its_duplicates_and_leaves_a_refused_row() {
+        use crate::document_request::StoredDocument;
+
+        let refused = cannot_start("a", "不能启动 cannot start");
+        let (live, later) = (own("a", "活的 live"), own("a", "后来的 later"));
+        let b = own("b", "乙 B");
+        let mut desired = table(&[refused.clone(), live.clone(), b.clone(), later]);
+        ProfilesV1::apply_press(&mut desired, &table(&[live, b.clone()]), &table(&[b.clone()]));
+        assert_eq!(desired.profiles, vec![refused, b]);
+        assert_eq!(
+            in_force(&desired, "a"),
+            (
+                None,
+                vec![crate::profiles::ProfileFault::Unusable { id: "a".to_owned() }]
+            ),
+            "the next start refuses `a` as before, and puts nothing of it in force"
         );
     }
 }

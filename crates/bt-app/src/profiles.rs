@@ -2543,6 +2543,18 @@ fn merge(shipped: Vec<Profile>, file: &ProfilesV1) -> (Vec<Profile>, Vec<Profile
     merge_on(shipped, file, SeedPlatform::of_this_build())
 }
 
+/// **Whether the installer can put an entry in force** — [`merge_on`]'s test,
+/// read without installing: a built-in id this build ships, whose row the
+/// entry edits, or a row of the reader's own that names a program. An entry
+/// it cannot is refused (`ProfileFault::Unusable`); the first one it can is
+/// its id's row in force, and every later row of that id is a duplicate. The
+/// profiles merge and a press's delta read a document by this (review round
+/// 4).
+pub(crate) fn installable() -> impl Fn(&ProfileEntryV1) -> bool {
+    let shipped_ids: Vec<String> = shipped().into_iter().map(|profile| profile.id).collect();
+    move |entry| entry.program.is_some() || shipped_ids.iter().any(|id| *id == entry.id)
+}
+
 /// **The table [`install`] would put in force from `file`**, and what it
 /// refused — for a test's window, which has no process-wide table of its own.
 #[cfg(test)]

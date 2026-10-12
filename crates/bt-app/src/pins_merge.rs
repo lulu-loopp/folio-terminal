@@ -11,7 +11,9 @@
 //!   kind this build cannot name (`bt_persist::pins`' header): it is neither
 //!   dropped nor retagged. A carried duplicate goes with its identity's
 //!   row: when the merge removes that row, the duplicate goes too
-//!   (`document_request::remove_key`'s rule, the one an unpin follows).
+//!   (`document_request::remove_in_force_and_its_duplicates`' rule, the one
+//!   an unpin follows). No pin is refused: every row of a kind this build
+//!   names is usable, and a row of a kind it cannot name is carried untouched.
 //! - **A union of the additions, not of the tables.** Per identity, with
 //!   presence `p`: if `O` kept `B`'s presence the file's stands, if `T` kept it
 //!   Folio's stands, and when both moved they agree. An unpin is as much a
@@ -172,8 +174,9 @@ pub(crate) fn merge(base: &PinsV1, ours: &PinsV1, theirs: &PinsV1) -> Merged {
     let mut pins = Vec::with_capacity(theirs.pins.len() + o_rows.len());
     // The file's rows in the file's order: each identity's first row merged,
     // every other row carried as it stands — unless the merge removed the row
-    // of its identity, which it goes with (`document_request::remove_key`'s
-    // rule): a row the menus never read never becomes the pin.
+    // of its identity, which it goes with
+    // (`document_request::remove_in_force_and_its_duplicates`' rule): a row the
+    // menus never read never becomes the pin.
     let mut seen = HashSet::new();
     let mut gone = HashSet::new();
     for pin in &theirs.pins {

@@ -756,39 +756,75 @@ where
 }
 
 /// Which of several entries under one key a reader puts in force.
-#[derive(Clone, Copy)]
-enum InForce {
-    First,
+enum InForce<'a, E> {
+    /// The first entry naming the key that `usable` accepts: `profiles.json`'s
+    /// installer (the first row it can start) and `pins.json`'s menus (the
+    /// first row; every pin is usable). An unusable entry before it is refused
+    /// and stays; every entry after it is its duplicate and goes with it
+    /// ([`remove_in_force_and_its_duplicates`]).
+    First(&'a dyn Fn(&E) -> bool),
+    /// The last line about the key: `keybindings.json`'s reader.
     Last,
 }
 
-/// **A key removed from a keyed list: its entry in force and every shadowed
-/// entry naming it** ((b)8's one rule, review round 3). A shadowed entry —
-/// a later duplicate profile id or pin, an earlier keybindings line — was
-/// never in force, and it must not become the live entry because the one in
-/// force went: it goes with it. The press road ([`apply_keyed_press`],
-/// `pins::toggle_pin`) and the merges (`profiles_merge`, `pins_merge`) all
-/// follow this one rule.
-pub(crate) fn remove_key<E, K: PartialEq>(list: &mut Vec<E>, key: impl Fn(&E) -> K, wanted: &K) {
-    list.retain(|entry| key(entry) != *wanted);
+impl<E> Clone for InForce<'_, E> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<E> Copy for InForce<'_, E> {}
+
+/// **A key removed from a first-wins list** (`profiles.json`, `pins.json`;
+/// (b)8's one rule, review rounds 3 and 4): the entry in force — the first
+/// entry naming `wanted` that `usable` accepts — and every entry after it
+/// naming `wanted`, its duplicates, which were never in force and must not
+/// become the live entry because the one in force went. An unusable entry
+/// before it is a refused row: it stays, and stays reported. With no entry in
+/// force, nothing goes. The press road ([`apply_keyed_press`] for these two
+/// documents, `pins::toggle_pin`) follows this rule, and so do the merges
+/// (`profiles_merge`, `pins_merge`) on their own reading of the same model.
+pub(crate) fn remove_in_force_and_its_duplicates<E, K: PartialEq>(
+    list: &mut Vec<E>,
+    key: impl Fn(&E) -> K,
+    wanted: &K,
+    usable: impl Fn(&E) -> bool,
+) {
+    let Some(in_force) = list
+        .iter()
+        .position(|entry| key(entry) == *wanted && usable(entry))
+    else {
+        return;
+    };
+    let mut at = 0;
+    list.retain(|entry| {
+        let keep = at < in_force || key(entry) != *wanted;
+        at += 1;
+        keep
+    });
 }
 
 /// **A press's delta over a list of entries named by a key** ((b)6, (b)8's
 /// units): every key whose entry in force differs between `before` and `after`
 /// takes `after`'s in `desired` — replaced where `desired` has it in force,
 /// added after its nearest predecessor in `after` otherwise, removed when
-/// `after` has none (with every shadowed entry naming it, [`remove_key`]) —
-/// and, when the press reordered the keys both sides hold,
+/// `after` has none — and, when the press reordered the keys both sides hold,
 /// those entries take `after`'s order in the places they hold in `desired`.
-/// Entries `desired` carries that the projection never had (a line a reader
-/// refused, a shadowed duplicate) keep their place — a shadowed duplicate until
-/// its key goes, and then with it.
+///
+/// **What a removal takes, per document.** `profiles.json` and `pins.json`
+/// ([`InForce::First`]): the entry in force and its duplicates after it
+/// ([`remove_in_force_and_its_duplicates`]); a refused row before it stays.
+/// `keybindings.json` ([`InForce::Last`]): the line in force alone; every other
+/// line about the action stays (its reading is T-STORE-MERGE-KEYBINDINGS').
+/// Every other entry `desired` carries that the projection never had (a line a
+/// reader refused, a refused profile row, a duplicate whose key stays) keeps
+/// its place.
 fn apply_keyed_press<E, K>(
     desired: &mut Vec<E>,
     before: &[E],
     after: &[E],
     key: impl Fn(&E) -> K,
-    in_force: InForce,
+    in_force: InForce<'_, E>,
 ) where
     E: Clone + PartialEq,
     K: PartialEq + Clone,
@@ -803,7 +839,7 @@ fn apply_keyed_press<E, K>(
             .enumerate()
             .filter(|(_, entry)| key(entry) == *wanted);
         match in_force {
-            InForce::First => found.next(),
+            InForce::First(usable) => found.find(|(_, entry)| usable(entry)),
             InForce::Last => found.last(),
         }
         .map(|(index, _)| index)
@@ -823,7 +859,14 @@ fn apply_keyed_press<E, K>(
         }
         match (position(desired, name), is) {
             (Some(at), Some(entry)) => desired[at] = entry.clone(),
-            (Some(_), None) => remove_key(desired, &key, name),
+            (Some(at), None) => match in_force {
+                InForce::First(usable) => {
+                    remove_in_force_and_its_duplicates(desired, &key, name, usable);
+                }
+                InForce::Last => {
+                    desired.remove(at);
+                }
+            },
             (None, Some(entry)) => {
                 let at = position(after, name).unwrap_or(0);
                 let anchor = after[..at]
@@ -912,19 +955,22 @@ impl StoredDocument for ProfilesV1 {
         bt_persist::parse_profiles(bytes)
     }
 
-    /// The unit is the row, by id, the first in force (the installer's rule).
+    /// The unit is the row, by id: the first row the installer can start
+    /// (`profiles::installable`, the installer's rule); a removal takes it
+    /// and its duplicates after it, and leaves a refused row before it.
     fn apply_press(desired: &mut Self, before: &Self, after: &Self) {
         if desired == before {
             *desired = after.clone();
             return;
         }
         desired.schema_version = after.schema_version;
+        let usable = crate::profiles::installable();
         apply_keyed_press(
             &mut desired.profiles,
             &before.profiles,
             &after.profiles,
             |row| row.id.clone(),
-            InForce::First,
+            InForce::First(&usable),
         );
     }
 
@@ -967,7 +1013,7 @@ impl StoredDocument for PinsV1 {
             &before.pins,
             &after.pins,
             |pin| (pin.kind.clone(), pin.target.clone()),
-            InForce::First,
+            InForce::First(&|_| true),
         );
     }
 

@@ -3160,7 +3160,8 @@ fn merge_profiles(
     theirs: &ProfilesV1,
 ) -> (ProfilesV1, crate::settings_merge::Account) {
     let shipped_title = |id: &str| crate::profiles::row_of(id).map(|row| row.display_title);
-    let merged = crate::profiles_merge::merge(base, ours, theirs, &shipped_title);
+    let usable = crate::profiles::installable();
+    let merged = crate::profiles_merge::merge(base, ours, theirs, &shipped_title, &usable);
     (merged.document, merged.account)
 }
 
