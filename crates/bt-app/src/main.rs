@@ -97,10 +97,10 @@ mod install_channel;
 #[path = "journeys_tests.rs"]
 mod journeys_tests;
 mod keyhint;
-/// **The lane contract** (D-33, `docs/ARCHITECTURE.md` §5.1): each lane's declared policy, the
-/// claims every lane is held to, and the lanes' declared failures. Compiled with the tests: no
-/// product code reads a declaration yet.
-#[cfg(test)]
+/// **The lane contract** (D-33, `docs/ARCHITECTURE.md` §5.1; the side-effects contract, S-3): the
+/// seam a lane is built on — its `Executor`, its request `Ledger` and their hooks — and, with the
+/// tests, each lane's declared policy, the claims every lane is held to, and the lanes' declared
+/// failures.
 mod lane;
 #[cfg(test)]
 mod lane_contract_tests;
