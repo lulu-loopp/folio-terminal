@@ -1839,8 +1839,9 @@ off**, and **a name containing `TRACE` keeps the console**.
 adapters) is a fourth entrance. It declares, in this table, its audience, what
 it may carry, whether it persists, and its reload discipline — before it accepts
 its first flag. An outward interface that accumulates flags by accretion will
-drift from the in-app settings, and the two reload disciplines already in the
-table are the evidence that drift is cheap.
+drift from the in-app settings: the four hand-editable documents drifted into two
+reload disciplines, and bringing them back under the one in this table took a
+design note and its tickets (`settings-reread-2026-10-11.md`).
 
 ---
 
