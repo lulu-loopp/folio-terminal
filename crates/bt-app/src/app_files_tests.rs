@@ -1272,7 +1272,7 @@ fn a_pooled_document_no_pane_is_on_still_follows_its_file() {
     );
     let leaf = seat_of(TabId(1), seat);
     // A reader half way down the page they are *not* about to leave.
-    tab.preview_panes.entry(leaf).scroll = [0.0, 420.0];
+    tab.preview_panes.entry(leaf).scroll_to([0.0, 420.0]);
 
     // ① The gate. Both documents, and the one no pane is on is the point.
     let watched = files_a_tab_stands_on(&tab);
@@ -1318,7 +1318,7 @@ fn a_pooled_document_no_pane_is_on_still_follows_its_file() {
 
     // ③ The scroll.
     assert_eq!(
-        tab.preview_panes.entry(leaf).scroll,
+        tab.preview_panes.entry(leaf).scroll(),
         [0.0, 420.0],
         "a file rewritten under a reader does not send them back to the top"
     );
@@ -1361,8 +1361,12 @@ fn the_picture_a_pane_is_showing_is_a_file_this_tab_stands_on() {
     let notes = PathBuf::from(r"D:\folio-social\notes.md");
 
     let mut panes = PreviewPanes::default();
-    panes.entry(seat_of(TAB_ONE, identity)).image = Some(PreviewImageState::new(card.clone()));
-    panes.entry(seat_of(TAB_ONE, SeatId(9))).image = Some(PreviewImageState::new(reel.clone()));
+    panes
+        .entry(seat_of(TAB_ONE, identity))
+        .show_picture(card.clone());
+    panes
+        .entry(seat_of(TAB_ONE, SeatId(9)))
+        .show_picture(reel.clone());
     let mut pool = preview::PreviewPool::default();
     pool.insert(preview::PreviewBuffer::new(
         preview::PreviewSource::file(notes.clone()),

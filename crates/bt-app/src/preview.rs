@@ -6346,6 +6346,81 @@ pub enum ReadLanded {
     Kept { said: bool },
 }
 
+/// **A source a keeper of buffers holds** — the only name a pane's document
+/// view can be built from (the ownership contract's §2.2 invariant 2: a view
+/// without a document is impossible).
+///
+/// Minted in this module, and only by the two owners that keep a buffer alive
+/// while a view reads it: the tab's [`PreviewPool`] ([`PreviewPool::held`],
+/// [`PreviewPool::held_mut`], [`PreviewPool::open_held`],
+/// [`PreviewPool::insert`]) and the hover card's [`GlanceSlot`]
+/// ([`GlanceSlot::put`]). Never from a buffer in hand: a buffer nobody keeps is
+/// gone by the time the view is drawn. So **constructing** a view requires a
+/// buffer its owner holds at that moment.
+///
+/// **What the type does not prevent today.** A `Held` is a name, not a lease:
+/// [`PreviewPool::clear`], [`PreviewPool::discard_dirty`] and
+/// [`PreviewPool::take`] can still remove a buffer a pane is standing on.
+/// Their callers keep the two together by order — closing drops the views
+/// with the pool, a migration or a rename puts the buffer back and moves the
+/// panes in the same step — and the eviction law never takes a buffer a pane
+/// is reading. Making removal itself impossible is the document registry's
+/// (ownership contract ticket O-6/O-9; `docs/plans/structural-debt.md` D-17).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Held(PreviewSource);
+
+impl Held {
+    /// The source the buffer answers to.
+    pub fn source(&self) -> &PreviewSource {
+        &self.0
+    }
+
+    /// The same, owned.
+    pub fn into_source(self) -> PreviewSource {
+        self.0
+    }
+}
+
+/// **The hover card's own buffer** — a glance at a file the tab's pool does not
+/// hold (P145), kept here for as long as the card stands on it.
+///
+/// A slot rather than an `Option` so that the card's view can be put on its
+/// buffer only by the slot that keeps it: [`Self::put`] keeps the buffer and
+/// hands back its [`Held`] in one step.
+#[derive(Debug, Default)]
+pub struct GlanceSlot {
+    buffer: Option<PreviewBuffer>,
+}
+
+impl GlanceSlot {
+    /// Keep this buffer, in place of whatever the last glance kept, and hand
+    /// back the name a view may stand on.
+    pub fn put(&mut self, buffer: PreviewBuffer) -> Held {
+        let held = Held(buffer.source.clone());
+        self.buffer = Some(buffer);
+        held
+    }
+
+    /// Let go of the glance's buffer.
+    pub fn clear(&mut self) {
+        self.buffer = None;
+    }
+
+    /// The buffer kept here, if it is the one for `source`.
+    pub fn get(&self, source: &PreviewSource) -> Option<&PreviewBuffer> {
+        self.buffer
+            .as_ref()
+            .filter(|buffer| &buffer.source == source)
+    }
+
+    /// The same, mutably — a read's answer lands in it.
+    pub fn get_mut(&mut self, source: &PreviewSource) -> Option<&mut PreviewBuffer> {
+        self.buffer
+            .as_mut()
+            .filter(|buffer| &buffer.source == source)
+    }
+}
+
 /// One tab's shared pool of live buffers.
 ///
 /// A `Vec` and not a map, because the order *is* the history the filename
@@ -6366,6 +6441,20 @@ impl PreviewPool {
 
     pub fn get(&self, source: &PreviewSource) -> Option<&PreviewBuffer> {
         self.buffers.iter().find(|buffer| &buffer.source == source)
+    }
+
+    /// **The name a view may stand on**, if this pool holds that buffer — and
+    /// nothing when it does not, which is what makes a document view on a
+    /// source the pool has never heard of unbuildable.
+    pub fn held(&self, source: &PreviewSource) -> Option<Held> {
+        self.get(source).map(|buffer| Held(buffer.source.clone()))
+    }
+
+    /// The buffer for this source and the name a view may stand on, when this
+    /// pool holds it.
+    pub fn held_mut(&mut self, source: &PreviewSource) -> Option<(Held, &mut PreviewBuffer)> {
+        let buffer = self.get_mut(source)?;
+        Some((Held(buffer.source.clone()), buffer))
     }
 
     pub fn get_mut(&mut self, source: &PreviewSource) -> Option<&mut PreviewBuffer> {
@@ -6429,11 +6518,27 @@ impl PreviewPool {
     /// house — and a migration that silently dropped somebody's unsaved edit to
     /// keep a ceiling would be the ceiling costing exactly what it is not worth
     /// (see `open`'s own note).
-    pub fn insert(&mut self, buffer: PreviewBuffer) {
+    ///
+    /// Answers the name a view may stand on, since the pool now holds it.
+    pub fn insert(&mut self, buffer: PreviewBuffer) -> Held {
+        let held = Held(buffer.source.clone());
         match self.index_of(&buffer.source) {
             Some(index) => self.buffers[index] = buffer,
             None => self.buffers.push(buffer),
         }
+        held
+    }
+
+    /// [`Self::open`], and the name a view may stand on — the buffer is in this
+    /// pool when `open` answers.
+    pub fn open_held(
+        &mut self,
+        source: PreviewSource,
+        name: String,
+        displayed: &[PreviewSource],
+    ) -> (Held, &mut PreviewBuffer) {
+        let held = Held(source.clone());
+        (held, self.open(source, name, displayed))
     }
 
     /// **P122 — one buffer arriving from another tab's pool, merged in under the
@@ -6467,7 +6572,7 @@ impl PreviewPool {
     ///
     /// Panes need no redirecting afterwards, and that falls out of the port
     /// rather than being arranged: a surface names its buffer **by source**
-    /// ([`crate::PreviewPane::buffer`] is a [`PreviewSource`]), so "one buffer
+    /// ([`crate::PreviewPane::source`] is a [`PreviewSource`]), so "one buffer
     /// per file" and "every pane showing the loser now reads the winner" are the
     /// same sentence here. The mock-up needed a redirect pass because its panes
     /// held object references.

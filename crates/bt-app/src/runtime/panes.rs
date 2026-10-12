@@ -3348,7 +3348,7 @@ impl Runtime<'_> {
                 }
                 tab.preview_panes
                     .get(PreviewSurface::Seat(leaf))
-                    .and_then(|pane: &crate::PreviewPane| pane.image.as_ref())
+                    .and_then(|pane: &crate::PreviewPane| pane.image())
                     .is_some_and(|image| preview::path_names_a_video(&image.path))
             })
             .collect()
