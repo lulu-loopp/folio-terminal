@@ -60,10 +60,20 @@
 //! every one; a generation only keeps a stale answer's visible effect from
 //! landing after a newer one's ((b)4).
 //!
-//! Until the merge tickets (T-STORE-MERGE-*), the four stores send `Restore`
-//! requests ((b)16 item 1): a crossing hand edit is put back and kept, its
-//! bytes are stored for the merge, and the store stays owed against a file it
-//! will not write over. Nothing is merged yet, and nothing is lost.
+//! **Two policies per store.** The request's ([`Mode`]): `settings.json` sends
+//! `Merge` requests (T-STORE-MERGE-SETTINGS); the other three still send
+//! `Restore` ((b)16 item 1) until their merges exist — a crossing hand edit is
+//! put back and kept, its bytes are stored for the merge, and the store is held
+//! against a file it will not write over. And the re-read's ([`Follow`]): a file
+//! that changed is merged (settings), held for a merge still to be built
+//! (keybindings, T-STORE-MERGE-KEYBINDINGS), or taken whole (profiles and pins,
+//! until T-STORE-MERGE-PROFILES-PINS).
+//!
+//! **The merge's seam** ([`DocumentState::merge_stored`]): every file stored
+//! for the merge, in the order it was stored, is merged by the document's own
+//! merge against its base and folded into `desired` ([`DocumentState::fold`],
+//! (c)1 and (d)1). Nothing is merged on the worker, and nothing here knows a
+//! document's units: the merge is handed in.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -81,15 +91,6 @@ use crate::persist::{DocumentWrites, Revision, StorageLane};
 pub(crate) enum Mode {
     /// The asker merges: a displaced file stays on disk, named in the answer,
     /// for its merge.
-    // The four stores join `Merge` with the merge tickets; until then only the
-    // tests that drive the merge's bookkeeping send it.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T-STORAGE-WORKER-REQUEST until 2026-10-31: T-STORE-MERGE-SETTINGS sends it"
-        )
-    )]
     Merge,
     /// The asker has no merge: a displaced file is put back under its name and
     /// the answer is a conflict.
@@ -936,7 +937,8 @@ impl ReadNews {
 
 /// **A file's bytes, kept for the merge** (T-STORE-MERGE-*): a `Moved`,
 /// `Displaced` or `Conflict` answer, or a re-read that found the file changed
-/// while a change of Folio's was not yet on disk.
+/// while a change of Folio's was not yet on disk — or, for a store that merges
+/// what it re-reads, any re-read that found the file changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PendingMerge<T> {
     /// The revision the file was compared with — the merge's base: for a
@@ -946,6 +948,42 @@ pub(crate) struct PendingMerge<T> {
     pub(crate) theirs: Option<Arc<[u8]>>,
     /// Where the person's bytes are kept beside the file (`Displaced`).
     pub(crate) kept: Option<PathBuf>,
+    /// The document the exchange wrote (`Displaced`): the merge's `O` ((c)1).
+    /// `None` for every other answer, whose `O` is `desired`.
+    pub(crate) written: Option<T>,
+}
+
+/// **What a store does with a re-read that found its file changed** — the
+/// file not Folio's own write, and the store not held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Follow {
+    /// Taken whole when nothing of Folio's is owed; stored for the merge when
+    /// something is (`profiles.json`, `pins.json`, until their merge).
+    Take,
+    /// Stored for the merge, always: the document's merge puts it in force
+    /// through its doors (`settings.json`).
+    Merge,
+    /// Stored for a merge still to be built, and the store held: nothing is
+    /// taken and nothing is written over it (`keybindings.json`, until
+    /// T-STORE-MERGE-KEYBINDINGS).
+    Hold,
+}
+
+/// **What one merge pass replaced in one file** — the data the pass's card
+/// (§3.6, T-STORE-NOTICE) names: the file, and every value the file won a
+/// conflict over, named the way the reader knows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReplacedInFile {
+    pub(crate) file: &'static str,
+    pub(crate) values: Vec<String>,
+}
+
+/// **What one storage pass's merges replaced**: one entry per file that lost a
+/// value of Folio's to the file — none for a clean hand edit (§3.6, owner
+/// ruling Q2). T-STORE-NOTICE raises the pass's one card from it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MergeNotice {
+    pub(crate) files: Vec<ReplacedInFile>,
 }
 
 /// One request a store has on the worker.
@@ -977,6 +1015,7 @@ pub(crate) struct DocumentState<T> {
     version: u64,
     generation: u64,
     mode: Mode,
+    follow: Follow,
     outstanding: VecDeque<Outstanding<T>>,
     /// A re-read was asked for while one was on the worker: one more is sent
     /// when it has been answered.
@@ -1020,6 +1059,7 @@ impl<T: StoredDocument> DocumentState<T> {
             version: 0,
             generation: 0,
             mode: Mode::Restore,
+            follow: Follow::Take,
             outstanding: VecDeque::new(),
             read_again: false,
             send_again: false,
@@ -1034,9 +1074,22 @@ impl<T: StoredDocument> DocumentState<T> {
         }
     }
 
+    /// **This store's two policies**: what its writes ask of the worker, and
+    /// what it does with a file a re-read found changed.
+    pub(crate) fn with_policies(mut self, mode: Mode, follow: Follow) -> Self {
+        self.mode = mode;
+        self.follow = follow;
+        self
+    }
+
     /// The document readers read.
     pub(crate) fn projection(&self) -> &T {
         &self.projection
+    }
+
+    /// The document Folio wants on disk ((b)6).
+    pub(crate) fn desired(&self) -> &T {
+        &self.desired
     }
 
     /// What the file is known to hold.
@@ -1375,6 +1428,7 @@ impl<T: StoredDocument> DocumentState<T> {
                     base: flight.base,
                     theirs: bytes,
                     kept: None,
+                    written: None,
                 });
             }
             Outcome::MovedDuringRead => {
@@ -1391,6 +1445,7 @@ impl<T: StoredDocument> DocumentState<T> {
                     base: flight.base,
                     theirs: Some(bytes),
                     kept: Some(kept),
+                    written: Some(flight.document.clone()),
                 });
                 self.revision.landed(flight.bytes, flight.document);
                 self.writes.record(file, Ok(()));
@@ -1401,6 +1456,7 @@ impl<T: StoredDocument> DocumentState<T> {
                     base: flight.base,
                     theirs: Some(Arc::clone(&theirs)),
                     kept: None,
+                    written: None,
                 });
                 // (c)3: the revision is the file the person now has — a file
                 // that will not parse is its bytes beside the default document,
@@ -1448,7 +1504,14 @@ impl<T: StoredDocument> DocumentState<T> {
 
     /// Store a file's bytes for the merge. A newer file with no kept copy
     /// replaces an older one: the merge reconciles what the file holds now.
+    ///
+    /// **A store that merges holds its writes until the merge has folded the
+    /// file in**: a write sent now would be conditional on a file that is no
+    /// longer there, and would answer `Moved` (§3.3: an owed edit waits).
     fn keep_for_the_merge(&mut self, merge: PendingMerge<T>) {
+        if self.mode == Mode::Merge {
+            self.held_for_merge = true;
+        }
         if merge.kept.is_none()
             && let Some(last) = self.merges.last_mut()
             && last.kept.is_none()
@@ -1504,6 +1567,33 @@ impl<T: StoredDocument> DocumentState<T> {
             self.held_file_moved(bytes, document);
             return;
         }
+        match self.follow {
+            Follow::Take => {}
+            Follow::Merge => {
+                self.keep_for_the_merge(PendingMerge {
+                    base: self.revision.clone(),
+                    theirs: bytes,
+                    kept: None,
+                    written: None,
+                });
+                return;
+            }
+            Follow::Hold => {
+                eprintln!(
+                    "BT_PERSIST {file} changed on disk; it is held until it can be merged, and \
+                     not written over"
+                );
+                self.keep_for_the_merge(PendingMerge {
+                    base: self.revision.clone(),
+                    theirs: bytes.clone(),
+                    kept: None,
+                    written: None,
+                });
+                self.revision = Revision { bytes, document };
+                self.held_for_merge = true;
+                return;
+            }
+        }
         if self.desired != self.revision.document {
             // A change of Folio's is not on disk — in flight, refused, or a
             // process that does not write here — and a re-read does not undo it.
@@ -1516,6 +1606,7 @@ impl<T: StoredDocument> DocumentState<T> {
                 base: self.revision.clone(),
                 theirs: bytes,
                 kept: None,
+                written: None,
             });
             return;
         }
@@ -1545,6 +1636,7 @@ impl<T: StoredDocument> DocumentState<T> {
             base,
             theirs: bytes.clone(),
             kept: None,
+            written: None,
         });
         self.revision = Revision { bytes, document };
     }
@@ -1569,29 +1661,80 @@ impl<T: StoredDocument> DocumentState<T> {
     }
 
     /// **The file's bytes stored for the merge**, taken by it.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T-STORAGE-WORKER-REQUEST until 2026-10-31: T-STORE-MERGE-SETTINGS takes them"
-        )
-    )]
     pub(crate) fn take_merges(&mut self) -> Vec<PendingMerge<T>> {
         std::mem::take(&mut self.merges)
+    }
+
+    /// Whether a file's bytes wait for the merge.
+    pub(crate) fn merge_waits(&self) -> bool {
+        !self.merges.is_empty()
+    }
+
+    /// **The merge's seam: every file stored for the merge, merged and
+    /// folded**, in the order the store kept them ((c)1's table).
+    ///
+    /// For each, `merge(base, ours, theirs)` answers the merged document and
+    /// what it has to say about it:
+    /// - `base` is the revision the file was compared with — for a displaced
+    ///   file, the revision before the exchange ((b)3);
+    /// - `ours` is `desired` — for a displaced file, the document written; the
+    ///   presses that arrived after it was sent are then laid over the merged
+    ///   document by their unit delta ((c)1), neither lost nor counted twice;
+    /// - `theirs` is the file's document; no file is the default document.
+    ///
+    /// Each result is folded ([`Self::fold`]). A file whose bytes will not
+    /// parse is not merged (§3.3): a file that moved stays stored, and the
+    /// store stays held, until a later read finds it parsing; a displaced copy
+    /// that will not parse stays on disk beside the file under its own name,
+    /// said in `stderr`, and nothing retires it.
+    pub(crate) fn merge_stored<R>(
+        &mut self,
+        mut merge: impl FnMut(&T, &T, &T) -> (T, R),
+    ) -> Vec<R> {
+        let file = self.file;
+        let mut said = Vec::new();
+        for pending in self.take_merges() {
+            let theirs = match &pending.theirs {
+                None => T::default(),
+                Some(bytes) => match T::from_bytes(bytes) {
+                    Ok(document) => document,
+                    Err(reason) => {
+                        match &pending.kept {
+                            Some(kept) => eprintln!(
+                                "BT_PERSIST {file}: the edit kept as {} would not parse \
+                                 ({reason:?}); it stays beside the file and is not merged",
+                                kept.display()
+                            ),
+                            None => self.merges.push(pending),
+                        }
+                        continue;
+                    }
+                },
+            };
+            let ours = pending
+                .written
+                .clone()
+                .unwrap_or_else(|| self.desired.clone());
+            let (mut merged, about) = merge(&pending.base.document, &ours, &theirs);
+            if let Some(written) = &pending.written {
+                T::apply_press(&mut merged, written, &self.desired);
+            }
+            self.fold(pending, merged, theirs);
+            said.push(about);
+        }
+        if !self.merges.is_empty() {
+            self.held_for_merge = true;
+        }
+        said
     }
 
     /// **A merge folded a file's bytes into `desired`** ((c)1, (d)1): `merged`
     /// is the new `desired`, at a new version. A kept file the merge took its
     /// units from is retired by a landing of this version or a later one. A
     /// file that moved (not a displaced copy) is what the file holds: it becomes
-    /// the revision, as `theirs` parsed.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T-STORAGE-WORKER-REQUEST until 2026-10-31: T-STORE-MERGE-SETTINGS folds"
-        )
-    )]
+    /// the revision, as `theirs` parsed. With nothing left for the merge, the
+    /// hold is released, and the next trigger writes `desired` conditional on
+    /// what the file is known to hold.
     pub(crate) fn fold(&mut self, merge: PendingMerge<T>, merged: T, theirs: T) {
         self.desired = merged;
         self.version += 1;

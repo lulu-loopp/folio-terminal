@@ -24,7 +24,7 @@ use bt_persist::{
     read_settings, read_settings_keeping, read_settings_keeping_bytes, remove_sentinel,
 };
 
-use crate::document_request::{DocumentState, ReadNews};
+use crate::document_request::{DocumentState, Follow, Mode, ReadNews};
 
 /// The name the session document wears on disk, which is also what a notice
 /// about it has to say out loud — [`KEYBINDINGS_FILE_NAME`]'s rule, one file
@@ -765,6 +765,15 @@ impl StorageLane {
             }),
         };
         (lane, receipts)
+    }
+
+    /// **A lane nobody serves**: every job handed over is queued and stays
+    /// there, for as long as the [`UnservedJobs`] it answers with is held — a
+    /// test outside this module that hands a store its answers itself.
+    #[cfg(test)]
+    pub(crate) fn unserved() -> (Self, UnservedJobs) {
+        let (lane, jobs) = Self::held();
+        (lane, UnservedJobs { _jobs: jobs })
     }
 
     /// **A lane whose queue the test serves**: every job handed over arrives on
@@ -1935,6 +1944,12 @@ impl SessionStore {
     }
 }
 
+/// The queue of a [`StorageLane::unserved`] lane, kept so the lane stays open.
+#[cfg(test)]
+pub(crate) struct UnservedJobs {
+    _jobs: mpsc::Receiver<StorageJob>,
+}
+
 /// `settings.json` and when it reaches the disk.
 ///
 /// No debouncer, unlike [`SessionStore`], and §1.1 is explicit about why the two
@@ -1972,6 +1987,11 @@ pub struct SettingsStore {
     /// write — the one a single press makes — rather than forty. `None` is the
     /// ordinary state: every store hands its document over at once.
     held: Option<bool>,
+    /// **A merge's doors are running** (design note 2026-10-11 (b)6): a store
+    /// moves what is in force and nothing else. `desired` is already the merged
+    /// document, and a door that puts in force something else than the file
+    /// said — a font this machine lacks — must not write that back as a change.
+    merging: bool,
 }
 
 impl SettingsStore {
@@ -2009,10 +2029,12 @@ impl SettingsStore {
                 writer_of_record,
                 crate::update_trial::Writer::Settings,
                 lane,
-            ),
+            )
+            .with_policies(Mode::Merge, Follow::Merge),
             fault,
             missing: report == ReadReport::NotFound,
             held: None,
+            merging: false,
         }
     }
 
@@ -2073,10 +2095,12 @@ impl SettingsStore {
                 writer_of_record,
                 crate::update_trial::Writer::Settings,
                 lane,
-            ),
+            )
+            .with_policies(Mode::Merge, Follow::Merge),
             fault: None,
             missing: true,
             held: None,
+            merging: false,
         }
     }
 
@@ -2121,6 +2145,11 @@ impl SettingsStore {
     /// somebody makes when a setting did not take, and a document still owed is
     /// handed over again whether or not the press changed anything.
     pub fn store(&mut self, settings: SettingsV1) -> bool {
+        if self.merging {
+            let changed = self.document.projection() != &settings;
+            self.document.project(settings);
+            return changed;
+        }
         let held = self.held.is_some();
         let stored = self.document.store(settings, held);
         if let Some(any) = self.held.as_mut() {
@@ -2143,6 +2172,65 @@ impl SettingsStore {
         }
     }
 
+    /// **Ask for the file to be read again, because the storage watch heard
+    /// it** (R33, owner ruling Q3 2026-10-11). The read runs on the storage
+    /// worker; a file that changed is stored for the merge
+    /// ([`Self::begin_merge`]), one that will not parse is not, and what is in
+    /// force stays.
+    pub(crate) fn ask_reread(&mut self) {
+        self.document.ask_read();
+    }
+
+    /// **A storage pass's merge, its first three steps** (design note
+    /// 2026-10-11 §3.3, (b)6, (b)8, (c)1): every file stored for the merge is
+    /// merged field by field against its base ([`settings_merge::merge`]) and
+    /// folded into `desired`, which moves the revision to the file the merge
+    /// read; the three machine receipts are put in force by storing them; the
+    /// writes are held in the import's batch shape, and every store until
+    /// [`Self::end_merge`] moves only what is in force. The answer is the doors
+    /// that put the merged document in force, derived from what is in force
+    /// now — `None` when nothing was merged.
+    ///
+    /// [`settings_merge::merge`]: crate::settings_merge::merge
+    pub(crate) fn begin_merge(
+        &mut self,
+        platform: bt_platform::HostPlatform,
+    ) -> Option<crate::settings_merge::SettingsPass> {
+        if !self.document.merge_waits() {
+            return None;
+        }
+        let merges = self.document.merge_stored(|base, ours, theirs| {
+            let merged = crate::settings_merge::merge(base, ours, theirs, platform);
+            (merged.document, merged.account)
+        });
+        if merges.is_empty() {
+            return None;
+        }
+        let mut account = crate::settings_merge::Account::default();
+        for merge in merges {
+            account.add(merge);
+        }
+        let merged = self.document.desired().clone();
+        let mut in_force = self.document.projection().clone();
+        crate::settings_merge::take_receipts(&mut in_force, &merged);
+        self.document.project(in_force);
+        self.hold_writes();
+        self.merging = true;
+        Some(crate::settings_merge::SettingsPass {
+            doors: crate::settings_merge::doors(self.document.projection(), &merged, platform),
+            account,
+        })
+    }
+
+    /// **A storage pass's merge, its last step**: the writes are released, and
+    /// the merged document is handed to the worker, conditional on the file the
+    /// merge read, if it differs from it — the units that kept Folio's value.
+    pub(crate) fn end_merge(&mut self) {
+        self.merging = false;
+        self.held = None;
+        self.document.send_owed();
+    }
+
     /// **An update's trial was committed: the document as it stands is handed
     /// over** — every write the trial held back (`update_trial`), conditional on
     /// the revision, so a hand edit made during the trial is not written over.
@@ -2150,9 +2238,10 @@ impl SettingsStore {
         self.document.send_owed();
     }
 
-    /// **Take what the storage worker has answered** (`AppEvent::DocumentsAnswered`).
-    pub(crate) fn take_answers(&mut self) {
-        let _ = self.document.take_answers();
+    /// **Take what the storage worker has answered** (`AppEvent::DocumentsAnswered`):
+    /// whether a re-read found a file that would not parse.
+    pub(crate) fn take_answers(&mut self) -> ReadNews {
+        self.document.take_answers()
     }
 
     /// Let the worker answer everything this store asked, and take it.
@@ -2225,7 +2314,8 @@ impl KeybindingsStore {
                 writer_of_record,
                 crate::update_trial::Writer::Keybindings,
                 lane,
-            ),
+            )
+            .with_policies(Mode::Restore, Follow::Hold),
             fault,
         }
     }
@@ -2302,9 +2392,25 @@ impl KeybindingsStore {
         self.document.send_owed();
     }
 
-    /// **Take what the storage worker has answered** (`AppEvent::DocumentsAnswered`).
-    pub(crate) fn take_answers(&mut self) {
-        let _ = self.document.take_answers();
+    /// **Ask for the file to be read again, because the storage watch heard
+    /// it** (R33, owner ruling Q3 2026-10-11). Until its merge exists
+    /// (T-STORE-MERGE-KEYBINDINGS), a file that changed is stored for it and
+    /// the store is held: the table in force stays, and nothing is written over
+    /// the file. One that will not parse is not stored, and is said.
+    pub(crate) fn ask_reread(&mut self) {
+        self.document.ask_read();
+    }
+
+    /// **Take what the storage worker has answered** (`AppEvent::DocumentsAnswered`):
+    /// whether a re-read found a file that would not parse.
+    pub(crate) fn take_answers(&mut self) -> ReadNews {
+        self.document.take_answers()
+    }
+
+    /// The document half, for a test to look into.
+    #[cfg(test)]
+    pub(crate) fn document(&mut self) -> &mut DocumentState<KeybindingsV1> {
+        &mut self.document
     }
 
     /// Let the worker answer everything this store asked, and take it.
@@ -2505,6 +2611,11 @@ impl ProfilesStore {
 /// **What the storage worker's answers came to, for the window** (`AppEvent::DocumentsAnswered`).
 #[derive(Debug, Default)]
 pub(crate) struct DocumentsHeard {
+    /// Whether a re-read of `settings.json` found a file that would not parse.
+    pub(crate) settings: ReadNews,
+    /// Whether a re-read of `keybindings.json` found a file that would not
+    /// parse.
+    pub(crate) keybindings: ReadNews,
     /// What the re-reads of `profiles.json` put in force.
     pub(crate) profiles: ReadNews,
     /// What the re-reads of `pins.json` put in force.
@@ -2523,8 +2634,8 @@ pub(crate) fn hear_documents(
     profiles: &mut ProfilesStore,
     pins: &mut crate::pins::PinsStore,
 ) -> DocumentsHeard {
-    settings.take_answers();
-    keybindings.take_answers();
+    let settings_news = settings.take_answers();
+    let keybindings_news = keybindings.take_answers();
     let profiles_news = profiles.take_answers();
     let pins_news = pins.take_answers();
     let faults = [
@@ -2537,6 +2648,8 @@ pub(crate) fn hear_documents(
     .flatten()
     .collect();
     DocumentsHeard {
+        settings: settings_news,
+        keybindings: keybindings_news,
         profiles: profiles_news,
         pins: pins_news,
         faults,
@@ -5455,18 +5568,20 @@ mod conditional_write_tests {
         )
     }
 
-    /// RED ((b)14-4, as this ticket builds it: the merge is T-STORE-MERGE-SETTINGS's) — **the
-    /// displaced bytes are stored for the merge against the pre-exchange revision**, and only then
-    /// is the revision what the file holds ((b)3, (c)1).
+    /// RED ((b)14-4, (c)1) — **a displaced file merges against the pre-exchange revision, and
+    /// the next write is conditional on what the exchange wrote.**
     ///
-    /// Folio writes its font; a hand edit lands between the precondition read and the exchange.
-    /// The exchange puts Folio's document on disk and hands the person's bytes back, kept beside
-    /// it. The merge's base must be the revision the write was conditional on: measured against
-    /// what Folio just wrote, a unit only Folio changed would look like the file's change.
+    /// Folio writes its font family; a hand edit of the font size lands between the precondition
+    /// read and the exchange; a press of the theme arrives while the write is on its way. The
+    /// exchange puts Folio's document on disk and hands the person's bytes back, kept beside it.
+    /// The merge's base is the revision the write was conditional on, its `O` the document
+    /// written, its `T` the person's: it keeps both, names no conflict, and lays the theme press
+    /// over the result. The revision is what the target holds — the document written — so the
+    /// merged document is sent conditional on those bytes.
     ///
-    /// MUTATION: in `DocumentState::on_document`'s `Displaced` arm, set the revision to the bytes
-    /// written before storing the merge, and store the revision as its base — the base is Folio's
-    /// own document and the first assertion fails.
+    /// MUTATION: in `DocumentState::on_document`'s `Displaced` arm, set the revision to `theirs`
+    /// (revision (b)'s text) — the revision assertion fails, and the next write would be
+    /// conditional on bytes the file does not hold.
     #[test]
     fn displaced_merges_against_the_pre_exchange_revision() {
         let root = scratch("displaced-base");
@@ -5477,12 +5592,19 @@ mod conditional_write_tests {
 
         let ours = settings("我们的 Ours Mono");
         assert!(store.store(ours.clone()));
-        let theirs = bytes(&SettingsV1 {
+        let write = next_write(&jobs);
+        let pressed = SettingsV1 {
+            theme_mode: bt_persist::ThemeModeV1::Light,
+            ..ours.clone()
+        };
+        assert!(store.store(pressed));
+        let theirs = SettingsV1 {
             terminal_font_size: 19,
             ..base.clone()
-        });
-        serve_crossed(next_write(&jobs), Some(theirs.clone()));
+        };
+        serve_crossed(write, Some(bytes(&theirs)));
         store.settle();
+        assert!(jobs.try_recv().is_err(), "nothing is sent before the merge");
 
         let merges = store.document().merges().to_vec();
         assert_eq!(merges.len(), 1, "the crossing edit is stored for the merge");
@@ -5490,23 +5612,242 @@ mod conditional_write_tests {
             merges[0].base.document, base,
             "against the pre-exchange revision"
         );
-        assert_eq!(merges[0].base.bytes.as_deref(), Some(&bytes(&base)[..]));
-        assert_eq!(merges[0].theirs.as_deref(), Some(&theirs[..]));
         let kept = merges[0]
             .kept
             .clone()
             .expect("the person's bytes are kept beside the file");
-        assert_eq!(file_bytes(&kept), theirs, "and nothing of them is lost");
+        assert_eq!(
+            file_bytes(&kept),
+            bytes(&theirs),
+            "and nothing of them is lost"
+        );
         assert_eq!(
             file_bytes(&path),
             bytes(&ours),
             "Folio's document is on disk"
         );
         assert_eq!(
-            store.revision().document,
-            ours,
+            store.revision().bytes.as_deref(),
+            Some(&bytes(&ours)[..]),
             "and the revision is what the file holds"
         );
+
+        let pass = store
+            .begin_merge(bt_platform::HostPlatform::Windows)
+            .expect("the displaced file is merged");
+        store.end_merge();
+        assert!(pass.account.conflicts.is_empty(), "no conflict is named");
+        let merged = SettingsV1 {
+            terminal_font_size: 19,
+            theme_mode: bt_persist::ThemeModeV1::Light,
+            ..ours.clone()
+        };
+        assert_eq!(
+            store.document().desired(),
+            &merged,
+            "both edits and the press"
+        );
+        let next = next_write(&jobs);
+        assert_eq!(
+            next.expected.as_deref(),
+            Some(&bytes(&ours)[..]),
+            "conditional on the document written"
+        );
+        assert_eq!(&*next.bytes, &bytes(&merged)[..]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED ((c)1) — **a unit recovered from a displaced file survives a later `Moved`.**
+    ///
+    /// Folio writes its font family (A); a crossing edit sets the size (B), displaced and
+    /// recovered into `desired`; before the merged document is written the person changes the
+    /// theme in the file (C). The `Moved` merge is measured against the revision the target
+    /// held — the document written — so B, which only Folio's `desired` holds now, is Folio's
+    /// unit, and the merge keeps A, B and C, and lands them.
+    ///
+    /// MUTATION: revision (b)'s bookkeeping — in `DocumentState::on_document`'s `Displaced` arm,
+    /// set the revision to `theirs` — the `Moved` merge sees B as unchanged against its base and
+    /// the file's old size as the file's change: B is lost.
+    #[test]
+    fn a_unit_recovered_from_a_displaced_file_survives_a_later_moved() {
+        let root = scratch("recovered-survives");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let base = settings("基线 Base Mono");
+        std::fs::write(&path, bytes(&base)).unwrap();
+        let (mut store, jobs) = merging_store(&path);
+        let platform = bt_platform::HostPlatform::Windows;
+
+        // A, crossed by B.
+        let a = settings("甲 A Mono");
+        assert!(store.store(a.clone()));
+        let with_b = SettingsV1 {
+            terminal_font_size: 21,
+            ..base.clone()
+        };
+        serve_crossed(next_write(&jobs), Some(bytes(&with_b)));
+        store.settle();
+        store.begin_merge(platform).expect("Displaced is merged");
+        store.end_merge();
+        let a_b = SettingsV1 {
+            terminal_font_size: 21,
+            ..a.clone()
+        };
+        assert_eq!(store.document().desired(), &a_b);
+
+        // C, on the file the target holds (A), before A+B is written.
+        let write = next_write(&jobs);
+        let a_c = SettingsV1 {
+            theme_mode: bt_persist::ThemeModeV1::Dark,
+            ..a.clone()
+        };
+        std::fs::write(&path, bytes(&a_c)).unwrap();
+        serve_crossed(write, None);
+        store.settle();
+        let pass = store.begin_merge(platform).expect("Moved is merged");
+        store.end_merge();
+        let a_b_c = SettingsV1 {
+            terminal_font_size: 21,
+            theme_mode: bt_persist::ThemeModeV1::Dark,
+            ..a.clone()
+        };
+        assert_eq!(store.document().desired(), &a_b_c, "A, B and C");
+        assert!(pass.account.conflicts.is_empty());
+        serve_crossed(next_write(&jobs), None);
+        store.settle();
+        assert_eq!(file_bytes(&path), bytes(&a_b_c), "and they land");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED ((c)1, (d)1) — **a kept file is removed only after a document derived from it
+    /// lands.** The displaced copy stays on disk through the `Displaced` answer and the merge;
+    /// the landing of the merged document removes it.
+    ///
+    /// MUTATION: remove `kept` on the `Displaced` answer (in `settle_exchange`'s `Merge` arm,
+    /// remove the displaced file) — the copy is gone before the merged document lands.
+    #[test]
+    fn a_kept_file_is_removed_only_after_a_document_derived_from_it_lands() {
+        let root = scratch("kept-derived");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let base = settings("基线 Base Mono");
+        std::fs::write(&path, bytes(&base)).unwrap();
+        let (mut store, jobs) = merging_store(&path);
+
+        assert!(store.store(settings("我们的 Ours Mono")));
+        let theirs = SettingsV1 {
+            terminal_font_size: 18,
+            ..base.clone()
+        };
+        serve_crossed(next_write(&jobs), Some(bytes(&theirs)));
+        store.settle();
+        let kept = store.document().merges()[0]
+            .kept
+            .clone()
+            .expect("the person's bytes are kept");
+        assert!(kept.is_file(), "the kept file is on disk after `Displaced`");
+        store
+            .begin_merge(bt_platform::HostPlatform::Windows)
+            .expect("merged");
+        store.end_merge();
+        assert!(
+            kept.is_file(),
+            "and after the merge, until a document derived from it lands"
+        );
+        assert_eq!(store.document().kept().len(), 1, "one obligation");
+        serve_crossed(next_write(&jobs), None);
+        store.settle();
+        assert!(!kept.exists(), "the derived document landed: the copy goes");
+        assert!(store.document().kept().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (carry-forward 1) — **a held settings document is folded, and the next trigger writes
+    /// conditionally.** A write answers `Moved`: the file's bytes are stored and the store is held
+    /// — a press sends nothing. The merge folds the file in and releases the hold; the merged
+    /// document and the next press are each sent conditional on the bytes the file holds.
+    ///
+    /// MUTATION: `DocumentState::fold` leaves the hold (drop its release) — nothing is queued
+    /// after the merge.
+    #[test]
+    fn a_held_settings_document_is_folded_and_the_next_trigger_writes_conditionally() {
+        let root = scratch("held-folded");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let base = settings("基线 Base Mono");
+        std::fs::write(&path, bytes(&base)).unwrap();
+        let (mut store, jobs) = merging_store(&path);
+
+        assert!(store.store(settings("我们的 Ours Mono")));
+        let write = next_write(&jobs);
+        let theirs = SettingsV1 {
+            terminal_font_size: 20,
+            ..base.clone()
+        };
+        std::fs::write(&path, bytes(&theirs)).unwrap();
+        serve_crossed(write, None);
+        store.settle();
+        assert!(store.store(settings("再按 Pressed Mono")));
+        assert!(
+            jobs.try_recv().is_err(),
+            "held: nothing is written over the file"
+        );
+
+        store
+            .begin_merge(bt_platform::HostPlatform::Windows)
+            .expect("the moved file is merged");
+        store.end_merge();
+        let sent = next_write(&jobs);
+        assert_eq!(
+            sent.expected.as_deref(),
+            Some(&bytes(&theirs)[..]),
+            "the merged document, conditional on the file"
+        );
+        assert_eq!(
+            &*sent.bytes,
+            &bytes(&SettingsV1 {
+                terminal_font_size: 20,
+                ..settings("再按 Pressed Mono")
+            })[..]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (carry-forward 1, (b)17 row 6) — **a keybindings change is held for its merge, not
+    /// overwritten.** `keybindings.json` joins the pass; until its merge exists
+    /// (T-STORE-MERGE-KEYBINDINGS) a re-read that finds the file changed takes nothing — the
+    /// table in force stays — and holds the store, so a press is not written over the file.
+    ///
+    /// MUTATION: the keybindings re-read is taken (open the store with `Follow::Take`) — the
+    /// file's line is put in force.
+    #[test]
+    fn keybindings_change_is_held_for_ticket_7_not_overwritten() {
+        let root = scratch("keybindings-held");
+        let path = root.join(super::KEYBINDINGS_FILE_NAME);
+        let line = |action: &str, chord: &str| bt_persist::BindingOverrideV1 {
+            action: action.to_owned(),
+            chord: Some(chord.to_owned()),
+        };
+        let platform = super::keybindings_platform();
+        let document = |lines| {
+            bt_persist::serialize_keybindings(&super::keybindings_document(lines, platform))
+                .expect("a keybindings document serializes")
+        };
+        std::fs::write(&path, document(vec![line("new-tab", "Ctrl+Shift+T")])).unwrap();
+        let (lane, jobs) = StorageLane::held();
+        let mut store = super::KeybindingsStore::at_on(path.clone(), lane);
+        let in_force = store.loaded().to_vec();
+
+        let hand = document(vec![line("new-tab", "Ctrl+Alt+新")]);
+        std::fs::write(&path, &hand).unwrap();
+        let news = store
+            .document()
+            .hear_read(StableRead::Bytes(Arc::from(&hand[..])));
+        assert!(!news.taken, "nothing is taken");
+        assert_eq!(store.loaded(), &in_force[..], "the table in force stays");
+        assert_eq!(store.document().merges().len(), 1, "stored for the merge");
+
+        assert!(store.store(vec![line("close-tab", "Ctrl+Shift+W")]));
+        store.release_trial();
+        assert!(jobs.try_recv().is_err(), "nothing is written over the file");
+        assert_eq!(file_bytes(&path), hand, "the person's file stands");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6036,6 +6377,8 @@ mod conditional_write_tests {
         std::fs::write(&path, bytes(&settings("基线 Base Mono"))).unwrap();
         let (lane, jobs) = StorageLane::held();
         let mut store = SettingsStore::read_at(path.clone(), is_writer_of_document(&path), lane);
+        // The `Restore` policy the three other stores still send, carried on a settings document.
+        store.document().sending(Mode::Restore);
 
         assert!(store.store(settings("我们的 Ours Mono")));
         let theirs = bytes(&settings("他们的 Theirs Mono — 手改"));
@@ -6082,6 +6425,8 @@ mod conditional_write_tests {
         std::fs::write(&path, bytes(&base)).unwrap();
         let (lane, jobs) = StorageLane::held();
         let mut store = SettingsStore::read_at(path.clone(), is_writer_of_document(&path), lane);
+        // The `Restore` policy the three other stores still send, carried on a settings document.
+        store.document().sending(Mode::Restore);
         assert!(store.store(settings("我们的 Ours Mono")));
         let theirs = bytes(&settings("他们的 Theirs Mono"));
         serve_crossed(next_write(&jobs), Some(theirs.clone()));

@@ -8,6 +8,11 @@
 //! chooser `ImagePicker` already is), the import file is read once through
 //! `bt_persist::read_export` — the bounded read on `file_reads`' settings lane —
 //! and the writes are the stores' own, the settings batch landing as one write.
+//!
+//! **A hand edit of `settings.json` enters by the same doors** (R33; design note
+//! 2026-10-11 §3.3, §5.1; T-STORE-MERGE-SETTINGS): the storage pass's merge
+//! ([`Runtime::merge_documents`]) walks each changed row's own apply function
+//! with the store's writes held, exactly as an import's settings part does.
 
 use std::path::Path;
 
@@ -16,7 +21,8 @@ use bt_persist::{ExportParts, FallbackReason, KeybindingsV1};
 
 use crate::settings_bundle::{self, ImportFault, SettingChange};
 use crate::{
-    FilePick, Runtime, hang_watch, i18n, persist, profiles, schemes, settings, shortcuts, toast,
+    FilePick, Runtime, document_request, hang_watch, i18n, persist, profiles, schemes, settings,
+    shortcuts, toast,
 };
 
 fn keybindings_for_export(
@@ -340,6 +346,92 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// **The storage pass's merges, put in force** (design note 2026-10-11
+    /// §3.3, §3.6): what the files' merges replaced, for the pass's one card
+    /// (T-STORE-NOTICE raises it) — nothing for a clean hand edit.
+    pub(crate) fn merge_documents(&mut self) -> Result<document_request::MergeNotice> {
+        let mut notice = document_request::MergeNotice::default();
+        notice.files.extend(self.merge_settings_file()?);
+        Ok(notice)
+    }
+
+    /// **`settings.json`'s merge, in §3.3's order.** The store merges every
+    /// file stored for it field by field and folds the result into `desired`,
+    /// the revision becoming the file the merge read
+    /// (`SettingsStore::begin_merge`); then, with the writes held, every value
+    /// that differs between what is in force and the merged document goes
+    /// through its row's own door — the import's walk, and the import's batch
+    /// shape — while a store moves only what is in force; then the writes are
+    /// released, and what kept Folio's value is written, conditional on the
+    /// file. A value no row on this platform shows is stored as it came.
+    ///
+    /// Then the open dialog re-derives, the chrome follows, and
+    /// `diagnostics.log` gets the pass's one line. Answers what the file
+    /// replaced, `None` for a clean hand edit or no merge.
+    fn merge_settings_file(&mut self) -> Result<Option<document_request::ReplacedInFile>> {
+        let Some(pass) = self
+            .app
+            .settings_store
+            .begin_merge(bt_platform::host_platform())
+        else {
+            return Ok(None);
+        };
+        let mut outcome = Ok(());
+        for change in &pass.doors.apply {
+            outcome = self.apply_imported_setting(change.clone());
+            if outcome.is_err() {
+                break;
+            }
+        }
+        for change in &pass.doors.elsewhere {
+            self.store_imported_value(change);
+        }
+        self.app.settings_store.end_merge();
+        outcome?;
+        eprintln!("{}", pass.diagnostics());
+        if !pass.doors.apply.is_empty() || !pass.doors.elsewhere.is_empty() {
+            let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
+            let content =
+                self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
+            self.window.settings.keep_focus_reachable(content);
+            if self.refresh_chrome() {
+                self.present_chrome_change()?;
+            }
+        }
+        Ok(pass.replaced())
+    }
+
+    /// **A re-read that found `settings.json` or `keybindings.json` would not
+    /// parse**: what is in force stays, and one card says so — once, until the
+    /// file reads cleanly again (`App::profiles_file_broken`'s rule, §3.6).
+    pub(crate) fn take_kept_news(
+        &mut self,
+        settings: document_request::ReadNews,
+        keybindings: document_request::ReadNews,
+    ) -> Result<()> {
+        let (say, broken) = said_once(self.app.settings_file_broken, settings);
+        self.app.settings_file_broken = broken;
+        if say {
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                i18n::settings_file_kept(persist::SETTINGS_FILE_NAME),
+            )?;
+        }
+        let (say, broken) = said_once(self.app.keybindings_file_broken, keybindings);
+        self.app.keybindings_file_broken = broken;
+        if say {
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                i18n::keybindings_file_kept(persist::KEYBINDINGS_FILE_NAME),
+            )?;
+        }
+        Ok(())
+    }
+
     /// **One imported value, through the function a press on its row calls.**
     ///
     /// The values no row shows, and the two rows whose press only records a
@@ -529,6 +621,17 @@ impl Runtime<'_> {
             Some(i18n::Text::SettingsSkipped.text().to_owned()),
             names.join(", "),
         )
+    }
+}
+
+/// **Whether a re-read's verdict raises the "kept" card now**, and whether the
+/// file is broken after it: said when it first will not parse, and again only
+/// after it read cleanly in between.
+fn said_once(broken: bool, news: document_request::ReadNews) -> (bool, bool) {
+    match news.unreadable {
+        Some(true) => (!broken, true),
+        Some(false) => (false, false),
+        None => (false, broken),
     }
 }
 
