@@ -1628,8 +1628,7 @@ mod tests {
     ///
     /// MUTATIONS: (1) drop the physical fallback from `input::verb_letter` —
     /// the Russian `ь` goes red; (2) apply it to every letter — AZERTY's `,` on
-    /// the physical `M` is not a letter and stays nothing, but its `m` on the
-    /// physical `;` goes red.
+    /// the physical `M` becomes the mute and goes red.
     #[test]
     fn the_mute_is_the_key_at_m_on_a_non_latin_layout() {
         use winit::keyboard::{Key, KeyCode, PhysicalKey};
