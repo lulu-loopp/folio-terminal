@@ -40263,10 +40263,11 @@ mod shell_birth_tests {
     }
 
     /// RED (round 2, B1) — **a birth worker that panics is a birth that failed**: its pane is
-    /// woken and lands the refusal toast's reason, naming the panic, instead of waiting for ever.
+    /// woken and lands the refusal toast's reason, that the birth panicked, instead of waiting for
+    /// ever. The panic's own text is not in it: it is in the panic log (T-PANIC-ROWS-HONEST).
     ///
-    /// MUTATION (observed red): the worker body without its `catch_unwind` — nothing is
-    /// published and the pane is never woken.
+    /// MUTATION (observed red): the worker body without its `contained_panic::contain` — nothing
+    /// is published and the pane is never woken.
     #[test]
     fn a_birth_worker_that_panics_lands_the_refusal() {
         let decision = decided(Started::AsAsked);
@@ -40283,9 +40284,10 @@ mod shell_birth_tests {
                 .expect("a failed birth is not this window's error")
                 .expect("it is the refusal to say")
         );
+        assert!(said.contains(pty_door::BIRTH_PANICKED), "{said}");
         assert!(
-            said.contains("the PTY birth worker panicked: 举手-planted"),
-            "{said}"
+            !said.contains("举手-planted"),
+            "the payload is not the pane's: {said}"
         );
         assert!(leaf.birth.is_none() && leaf.pty.is_none());
     }
@@ -74872,9 +74874,10 @@ fn the_hook_lets_this_panic_unwind() -> bool {
 }
 
 /// **A worker's unit of work whose panic is that request's failure, not the
-/// process's end** (H2-NITS round 5) — the resident panic hook's second contained
-/// kind beside a formula's render, and the one mechanism every worker uses for
-/// it (`docs/plans/structural-debt.md` D-96 names the rows still to adopt it).
+/// process's end** (H2-NITS round 5; T-PANIC-ROWS-HONEST) — the resident panic
+/// hook's second contained kind beside a formula's render, and the one mechanism
+/// every worker uses for it: [`bt_platform::contained_panic`], which the
+/// platform's own callbacks reach too.
 ///
 /// [`contain`] marks this thread for the length of `work` and is its unwind
 /// boundary; the hook ([`the_hook_lets_this_panic_unwind`]) asks [`is_contained`]
@@ -74883,30 +74886,7 @@ fn the_hook_lets_this_panic_unwind() -> bool {
 /// state another thread reads half-written is the only kind to contain: the
 /// caller turns the `Err` into its request's `Failed` terminal (C2, C3).
 mod contained_panic {
-    use std::cell::Cell;
-
-    thread_local! {
-        static CONTAINED: Cell<bool> = const { Cell::new(false) };
-    }
-
-    /// Run `work` with this thread's panics contained; `Err` carries the panic.
-    pub(crate) fn contain<T>(work: impl FnOnce() -> T) -> std::thread::Result<T> {
-        struct Restore(bool);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                CONTAINED.set(self.0);
-            }
-        }
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            let _restore = Restore(CONTAINED.replace(true));
-            work()
-        }))
-    }
-
-    /// Whether this thread is inside [`contain`] now.
-    pub(crate) fn is_contained() -> bool {
-        CONTAINED.get()
-    }
+    pub(crate) use bt_platform::contained_panic::{contain, is_contained};
 
     #[cfg(test)]
     mod tests {

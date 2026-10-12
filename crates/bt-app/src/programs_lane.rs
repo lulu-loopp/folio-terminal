@@ -1672,6 +1672,60 @@ pub(crate) mod tests {
         let answers = answers_through(lane, &wakes, next);
         assert_eq!(answers.verdicts[0].generation, next);
     }
+
+    /// RED (T-PANIC-ROWS-HONEST; S-4) — **a walk that panics under the resident panic hook is a
+    /// reported death, not the process's end.** The product's hook ends the process for a panic it
+    /// is not told is contained; the walk runs inside `lane::task` and the worker's body inside
+    /// the executor, both within `contained_panic::contain` (S-4: the seam's containment, which
+    /// replaced the program walk's own), so the hook's decision at the panic is yes and the
+    /// unwind reaches the task: the request ends `Failed`, which the window thread takes.
+    ///
+    /// MUTATION: `lane::task` and `Executor::start_worker` without `contained_panic::contain` —
+    /// the decision at the panic is no (the process would end there).
+    #[test]
+    fn a_walk_that_panics_under_the_resident_hook_is_a_reported_death() {
+        struct Decides(FakeMachine, Mutex<mpsc::Sender<bool>>);
+        impl Machine for Decides {
+            fn environment(
+                &self,
+                _ctx: &WorkerCtx,
+                _note: &dyn Fn(&str),
+            ) -> Box<dyn ShellEnvironment> {
+                let _ = self
+                    .1
+                    .lock()
+                    .unwrap()
+                    .send(crate::the_hook_lets_this_panic_unwind());
+                panic!("scripted: 程序清点中途失败 the walk fails");
+            }
+            fn wsl(&self) -> WslFacts {
+                self.0.wsl()
+            }
+        }
+        let (told, decision) = mpsc::channel();
+        let lane: &'static ProgramsLane = Box::leak(Box::new(ProgramsLane::new(
+            Decides(FakeMachine::with_path(&[bin_dir()]), Mutex::new(told)),
+            |_: &str| {},
+        )));
+        let (woke, wakes) = mpsc::channel();
+        let woke = Mutex::new(woke);
+        lane.install_wake(move || {
+            let _ = woke.lock().unwrap().send(());
+        });
+        let rows = [row("rg", "rg.exe")];
+        let dead = lane
+            .request(request(&rows, Trigger::Launch))
+            .expect("admitted");
+        assert!(
+            crate::lane::receive(&decision, "the hook's decision inside the walk"),
+            "the walk runs where the resident hook lets its panic unwind"
+        );
+        let ended = ends_through(lane, &wakes, dead);
+        assert!(
+            matches!(ended[..], [(id, Terminal::Failed(_))] if id == dead),
+            "{ended:?}"
+        );
+    }
 }
 
 /// **The lane contract's adapter** (`crate::lane`, `lane_contract_tests`): a [`ProgramsLane`] of

@@ -8,6 +8,9 @@ use std::num::NonZeroIsize;
 /// admission (`docs/ARCHITECTURE.md` §5.1; design note 2026-09-26): `bt-effects`' vocabulary,
 /// re-exported, and the thread door. The one module of this crate that forbids `unsafe`.
 pub mod admission;
+/// A unit of work whose panic is its own failure under the resident fatal panic hook: the one
+/// unwind boundary of the product's workers and callbacks.
+pub mod contained_panic;
 /// The platform-free elevated-pane wire codec and its pure lifecycle models.
 pub mod elevated_protocol;
 pub mod environment;
