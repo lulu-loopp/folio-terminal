@@ -43,7 +43,7 @@
 //!    proved the same code (`macos_update::rescue_clone`; [`Stop::Clone`]).
 //! 6. **`Prepared`**, durably, with both bundles' identities — after both
 //!    bundles, every file and folder, are on the medium
-//!    (`macos_update::make_durable`, 0.4.8 E6; [`Stop::Copy`], [`Stop::Clone`])
+//!    ([`make_durable`], 0.4.8 E6; [`Stop::Copy`], [`Stop::Clone`])
 //!    (`Layout::Bundle`, `deferred_launches: 0`, outcome `none`), and the
 //!    staged transaction — home, journal, lock — handed to the job with
 //!    `Poster::verified`.
@@ -145,8 +145,8 @@ pub(crate) trait Tools: Send + Sync {
 /// process's designated requirement, `codesign --verify --strict --deep
 /// --all-architectures -R`, and Gatekeeper's assessment recorded through its
 /// decision, F-9), `macos_update::copy_bundle` (`ditto`),
-/// `macos_update::rescue_clone`, `macos_update::item_replacement_directory` and
-/// `macos_update::make_durable`.
+/// `macos_update::rescue_clone`, `macos_update::item_replacement_directory`, and
+/// [`make_durable`] (the files door's listing and `macos_update::flush_to_medium`).
 pub(crate) struct System;
 
 impl Tools for System {
@@ -175,8 +175,56 @@ impl Tools for System {
     }
 
     fn make_durable(&self, worker: &WorkerCtx, bundle: &Path) -> Result<(), String> {
-        macos_update::make_durable(worker, bundle).map_err(|refusal| refusal.to_string())
+        make_durable(worker, bundle)
     }
+}
+
+/// **Put the bundle at `bundle` on the medium** (0.4.8 E6, the release read's
+/// F6): every regular file and every folder of it, `bundle` itself included,
+/// flushed (`macos_update::flush_to_medium`, `F_FULLFSYNC`), each folder after
+/// what it holds, and then the folder `bundle` stands in, so its own name is
+/// on the medium too. A link is not followed: it is an entry of its folder,
+/// flushed with that folder. Each folder is listed through the files door
+/// (`files::read_directory`); one that cannot be listed, or holds more names
+/// than one listing reads, is a refusal, never a partial flush.
+///
+/// # Errors
+/// The first folder that could not be listed whole, or the first name that
+/// could not be flushed, as a sentence.
+fn make_durable(worker: &WorkerCtx, bundle: &Path) -> Result<(), String> {
+    flush_tree(worker, bundle)?;
+    let parent = bundle.parent().unwrap_or(bundle);
+    macos_update::flush_to_medium(worker, parent).map_err(|refusal| refusal.to_string())
+}
+
+/// [`make_durable`]'s walk: what the folder `path` holds first, then `path`.
+fn flush_tree(worker: &WorkerCtx, path: &Path) -> Result<(), String> {
+    let listing = match crate::files::read_directory(path) {
+        crate::files::DirOutcome::Listed(listing) => listing,
+        crate::files::DirOutcome::Failed(fault) => {
+            return Err(format!("{} could not be listed: {fault:?}", path.display()));
+        }
+    };
+    if listing.omitted > 0 {
+        return Err(format!(
+            "{} holds {} more names than one listing reads",
+            path.display(),
+            listing.omitted
+        ));
+    }
+    for entry in &listing.entries {
+        let inside = path.join(&entry.name);
+        if entry.is_symlink {
+            continue;
+        }
+        if entry.is_dir {
+            flush_tree(worker, &inside)?;
+        } else {
+            macos_update::flush_to_medium(worker, &inside)
+                .map_err(|refusal| refusal.to_string())?;
+        }
+    }
+    macos_update::flush_to_medium(worker, path).map_err(|refusal| refusal.to_string())
 }
 
 // ── the driver ──────────────────────────────────────────────────────────────

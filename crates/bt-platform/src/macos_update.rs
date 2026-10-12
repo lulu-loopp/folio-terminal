@@ -141,8 +141,8 @@ pub enum Refusal {
     /// An extended attribute could not be carried onto a bundle: not
     /// written, not read back, read back different, or not flushed.
     Attribute { name: String, detail: String },
-    /// A file or folder of a staged bundle could not be read or flushed to
-    /// the medium ([`make_durable`]).
+    /// A file or folder could not be opened or flushed to the medium
+    /// ([`flush_to_medium`]).
     Durable { path: PathBuf, error: io::Error },
 }
 
@@ -1275,47 +1275,26 @@ pub fn carry_attributes(bundle: &Path, attributes: &[(&str, &[u8])]) -> Result<(
     })
 }
 
-/// **Make the bundle at `bundle` durable** (0.4.8 E6, the release read's
-/// F6): every regular file in it and every folder of it, `bundle` itself
-/// included, flushed to the medium (`F_FULLFSYNC`), folders after what they
-/// hold, and then the folder `bundle` stands in, so its own name is on the
-/// medium too. A link is not followed: it is an entry of its folder, flushed
-/// with that folder. What a `clonefile` or a `ditto` leaves is in the page
-/// cache until this, and the journal that vouches for it (`Prepared`) is
-/// written durably only after it — as the Windows Prepare's staged files are
-/// each flushed before their name (`install_txn::durable_copy`). Worker only:
-/// it reads every folder of the bundle.
+/// **Put the file or folder at `path` on the medium** (0.4.8 E6, the release
+/// read's F6): `F_FULLFSYNC` on a read-only descriptor of it — for a file its
+/// data and its metadata, for a folder its entries — so a power cut after the
+/// answer keeps it. What a `clonefile` or a `ditto` leaves is in the page cache
+/// until each of its files and folders is flushed; the macOS Prepare walks a
+/// staged bundle and flushes every one before the journal vouches for it
+/// (`update_prepare_macos` in `bt-app`), as the Windows Prepare flushes each
+/// staged file before its name (`install_txn::durable_copy`). Worker only.
 ///
 /// # Errors
-/// [`Refusal::NotHere`] off macOS; [`Refusal::Durable`] naming the first file
-/// or folder that could not be listed, opened or flushed.
-pub fn make_durable(_worker: &crate::admission::WorkerCtx, bundle: &Path) -> Result<(), Refusal> {
+/// [`Refusal::NotHere`] off macOS; [`Refusal::Durable`] when `path` could not
+/// be opened or flushed.
+pub fn flush_to_medium(_worker: &crate::admission::WorkerCtx, path: &Path) -> Result<(), Refusal> {
     if crate::host_platform() != HostPlatform::MacOs {
         return Err(Refusal::NotHere);
     }
-    flush_tree(bundle).map_err(|(path, error)| Refusal::Durable { path, error })?;
-    let parent = bundle.parent().unwrap_or(bundle);
-    full_fsync(parent).map_err(|error| Refusal::Durable {
-        path: parent.to_path_buf(),
+    full_fsync(path).map_err(|error| Refusal::Durable {
+        path: path.to_path_buf(),
         error,
     })
-}
-
-/// [`make_durable`]'s walk: what `path` holds first, then `path`; the path
-/// that refused with its error.
-fn flush_tree(path: &Path) -> Result<(), (PathBuf, io::Error)> {
-    let refused = |error| (path.to_path_buf(), error);
-    let kind = std::fs::symlink_metadata(path)
-        .map_err(refused)?
-        .file_type();
-    if kind.is_dir() {
-        for entry in std::fs::read_dir(path).map_err(refused)? {
-            flush_tree(&entry.map_err(refused)?.path())?;
-        }
-    } else if !kind.is_file() {
-        return Ok(());
-    }
-    full_fsync(path).map_err(refused)
 }
 
 /// `setxattr(XATTR_NOFOLLOW)`, creating or replacing the value.
@@ -1386,7 +1365,7 @@ fn full_fsync(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Off macOS [`carry_attributes`] and [`make_durable`] refuse before these
+/// Off macOS [`carry_attributes`] and [`flush_to_medium`] refuse before these
 /// would be asked.
 #[cfg(not(target_os = "macos"))]
 fn write_attribute(_path: &Path, _name: &str, _value: &[u8]) -> io::Result<()> {
@@ -1623,7 +1602,7 @@ mod tests {
                     Err(Refusal::NotHere)
                 ));
                 assert!(matches!(
-                    make_durable(worker, bundle),
+                    flush_to_medium(worker, bundle),
                     Err(Refusal::NotHere)
                 ));
             },
@@ -1698,38 +1677,40 @@ mod tests {
             assert!(output.status.success(), "{}", said(&output));
         }
 
-        /// RED (0.4.8 E6, the release read's F6) — **a staged bundle is made
-        /// durable whole**: a bundle with a link in it is flushed and answers
-        /// `Ok`; a folder of it that cannot be listed is a refusal naming that
-        /// folder, never a silent success.
+        /// RED (0.4.8 E6, the release read's F6) — **a file and a folder are
+        /// flushed to the medium, and a name that cannot be opened is a
+        /// refusal naming it**, never a silent success.
         ///
-        /// MUTATION: in `flush_tree`, flush only `path` (skip the folder's
-        /// entries) — the unreadable folder is never reached and the call
-        /// answers `Ok`.
+        /// MUTATION: in `flush_to_medium`, answer `Ok(())` without
+        /// `full_fsync`.
         #[test]
-        fn a_staged_bundle_is_made_durable_whole() {
-            use std::os::unix::fs::PermissionsExt;
+        fn a_file_and_a_folder_are_flushed_and_a_missing_one_is_refused() {
             let root = scratch("durable");
             let bundle = tiny_bundle(&root, "Folio.app");
-            std::os::unix::fs::symlink("MacOS/tiny", bundle.join("Contents/link")).unwrap();
-            let on_worker = |bundle: PathBuf| {
-                crate::spawn_at_priority(
-                    "bt-e6-durable-test",
-                    crate::ThreadPriority::BelowNormal,
-                    move |worker| make_durable(worker, &bundle),
-                )
-                .expect("the thread door starts a thread")
-                .join()
-                .expect("the walk does not panic")
-            };
-            assert!(on_worker(bundle.clone()).is_ok());
-            let sealed = bundle.join("Contents/Resources");
-            std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
-            let refused = on_worker(bundle.clone());
-            std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let missing = bundle.join("Contents/Resources/gone.txt");
+            let flushed = crate::spawn_at_priority(
+                "bt-e6-durable-test",
+                crate::ThreadPriority::BelowNormal,
+                {
+                    let (bundle, missing) = (bundle.clone(), missing.clone());
+                    move |worker| {
+                        (
+                            flush_to_medium(worker, &bundle.join("Contents/MacOS/tiny")),
+                            flush_to_medium(worker, &bundle),
+                            flush_to_medium(worker, &missing),
+                        )
+                    }
+                },
+            )
+            .expect("the thread door starts a thread")
+            .join()
+            .expect("the flushes do not panic");
+            assert!(flushed.0.is_ok(), "{:?}", flushed.0);
+            assert!(flushed.1.is_ok(), "{:?}", flushed.1);
             assert!(
-                matches!(&refused, Err(Refusal::Durable { path, .. }) if *path == sealed),
-                "{refused:?}"
+                matches!(&flushed.2, Err(Refusal::Durable { path, .. }) if *path == missing),
+                "{:?}",
+                flushed.2
             );
             let _ = std::fs::remove_dir_all(&root);
         }
