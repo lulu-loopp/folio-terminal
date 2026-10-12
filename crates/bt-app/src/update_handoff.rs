@@ -884,8 +884,8 @@ mod tests {
     use crate::update_apply::Window;
     use crate::update_job::{Abandon, Applied, Job, Offer, State};
     use crate::update_txn::{
-        Asker, Class, Disk, HeaderOutcome, Home, Inventories, Journal, JournalRead, Layout,
-        Located, Nonce, Phase, PhaseKind, StartAction, StartView, TxnId, at_start, decide,
+        Asker, Class, Disk, HeaderOutcome, Home, Inventories, Journal, Layout, Located, Nonce,
+        Phase, PhaseKind, StartAction, StartView, TxnId, at_start, decide,
     };
 
     #[cfg(windows)]
@@ -1304,7 +1304,7 @@ mod tests {
         assert_eq!(header.outcome, HeaderOutcome::None);
         assert_eq!(
             at_start(&StartView {
-                journal: JournalRead::Read(header),
+                header,
                 lock_free: true,
                 own_image: None,
                 rescue_image: None,
@@ -1592,7 +1592,7 @@ mod tests {
         let mut quit = Quit::begin_for(vec!["notes.md".to_owned()], reason);
         let row = |journal: &Journal| {
             let start = at_start(&StartView {
-                journal: JournalRead::Read(journal.header()),
+                header: journal.header(),
                 lock_free: true,
                 own_image: None,
                 rescue_image: None,

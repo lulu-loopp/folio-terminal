@@ -1112,6 +1112,10 @@ fn first_text_during_the_documents_phase_writes_the_trial_receipt_ahead_of_the_c
     let answer = session.write_receipt(crate::update_trial::ReceiptJob {
         path: root.join("trial-receipt 试用.json"),
         bytes: b"{\"trial\":\"receipt\"}".to_vec(),
+        // The scripted worker records the job and writes nothing, so no
+        // journal stands here to grant it.
+        journal: root.join("journal.json"),
+        txn: crate::update_txn::TxnId::new([0x7e; 16]),
     });
     assert!(answer.is_some(), "a worker takes it");
     disk.look();

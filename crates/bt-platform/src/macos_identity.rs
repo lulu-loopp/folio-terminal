@@ -563,7 +563,8 @@ mod arm {
 
     /// **Run `program` with `arguments` under `bound`**, through the child
     /// door; a child past its bound, or past [`OUTPUT_BOUND`] on a stream, is
-    /// ended by its own handle and the call refused at `stage`.
+    /// ended by its own handle and the call refused at `stage` — one past its
+    /// bound quoting the first line of what it had said by then.
     pub(super) fn run(
         stage: Stage,
         program: &str,
@@ -580,10 +581,10 @@ mod arm {
             child.take_stderr().expect("stderr was piped"),
         );
         let deadline = Instant::now() + bound;
+        let (mut out, mut err) = (Vec::new(), Vec::new());
         let collected = (|| {
             nonblocking(&stdout).map_err(|_| Why::DidNotStart)?;
             nonblocking(&stderr).map_err(|_| Why::DidNotStart)?;
-            let (mut out, mut err) = (Vec::new(), Vec::new());
             let (mut out_done, mut err_done) = (false, false);
             loop {
                 out_done = out_done || drain(&mut stdout, &mut out)?;
@@ -596,7 +597,7 @@ mod arm {
                     if !err_done {
                         drain(&mut stderr, &mut err)?;
                     }
-                    return Ok((status.code(), out, err));
+                    return Ok(status.code());
                 }
                 if Instant::now() >= deadline {
                     return Err(Why::TimedOut);
@@ -604,11 +605,19 @@ mod arm {
                 std::thread::sleep(POLL);
             }
         })();
-        let (status, out, err) = collected.map_err(|why| {
+        let status = collected.map_err(|why| {
             // Only the child this call started is ended, by its own handle.
             let _ = child.kill();
             let _ = child.wait();
-            refuse(why)
+            // A child ended at its bound is quoted by what it had said by
+            // then (0.4.8 E6): the line names where it stood.
+            if why == Why::TimedOut {
+                let mut said = String::from_utf8_lossy(&out).into_owned();
+                said.push_str(&String::from_utf8_lossy(&err));
+                Refusal::quoting(stage, why, &said)
+            } else {
+                refuse(why)
+            }
         })?;
         let text = |bytes: Vec<u8>| String::from_utf8(bytes).map_err(|_| refuse(Why::NotText));
         Ok(Answer {
