@@ -522,41 +522,51 @@ pub(crate) fn dialect_of(platform: KeybindingsPlatformV1) -> Option<bt_platform:
 }
 
 /// **A shortcut document, read** — the one reader of a `keybindings.json`
-/// document, at launch and on an import (T-STORE-MERGE-KEYBINDINGS round 2,
-/// coordinator ruling 2026-10-12: one document, one reading rule): this build's
-/// table for `platform`, then each line read in the document's own dialect and
-/// carried to this one ([`crate::shortcuts::read_chord_in`], the rule the
-/// keybindings merge reads with too), then laid over the table by the two-pass
-/// reader (`Shortcuts::apply_overrides`). Every refused line, by its id.
+/// document: at launch, on an import, and for the keybindings merge's door
+/// (T-STORE-MERGE-KEYBINDINGS rounds 2 and 3, coordinator rulings 2026-10-12:
+/// one document, one reading rule). This build's table for `platform`, then
+/// each line read in the document's own dialect and carried to this one
+/// ([`crate::shortcuts::read_chord_in`], the rule the merge reads its sides
+/// with too). **The last line about an action that reads is the one in force:
+/// an earlier line about it is neither dealt nor reported** — it is the file's
+/// words, kept, and inert on every road. The lines in force are then laid over
+/// the table by the two-pass reader (`Shortcuts::apply_overrides`). Every
+/// refused line, by its id.
 pub(crate) fn read_keybindings(
     file: &KeybindingsV1,
     platform: bt_platform::HostPlatform,
 ) -> (Shortcuts, Vec<OverrideFault>) {
     let source = dialect_of(file.writing_platform);
-    let mut faults = Vec::new();
-    let overrides: Vec<Override> = file
+    let read: Vec<Result<Option<String>, &'static str>> = file
         .bindings
         .iter()
-        .filter_map(|entry| {
-            let chord = match entry.chord.as_deref() {
-                Some(chord) => match read_chord_in(chord, source, platform) {
-                    Ok(chord) => Some(format_chord_on(&chord, platform)),
-                    Err(reason) => {
-                        faults.push(OverrideFault {
-                            id: entry.action.clone(),
-                            reason: reason.to_owned(),
-                        });
-                        return None;
-                    }
-                },
-                None => None,
-            };
-            Some(Override {
-                id: entry.action.clone(),
-                chord,
-            })
+        .map(|entry| match entry.chord.as_deref() {
+            Some(chord) => read_chord_in(chord, source, platform)
+                .map(|chord| Some(format_chord_on(&chord, platform))),
+            None => Ok(None),
         })
         .collect();
+    let mut faults = Vec::new();
+    let mut overrides: Vec<Override> = Vec::new();
+    for (index, (entry, line)) in file.bindings.iter().zip(&read).enumerate() {
+        let shadowed = file.bindings[index + 1..]
+            .iter()
+            .zip(&read[index + 1..])
+            .any(|(later, read)| later.action == entry.action && read.is_ok());
+        if shadowed {
+            continue;
+        }
+        match line {
+            Ok(chord) => overrides.push(Override {
+                id: entry.action.clone(),
+                chord: chord.clone(),
+            }),
+            Err(reason) => faults.push(OverrideFault {
+                id: entry.action.clone(),
+                reason: (*reason).to_owned(),
+            }),
+        }
+    }
     let mut table = Shortcuts::defaults_for(platform);
     faults.extend(table.apply_overrides(&overrides));
     (table, faults)

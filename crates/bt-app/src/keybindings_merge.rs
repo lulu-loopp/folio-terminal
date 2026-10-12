@@ -14,8 +14,10 @@
 //! - in this platform's dialect: each chord is read in its side's own dialect and
 //!   carried across by `shortcuts::read_chord_in`, the launch's and an import's rule; a
 //!   line that cannot be carried across is **carried**;
-//! - one departure per action, the last line about it in force (the reader's rule); the
-//!   earlier lines about it are **carried** while it keeps that line;
+//! - one departure per action: **the last line about an action that reads is the one in
+//!   force, and an earlier line about it is neither dealt nor reported** — the selection
+//!   `settings_bundle::read_keybindings` makes on every road (launch, import, this
+//!   merge's door); the earlier lines are **carried** while the action keeps that line;
 //! - a line naming an action this build has no row for is **carried**.
 //!
 //! **The one rule for what is carried** ((b)8): it is in the merged document verbatim,
@@ -32,7 +34,9 @@
 //!   carried into.** Every side, the launch's reader and an import read a line by one
 //!   rule (`shortcuts::read_chord_in`), and a line it refuses from its own dialect is a
 //!   text this platform's dialect does not read either, so the merged document — written
-//!   in this platform's dialect — keeps it verbatim and its next reader refuses it again.
+//!   in this platform's dialect — keeps it verbatim and its next reader refuses it again
+//!   (said, unless a later line about its action reads: then it is a shadowed line, and
+//!   inert without a word).
 //!
 //! **The unit is one action's departure**, merged by §3.3's table
 //! (`settings_merge::unit`): changed on one side takes that side; changed differently
@@ -52,8 +56,8 @@
 //! own order (`Shortcuts::overrides`' walk); carried lines where the file has them.
 //!
 //! **The merge is pure.** It builds no table anybody reads and runs no door. The door —
-//! the table rebuilt from this build's defaults and the merged departures by the
-//! two-pass reader ([`rebuild`]), then the store told what is in force — runs after
+//! the table read from the merged document by the one reader the launch and an import
+//! use (`settings_bundle::read_keybindings`), then the store told what is in force — runs after
 //! `merge_stored`, on the window thread ([`run_pass`]).
 
 use std::collections::BTreeMap;
@@ -62,7 +66,7 @@ use bt_persist::{BindingOverrideV1, KEYBINDINGS_SCHEMA_VERSION, KeybindingsV1};
 
 use crate::document_request::ReplacedInFile;
 use crate::persist::KEYBINDINGS_FILE_NAME;
-use crate::settings_bundle::dialect_of;
+use crate::settings_bundle::{dialect_of, read_keybindings};
 use crate::settings_merge::{Account, PassOutcome, Unit, unit};
 use crate::shortcuts::{
     Chord, ChordVerdict, Override, OverrideFault, Shortcuts, format_chord_on, parse_chord,
@@ -214,12 +218,6 @@ pub(crate) struct About {
     pub(crate) untranslatable: Vec<(String, String)>,
     /// The actions whose departure the merge took from the file.
     pub(crate) from_the_file: Vec<String>,
-    /// **The lines the merged document carries**, in its order: never dealt out by
-    /// [`rebuild`]. Once the document is written in this platform's dialect, a line
-    /// another platform's dialect could not carry across reads like any other, and a
-    /// shadowed line whose later line the merge left out would be the last about its
-    /// action — what was carried is known here, where it was decided, and nowhere else.
-    pub(crate) carried: Vec<BindingOverrideV1>,
 }
 
 impl About {
@@ -237,9 +235,6 @@ impl About {
         for action in other.from_the_file {
             push_once(&mut self.from_the_file, action);
         }
-        // Each merge's document is built whole from its file: the latest one's
-        // carried lines are the ones `desired` carries.
-        self.carried = other.carried;
     }
 }
 
@@ -311,17 +306,13 @@ pub(crate) fn merge(
     let mut named = Vec::new();
     for line in &t.lines {
         match line {
-            Line::Carried(line) => {
-                bindings.push(line.clone());
-                about.carried.push(line.clone());
-            }
+            Line::Carried(line) => bindings.push(line.clone()),
             // An earlier line about an action stays carried only while the action keeps
             // its line after it: with that line gone, the earlier one would be the last
             // about the action, and the next reader would put it in force.
             Line::Shadowed(line, action) => {
                 if let Some((Some(_), _)) = merged.get(action) {
                     bindings.push(line.clone());
-                    about.carried.push(line.clone());
                 }
             }
             Line::InForce(action) => {
@@ -440,43 +431,6 @@ fn give_the_files_actions_their_chords(
     }
 }
 
-/// **The table this build puts in force from a merged `document`** — this build's
-/// defaults, then the document's departures dealt out by the two-pass reader, exactly as
-/// at start and on an import (`Shortcuts::apply_overrides`). The lines the merge
-/// `carried` are passed over, in order, and the rest read as [`merge`] reads them. The
-/// lines the reader refused, by action.
-pub(crate) fn rebuild(
-    document: &KeybindingsV1,
-    carried: &[BindingOverrideV1],
-    platform: bt_platform::HostPlatform,
-) -> (Shortcuts, Vec<OverrideFault>) {
-    let mut table = Shortcuts::defaults_for(platform);
-    let mut passed_over = carried.iter().peekable();
-    let dealt_lines = KeybindingsV1 {
-        bindings: document
-            .bindings
-            .iter()
-            .filter(|line| passed_over.next_if(|carried| carried == line).is_none())
-            .cloned()
-            .collect(),
-        ..document.clone()
-    };
-    let side = side_of(&dealt_lines, &table, platform);
-    let dealt: Vec<Override> = side
-        .lines
-        .iter()
-        .filter_map(|line| match line {
-            Line::InForce(action) => side.units.get(action).map(|departure| Override {
-                id: action.clone(),
-                chord: departure.meaning.clone(),
-            }),
-            Line::Carried(_) | Line::Shadowed(..) => None,
-        })
-        .collect();
-    let faults = table.apply_overrides(&dealt);
-    (table, faults)
-}
-
 /// **One storage pass's merge of `keybindings.json`** — what
 /// `KeybindingsStore::begin_merge` hands the window.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -575,7 +529,7 @@ pub(crate) fn run_pass(window: &mut impl KeybindingsWindow) -> PassOutcome {
             presented: Ok(()),
         };
     };
-    let (table, faults) = rebuild(&pass.document, &pass.about.carried, pass.platform);
+    let (table, faults) = read_keybindings(&pass.document, pass.platform);
     for fault in faults {
         if pass.about.from_the_file.contains(&fault.id) {
             pass.refused.push((name(&table, &fault.id), fault.reason));
@@ -684,7 +638,7 @@ mod tests {
                 vec![line("new-tab", Some(expected)), line("close-pane", None)],
                 "in {dialect:?}'s dialect"
             );
-            let (table, faults) = rebuild(&merged.document, &merged.about.carried, here);
+            let (table, faults) = read_keybindings(&merged.document, here);
             assert!(faults.is_empty(), "{faults:?}");
             assert_eq!(
                 chord_of(&table, "new-tab", here).as_deref(),
@@ -738,7 +692,7 @@ mod tests {
             "named"
         );
 
-        let (table, _) = rebuild(&merged.document, &merged.about.carried, PLATFORM);
+        let (table, _) = read_keybindings(&merged.document, PLATFORM);
         let defaults = Shortcuts::defaults_for(PLATFORM);
         assert_eq!(
             chord_of(&table, "new-tab", PLATFORM).as_deref(),
@@ -779,7 +733,7 @@ mod tests {
             merged.document.bindings,
             vec![line("close-pane", Some("Ctrl+k"))]
         );
-        let (table, faults) = rebuild(&merged.document, &merged.about.carried, PLATFORM);
+        let (table, faults) = read_keybindings(&merged.document, PLATFORM);
         assert!(faults.is_empty(), "{faults:?}");
         assert_eq!(
             chord_of(&table, "close-pane", PLATFORM).as_deref(),
@@ -828,7 +782,7 @@ mod tests {
                 line("new-tab", None),
             ]
         );
-        let (table, faults) = rebuild(&merged.document, &merged.about.carried, PLATFORM);
+        let (table, faults) = read_keybindings(&merged.document, PLATFORM);
         assert!(faults.is_empty(), "{faults:?}");
         assert_eq!(chord_of(&table, "new-tab", PLATFORM), None, "unset");
         assert_eq!(
@@ -877,7 +831,7 @@ mod tests {
         let account = &merged.about.account;
         assert_eq!((account.took, account.kept, account.conflicted), (2, 1, 1));
         assert_eq!(account.conflicts, vec![action_title("files-pane")]);
-        let (_, faults) = rebuild(&merged.document, &merged.about.carried, PLATFORM);
+        let (_, faults) = read_keybindings(&merged.document, PLATFORM);
         assert!(faults.is_empty(), "{faults:?}");
     }
 
@@ -1188,6 +1142,88 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["zoom-pane"],
             "one refusal"
+        );
+    }
+
+    /// RED (round 3, the review's blocker) — **a merged document with an earlier duplicate
+    /// reads at the next start as the door read it**, in both orders of the review's
+    /// example: Close pane takes `Ctrl+J`, New tab's earlier line asks for it too and its
+    /// later line says `Ctrl+K`. The later line is New tab's; the earlier one is neither
+    /// dealt nor reported, by the door and by the launch alike.
+    ///
+    /// MUTATION: deal every line (in `settings_bundle::read_keybindings`, drop the
+    /// selection) — the earlier line is refused, the refusal puts New tab back on its
+    /// default, and a refusal is said.
+    #[test]
+    fn a_merged_document_with_duplicates_reads_at_the_next_start_as_the_door_read_it() {
+        for (case, file) in [
+            (
+                "duplicates-after",
+                vec![
+                    line("close-pane", Some("Ctrl+j")),
+                    line("new-tab", Some("Ctrl+j")),
+                    line("new-tab", Some("Ctrl+k")),
+                ],
+            ),
+            (
+                "duplicates-around",
+                vec![
+                    line("new-tab", Some("Ctrl+j")),
+                    line("close-pane", Some("Ctrl+j")),
+                    line("new-tab", Some("Ctrl+k")),
+                ],
+            ),
+        ] {
+            let base = windows(Vec::new());
+            let merged = merge(&base, &base, &windows(file.clone()), PLATFORM);
+            assert_eq!(
+                merged.document.bindings, file,
+                "{case}: carried as it stands"
+            );
+            let door = read_keybindings(&merged.document, PLATFORM);
+            let start = next_start(case, &merged.document);
+            for (road, (table, faults)) in [("the door", &door), ("the next start", &start)] {
+                assert!(faults.is_empty(), "{case}, {road}: {faults:?}");
+                assert_eq!(
+                    chord_of(table, "new-tab", PLATFORM).as_deref(),
+                    Some("Ctrl+k"),
+                    "{case}, {road}: the later line"
+                );
+                assert_eq!(
+                    chord_of(table, "close-pane", PLATFORM).as_deref(),
+                    Some("Ctrl+j"),
+                    "{case}, {road}"
+                );
+            }
+            assert_eq!(door.0, start.0, "{case}: one table on both roads");
+        }
+    }
+
+    /// RED (round 3, the review's blocker, across dialects) — **a Mac's shadowed line carried
+    /// into a Windows document is inert at the next start**: `Cmd+Shift+J` is kept verbatim
+    /// in front of New tab's later line, which is in force; nothing is said about it.
+    ///
+    /// MUTATION: deal every line (in `settings_bundle::read_keybindings`, drop the
+    /// selection) — the Windows reader refuses `Cmd+Shift+J` and says so at every start.
+    #[test]
+    fn a_shadowed_line_from_another_dialect_is_inert_at_the_next_start() {
+        let shadowed = line("new-tab", Some("Cmd+Shift+J"));
+        let theirs = document(
+            KeybindingsPlatformV1::MacOs,
+            vec![shadowed.clone(), line("new-tab", Some("Cmd+Shift+K"))],
+        );
+        let base = windows(Vec::new());
+        let merged = merge(&base, &base, &theirs, PLATFORM);
+        assert_eq!(
+            merged.document.bindings,
+            vec![shadowed, line("new-tab", Some("Ctrl+Shift+k"))]
+        );
+        let (table, faults) = next_start("shadowed-dialect", &merged.document);
+        assert!(faults.is_empty(), "no refusal is said: {faults:?}");
+        assert_eq!(
+            chord_of(&table, "new-tab", PLATFORM).as_deref(),
+            Some("Ctrl+Shift+k"),
+            "New tab's later line"
         );
     }
 }

@@ -7385,4 +7385,114 @@ mod tests {
             );
         }
     }
+
+    /// RED (T-STORE-MERGE-KEYBINDINGS round 3, review nit 2) — **each dialect reads its own
+    /// command word, and a line goes from one dialect to another by one rule.** The whole
+    /// table, every arm pinned by platform, so it runs alike on Windows and on a Mac:
+    /// a Windows (or other Unix) file's `Cmd+K` is refused there and is `Cmd+K` on macOS;
+    /// a macOS file's `Win+K` is refused there and is `Win+K` elsewhere; a file with no
+    /// recorded dialect reads all three words; the command modifier is carried across, and a
+    /// collision is refused.
+    ///
+    /// MUTATION: drop `read_chord_in`'s second reading (a text its own dialect does not read
+    /// is refused outright) — the macOS file's `Win+K` is refused on Windows.
+    #[test]
+    fn each_dialect_reads_its_own_command_word_and_carries_the_rest() {
+        use bt_platform::HostPlatform::{MacOs, OtherUnix, Windows};
+        let k = |modifiers: ModifiersState| Chord::new(modifiers, super::character("k"));
+        let sup = ModifiersState::SUPER;
+        let ctrl = ModifiersState::CONTROL;
+        for (text, dialect, expected) in [
+            ("Win+K", Some(Windows), Some(k(sup))),
+            ("Cmd+K", Some(Windows), None),
+            ("Command+K", Some(Windows), None),
+            ("Win+K", Some(OtherUnix), Some(k(sup))),
+            ("Cmd+K", Some(OtherUnix), None),
+            ("Cmd+K", Some(MacOs), Some(k(sup))),
+            ("Command+K", Some(MacOs), Some(k(sup))),
+            ("Win+K", Some(MacOs), None),
+            ("Win+K", None, Some(k(sup))),
+            ("Cmd+K", None, Some(k(sup))),
+            ("Command+K", None, Some(k(sup))),
+            ("Option+K", Some(Windows), Some(k(ModifiersState::ALT))),
+            (
+                "Ctrl+Alt+Shift+K",
+                Some(MacOs),
+                Some(k(ctrl | ModifiersState::ALT | ModifiersState::SHIFT)),
+            ),
+        ] {
+            assert_eq!(
+                parse_chord_in(text, dialect),
+                expected,
+                "{text:?} in {dialect:?}"
+            );
+        }
+        for (text, written_in, here, expected) in [
+            // A Windows file's `Cmd+K`.
+            ("Cmd+K", Some(Windows), Windows, None),
+            ("Cmd+K", Some(Windows), OtherUnix, None),
+            ("Cmd+K", Some(Windows), MacOs, Some(k(sup))),
+            // A macOS file's `Win+K`.
+            ("Win+K", Some(MacOs), MacOs, None),
+            ("Win+K", Some(MacOs), Windows, Some(k(sup))),
+            ("Win+K", Some(MacOs), OtherUnix, Some(k(sup))),
+            // An other-Unix file's `Cmd+K`.
+            ("Cmd+K", Some(OtherUnix), OtherUnix, None),
+            ("Cmd+K", Some(OtherUnix), Windows, None),
+            ("Cmd+K", Some(OtherUnix), MacOs, Some(k(sup))),
+            // No recorded dialect: read as spelled, nothing carried.
+            ("Win+K", None, MacOs, Some(k(sup))),
+            ("Cmd+K", None, Windows, Some(k(sup))),
+            // The command modifier carried across, and a collision refused.
+            ("Cmd+K", Some(MacOs), Windows, Some(k(ctrl))),
+            ("Ctrl+K", Some(Windows), MacOs, Some(k(sup))),
+            ("Ctrl+K", Some(Windows), OtherUnix, Some(k(ctrl))),
+            ("Cmd+Ctrl+K", Some(MacOs), Windows, None),
+            ("Win+Ctrl+K", Some(Windows), MacOs, None),
+        ] {
+            assert_eq!(
+                read_chord_in(text, written_in, here).ok(),
+                expected,
+                "{text:?} written in {written_in:?}, read in {here:?}"
+            );
+        }
+    }
+
+    /// RED (T-STORE-MERGE-KEYBINDINGS round 3, review nit 2) — **the shipped macOS table
+    /// survives the macOS words**: every default chord as a macOS file writes it reads back
+    /// as itself there, no line says `Win+`, and a macOS file holding every default reads,
+    /// with nothing refused, into the shipped table.
+    ///
+    /// MUTATION: read macOS's command word as `Win+` only (in `parse_chord_in`) — every
+    /// `Cmd` default is refused.
+    #[test]
+    fn the_shipped_macos_defaults_survive_the_macos_words() {
+        let mac = bt_platform::HostPlatform::MacOs;
+        let defaults = Shortcuts::defaults_for(mac);
+        let mut bindings = Vec::new();
+        for row in defaults.rows() {
+            let Some(chord) = &row.chord else {
+                continue;
+            };
+            let text = format_chord_on(chord, mac);
+            assert!(!text.contains("Win+"), "{}: {text}", row.id);
+            assert_eq!(
+                parse_chord_in(&text, Some(mac)).as_ref(),
+                Some(chord),
+                "{text}"
+            );
+            bindings.push(bt_persist::BindingOverrideV1 {
+                action: row.id.to_owned(),
+                chord: Some(text),
+            });
+        }
+        let file = bt_persist::KeybindingsV1 {
+            schema_version: bt_persist::KEYBINDINGS_SCHEMA_VERSION,
+            writing_platform: bt_persist::KeybindingsPlatformV1::MacOs,
+            bindings,
+        };
+        let (table, faults) = crate::settings_bundle::read_keybindings(&file, mac);
+        assert!(faults.is_empty(), "{faults:?}");
+        assert_eq!(table, defaults);
+    }
 }
