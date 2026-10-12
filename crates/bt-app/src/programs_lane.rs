@@ -798,8 +798,11 @@ pub fn install_wake(wake: impl Fn() + Send + Sync + 'static) {
 
 /// [`ProgramsLane::request`] on the product's lane, over the live table: the rows the default's
 /// rule reads first (`stored_default` is `settings.json`'s choice), then `also_first`. A request
-/// the lane refuses at its door has that refusal as its outcome and is waited on by nobody: the
-/// walk already standing walks every row it would have asked about.
+/// the lane refuses at its door has that refusal as its outcome and is waited on by nobody. Past
+/// the ledger's bound, the walks already owed walk every row it would have asked about; after the
+/// worker's end, that end was said once, by the ledger; and when the thread door refused to start
+/// the worker, the ledger said so (once per streak), no walk stands, and the next new trigger
+/// starts the worker again.
 pub fn request(trigger: Trigger, stored_default: &str, also_first: &[String]) {
     let mut first = profiles::default_chain(stored_default);
     for id in also_first {
@@ -1568,24 +1571,30 @@ pub(crate) mod tests {
     /// says so once, and the next request starts the worker** (revision (b)5, rule 1: a new
     /// request tries again; the lane is not in fault, because its worker never ran). In round 1
     /// the request was minted, ended `WorkerGone`, and faulted the lane; now it is refused without
-    /// an identity, and the next request walks.
+    /// an identity, and the next request walks. A door that refuses twice in a row is one streak,
+    /// said once (C3, round 3).
     ///
     /// MUTATION: fault the lane on a refused start (`lane::Ran::worker_ended` handing
     /// `NotStarted` to the ledger) — the ledger says the worker's end beside the refusal (two
     /// lines, observed red at "said once"), and the next request would be refused `Faulted`.
+    /// MUTATION: say every refused start (`Ledger::say_not_started` ignoring the streak) — the two
+    /// refusals are two lines.
     #[test]
     fn a_refused_spawn_refuses_this_request_and_the_next_request_starts_the_worker() {
         let gate = Arc::new(Gate::default());
         let (lane, wakes, notes) = scripted_lane(&gate, FakeMachine::with_path(&[bin_dir()]));
         let rows = [row("rg", "rg.exe")];
         gate.refuse_next_start();
-        assert!(
-            matches!(
-                lane.request(request(&rows, Trigger::Launch)),
-                Err(crate::lane::Refused::NotStarted(_))
-            ),
-            "the request whose start was refused is refused at the door"
-        );
+        gate.refuse_next_start();
+        for trigger in [Trigger::Launch, Trigger::Environment] {
+            assert!(
+                matches!(
+                    lane.request(request(&rows, trigger)),
+                    Err(crate::lane::Refused::NotStarted(_))
+                ),
+                "the request whose start was refused is refused at the door"
+            );
+        }
         assert_eq!(
             lane.requests.ledger().earliest_owed(),
             None,
@@ -1597,7 +1606,7 @@ pub(crate) mod tests {
         let next = lane
             .request(request(&rows, Trigger::ProgramMenu))
             .expect("the next request starts the worker");
-        assert_eq!(next, 1, "the refused request took no number");
+        assert_eq!(next, 1, "the refused requests took no number");
         let answers = answers_through(lane, &wakes, next);
         assert_eq!(
             answers.verdicts[0].generation, next,

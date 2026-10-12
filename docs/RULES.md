@@ -602,8 +602,8 @@ Entries read: §7.1.6c-8 ruling four (2026-08-19), *the picker ends in
   `run_font_lane`), never on the window thread.
   `bt_platform::monospace_font_families` and `cjk_font_families` have no other
   product caller. A start the thread door refuses refuses the request that
-  asked for it, at the door, said once; the lane is not in fault, and the next
-  request starts the worker again (S-4, 2026-10-12).
+  asked for it, at the door, said once per streak; the lane is not in fault,
+  and the next request starts the worker again (S-4, 2026-10-12).
 - **The list rescans when the dialog opens, not while it is up** (2026-08-19):
   `Runtime::toggle_settings_panel` calls `settings::begin_monospace_scan`. One
   walk is out at a time and at most one waits. A request made while a walk is

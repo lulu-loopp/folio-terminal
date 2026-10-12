@@ -18,8 +18,10 @@
 //!   ends the process for any other panic, a panic in either reaches the seam (S-5 round 3);
 //!   a thread-door refusal is returned synchronously as `WorkerEnd::NotStarted` and also reported
 //!   through `Ends`; a lane started before its request door may treat that as its failed start,
-//!   while [`Coalescing`] interposes before minting, refuses only that request, and lets the next
-//!   new request try the start again without faulting the lane (revision (b)5, rule 1);
+//!   while [`Coalescing`] interposes before minting, refuses only that request — said like a
+//!   failure, once per streak where the lane declares one, after the lane's lock is let go — and
+//!   lets the next new request try the start again without faulting the lane (revision (b)5,
+//!   rule 1);
 //! - a [`Ledger`], which mints each request's identity or refuses it at the door (C1's admission),
 //!   records what each identity is owed — the sink its terminal goes to when its requester has
 //!   gone (C6) — and turns every identity into exactly one [`Terminal`]: `Done`, `Failed`,
@@ -214,7 +216,16 @@ struct Book<Id, O: Owed<Id>> {
     entries: BTreeMap<Id, Entry<Id, O>>,
     fault: Option<WorkerEnd>,
     /// The last failure said, while no answer has been delivered since ([`Saying::PerStreak`]).
-    streak: Option<String>,
+    streak: Option<Streak>,
+}
+
+/// **What the current streak is a streak of** ([`Saying::PerStreak`]): a delivered failure, in its
+/// words, or a worker start the thread door refused, in the door's. The two never continue each
+/// other's streak.
+#[derive(PartialEq)]
+enum Streak {
+    Failed(String),
+    NotStarted(String),
 }
 
 struct Entry<Id, O: Owed<Id>> {
@@ -403,14 +414,38 @@ where
         self.end(book, id, terminal, out);
     }
 
-    /// **Say a worker start the thread door refused**, once, for the request it refused (C3): the
-    /// refusal is that request's terminal, given at the door, and the lane is not in fault.
+    /// **Say a worker start the thread door refused** (C3): the refusal is the terminal of the
+    /// request that asked for the start, given at the door, and the lane is not in fault. Said like
+    /// any failure — once per request, or once per streak where the lane declares
+    /// [`Saying::PerStreak`], so a door that keeps refusing is said once until a start succeeds
+    /// ([`Ledger::started`]). Said after the ledger's lock is let go.
     fn say_not_started(&self, end: &WorkerEnd) {
-        (self.say)(&format!(
-            "{}: the worker was not started — {end}; the request is refused, and the next \
-             request starts it again",
-            self.lane
-        ));
+        let said = end.to_string();
+        let line = {
+            let mut book = lock(&self.book);
+            let again = matches!(&book.streak, Some(Streak::NotStarted(last)) if *last == said);
+            let line = (self.saying == Saying::PerRequest || !again).then(|| {
+                format!(
+                    "{}: the worker was not started — {said}; the request is refused, and the \
+                     next request starts it again",
+                    self.lane
+                )
+            });
+            book.streak = Some(Streak::NotStarted(said));
+            line
+        };
+        if let Some(line) = line {
+            (self.say)(&line);
+        }
+    }
+
+    /// **A worker start succeeded**: a streak of refused starts ends with it, so a later refusal is
+    /// said again. A streak of delivered failures is not one a start ends.
+    fn started(&self) {
+        let mut book = lock(&self.book);
+        if matches!(book.streak, Some(Streak::NotStarted(_))) {
+            book.streak = None;
+        }
     }
 
     /// **The earliest identity still owed a terminal**, or `None` when every identity minted and
@@ -473,7 +508,7 @@ where
         match outcome {
             Terminal::Failed(failure) => {
                 let said = failure.to_string();
-                let again = book.streak.as_deref() == Some(said.as_str());
+                let again = matches!(&book.streak, Some(Streak::Failed(last)) if *last == said);
                 if self.saying == Saying::PerRequest || !again {
                     out.lines.push(match joined {
                         Some(with) => format!(
@@ -483,7 +518,7 @@ where
                         None => format!("{}: request {id:?} failed: {said}", self.lane),
                     });
                 }
-                book.streak = Some(said);
+                book.streak = Some(Streak::Failed(said));
             }
             Terminal::Done(_) => book.streak = None,
             Terminal::Cancelled
@@ -827,9 +862,16 @@ where
         let mut book = lock(&self.book);
         if !book.started {
             if let Err(end) = start(Arc::new(Ran(Arc::clone(&self.ledger)))) {
+                // Said after the lane's lock is let go. A lock of the calling lane's own may still
+                // be held (the program walk's, across its admission); that is harmless: a refused
+                // start means the lane has no worker to wait on it, and a requester or consumer
+                // waiting on it waits only for one diagnostics line's write — the door answered
+                // without waiting for a thread, and nothing here waits for one either.
+                drop(book);
                 self.ledger.say_not_started(&end);
                 return Err(Refused::NotStarted(end.to_string()));
             }
+            self.ledger.started();
             book.started = true;
         }
         let (request, waiting, displaced) = match book.waiting.take() {

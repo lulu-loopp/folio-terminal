@@ -1939,10 +1939,13 @@ pub fn begin_monospace_scan(in_force: &str, cjk_in_force: &str) {
 ///
 /// Coalesced by the lane ([`FontLane::request_walk`]): one walk out at a time, at
 /// most one waiting, and every request asked while one waits joined to it. A
-/// request the lane refuses at its door — its ledger already owes
-/// [`FONT_BOUND`], or its worker has ended — has that refusal as its outcome
-/// and is asked by nobody who waits: the walk already standing answers what it
-/// would have asked, and the worker's end was said once, by the ledger.
+/// request the lane refuses at its door has that refusal as its outcome and is
+/// asked by nobody who waits. Past [`FONT_BOUND`], the walks already owed answer
+/// what it would have asked; after the worker's end, that end was said once, by
+/// the ledger; and when the thread door refused to start the worker, the ledger
+/// said so (once per streak), no walk stands, and the next request — the next
+/// opening of the dialog, or the next family named before a list lands — starts
+/// the worker again.
 fn request_font_walk() {
     let _ = FONT_LANE.request_walk();
 }
@@ -17983,24 +17986,30 @@ mod tests {
     /// The worker is started by the first request that finds it not started. A machine that will
     /// not give this process a thread refuses that request (`Refused::NotStarted`, no identity
     /// minted, one line said); the lane is not in fault — its worker never ran — so the next
-    /// request, new input, starts it again and is walked (revision (b)5, rule 1).
+    /// request, new input, starts it again and is walked (revision (b)5, rule 1). A door that
+    /// refuses twice in a row is one streak, said once (C3, round 3).
     ///
     /// MUTATION: fault the lane on a refused start (`lane::Ran::worker_ended` handing
     /// `NotStarted` to the ledger) — the ledger says the worker's end beside the refusal (two
     /// lines, observed red at "said once"), and the next request would be refused `Faulted`.
+    /// MUTATION: say every refused start (`Ledger::say_not_started` ignoring the streak) — the two
+    /// refusals are two lines.
     #[test]
     fn a_refused_spawn_refuses_this_request_and_the_next_request_starts_the_worker() {
         let gate = std::sync::Arc::new(crate::lane::Gate::default());
         let (lane, wakes, said) =
             font_lane(&gate, |_| Ok((vec![family("等宽 Consolas")], Vec::new())));
         gate.refuse_next_start();
-        assert!(
-            matches!(
-                lane.request_walk(),
-                Err(crate::lane::Refused::NotStarted(_))
-            ),
-            "the request whose start was refused is refused at the door"
-        );
+        gate.refuse_next_start();
+        for _ in 0..2 {
+            assert!(
+                matches!(
+                    lane.request_walk(),
+                    Err(crate::lane::Refused::NotStarted(_))
+                ),
+                "the request whose start was refused is refused at the door"
+            );
+        }
         assert_eq!(
             lane.requests.ledger().earliest_owed(),
             None,
@@ -18012,7 +18021,7 @@ mod tests {
         let next = lane
             .request_walk()
             .expect("the next request starts the worker");
-        assert_eq!(next, FontId(1), "the refused request took no identity");
+        assert_eq!(next, FontId(1), "the refused requests took no identity");
         let ended = terminals_through(lane, &wakes, next);
         assert!(
             matches!(ended[..], [(id, crate::lane::Terminal::Done(_))] if id == next),

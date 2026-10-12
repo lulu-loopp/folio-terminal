@@ -200,9 +200,11 @@ impl TaskbarLane {
     }
 
     /// **Make a request and see that the worker serves it.** A request the lane refuses at its
-    /// door — its ledger already owes [`BOUND`], or its worker has ended — has that refusal as its
-    /// outcome and is waited on by nobody: the ask already standing answers what it would have
-    /// asked, and the worker's end was said once, by the ledger.
+    /// door has that refusal as its outcome and is waited on by nobody. Past [`BOUND`], the asks
+    /// already owed answer what it would have asked; after the worker's end, that end was said
+    /// once, by the ledger; and when the thread door refused to start the worker, the ledger said
+    /// so (once per streak), no ask stands, and the next request — the window's next reading once
+    /// [`REFRESH_INTERVAL`] has passed — starts the worker again.
     pub fn request(&'static self, now: Instant) {
         let _ = self.ask(now);
     }
@@ -503,21 +505,27 @@ pub(crate) mod tests {
 
     /// RED (S-4 round 2) — **A start the thread door refuses refuses that request at the door,
     /// says so once, and the next request starts the worker** (revision (b)5, rule 1: a new
-    /// request tries again; the lane is not in fault, because its worker never ran).
+    /// request tries again; the lane is not in fault, because its worker never ran). A door that
+    /// refuses at every reading is one streak, said once (C3, round 3).
     ///
     /// MUTATION: fault the lane on a refused start (`lane::Ran::worker_ended` handing
     /// `NotStarted` to the ledger) — the ledger says the worker's end beside the refusal (two
     /// lines, observed red at "said once"), and the next request would be refused `Faulted`.
+    /// MUTATION: say every refused start (`Ledger::say_not_started` ignoring the streak) — the two
+    /// refusals are two lines.
     #[test]
     fn a_refused_spawn_refuses_this_request_and_the_next_request_starts_the_worker() {
         let gate = Arc::new(Gate::default());
         let (lane, wakes, said) = scripted_lane(&gate, |_| true);
         let start = Instant::now();
         gate.refuse_next_start();
-        assert!(
-            matches!(lane.ask(start), Err(crate::lane::Refused::NotStarted(_))),
-            "the request whose start was refused is refused at the door"
-        );
+        gate.refuse_next_start();
+        for _ in 0..2 {
+            assert!(
+                matches!(lane.ask(start), Err(crate::lane::Refused::NotStarted(_))),
+                "the request whose start was refused is refused at the door"
+            );
+        }
         assert_eq!(
             lane.requests.ledger().earliest_owed(),
             None,
@@ -527,7 +535,7 @@ pub(crate) mod tests {
         assert_eq!(lines.len(), 1, "said once: {lines:?}");
         assert!(lines[0].contains(crate::lane::REFUSED_START), "{lines:?}");
         let next = lane.ask(start).expect("the next request starts the worker");
-        assert_eq!(next, TaskbarId(1), "the refused request took no identity");
+        assert_eq!(next, TaskbarId(1), "the refused requests took no identity");
         let ended = terminals_through(lane, &wakes, next);
         assert_eq!(
             ended,
