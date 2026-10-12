@@ -940,6 +940,11 @@ text_entries! {
     RecoveredEditKept,
     /// The same, for `{count}` copies.
     RecoveredEditsKept,
+    /// A re-read of `settings.json` that would not parse, `{file}` filled by
+    /// [`settings_file_kept_in`] (T-STORE-MERGE-SETTINGS).
+    SettingsFileKept,
+    /// The same, for `keybindings.json` ([`keybindings_file_kept_in`]).
+    KeybindingsFileKept,
     /// The tail line of a crowded pane strip, for one seat it has no row for
     /// (AUDIT-hardcode SEAT-1; filled by [`seat_overflow_notice_in`]).
     SeatOverflowOne,
@@ -3801,6 +3806,16 @@ impl Text {
                 "{count} unsaved edits were kept at {folder}",
                 "{count} unsaved edits were kept at {folder}", // zh: pending T-RECOVERED-FOLDER
             ),
+            Self::SettingsFileKept => pick(
+                lang,
+                "{file} could not be read; the settings already in force were kept",
+                "{file} could not be read; the settings already in force were kept", // zh: pending T-STORE-MERGE-SETTINGS
+            ),
+            Self::KeybindingsFileKept => pick(
+                lang,
+                "{file} could not be read; the shortcuts already in force were kept",
+                "{file} could not be read; the shortcuts already in force were kept", // zh: pending T-STORE-MERGE-SETTINGS
+            ),
             Self::SeatOverflowOne => pick(
                 lang,
                 "1 more does not fit",
@@ -6212,6 +6227,12 @@ impl Text {
         (Self::RecoveredEditKept, HostPlatform::MacOs),
         (Self::RecoveredEditsKept, HostPlatform::Windows),
         (Self::RecoveredEditsKept, HostPlatform::MacOs),
+        // zh: pending T-STORE-MERGE-SETTINGS — the "kept" card for a settings or
+        // keybindings file that will not parse mid-run.
+        (Self::SettingsFileKept, HostPlatform::Windows),
+        (Self::SettingsFileKept, HostPlatform::MacOs),
+        (Self::KeybindingsFileKept, HostPlatform::Windows),
+        (Self::KeybindingsFileKept, HostPlatform::MacOs),
         // 0.4.8 E5: the card of a rollback that did not keep what a Folio ran over it changed.
         (Self::UpdateFailedUndone, HostPlatform::Windows),
         (Self::UpdateFailedUndone, HostPlatform::MacOs),
@@ -8754,6 +8775,31 @@ fn pins_file_kept_in(lang: Lang, file: &str) -> String {
         Lang::English => format!("{file} could not be read; the pins already in force were kept"),
         Lang::Chinese => format!("{file} 无法读取；保留了正在生效的钉住条目"),
     }
+}
+
+/// `settings.json` refusing to parse **after** a window has been running on
+/// it (T-STORE-MERGE-SETTINGS, §3.6 of the 2026-10-11 design note) —
+/// [`pins_file_kept`]'s family: what stands in for the damaged file is the
+/// settings the reader has been using all along.
+#[must_use]
+pub fn settings_file_kept(file: &str) -> String {
+    settings_file_kept_in(current(), file)
+}
+
+fn settings_file_kept_in(lang: Lang, file: &str) -> String {
+    Text::SettingsFileKept.in_lang(lang).replace("{file}", file)
+}
+
+/// The same for `keybindings.json`: the shortcut table in force stays.
+#[must_use]
+pub fn keybindings_file_kept(file: &str) -> String {
+    keybindings_file_kept_in(current(), file)
+}
+
+fn keybindings_file_kept_in(lang: Lang, file: &str) -> String {
+    Text::KeybindingsFileKept
+        .in_lang(lang)
+        .replace("{file}", file)
 }
 
 /// **A switcher row the pin would not keep** (§7.7 ⑤, 2026-08-24).
