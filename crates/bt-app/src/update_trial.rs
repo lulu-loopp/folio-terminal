@@ -2756,12 +2756,16 @@ mod tests {
         let mut changed = settings.loaded().clone();
         changed.update_check = !changed.update_check;
         settings.store(changed);
+        // Lands by receipt on the storage worker: waited for, within the suite's patience, so
+        // the session's close below finds nothing of the documents still queued.
+        settings.settle();
 
         let mut keybindings = persist::KeybindingsStore::open(session.lane());
         keybindings.store(vec![
             serde_json::from_value(serde_json::json!({ "action": "new-tab", "chord": "Ctrl+T" }))
                 .unwrap(),
         ]);
+        keybindings.settle();
 
         let mut profiles = persist::ProfilesStore::open(session.lane());
         profiles.store(bt_persist::ProfilesV1 {
@@ -2771,6 +2775,7 @@ mod tests {
                 ..bt_persist::ProfileEntryV1::default()
             }],
         });
+        let _ = profiles.settle();
 
         let mut pins = crate::pins::PinsStore::open(session.lane());
         pins.store(bt_persist::PinsV1 {
@@ -2780,6 +2785,7 @@ mod tests {
             ],
             ..bt_persist::PinsV1::default()
         });
+        let _ = pins.settle();
 
         let offers = crate::update::OfferState::load(&storage, true);
         offers.skip("v9.9.9").unwrap();
