@@ -27,11 +27,16 @@
 //!   rows anchored to the same predecessor stand `T`'s before `O`'s, each side's
 //!   in its own order.
 //! - **A carried row never stands before its id's row.** It is placed last,
-//!   immediately after whichever stands later in the result of its nearest
-//!   predecessor in the file's sequence and the row of its own id — so the
-//!   installer's first-wins reading puts in force the row the merge kept, and
-//!   a carried row stays the shadowed one it was in the file (an unusable first
-//!   row and the later one the installer then takes keep their order too).
+//!   in the file's order, immediately after the last row of its own id placed
+//!   so far — the id's row or an earlier carried row naming it — so the rows of
+//!   one id stand together in the file's order, the installer's first-wins
+//!   reading puts in force the row the merge kept, and each carried row stays
+//!   the shadowed one it was in the file (an unusable first row and the later
+//!   one the installer then takes keep their order too). A
+//!   carried row goes with its id's row: when the merge removes that row, the
+//!   carried rows naming it go too (`document_request::remove_key`'s rule, the
+//!   one the press road follows), so a row that was never in force never
+//!   becomes the live one, and the id meets its shipped value or none.
 //! - **Shipped ids the file never names** are appended by the installer as
 //!   always; they are not units here.
 //!
@@ -145,7 +150,7 @@ fn merge_row(
             |e| &e.display_title,
             display_title,
         ),
-        hidden: m.field(Text::ProfilesBadgeHidden.text(), |e| &e.hidden, hidden),
+        hidden: m.field(Text::MergedProfileHidden.text(), |e| &e.hidden, hidden),
         program: m.field(Text::ProfilesRowProgram.text(), |e| &e.program, program),
         args: m.field(Text::ProfilesRowArgs.text(), |e| &e.args, args),
         env: m.field(Text::ProfilesRowEnv.text(), |e| &e.env, env),
@@ -380,21 +385,23 @@ fn order(
         place(&mut pending, &mut placed);
     }
 
-    // The carried rows, in the file's order: each right after whichever
-    // stands later of its nearest predecessor in the file's sequence and the
-    // row of its own id, so it never stands before that row.
-    for (at, slot) in t_sequence.iter().enumerate() {
+    // The carried rows, in the file's order: each right after the last slot of
+    // its own id placed so far — its id's row, or an earlier carried row naming
+    // it — so it never stands before that row, and the rows of one id stay
+    // together in the file's order.
+    for slot in t_sequence {
         let Slot::Carried(_, id) = slot else {
             continue;
         };
-        let position = |wanted: &Slot| placed.iter().position(|placed| placed == wanted);
-        let after_predecessor = t_sequence[..at].iter().rev().find_map(&position);
-        let after_its_row = position(&Slot::Row(id.clone()));
-        let at_index = match after_predecessor.max(after_its_row) {
-            Some(anchor) => anchor + 1,
-            None => 0,
-        };
-        placed.insert(at_index, slot.clone());
+        // A carried row goes with its id's row (`document_request::remove_key`'s
+        // rule): one the merge removed takes it along.
+        if !result.contains_key(id) {
+            continue;
+        }
+        let last_of_its_id = placed.iter().rposition(|placed| {
+            matches!(placed, Slot::Row(named) | Slot::Carried(_, named) if named == id)
+        });
+        placed.insert(last_of_its_id.map_or(0, |at| at + 1), slot.clone());
     }
     placed
 }
@@ -697,8 +704,8 @@ mod tests {
             let ours = table(&[b.clone(), first.clone(), later.clone()]);
             let merged = merge(&base, &ours, &theirs, &no_titles);
             assert_eq!(
-                ids(&merged.document),
-                vec!["b", "a", "a"],
+                merged.document.profiles,
+                vec![b_there.clone(), first.clone(), later.clone()],
                 "Folio's order of the rows, the carried row after its id's row"
             );
             assert_eq!(
@@ -760,5 +767,107 @@ mod tests {
         );
         assert_eq!(same.document.profiles, vec![a, mine]);
         assert_eq!(same.account.conflicted, 0);
+    }
+
+    /// A built-in id of this build, a row of Folio's own for it, and a later
+    /// row naming it again — the duplicate the file carries.
+    fn built_in_and_its_shadow() -> (String, ProfileEntryV1, ProfileEntryV1) {
+        let id = crate::profiles::shipped_order()[0].to_owned();
+        let first = ProfileEntryV1 {
+            display_title: Some("我的 Mine".to_owned()),
+            ..shipped(&id)
+        };
+        let shadow = ProfileEntryV1 {
+            display_title: Some("影子 shadow".to_owned()),
+            ..shipped(&id)
+        };
+        (id, first, shadow)
+    }
+
+    /// The shipped title of `id`, which a document naming nothing of it shows.
+    fn shipped_title(id: &str) -> Option<String> {
+        in_force(&table(&[]), id).0
+    }
+
+    /// RED (review round 3, coordinator's ruling) — **a carried row goes with
+    /// its id's row on the merge road**: Folio removed the row, the file carries
+    /// a later duplicate of it; the merged document holds neither, and the id
+    /// meets its shipped value at the next start — never the duplicate, which
+    /// was never in force. A row of the reader's own is simply gone.
+    ///
+    /// MUTATION: keep the duplicate (in `order`, place a carried row whatever
+    /// became of its id's row) — the duplicate is put in force.
+    #[test]
+    fn a_carried_row_goes_with_its_ids_row_on_the_merge_road() {
+        let (id, first, shadow) = built_in_and_its_shadow();
+        let b = own("b", "乙 B");
+        let base = table(&[first.clone(), b.clone(), shadow.clone()]);
+        let mut b_there = b.clone();
+        b_there.display_title = Some("乙 改名 renamed".to_owned());
+        let theirs = table(&[first.clone(), b_there.clone(), shadow.clone()]);
+        let merged = merge(&base, &table(std::slice::from_ref(&b)), &theirs, &no_titles);
+        assert_eq!(merged.document.profiles, vec![b_there.clone()]);
+        assert_eq!(in_force(&merged.document, &id).0, shipped_title(&id));
+
+        let (a, later) = (own("a", "甲 A"), own("a", "后来的 a′ later"));
+        let base = table(&[a.clone(), b.clone(), later.clone()]);
+        let theirs = table(&[a.clone(), b_there.clone(), later.clone()]);
+        let merged = merge(&base, &table(std::slice::from_ref(&b)), &theirs, &no_titles);
+        assert_eq!(merged.document.profiles, vec![b_there]);
+        assert_eq!(in_force(&merged.document, "a").0, None);
+    }
+
+    /// RED (review round 3, coordinator's ruling) — **a press that removes a
+    /// row takes its carried duplicates with it** (`document_request::remove_key`,
+    /// the merge road's rule): `desired` holds the row and a later duplicate the
+    /// installer refused; the projection, the table in force, has only the row;
+    /// the press removes it. The next start shows the id at its shipped value.
+    ///
+    /// MUTATION: keep the duplicate (in `remove_key`, remove only the first
+    /// entry naming the key — today's Delete) — the duplicate is the row in
+    /// force at the next start.
+    #[test]
+    fn a_press_that_removes_a_row_takes_its_carried_duplicates() {
+        use crate::document_request::StoredDocument;
+
+        let (id, first, shadow) = built_in_and_its_shadow();
+        let b = own("b", "乙 B");
+        let mut desired = table(&[first.clone(), b.clone(), shadow]);
+        let before = table(&[first, b.clone()]);
+        let after = table(std::slice::from_ref(&b));
+        ProfilesV1::apply_press(&mut desired, &before, &after);
+        assert_eq!(desired.profiles, vec![b]);
+        assert_eq!(in_force(&desired, &id).0, shipped_title(&id));
+    }
+
+    /// RED (review round 3) — **two carried rows of one id keep the file's
+    /// relative order**, together after their id's row, even when a common row
+    /// between them moved.
+    ///
+    /// The base and the file hold `a` (an id of the reader's own with no
+    /// program, which the installer refuses), `a′`, `c`, then `a″`; Folio moved
+    /// `c` up. Read from the file, `a′` is in force and `a″` is refused as a
+    /// duplicate; read from the merged document, the same.
+    ///
+    /// MUTATION: place a carried row after whichever stands later of its file
+    /// predecessor and its id's row (round 2's rule) — `a″` lands before `a′`
+    /// and is put in force.
+    #[test]
+    fn two_carried_rows_of_one_id_keep_the_files_order() {
+        let first = ProfileEntryV1 {
+            program: None,
+            ..own("a", "不能启动 cannot start")
+        };
+        let (second, third) = (own("a", "第二 a′"), own("a", "第三 a″"));
+        let c = own("c", "丙 C");
+        let file = table(&[first.clone(), second.clone(), c.clone(), third.clone()]);
+        let ours = table(&[c.clone(), first.clone(), second.clone(), third.clone()]);
+        let merged = merge(&file, &ours, &file, &no_titles);
+        assert_eq!(merged.document.profiles, vec![c, first, second, third]);
+        assert_eq!(
+            in_force(&merged.document, "a"),
+            in_force(&file, "a"),
+            "read back first-wins: `a′` in force, the same refusals"
+        );
     }
 }

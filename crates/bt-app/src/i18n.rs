@@ -951,6 +951,10 @@ text_entries! {
     /// The order of the profiles, as a value the file won over Folio's
     /// (T-STORE-MERGE-PROFILES-PINS).
     MergedProfilesOrder,
+    /// Whether a profile is kept out of the pickers, as a field a profiles
+    /// merge names: the editor has a verb for it (Hide / Show), not a row
+    /// (T-STORE-MERGE-PROFILES-PINS).
+    MergedProfileHidden,
     /// The tail line of a crowded pane strip, for one seat it has no row for
     /// (AUDIT-hardcode SEAT-1; filled by [`seat_overflow_notice_in`]).
     SeatOverflowOne,
@@ -3884,6 +3888,11 @@ impl Text {
                 "Order of the profiles",
                 "Order of the profiles", // zh: pending T-STORE-MERGE-PROFILES-PINS
             ),
+            Self::MergedProfileHidden => pick(
+                lang,
+                "Hidden from the pickers",
+                "Hidden from the pickers", // zh: pending T-STORE-MERGE-PROFILES-PINS
+            ),
             Self::SeatOverflowOne => pick(
                 lang,
                 "1 more does not fit",
@@ -6406,6 +6415,8 @@ impl Text {
         (Self::MergedProfileValue, HostPlatform::MacOs),
         (Self::MergedProfilesOrder, HostPlatform::Windows),
         (Self::MergedProfilesOrder, HostPlatform::MacOs),
+        (Self::MergedProfileHidden, HostPlatform::Windows),
+        (Self::MergedProfileHidden, HostPlatform::MacOs),
         // 0.4.8 E5: the card of a rollback that did not keep what a Folio ran over it changed.
         (Self::UpdateFailedUndone, HostPlatform::Windows),
         (Self::UpdateFailedUndone, HostPlatform::MacOs),

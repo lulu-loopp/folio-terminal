@@ -57,11 +57,18 @@ pub const PINS_FILE_NAME: &str = "pins.json";
 /// pointer of the hand that is still on the menu.
 ///
 /// Rows of other categories, and rows of no category this build knows, are not
-/// touched: this walks for one target under one tag and edits one row.
+/// touched: this walks for one target under one tag and edits its rows only. An
+/// unpin takes every row of that target and tag — a later duplicate the menus
+/// never read goes with the row they did (`document_request::remove_key`),
+/// so it never becomes the pin.
 pub fn toggle_pin(table: &mut PinsV1, kind: PinKind, target: &str) -> bool {
     match row_of(table, kind, target) {
-        Some(index) => {
-            table.pins.remove(index);
+        Some(_) => {
+            crate::document_request::remove_key(
+                &mut table.pins,
+                |pin| (pin.kind(), pin.target.clone()),
+                &(Some(kind), target.to_owned()),
+            );
             false
         }
         None => {
@@ -852,6 +859,35 @@ mod tests {
         let mut expected = theirs.pins.clone();
         expected.push(PinEntryV1::new(PinKind::Folder, r"E:\我的"));
         assert_eq!(store.document().desired().pins, expected);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (review round 3, coordinator's ruling) — **an unpin takes every row
+    /// of its target and tag**: the file pins a folder twice; the menus read
+    /// the first; unpinning it leaves neither, in the table the press makes and
+    /// in the document Folio writes — the later row never becomes the pin.
+    ///
+    /// MUTATION: keep the duplicate (in `document_request::remove_key`, remove
+    /// only the first entry naming the key — the press road before this
+    /// round) — the later row is pinned after the unpin.
+    #[test]
+    fn an_unpin_takes_the_later_duplicates_of_its_pin() {
+        let file = table(&[
+            ("folder", "项目 project"),
+            ("file", "笔记 notes.md"),
+            ("folder", "项目 project"),
+        ]);
+        let mut pressed = file.clone();
+        assert!(!toggle_pin(&mut pressed, PinKind::Folder, "项目 project"));
+        assert!(!is_pinned(&pressed, PinKind::Folder, "项目 project"));
+
+        let (root, mut store, _jobs) = merging_store("unpin-duplicate", &file);
+        assert!(!store.toggle(PinKind::Folder, "项目 project"));
+        assert_eq!(
+            store.document().desired().pins,
+            vec![PinEntryV1::new(PinKind::File, "笔记 notes.md")],
+            "the document Folio writes holds neither row of the folder"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

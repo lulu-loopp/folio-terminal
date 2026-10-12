@@ -762,14 +762,27 @@ enum InForce {
     Last,
 }
 
+/// **A key removed from a keyed list: its entry in force and every shadowed
+/// entry naming it** ((b)8's one rule, review round 3). A shadowed entry —
+/// a later duplicate profile id or pin, an earlier keybindings line — was
+/// never in force, and it must not become the live entry because the one in
+/// force went: it goes with it. The press road ([`apply_keyed_press`],
+/// `pins::toggle_pin`) and the merges (`profiles_merge`, `pins_merge`) all
+/// follow this one rule.
+pub(crate) fn remove_key<E, K: PartialEq>(list: &mut Vec<E>, key: impl Fn(&E) -> K, wanted: &K) {
+    list.retain(|entry| key(entry) != *wanted);
+}
+
 /// **A press's delta over a list of entries named by a key** ((b)6, (b)8's
 /// units): every key whose entry in force differs between `before` and `after`
 /// takes `after`'s in `desired` — replaced where `desired` has it in force,
 /// added after its nearest predecessor in `after` otherwise, removed when
-/// `after` has none — and, when the press reordered the keys both sides hold,
+/// `after` has none (with every shadowed entry naming it, [`remove_key`]) —
+/// and, when the press reordered the keys both sides hold,
 /// those entries take `after`'s order in the places they hold in `desired`.
 /// Entries `desired` carries that the projection never had (a line a reader
-/// refused, a shadowed duplicate) keep their place.
+/// refused, a shadowed duplicate) keep their place — a shadowed duplicate until
+/// its key goes, and then with it.
 fn apply_keyed_press<E, K>(
     desired: &mut Vec<E>,
     before: &[E],
@@ -810,9 +823,7 @@ fn apply_keyed_press<E, K>(
         }
         match (position(desired, name), is) {
             (Some(at), Some(entry)) => desired[at] = entry.clone(),
-            (Some(at), None) => {
-                desired.remove(at);
-            }
+            (Some(_), None) => remove_key(desired, &key, name),
             (None, Some(entry)) => {
                 let at = position(after, name).unwrap_or(0);
                 let anchor = after[..at]

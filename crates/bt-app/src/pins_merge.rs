@@ -9,7 +9,9 @@
 //!   identity in `T` is **carried** — kept verbatim in the file's position,
 //!   never merged and never rewritten ((b)8's one rule) — and so is a row of a
 //!   kind this build cannot name (`bt_persist::pins`' header): it is neither
-//!   dropped nor retagged.
+//!   dropped nor retagged. A carried duplicate goes with its identity's
+//!   row: when the merge removes that row, the duplicate goes too
+//!   (`document_request::remove_key`'s rule, the one an unpin follows).
 //! - **A union of the additions, not of the tables.** Per identity, with
 //!   presence `p`: if `O` kept `B`'s presence the file's stands, if `T` kept it
 //!   Folio's stands, and when both moved they agree. An unpin is as much a
@@ -169,18 +171,22 @@ pub(crate) fn merge(base: &PinsV1, ours: &PinsV1, theirs: &PinsV1) -> Merged {
 
     let mut pins = Vec::with_capacity(theirs.pins.len() + o_rows.len());
     // The file's rows in the file's order: each identity's first row merged,
-    // every other row carried as it stands.
+    // every other row carried as it stands — unless the merge removed the row
+    // of its identity, which it goes with (`document_request::remove_key`'s
+    // rule): a row the menus never read never becomes the pin.
     let mut seen = HashSet::new();
+    let mut gone = HashSet::new();
     for pin in &theirs.pins {
         match identity(pin) {
             Some(id) if seen.insert(id.clone()) => {
-                pins.extend(resolve(
-                    b.get(&id).copied(),
-                    o.get(&id).copied(),
-                    Some(pin),
-                    &mut account,
-                ));
+                match resolve(b.get(&id).copied(), o.get(&id).copied(), Some(pin), &mut account) {
+                    Some(row) => pins.push(row),
+                    None => {
+                        gone.insert(id);
+                    }
+                }
             }
+            Some(id) if gone.contains(&id) => {}
             _ => pins.push(pin.clone()),
         }
     }
@@ -296,5 +302,24 @@ mod tests {
         let theirs = table(&[workspace.clone(), a.clone()]);
         let merged = merge(&base, &ours, &theirs);
         assert_eq!(merged.document.pins, vec![workspace, a, mine]);
+    }
+
+    /// RED (review round 3, coordinator's ruling) — **a duplicate pin goes
+    /// with its identity's row on the merge road**: Folio unpinned a folder the
+    /// file pins twice (a later duplicate the menus never read); the file pinned
+    /// something else. The merged table holds neither row of the folder.
+    ///
+    /// MUTATION: keep the duplicate (in `merge`, drop the `gone` arm) — the
+    /// later row becomes the pin.
+    #[test]
+    fn a_duplicate_pin_goes_with_its_row_on_the_merge_road() {
+        let folder = pin("folder", "项目 project");
+        let mut later = pin("folder", "项目 project");
+        later.extra.insert("注".to_owned(), json!("第二 second"));
+        let other = pin("file", "笔记 notes.md");
+        let base = table(&[folder.clone(), later.clone()]);
+        let theirs = table(&[folder.clone(), later.clone(), other.clone()]);
+        let merged = merge(&base, &table(&[]), &theirs);
+        assert_eq!(merged.document.pins, vec![other]);
     }
 }
