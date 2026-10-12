@@ -797,6 +797,41 @@ mod tests {
         );
     }
 
+    /// RED (S-5 round 3; D-70) — **a hand-off's panic is contained under the resident panic
+    /// hook.** The product's hook ends the process for a panic it is not told is contained, before
+    /// any catch runs; the door is called inside the seam's task, so the hook's decision there is
+    /// yes and a panicking hand-off is that request's `Failed`, not the end of Folio.
+    ///
+    /// MUTATION: run both the seam's task and its worker body under `catch_unwind` instead of
+    /// `contained_panic::contain` (`lane::task`, `Executor::start_worker`), and the decision at the
+    /// door is no. (Either one alone still contains the door.)
+    #[test]
+    fn a_hand_offs_panic_is_contained_under_the_resident_hook() {
+        let (told, heard) = mpsc::channel();
+        let told = Mutex::new(told);
+        let (lane, _, wakes, _) = recording_lane(
+            &Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
+            move |_| {
+                let _ = told
+                    .lock()
+                    .expect("the channel")
+                    .send(crate::the_hook_lets_this_panic_unwind());
+                Ok(())
+            },
+        );
+        let mut pending: Pending<()> = Pending::default();
+        pending.owe(
+            lane.submit(window(), Handoff::FontsPage)
+                .expect("the lane admits it"),
+            (),
+        );
+        assert!(
+            crate::lane::receive(&heard, "the door's decision"),
+            "the door runs where the hook lets a panic unwind"
+        );
+        assert_eq!(answers(&mut pending, &wakes, 1).len(), 1);
+    }
+
     /// PIN (ticket 10) — **a flood of presses is refused at the lane's door, never waited on.**
     ///
     /// The window thread may not block on the lane. With the door held, the ledger fills to

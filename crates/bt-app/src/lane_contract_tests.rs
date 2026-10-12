@@ -1682,6 +1682,65 @@ impl Owed<u64> for SentOn {
     }
 }
 
+/// RED (S-5 round 3) — **The seam contains its panics under the resident panic hook.** The
+/// product's hook ends the process for every panic it is not told is contained, and it runs before
+/// any `catch_unwind`; so a task's panic reaches `lane::task` as that request's `Failed`, and a
+/// panic outside a task reaches `Executor::start_worker` as the worker's end, only if the hook's
+/// decision, `the_hook_lets_this_panic_unwind`, answers yes at that point. Asked on the product's
+/// executor, inside a task and in the worker's body outside any task: yes both times, and still
+/// yes in the body after the task; a task run on a thread the executor did not start contains
+/// itself; and nothing on this thread is contained.
+///
+/// MUTATION: in `lane::task`, run the task under `catch_unwind` instead of
+/// `contained_panic::contain` — the bare task's decision is no. Or the same in
+/// `Executor::start_worker` around the body — the decision in the body is no.
+#[test]
+fn the_seam_contains_its_task_and_worker_panics_under_the_resident_hook() {
+    let (told, heard) = mpsc::channel();
+    let ledger: Arc<Ledger<u64, SentOn>> = Ledger::new(
+        "contained",
+        None,
+        Saying::PerRequest,
+        |_line: &str| {},
+        || {},
+    );
+    Executor::thread_door(bt_platform::ThreadPriority::Normal)
+        .start_worker("lane-contract-contained", Arc::clone(&ledger), move |ctx| {
+            let in_body = crate::the_hook_lets_this_panic_unwind();
+            let in_task = task(ctx, |_ctx| {
+                Ok::<bool, String>(crate::the_hook_lets_this_panic_unwind())
+            });
+            let after_task = crate::the_hook_lets_this_panic_unwind();
+            let _ = told.send((in_body, in_task, after_task));
+        })
+        .expect("the worker starts");
+    let (in_body, in_task, after_task) = receive(&heard, "the worker's answers");
+    // A task contains itself as well, on a thread the executor did not start.
+    let bare = bt_platform::spawn_at_priority(
+        "lane-contract-bare-task",
+        bt_platform::ThreadPriority::Normal,
+        |ctx| {
+            task(ctx, |_ctx| {
+                Ok::<bool, String>(crate::the_hook_lets_this_panic_unwind())
+            })
+        },
+    )
+    .expect("the thread starts")
+    .join()
+    .expect("the task returned");
+    assert_eq!(bare, Ok(true), "a task contains its own panic");
+    assert!(
+        in_body,
+        "a panic in the worker's body unwinds to the executor"
+    );
+    assert_eq!(in_task, Ok(true), "a panic in a task unwinds to the task");
+    assert!(after_task, "the body is still contained after its task");
+    assert!(
+        !crate::the_hook_lets_this_panic_unwind(),
+        "and nothing outside the seam is"
+    );
+}
+
 /// RED (S-3) — **A task panic is that request's failure; the worker's end is every owed request's
 /// `WorkerGone`.** On the product's executor (`Executor::thread_door`): a worker whose first task
 /// panics publishes `Failed(Panicked)` for it and goes on to answer the second; then its body

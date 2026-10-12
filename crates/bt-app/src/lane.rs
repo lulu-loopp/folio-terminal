@@ -13,7 +13,9 @@
 //!   suite's runs the same body under a scripted gate. A task — one request's work — runs inside
 //!   [`task`] (`lane::task(ctx, …)`), which turns a panic into that request's `Failed(Panicked)`
 //!   and lets the worker go on; the worker's own end (its body returning, or a panic outside a
-//!   task) is reported by the executor through [`Ends::worker_ended`];
+//!   task) is reported by the executor through [`Ends::worker_ended`]. Both the task and the
+//!   worker's body run inside `contained_panic::contain`, so under the resident panic hook, which
+//!   ends the process for any other panic, a panic in either reaches the seam (S-5 round 3);
 //! - a [`Ledger`], which mints each request's identity or refuses it at the door (C1's admission),
 //!   records what each identity is owed — the sink its terminal goes to when its requester has
 //!   gone (C6) — and turns every identity into exactly one [`Terminal`]: `Done`, `Failed`,
@@ -64,7 +66,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bt_platform::ThreadPriority;
@@ -593,7 +594,9 @@ impl Executor {
         let started = bt_platform::spawn_at_priority(name, self.band, move |ctx| {
             #[cfg(test)]
             SCRIPT.with(|held| *held.borrow_mut() = script);
-            let cause = match catch_unwind(AssertUnwindSafe(|| body(ctx))) {
+            // Contained (`contained_panic::contain`): the resident panic hook lets a panic
+            // outside a task unwind to here, where it is the worker's end, not the process's.
+            let cause = match crate::contained_panic::contain(|| body(ctx)) {
                 Ok(()) => WorkerEnd::Returned,
                 Err(panic) => {
                     WorkerEnd::Panicked(crate::pty_door::panic_message(panic.as_ref()).to_owned())
@@ -620,7 +623,9 @@ pub(crate) fn task<T, E>(
     run: impl FnOnce(&WorkerCtx) -> Result<T, E>,
 ) -> Result<T, TaskFailure<E>> {
     arrive();
-    match catch_unwind(AssertUnwindSafe(|| run(ctx))) {
+    // Contained (`contained_panic::contain`): the resident panic hook lets a panic inside the
+    // task unwind to here, where it is this request's failure, not the process's end.
+    match crate::contained_panic::contain(|| run(ctx)) {
         Ok(result) => result.map_err(TaskFailure::Error),
         Err(panic) => Err(TaskFailure::Panicked(
             crate::pty_door::panic_message(panic.as_ref()).to_owned(),
