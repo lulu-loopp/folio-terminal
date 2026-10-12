@@ -1161,6 +1161,10 @@ fn trial_folder(label: &str, scope: &Scope) -> Entry {
 /// started for the detach (`bt_platform::macos_update::detach_all_under` takes
 /// the worker's capability, and waits on `hdiutil`), and this cleanup — a
 /// process with no window — waits for it. Only macOS mounts an update's image.
+///
+/// The worker's body runs inside `contained_panic::contain` (T-JOINED-PANIC-VALUES), so a panic
+/// in the detach is this step's refusal whatever panic hook the process has: this cleanup runs
+/// before the resident hook is installed, and the boundary makes the answer the same under it.
 fn detach_images_under(home: &Path) -> Result<(), String> {
     if bt_platform::host_platform() != HostPlatform::MacOs {
         return Ok(());
@@ -1175,12 +1179,15 @@ fn detach_images_under(home: &Path) -> Result<(), String> {
         "folio-update-home-detach",
         bt_platform::ThreadPriority::BelowNormal,
         move |worker| {
-            bt_platform::macos_update::detach_all_under(worker, &home)
-                .map_err(|refusal| refusal.to_string())
+            crate::contained_panic::contain(move || {
+                bt_platform::macos_update::detach_all_under(worker, &home)
+                    .map_err(|refusal| refusal.to_string())
+            })
         },
     )
     .map_err(|error| error.to_string())?
     .join()
+    .and_then(|contained| contained)
     .map_err(|_| "the detach's worker stopped".to_owned())?
 }
 

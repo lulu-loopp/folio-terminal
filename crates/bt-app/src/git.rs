@@ -2410,8 +2410,13 @@ fn run_git_with_input(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let stdout = out.join().unwrap_or_default();
-                let stderr = String::from_utf8_lossy(&err.join().unwrap_or_default()).into_owned();
+                // A pipe reader's panic is not an empty stream: under the resident panic hook it
+                // ends the process before this join (the reader is not contained), and where no
+                // fatal hook is installed the join carries it on.
+                let stdout = out.join().expect("a git pipe reader panicked");
+                let stderr =
+                    String::from_utf8_lossy(&err.join().expect("a git pipe reader panicked"))
+                        .into_owned();
                 return Ok(GitRun {
                     ok: status.success(),
                     code: status.code(),
