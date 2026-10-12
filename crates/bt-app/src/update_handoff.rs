@@ -1998,7 +1998,9 @@ mod tests {
     /// RED (T-UPDATE-LOCK-RACE round 3, R2-2) — **a transient owner-mark
     /// read failure is asked again under the same election lock and budget;
     /// only the successful second read is allowed to decide the duty.** The
-    /// injected pause returns immediately, so no clock chooses the result.
+    /// injected pause returns immediately and the mark's write is injected
+    /// too, so neither a clock nor a scanner holding the new mark chooses the
+    /// result.
     ///
     /// MUTATION: return `Mine` on the first read error, or remove the read
     /// retry in `take_the_window_within_using` (one attempt is observed).
@@ -2009,6 +2011,7 @@ mod tests {
         let txn = TxnId::new(TXN);
         let me = crate::update_apply::this_process();
         let mut attempts = 0;
+        let mut written = Vec::new();
         let answer = crate::update_apply::take_the_window_within_reads_at(
             &staged.home,
             txn,
@@ -2025,12 +2028,26 @@ mod tests {
                     Ok(None)
                 }
             },
+            |mark, bytes| {
+                written.push((mark.to_path_buf(), bytes.to_vec()));
+                Ok(())
+            },
         );
         assert!(answer.is_mine(), "{answer:?}");
         assert_eq!(attempts, 2);
+        let [(mark, bytes)] = written.as_slice() else {
+            panic!("the mark is written once: {written:?}");
+        };
+        assert_eq!(
+            mark,
+            &crate::update_apply::owner_path(&staged.home, txn),
+            "at the window's mark"
+        );
+        std::fs::write(mark, bytes).unwrap();
         assert_eq!(
             crate::update_apply::window_owner(&staged.home, txn),
-            Some(me)
+            Some(me),
+            "naming this process"
         );
     }
 

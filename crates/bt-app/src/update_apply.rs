@@ -2245,8 +2245,9 @@ pub(crate) fn take_the_window_within_writes_at<C: Contender>(
     )
 }
 
-/// [`take_the_window_within_at`] with an injected mark reader and immediate
-/// pauses. It pins transient read refusals without depending on the clock.
+/// [`take_the_window_within_at`] with an injected mark reader, an injected
+/// mark writer and immediate pauses. It pins transient read refusals without
+/// depending on the clock, or on a scanner letting go of the mark it writes.
 #[cfg(test)]
 pub(crate) fn take_the_window_within_reads_at(
     home: &Home,
@@ -2254,6 +2255,7 @@ pub(crate) fn take_the_window_within_reads_at(
     me: Running,
     within: Duration,
     read: impl FnMut() -> io::Result<Option<Running>>,
+    write: impl FnMut(&Path, &[u8]) -> Result<(), MarkWriteFailure>,
 ) -> Window {
     take_the_window_within_using(
         home,
@@ -2265,9 +2267,7 @@ pub(crate) fn take_the_window_within_reads_at(
             after_lock: || {},
             read_owner: read,
             read_phase: || read_window_phase(home, txn),
-            write: |path: &Path, bytes: &[u8]| {
-                MarkWriteFailure::from_result(install_txn::durable_write(path, bytes))
-            },
+            write,
             wait: |_| true,
         },
     )
@@ -3279,6 +3279,9 @@ mod beyond_tests {
                 this_process(),
                 Duration::from_millis(500),
                 || Ok(None),
+                |path: &Path, bytes: &[u8]| {
+                    MarkWriteFailure::from_result(install_txn::durable_write(path, bytes))
+                },
             );
             assert!(
                 matches!(window, Window::StoodAside(_)),

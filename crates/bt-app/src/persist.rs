@@ -3923,19 +3923,17 @@ pub(crate) mod tests {
         let first = writer.send(&path, b"first".to_vec()).expect("queued");
         let second = writer.send(&path, b"second".to_vec()).expect("queued");
         assert_eq!((first, second), (1, 2));
-        let (earlier, landed) = admitted::<doors::SessionWriteWait, _>(|token| {
-            writer.wait_for(token, second, Instant::now() + SESSION_SAVE_BUDGET)
-        })
-        .expect("admitted on the way out");
-        assert_eq!(landed, Ok(()));
+        // The receipts as the writer sends them, each awaited on the channel within the suite's
+        // patience: how fast two atomic writes land on a loaded disk is not this test's subject,
+        // and the session's own budget would make it one.
+        let earlier = crate::lane::receive(&writer.receipts, "the older document's receipt");
+        let landed = crate::lane::receive(&writer.receipts, "the newer document's receipt");
         assert_eq!(
-            earlier
-                .iter()
-                .map(|receipt| receipt.generation)
-                .collect::<Vec<_>>(),
-            vec![first],
+            [earlier.generation, landed.generation],
+            [first, second],
             "the older document answered first, which is what one writer buys"
         );
+        assert_eq!((earlier.result, landed.result), (Ok(()), Ok(())));
         assert_eq!(
             std::fs::read(&path).expect("the file the writer left"),
             b"second".to_vec(),
