@@ -705,64 +705,6 @@ fn write_receipt(job: &crate::update_trial::ReceiptJob) -> ReceiptWritten {
     }
 }
 
-/// **Serve one job on the storage worker** — the worker's whole answer to it — and say
-/// whether the worker goes on (a session receipt nobody is left to hear ends it).
-fn serve_storage_job(
-    ctx: &bt_platform::admission::WorkerCtx,
-    job: StorageJob,
-    outgoing: &mpsc::Sender<SessionWriteReceipt>,
-    wake: &(dyn Fn() + Send + Sync),
-) -> bool {
-    let request = match job {
-        StorageJob::Session(request) => request,
-        // The answer is in its channel before the wake: the steward's order.
-        StorageJob::Document(job) => {
-            crate::document_request::serve_document(ctx, job);
-            wake();
-            return true;
-        }
-        StorageJob::Read(job) => {
-            crate::document_request::serve_read(ctx, job);
-            wake();
-            return true;
-        }
-        StorageJob::Recovered(job) => {
-            crate::document_request::serve_recovered(ctx, job);
-            wake();
-            return true;
-        }
-        StorageJob::SessionBackup(request) => {
-            if let Err(error) = bt_persist::atomic_write_carrying_from(
-                &request.path,
-                &request.bytes,
-                &request.source,
-            ) {
-                crate::diagnostics::note(&format!(
-                    "BT_PERSIST {PREVIOUS_SESSION_FILE_NAME} backup failed: {error}"
-                ));
-            }
-            return true;
-        }
-        StorageJob::Receipt { job, answer } => {
-            let _ = answer.send(write_receipt(&job));
-            return true;
-        }
-        StorageJob::Handoff { job, answer } => {
-            let _ = answer.send(crate::update_handoff::perform(job));
-            return true;
-        }
-        StorageJob::Ahead => return true,
-    };
-    let result =
-        bt_persist::atomic_write(&request.path, &request.bytes).map_err(|error| error.to_string());
-    outgoing
-        .send(SessionWriteReceipt {
-            generation: request.generation,
-            result,
-        })
-        .is_ok()
-}
-
 /// The channel ends one writer thread works from: requests in, receipts out.
 struct SessionWriterEnds {
     incoming: mpsc::Receiver<StorageJob>,
@@ -1122,17 +1064,65 @@ impl SessionWriter {
                     wake: Arc::clone(&wake),
                     ahead,
                 };
-                while let Ok(job) = end.ends.incoming.recv() {
+                'serving: while let Ok(next) = end.ends.incoming.recv() {
                     // **Every job admitted ahead is served before the one the queue gave**
                     // ([`StorageLane::submit_ahead`]): the worker drains them at each job it
                     // takes, and the `Ahead` token wakes it for them when it is idle.
                     let ahead: Vec<StorageJob> = lane_lock(&end.ahead).drain(..).collect();
-                    let going = ahead
-                        .into_iter()
-                        .chain(std::iter::once(job))
-                        .all(|job| serve_storage_job(ctx, job, &end.ends.outgoing, &*wake));
-                    if !going {
-                        break;
+                    for job in ahead.into_iter().chain(std::iter::once(next)) {
+                        let request = match job {
+                            StorageJob::Session(request) => request,
+                            // The answer is in its channel before the wake: the steward's order.
+                            StorageJob::Document(job) => {
+                                crate::document_request::serve_document(ctx, job);
+                                wake();
+                                continue;
+                            }
+                            StorageJob::Read(job) => {
+                                crate::document_request::serve_read(ctx, job);
+                                wake();
+                                continue;
+                            }
+                            StorageJob::Recovered(job) => {
+                                crate::document_request::serve_recovered(ctx, job);
+                                wake();
+                                continue;
+                            }
+                            StorageJob::SessionBackup(request) => {
+                                if let Err(error) = bt_persist::atomic_write_carrying_from(
+                                    &request.path,
+                                    &request.bytes,
+                                    &request.source,
+                                ) {
+                                    crate::diagnostics::note(&format!(
+                                        "BT_PERSIST {PREVIOUS_SESSION_FILE_NAME} backup failed: {error}"
+                                    ));
+                                }
+                                continue;
+                            }
+                            StorageJob::Receipt { job, answer } => {
+                                let _ = answer.send(write_receipt(&job));
+                                continue;
+                            }
+                            StorageJob::Handoff { job, answer } => {
+                                let _ = answer.send(crate::update_handoff::perform(job));
+                                continue;
+                            }
+                            StorageJob::Ahead => continue,
+                        };
+                        let result = bt_persist::atomic_write(&request.path, &request.bytes)
+                            .map_err(|error| error.to_string());
+                        if end
+                            .ends
+                            .outgoing
+                            .send(SessionWriteReceipt {
+                                generation: request.generation,
+                                result,
+                            })
+                            .is_err()
+                        {
+                            break 'serving;
+                        }
                     }
                 }
             },
