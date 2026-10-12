@@ -361,33 +361,28 @@ impl Runtime<'_> {
     /// (`SettingsStore::begin_merge`); then, with the writes held, every value
     /// that differs between what is in force and the merged document goes
     /// through its row's own door — the import's walk, and the import's batch
-    /// shape — while a store moves only what is in force; then the writes are
-    /// released, and what kept Folio's value is written, conditional on the
-    /// file. A value no row on this platform shows is stored as it came.
+    /// shape — while a store moves only what is in force. **Every door is
+    /// walked**: one that refuses is named and the walk goes on
+    /// (`SettingsPass::walk_doors`). A value no row on this platform shows is
+    /// stored as it came. Then the writes are released, and what kept Folio's
+    /// value is written, conditional on the file.
     ///
-    /// Then the open dialog re-derives, the chrome follows, and
-    /// `diagnostics.log` gets the pass's one line. Answers what the file
-    /// replaced, `None` for a clean hand edit or no merge.
+    /// Then `diagnostics.log` gets the pass's one line, always, the open
+    /// dialog re-derives and the chrome follows. Answers what the file replaced
+    /// and what was not applied, `None` for a clean hand edit or no merge.
     fn merge_settings_file(&mut self) -> Result<Option<document_request::ReplacedInFile>> {
-        let Some(pass) = self
+        let Some(mut pass) = self
             .app
             .settings_store
             .begin_merge(bt_platform::host_platform())
         else {
             return Ok(None);
         };
-        let mut outcome = Ok(());
-        for change in &pass.doors.apply {
-            outcome = self.apply_imported_setting(change.clone());
-            if outcome.is_err() {
-                break;
-            }
-        }
+        pass.walk_doors(|change| self.apply_imported_setting(change.clone()));
         for change in &pass.doors.elsewhere {
             self.store_imported_value(change);
         }
         self.app.settings_store.end_merge();
-        outcome?;
         eprintln!("{}", pass.diagnostics());
         if !pass.doors.apply.is_empty() || !pass.doors.elsewhere.is_empty() {
             let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();

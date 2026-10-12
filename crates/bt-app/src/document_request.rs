@@ -970,12 +970,14 @@ pub(crate) enum Follow {
 }
 
 /// **What one merge pass replaced in one file** — the data the pass's card
-/// (§3.6, T-STORE-NOTICE) names: the file, and every value the file won a
-/// conflict over, named the way the reader knows it.
+/// (§3.6, T-STORE-NOTICE) names: the file, every value the file won a
+/// conflict over, and every value whose door refused it ("not applied"),
+/// each named the way the reader knows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ReplacedInFile {
     pub(crate) file: &'static str,
     pub(crate) values: Vec<String>,
+    pub(crate) not_applied: Vec<String>,
 }
 
 /// **What one storage pass's merges replaced**: one entry per file that lost a
@@ -1424,8 +1426,10 @@ impl<T: StoredDocument> DocumentState<T> {
                      written over it (generation {})",
                     flight.generation
                 );
+                // (c)1's `Moved` row: the base is the revision as it stands
+                // when the answer is processed, in worker order.
                 self.keep_for_the_merge(PendingMerge {
-                    base: flight.base,
+                    base: self.revision.clone(),
                     theirs: bytes,
                     kept: None,
                     written: None,
@@ -1503,7 +1507,10 @@ impl<T: StoredDocument> DocumentState<T> {
     }
 
     /// Store a file's bytes for the merge. A newer file with no kept copy
-    /// replaces an older one: the merge reconciles what the file holds now.
+    /// replaces an older one measured against the same base: the merge
+    /// reconciles what the file holds now. Against another base it is stored
+    /// after it, and the merges run in order, each folding into `desired` what
+    /// the next one is measured with.
     ///
     /// **A store that merges holds its writes until the merge has folded the
     /// file in**: a write sent now would be conditional on a file that is no
@@ -1515,6 +1522,7 @@ impl<T: StoredDocument> DocumentState<T> {
         if merge.kept.is_none()
             && let Some(last) = self.merges.last_mut()
             && last.kept.is_none()
+            && last.base == merge.base
         {
             *last = merge;
             return;
@@ -1623,17 +1631,15 @@ impl<T: StoredDocument> DocumentState<T> {
         }
     }
 
-    /// **A held document's file changed again** (review round 3): the revision
-    /// follows the file — the bytes the next merge must not write over — and the
-    /// file bytes stored for the merge become the newest, against the base the
-    /// hold began with. The hold stays: only the merge's fold releases it.
+    /// **A held document's file changed again**: the file is stored for the
+    /// merge against the revision as it stands now — (c)1's `Moved` row, whose
+    /// base is always the current revision, answers being processed in worker
+    /// order (a `Displaced` before it has moved the revision to the document
+    /// written) — and the revision follows the file, the bytes the next merge
+    /// must not write over. The hold stays: only the merge releases it.
     fn held_file_moved(&mut self, bytes: Option<Arc<[u8]>>, document: T) {
-        let base = self
-            .merges
-            .last()
-            .map_or_else(|| self.revision.clone(), |merge| merge.base.clone());
         self.keep_for_the_merge(PendingMerge {
-            base,
+            base: self.revision.clone(),
             theirs: bytes.clone(),
             kept: None,
             written: None,
@@ -1686,7 +1692,11 @@ impl<T: StoredDocument> DocumentState<T> {
     /// parse is not merged (§3.3): a file that moved stays stored, and the
     /// store stays held, until a later read finds it parsing; a displaced copy
     /// that will not parse stays on disk beside the file under its own name,
-    /// said in `stderr`, and nothing retires it.
+    /// said once in `stderr`, never merged and never removed — like a
+    /// `.rejected-` copy — and with nothing of it left to merge, `desired` and
+    /// the revision (the document written, (c)1) stay as they are. **The hold
+    /// is released whenever nothing waits for the merge**, so the next trigger
+    /// writes conditionally on what the file is known to hold.
     pub(crate) fn merge_stored<R>(
         &mut self,
         mut merge: impl FnMut(&T, &T, &T) -> (T, R),
@@ -1722,9 +1732,7 @@ impl<T: StoredDocument> DocumentState<T> {
             self.fold(pending, merged, theirs);
             said.push(about);
         }
-        if !self.merges.is_empty() {
-            self.held_for_merge = true;
-        }
+        self.held_for_merge = !self.merges.is_empty();
         said
     }
 

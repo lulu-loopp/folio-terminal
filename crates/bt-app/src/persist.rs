@@ -2216,10 +2216,10 @@ impl SettingsStore {
         self.document.project(in_force);
         self.hold_writes();
         self.merging = true;
-        Some(crate::settings_merge::SettingsPass {
-            doors: crate::settings_merge::doors(self.document.projection(), &merged, platform),
+        Some(crate::settings_merge::SettingsPass::new(
+            crate::settings_merge::doors(self.document.projection(), &merged, platform),
             account,
-        })
+        ))
     }
 
     /// **A storage pass's merge, its last step**: the writes are released, and
@@ -5810,6 +5810,124 @@ mod conditional_write_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// RED (round 2, finding 1) — **an unparseable displaced copy releases the hold and keeps
+    /// the file.** A hand edit that will not parse crosses Folio's write: Folio's document is on
+    /// disk, the person's bytes are kept beside it. There is nothing to merge, so the pass releases
+    /// the hold in the same step — `desired` unchanged, the revision the document written, the kept
+    /// copy on disk with no obligation on it — and the next press writes, conditional on the
+    /// document written.
+    ///
+    /// MUTATION: leave the hold (in `DocumentState::merge_stored`, only ever set
+    /// `held_for_merge`, never clear it) — the press queues nothing.
+    #[test]
+    fn an_unparseable_displaced_copy_releases_the_hold_and_keeps_the_file() {
+        let root = scratch("unparseable-displaced");
+        let path = root.join(SETTINGS_FILE_NAME);
+        std::fs::write(&path, bytes(&settings("基线 Base Mono"))).unwrap();
+        let (mut store, jobs) = merging_store(&path);
+
+        let ours = settings("我们的 Ours Mono");
+        assert!(store.store(ours.clone()));
+        let broken = "{ \"theme_mode\": 半截".as_bytes().to_vec();
+        serve_crossed(next_write(&jobs), Some(broken.clone()));
+        store.settle();
+        let kept = store.document().merges()[0]
+            .kept
+            .clone()
+            .expect("the person's bytes are kept");
+
+        assert!(
+            store
+                .begin_merge(bt_platform::HostPlatform::Windows)
+                .is_none(),
+            "nothing is merged"
+        );
+        assert_eq!(file_bytes(&kept), broken, "the copy stays, as it was");
+        assert!(store.document().kept().is_empty(), "and nothing retires it");
+        assert!(store.document().merges().is_empty());
+        assert_eq!(store.document().desired(), &ours, "`desired` is unchanged");
+        assert_eq!(
+            store.revision().bytes.as_deref(),
+            Some(&bytes(&ours)[..]),
+            "the revision is the document written"
+        );
+
+        let pressed = settings("再按 Pressed Mono");
+        assert!(store.store(pressed.clone()));
+        let next = next_write(&jobs);
+        assert_eq!(
+            next.expected.as_deref(),
+            Some(&bytes(&ours)[..]),
+            "the next trigger writes, conditional on the document written"
+        );
+        assert_eq!(&*next.bytes, &bytes(&pressed)[..]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (round 2, finding 2; (c)1's `Moved` row) — **a re-read answered after a `Displaced`
+    /// in the same turn merges against the document written.** Folio writes its font family; a
+    /// crossing edit sets the size and is displaced; then, before the turn that hears both, the
+    /// person reverts the family in the file Folio left. The re-read's merge is measured against
+    /// the revision the `Displaced` moved to — the document written — so the revert is the file's
+    /// change and wins, and the displaced size survives.
+    ///
+    /// MUTATION: measure a held re-read against the previous stored merge's base (the stale
+    /// pre-exchange revision) — the revert looks like no change, and Folio's family stays.
+    #[test]
+    fn a_reread_after_displaced_merges_against_the_document_written() {
+        let root = scratch("reread-after-displaced");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let base = settings("基线 Base Mono");
+        std::fs::write(&path, bytes(&base)).unwrap();
+        let (mut store, jobs) = merging_store(&path);
+
+        let ours = settings("我们的 Ours Mono");
+        assert!(store.store(ours.clone()));
+        store.document().ask_read();
+        let write = next_write(&jobs);
+        let read = match jobs.try_recv() {
+            Ok(StorageJob::Read(read)) => read,
+            _ => panic!("the read is queued behind the write"),
+        };
+        let with_size = SettingsV1 {
+            terminal_font_size: 19,
+            ..base.clone()
+        };
+        serve_crossed(write, Some(bytes(&with_size)));
+        // The person reverts the family in the file Folio left.
+        let reverted = SettingsV1 {
+            terminal_font_family: base.terminal_font_family.clone(),
+            ..ours.clone()
+        };
+        std::fs::write(&path, bytes(&reverted)).unwrap();
+        on_a_worker(move |worker| crate::document_request::serve_read(worker, read));
+        store.settle();
+
+        let merges = store.document().merges().to_vec();
+        assert_eq!(merges.len(), 2, "the displaced copy, then the re-read");
+        assert_eq!(
+            merges[0].base.document, base,
+            "Displaced: the pre-exchange revision"
+        );
+        assert_eq!(
+            merges[1].base.document, ours,
+            "the re-read: the document written"
+        );
+        store
+            .begin_merge(bt_platform::HostPlatform::Windows)
+            .expect("both are merged");
+        store.end_merge();
+        assert_eq!(
+            store.document().desired(),
+            &SettingsV1 {
+                terminal_font_size: 19,
+                ..base.clone()
+            },
+            "the file's revert wins, and the displaced size survives"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// RED (carry-forward 1, (b)17 row 6) — **a keybindings change is held for its merge, not
     /// overwritten.** `keybindings.json` joins the pass; until its merge exists
     /// (T-STORE-MERGE-KEYBINDINGS) a re-read that finds the file changed takes nothing — the
@@ -6410,9 +6528,11 @@ mod conditional_write_tests {
     }
 
     /// RED (review round 3, finding 1) — **a re-read while held keeps the hold**:
-    /// only the merge's fold releases it. The person's file read back is nothing;
-    /// the file changed again is the new revision and the newest bytes for the
-    /// merge, against the base the hold began with; and still nothing is written.
+    /// only the merge releases it. The person's file read back is nothing; the
+    /// file changed again is the new revision and is stored for the merge after
+    /// the conflict's, against the revision as it stood (T-STORE-MERGE-SETTINGS
+    /// round 2: a `Moved` or re-read merge's base is always the current
+    /// revision); and still nothing is written.
     ///
     /// MUTATION: let a re-read release the hold (put `self.held_for_merge = false`
     /// back in `DocumentState::on_read`'s taking branch and let a held read take
@@ -6448,13 +6568,21 @@ mod conditional_write_tests {
         assert!(!news.taken, "a held document takes nothing from a re-read");
         assert_eq!(store.revision().bytes.as_deref(), Some(&again[..]));
         let merges = store.document().merges().to_vec();
-        assert_eq!(merges.len(), 1);
+        assert_eq!(merges.len(), 2, "the conflict's file, then the newest");
         assert_eq!(
-            merges[0].theirs.as_deref(),
+            merges[0].base.document, base,
+            "the conflict, against its own base"
+        );
+        assert_eq!(
+            merges[1].theirs.as_deref(),
             Some(&again[..]),
             "the newest file"
         );
-        assert_eq!(merges[0].base.document, base, "against the hold's own base");
+        assert_eq!(
+            merges[1].base.document,
+            settings("他们的 Theirs Mono"),
+            "against the revision it was read over"
+        );
 
         assert!(store.store(settings("再按 Pressed Mono")));
         store.release_trial();

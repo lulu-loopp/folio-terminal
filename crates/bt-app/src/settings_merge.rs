@@ -35,7 +35,7 @@
 use bt_persist::{SETTINGS_SCHEMA_VERSION, SettingsV1};
 
 use crate::document_request::ReplacedInFile;
-use crate::settings_bundle::{SettingsPlan, plan_settings};
+use crate::settings_bundle::{SettingChange, SettingsPlan, plan_settings};
 
 /// **What one unit came to** (§3.3's table).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -387,29 +387,75 @@ pub(crate) struct SettingsPass {
     pub(crate) doors: SettingsPlan,
     /// Every merge of the pass, summed.
     pub(crate) account: Account,
+    /// The doors that refused their change, named by row, with the door's
+    /// error ([`Self::walk_doors`]).
+    pub(crate) refused: Vec<(String, String)>,
 }
 
 impl SettingsPass {
-    /// **The pass's one line for `diagnostics.log`** (§3.6).
+    /// A pass over `doors`, with `account` to say; no door walked yet.
+    pub(crate) fn new(doors: SettingsPlan, account: Account) -> Self {
+        Self {
+            doors,
+            account,
+            refused: Vec::new(),
+        }
+    }
+
+    /// **Every door of the pass, each one walked** (§3.3 step 3: every unit
+    /// that takes the file's value is put in force). A door that refuses does
+    /// not stop the pass: it is named, with its error, and the next door is
+    /// walked. What the refused unit is in `desired` stays as the file said it,
+    /// and what is in force keeps its value ((b)6): it is not written back as a
+    /// change.
+    pub(crate) fn walk_doors<E: std::fmt::Display>(
+        &mut self,
+        mut door: impl FnMut(&SettingChange) -> Result<(), E>,
+    ) {
+        for change in &self.doors.apply {
+            if let Err(error) = door(change) {
+                let name = change.row().map_or_else(
+                    || crate::persist::SETTINGS_FILE_NAME.to_owned(),
+                    |row| row.title().to_owned(),
+                );
+                self.refused.push((name, error.to_string()));
+            }
+        }
+    }
+
+    /// **The pass's one line for `diagnostics.log`** (§3.6), with the doors
+    /// that refused and why.
     pub(crate) fn diagnostics(&self) -> String {
-        format!(
-            "BT_PERSIST {} merged: took {} from the file, kept {} from Folio, conflicts {}",
+        let mut line = format!(
+            "BT_PERSIST {} merged: took {} from the file, kept {} from Folio, conflicts {}, \
+             doors refused: {}",
             crate::persist::SETTINGS_FILE_NAME,
             self.account.took,
             self.account.kept,
-            self.account.conflicted
-        )
+            self.account.conflicted,
+            self.refused.len()
+        );
+        for (name, error) in &self.refused {
+            line.push_str(&format!("; {name}: {error}"));
+        }
+        line
     }
 
-    /// **What the file replaced, for the pass's card** (§3.6): nothing for a
-    /// clean hand edit; the file and each value it won otherwise, named once.
+    /// **What the pass replaced and could not apply, for its card** (§3.6):
+    /// nothing for a clean hand edit; otherwise the file, each value it won
+    /// over Folio's, and each value whose door refused it, each named once.
     pub(crate) fn replaced(&self) -> Option<ReplacedInFile> {
-        if self.account.conflicts.is_empty() {
+        if self.account.conflicts.is_empty() && self.refused.is_empty() {
             return None;
+        }
+        let mut not_applied = Vec::new();
+        for (name, _) in &self.refused {
+            push_once(&mut not_applied, name.clone());
         }
         Some(ReplacedInFile {
             file: crate::persist::SETTINGS_FILE_NAME,
             values: self.account.conflicts.clone(),
+            not_applied,
         })
     }
 }
@@ -459,7 +505,6 @@ mod tests {
     use super::*;
     use crate::document_request::StoredDocument;
     use crate::persist::{SETTINGS_FILE_NAME, SettingsStore, StorageLane};
-    use crate::settings_bundle::SettingChange;
 
     const PLATFORM: bt_platform::HostPlatform = bt_platform::HostPlatform::Windows;
 
@@ -614,6 +659,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// RED (round 2, finding 3; §3.3 step 3, §3.6) — **a door that refuses does not stop the
+    /// pass.** The file changed the theme and the font size; the theme's door refuses. The font's
+    /// door is still walked, the pass's line says one door refused and why, and the card's data
+    /// names the theme as not applied. `desired` keeps the file's theme, and what is in force
+    /// keeps its own ((b)6).
+    ///
+    /// MUTATION: in `SettingsPass::walk_doors`, stop at the first door that refuses — the font's
+    /// door is never walked.
+    #[test]
+    fn a_refused_door_is_named_and_every_other_door_is_walked() {
+        let (root, mut store, _jobs) = store("refused-door");
+        let base = SettingsV1::default();
+        let theirs = SettingsV1 {
+            theme_mode: ThemeModeV1::Light,
+            terminal_font_size: 20,
+            ..base.clone()
+        };
+        let _ = store
+            .document()
+            .hear_read(bt_persist::StableRead::Bytes(bytes(&theirs)));
+        let mut pass = store.begin_merge(PLATFORM).expect("a merge ran");
+        let mut walked = Vec::new();
+        pass.walk_doors(|change| match change {
+            SettingChange::Theme(_) => Err("这台机器拒绝 refused"),
+            other => {
+                walked.push(other.clone());
+                Ok(())
+            }
+        });
+        store.end_merge();
+        assert_eq!(
+            walked,
+            vec![SettingChange::TerminalFont {
+                family: base.terminal_font_family.clone(),
+                cjk_family: base.terminal_cjk_font_family.clone(),
+                size: 20,
+            }],
+            "the second door is walked"
+        );
+        let theme = crate::settings::SettingsRow::Theme.title();
+        assert_eq!(
+            pass.diagnostics(),
+            format!(
+                "BT_PERSIST settings.json merged: took 2 from the file, kept 0 from Folio, \
+                 conflicts 0, doors refused: 1; {theme}: 这台机器拒绝 refused"
+            )
+        );
+        let replaced = pass.replaced().expect("the refusal is the card's");
+        assert_eq!(replaced.not_applied, vec![theme.to_owned()]);
+        assert!(replaced.values.is_empty(), "no conflict");
+        assert_eq!(store.document().desired().theme_mode, ThemeModeV1::Light);
+        assert_eq!(
+            store.loaded().theme_mode,
+            base.theme_mode,
+            "in force: its own"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// RED (§3.6) — **a clean hand edit says nothing, and a conflict is named
     /// once per pass**: the card's data is no entry for a pass the file won no
     /// conflict in, and one entry, naming each row once, for a pass it did —
@@ -640,7 +744,8 @@ mod tests {
         assert_eq!(pass.replaced(), None, "nothing to say");
         assert_eq!(
             pass.diagnostics(),
-            "BT_PERSIST settings.json merged: took 1 from the file, kept 0 from Folio, conflicts 0"
+            "BT_PERSIST settings.json merged: took 1 from the file, kept 0 from Folio, conflicts 0, \
+             doors refused: 0"
         );
 
         // A conflict: Folio picked dark, the file says system, twice over.
