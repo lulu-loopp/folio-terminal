@@ -1121,6 +1121,12 @@ windows = { version = "0.62.2", features = [
     # `Win32_System_Com_StructuredStorage` above, which was already here for the
     # memory stream a page's thumbnail is captured into.
     "Win32_System_Variant",
+    # `MK_LBUTTON` and the rest of the key-state word a mouse message carries: the
+    # custom frame hands the maximize button's non-client messages back to the
+    # application as the client messages they were, word for word
+    # (`window_button_passage`, T-SNAP-LAYOUTS-MAXBUTTON). A feature, not a
+    # package — `docs/DESIGN.md` §8's bar.
+    "Win32_System_SystemServices",
     # `DRIVE_REMOTE` / `DRIVE_REMOVABLE`: the names of the two kinds `GetDriveTypeW` answers that
     # the PATH ear reads (`program_path_directory`). A feature, not a package.
     "Win32_System_WindowsProgramming",
@@ -1141,6 +1147,11 @@ windows = { version = "0.62.2", features = [
     # `docs/DESIGN.md` §8's bar.
     "Wdk_Foundation",
     "Wdk_Storage_FileSystem",
+    # `WM_MOUSELEAVE`, which the `windows` crate files with the common controls:
+    # the custom frame says it to the application when the pointer comes off the
+    # maximize button it answered `HTMAXBUTTON` for (`window_button_passage`,
+    # T-SNAP-LAYOUTS-MAXBUTTON). A feature, not a package.
+    "Win32_UI_Controls",
     "Win32_UI_HiDpi",
     # `ImmGetContext` / `ImmNotifyIME` / `ImmReleaseContext`: the one call that
     # ends a composition the field it was typed into no longer exists for

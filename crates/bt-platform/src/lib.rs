@@ -8957,8 +8957,10 @@ mod windows_impl {
                     CPS_CANCEL, ImmGetContext, ImmNotifyIME, ImmReleaseContext, NI_COMPOSITIONSTR,
                 },
                 KeyboardAndMouse::{
-                    GetCapture, GetKeyboardLayout, MAPVK_VK_TO_CHAR, MAPVK_VSC_TO_VK_EX,
-                    MapVirtualKeyW, SetFocus, VkKeyScanW,
+                    GetCapture, GetKeyState, GetKeyboardLayout, MAPVK_VK_TO_CHAR,
+                    MAPVK_VSC_TO_VK_EX, MapVirtualKeyW, SetFocus, TME_LEAVE, TME_NONCLIENT,
+                    TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY, VK_CONTROL, VK_LBUTTON,
+                    VK_MBUTTON, VK_RBUTTON, VK_SHIFT, VK_XBUTTON1, VK_XBUTTON2, VkKeyScanW,
                 },
                 // One call that undoes one winit makes, and the four that answer
                 // the system's pan gesture — see
@@ -8994,9 +8996,14 @@ mod windows_impl {
                 SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
                 TPM_RIGHTBUTTON, TrackPopupMenu, WINDOWPOS, WM_APP, WM_CLOSE, WM_DEVICECHANGE,
                 WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GESTURE,
-                WM_GETMINMAXINFO, WM_INPUTLANGCHANGE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST,
-                WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WM_SETTINGCHANGE, WM_THEMECHANGED,
-                WM_TOUCH, WM_WINDOWPOSCHANGING, WindowFromPoint,
+                WM_GETMINMAXINFO, WM_INPUTLANGCHANGE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+                WM_MBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST,
+                WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMBUTTONDBLCLK,
+                WM_NCMBUTTONDOWN, WM_NCMBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
+                WM_NCRBUTTONDBLCLK, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_NCXBUTTONDBLCLK,
+                WM_NCXBUTTONDOWN, WM_NCXBUTTONUP, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE,
+                WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TOUCH,
+                WM_WINDOWPOSCHANGING, WM_XBUTTONDOWN, WM_XBUTTONUP, WindowFromPoint,
             },
         },
     };
@@ -9009,6 +9016,16 @@ mod windows_impl {
         custom_frame_hit_test, hold_pending_pos_to, logical_px_for_dpi, window_skirt,
     };
     use crate::admission::{WaitToken, doors};
+
+    // The custom frame hands the pointer messages its `HTMAXBUTTON` answer turns
+    // non-client back to the application as the client messages they were
+    // (`window_button_passage`): the key-state word those carry, and the one
+    // client message that is not in `WindowsAndMessaging`.
+    use windows::Win32::System::SystemServices::{
+        MK_CONTROL, MK_LBUTTON, MK_MBUTTON, MK_RBUTTON, MK_SHIFT, MK_XBUTTON1, MK_XBUTTON2,
+        MODIFIERKEYS_FLAGS,
+    };
+    use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 
     /// Classify one absolute `PATH` directory without ever touching a remote server. Drive type
     /// is asked from the lexical root first; only a local or removable path reaches metadata.
@@ -10350,6 +10367,16 @@ mod windows_impl {
         /// `HWND`, which is that same event loop. Nothing between the borrow and
         /// its end sends a message, so the callback cannot re-enter it.
         title_bar_boxes: RefCell<Vec<TitleBarBox>>,
+        /// **Whether the application has been told the pointer is on the
+        /// maximize button** through a client message this frame made out of a
+        /// non-client one (T-SNAP-LAYOUTS-MAXBUTTON; [`window_button_passage`]).
+        ///
+        /// Written by the subclass procedure alone, on the window's own thread,
+        /// so a `Cell` for `title_bar_boxes`' reason. It is what lets the frame
+        /// say "the pointer came off it" exactly once, and what tells a
+        /// `WM_MOUSELEAVE` about the *client* area — which the button is not, to
+        /// the system — from the pointer leaving the window.
+        on_window_button: Cell<bool>,
         /// Smallest client size the window may be dragged to, in logical pixels,
         /// or `(0, 0)` for "no minimum". Logical rather than physical so the
         /// constraint survives a DPI change without anyone recomputing it.
@@ -10422,6 +10449,7 @@ mod windows_impl {
             let state = Box::new(CustomFrameState {
                 geometry,
                 title_bar_boxes: RefCell::new(Vec::new()),
+                on_window_button: Cell::new(false),
                 min_client_logical_width: AtomicI32::new(0),
                 min_client_logical_height: AtomicI32::new(0),
                 adopting: AtomicBool::new(false),
@@ -10796,6 +10824,19 @@ mod windows_impl {
                     None => unsafe { DefSubclassProc(hwnd, message, wparam, lparam) },
                 }
             }
+            // **The maximize button's pointer messages, handed back to the
+            // application** (T-SNAP-LAYOUTS-MAXBUTTON). Every message here is
+            // either one that `HTMAXBUTTON` turned non-client or one whose
+            // meaning that answer changed; [`window_button_passage`] decides
+            // each and [`pass_window_button_message`] does what it says.
+            WM_NCMOUSEMOVE | WM_NCMOUSELEAVE | WM_MOUSEMOVE | WM_MOUSELEAVE | WM_NCLBUTTONDOWN
+            | WM_NCLBUTTONUP | WM_NCLBUTTONDBLCLK | WM_NCRBUTTONDOWN | WM_NCRBUTTONUP
+            | WM_NCRBUTTONDBLCLK | WM_NCMBUTTONDOWN | WM_NCMBUTTONUP | WM_NCMBUTTONDBLCLK
+            | WM_NCXBUTTONDOWN | WM_NCXBUTTONUP | WM_NCXBUTTONDBLCLK => {
+                // SAFETY: as above.
+                let state = unsafe { &*(reference_data as *const CustomFrameState) };
+                unsafe { pass_window_button_message(hwnd, state, message, wparam, lparam) }
+            }
             _ => unsafe { DefSubclassProc(hwnd, message, wparam, lparam) },
         }
     }
@@ -10856,6 +10897,221 @@ mod windows_impl {
             CustomFrameHit::BottomLeft => HTBOTTOMLEFT,
             CustomFrameHit::BottomRight => HTBOTTOMRIGHT,
         }
+    }
+
+    /// **What the custom frame does with one pointer message, given whether the
+    /// pointer is on the maximize button** (T-SNAP-LAYOUTS-MAXBUTTON).
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(super) struct ButtonPassage {
+        /// A `WM_MOUSELEAVE` goes on to the application before anything else:
+        /// it was told the pointer is on the button, and the pointer is not.
+        pub(super) leave_first: bool,
+        /// The client message that goes on in this one's place, at this one's
+        /// point in client coordinates.
+        pub(super) as_client: Option<u32>,
+        /// Whether this message itself goes on afterwards, as it came.
+        pub(super) onward: bool,
+        /// Whether the pointer is on the button once this message is done.
+        pub(super) on_button: bool,
+        /// Whether the frame asks the system for the `WM_NCMOUSELEAVE` that
+        /// says the pointer has left the non-client area it is in.
+        pub(super) track_leave: bool,
+    }
+
+    /// **The one decision in handing the maximize button back to the
+    /// application** (T-SNAP-LAYOUTS-MAXBUTTON).
+    ///
+    /// # Why the application gets client messages for a button the system knows
+    ///
+    /// Windows 11 opens its Snap Layouts flyout over a window's maximize button,
+    /// and stands the Win+Z picker on it, only where the window's own
+    /// `WM_NCHITTEST` says `HTMAXBUTTON` (Microsoft, "Support snap layouts for
+    /// desktop apps on Windows 11"). That answer makes the button non-client to
+    /// the system, so the pointer over it arrives as `WM_NCMOUSEMOVE`,
+    /// `WM_NCLBUTTONDOWN` and the rest — messages winit turns into no event,
+    /// and which `DefWindowProc` answers by drawing and tracking a native button
+    /// of its own. The button is still the application's: drawn, washed on
+    /// hover, tipped and pressed by the same code as every other box in the
+    /// bar. So each of those messages goes on to winit as the client message
+    /// the pointer made before the answer changed, at the same point in client
+    /// coordinates, and the application's road for a hover, a tooltip and a
+    /// press is the one it always was — the press acts when the button goes
+    /// down, as it always has, and a quick second press is a press, because the
+    /// window class asks for no double clicks. Only `WM_NCMOUSEMOVE` also goes
+    /// on as itself: the system's own hover over its maximize button is the
+    /// flyout.
+    ///
+    /// # The leave the client area raises is not the pointer leaving
+    ///
+    /// winit asks for a `WM_MOUSELEAVE` when the pointer enters the client
+    /// area, and the system answers at once when the pointer is not in the
+    /// client area — which, on the button, it is not. So while the application
+    /// is told the pointer is on the button, a `WM_MOUSELEAVE` is the client
+    /// area's and is kept back; the frame asks for the non-client
+    /// `WM_NCMOUSELEAVE` instead, and says `WM_MOUSELEAVE` itself when the
+    /// pointer comes off the button: on that message, on a `WM_NCMOUSEMOVE`
+    /// over another part of the frame, or on a client move whose point the hit
+    /// test no longer gives to the button. That leave is also what makes winit
+    /// track the client area again: its next move is an entry.
+    ///
+    /// `on` is whether the pointer is on the button by this message: its hit
+    /// code for a non-client message, the hit test of its point for a client
+    /// move (asked only while `was`), `false` for `WM_NCMOUSELEAVE`, and `was`
+    /// for `WM_MOUSELEAVE`, which says nothing about the button.
+    pub(super) fn window_button_passage(message: u32, on: bool, was: bool) -> ButtonPassage {
+        let untouched = ButtonPassage {
+            leave_first: was && !on,
+            as_client: None,
+            onward: true,
+            on_button: on,
+            track_leave: false,
+        };
+        match message {
+            WM_NCMOUSEMOVE if on => ButtonPassage {
+                as_client: Some(WM_MOUSEMOVE),
+                track_leave: true,
+                ..untouched
+            },
+            WM_MOUSELEAVE if on => ButtonPassage {
+                onward: false,
+                ..untouched
+            },
+            _ if on => match client_button_message(message) {
+                Some(client) => ButtonPassage {
+                    as_client: Some(client),
+                    onward: false,
+                    ..untouched
+                },
+                None => untouched,
+            },
+            _ => untouched,
+        }
+    }
+
+    /// **The client message a non-client button message stands for.** A double
+    /// click is the press it is in the client area of a window whose class asks
+    /// for no double clicks, which winit's does not.
+    fn client_button_message(message: u32) -> Option<u32> {
+        Some(match message {
+            WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK => WM_LBUTTONDOWN,
+            WM_NCLBUTTONUP => WM_LBUTTONUP,
+            WM_NCRBUTTONDOWN | WM_NCRBUTTONDBLCLK => WM_RBUTTONDOWN,
+            WM_NCRBUTTONUP => WM_RBUTTONUP,
+            WM_NCMBUTTONDOWN | WM_NCMBUTTONDBLCLK => WM_MBUTTONDOWN,
+            WM_NCMBUTTONUP => WM_MBUTTONUP,
+            WM_NCXBUTTONDOWN | WM_NCXBUTTONDBLCLK => WM_XBUTTONDOWN,
+            WM_NCXBUTTONUP => WM_XBUTTONUP,
+            _ => return None,
+        })
+    }
+
+    /// **The `wParam` of the client message a non-client one stands for**: the
+    /// key-state word a client mouse message carries, and, for an X button,
+    /// which one, in the high word where both kinds of message keep it.
+    pub(super) fn client_mouse_wparam(
+        message: u32,
+        wparam: WPARAM,
+        keys: MODIFIERKEYS_FLAGS,
+    ) -> WPARAM {
+        let x_button = match message {
+            WM_NCXBUTTONDOWN | WM_NCXBUTTONUP | WM_NCXBUTTONDBLCLK => wparam.0 & 0xFFFF_0000,
+            _ => 0,
+        };
+        WPARAM(x_button | keys.0 as usize)
+    }
+
+    /// The key-state word of a client mouse message, read the way the system
+    /// writes it: which buttons, and which of Shift and Ctrl, are down.
+    fn mouse_key_state() -> MODIFIERKEYS_FLAGS {
+        // SAFETY: a read of this thread's keyboard state.
+        let down = |key: VIRTUAL_KEY| unsafe { GetKeyState(i32::from(key.0)) } < 0;
+        [
+            (VK_LBUTTON, MK_LBUTTON),
+            (VK_RBUTTON, MK_RBUTTON),
+            (VK_MBUTTON, MK_MBUTTON),
+            (VK_XBUTTON1, MK_XBUTTON1),
+            (VK_XBUTTON2, MK_XBUTTON2),
+            (VK_SHIFT, MK_SHIFT),
+            (VK_CONTROL, MK_CONTROL),
+        ]
+        .into_iter()
+        .filter(|(key, _)| down(*key))
+        .fold(MODIFIERKEYS_FLAGS(0), |word, (_, flag)| {
+            MODIFIERKEYS_FLAGS(word.0 | flag.0)
+        })
+    }
+
+    /// Carry out [`window_button_passage`] for one message.
+    ///
+    /// # Safety
+    ///
+    /// Called from the custom-frame subclass procedure with that call's own
+    /// arguments; `state` is the frame's.
+    unsafe fn pass_window_button_message(
+        hwnd: HWND,
+        state: &CustomFrameState,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        let was = state.on_window_button.get();
+        let on = match message {
+            WM_NCMOUSELEAVE => false,
+            WM_MOUSELEAVE => was,
+            WM_MOUSEMOVE => {
+                was && {
+                    let point = POINT {
+                        x: low_word_signed(lparam.0),
+                        y: high_word_signed(lparam.0),
+                    };
+                    let hit = unsafe { frame_hit_at(hwnd, state, point) };
+                    hit == Some(CustomFrameHit::MaximizeButton)
+                }
+            }
+            // Every non-client mouse message carries its hit code in the low word.
+            _ => (wparam.0 & 0xFFFF) as u32 == HTMAXBUTTON,
+        };
+        let passage = window_button_passage(message, on, was);
+        // Written before anything goes on, so a message sent while this one is
+        // being handled reads where the pointer is now.
+        state.on_window_button.set(passage.on_button);
+        if passage.leave_first {
+            let _ = unsafe { DefSubclassProc(hwnd, WM_MOUSELEAVE, WPARAM(0), LPARAM(0)) };
+        }
+        let mut result = LRESULT(0);
+        if let Some(client_message) = passage.as_client {
+            // A non-client mouse message carries its point in screen
+            // coordinates, a client one in client coordinates.
+            let mut point = POINT {
+                x: low_word_signed(lparam.0),
+                y: high_word_signed(lparam.0),
+            };
+            // SAFETY: this thread's own window and a point on the stack.
+            let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut point) };
+            let client_lparam =
+                LPARAM(((u32::from(point.y as u16) << 16) | u32::from(point.x as u16)) as isize);
+            let client_wparam = client_mouse_wparam(message, wparam, mouse_key_state());
+            result = unsafe { DefSubclassProc(hwnd, client_message, client_wparam, client_lparam) };
+        }
+        if passage.track_leave {
+            // After the client move and not before it: the system tracks one
+            // leave at a time, and winit asks for the client area's while it
+            // handles that move.
+            let mut track = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE | TME_NONCLIENT,
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
+            // SAFETY: a structure sized as the call asks, naming this thread's
+            // window. A refusal leaves the next move over another part of the
+            // frame, or the next client move, to say the pointer came off.
+            let _ = unsafe { TrackMouseEvent(&mut track) };
+        }
+        if passage.onward {
+            result = unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+        }
+        result
     }
 
     /// **The messages a touch makes that Windows' own translation has to see**,
@@ -25311,15 +25567,23 @@ mod custom_frame_tests {
     }
 }
 
-/// **How the custom frame tells Windows which box is the maximize button**
-/// (T-SNAP-LAYOUTS-MAXBUTTON): the `WM_NCHITTEST` code.
+/// **How the custom frame hands the maximize button back to the application**
+/// (T-SNAP-LAYOUTS-MAXBUTTON): the `WM_NCHITTEST` code, and the decision about
+/// every pointer message that code turns non-client.
 #[cfg(all(test, windows))]
 mod window_button_message_tests {
     use super::CustomFrameHit;
-    use super::windows_impl::hit_test_code;
+    use super::windows_impl::{
+        ButtonPassage, client_mouse_wparam, hit_test_code, window_button_passage,
+    };
+    use windows::Win32::Foundation::WPARAM;
+    use windows::Win32::System::SystemServices::{MK_LBUTTON, MK_SHIFT, MODIFIERKEYS_FLAGS};
+    use windows::Win32::UI::Controls::WM_MOUSELEAVE;
     use windows::Win32::UI::WindowsAndMessaging::{
         HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTMAXBUTTON, HTRIGHT,
-        HTTOP, HTTOPLEFT, HTTOPRIGHT,
+        HTTOP, HTTOPLEFT, HTTOPRIGHT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+        WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
+        WM_NCRBUTTONUP, WM_NCXBUTTONUP, WM_RBUTTONUP, XBUTTON2,
     };
 
     /// RED (T-SNAP-LAYOUTS-MAXBUTTON) — **the maximize button's region is
@@ -25344,6 +25608,182 @@ mod window_button_message_tests {
         ] {
             assert_eq!(hit_test_code(hit), code, "{hit:?}");
         }
+    }
+
+    /// RED (T-SNAP-LAYOUTS-MAXBUTTON) — **a press and a release on the
+    /// maximize button take the button's own road**: each goes on to the
+    /// application as the client message it was before the frame said
+    /// `HTMAXBUTTON`, and never on as itself — `DefWindowProc` given the
+    /// non-client press draws and tracks a native button of its own, and given
+    /// the right button's release opens the window menu. The press is the
+    /// client press, which is where the application's caption buttons act; a
+    /// quick second press is a press, as it is in a client area whose window
+    /// class asks for no double clicks.
+    ///
+    /// MUTATIONS: let `WM_NCLBUTTONDOWN` go on as itself (`onward: true`) and
+    /// the first assertion goes red; swap the client messages the press and the
+    /// release stand for (the press acting on the release) and the first two
+    /// go red; turn the double click into nothing and the third goes red.
+    #[test]
+    fn an_nc_press_and_release_on_the_maximize_button_takes_the_buttons_own_road() {
+        let as_client = |client| ButtonPassage {
+            leave_first: false,
+            as_client: Some(client),
+            onward: false,
+            on_button: true,
+            track_leave: false,
+        };
+        assert_eq!(
+            window_button_passage(WM_NCLBUTTONDOWN, true, true),
+            as_client(WM_LBUTTONDOWN),
+            "the press, as the client press, swallowed from the default procedure"
+        );
+        assert_eq!(
+            window_button_passage(WM_NCLBUTTONUP, true, true),
+            as_client(WM_LBUTTONUP),
+            "the release, as the client release"
+        );
+        assert_eq!(
+            window_button_passage(WM_NCLBUTTONDBLCLK, true, true),
+            as_client(WM_LBUTTONDOWN),
+            "a second press inside the double-click time is the press it was"
+        );
+        assert_eq!(
+            window_button_passage(WM_NCRBUTTONUP, true, true),
+            as_client(WM_RBUTTONUP),
+            "the right button's release is the application's, not the window menu"
+        );
+        // The X button keeps saying which one it is; the key word is the
+        // client message's own.
+        let x2 = (usize::from(XBUTTON2)) << 16;
+        assert_eq!(
+            client_mouse_wparam(
+                WM_NCXBUTTONUP,
+                WPARAM(x2 | HTMAXBUTTON as usize),
+                MODIFIERKEYS_FLAGS(MK_SHIFT.0 | MK_LBUTTON.0)
+            ),
+            WPARAM(x2 | (MK_SHIFT.0 | MK_LBUTTON.0) as usize)
+        );
+        assert_eq!(
+            client_mouse_wparam(WM_NCLBUTTONDOWN, WPARAM(HTMAXBUTTON as usize), MK_LBUTTON),
+            WPARAM(MK_LBUTTON.0 as usize),
+            "the hit code does not travel into the client message"
+        );
+        // A press anywhere else in the frame is the system's, as it was: the
+        // caption's drag and the edges' resize.
+        assert_eq!(
+            window_button_passage(WM_NCLBUTTONDOWN, false, false),
+            ButtonPassage {
+                leave_first: false,
+                as_client: None,
+                onward: true,
+                on_button: false,
+                track_leave: false,
+            }
+        );
+    }
+
+    /// What the application hears of the pointer, as winit tells it: on after a
+    /// client move, off after a leave. `steps` are the messages the frame is
+    /// sent and whether each puts the pointer on the button, read the way the
+    /// subclass reads it (`WM_NCMOUSELEAVE` never does, `WM_MOUSELEAVE` keeps
+    /// what was).
+    fn hover_after(steps: &[(u32, bool)]) -> Vec<bool> {
+        let (mut was, mut hovered) = (false, false);
+        let mut heard = Vec::new();
+        for &(message, on) in steps {
+            let on = match message {
+                WM_NCMOUSELEAVE => false,
+                WM_MOUSELEAVE => was,
+                _ => on,
+            };
+            let passage = window_button_passage(message, on, was);
+            if passage.leave_first {
+                hovered = false;
+            }
+            if passage.as_client == Some(WM_MOUSEMOVE) {
+                hovered = true;
+            }
+            if passage.onward {
+                match message {
+                    WM_MOUSEMOVE => hovered = true,
+                    WM_MOUSELEAVE => hovered = false,
+                    _ => {}
+                }
+            }
+            was = passage.on_button;
+            heard.push(hovered);
+        }
+        heard
+    }
+
+    /// RED (T-SNAP-LAYOUTS-MAXBUTTON) — **the pointer coming onto the maximize
+    /// button lights it and the pointer leaving puts it out**, through the very
+    /// client move and leave the application has always drawn the wash from.
+    ///
+    /// The awkward step is the third: winit asks for the client area's leave
+    /// as the pointer enters, and the system answers at once because the button
+    /// is not client area to it. That leave is kept back, so the wash stays;
+    /// the non-client leave the frame asked for is the one that puts it out.
+    ///
+    /// MUTATION: make `WM_NCMOUSELEAVE` say nothing (`leave_first: false` and
+    /// the pointer kept on the button) and the hover sticks: the fifth step
+    /// goes red.
+    #[test]
+    fn nc_mouse_move_and_leave_drive_the_drawn_buttons_hover() {
+        let onto_the_button = window_button_passage(WM_NCMOUSEMOVE, true, false);
+        assert_eq!(
+            onto_the_button,
+            ButtonPassage {
+                leave_first: false,
+                as_client: Some(WM_MOUSEMOVE),
+                onward: true,
+                on_button: true,
+                track_leave: true,
+            },
+            "the client move for the application, the non-client one still for \
+             the system (its hover is the flyout), and the non-client leave asked for"
+        );
+        assert_eq!(
+            hover_after(&[
+                // The tab strip's client area tells winit the pointer left it.
+                (WM_MOUSELEAVE, false),
+                // Onto the button.
+                (WM_NCMOUSEMOVE, true),
+                // winit's own leave, answered at once.
+                (WM_MOUSELEAVE, false),
+                (WM_NCMOUSEMOVE, true),
+                // Off it, out of the window.
+                (WM_NCMOUSELEAVE, false),
+                // And a later client leave is the client area's again.
+                (WM_MOUSELEAVE, false),
+            ]),
+            [false, true, true, true, false, false]
+        );
+        // Off it onto the empty bar, which is non-client too and raises no
+        // non-client leave.
+        assert_eq!(
+            hover_after(&[(WM_NCMOUSEMOVE, true), (WM_NCMOUSEMOVE, false)]),
+            [true, false]
+        );
+        // Off it into the client area, before the non-client leave arrives:
+        // the client move is a fresh entry.
+        assert_eq!(
+            window_button_passage(WM_MOUSEMOVE, false, true),
+            ButtonPassage {
+                leave_first: true,
+                as_client: None,
+                onward: true,
+                on_button: false,
+                track_leave: false,
+            }
+        );
+        // A client move whose point is still the button — the hand holding a
+        // press — leaves it lit.
+        assert_eq!(
+            hover_after(&[(WM_NCMOUSEMOVE, true), (WM_MOUSEMOVE, true)]),
+            [true, true]
+        );
     }
 }
 
