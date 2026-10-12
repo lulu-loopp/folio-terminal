@@ -98,58 +98,81 @@
 //!      at a time by the path that call is handed**. The argument is reduced
 //!      as far as its own spelling goes:
 //!      - a string literal; a `Path::new`/`PathBuf::from`/`.join(…)`/
-//!        `.parent()` chain; `env!("CARGO_MANIFEST_DIR")`;
-//!      - `concat!` and `format!`, spliced piece by piece: a format string's
-//!        holes are filled by what fills them (the next or a numbered
-//!        argument, a named one, a captured name; a hole with a spec is not
-//!        the value's own text). Text after a leading path continues the
-//!        path; a path spelled into text after other text makes a string
-//!        that names that path (`format!(". '{}'", script.display())`), judged
-//!        by it;
-//!      - the innermost binding of a name in scope at the call: a `let` is in
-//!        scope over the rest of its block, a `for` loop's variable over the
-//!        loop's body, and the latest one whose scope holds the call wins, so
-//!        an inner loop's variable is gone once the inner loop ends. A loop
-//!        over a literal list (an array, `&[…]`, `vec![…]`, `.iter()` over one,
-//!        a name or constant bound to one; a tuple pattern picks its field) is
-//!        each element in turn, every one judged;
-//!      - a constant: by bare name, the file's constant of that name; through
-//!        `self::`, `super::` and `crate::`, the module bt-source's module tree
-//!        leads to — in this file or another of the same target — and the
-//!        constant written there, brought there by a `use` or a `use …::*`, or
-//!        declared there by `thread_local!` (never a path). Any other longer
-//!        path, and one that runs through a type (`crate::x::Type::CONST`),
-//!        names an item this reading cannot see. A constant name is
-//!        SCREAMING_SNAKE_CASE, as the workspace's `non_upper_case_globals`
-//!        lint makes every one;
-//!      - a call of a free function of the same file: its tail, with its
-//!        parameters bound to what the call hands it.
+//!        `.parent()`/`.with_file_name(…)`/`.with_extension(…)` chain;
+//!        `env!("CARGO_MANIFEST_DIR")`; `&`, `*`, `?`, and a block's, an
+//!        `if`'s or a `match`'s value (each branch, seen from inside it);
+//!      - `concat!` and `format!`, spliced piece by piece. Placeholders take
+//!        their arguments as `std` does: an implicit one (`{}`, `{:?}`) the
+//!        next positional argument, `{0}` and `{name}` (a named argument or a
+//!        captured name) the one they name, a `.*` precision one positional
+//!        argument more. A placeholder with a spec puts no path text in: it
+//!        is words, or a string naming the path it renders. Text after a
+//!        leading path continues the path; a path after other text makes a
+//!        string that names that path (`format!(". '{}'", script.display())`),
+//!        judged by it; a tuple, array or struct literal holding paths names
+//!        them the same way;
+//!      - the innermost binding of a name in scope at the call: a `let` from
+//!        the end of its statement — after its initialiser, so `let path =
+//!        read(path)` reads the earlier `path` — to the end of its block; an
+//!        `if let`'s or `while let`'s body; a `match` arm's body; a `for`
+//!        loop's body. The one whose scope starts last wins, so an inner
+//!        loop's variable is gone once the inner loop ends. `Some(x)` and
+//!        `Ok(x)` bind `x` to what they unwrap; a tuple pattern picks its
+//!        field. A loop over a literal list (an array, `&[…]`, `vec![…]`,
+//!        `.iter()` over one, a name or constant bound to one) is each element
+//!        in turn, every one judged;
+//!      - a constant, as Rust resolves the path: a bare name, the file's
+//!        constants of that name, then what the module brings in by `use` and
+//!        `use …::*`; `self::`, `super::`, `crate::`, a child module or a
+//!        first-party crate's name, through bt-source's module trees — in any
+//!        file of any first-party package, every file a module is written in
+//!        under its `cfg`s — to the constant there, its `use`s and globs, or a
+//!        `thread_local!` (never a path); `Self::NAME`, `Type::NAME` and
+//!        `<Type as Trait>::NAME`, the constants `impl` blocks of that type
+//!        declare. Another crate's item or a primitive's (`u32::MAX`, a
+//!        `windows` constant, a glob of another crate's module) is never a
+//!        path into this checkout. A name found nowhere that is spelled
+//!        SCREAMING_SNAKE_CASE is unreduced; any other is a function, a type
+//!        or a variant — CI's workspace-wide `clippy -D warnings` makes
+//!        `non_upper_case_globals` refuse a constant spelled otherwise, and a
+//!        snake_case constant that is there is found by its name all the same;
+//!      - a call of a free function of the same file: what it returns (its
+//!        tail, or a `return` that ends it), with its parameters bound to what
+//!        the call hands it; several of one name under exclusive `cfg`s are
+//!        each followed, and one that calls itself adds nothing of its own to
+//!        what its other branches return.
 //!
-//!      Constants and helpers are followed as far as their chains go; one
-//!      that reaches itself again on the same resolution path is a cycle. Its
-//!      base is the package directory (`CARGO_MANIFEST_DIR`, or a relative
-//!      path, which `cargo test` resolves there), a scratch root (`temp_dir`,
+//!      Constants are followed as far as their chains go; one that reaches
+//!      itself again on the same resolution path is a cycle. Its base is the
+//!      package directory (`CARGO_MANIFEST_DIR`, or a relative path, which
+//!      `cargo test` resolves there), a scratch root (`temp_dir`,
 //!      `temp_path`, `tempfile`), an absolute path (outside the checkout: a
 //!      committed absolute path into it would be a machine path, which
 //!      `scripts/check-machine-paths.ps1` refuses), or a base this reading
-//!      cannot see (a parameter, a field, another file's function). A path
-//!      under the package directory that lands on a committed document is a
-//!      read of it; one that lands under `target/`, on Rust source or on an
-//!      uncommitted file is not; a scratch path is not. A path on an unseen
-//!      base reads a committed document only when its literal segments are a
-//!      whole path to one from the workspace root (two segments or more,
-//!      which a scratch file's bare name is not). So a function that reads its
-//!      own output under `target/` and a committed `.tsv` is a reader of the
-//!      `.tsv` alone.
+//!      cannot see (a parameter, a field, another function's result: the
+//!      function or caller that hands that base on is the call judged for
+//!      it). A path under the package directory that lands on a committed
+//!      document is a read of it; one that lands under `target/`, on Rust
+//!      source, on a directory or on an uncommitted file is not; a scratch
+//!      path is not. A path on an unseen base reads a committed document only
+//!      when its literal segments are a whole path to one from the workspace
+//!      root (two segments or more, which a scratch file's bare name is not).
+//!      So a function that reads its own output under `target/` and a
+//!      committed `.tsv` is a reader of the `.tsv` alone.
 //!
-//!      **A path this reading gives up on is never dropped in silence.** A
-//!      rooted path that keeps a piece it cannot reduce (`root.join(name)`
-//!      with `name` a parameter, a `format!` hole it cannot fill, another
-//!      crate's constant), a constant or helper that comes back to itself, and
-//!      a `self::`/`super::`/`crate::` constant the module tree holds no
-//!      constant, `use` or `thread_local!` of, is not judged: it is counted
-//!      and listed as a diagnostic — file, line, item, callee and why, printed
-//!      by the test and counted in its refusal — and not refused.
+//!      **A path this reading gives up on is never dropped in silence.** It
+//!      is a diagnostic — file, line, item, callee and why, printed by the
+//!      test and counted in its refusal — and not refused, when:
+//!      - a rooted path keeps a piece it cannot reduce (`root.join(name)`
+//!        with `name` a parameter, another crate's constant it cannot read);
+//!      - a `concat!` or `format!` holds a rooted piece and, anywhere, a
+//!        piece it cannot reduce (`format!("{}{}/x", unknown, root)`);
+//!      - a string naming a rooted path is joined onto, or joined onto a
+//!        path; a list or a tuple it cannot pick a part of holds a rooted
+//!        path; a macro it does not expand is handed one;
+//!      - a constant reaches itself again;
+//!      - a SCREAMING_SNAKE_CASE name leads to no constant, `use`, glob or
+//!        `thread_local!` of the module tree (a constant a macro declares).
 //!   3. **any other call or method handed a committed document**: every call
 //!      of a path (`read_session(…)`, `Engine::open(…)`, `std::fs::copy(…)`)
 //!      and every method call is judged by each of its arguments and by the
@@ -1098,6 +1121,9 @@ fn first_party_indices(root: &Path) -> Vec<(PathBuf, Index)> {
 /// One index, read for its document readers.
 struct DocumentScan<'a> {
     index: &'a Index,
+    /// The index's position among the scan's indices.
+    number: usize,
+    world: &'a World<'a>,
     root: &'a Path,
     /// The package's own directory, where `cargo test` runs its tests.
     package: &'a Path,
@@ -1383,7 +1409,7 @@ impl DocumentScan<'_> {
     /// method by each argument and by the value it is called on.
     fn read_at_run_time(&self) -> (Vec<DocumentReader>, Vec<UnresolvedRead>) {
         let reads = self.read_calls();
-        let world = World::of(self.index);
+        let world = self.world;
         let mut readers = Vec::new();
         let mut unresolved = Vec::new();
         for (position, file) in self.index.files().iter().enumerate() {
@@ -1392,12 +1418,13 @@ impl DocumentScan<'_> {
             let syntax = Rc::new(FileSyntax::of(text, file.path()));
             for call in &syntax.calls {
                 let at = span.start() + call.offset;
-                let module = world.module_at(at);
+                let file_id = (self.number, position);
+                let module = world.module_at(file_id, call.offset);
                 let evaluate = |expression: &syn::Expr| {
                     Evaluation {
-                        world: &world,
+                        world,
                         syntax: Rc::clone(&syntax),
-                        file: position,
+                        file: file_id,
                         module: module.clone(),
                         function: call.function,
                         position: call.offset,
@@ -1492,7 +1519,9 @@ impl DocumentScan<'_> {
                 segments,
                 open,
             } => vec![self.judge_path(base, &segments, open, read)],
-            Value::Text(_) | Value::Opaque => vec![Judgement::NotADocument],
+            Value::Text(_) | Value::Opaque | Value::Words => {
+                unreachable!("into_path makes a path of text, nothing and words")
+            }
         }
     }
 
@@ -1645,9 +1674,13 @@ enum Value {
     /// A path this reading gave up on, and why: a diagnostic wherever it is
     /// handed.
     Unreduced(Why),
-    /// Text with paths spelled into it (`format!(". '{}'", script.display())`):
-    /// it names each of them, and is judged by them.
+    /// Text with paths spelled into it (`format!(". '{}'", script.display())`),
+    /// or a tuple, array or struct holding paths: it names each of them, and
+    /// is judged by them.
     Within(Vec<Value>),
+    /// Text whose content is not known and holds no path: a `{:?}` of a
+    /// label, a file's contents, another variable's value at build time.
+    Words,
 }
 
 impl Value {
@@ -1667,13 +1700,139 @@ impl Value {
                     open: false,
                 },
             },
-            Self::Opaque => Self::Path {
+            Self::Opaque | Self::Words => Self::Path {
                 base: Base::Unknown,
                 segments: Vec::new(),
                 open: false,
             },
             Self::Each(values) => Self::Each(values.into_iter().map(Self::into_path).collect()),
             path @ (Self::Path { .. } | Self::Unreduced(_) | Self::Within(_)) => path,
+        }
+    }
+
+    fn package() -> Self {
+        Self::Path {
+            base: Base::Package,
+            segments: Vec::new(),
+            open: false,
+        }
+    }
+
+    /// One value, several, or none.
+    fn several(mut values: Vec<Self>) -> Self {
+        match values.len() {
+            0 => Self::Opaque,
+            1 => values.pop().expect("one value"),
+            _ => Self::Each(values),
+        }
+    }
+
+    /// Whether this is, or names, a path rooted in the package directory, or
+    /// a path already unreduced.
+    fn holds_root(&self) -> bool {
+        match self {
+            // A path that leads only up and then into `target/` is built, not
+            // committed.
+            Self::Path {
+                base: Base::Package,
+                segments,
+                ..
+            } => {
+                segments
+                    .iter()
+                    .find(|segment| *segment != "..")
+                    .map(String::as_str)
+                    != Some("target")
+            }
+            Self::Unreduced(_) => true,
+            Self::Within(values) | Self::Each(values) => values.iter().any(Self::holds_root),
+            _ => false,
+        }
+    }
+
+    /// Whether this is, or names, a path of a base this reading sees.
+    fn names_a_path(&self) -> bool {
+        match self {
+            Self::Path { base, .. } => *base != Base::Unknown,
+            Self::Unreduced(_) => true,
+            Self::Within(values) | Self::Each(values) => values.iter().any(Self::names_a_path),
+            _ => false,
+        }
+    }
+
+    /// Whether this is a piece this reading cannot reduce: anything at all.
+    fn unreducible(&self) -> bool {
+        matches!(
+            self,
+            Self::Opaque
+                | Self::Path {
+                    base: Base::Unknown,
+                    ..
+                }
+        )
+    }
+
+    /// What a part of this value is, when the part cannot be picked out (an
+    /// element of a list this reading cannot read, a field of a value not
+    /// written as a tuple): unreduced the same way if this is, unreduced if
+    /// this holds a rooted path, and nothing otherwise.
+    fn unreachable_part(self) -> Self {
+        match self {
+            unreduced @ Self::Unreduced(_) => unreduced,
+            value if value.holds_root() => Self::Unreduced(Why::Computed),
+            _ => Self::Opaque,
+        }
+    }
+
+    fn unreduced(&self) -> Option<Why> {
+        match self {
+            Self::Unreduced(why) => Some(*why),
+            _ => None,
+        }
+    }
+
+    /// `self.with_extension(extension)`: the last segment's extension
+    /// replaced, where both are known; the path left open where the
+    /// extension is not.
+    fn with_extension(self, extension: Self) -> Self {
+        match (self, extension) {
+            (Self::Each(values), extension) => Self::several(
+                values
+                    .into_iter()
+                    .map(|value| value.with_extension(extension.clone()))
+                    .collect(),
+            ),
+            (
+                Self::Path {
+                    base,
+                    mut segments,
+                    open: false,
+                },
+                Self::Text(extension),
+            ) if segments.last().is_some_and(|last| last != "..") => {
+                if let Some(last) = segments.last_mut() {
+                    if let Some((stem, _)) = last.rsplit_once('.')
+                        && !stem.is_empty()
+                    {
+                        *last = stem.to_owned();
+                    }
+                    if !extension.is_empty() {
+                        last.push('.');
+                        last.push_str(&extension);
+                    }
+                }
+                Self::Path {
+                    base,
+                    segments,
+                    open: false,
+                }
+            }
+            (Self::Path { base, segments, .. }, _) => Self::Path {
+                base,
+                segments,
+                open: true,
+            },
+            (other, _) => other,
         }
     }
 
@@ -1704,8 +1863,15 @@ impl Value {
                 open,
             } => (base, segments, open),
             Self::Unreduced(why) => return Self::Unreduced(why),
-            // Text with paths in it is no path to join onto.
-            Self::Within(_) => return Self::Opaque,
+            // Text naming paths is no path to join onto: unreduced if it names
+            // a rooted one, and no path into the checkout otherwise.
+            within @ Self::Within(_) => {
+                return if within.holds_root() {
+                    Self::Unreduced(Why::Computed)
+                } else {
+                    Self::Opaque
+                };
+            }
             _ => unreachable!("into_path is a path, several, unreduced or text with paths"),
         };
         match other {
@@ -1722,11 +1888,15 @@ impl Value {
             },
             Self::Unreduced(why) => return Self::Unreduced(why),
             Self::Each(_) => unreachable!("several values are joined one by one above"),
+            within @ Self::Within(_) if within.holds_root() => {
+                return Self::Unreduced(Why::Computed);
+            }
             Self::Path {
                 base: Base::Unknown,
                 ..
             }
             | Self::Opaque
+            | Self::Words
             | Self::Within(_) => open = true,
             rooted @ Self::Path { .. } => return rooted,
         }
@@ -1821,33 +1991,76 @@ fn converts(segments: &[String]) -> bool {
     )
 }
 
-/// One binding of a single name: a `let`, or a `for` loop's variable.
+/// One binding of a single name: a `let` (or `let … else`), an `if let` or
+/// `while let`, a `match` arm, or a `for` loop's variable.
 struct Binding {
+    /// Where the binding is written: its value is read as of here.
     offset: usize,
     function: usize,
-    /// The bytes the name is in scope over: the block a `let` is written in,
-    /// or a `for` loop's body.
+    /// The bytes the name is in scope over: from the end of a `let`'s
+    /// statement to the end of its block; an `if let`'s branch, a
+    /// `while let`'s or a `for` loop's body; a `match` arm's body.
     scope: (usize, usize),
     name: String,
-    /// What a `let` binds, or what a `for` loop iterates.
+    /// What the pattern is matched against: a `let`'s value, a `match`'s
+    /// scrutinee, what a `for` loop iterates.
     value: syn::Expr,
-    /// A loop variable: the name is, in turn, the part of each element of
-    /// `value` this path of tuple positions picks — empty for the whole
-    /// element (`for name in …`), `[0]` for `for (name, _) in …`.
-    each: Option<Vec<usize>>,
+    /// The steps the pattern takes the name from — empty for the whole
+    /// value; `Some(x)` and `Ok(x)` take the value itself.
+    projection: Vec<Step>,
+    /// A loop variable: the name is each element of `value` in turn.
+    each: bool,
 }
 
-/// Every name a loop pattern binds, with the tuple positions that reach it.
-fn loop_names(pattern: &syn::Pat, at: &mut Vec<usize>, found: &mut Vec<(String, Vec<usize>)>) {
+/// One step into a value: a tuple's or tuple struct's position, or a
+/// struct's field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Step {
+    Index(usize),
+    Field(String),
+}
+
+/// Every name a pattern binds, with the steps that reach it. `Some(x)` and
+/// `Ok(x)` bind `x` to the value they unwrap; a slice or a `|` pattern binds
+/// nothing this reading follows, and a name it binds is a parameter of the
+/// pattern (the unseen base).
+fn pattern_names(pattern: &syn::Pat, at: &mut Vec<Step>, found: &mut Vec<(String, Vec<Step>)>) {
     match pattern {
         syn::Pat::Ident(name) => found.push((name.ident.to_string(), at.clone())),
-        syn::Pat::Type(typed) => loop_names(&typed.pat, at, found),
-        syn::Pat::Reference(reference) => loop_names(&reference.pat, at, found),
-        syn::Pat::Paren(inner) => loop_names(&inner.pat, at, found),
+        syn::Pat::Type(typed) => pattern_names(&typed.pat, at, found),
+        syn::Pat::Reference(reference) => pattern_names(&reference.pat, at, found),
+        syn::Pat::Paren(inner) => pattern_names(&inner.pat, at, found),
         syn::Pat::Tuple(tuple) => {
             for (position, element) in tuple.elems.iter().enumerate() {
-                at.push(position);
-                loop_names(element, at, found);
+                at.push(Step::Index(position));
+                pattern_names(element, at, found);
+                at.pop();
+            }
+        }
+        syn::Pat::TupleStruct(wrapped)
+            if wrapped.elems.len() == 1
+                && wrapped
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|last| last.ident == "Some" || last.ident == "Ok") =>
+        {
+            pattern_names(&wrapped.elems[0], at, found);
+        }
+        syn::Pat::TupleStruct(wrapped) => {
+            for (position, element) in wrapped.elems.iter().enumerate() {
+                at.push(Step::Index(position));
+                pattern_names(element, at, found);
+                at.pop();
+            }
+        }
+        syn::Pat::Struct(record) => {
+            for field in &record.fields {
+                at.push(match &field.member {
+                    syn::Member::Named(name) => Step::Field(name.to_string()),
+                    syn::Member::Unnamed(position) => Step::Index(position.index as usize),
+                });
+                pattern_names(&field.pat, at, found);
                 at.pop();
             }
         }
@@ -1855,25 +2068,52 @@ fn loop_names(pattern: &syn::Pat, at: &mut Vec<usize>, found: &mut Vec<(String, 
     }
 }
 
-/// The part of a list element a loop variable is: the element itself, or
-/// the tuple fields its positions pick.
-fn projected<'e>(element: &'e syn::Expr, positions: &[usize]) -> Option<&'e syn::Expr> {
-    let Some((first, rest)) = positions.split_first() else {
+/// The part of a value a pattern's steps pick, where the value is written as
+/// tuples, tuple structs and struct literals.
+fn projected<'e>(element: &'e syn::Expr, steps: &[Step]) -> Option<&'e syn::Expr> {
+    let Some((first, rest)) = steps.split_first() else {
         return Some(element);
     };
-    match element {
-        syn::Expr::Tuple(tuple) => projected(tuple.elems.iter().nth(*first)?, rest),
-        syn::Expr::Paren(inner) => projected(&inner.expr, positions),
-        syn::Expr::Reference(reference) => projected(&reference.expr, positions),
+    match (element, first) {
+        (syn::Expr::Paren(inner), _) => projected(&inner.expr, steps),
+        (syn::Expr::Reference(reference), _) => projected(&reference.expr, steps),
+        (syn::Expr::Tuple(tuple), Step::Index(position)) => {
+            projected(tuple.elems.iter().nth(*position)?, rest)
+        }
+        // A tuple struct's or variant's constructor — capitalised, as
+        // rustc's `non_camel_case_types` has every type and variant — and not
+        // a function, whose result is no tuple of its arguments.
+        (syn::Expr::Call(call), Step::Index(position))
+            if matches!(&*call.func, syn::Expr::Path(path)
+            if path.path.segments.last().is_some_and(|last| {
+                last.ident.to_string().starts_with(|first: char| first.is_ascii_uppercase())
+            })) =>
+        {
+            projected(call.args.iter().nth(*position)?, rest)
+        }
+        (syn::Expr::Struct(record), step) => {
+            let field = record
+                .fields
+                .iter()
+                .find(|field| match (&field.member, step) {
+                    (syn::Member::Named(name), Step::Field(wanted)) => name == wanted,
+                    (syn::Member::Unnamed(position), Step::Index(wanted)) => {
+                        position.index as usize == *wanted
+                    }
+                    _ => false,
+                })?;
+            projected(&field.expr, rest)
+        }
         _ => None,
     }
 }
 
-/// A free function of the file: its parameters' names and its tail
-/// expression.
+/// A free function of the file: its parameters' names and the expression it
+/// returns.
 struct Helper {
     function: usize,
-    /// Where the tail starts: the point its bindings are seen from.
+    /// Where the returned expression starts: the point its bindings are seen
+    /// from.
     tail_at: usize,
     parameters: Vec<Option<String>>,
     tail: Option<syn::Expr>,
@@ -1886,17 +2126,21 @@ struct Constant {
     value: syn::Expr,
 }
 
-/// What one file's syntax says about the paths its read calls are handed:
-/// the calls, the bindings before them, the file's own constants and free
-/// functions. Parsed from the index's own text of the file.
+/// What one file's syntax says about the paths its calls are handed: the
+/// calls, the bindings, the file's constants, `use`s and free functions, and
+/// its text, to place a span. Parsed from the index's own text of the file.
 struct FileSyntax {
+    text: String,
+    line_starts: Vec<usize>,
     calls: Vec<ReadCall>,
     bindings: Vec<Binding>,
-    /// By bare name, file-wide: `None` where two items share the name, which
-    /// a bare name cannot tell apart.
-    constants: BTreeMap<String, Option<Rc<Constant>>>,
+    /// By bare name, file-wide: every constant of that name (two under
+    /// exclusive `cfg`s are both kept, and both judged).
+    constants: BTreeMap<String, Vec<Rc<Constant>>>,
     /// By the inline modules they are written in and their name.
-    scoped: BTreeMap<(Vec<String>, String), Rc<Constant>>,
+    scoped: BTreeMap<(Vec<String>, String), Vec<Rc<Constant>>>,
+    /// The constants an `impl` block declares, by the type and their name.
+    associated: BTreeMap<(String, String), Vec<Rc<Constant>>>,
     /// Each `use` binding of a name, by the inline modules it is written in:
     /// the path it names.
     uses: BTreeMap<(Vec<String>, String), Vec<String>>,
@@ -1905,7 +2149,7 @@ struct FileSyntax {
     /// The statics `thread_local!` declares: keys to a thread's own value,
     /// never a path.
     locals: BTreeSet<(Vec<String>, String)>,
-    helpers: BTreeMap<String, Option<Helper>>,
+    helpers: BTreeMap<String, Vec<Helper>>,
 }
 
 impl FileSyntax {
@@ -1917,18 +2161,20 @@ impl FileSyntax {
             )
         });
         let mut collector = Collector {
-            text,
-            line_starts: std::iter::once(0)
-                .chain(text.match_indices('\n').map(|(at, _)| at + 1))
-                .collect(),
             functions: vec![0],
             blocks: vec![(0, text.len())],
             modules: Vec::new(),
+            impls: Vec::new(),
             syntax: Self {
+                text: text.to_owned(),
+                line_starts: std::iter::once(0)
+                    .chain(text.match_indices('\n').map(|(at, _)| at + 1))
+                    .collect(),
                 calls: Vec::new(),
                 bindings: Vec::new(),
                 constants: BTreeMap::new(),
                 scoped: BTreeMap::new(),
+                associated: BTreeMap::new(),
                 uses: BTreeMap::new(),
                 globs: BTreeMap::new(),
                 locals: BTreeSet::new(),
@@ -1938,31 +2184,9 @@ impl FileSyntax {
         syn::visit::visit_file(&mut collector, &file);
         collector.syntax
     }
-}
 
-struct Collector<'a> {
-    text: &'a str,
-    line_starts: Vec<usize>,
-    /// The start of each function the walk is inside, innermost last.
-    functions: Vec<usize>,
-    /// The span of each block the walk is inside, innermost last.
-    blocks: Vec<(usize, usize)>,
-    /// The inline modules the walk is inside, outermost first.
-    modules: Vec<String>,
-    syntax: FileSyntax,
-}
-
-impl Collector<'_> {
-    /// A span's start as a byte offset into the file. The parser counts
-    /// columns in characters.
-    fn offset(&self, span: proc_macro2::Span) -> usize {
-        self.at(span.start())
-    }
-
-    fn end(&self, span: proc_macro2::Span) -> usize {
-        self.at(span.end())
-    }
-
+    /// A position as a byte offset into the file. The parser counts columns
+    /// in characters.
     fn at(&self, at: proc_macro2::LineColumn) -> usize {
         let line = self.line_starts[at.line - 1];
         let rest = &self.text[line..];
@@ -1970,6 +2194,36 @@ impl Collector<'_> {
             .char_indices()
             .nth(at.column)
             .map_or(rest.len(), |(byte, _)| byte)
+    }
+
+    fn offset(&self, span: proc_macro2::Span) -> usize {
+        self.at(span.start())
+    }
+
+    fn end(&self, span: proc_macro2::Span) -> usize {
+        self.at(span.end())
+    }
+}
+
+struct Collector {
+    /// The start of each function the walk is inside, innermost last.
+    functions: Vec<usize>,
+    /// The span of each block the walk is inside, innermost last.
+    blocks: Vec<(usize, usize)>,
+    /// The inline modules the walk is inside, outermost first.
+    modules: Vec<String>,
+    /// The type of each `impl` block the walk is inside, innermost last.
+    impls: Vec<String>,
+    syntax: FileSyntax,
+}
+
+impl Collector {
+    fn offset(&self, span: proc_macro2::Span) -> usize {
+        self.syntax.offset(span)
+    }
+
+    fn end(&self, span: proc_macro2::Span) -> usize {
+        self.syntax.end(span)
     }
 
     fn function(&self) -> usize {
@@ -1987,11 +2241,62 @@ impl Collector<'_> {
         self.syntax
             .constants
             .entry(name.clone())
-            .and_modify(|held| *held = None)
-            .or_insert_with(|| Some(Rc::clone(&constant)));
+            .or_default()
+            .push(Rc::clone(&constant));
         self.syntax
             .scoped
-            .insert((self.modules.clone(), name), constant);
+            .entry((self.modules.clone(), name))
+            .or_default()
+            .push(constant);
+    }
+
+    /// Bindings for every name a pattern binds, matched against `value`, in
+    /// scope over `scope`.
+    fn bind(
+        &mut self,
+        pattern: &syn::Pat,
+        value: &syn::Expr,
+        at: usize,
+        scope: (usize, usize),
+        each: bool,
+    ) {
+        let mut names = Vec::new();
+        pattern_names(pattern, &mut Vec::new(), &mut names);
+        for (name, projection) in names {
+            self.syntax.bindings.push(Binding {
+                offset: at,
+                function: self.function(),
+                scope,
+                name,
+                value: value.clone(),
+                projection,
+                each,
+            });
+        }
+    }
+
+    /// The `let`s of an `if`'s or `while`'s condition, `&&`-chained or alone.
+    fn bind_condition(&mut self, condition: &syn::Expr, at: usize, scope: (usize, usize)) {
+        match condition {
+            syn::Expr::Let(binding) => {
+                self.bind(&binding.pat, &binding.expr, at, scope, false);
+            }
+            syn::Expr::Binary(chain) if matches!(chain.op, syn::BinOp::And(_)) => {
+                self.bind_condition(&chain.left, at, scope);
+                self.bind_condition(&chain.right, at, scope);
+            }
+            syn::Expr::Paren(inner) => self.bind_condition(&inner.expr, at, scope),
+            _ => {}
+        }
+    }
+}
+
+fn bound_name(pattern: &syn::Pat) -> Option<String> {
+    match pattern {
+        syn::Pat::Ident(name) => Some(name.ident.to_string()),
+        syn::Pat::Type(typed) => bound_name(&typed.pat),
+        syn::Pat::Reference(reference) => bound_name(&reference.pat),
+        _ => None,
     }
 }
 
@@ -2027,22 +2332,61 @@ fn use_bindings(
     }
 }
 
-fn bound_name(pattern: &syn::Pat) -> Option<String> {
-    match pattern {
-        syn::Pat::Ident(name) => Some(name.ident.to_string()),
-        syn::Pat::Type(typed) => bound_name(&typed.pat),
-        syn::Pat::Reference(reference) => bound_name(&reference.pat),
+/// `vec![element; count]`'s element.
+fn repeated(mac: &syn::Macro) -> Option<syn::Expr> {
+    if !mac.path.is_ident("vec") {
+        return None;
+    }
+    mac.parse_body_with(|input: syn::parse::ParseStream<'_>| {
+        let element: syn::Expr = input.parse()?;
+        input.parse::<syn::Token![;]>()?;
+        input.parse::<syn::Expr>()?;
+        Ok(element)
+    })
+    .ok()
+}
+
+/// The expression a function returns: its tail, or a `return` that ends it.
+fn returned(block: &syn::Block) -> Option<&syn::Expr> {
+    match block.stmts.last()? {
+        syn::Stmt::Expr(syn::Expr::Return(early), _) => early.expr.as_deref(),
+        syn::Stmt::Expr(tail, None) => Some(tail),
         _ => None,
     }
 }
 
-impl<'ast> syn::visit::Visit<'ast> for Collector<'_> {
+impl<'ast> syn::visit::Visit<'ast> for Collector {
     fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
         if item.content.is_some() {
             self.modules.push(item.ident.to_string());
             syn::visit::visit_item_mod(self, item);
             self.modules.pop();
         }
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        let name = match &*item.self_ty {
+            syn::Type::Path(path) => path.path.segments.last().map(|last| last.ident.to_string()),
+            _ => None,
+        };
+        self.impls.push(name.unwrap_or_default());
+        syn::visit::visit_item_impl(self, item);
+        self.impls.pop();
+    }
+
+    fn visit_impl_item_const(&mut self, item: &'ast syn::ImplItemConst) {
+        if let Some(owner) = self.impls.last().filter(|owner| !owner.is_empty()) {
+            let constant = Rc::new(Constant {
+                inline: self.modules.clone(),
+                value: item.expr.clone(),
+            });
+            self.syntax
+                .associated
+                .entry((owner.clone(), item.ident.to_string()))
+                .or_default()
+                .push(constant);
+        }
+        syn::visit::visit_impl_item_const(self, item);
     }
 
     fn visit_block(&mut self, block: &'ast syn::Block) {
@@ -2054,10 +2398,7 @@ impl<'ast> syn::visit::Visit<'ast> for Collector<'_> {
 
     fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
         let start = self.offset(item.span());
-        let tail = match item.block.stmts.last() {
-            Some(syn::Stmt::Expr(expression, None)) => Some(expression.clone()),
-            _ => None,
-        };
+        let tail = returned(&item.block).cloned();
         let helper = Helper {
             function: start,
             tail_at: tail.as_ref().map_or(start, |tail| self.offset(tail.span())),
@@ -2075,8 +2416,8 @@ impl<'ast> syn::visit::Visit<'ast> for Collector<'_> {
         self.syntax
             .helpers
             .entry(item.sig.ident.to_string())
-            .and_modify(|held| *held = None)
-            .or_insert(Some(helper));
+            .or_default()
+            .push(helper);
         self.functions.push(start);
         syn::visit::visit_item_fn(self, item);
         self.functions.pop();
@@ -2118,37 +2459,68 @@ impl<'ast> syn::visit::Visit<'ast> for Collector<'_> {
         syn::visit::visit_item_static(self, item);
     }
 
+    /// A `let` is in scope from the end of its statement — after its
+    /// initialiser, so `let path = path.join(…)` reads the earlier `path` —
+    /// to the end of its block.
     fn visit_local(&mut self, local: &'ast syn::Local) {
-        if let (Some(name), Some(init)) = (bound_name(&local.pat), &local.init) {
-            self.syntax.bindings.push(Binding {
-                offset: self.offset(local.span()),
-                function: self.function(),
-                scope: *self.blocks.last().expect("the file is the outermost block"),
-                name,
-                value: (*init.expr).clone(),
-                each: None,
-            });
+        if let Some(init) = &local.init {
+            let block = *self.blocks.last().expect("the file is the outermost block");
+            let scope = (self.end(local.span()), block.1);
+            self.bind(
+                &local.pat,
+                &init.expr,
+                self.offset(local.span()),
+                scope,
+                false,
+            );
         }
         syn::visit::visit_local(self, local);
     }
 
-    fn visit_expr_for_loop(&mut self, looped: &'ast syn::ExprForLoop) {
-        let mut names = Vec::new();
-        loop_names(&looped.pat, &mut Vec::new(), &mut names);
-        let body = (
+    fn visit_expr_if(&mut self, branch: &'ast syn::ExprIf) {
+        let scope = (
+            self.offset(branch.then_branch.span()),
+            self.end(branch.then_branch.span()),
+        );
+        self.bind_condition(&branch.cond, self.offset(branch.span()), scope);
+        syn::visit::visit_expr_if(self, branch);
+    }
+
+    fn visit_expr_while(&mut self, looped: &'ast syn::ExprWhile) {
+        let scope = (
             self.offset(looped.body.span()),
             self.end(looped.body.span()),
         );
-        for (name, positions) in names {
-            self.syntax.bindings.push(Binding {
-                offset: self.offset(looped.span()),
-                function: self.function(),
-                scope: body,
-                name,
-                value: (*looped.expr).clone(),
-                each: Some(positions),
-            });
+        self.bind_condition(&looped.cond, self.offset(looped.span()), scope);
+        syn::visit::visit_expr_while(self, looped);
+    }
+
+    fn visit_expr_match(&mut self, matched: &'ast syn::ExprMatch) {
+        for arm in &matched.arms {
+            let scope = (self.offset(arm.body.span()), self.end(arm.body.span()));
+            self.bind(
+                &arm.pat,
+                &matched.expr,
+                self.offset(arm.span()),
+                scope,
+                false,
+            );
         }
+        syn::visit::visit_expr_match(self, matched);
+    }
+
+    fn visit_expr_for_loop(&mut self, looped: &'ast syn::ExprForLoop) {
+        let scope = (
+            self.offset(looped.body.span()),
+            self.end(looped.body.span()),
+        );
+        self.bind(
+            &looped.pat,
+            &looped.expr,
+            self.offset(looped.span()),
+            scope,
+            true,
+        );
         syn::visit::visit_expr_for_loop(self, looped);
     }
 
@@ -2171,6 +2543,16 @@ impl<'ast> syn::visit::Visit<'ast> for Collector<'_> {
                     function: self.function(),
                 });
             }
+        } else {
+            // A call of a value — `(self.open)(path)`, `handlers[0](path)` —
+            // is handed its arguments all the same.
+            self.syntax.calls.push(ReadCall {
+                offset: self.offset(call.func.span()),
+                callee: "(callable)".to_owned(),
+                arguments: call.args.iter().cloned().collect(),
+                receiver: None,
+                function: self.function(),
+            });
         }
         syn::visit::visit_expr_call(self, call);
     }
@@ -2190,7 +2572,8 @@ impl<'ast> syn::visit::Visit<'ast> for Collector<'_> {
     }
 
     /// A macro's arguments, where they parse as expressions — `assert!`,
-    /// `assert_eq!`, `format!`, `vec![…]` — are walked like any other code.
+    /// `assert_eq!`, `format!`, `vec![…]` — are walked like any other code;
+    /// `thread_local!`'s statics are recorded as never a path.
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         if mac
             .path
@@ -2225,17 +2608,26 @@ impl<'ast> syn::visit::Visit<'ast> for Collector<'_> {
 /// bt-source gives it there.
 type ModuleKey = (TargetId, String);
 
-/// Where every module of one index is written, and the files read so far for
-/// a constant another file names.
+/// A file of the scan: the position of its package's index, and its position
+/// in that index's files.
+type FileId = (usize, usize);
+
+/// Where every module of every first-party index is written, the library
+/// each first-party crate name stands for, and the files read so far for a
+/// constant another file names.
 struct World<'a> {
-    index: &'a Index,
-    /// Each module: the position of its file in `index.files()`, and the
-    /// inline `mod`s inside that file that lead to it.
-    modules: BTreeMap<ModuleKey, (usize, Vec<String>)>,
+    indices: &'a [(PathBuf, Index)],
+    /// Each module: its file, and the inline `mod`s inside that file that
+    /// lead to it.
+    /// One module may be written in several files, each under its own `cfg`
+    /// (`#[cfg(windows)] #[path = "x.rs"] mod x;` beside an `x_unsupported.rs`).
+    modules: BTreeMap<ModuleKey, Vec<(FileId, Vec<String>)>>,
     /// The other way round: the module a file's inline path is, in the first
     /// target that compiles it.
-    placed: BTreeMap<(usize, Vec<String>), ModuleKey>,
-    read: RefCell<BTreeMap<usize, Rc<FileSyntax>>>,
+    placed: BTreeMap<(FileId, Vec<String>), ModuleKey>,
+    /// Each first-party library, by the crate name a path spells it with.
+    crates: BTreeMap<String, TargetId>,
+    read: RefCell<BTreeMap<FileId, Rc<FileSyntax>>>,
 }
 
 /// The owning declaration path of a file a module path extends.
@@ -2249,58 +2641,162 @@ fn owner_of<'f>(file: &'f FileRecord, declared: &str) -> Option<&'f bt_source::F
         .max_by_key(|owner| owner.module_path.len())
 }
 
+/// Where a module path leads from a module: to a module of the same target;
+/// to a segment that is no module there — a type, a function, an enum —
+/// with the module it was looked up in; or nowhere (`super` past the root).
+enum Walk {
+    Module(ModuleKey),
+    Item { module: ModuleKey, at: usize },
+    Lost,
+}
+
 impl<'a> World<'a> {
-    fn of(index: &'a Index) -> Self {
+    fn of(indices: &'a [(PathBuf, Index)]) -> Self {
         let mut modules = BTreeMap::new();
         let mut placed = BTreeMap::new();
-        for module in index.modules() {
-            let start = module.span().start();
-            let position = index
-                .files()
-                .partition_point(|file| file.span().end() <= start);
-            let file = &index.files()[position];
-            for declared in module.module_paths() {
-                let Some(owner) = owner_of(file, declared) else {
-                    continue;
-                };
-                let inline: Vec<String> = declared[owner.module_path.len()..]
-                    .split("::")
-                    .filter(|segment| !segment.is_empty())
-                    .map(ToOwned::to_owned)
-                    .collect();
-                let key = (owner.target.clone(), declared.clone());
-                placed
-                    .entry((position, inline.clone()))
-                    .or_insert_with(|| key.clone());
-                modules.insert(key, (position, inline));
+        let mut crates = BTreeMap::new();
+        for (number, (_, index)) in indices.iter().enumerate() {
+            for module in index.modules() {
+                let start = module.span().start();
+                let position = index
+                    .files()
+                    .partition_point(|file| file.span().end() <= start);
+                let file = &index.files()[position];
+                for declared in module.module_paths() {
+                    let Some(owner) = owner_of(file, declared) else {
+                        continue;
+                    };
+                    let inline: Vec<String> = declared[owner.module_path.len()..]
+                        .split("::")
+                        .filter(|segment| !segment.is_empty())
+                        .map(ToOwned::to_owned)
+                        .collect();
+                    if owner.target.kind == TargetKind::Library {
+                        crates
+                            .entry(owner.target.name.replace('-', "_"))
+                            .or_insert_with(|| owner.target.clone());
+                    }
+                    let key = (owner.target.clone(), declared.clone());
+                    placed
+                        .entry(((number, position), inline.clone()))
+                        .or_insert_with(|| key.clone());
+                    let placements: &mut Vec<(FileId, Vec<String>)> =
+                        modules.entry(key).or_default();
+                    if !placements.contains(&((number, position), inline.clone())) {
+                        placements.push(((number, position), inline));
+                    }
+                }
             }
         }
         Self {
-            index,
+            indices,
             modules,
             placed,
+            crates,
             read: RefCell::new(BTreeMap::new()),
         }
     }
 
-    /// The syntax of the file at a position, read once, its calls left out.
-    fn syntax(&self, position: usize) -> Rc<FileSyntax> {
-        if let Some(syntax) = self.read.borrow().get(&position) {
+    fn index(&self, file: FileId) -> &'a Index {
+        &self.indices[file.0].1
+    }
+
+    /// The syntax of a file, read once, its calls left out.
+    fn syntax(&self, file: FileId) -> Rc<FileSyntax> {
+        if let Some(syntax) = self.read.borrow().get(&file) {
             return Rc::clone(syntax);
         }
-        let file = &self.index.files()[position];
-        let mut syntax = FileSyntax::of(self.index.text(file.span()), file.path());
+        let index = self.index(file);
+        let record = &index.files()[file.1];
+        let mut syntax = FileSyntax::of(index.text(record.span()), record.path());
         syntax.calls.clear();
         let syntax = Rc::new(syntax);
-        self.read.borrow_mut().insert(position, Rc::clone(&syntax));
+        self.read.borrow_mut().insert(file, Rc::clone(&syntax));
         syntax
     }
 
-    /// Where a path of module segments leads from a module: `self`, `super`,
-    /// `crate`, and child modules bt-source's module tree declares.
-    fn walk(&self, from: &ModuleKey, segments: &[String]) -> Walk {
-        let (target, mut path) = from.clone();
-        for segment in segments {
+    /// The module a byte of a file is written in.
+    fn module_at(&self, file: FileId, offset: usize) -> Option<ModuleKey> {
+        let index = self.index(file);
+        let record = &index.files()[file.1];
+        let at = record.span().start() + offset;
+        let module = index
+            .modules()
+            .iter()
+            .filter(|module| module.span().holds(at))
+            .min_by_key(|module| module.span().len())?;
+        let declared = module.module_paths().first()?;
+        let owner = owner_of(record, declared)?;
+        Some((owner.target.clone(), declared.clone()))
+    }
+
+    /// The type of the `impl` block a byte of a file is written in.
+    fn impl_type_at(&self, file: FileId, offset: usize) -> Option<String> {
+        let index = self.index(file);
+        let at = index.files()[file.1].span().start() + offset;
+        index
+            .impls()
+            .iter()
+            .filter(|block| block.body().holds(at))
+            .min_by_key(|block| block.body().len())
+            .map(|block| block.type_owner().to_owned())
+    }
+
+    /// Whether an index declares a `struct`, `enum` or `union` of that name.
+    fn declares_type(&self, number: usize, name: &str) -> bool {
+        self.indices[number]
+            .1
+            .items()
+            .iter()
+            .any(|item| item.kind().is_type() && item.name() == name)
+    }
+
+    /// Every constant an `impl` block of the named type declares under a
+    /// name, in one index.
+    fn associated(&self, number: usize, owner: &str, name: &str) -> Vec<(FileId, Rc<Constant>)> {
+        let index = &self.indices[number].1;
+        let mut files: BTreeSet<FileId> = BTreeSet::new();
+        for block in index.impls() {
+            if block.type_owner() == owner {
+                let start = block.body().start();
+                files.insert((
+                    number,
+                    index
+                        .files()
+                        .partition_point(|file| file.span().end() <= start),
+                ));
+            }
+        }
+        files
+            .into_iter()
+            .flat_map(|file| {
+                self.syntax(file)
+                    .associated
+                    .get(&(owner.to_owned(), name.to_owned()))
+                    .into_iter()
+                    .flatten()
+                    .map(|constant| (file, Rc::clone(constant)))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Where a path of module segments leads from a module: a first-party
+    /// crate's name, `self`, `super`, `crate`, and the child modules
+    /// bt-source's module tree declares.
+    fn walk(&self, from: Option<&ModuleKey>, segments: &[String]) -> Walk {
+        let (target, mut path, rest) = match segments.first() {
+            Some(first) if self.crates.contains_key(first) => (
+                self.crates[first].clone(),
+                "crate".to_owned(),
+                &segments[1..],
+            ),
+            _ => match from {
+                Some((target, path)) => (target.clone(), path.clone(), segments),
+                None => return Walk::Lost,
+            },
+        };
+        for (at, segment) in rest.iter().enumerate() {
             match segment.as_str() {
                 "self" => {}
                 "crate" => path = "crate".to_owned(),
@@ -2311,7 +2807,10 @@ impl<'a> World<'a> {
                 child => {
                     let next = format!("{path}::{child}");
                     if !self.modules.contains_key(&(target.clone(), next.clone())) {
-                        return Walk::Item;
+                        return Walk::Item {
+                            module: (target, path),
+                            at: at + segments.len() - rest.len(),
+                        };
                     }
                     path = next;
                 }
@@ -2319,67 +2818,44 @@ impl<'a> World<'a> {
         }
         Walk::Module((target, path))
     }
-
-    /// The module a byte of the index is written in.
-    fn module_at(&self, at: usize) -> Option<ModuleKey> {
-        let module = self
-            .index
-            .modules()
-            .iter()
-            .filter(|module| module.span().holds(at))
-            .min_by_key(|module| module.span().len())?;
-        let file = self.index.file_at(at)?;
-        let declared = module.module_paths().first()?;
-        let owner = owner_of(file, declared)?;
-        Some((owner.target.clone(), declared.clone()))
-    }
 }
 
-/// A constant's name: every `const` and `static` of this workspace is
-/// SCREAMING_SNAKE_CASE, which the `non_upper_case_globals` lint the
-/// workspace denies makes a rule. A longer path ending in any other name is a
-/// function, a type or a variant.
+/// A constant's name: SCREAMING_SNAKE_CASE. `non_upper_case_globals` warns on
+/// any other, and CI runs clippy with `-D warnings` over the whole workspace
+/// (the workspace's `Cargo.toml` does not list it: it is rustc's default
+/// warn, and CI makes it a refusal), so every
+/// constant is spelled so; a path ending in another name that leads to no
+/// constant is a function, a type or a variant.
 fn names_a_constant(name: &str) -> bool {
     name.chars().all(|character| {
         character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
     }) && name.chars().any(|character| character.is_ascii_uppercase())
 }
 
-/// Where a module path leads from a module: to a module of the same target,
-/// through a type, function or other crate (an item this reading cannot see),
-/// or nowhere (`super` past the crate root).
-enum Walk {
-    Module(ModuleKey),
-    Item,
-    Lost,
-}
-
-/// A constant found, with the scope its value is read in, or the value that
-/// stands for one that was not.
+/// The constants found, each with the scope its value is read in, or the
+/// value that stands for none.
 enum Resolved<'a> {
-    Found(Evaluation<'a>, Rc<Constant>),
+    Found(Vec<(Evaluation<'a>, Rc<Constant>)>),
     Missing(Value),
 }
 
-/// A file's syntax, its position in the index, and a module written in it.
+/// A file's syntax, its place in the scan, and a module written in it.
 struct Place {
     syntax: Rc<FileSyntax>,
-    file: usize,
+    file: FileId,
     module: Option<ModuleKey>,
 }
 
-/// One expression, evaluated as a path in the scope of one read call.
+/// One expression, evaluated as a path in the scope of one call.
 struct Evaluation<'a> {
     world: &'a World<'a>,
     syntax: Rc<FileSyntax>,
-    /// The position of the syntax's file in the index.
-    file: usize,
+    file: FileId,
     /// The module the expression is written in.
     module: Option<ModuleKey>,
     /// The function whose bindings are in scope.
     function: usize,
-    /// Only bindings written before this offset, and whose scope holds it,
-    /// are in scope.
+    /// Only bindings whose scope holds this offset are in scope.
     position: usize,
     /// A helper's parameters, bound to what its caller handed it.
     parameters: BTreeMap<String, Value>,
@@ -2416,7 +2892,7 @@ impl<'a> Evaluation<'a> {
         })
     }
 
-    /// The same scope, seen from an earlier point of the same function.
+    /// The same scope, seen from another point of the same function.
     fn at(&self, position: usize) -> Evaluation<'a> {
         Evaluation {
             world: self.world,
@@ -2430,6 +2906,11 @@ impl<'a> Evaluation<'a> {
         }
     }
 
+    /// The same scope, seen from where an expression of this file starts.
+    fn from(&self, expression: &syn::Expr) -> Evaluation<'a> {
+        self.at(self.syntax.offset(expression.span()))
+    }
+
     fn of(&self, expression: &syn::Expr) -> Value {
         match expression {
             syn::Expr::Lit(syn::ExprLit {
@@ -2439,7 +2920,38 @@ impl<'a> Evaluation<'a> {
             syn::Expr::Reference(reference) => self.of(&reference.expr),
             syn::Expr::Paren(inner) => self.of(&inner.expr),
             syn::Expr::Group(inner) => self.of(&inner.expr),
+            syn::Expr::Try(inner) => self.of(&inner.expr),
+            syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
+                self.of(&unary.expr)
+            }
             syn::Expr::Macro(mac) => self.of_macro(&mac.mac),
+            // `<Type as Trait>::NAME`: the type's associated constant.
+            syn::Expr::Path(path) if path.qself.is_some() => {
+                let owner = path.qself.as_ref().and_then(|qself| match &*qself.ty {
+                    syn::Type::Path(owner) => owner
+                        .path
+                        .segments
+                        .last()
+                        .map(|last| last.ident.to_string()),
+                    // `<[u8]>::len`, `<dyn Trait>::f`: no type this reading
+                    // names.
+                    _ => None,
+                });
+                match (owner, path.path.segments.last()) {
+                    (Some(owner), Some(name)) => {
+                        match self.associated(self.file.0, &owner, &name.ident.to_string()) {
+                            Resolved::Found(found) => Value::several(
+                                found
+                                    .iter()
+                                    .map(|(scope, constant)| scope.of(&constant.value))
+                                    .collect(),
+                            ),
+                            Resolved::Missing(value) => value,
+                        }
+                    }
+                    _ => Value::Opaque,
+                }
+            }
             syn::Expr::Path(path) => {
                 let segments: Vec<String> = path
                     .path
@@ -2452,36 +2964,140 @@ impl<'a> Evaluation<'a> {
                     _ => self.constant(&segments),
                 }
             }
-            syn::Expr::MethodCall(call) => {
-                let receiver = || self.of(&call.receiver);
-                match call.method.to_string().as_str() {
-                    "join" => match call.args.first() {
-                        Some(argument) => receiver().join(self.of(argument)),
-                        None => Value::Opaque,
-                    },
-                    "parent" => receiver().parent(),
-                    // `dir.parent().and_then(Path::parent)`: the parent's parent.
-                    "and_then" | "map"
-                        if call.args.len() == 1
-                            && matches!(&call.args[0], syn::Expr::Path(path)
-                                if path.path.segments.last().is_some_and(|last| last.ident == "parent")) =>
-                    {
-                        receiver().parent()
-                    }
-                    // A path spelled for `format!` is the path's own text.
-                    "to_path_buf" | "as_path" | "clone" | "to_owned" | "into" | "as_ref"
-                    | "unwrap" | "expect" | "borrow" | "as_os_str" | "display"
-                    | "to_string_lossy" | "to_str" | "to_string" | "into_owned" => receiver(),
-                    _ => Value::Opaque,
-                }
-            }
+            syn::Expr::MethodCall(call) => self.of_method(call),
             syn::Expr::Call(call) => self.of_call(call),
+            syn::Expr::Block(block) => self.of_block(&block.block),
+            syn::Expr::Unsafe(block) => self.of_block(&block.block),
+            syn::Expr::If(branch) => {
+                let mut values = vec![self.of_block(&branch.then_branch)];
+                if let Some((_, otherwise)) = &branch.else_branch {
+                    values.push(self.from(otherwise).of(otherwise));
+                }
+                Value::several(values)
+            }
+            syn::Expr::Match(matched) => Value::several(
+                matched
+                    .arms
+                    .iter()
+                    .map(|arm| self.from(&arm.body).of(&arm.body))
+                    .collect(),
+            ),
+            syn::Expr::Index(indexed) => match self.of(&indexed.expr) {
+                Value::Within(values) => Value::several(values),
+                value => value,
+            },
+            syn::Expr::Field(field) => {
+                let step = match &field.member {
+                    syn::Member::Named(name) => Step::Field(name.to_string()),
+                    syn::Member::Unnamed(position) => Step::Index(position.index as usize),
+                };
+                self.member(&field.base, step)
+            }
+            syn::Expr::Tuple(tuple) => self.composite(tuple.elems.iter()),
+            syn::Expr::Array(array) => self.composite(array.elems.iter()),
+            syn::Expr::Struct(record) => {
+                self.composite(record.fields.iter().map(|field| &field.expr))
+            }
+            // Not a path value: a closure, a number, a comparison, an
+            // arithmetic, a range, a cast, a loop, an assignment.
+            _ => Value::Opaque,
+        }
+    }
+
+    /// A field of a value: of a literal written here, or of one a name in
+    /// scope is bound to. A field of a value from elsewhere — a parameter,
+    /// `self`, a call's result — is the unseen base, unless that value is
+    /// itself rooted or unreduced.
+    fn member(&self, base: &syn::Expr, step: Step) -> Value {
+        if let Some(part) = projected(base, std::slice::from_ref(&step)) {
+            return self.of(part);
+        }
+        if let syn::Expr::Path(path) = base
+            && let Some(name) = path.path.get_ident()
+            && !self.parameters.contains_key(&name.to_string())
+            && let Some(binding) = self.binding(&name.to_string(), true)
+        {
+            let scope = self.at(binding.offset);
+            let mut steps = binding.projection.clone();
+            steps.push(step);
+            if !binding.each {
+                return scope.part(&binding.value, &steps);
+            }
+            return match scope.elements(&binding.value) {
+                Some(elements) => Value::several(
+                    elements
+                        .iter()
+                        .map(|element| scope.part(element, &steps))
+                        .collect(),
+                ),
+                None => scope.of(&binding.value).unreachable_part(),
+            };
+        }
+        self.of(base).unreachable_part()
+    }
+
+    /// A tuple, array or struct literal: a value that names the paths among
+    /// its parts, or nothing.
+    fn composite<'e>(&self, parts: impl Iterator<Item = &'e syn::Expr>) -> Value {
+        let paths: Vec<Value> = parts
+            .map(|part| self.of(part))
+            .filter(Value::names_a_path)
+            .collect();
+        if paths.is_empty() {
+            // Numbers, flags, text: no path among the parts.
+            Value::Opaque
+        } else {
+            Value::Within(paths)
+        }
+    }
+
+    /// A block's value: the expression it ends with, seen from inside it.
+    fn of_block(&self, block: &syn::Block) -> Value {
+        match block.stmts.last() {
+            Some(syn::Stmt::Expr(tail, None)) => self.from(tail).of(tail),
+            // A block that ends in a statement is `()`.
+            _ => Value::Opaque,
+        }
+    }
+
+    fn of_method(&self, call: &syn::ExprMethodCall) -> Value {
+        let receiver = || self.of(&call.receiver);
+        let argument = || {
+            call.args
+                .first()
+                .map_or(Value::Opaque, |argument| self.of(argument))
+        };
+        match call.method.to_string().as_str() {
+            "join" => receiver().join(argument()),
+            "parent" => receiver().parent(),
+            "with_file_name" => receiver().parent().join(argument()),
+            "with_extension" => receiver().with_extension(argument()),
+            // `dir.parent().and_then(Path::parent)`: the parent's parent.
+            "and_then" | "map"
+                if call.args.len() == 1
+                    && matches!(&call.args[0], syn::Expr::Path(path)
+                        if path.path.segments.last().is_some_and(|last| last.ident == "parent")) =>
+            {
+                receiver().parent()
+            }
+            // A path spelled for `format!` is the path's own text.
+            "to_path_buf" | "as_path" | "clone" | "to_owned" | "into" | "as_ref" | "unwrap"
+            | "expect" | "borrow" | "as_os_str" | "display" | "to_string_lossy" | "to_str"
+            | "to_string" | "into_owned" => receiver(),
+            // Any other method is a call of its own, judged by what it is
+            // handed (`read_at_run_time`); what it returns is not a path this
+            // reading can follow, and the paths it was handed are not lost.
+            // The path-describing ones (`file_name`, `extension`,
+            // `starts_with`, `components`…) answer a name, a flag or an
+            // iterator, not a path.
             _ => Value::Opaque,
         }
     }
 
     fn of_call(&self, call: &syn::ExprCall) -> Value {
         let syn::Expr::Path(function) = &*call.func else {
+            // A call of a value: a call of its own, judged by what it is
+            // handed.
             return Value::Opaque;
         };
         let segments: Vec<String> = function
@@ -2496,11 +3112,7 @@ impl<'a> Evaluation<'a> {
                 if text.value() == MANIFEST_DIRECTORY)
         });
         if names_the_manifest_directory {
-            return Value::Path {
-                base: Base::Package,
-                segments: Vec::new(),
-                open: false,
-            };
+            return Value::package();
         }
         if matches!(last, "temp_dir" | "temp_path") || segments.iter().any(|s| s == "tempfile") {
             return Value::Path {
@@ -2509,7 +3121,13 @@ impl<'a> Evaluation<'a> {
                 open: false,
             };
         }
-        if converts(&segments) {
+        // A conversion, or a wrapper that holds its argument as it is.
+        let wraps = matches!(last, "Some" | "Ok")
+            || matches!(
+                segments.as_slice(),
+                [.., owner, new] if new == "new" && matches!(owner.as_str(), "Box" | "Rc" | "Arc")
+            );
+        if converts(&segments) || wraps {
             return call
                 .args
                 .first()
@@ -2518,12 +3136,18 @@ impl<'a> Evaluation<'a> {
         if segments.len() == 1 {
             return self.helper(last, call);
         }
+        // Another function: a call of its own, judged by what it is handed.
         Value::Opaque
     }
 
     fn of_macro(&self, mac: &syn::Macro) -> Value {
+        if let Some(element) = repeated(mac) {
+            return self.composite(std::iter::once(&element));
+        }
         let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
         let Ok(arguments) = mac.parse_body_with(parser) else {
+            // A pattern or bare tokens, not values (`matches!(x, Some(_))`,
+            // a `macro_rules!` body): nothing a path is handed to.
             return Value::Opaque;
         };
         let arguments: Vec<syn::Expr> = arguments.into_iter().collect();
@@ -2537,13 +3161,13 @@ impl<'a> Evaluation<'a> {
                 Some(syn::Expr::Lit(syn::ExprLit {
                     lit: syn::Lit::Str(text),
                     ..
-                })) if text.value() == MANIFEST_DIRECTORY => Value::Path {
-                    base: Base::Package,
-                    segments: Vec::new(),
-                    open: false,
-                },
-                _ => Value::Opaque,
+                })) if text.value() == MANIFEST_DIRECTORY => Value::package(),
+                // Another variable's value at build time: a string of the
+                // build's, not a path into the checkout.
+                _ => Value::Words,
             },
+            // A file's contents, not its path.
+            Some("include_str" | "include_bytes") => Value::Words,
             Some("concat") => splice(arguments.iter().map(|argument| self.of(argument)).collect()),
             Some("format") => match arguments.split_first() {
                 Some((
@@ -2555,14 +3179,27 @@ impl<'a> Evaluation<'a> {
                 )) => splice(self.format_pieces(&template.value(), rest)),
                 _ => Value::Opaque,
             },
-            _ => Value::Opaque,
+            // A macro this reading does not expand: a path handed to it is
+            // unreduced; with none, nothing.
+            _ => {
+                let values: Vec<Value> =
+                    arguments.iter().map(|argument| self.of(argument)).collect();
+                match values.iter().find_map(Value::unreduced) {
+                    Some(why) => Value::Unreduced(why),
+                    None if values.iter().any(Value::holds_root) => Value::Unreduced(Why::Computed),
+                    None => Value::Opaque,
+                }
+            }
         }
     }
 
-    /// A format string's pieces: its text, and each hole filled with the value
-    /// of what fills it — the next or a numbered argument, a named one, or a
-    /// name the string captures. A hole with a format spec (`{:?}`, `{:>8}`)
-    /// is not the value's own text.
+    /// A format string's pieces: its text, and what each placeholder puts in
+    /// it. Placeholders take their arguments as `std` does: an implicit one
+    /// (`{}`, `{:?}`) the next positional argument, `{0}` and `{name}` (a
+    /// named argument or a captured name) the one they name, and a `.*`
+    /// precision one more positional argument first. A placeholder with a
+    /// spec is not the value's own text: it is words, or a string that names
+    /// the path it renders.
     fn format_pieces(&self, template: &str, arguments: &[syn::Expr]) -> Vec<Value> {
         let mut positional = Vec::new();
         let mut named = BTreeMap::new();
@@ -2595,9 +3232,10 @@ impl<'a> Evaluation<'a> {
                 '{' => {
                     let hole: String = characters.by_ref().take_while(|c| *c != '}').collect();
                     let (reference, spec) = hole.split_once(':').unwrap_or((&hole, ""));
-                    let value = if !spec.is_empty() {
-                        Value::Opaque
-                    } else if reference.is_empty() {
+                    if spec.contains(".*") {
+                        next += 1;
+                    }
+                    let value = if reference.is_empty() {
                         next += 1;
                         positional
                             .get(next - 1)
@@ -2611,6 +3249,13 @@ impl<'a> Evaluation<'a> {
                     } else {
                         self.named(reference)
                     };
+                    let value = if spec.is_empty() {
+                        value
+                    } else if value.names_a_path() {
+                        Value::Within(vec![value])
+                    } else {
+                        Value::Words
+                    };
                     pieces.push(Value::Text(std::mem::take(&mut text)));
                     pieces.push(value);
                 }
@@ -2621,25 +3266,24 @@ impl<'a> Evaluation<'a> {
         pieces
     }
 
-    /// The innermost binding of a name in scope here: written before this
-    /// point, in this function, in a scope that holds this point.
+    /// The innermost binding of a name in scope here: in this function, with
+    /// a scope that holds this point; the one whose scope starts last wins.
     fn binding(&self, name: &str, loops: bool) -> Option<&Binding> {
         self.syntax
             .bindings
             .iter()
             .filter(|binding| {
                 binding.function == self.function
-                    && binding.offset < self.position
                     && binding.scope.0 <= self.position
                     && self.position < binding.scope.1
                     && binding.name == name
-                    && (loops || binding.each.is_none())
+                    && (loops || !binding.each)
             })
-            .max_by_key(|binding| binding.offset)
+            .max_by_key(|binding| binding.scope.0)
     }
 
     /// A single name: a helper's parameter, then the innermost binding of it
-    /// in scope here, then the file's constant.
+    /// in scope here, then a constant.
     fn named(&self, name: &str) -> Value {
         if let Some(value) = self.parameters.get(name) {
             return value.clone();
@@ -2648,19 +3292,29 @@ impl<'a> Evaluation<'a> {
             return self.constant(&[name.to_owned()]);
         };
         let scope = self.at(binding.offset);
-        let Some(positions) = &binding.each else {
-            return scope.of(&binding.value);
-        };
+        if !binding.each {
+            return scope.part(&binding.value, &binding.projection);
+        }
         match scope.elements(&binding.value) {
-            Some(elements) => Value::Each(
+            Some(elements) => Value::several(
                 elements
                     .iter()
-                    .map(|element| {
-                        projected(element, positions).map_or(Value::Opaque, |part| scope.of(part))
-                    })
+                    .map(|element| scope.part(element, &binding.projection))
                     .collect(),
             ),
-            None => Value::Opaque,
+            // A loop over a list this reading cannot read: the list is a
+            // value of its own, handed to whatever made it; a rooted one is
+            // unreduced.
+            None => scope.of(&binding.value).unreachable_part(),
+        }
+    }
+
+    /// The part of a value a pattern's positions pick. One not written as
+    /// tuples is unreduced if it holds a rooted path, and nothing otherwise.
+    fn part(&self, value: &syn::Expr, positions: &[Step]) -> Value {
+        match projected(value, positions) {
+            Some(part) => self.of(part),
+            None => self.of(value).unreachable_part(),
         }
     }
 
@@ -2674,6 +3328,9 @@ impl<'a> Evaluation<'a> {
             syn::Expr::Paren(inner) => self.elements(&inner.expr),
             syn::Expr::Group(inner) => self.elements(&inner.expr),
             syn::Expr::Macro(mac) if mac.mac.path.is_ident("vec") => {
+                if let Some(element) = repeated(&mac.mac) {
+                    return Some(vec![element]);
+                }
                 let parser =
                     syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
                 mac.mac
@@ -2699,11 +3356,18 @@ impl<'a> Evaluation<'a> {
                     .collect();
                 if let [name] = segments.as_slice()
                     && let Some(binding) = self.binding(name, false)
+                    && binding.projection.is_empty()
                 {
                     return self.at(binding.offset).elements(&binding.value);
                 }
-                match self.resolve_constant(&segments) {
-                    Resolved::Found(scope, constant) => scope.elements(&constant.value),
+                match self.resolve(&segments) {
+                    Resolved::Found(found) => {
+                        let lists: Vec<Vec<syn::Expr>> = found
+                            .iter()
+                            .filter_map(|(scope, constant)| scope.elements(&constant.value))
+                            .collect();
+                        (!lists.is_empty()).then(|| lists.into_iter().flatten().collect())
+                    }
                     Resolved::Missing(_) => None,
                 }
             }
@@ -2711,63 +3375,140 @@ impl<'a> Evaluation<'a> {
         }
     }
 
-    /// A constant's value, followed as far as its chain goes.
+    /// A constant's value, followed as far as its chain goes; several
+    /// constants of one name are each followed.
     fn constant(&self, segments: &[String]) -> Value {
-        match self.resolve_constant(segments) {
-            Resolved::Found(scope, constant) => scope.of(&constant.value),
+        match self.resolve(segments) {
+            Resolved::Found(found) => Value::several(
+                found
+                    .iter()
+                    .map(|(scope, constant)| scope.of(&constant.value))
+                    .collect(),
+            ),
             Resolved::Missing(value) => value,
         }
     }
 
-    /// The constant a path names. A bare name is the file's constant of that
-    /// name. `self::`, `super::` and `crate::` lead from the module this is
-    /// written in through bt-source's module tree to a module of the same
-    /// target, in this file or another, and the constant written there; one
-    /// this reading cannot place is unreduced, never silent. Any other longer
-    /// path (`bt_render::EASE`, `Curve::EASE`) names an item of another crate
-    /// or type, which this reading cannot see. A constant reached again on its
-    /// own resolution path is a cycle.
-    fn resolve_constant(&self, segments: &[String]) -> Resolved<'a> {
+    /// The constants a path names, as Rust resolves a path written here:
+    /// - a bare name: the file's constants of that name, then what the
+    ///   module this is written in brings in by `use` and `use …::*`;
+    /// - `Self::NAME`: the constants the `impl` blocks of the type this is
+    ///   written in declare;
+    /// - a longer path: from a first-party crate's name, `self`, `super`,
+    ///   `crate` or a child module, through bt-source's module tree, to the
+    ///   module's constant (or its `use`s and globs), or — where the path
+    ///   ends at a type of this workspace — that type's associated constant.
+    ///
+    /// A path through another crate's items or a primitive (`u32::MAX`,
+    /// `std::path::MAIN_SEPARATOR`) is never rooted in this checkout. A
+    /// constant-spelled name this reading cannot place is unreduced; any
+    /// other name it cannot place is a function, a type or a variant.
+    fn resolve(&self, segments: &[String]) -> Resolved<'a> {
         let Some((name, modules)) = segments.split_last() else {
             return Resolved::Missing(Value::Opaque);
         };
-        if modules.is_empty() {
-            let Some(Some(constant)) = self.syntax.constants.get(name) else {
-                return Resolved::Missing(Value::Opaque);
+        let resolved = match modules {
+            [] => {
+                let here: Vec<(FileId, Rc<Constant>)> = self
+                    .syntax
+                    .constants
+                    .get(name)
+                    .into_iter()
+                    .flatten()
+                    .map(|constant| (self.file, Rc::clone(constant)))
+                    .collect();
+                if !here.is_empty() {
+                    return self.found(name, &here);
+                }
+                match self.module.clone() {
+                    Some(module) => self.constant_in(module, name, &mut BTreeSet::new()),
+                    None => Resolved::Missing(Value::Unreduced(Why::Elsewhere)),
+                }
+            }
+            [owner] if owner == "Self" => match self.world.impl_type_at(self.file, self.position) {
+                Some(owner) => self.associated(self.file.0, &owner, name),
+                None => Resolved::Missing(Value::Unreduced(Why::Elsewhere)),
+            },
+            _ => self.locate(self.module.clone(), modules, name, &mut BTreeSet::new()),
+        };
+        match resolved {
+            Resolved::Missing(Value::Unreduced(Why::Elsewhere)) if !names_a_constant(name) => {
+                Resolved::Missing(Value::Opaque)
+            }
+            other => other,
+        }
+    }
+
+    /// The constants found, each entered on the resolution path.
+    fn found(&self, name: &str, constants: &[(FileId, Rc<Constant>)]) -> Resolved<'a> {
+        let mut found = Vec::new();
+        for (number, (file, constant)) in constants.iter().enumerate() {
+            let syntax = if *file == self.file {
+                Rc::clone(&self.syntax)
+            } else {
+                self.world.syntax(*file)
             };
             let module = self
                 .world
                 .placed
-                .get(&(self.file, constant.inline.clone()))
+                .get(&(*file, constant.inline.clone()))
                 .cloned();
-            let identity = format!("const {}:{}::{name}", self.file, constant.inline.join("::"));
-            return match self.entering(
-                identity,
-                Place {
-                    syntax: Rc::clone(&self.syntax),
-                    file: self.file,
-                    module,
-                },
-                usize::MAX,
-                0,
-                BTreeMap::new(),
-            ) {
-                Some(scope) => Resolved::Found(scope, Rc::clone(constant)),
-                None => Resolved::Missing(Value::Unreduced(Why::Cycle)),
+            let identity = format!(
+                "const {file:?}:{}::{name}#{number}",
+                constant.inline.join("::")
+            );
+            let place = Place {
+                syntax,
+                file: *file,
+                module,
             };
+            match self.entering(identity, place, usize::MAX, 0, BTreeMap::new()) {
+                Some(scope) => found.push((scope, Rc::clone(constant))),
+                None => return Resolved::Missing(Value::Unreduced(Why::Cycle)),
+            }
         }
-        let relative = matches!(modules[0].as_str(), "self" | "super" | "crate");
-        if !relative || !names_a_constant(name) {
-            return Resolved::Missing(Value::Opaque);
-        }
-        let Some(start) = self.module.clone() else {
-            return Resolved::Missing(Value::Unreduced(Why::Elsewhere));
-        };
-        match self.world.walk(&start, modules) {
-            Walk::Module(key) => self.constant_in(key, name, &mut BTreeSet::new()),
-            Walk::Item => Resolved::Missing(Value::Opaque),
+        Resolved::Found(found)
+    }
+
+    /// A constant a path of module segments leads to from a module.
+    fn locate(
+        &self,
+        from: Option<ModuleKey>,
+        modules: &[String],
+        name: &str,
+        seen: &mut BTreeSet<(ModuleKey, String)>,
+    ) -> Resolved<'a> {
+        match self.world.walk(from.as_ref(), modules) {
+            Walk::Module(key) => self.constant_in(key, name, seen),
+            Walk::Item { module, at } if at + 1 == modules.len() => {
+                let Some(((number, _), _)) = self
+                    .world
+                    .modules
+                    .get(&module)
+                    .and_then(|placed| placed.first())
+                else {
+                    return Resolved::Missing(Value::Unreduced(Why::Elsewhere));
+                };
+                self.associated(*number, &modules[at], name)
+            }
+            // A path through an item further down, or through another crate.
+            Walk::Item { .. } => Resolved::Missing(Value::Opaque),
             Walk::Lost => Resolved::Missing(Value::Unreduced(Why::Elsewhere)),
         }
+    }
+
+    /// The constants the `impl` blocks of a type declare under a name. A type
+    /// this workspace does not declare is another crate's or a primitive,
+    /// never rooted in the checkout.
+    fn associated(&self, number: usize, owner: &str, name: &str) -> Resolved<'a> {
+        if !self.world.declares_type(number, owner) {
+            return Resolved::Missing(Value::Opaque);
+        }
+        let constants = self.world.associated(number, owner, name);
+        if constants.is_empty() {
+            return Resolved::Missing(Value::Unreduced(Why::Elsewhere));
+        }
+        self.found(name, &constants)
     }
 
     /// The constant a module holds under a name: written there, brought
@@ -2780,29 +3521,54 @@ impl<'a> Evaluation<'a> {
         name: &str,
         seen: &mut BTreeSet<(ModuleKey, String)>,
     ) -> Resolved<'a> {
+        // Glob imports may lead back to a module already asked (`use
+        // super::*` in a child, `pub use child::*` in its parent): the name is
+        // not held along that way.
         if !seen.insert((key.clone(), name.to_owned())) {
-            return Resolved::Missing(Value::Unreduced(Why::Cycle));
+            return Resolved::Missing(Value::Unreduced(Why::Elsewhere));
         }
-        let Some((file, inline)) = self.world.modules.get(&key).cloned() else {
+        let Some(placements) = self.world.modules.get(&key).cloned() else {
             return Resolved::Missing(Value::Unreduced(Why::Elsewhere));
         };
+        // Each file the module is written in answers for its own `cfg`; what
+        // any of them holds is held.
+        let mut found = Vec::new();
+        let mut missing = None;
+        for (file, inline) in placements {
+            match self.held_in(&key, file, &inline, name, seen) {
+                Resolved::Found(more) => found.extend(more),
+                Resolved::Missing(Value::Unreduced(Why::Elsewhere)) => {}
+                Resolved::Missing(value) => missing = missing.or(Some(value)),
+            }
+        }
+        if !found.is_empty() {
+            Resolved::Found(found)
+        } else {
+            Resolved::Missing(missing.unwrap_or(Value::Unreduced(Why::Elsewhere)))
+        }
+    }
+
+    /// What one file of a module holds under a name.
+    fn held_in(
+        &self,
+        key: &ModuleKey,
+        file: FileId,
+        inline: &[String],
+        name: &str,
+        seen: &mut BTreeSet<(ModuleKey, String)>,
+    ) -> Resolved<'a> {
         let syntax = if file == self.file {
             Rc::clone(&self.syntax)
         } else {
             self.world.syntax(file)
         };
-        let here = (inline.clone(), name.to_owned());
-        if let Some(constant) = syntax.scoped.get(&here).cloned() {
-            let identity = format!("const {file}:{}::{name}", inline.join("::"));
-            let place = Place {
-                syntax,
-                file,
-                module: Some(key),
-            };
-            return match self.entering(identity, place, usize::MAX, 0, BTreeMap::new()) {
-                Some(scope) => Resolved::Found(scope, constant),
-                None => Resolved::Missing(Value::Unreduced(Why::Cycle)),
-            };
+        let here = (inline.to_vec(), name.to_owned());
+        if let Some(constants) = syntax.scoped.get(&here) {
+            let constants: Vec<(FileId, Rc<Constant>)> = constants
+                .iter()
+                .map(|constant| (file, Rc::clone(constant)))
+                .collect();
+            return self.found(name, &constants);
         }
         if syntax.locals.contains(&here) {
             return Resolved::Missing(Value::Opaque);
@@ -2811,64 +3577,93 @@ impl<'a> Evaluation<'a> {
             let Some((last, modules)) = path.split_last() else {
                 return Resolved::Missing(Value::Unreduced(Why::Elsewhere));
             };
-            return match self.world.walk(&key, modules) {
-                Walk::Module(next) => self.constant_in(next, last, seen),
-                Walk::Item => Resolved::Missing(Value::Opaque),
-                Walk::Lost => Resolved::Missing(Value::Unreduced(Why::Elsewhere)),
-            };
+            return self.locate(Some(key.clone()), modules, last, seen);
         }
-        for glob in syntax.globs.get(&inline).into_iter().flatten() {
-            if let Walk::Module(next) = self.world.walk(&key, glob)
-                && let found @ Resolved::Found(..) = self.constant_in(next, name, seen)
-            {
-                return found;
+        // The first glob that brings the name in decides it: a constant, a
+        // thread-local, or a `use` of another crate's item.
+        let mut beyond = false;
+        for glob in syntax.globs.get(inline).into_iter().flatten() {
+            match self.world.walk(Some(key), glob) {
+                Walk::Module(next) => match self.constant_in(next, name, seen) {
+                    Resolved::Missing(Value::Unreduced(Why::Elsewhere)) => {}
+                    held => return held,
+                },
+                Walk::Item { .. } | Walk::Lost => beyond = true,
             }
         }
-        Resolved::Missing(Value::Unreduced(Why::Elsewhere))
+        // A glob of another crate's module (`use windows::Win32::…::*`) may
+        // bring the name in from outside the workspace, which is never a path
+        // into this checkout.
+        if beyond {
+            Resolved::Missing(Value::Opaque)
+        } else {
+            Resolved::Missing(Value::Unreduced(Why::Elsewhere))
+        }
     }
 
-    /// A call of the file's own free function: its tail, with its parameters
-    /// bound to what this call hands it.
+    /// A call of the file's own free function: what it returns, with its
+    /// parameters bound to what this call hands it. Several functions of the
+    /// name (under exclusive `cfg`s) are each followed.
     fn helper(&self, name: &str, call: &syn::ExprCall) -> Value {
-        let Some(Some(helper)) = self.syntax.helpers.get(name) else {
+        let Some(helpers) = self.syntax.helpers.get(name) else {
+            // Another file's or crate's function: a call of its own, judged
+            // by what it is handed.
             return Value::Opaque;
         };
-        let Some(tail) = &helper.tail else {
-            return Value::Opaque;
-        };
-        let parameters = helper
-            .parameters
-            .iter()
-            .zip(&call.args)
-            .filter_map(|(parameter, argument)| {
-                parameter
-                    .as_ref()
-                    .map(|parameter| (parameter.clone(), self.of(argument)))
-            })
-            .collect();
-        match self.entering(
-            format!("fn {}:{name}", self.file),
-            Place {
+        let mut values = Vec::new();
+        for (number, helper) in helpers.iter().enumerate() {
+            let Some(tail) = &helper.tail else {
+                // A function that returns nothing a path can be read from.
+                continue;
+            };
+            let parameters = helper
+                .parameters
+                .iter()
+                .zip(&call.args)
+                .filter_map(|(parameter, argument)| {
+                    parameter
+                        .as_ref()
+                        .map(|parameter| (parameter.clone(), self.of(argument)))
+                })
+                .collect();
+            let place = Place {
                 syntax: Rc::clone(&self.syntax),
                 file: self.file,
                 module: self.module.clone(),
-            },
-            helper.function,
-            helper.tail_at,
-            parameters,
-        ) {
-            Some(scope) => scope.of(tail),
-            None => Value::Unreduced(Why::Cycle),
+            };
+            values.push(
+                match self.entering(
+                    format!("fn {:?}:{name}#{number}", self.file),
+                    place,
+                    helper.function,
+                    helper.tail_at,
+                    parameters,
+                ) {
+                    Some(scope) => scope.of(tail),
+                    // A function that calls itself: what it returns comes from
+                    // the branches that do not, which are followed; the
+                    // recursion adds no value of its own.
+                    None => Value::Opaque,
+                },
+            );
+        }
+        if values.is_empty() {
+            // Functions of the name that return `()`: no value.
+            Value::Opaque
+        } else {
+            Value::several(values)
         }
     }
 }
 
 /// Pieces written one after another — `concat!`'s arguments, a format
-/// string's text and holes — as one value: texts join into a text, a text
-/// after a path continues the path (from its last segment, or past a
-/// separator), and one of several values splices each in turn. A rooted path
-/// that a piece this reading cannot reduce follows, or precedes, is
-/// unreduced and diagnosed; with no rooted piece, it is an ordinary string.
+/// string's text and placeholders — as one value. A piece this reading cannot
+/// reduce anywhere among pieces that hold a rooted path makes the whole
+/// unreduced: never a silent drop, and no later piece is discarded.
+/// Otherwise texts join into a text, text after a leading path continues the
+/// path (past a separator or on its last segment), and a path after other
+/// text makes a string that names the path. With no rooted piece and an
+/// unreducible one, it is an ordinary string.
 fn splice(pieces: Vec<Value>) -> Value {
     if let Some(at) = pieces
         .iter()
@@ -2877,7 +3672,7 @@ fn splice(pieces: Vec<Value>) -> Value {
         let Value::Each(choices) = pieces[at].clone() else {
             unreachable!("found as several")
         };
-        return Value::Each(
+        return Value::several(
             choices
                 .into_iter()
                 .map(|choice| {
@@ -2888,51 +3683,60 @@ fn splice(pieces: Vec<Value>) -> Value {
                 .collect(),
         );
     }
-    let rooted = |value: &Value| {
-        matches!(
-            value,
-            Value::Path {
-                base: Base::Package,
-                ..
-            }
-        )
-    };
+    if let Some(why) = pieces.iter().find_map(Value::unreduced) {
+        return Value::Unreduced(why);
+    }
+    let unreducible = pieces.iter().any(Value::unreducible);
+    if unreducible && pieces.iter().any(Value::holds_root) {
+        return Value::Unreduced(Why::Computed);
+    }
+    if unreducible {
+        // No rooted piece: an ordinary string.
+        return Value::Opaque;
+    }
     let mut spliced = Value::Text(String::new());
     for piece in pieces {
         spliced = match (spliced, piece) {
-            (Value::Unreduced(why), _) | (_, Value::Unreduced(why)) => Value::Unreduced(why),
             (Value::Text(before), Value::Text(after)) => Value::Text(before + &after),
             (Value::Text(before), path @ Value::Path { .. }) if before.is_empty() => path,
-            // A path after text is spelled into a string, which names it;
-            // text after that is more string, not more path.
-            (Value::Text(_) | Value::Opaque, path @ Value::Path { .. }) => {
-                Value::Within(vec![path])
-            }
+            (Value::Text(_) | Value::Words, Value::Text(_) | Value::Words) => Value::Words,
+            (Value::Text(_) | Value::Words, path @ Value::Path { .. }) => Value::Within(vec![path]),
+            (Value::Text(_) | Value::Words, Value::Within(paths)) => Value::Within(paths),
             (Value::Within(mut paths), path @ Value::Path { .. }) => {
                 paths.push(path);
                 Value::Within(paths)
             }
-            (within @ Value::Within(_), _) => within,
+            (Value::Within(mut paths), Value::Within(more)) => {
+                paths.extend(more);
+                Value::Within(paths)
+            }
+            (within @ Value::Within(_), Value::Text(_) | Value::Words) => within,
             (path @ Value::Path { .. }, Value::Text(after)) => continued(path, &after),
-            (path, _) if rooted(&path) => {
-                let Value::Path { base, segments, .. } = path else {
-                    unreachable!("rooted is a path")
-                };
-                Value::Path {
-                    base,
-                    segments,
-                    open: true,
+            // Unknown text right after a path: the path's own text is no
+            // longer known.
+            (Value::Path { base, segments, .. }, Value::Words) => Value::Path {
+                base,
+                segments,
+                open: true,
+            },
+            // Two paths, or a path and a string naming paths, side by side.
+            (first, second) => {
+                if first.holds_root() || second.holds_root() {
+                    Value::Unreduced(Why::Computed)
+                } else {
+                    // Scratch, absolute or relative text side by side: no
+                    // path into the checkout.
+                    Value::Opaque
                 }
             }
-            _ => Value::Opaque,
         };
     }
     spliced
 }
 
 /// A path with text written straight after it: past a separator the text
-/// is more segments; otherwise it lengthens the last one. A rooted path
-/// already open stays open.
+/// is more segments; otherwise it lengthens the last one. A path already
+/// open stays open, and text that lengthens no segment leaves it open.
 fn continued(path: Value, after: &str) -> Value {
     let Value::Path {
         base,
@@ -2962,8 +3766,13 @@ fn continued(path: Value, after: &str) -> Value {
     let (first, rest) = after.split_once(['/', '\\']).unwrap_or((after, ""));
     match segments.last_mut() {
         Some(last) if last != ".." => last.push_str(first),
-        _ if base == Base::Package => return Value::Unreduced(Why::Computed),
-        _ => return Value::Opaque,
+        _ => {
+            return Value::Path {
+                base,
+                segments,
+                open: true,
+            };
+        }
     }
     Value::Path {
         base,
@@ -2983,9 +3792,12 @@ fn document_readers(
 ) -> (Vec<DocumentReader>, Vec<UnresolvedRead>) {
     let mut by_item: BTreeMap<(String, BTreeSet<String>), DocumentReader> = BTreeMap::new();
     let mut unresolved = Vec::new();
-    for (package, index) in indices {
+    let world = World::of(indices);
+    for (number, (package, index)) in indices.iter().enumerate() {
         let scan = DocumentScan {
             index,
+            number,
+            world: &world,
             root,
             package,
             committed,
@@ -3007,6 +3819,8 @@ fn document_readers(
         }
     }
     unresolved.sort();
+    // A call judged once per value a loop gives it is one entry.
+    unresolved.dedup();
     (by_item.into_values().collect(), unresolved)
 }
 
@@ -3139,7 +3953,14 @@ fn every_reader_of_a_committed_document_is_on_a_list() {
 /// `structural-debt.md` joins `tests::hands_the_outer_fixtures_after_an_inner_loop`;
 /// read `format!` as nothing (`Some("format") => Value::Opaque`) and
 /// `tests::reads_a_formatted_path` is not found and
-/// `tests::reads_a_formatted_name` leaves the diagnostic.
+/// `tests::reads_a_formatted_name` leaves the diagnostic; start a `let`'s
+/// scope at the `let` (`self.offset(local.span())` for the scope's start in
+/// `Collector::visit_local`) and `tests::reads_through_a_shadowing_let`
+/// reads its own result; let a spec'd placeholder take no argument and
+/// `tests::formats_a_label_before_the_path` reads nothing; splice an
+/// unreducible piece before a rooted one into a string that names the path
+/// and `tests::reads_after_an_unknown_prefix` leaves the diagnostic, which
+/// the count shows.
 ///
 /// It also reads through a chain of nine constants to a committed `.tsv`,
 /// hands two ledgers to a wrapper in a loop over a literal list of tuples,
@@ -3148,7 +3969,9 @@ fn every_reader_of_a_committed_document_is_on_a_list() {
 /// shadows a loop variable in an inner loop and hands the outer one on after
 /// it, reads a path built by `format!` and one whose `format!` takes a
 /// computed name, reads a parent module's constant through `super::`, and one
-/// `super::super::` leads to no constant of.
+/// `super::super::` leads to no constant of. And it shadows a `let` with one
+/// whose initialiser reads the first, formats a path after a `{:?}` label,
+/// and formats an unknown prefix before a rooted path.
 #[test]
 fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
     let plot = temporary_directory("planted-documents");
@@ -3195,6 +4018,11 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
             "tests::LIST",
             Reading::Included,
             "crates/bt-app/src/window_waits.tsv",
+        ),
+        (
+            "tests::formats_a_label_before_the_path",
+            Reading::HandedTo("read_fixture".to_owned()),
+            "docs/plans/SOURCE-READERS.tsv",
         ),
         (
             "tests::hands_a_fixture_to_a_method",
@@ -3245,6 +4073,11 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
             "tests::reads_the_ledger",
             Reading::AtRunTime,
             "docs/plans/structural-debt.md",
+        ),
+        (
+            "tests::reads_through_a_shadowing_let",
+            Reading::AtRunTime,
+            "docs/plans/TIMING-BOUND-TESTS.tsv",
         ),
         (
             "tests::reads_through_nine_constants",
@@ -3299,17 +4132,30 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
                 "std::fs::read_to_string".to_owned(),
                 Why::Cycle
             ),
+            (
+                "tests::reads_after_an_unknown_prefix".to_owned(),
+                "std::fs::read_to_string".to_owned(),
+                Why::Computed
+            ),
         ],
         "the rooted reads with a computed name, handed to a read or to a wrapper, and the \
          self-named constant are the diagnostic; the computed reads under target/ and the \
          temporary directory are not"
     );
 
+    // The count on its own: a planted shape the scan stops seeing — dropped
+    // in silence instead of diagnosed — changes it.
+    assert_eq!(
+        unresolved.len(),
+        6,
+        "the planted crate's diagnostic is exactly six paths"
+    );
+
     let listed = listed_readers(&workspace_root());
     let strays = unlisted_documents(&readers, &listed);
     assert_eq!(
         strays.len(),
-        12,
+        14,
         "a planted reader was taken for a listed one"
     );
     let said = document_complaint(&strays, &unresolved);
@@ -3320,7 +4166,7 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
             && said.contains("tests::LIST")
             && said.contains(DEBT_LIST)
             && said.contains(SOURCE_LIST)
-            && said.contains("5 path(s) handed to a call"),
+            && said.contains("6 path(s) handed to a call"),
         "the refusal names each item, its file, both lists and the diagnostic; it said:\n{said}"
     );
     assert!(
@@ -3490,6 +4336,25 @@ mod tests {
     #[test]
     fn reads_a_formatted_path() {
         let _ = std::fs::read_to_string(format!("{}/../../docs/DESIGN.md", env!("CARGO_MANIFEST_DIR")));
+    }
+
+    #[test]
+    fn reads_through_a_shadowing_let() {
+        let path = repository_root().join("docs/plans/TIMING-BOUND-TESTS.tsv");
+        let path = std::fs::read_to_string(path);
+        assert!(path.is_ok());
+    }
+
+    #[test]
+    fn formats_a_label_before_the_path() {
+        let label = "ledger";
+        let ledger = repository_root().join("docs/plans/SOURCE-READERS.tsv");
+        let said = format!("{:?} {}", label, ledger.display());
+        let _ = read_fixture(std::path::Path::new(&said));
+    }
+
+    fn reads_after_an_unknown_prefix(unknown: &str) -> String {
+        std::fs::read_to_string(format!("{}{}/docs/DESIGN.md", unknown, env!("CARGO_MANIFEST_DIR"))).unwrap()
     }
 
     fn reads_a_formatted_name(name: &str) -> String {
