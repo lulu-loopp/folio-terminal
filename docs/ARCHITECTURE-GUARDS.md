@@ -216,7 +216,30 @@ contract's ledger, one row per request protocol, held by the
 in `window_waits_tests` and by the fifth and sixth checks of `scripts/ci/check-window-waits.ps1`. A door that
 reaches a lane started elsewhere is listed, with its reason, in
 `docs/plans/completions-door-starts.tsv`, which only shrinks; reachability is a call path to
-the function that starts the thread, never a shared type or module.
+the function that starts the thread, never a shared type or module. The path follows a call on
+a receiver stated to be a first-party trait (`dyn Trait` behind `&`, `Box`, `Arc` or `Rc`,
+`impl Trait`, a generic parameter bound by the trait, `self` in the trait's default method, or
+a path call `Trait::m` / `D::m` with `D: Trait`) into that trait's implementations, so a body
+reached only through a trait object (the update job's `driver.prepare`) needs no list line. A
+trait is its identity — package, module path and name, resolved through `use` items, globs and
+re-exports by `bt_source::TraitResolver` — so two traits of one name (the macOS and the
+Windows `PreparePoint`) are never followed together. What is followed: the method of every
+product `impl` of the trait, on every platform arm; the trait's default body, only for an
+impl that does not override it (or when there is no impl); and the trait's first-party
+supertraits, whose impls count only for types implementing the stated trait. The answer is the
+trait's implementations alone — never united with the by-name answer — and a call on a
+parameter is not typed by the parameter's declaration when another binding of its name is in
+scope at the call: one begun before the call whose scope holds it (a `let` to the end of its
+block; an `if let`/`while let` binding, each `let` of a chain included, from the end of that
+`let` through the later operands and the body; a match-arm pattern, and each `let` of its guard
+from the end of that `let`, through the arm; a `for` or closure binding over its body), the
+scopes read by parsing the function body with `syn`, and a product body that does not parse
+fails the test by name; a binding in a closed block or after the call does not shadow. What is
+not followed: a
+stored closure, a function pointer, `<X as Trait>::m`, a type written through an alias, a
+standard or third-party trait object (and a foreign supertrait's methods, even on a
+first-party implementing type), and an untyped receiver whose method name is shared; those are
+S-2a's call graph.
 When red, give the new answer, lane, thread or registry row its ledger row (or
 correct the row the code moved past); a status names the D-row or registry row
 that repairs it and only ever becomes `conforms` — never mark a row conforming
@@ -254,7 +277,12 @@ says no failure line of its own (the ledger says each failed request once, a
 joined one carrying a failure included, or once per streak); and its
 `LaneUnderTest` adapter hands the real lane `Executor::scripted` and reports
 `sunk` and `said`. The OS hand-off lane (`handoff_lane`, S-5) is the first
-lane built this way. What the proof covers:
+lane built this way; the font, taskbar and program-walk lanes (S-4) followed,
+each on `lane::Coalescing` — the latest-value shape: one run out and at most one
+waiting, a request asked while one waits joined to it when it is the same
+operation and superseding it when it is not, the worker started by the first
+request, every terminal held for the application and taken in mint order
+below the earliest request still owed. What the proof covers:
 `lane_contract_tests::the_ledger_ends_every_identity_exactly_once_in_every_interleaving`
 plays every order of three identities' outcomes (the six terminals, a racing
 answer after a cancel, a terminal published for a joined identity itself),
