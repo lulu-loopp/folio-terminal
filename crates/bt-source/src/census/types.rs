@@ -34,7 +34,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::index::{ImplRecord, Index, ItemKind, ItemRecord, TokenKind};
+use super::Callable;
+use crate::index::{ImplRecord, Index, ItemKind, ItemRecord, ModuleShape, TokenKind};
 
 /// A type, as far as a declaration says.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -432,15 +433,30 @@ pub(crate) struct MethodDecl {
     pub(crate) impl_params: Vec<String>,
     pub(crate) self_args: Vec<Ty>,
     pub(crate) params: Vec<Ty>,
+    /// The item, when a product build can contain it: what a call resolved
+    /// to this declaration reaches.
+    pub(crate) callable: Option<Callable>,
 }
 
 /// One free function of the workspace.
 #[derive(Clone, Debug)]
 pub(crate) struct FnDecl {
     pub(crate) package: String,
+    /// Its package and module, whether or not a product build has it.
+    pub(crate) place: Place,
     pub(crate) generics: Vec<String>,
     pub(crate) params: Vec<Ty>,
     pub(crate) ret: Ty,
+    /// As [`MethodDecl::callable`].
+    pub(crate) callable: Option<Callable>,
+}
+
+/// The `use` items written directly in one module: each name brought in,
+/// with the path it was written as, and each glob's path.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Imports {
+    pub(crate) names: BTreeMap<String, Vec<String>>,
+    pub(crate) globs: Vec<Vec<String>>,
 }
 
 /// One `impl Deref for X`.
@@ -465,6 +481,8 @@ pub(crate) struct Declarations {
     pub(crate) trait_methods: BTreeSet<String>,
     /// Crate (library target) names, mapped to their packages.
     pub(crate) crates: BTreeMap<String, String>,
+    /// Every module's `use` items, by package and module path.
+    pub(crate) imports: BTreeMap<Place, Imports>,
     /// Declarations that did not parse: an answer this census would otherwise
     /// take without them.
     pub(crate) unparsed: Vec<String>,
@@ -562,6 +580,7 @@ impl Declarations {
     fn read_one(&mut self, index: &Index, crates: &BTreeSet<String>) {
         self.read_derefs(index, crates);
         self.read_aliases(index, crates);
+        self.read_imports(index);
         for item in index.items() {
             let package = package_of(index, item);
             let module = item
@@ -791,6 +810,7 @@ impl Declarations {
             syn::ReturnType::Type(_, ty) => written.ty(ty),
         };
         let params = typed_inputs(&written, &signature);
+        let callable = Callable::of(index, item, &package);
         self.methods
             .entry((owner.to_owned(), item.name().to_owned()))
             .or_default()
@@ -801,6 +821,7 @@ impl Declarations {
                 impl_params,
                 self_args,
                 params,
+                callable,
             });
     }
 
@@ -816,6 +837,7 @@ impl Declarations {
             self.unparsed.push(describe(item));
             return;
         };
+        let place = (package.clone(), module.clone());
         let mut written = self.written(package.clone(), module, crates);
         written.enter(&signature.generics);
         let ret = match &signature.output {
@@ -823,15 +845,94 @@ impl Declarations {
             syn::ReturnType::Type(_, ty) => written.ty(ty),
         };
         let params = typed_inputs(&written, &signature);
+        let callable = Callable::of(index, item, &package);
         self.functions
             .entry(item.name().to_owned())
             .or_default()
             .push(FnDecl {
                 package,
+                place,
                 generics: generic_names(&signature.generics),
                 params,
                 ret,
+                callable,
             });
+    }
+
+    /// The `use` items written directly in each module of `index` — not
+    /// those inside a function body, which bring a name into that body alone.
+    fn read_imports(&mut self, index: &Index) {
+        for module in index.modules() {
+            let text = index.text(module.span());
+            let items = match module.body() {
+                ModuleShape::WholeFile => syn::parse_file(text).map(|file| file.items),
+                ModuleShape::Inline => syn::parse_str::<syn::ItemMod>(&format!("mod m {text}"))
+                    .map(|parsed| parsed.content.map(|(_, items)| items).unwrap_or_default()),
+            };
+            let Ok(items) = items else {
+                self.unparsed.push(format!(
+                    "the `use` items of {}",
+                    module.module_paths().join(", ")
+                ));
+                continue;
+            };
+            let mut imports = Imports::default();
+            for item in &items {
+                if let syn::Item::Use(used) = item {
+                    flatten_use(&used.tree, &mut Vec::new(), &mut imports);
+                }
+            }
+            let package = package_at(index, module.span().start());
+            for path in module.module_paths() {
+                let entry = self
+                    .imports
+                    .entry((package.clone(), path.clone()))
+                    .or_default();
+                entry.names.extend(imports.names.clone());
+                entry.globs.extend(imports.globs.clone());
+            }
+        }
+    }
+}
+
+/// A `use` tree, flattened into the names it brings in and the globs it
+/// opens; `prefix` is the path written before this subtree.
+fn flatten_use(tree: &syn::UseTree, prefix: &mut Vec<String>, imports: &mut Imports) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            flatten_use(&path.tree, prefix, imports);
+            prefix.pop();
+        }
+        syn::UseTree::Name(name) => {
+            let name = name.ident.to_string();
+            if name == "self" {
+                if let Some(last) = prefix.last() {
+                    imports.names.insert(last.clone(), prefix.clone());
+                }
+            } else {
+                let mut path = prefix.clone();
+                path.push(name.clone());
+                imports.names.insert(name, path);
+            }
+        }
+        syn::UseTree::Rename(rename) => {
+            let original = rename.ident.to_string();
+            let path = if original == "self" {
+                prefix.clone()
+            } else {
+                let mut path = prefix.clone();
+                path.push(original);
+                path
+            };
+            imports.names.insert(rename.rename.to_string(), path);
+        }
+        syn::UseTree::Glob(_) => imports.globs.push(prefix.clone()),
+        syn::UseTree::Group(group) => {
+            for tree in &group.items {
+                flatten_use(tree, prefix, imports);
+            }
+        }
     }
 }
 
@@ -980,6 +1081,9 @@ pub(crate) struct Method {
     /// What a closure in each argument position receives (a workspace
     /// declaration's `impl FnMut(..)` parameters).
     pub(crate) by_position: Vec<Option<Vec<Ty>>>,
+    /// The product items of the workspace a call of it reaches; empty for a
+    /// method of the standard lists.
+    pub(crate) callees: BTreeSet<Callable>,
 }
 
 impl Method {
@@ -1002,6 +1106,7 @@ fn with_closure(class: Class, ret: Ty, closure: Vec<Ty>) -> Method {
         ret,
         closure,
         by_position: Vec::new(),
+        callees: BTreeSet::new(),
     }
 }
 
@@ -1521,6 +1626,39 @@ pub(crate) fn external_method(type_name: &str, name: &str) -> Option<Method> {
         ) => method(Class::Read, unknown_ret(name)),
         _ => return None,
     })
+}
+
+/// Whether `name` is a method the census's fixed lists know on some
+/// standard type other than the catch-all value types, on an iterator or an
+/// entry, or a prelude trait's — a name a call through an untyped receiver
+/// may mean there as well as in the workspace.
+pub(crate) fn standard_method_name(name: &str) -> bool {
+    let args = [Ty::unknown("any"), Ty::unknown("any")];
+    let any = Ty::unknown("any");
+    [
+        Std::Vec,
+        Std::VecDeque,
+        Std::Map,
+        Std::Set,
+        Std::Option,
+        Std::Result,
+        Std::String,
+        Std::Str,
+        Std::PathBuf,
+        Std::Path,
+        Std::Box,
+        Std::Shared,
+        Std::Cell,
+        Std::RefCell,
+        Std::Lock,
+        Std::Atomic,
+        Std::Channel,
+    ]
+    .into_iter()
+    .any(|kind| std_method(kind, &args, name).is_some())
+        || iterator_method(&any, name).is_some()
+        || entry_method(&any, name).is_some()
+        || prelude_method(name, &any).is_some()
 }
 
 pub(crate) fn prelude_method(name: &str, receiver: &Ty) -> Option<Method> {

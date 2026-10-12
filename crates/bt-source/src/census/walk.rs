@@ -15,11 +15,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use syn::punctuated::Punctuated;
 
-use super::Sink;
 use super::resolve::{FieldAnswer, Kind, Owner, Resolver, first_arg};
 use super::types::{
     Class, Receiver, Std, Ty, Written, closures_by_position, impl_header, impl_of, option_of,
+    standard_method_name,
 };
+use super::{Callable, Sink};
 use crate::index::{Index, ItemKind, ItemRecord};
 
 /// Which of the census's columns a site lands in.
@@ -36,6 +37,11 @@ pub enum Column {
     Membership,
     /// A change through a shared reference: `Cell`, `RefCell`, atomics, locks.
     Inner,
+    /// Nothing mutable: the value read, a `&` borrow, a `&self` method, a
+    /// pattern binding it by value or by `ref`, or a step on the way to
+    /// another field that is read. Kept apart from the four
+    /// ([`super::FieldCensus::reads`]).
+    Read,
 }
 
 impl Column {
@@ -46,12 +52,14 @@ impl Column {
             Self::Access => "access",
             Self::Membership => "membership",
             Self::Inner => "inner",
+            Self::Read => "read",
         }
     }
 }
 
 #[derive(Clone, Debug)]
 enum Effect {
+    Read,
     Write,
     Lend,
     Access,
@@ -143,6 +151,8 @@ pub(crate) struct Walk<'w, 'd> {
     sink: &'w mut Sink,
     module: String,
     function: String,
+    /// The item being walked, as a call it makes names its caller.
+    caller: Callable,
 }
 
 impl<'w, 'd> Walk<'w, 'd> {
@@ -152,11 +162,12 @@ impl<'w, 'd> Walk<'w, 'd> {
         resolver: &'w Resolver<'d>,
         index: &Index,
         item: &ItemRecord,
-        module: String,
-        function: String,
+        caller: Callable,
         crates: &BTreeSet<String>,
         sink: &'w mut Sink,
     ) -> Result<(), String> {
+        let module = caller.module.clone();
+        let function = caller.census_function();
         let text = index.text(item.whole());
         let (signature, block) = match item.kind() {
             ItemKind::Function => {
@@ -197,6 +208,7 @@ impl<'w, 'd> Walk<'w, 'd> {
             sink,
             module,
             function,
+            caller,
         };
         walk.function_body(&signature, &block);
         Ok(())
@@ -351,15 +363,19 @@ impl<'w, 'd> Walk<'w, 'd> {
                             ty: field_ty,
                             ..
                         }) => {
-                            if mode == Mode::Unique || pattern_takes_unique(&field.pat) {
-                                self.record(
-                                    fact,
-                                    &Use {
-                                        effect: Effect::Access,
-                                        kind: "pattern".to_owned(),
-                                    },
-                                );
-                            }
+                            let effect = if mode == Mode::Unique || pattern_takes_unique(&field.pat)
+                            {
+                                Effect::Access
+                            } else {
+                                Effect::Read
+                            };
+                            self.record(
+                                fact,
+                                &Use {
+                                    effect,
+                                    kind: "pattern".to_owned(),
+                                },
+                            );
                             self.bind(
                                 &field.pat,
                                 field_ty,
@@ -659,17 +675,23 @@ impl<'w, 'd> Walk<'w, 'd> {
         )
     }
 
-    /// A call `f(..)` or `Type::f(..)`: its value, and what closures in each
-    /// argument position receive.
-    fn callee(&self, call: &syn::ExprCall) -> (Val, Vec<Option<Vec<Ty>>>) {
+    /// A call `f(..)` or `Type::f(..)`: its value, what closures in each
+    /// argument position receive, and — for `Type::f` — the product items it
+    /// reaches by the type.
+    fn callee(&self, call: &syn::ExprCall) -> (Val, Vec<Option<Vec<Ty>>>, BTreeSet<Callable>) {
         let syn::Expr::Path(path) = &*call.func else {
             return (
                 Val::unknown("a call of something that is not a path"),
                 Vec::new(),
+                BTreeSet::new(),
             );
         };
         if path.qself.is_some() {
-            return (Val::unknown("a call through a qualified path"), Vec::new());
+            return (
+                Val::unknown("a call through a qualified path"),
+                Vec::new(),
+                BTreeSet::new(),
+            );
         }
         let segments: Vec<String> = path
             .path
@@ -685,9 +707,9 @@ impl<'w, 'd> Walk<'w, 'd> {
                 origin: args[0].origin,
                 shared: false,
             };
-            return (val, Vec::new());
+            return (val, Vec::new(), BTreeSet::new());
         }
-        let (ret, closures) = if segments.len() >= 2 {
+        let (ret, closures, callees) = if segments.len() >= 2 {
             let owner_ty = if segments[segments.len() - 2] == "Self" {
                 self.written
                     .self_ty
@@ -701,7 +723,8 @@ impl<'w, 'd> Walk<'w, 'd> {
             };
             self.resolver.associated(&owner_ty, &last)
         } else {
-            self.free_function(&last, &args)
+            let (ret, closures) = self.free_function(&last, &args);
+            (ret, closures, BTreeSet::new())
         };
         let origin = if ret.carries_reference() {
             let lenders: Vec<Option<Origin>> = args
@@ -723,7 +746,85 @@ impl<'w, 'd> Walk<'w, 'd> {
                 shared: false,
             },
             closures,
+            callees,
         )
+    }
+
+    /// The edge a call `f(..)` or `path::f(..)` adds: to what its type
+    /// reached (`Type::f`), or else to the free functions its path names by
+    /// the declarations and `use` items of the module it is written in. A
+    /// path that names a function of the subject package and reaches none, or
+    /// reaches more than one item, is listed as not followed.
+    fn call_edge(&mut self, call: &syn::ExprCall, by_type: BTreeSet<Callable>) {
+        let syn::Expr::Path(path) = &*call.func else {
+            return;
+        };
+        if path.qself.is_some() {
+            return;
+        }
+        let segments: Vec<String> = path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect();
+        let Some(name) = segments.last().cloned() else {
+            return;
+        };
+        if segments.len() == 1 && self.lookup(&name).is_some() {
+            // A closure or a function value held in a binding.
+            return;
+        }
+        if !by_type.is_empty() {
+            self.edge(by_type, &segments.join("::"));
+            return;
+        }
+        let package = self.resolver.subject.package.clone();
+        let reach = if segments.len() == 1 {
+            self.resolver.functions_at(&package, &self.module, &name)
+        } else {
+            let Some(absolute) = self.resolver.absolute(&package, &self.module, &segments) else {
+                // The path leaves the package.
+                return;
+            };
+            let Some((last, at)) = absolute.split_last() else {
+                return;
+            };
+            self.resolver.functions_at(&package, &at.join("::"), last)
+        };
+        if !reach.items.is_empty() {
+            self.edge(reach.items, &segments.join("::"));
+        } else if !reach.outside
+            && !reach.test_only
+            && self.resolver.subject.functions.contains(&name)
+        {
+            self.sink.unfollowed(
+                &self.module,
+                &self.function,
+                &segments.join("::"),
+                "a path the module's declarations and `use` items do not reach",
+            );
+        }
+    }
+
+    /// One call site's edge to what it reaches: the `cfg` variants of one
+    /// item. A site that reaches more than one item is listed as not
+    /// followed, never given to one of them.
+    fn edge(&mut self, callees: BTreeSet<Callable>, called: &str) {
+        let items: BTreeSet<(&str, &str)> = callees
+            .iter()
+            .map(|callable| (callable.module.as_str(), callable.function.as_str()))
+            .collect();
+        match items.len() {
+            0 => {}
+            1 => self.sink.call(&self.caller, callees),
+            _ => self.sink.unfollowed(
+                &self.module,
+                &self.function,
+                called,
+                "a call more than one item answers to",
+            ),
+        }
     }
 
     /// A free function's return type and closure parameters — with one
@@ -788,6 +889,7 @@ impl<'w, 'd> Walk<'w, 'd> {
         let hub = self.resolver.subject.facts[fact].hub;
         let label = self.resolver.subject.facts[fact].label();
         let column = match &use_.effect {
+            Effect::Read => Column::Read,
             Effect::Write if hub => Column::Membership,
             Effect::Write => Column::Write,
             Effect::Lend | Effect::Access => Column::Access,
@@ -901,16 +1003,28 @@ impl<'w, 'd> Walk<'w, 'd> {
                                 self.record(fact, &use_);
                                 Pending::Attributed
                             }
-                            other => other,
+                            Pending::Read => {
+                                self.record(
+                                    fact,
+                                    &Use {
+                                        effect: Effect::Read,
+                                        kind: "read".to_owned(),
+                                    },
+                                );
+                                Pending::Read
+                            }
+                            Pending::Attributed => Pending::Attributed,
                         };
                         self.visit(&field.base, next);
                     }
                     Ok(_) => self.visit(&field.base, pending),
                     Err(why) => {
-                        if let Pending::Use(use_) = &pending
-                            && self.resolver.subject.names.contains(&name)
-                        {
-                            self.unknown_name(&name, use_, &why);
+                        if self.resolver.subject.names.contains(&name) {
+                            match &pending {
+                                Pending::Use(use_) => self.unknown_name(&name, use_, &why),
+                                Pending::Read => self.sink.unattributed_reads += 1,
+                                Pending::Attributed => {}
+                            }
                         }
                         self.visit(&field.base, pending);
                     }
@@ -1157,6 +1271,24 @@ impl<'w, 'd> Walk<'w, 'd> {
         let receiver = self.eval(&call.receiver);
         let name = call.method.to_string();
         let found = self.resolver.method(&receiver.ty, receiver.shared, &name);
+        match &found {
+            Ok(found) => self.edge(found.method.callees.clone(), &name),
+            Err(unresolved) => {
+                if self.resolver.subject.methods.contains(&name) {
+                    let whose = if standard_method_name(&name) {
+                        "a method name the package declares and a standard type has too"
+                    } else {
+                        "a method name the package declares and no standard type has"
+                    };
+                    let reason = format!(
+                        "{whose}, called through a receiver the rules do not type: {}",
+                        unresolved.why
+                    );
+                    self.sink
+                        .unfollowed(&self.module, &self.function, &name, &reason);
+                }
+            }
+        }
         for (at, arg) in call.args.iter().enumerate() {
             match arg {
                 syn::Expr::Closure(closure) => {
@@ -1207,7 +1339,8 @@ impl<'w, 'd> Walk<'w, 'd> {
     fn call(&mut self, call: &syn::ExprCall) {
         self.visit(&call.func, Pending::Read);
         let swaps = mem_function(&call.func);
-        let closures = self.callee(call).1;
+        let (_, closures, callees) = self.callee(call);
+        self.call_edge(call, callees);
         for (at, arg) in call.args.iter().enumerate() {
             match (&swaps, arg) {
                 (Some(name), syn::Expr::Reference(reference)) if reference.mutability.is_some() => {
