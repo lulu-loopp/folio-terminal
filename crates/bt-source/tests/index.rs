@@ -17,13 +17,14 @@
 //!    one-call entry for a package shares that object rather than lowering a
 //!    universe of its own.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bt_source::{
     DiskScope, Index, ItemKind, ItemQuery, ModuleSpec, Needle, Package, Pattern, QueryFailure,
-    Scope, Search, Span, TargetId, TargetKind, TargetRoot, Universe, Vendor, View, Workspace,
-    report, universes,
+    Scope, Search, Span, TargetId, TargetKind, TargetRoot, TraitId, TraitResolver, Universe,
+    Vendor, View, Workspace, report, universes,
 };
 use syn::parse::Parser as _;
 
@@ -1638,4 +1639,105 @@ fn a_view_decides_what_is_there_and_a_match_crosses_nothing() {
         !index.contains(&across, View::Raw),
         "a union must not manufacture an occurrence at a file join"
     );
+}
+
+// ── which trait a path names ──────────────────────────────────────────────
+
+fn path(written: &str) -> Vec<String> {
+    written.split("::").map(str::to_owned).collect()
+}
+
+fn ids(found: &BTreeSet<TraitId>) -> Vec<String> {
+    found.iter().map(ToString::to_string).collect()
+}
+
+/// RED (T-DOOR-REACH-TRAIT-OBJECTS) — **a trait is its identity, and a path
+/// names the trait the compiler would take it to name.**
+///
+/// Two traits named `Point` in two modules are two traits, each implemented by
+/// the block beside it; `impl Run for Mac` under `use crate::job::{Driver as
+/// Run}`, `impl super::job::Driver for Win` and `impl Driver for Glob` under a
+/// glob all implement `crate::job::Driver`, whose supertrait `Named` resolves
+/// in its own module and whose `Send` and `Sync` resolve to nothing; a `pub use`
+/// of another package's trait names that package's trait; a standard trait is
+/// no trait of these packages.
+///
+/// MUTATION: in `TraitResolver::in_scope`, take a name to be every trait of
+/// that name the package declares, in whatever module (the bare-name keying of
+/// round 1) — the two `Point`s become one and both blocks implement each.
+#[test]
+fn a_trait_path_resolves_to_the_trait_its_module_names() {
+    let own = Index::shared(&fixture_universe("traits")).expect("the fixture lowers");
+    let dep = Index::shared(&fixture_universe("traits_dep")).expect("the fixture lowers");
+    let resolver = TraitResolver::new(&[("traits", &own), ("traits_dep", &dep)]);
+    let implemented: Vec<(String, Vec<String>)> = own
+        .impls()
+        .iter()
+        .map(|block| {
+            (
+                format!("{} {}", block.module_paths().join("|"), block.type_owner()),
+                ids(&resolver.implemented("traits", block)),
+            )
+        })
+        .collect();
+    assert_eq!(
+        implemented,
+        [
+            (
+                "crate::platform_a Ours",
+                vec!["traits crate::platform_a::Point"]
+            ),
+            (
+                "crate::platform_b Ours",
+                vec!["traits crate::platform_b::Point"]
+            ),
+            ("crate::drivers Mac", vec!["traits crate::job::Driver"]),
+            ("crate::drivers Mac", vec!["traits crate::job::Named"]),
+            ("crate::drivers Win", vec!["traits crate::job::Driver"]),
+            ("crate::globbed Glob", vec!["traits crate::job::Driver"]),
+            ("crate::user Opened", vec!["traits_dep crate::seam::Door"]),
+            ("crate::foreign Sent", vec![]),
+        ]
+        .map(|(block, traits)| {
+            (
+                block.to_owned(),
+                traits.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+            )
+        })
+    );
+    let driver = TraitId {
+        package: "traits".to_owned(),
+        module_path: "crate::job".to_owned(),
+        name: "Driver".to_owned(),
+    };
+    assert_eq!(
+        ids(&resolver.supertraits(&driver)),
+        ["traits crate::job::Named"]
+    );
+    assert_eq!(resolver.declarations(&driver).len(), 1);
+    assert_eq!(
+        ids(&resolver.resolve("traits", "crate::drivers", &path("Run"))),
+        ["traits crate::job::Driver"]
+    );
+    assert_eq!(
+        ids(&resolver.resolve("traits", "crate::user", &path("crate::reexport::Door"))),
+        ["traits_dep crate::seam::Door"]
+    );
+    assert_eq!(
+        ids(&resolver.resolve("traits", "crate::drivers", &path("traits_dep::seam::Door"))),
+        ["traits_dep crate::seam::Door"]
+    );
+    for (module, written) in [
+        ("crate::job", "Send"),
+        ("crate::foreign", "std::fmt::Debug"),
+        ("crate::drivers", "Point"),
+        ("crate::platform_a", "Ours"),
+    ] {
+        assert!(
+            resolver
+                .resolve("traits", module, &path(written))
+                .is_empty(),
+            "`{written}` in `{module}` names no trait of these packages"
+        );
+    }
 }

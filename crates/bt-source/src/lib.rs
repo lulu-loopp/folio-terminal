@@ -110,6 +110,11 @@
 //!   inverts the guard, because four other modules spell the same register
 //!   names for registers of their own.
 //!
+//! * [`TraitResolver`] — **which trait a path names** ([`TraitId`]: package,
+//!   module path, name), read from the index's [`TraitRecord`]s, [`UseRecord`]s
+//!   and the trait path an [`ImplRecord`] writes — so two traits of one name in
+//!   two modules stay two (T-DOOR-REACH-TRAIT-OBJECTS).
+//!
 //! What census-1 adds (0.4.6, `docs/plans/design/ownership-census-2026-09-25.md`
 //! revision (b)2):
 //!
@@ -139,6 +144,7 @@ mod paths;
 mod query;
 mod reject;
 mod scope;
+mod traits;
 mod universe;
 pub mod universes;
 
@@ -153,7 +159,7 @@ pub use index::{
     Certainty, CommentKind, CommentRecord, ConditionalVariant, DeclarationPath, FileRecord,
     ImplRecord, Index, ItemIdentity, ItemKind, ItemRecord, LiteralRecord, LiteralValue, Location,
     MacroKind, MacroRecord, MacroShape, ModuleRecord, ModuleShape, Span, TokenKind, TokenRecord,
-    UnsupportedMacroShape,
+    TraitRecord, UnsupportedMacroShape, UseRecord,
 };
 pub use manifest::{Package, TargetId, TargetKind, TargetRoot, Workspace};
 pub use paths::{is_inside, normalized};
@@ -163,4 +169,5 @@ pub use query::{
 };
 pub use reject::{Position, Rejection, report};
 pub use scope::FileScoped;
+pub use traits::{TraitId, TraitResolver};
 pub use universe::{DiskScope, Universe, Vendor, is_vendored, targets_of};
