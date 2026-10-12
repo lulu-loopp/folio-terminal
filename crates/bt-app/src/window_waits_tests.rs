@@ -2528,7 +2528,9 @@ impl<'w> Body<'w> {
                 ["self"] => generics.get("Self").cloned(),
                 [name] => match self.params.get(name) {
                     Some(written) => {
-                        let scopes = self.scopes.get_or_init(|| binding_scopes(s, self.record));
+                        let scopes = self
+                            .scopes
+                            .get_or_init(|| scope_body(s, self.record).and_then(binding_scopes));
                         (!shadowed_at(scopes.as_deref(), name, site.at))
                             .then(|| stated_traits(s, written, generics, &resolve))
                             .flatten()
@@ -2895,30 +2897,35 @@ fn closure_parameters(src: &Src, toks: &[Tok], at: usize) -> Option<usize> {
     None
 }
 
-/// How many function bodies [`binding_scopes`] could not parse — each one's parameters are then
-/// read as shadowed (untyped). Printed by
-/// `a_match_or_pattern_binds_nothing_and_a_real_shadow_is_not_typed`; never silent.
-static UNPARSED_BODIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
 /// One binding a function body introduces: the name, and the `[from, to)` union offsets of its
 /// lexical scope.
 type BindingScope = (String, usize, usize);
 
+/// The text and union base of one body whose binding scopes are to be read.
+struct ScopeBody<'a> {
+    text: &'a str,
+    base: usize,
+}
+
+fn scope_body<'a>(src: &'a Src, record: &ItemRecord) -> Option<ScopeBody<'a>> {
+    let body = record.body()?;
+    Some(ScopeBody {
+        text: src.index.text(body),
+        base: body.start(),
+    })
+}
+
 /// **The lexical scope of every binding a function body introduces**, read with `syn` from the
 /// body's text (the bytes `bt-source`'s item record spans — the source `bt-source` itself lowers
 /// with `syn`), as union offsets: a `let` from the end of its statement to the end of its
-/// enclosing block; an `if let` / `while let` pattern over the branch or loop body; a `for`
-/// pattern over the loop body; a match arm's pattern over the arm (its guard included); a
-/// closure's parameters over its body. Macro invocations are opaque tokens to `syn` and introduce
-/// no binding. `None` when the body does not parse (counted in [`UNPARSED_BODIES`]).
-fn binding_scopes(src: &Src, record: &ItemRecord) -> Option<Vec<BindingScope>> {
-    let body = record.body()?;
-    let Ok(block) = syn::parse_str::<syn::Block>(src.index.text(body)) else {
-        UNPARSED_BODIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return None;
-    };
+/// enclosing block; a let-chain binding from the end of its own `let` through the later operands
+/// and branch, loop or match-arm body; a `for` pattern over the loop body; a match arm's pattern
+/// over the arm (its guard included); a closure's parameters over its body. Macro invocations are
+/// opaque tokens to `syn` and introduce no binding. `None` when the body does not parse.
+fn binding_scopes(body: ScopeBody<'_>) -> Option<Vec<BindingScope>> {
+    let block = syn::parse_str::<syn::Block>(body.text).ok()?;
     let mut reader = ScopeReader {
-        base: body.start(),
+        base: body.base,
         scopes: Vec::new(),
     };
     syn::visit::Visit::visit_block(&mut reader, &block);
@@ -2955,18 +2962,18 @@ impl ScopeReader {
             .extend(names.0.into_iter().map(|name| (name, from, to)));
     }
 
-    /// The `let` patterns of a condition — one, or each of a `&&` chain — scoped to `body`.
-    fn bind_condition(&mut self, condition: &syn::Expr, body: &syn::Block) {
+    /// The `let` patterns of a condition — one, or each of a `&&` chain — through `to`.
+    fn bind_condition(&mut self, condition: &syn::Expr, to: usize) {
         match condition {
             syn::Expr::Let(binding) => {
-                let (from, to) = (self.start(body), self.end(body));
+                let from = self.end(binding);
                 self.bind(&binding.pat, from, to);
             }
             syn::Expr::Binary(chain) if matches!(chain.op, syn::BinOp::And(_)) => {
-                self.bind_condition(&chain.left, body);
-                self.bind_condition(&chain.right, body);
+                self.bind_condition(&chain.left, to);
+                self.bind_condition(&chain.right, to);
             }
-            syn::Expr::Paren(inner) => self.bind_condition(&inner.expr, body),
+            syn::Expr::Paren(inner) => self.bind_condition(&inner.expr, to),
             _ => {}
         }
     }
@@ -2985,12 +2992,12 @@ impl<'ast> syn::visit::Visit<'ast> for ScopeReader {
     }
 
     fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
-        self.bind_condition(&node.cond, &node.then_branch);
+        self.bind_condition(&node.cond, self.end(&node.then_branch));
         syn::visit::visit_expr_if(self, node);
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
-        self.bind_condition(&node.cond, &node.body);
+        self.bind_condition(&node.cond, self.end(&node.body));
         syn::visit::visit_expr_while(self, node);
     }
 
@@ -3003,6 +3010,9 @@ impl<'ast> syn::visit::Visit<'ast> for ScopeReader {
     fn visit_arm(&mut self, node: &'ast syn::Arm) {
         let (from, to) = (self.start(&node.pat), self.end(&node.body));
         self.bind(&node.pat, from, to);
+        if let Some((_, guard)) = &node.guard {
+            self.bind_condition(guard, to);
+        }
         syn::visit::visit_arm(self, node);
     }
 
@@ -9269,6 +9279,18 @@ mod trait_dispatch_source_shapes {
         }
     }
 
+    fn trait_shape_if_let_chain(driver: &dyn Driver, other: Option<&Cache>) {
+        if let Some(driver) = other
+            && driver.prepare(unreachable!(), unreachable!(), unreachable!())
+        {}
+    }
+
+    fn trait_shape_while_let_chain(driver: &dyn Driver, mut other: Option<&Cache>) {
+        while let Some(driver) = other.take()
+            && driver.prepare(unreachable!(), unreachable!(), unreachable!())
+        {}
+    }
+
     fn trait_shape_later_shadow(driver: &dyn Driver, other: &crate::preview_wrap::Cache) {
         let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
         let driver = other;
@@ -9290,6 +9312,26 @@ mod trait_dispatch_source_shapes {
         let _ = sink.flush();
     }
 }
+
+// A match guard's `if let` parses with `syn`, but rustc gates it as experimental even in the
+// `cfg(any())` fixture module above, so these two shapes are fed to the scope reader as text.
+const TRAIT_SHAPE_MATCH_GUARD_CHAIN: &str = r#"{
+    match x {
+        v if let Some(driver) = v.driver()
+            && driver.prepare(unreachable!(), unreachable!(), unreachable!()) => (),
+        _ => (),
+    }
+}"#;
+const TRAIT_SHAPE_MATCH_GUARD_BODY: &str = r#"{
+    match x {
+        v if let Some(driver) = v => driver.prepare(
+            unreachable!(),
+            unreachable!(),
+            unreachable!(),
+        ),
+        _ => unreachable!(),
+    }
+}"#;
 
 /// The record of a function of the source-shape fixtures, by its name, with its package.
 fn fixture(world: &World, name: &str) -> (usize, &'static ItemRecord) {
@@ -9632,15 +9674,20 @@ fn a_trait_is_its_identity_and_a_default_runs_only_where_it_is_not_overridden() 
 /// whose head is `const { … }` bind `driver` over their body (untyped), and so does a `match` on a
 /// closure with a return type (`match |a: u8| -> u8 { a } { driver => … }`); a closure with a
 /// return type binds only its own parameters, so a call on `driver` inside one is typed. The
-/// scopes are `syn`'s ([`binding_scopes`]); every product body's parse is counted and the count of
-/// those that do not parse is printed (`SCOPE_UNPARSED_BODIES`).
+/// let-chain bindings also cover the later condition operands, and a match guard's `let` bindings
+/// cover its later operands and arm body. The scopes are `syn`'s ([`binding_scopes`]); every
+/// product body's parse is counted, the count of those that do not parse is printed
+/// (`SCOPE_UNPARSED_BODIES`), and any nonzero count fails with each body's file, line and item.
 ///
 /// MUTATIONS: type a parameter whatever binds its name — the shadowed call names the `Driver`
 /// implementations; refuse a parameter's type whenever another binding of its name stands anywhere
 /// in the body (round 2's count, [`binding_count`] `!= 1`) — the closed-block and the later shadow
 /// name nobody; restore round 5's token walk over heads for the scopes — the turbofish `match`,
 /// the `match`-headed `if let`, the `const`-headed `while let` and the `match` on a closure with a
-/// return type are each read as typed.
+/// return type are each read as typed; begin a condition binding at the consequent body's opening
+/// brace — the `if let` and `while let` chain operands are read as typed; do not read guard
+/// conditions in [`ScopeReader::visit_arm`] — both match-guard calls are read as typed; begin a
+/// guard's binding at the arm body — the guard-chain call is read as typed.
 #[test]
 fn a_match_or_pattern_binds_nothing_and_a_real_shadow_is_not_typed() {
     let world = World::new();
@@ -9681,6 +9728,8 @@ fn a_match_or_pattern_binds_nothing_and_a_real_shadow_is_not_typed() {
         "trait_shape_match_in_head",
         "trait_shape_const_head",
         "trait_shape_closure_return_head",
+        "trait_shape_if_let_chain",
+        "trait_shape_while_let_chain",
     ] {
         let (src, record) = fixture(&world, shape);
         let body = Body::new(&world, src, record);
@@ -9691,7 +9740,24 @@ fn a_match_or_pattern_binds_nothing_and_a_real_shadow_is_not_typed() {
             .expect("the shadowed call is indexed");
         assert!(
             body.receiver_traits(&site).is_none(),
-            "`{shape}`: the construct's own binding is in scope at the call, past a block in its head"
+            "`{shape}`: the construct's own binding is in scope at the call"
+        );
+    }
+    for (shape, text) in [
+        (
+            "trait_shape_match_guard_chain",
+            TRAIT_SHAPE_MATCH_GUARD_CHAIN,
+        ),
+        ("trait_shape_match_guard_body", TRAIT_SHAPE_MATCH_GUARD_BODY),
+    ] {
+        let scopes = binding_scopes(ScopeBody { text, base: 0 })
+            .unwrap_or_else(|| panic!("`{shape}` parses"));
+        let call = text
+            .find("prepare(")
+            .unwrap_or_else(|| panic!("`{shape}` calls `driver.prepare`"));
+        assert!(
+            shadowed_at(Some(&scopes), "driver", call),
+            "`{shape}`: the guard's binding is in scope at the call"
         );
     }
     for shape in [
@@ -9707,18 +9773,84 @@ fn a_match_or_pattern_binds_nothing_and_a_real_shadow_is_not_typed() {
             "`{shape}`: a binding out of scope at the call does not shadow `driver`"
         );
     }
-    let mut parsed = 0;
-    for (at, src) in world.srcs.iter().enumerate() {
-        for record in src.index.items() {
-            if record.kind().is_callable() && src.product_item(record) && record.body().is_some() {
-                parsed += usize::from(binding_scopes(&world.srcs[at], record).is_some());
-            }
-        }
-    }
+    let (parsed, unparsed) = scope_census(world.srcs.iter().flat_map(|src| {
+        src.index
+            .items()
+            .iter()
+            .filter(|record| record.kind().is_callable() && src.product_item(record))
+            .filter_map(move |record| {
+                let body = scope_body(src, record)?;
+                let named = format!(
+                    "{} ({})",
+                    src.location(record.whole().start()),
+                    name_of(record)
+                );
+                Some((named, body))
+            })
+    }));
     eprintln!(
         "SCOPE_PARSED_BODIES\t{parsed}\nSCOPE_UNPARSED_BODIES\t{}",
-        UNPARSED_BODIES.load(std::sync::atomic::Ordering::Relaxed)
+        unparsed.len()
     );
+    assert_no_unparsed_bodies(&unparsed);
+}
+
+/// How many of `bodies` [`binding_scopes`] parses, and the name of each one it does not.
+fn scope_census<'a>(
+    bodies: impl IntoIterator<Item = (String, ScopeBody<'a>)>,
+) -> (usize, Vec<String>) {
+    let mut parsed = 0;
+    let mut unparsed = Vec::new();
+    for (named, body) in bodies {
+        if binding_scopes(body).is_some() {
+            parsed += 1;
+        } else {
+            unparsed.push(named);
+        }
+    }
+    (parsed, unparsed)
+}
+
+/// A body whose shadow scopes cannot be read leaves every call on its parameters untyped, so the
+/// census fails on one and names each.
+fn assert_no_unparsed_bodies(unparsed: &[String]) {
+    assert!(
+        unparsed.is_empty(),
+        "every product callable body parses for shadow scopes; unparsable bodies:\n  {}",
+        unparsed.join("\n  ")
+    );
+}
+
+/// RED (T-DOOR-REACH-TRAIT-OBJECTS round 7) — **an unparsable body makes the shadow census fail
+/// with that body's name.**
+///
+/// The census of `a_match_or_pattern_binds_nothing_and_a_real_shadow_is_not_typed` is fed one
+/// body that parses and one with a syntax error (`let driver = ;`): the parsed one is counted, and
+/// the assertion names the broken one by its file, line and item.
+///
+/// MUTATIONS: remove the assertion in [`assert_no_unparsed_bodies`] — this test does not panic;
+/// count a body that does not parse as parsed in [`scope_census`] — this test does not panic.
+#[test]
+#[should_panic(expected = "unparsable bodies:\n  fixtures/broken.rs:3 (`trait_shape_broken`)")]
+fn an_unparsable_shadow_body_is_reported_by_name() {
+    let (parsed, unparsed) = scope_census([
+        (
+            "fixtures/whole.rs:1 (`trait_shape_whole`)".to_owned(),
+            ScopeBody {
+                text: "{ let driver = 0; }",
+                base: 0,
+            },
+        ),
+        (
+            "fixtures/broken.rs:3 (`trait_shape_broken`)".to_owned(),
+            ScopeBody {
+                text: "{ let driver = ; }",
+                base: 0,
+            },
+        ),
+    ]);
+    assert_eq!(parsed, 1, "the body that parses is counted");
+    assert_no_unparsed_bodies(&unparsed);
 }
 
 /// RED (T-DOOR-REACH-TRAIT-OBJECTS) — **a trait the product does not declare adds nothing to the

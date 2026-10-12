@@ -114,9 +114,12 @@ supertraits, whose impls count only for types implementing the stated trait. The
 trait's implementations alone — never united with the by-name answer — and a call on a
 parameter is not typed by the parameter's declaration when another binding of its name is in
 scope at the call: one begun before the call whose scope holds it (a `let` to the end of its
-block, an `if let`/`while let`, `for`, match-arm or closure binding over its body), the scopes
-read by parsing the function body with `syn`; a binding in a closed block or after the call
-does not shadow. What is not followed: a
+block; an `if let`/`while let` binding, each `let` of a chain included, from the end of that
+`let` through the later operands and the body; a match-arm pattern, and each `let` of its guard
+from the end of that `let`, through the arm; a `for` or closure binding over its body), the
+scopes read by parsing the function body with `syn`, and a product body that does not parse
+fails the test by name; a binding in a closed block or after the call does not shadow. What is
+not followed: a
 stored closure, a function pointer, `<X as Trait>::m`, a type written through an alias, a
 standard or third-party trait object (and a foreign supertrait's methods, even on a
 first-party implementing type), and an untyped receiver whose method name is shared; those are
