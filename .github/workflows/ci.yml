@@ -468,6 +468,36 @@ jobs:
           }
           exit 0
 
+      # `lane::EXPECTED_FAILURES` only shrinks: a lane does not gain a declared
+      # failure for a claim the merge base already had. Planting one proves the
+      # comparison against the merge base is one.
+      - name: the expected-failures gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "crates/bt-app/src/lane_expected_failures.tsv"
+          $base = @(& git merge-base HEAD origin/main)[0]
+          & git cat-file -e "${base}:${file}" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "$file is new against the merge base: the canary runs once the list is on main"
+            exit 0
+          }
+          $original = [IO.File]::ReadAllText((Resolve-Path $file))
+          try {
+            [IO.File]::AppendAllText((Resolve-Path $file), "Handoff`tOrderIsAsDeclared`tOrderBroken`tD-70`n")
+            $failed = $false
+            try {
+              & ./scripts/ci/check-expected-failures.ps1
+            } catch {
+              $failed = $true
+            }
+            if (-not $failed) {
+              throw "the expected failures accepted a row that is not at the merge base"
+            }
+          } finally {
+            [IO.File]::WriteAllText((Resolve-Path $file), $original)
+          }
+          exit 0
+
       # The timing-bound inventory is the same whole-row, merge-base rule. Its
       # scratch-repository suite plants growth and a duplicate and requires both
       # to fail, while no-base, unchanged and shrink cases pass.
@@ -804,6 +834,13 @@ jobs:
       - name: the timing-bound test list only shrinks
         shell: pwsh
         run: ./scripts/ci/check-timing-bound.ps1
+
+      # The lane contract's declared failures (`lane::EXPECTED_FAILURES`): no
+      # lane gains one against the merge base; a claim new to the suite brings
+      # the rows of the lanes that do not keep it yet (S-3).
+      - name: the lane contract's expected failures only shrink
+        shell: pwsh
+        run: ./scripts/ci/check-expected-failures.ps1
 
       # "Built, not wired" (0.4.7 U-44): every `allow`/`expect(dead_code)` in
       # product code is on `docs/plans/DEAD-CODE.tsv`, which only shrinks

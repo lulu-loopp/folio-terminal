@@ -1,0 +1,50 @@
+## The lane contract's declared failures, as data the history can compare (S-3, 2026-10-11).
+##
+## `# claims` is every claim of the lane suite (`lane::Claim::ALL`, in order) and `# rows` every
+## row of `lane::EXPECTED_FAILURES` (its lane, claim, failure kind and repair, in order). The test
+## `lane_contract_tests::the_expected_failures_are_this_list` holds both equal to the code, and
+## `scripts/ci/check-expected-failures.ps1` holds `# rows` to the merge base: no lane gains a row
+## for a claim the merge base's `# claims` already has. A claim new to the suite brings the rows of
+## the lanes that do not keep it yet. Repairing a lane removes its row here and in the code.
+
+# claims
+claim
+FullLaneAnswersWithoutWaiting
+EveryRequestHasItsOwnIdentity
+OrderIsAsDeclared
+AnAbandonedOrOlderAnswerIsNotRaised
+EveryRequestEndsExactlyOnce
+TheWakeFollowsThePublication
+AnswersHeldAreBounded
+ADeadWorkerIsObservable
+ASupersededRequestSaysSo
+AJoinedRequestCarriesItsTwin
+AFailureIsSaidOnce
+AnOrphanedAnswerReachesItsSink
+
+# rows
+lane	claim	failure	repair
+Handoff	AnswersHeldAreBounded	AnswersUnbounded	D-71
+Handoff	ADeadWorkerIsObservable	DeathUnobservable	D-70
+Font	EveryRequestEndsExactlyOnce	NoTerminal	D-72
+Font	ADeadWorkerIsObservable	DeathUnobservable	D-72
+Taskbar	EveryRequestEndsExactlyOnce	NoTerminal	D-73
+Taskbar	ADeadWorkerIsObservable	DeathUnobservable	D-73
+Programs	EveryRequestEndsExactlyOnce	NoTerminal	D-85
+Computation	FullLaneAnswersWithoutWaiting	AdmissionUnbounded	D-74
+Computation	AnswersHeldAreBounded	AnswersUnbounded	D-74
+Computation	EveryRequestHasItsOwnIdentity	IdentityAmbiguous	D-75
+Computation	ADeadWorkerIsObservable	DeathUnobservable	D-76
+Handoff	AFailureIsSaidOnce	NoFailedTerminal	D-70
+Handoff	AnOrphanedAnswerReachesItsSink	OrphanNotSunk	D-70
+Font	ASupersededRequestSaysSo	SupersededInSilence	D-72
+Font	AJoinedRequestCarriesItsTwin	JoinedInSilence	D-72
+Font	AFailureIsSaidOnce	NoFailedTerminal	D-72
+Taskbar	ASupersededRequestSaysSo	SupersededInSilence	D-73
+Taskbar	AJoinedRequestCarriesItsTwin	JoinedInSilence	D-73
+Taskbar	AFailureIsSaidOnce	NoFailedTerminal	D-73
+Programs	ASupersededRequestSaysSo	SupersededInSilence	D-85
+Programs	AJoinedRequestCarriesItsTwin	JoinedInSilence	D-85
+Programs	AFailureIsSaidOnce	NoFailedTerminal	D-85
+Computation	AFailureIsSaidOnce	NoFailedTerminal	D-76
+Computation	AnOrphanedAnswerReachesItsSink	OrphanNotSunk	D-75

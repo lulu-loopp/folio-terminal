@@ -106,6 +106,56 @@ correct the row the code moved past); a status names the D-row or registry row
 that repairs it and only ever becomes `conforms` — never mark a row conforming
 to make a check pass.
 
+## Lane contract and the completion seam
+
+The rule: every lane is held to the lane contract's claims, and a lane that
+fails one says so as a dated row of `lane::EXPECTED_FAILURES` naming the
+structural-debt row that repairs it — never by being declared conformant.
+Every request a lane admits ends exactly once (the side-effects contract's
+C2–C4 and C6, `docs/plans/design/side-effects-contract-2026-10-11.md`
+revision (b)7; ruled 2026-10-11).
+
+What a lane does to adopt the seam (S-3, in `crates/bt-app/src/lane.rs`): it
+takes its worker from a `lane::Executor` (`start_worker("<thread name>", …)`,
+never the thread door itself — the completions reachability guard's
+`worker_roots` reads that call as the thread's start, so the lane's thread name
+and the worker-door bodies its body reaches are seen as a thread door's are);
+it builds its `lane::Ledger` with its own wake, which the ledger calls when the
+worker ends, after every owed identity has its terminal; it admits each request
+through the ledger (`admit`, or `admit_joined` for the same operation asked
+again), which mints the identity or refuses at the door, and records the sink
+the identity is owed when its requester goes; it runs each request's work
+inside `lane::task`, so a panic there is that request's `Failed` and the
+worker goes on; it ends each request it runs through the hook
+`Ledger::publish` — `Done`, `Failed`, `Cancelled`, or `Superseded { by }` for one
+a newer, different request displaced — and wakes its consumer after it
+publishes, while a joined request ends only with the one it joined (`Joined`,
+carrying that one's terminal, the worker's end included: a terminal published
+for a joined identity is refused) and `WorkerGone` comes from the ledger; it
+says no failure line of its own (the ledger says each failed request once, a
+joined one carrying a failure included, or once per streak); and its
+`LaneUnderTest` adapter hands the real lane `Executor::scripted` and reports
+`sunk` and `said`. What the proof covers:
+`lane_contract_tests::the_ledger_ends_every_identity_exactly_once_in_every_interleaving`
+plays every order of three identities' outcomes (the six terminals, a racing
+answer after a cancel, a terminal published for a joined identity itself),
+their requesters' drops and the worker's end — 4,103,588 interleavings — on the
+real `Ledger`, and requires one delivery per identity, at its requester or its
+sink, with the terminal the contract names, each failed request said once, one
+wake and the fault exactly when the worker ended. It does not cover a lane's
+own admission policy or its queue; the lane's claims do, through its adapter.
+
+Where and what to do:
+`lane_contract_tests::every_lane_runs_every_claim_and_fails_only_where_the_ledger_says`
+holds each lane to `EXPECTED_FAILURES` both ways (an undeclared failure and an
+unexpected pass are red), and `scripts/ci/check-expected-failures.ps1` holds the
+list — kept as data in `crates/bt-app/src/lane_expected_failures.tsv`, equal to
+the code by `lane_contract_tests::the_expected_failures_are_this_list` — to the
+merge base: no lane gains a row for a claim the merge base already
+had; a claim new to the suite brings the rows of the lanes that do not keep it
+yet. When red, repair the lane (a repair removes its row in the same change),
+or restore the behaviour the claim caught; do not add a row to quiet it.
+
 ## Timing-bound tests
 
 The rule: a test that depends on wall-clock progress is exceptional, named, and

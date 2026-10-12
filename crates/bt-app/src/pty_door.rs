@@ -300,7 +300,7 @@ pub(crate) fn holds(generation: u64) -> bool {
 }
 
 /// What a panic said, when it said it in text.
-fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
     panic
         .downcast_ref::<&str>()
         .copied()

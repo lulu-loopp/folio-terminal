@@ -7704,7 +7704,8 @@ fn every_open_or_pending_registry_row_names_its_completions_class() {
     );
 }
 
-/// One thread the product starts (`spawn_at_priority`, `spawn_at_priority_with_stack`) or one
+/// One thread the product starts (`spawn_at_priority`, `spawn_at_priority_with_stack`, the lane
+/// seam's `Executor::start_worker`) or one
 /// door process's main (`enter_standalone_main`), and the product functions taking a `WorkerCtx`
 /// that the capability it lends reaches.
 struct WorkerRoot {
@@ -7969,11 +7970,24 @@ fn arguments_to<'w>(
 /// every call that passes it on, to each function that takes one; through a function's own
 /// parameter (`make(ctx)`) to the closures its callers fill it with. A call is resolved with the
 /// source guard's resolver ([`Body::resolve`]) and a function is kept only when it takes a
-/// `WorkerCtx`, which is what a worker's door body is (revision (j)13).
+/// `WorkerCtx`, which is what a worker's door body is (revision (j)13). A lane built on the lane
+/// seam starts its thread through `lane::Executor::start_worker`, which is a start like the thread
+/// door's: the lane's call names the thread, and its body is followed as the door's is.
+///
+/// MUTATION (S-3): plant in `lane.rs` a product function starting
+/// `Executor::thread_door(..).start_worker("planted-seam-lane", .., move |ctx| planted_body(ctx))`,
+/// `planted_body(_worker: &WorkerCtx)` reading a directory, and its `# effects` row: with
+/// `start_worker` in `DOORS`, `every_worker_door_body_is_reached_from_a_completions_door` says the
+/// body runs on `planted-seam-lane` and no row's door leads there; without it, the guard sees no
+/// thread reach the body at all.
 fn worker_roots(world: &World) -> Vec<WorkerRoot> {
-    const DOORS: [(&str, bool); 3] = [
+    const DOORS: [(&str, bool); 4] = [
         ("spawn_at_priority", false),
         ("spawn_at_priority_with_stack", false),
+        // The lane seam's worker factory (`lane::Executor::start_worker`, S-3): its own call of the
+        // thread door hands on a name it was given, so the lane's call, which writes the name, is
+        // the start; its body's closure is lent the `WorkerCtx`, as the thread door's is.
+        ("start_worker", false),
         ("enter_standalone_main", true),
     ];
     let mut roots = Vec::new();
@@ -7990,7 +8004,10 @@ fn worker_roots(world: &World) -> Vec<WorkerRoot> {
                 let Some(arguments) = call_arguments(src, &body.toks, at) else {
                     continue;
                 };
-                let (Some(first), Some(last)) = (arguments.first(), arguments.last()) else {
+                // The body is the last argument written: a call laid out one argument a line ends in a
+                // comma, which splits off an empty one.
+                let last = arguments.iter().rev().find(|argument| !argument.is_empty());
+                let (Some(first), Some(last)) = (arguments.first(), last) else {
                     continue;
                 };
                 let Some(name) = thread_name(src, first) else {
