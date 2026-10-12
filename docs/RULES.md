@@ -987,7 +987,9 @@ because they are different kinds of input.
 *Settings file* — audience: the person using Folio; carries durable scalar
 preferences; persists under the data directory; versioned through
 `persist::SettingsStore` / `SettingsV1` and a forward-only migration list;
-applied in process at its own door and **not re-read from disk during a run**.
+applied in process at its own door, and **re-read from disk when the storage watch
+hears it** (`docs/plans/design/settings-reread-2026-10-11.md`; owner ruling Q3,
+2026-10-11).
 *CLI* — audience: the outside world (a shell, Explorer, another Folio); carries
 per-launch placement and the seven argv doors; never persists; `cli::parse` is pure
 and total over the raw arguments, producing a request or a fault, and `resolve`
@@ -1027,11 +1029,12 @@ fails, that birth alone uses ordinary process inheritance, with the carried
 overrides over it, and the next birth asks again. On non-Windows hosts the
 platform has no fresh-account block and pane birth retains ordinary inheritance,
 with the carried overrides over it.
-**The contrast that matters**: `profiles.json` and the pins are watched live
-through the storage watch on the data directory, re-read behind the shared quiet
-window and compared field by field, with an unparseable mid-run file leaving the
-live table untouched — while `settings.json` is not. Two reload disciplines
-already, before a fourth entrance exists.
+**One reload discipline**: `settings.json`, `keybindings.json`, `profiles.json` and
+the pins are followed live by the named storage watch, each re-read compared with
+the revision Folio last read or wrote, every write conditional on it, and a file
+that changed merged against it, the file winning a conflict (`settings.json` merges
+now; until their merges, `keybindings.json` is held and `profiles.json` and the pins
+are taken), with an unparseable mid-run file leaving what is in force untouched.
 **From.** The M2 persistence schema document (two files, unknown-field and
 failure policy); §7.2 *the command-line front door* and the `cli.rs` module doc;
 `docs/BT-ENVIRONMENT.md`, held complete in both directions by
@@ -1052,7 +1055,9 @@ written into the `schemes` folder, which is then re-read in process
 each refused line named; *settings* through `parse_document` — an older part
 migrated, a future part refused whole — and then **each changed value through the
 function a press on its row calls, never by writing `settings.json` and waiting**,
-with the store's writes held so the batch lands as one write. A part the file does
+with the store's writes held so the batch lands as one write. A hand edit enters by
+the same doors: the storage pass's merge puts each value the file gave through its
+row's function, with the writes held the same way. A part the file does
 not carry is left alone. Three keys are receipts about this machine and are not
 imported (`first_run_card`, `cards_gesture_hint_offer`, `web_pages_used`);
 `Focus mode` and `Shell integration` are
