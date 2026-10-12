@@ -530,17 +530,32 @@ fn wake_documents() {
 /// The lane's wake: what tells the loop a document answer is in its channel.
 type LaneWake = Arc<dyn Fn() + Send + Sync>;
 
-/// When the storage worker's thread ends, however it ends: the lane stops
-/// taking document requests, and the loop is woken, so a request the worker
-/// took and will never answer is known to every store.
-struct WakeOnEnd {
+/// **The storage worker's end, however it ends** (review round 3, C2). It owns
+/// the worker's channel ends, so the queue's receiver lives exactly as long as
+/// it. Under the queue's lock — the lock a document door admits under — it
+/// marks the lane down and drops every job still queued, so each such request's
+/// answer channel disconnects (its terminal: refused, no worker); no request can
+/// be admitted after that, because admission asks `up` under the same lock. Only
+/// then is the loop woken, so the wake follows every terminal.
+struct WorkerEnd {
+    ends: SessionWriterEnds,
+    /// The queue's sending end, weakly: the worker must not keep its own queue
+    /// open.
+    requests: std::sync::Weak<Mutex<Option<mpsc::Sender<StorageJob>>>>,
     up: Arc<std::sync::atomic::AtomicBool>,
     wake: LaneWake,
 }
 
-impl Drop for WakeOnEnd {
+impl Drop for WorkerEnd {
     fn drop(&mut self) {
-        self.up.store(false, std::sync::atomic::Ordering::Release);
+        {
+            let requests = self.requests.upgrade();
+            let _admission = requests.as_deref().map(lane_lock);
+            self.up.store(false, std::sync::atomic::Ordering::Release);
+            for job in self.ends.incoming.try_iter() {
+                drop(job);
+            }
+        }
         (self.wake)();
     }
 }
@@ -697,16 +712,20 @@ pub(crate) struct StorageLane {
 /// What the lane's clones share.
 struct LaneShared {
     /// The queue's sending end; `None` once the session store closed the lane.
-    requests: Mutex<Option<mpsc::Sender<StorageJob>>>,
+    /// Its lock is the one document admission is decided under, and the one the
+    /// worker's end takes ([`WorkerEnd`]).
+    requests: Arc<Mutex<Option<mpsc::Sender<StorageJob>>>>,
     /// The ends the thread works from, until one thread has them (release
     /// review X-9).
     ends: Arc<Mutex<Option<SessionWriterEnds>>>,
     /// The thread, once one runs.
     worker: Mutex<LaneWorker>,
-    /// **Whether a worker serves the queue** — set by [`SessionWriter::start`]
-    /// when its thread is up, cleared when it ends. A document request is
-    /// admitted only while it is set, so the request door never starts a thread
-    /// or waits on the worker's lock (side-effects contract C1).
+    /// **Whether a worker serves the queue** — written only under the queue's
+    /// lock: set by [`SessionWriter::start`] before its thread starts, cleared if
+    /// the spawn is refused and by the worker's end ([`WorkerEnd`]). A document
+    /// request is admitted only when it is set, asked under the same lock, so the
+    /// request door never starts a thread or waits on the worker's lock (C1),
+    /// and never admits a request after the worker's end (C2).
     up: Arc<std::sync::atomic::AtomicBool>,
     /// How the loop is woken after a document answer ([`StorageLane::wake`]).
     wake: LaneWake,
@@ -738,7 +757,7 @@ impl StorageLane {
         let (outgoing, receipts) = mpsc::channel::<SessionWriteReceipt>();
         let lane = Self {
             shared: Arc::new(LaneShared {
-                requests: Mutex::new(Some(requests)),
+                requests: Arc::new(Mutex::new(Some(requests))),
                 ends: Arc::new(Mutex::new(Some(SessionWriterEnds { incoming, outgoing }))),
                 worker: Mutex::new(LaneWorker::Waiting),
                 up: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -755,7 +774,7 @@ impl StorageLane {
         let (requests, incoming) = mpsc::channel::<StorageJob>();
         let lane = Self {
             shared: Arc::new(LaneShared {
-                requests: Mutex::new(Some(requests)),
+                requests: Arc::new(Mutex::new(Some(requests))),
                 ends: Arc::new(Mutex::new(None)),
                 worker: Mutex::new(LaneWorker::ByTest),
                 up: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -771,7 +790,7 @@ impl StorageLane {
     pub(crate) fn without_a_worker(wake: impl Fn() + Send + Sync + 'static) -> Self {
         Self {
             shared: Arc::new(LaneShared {
-                requests: Mutex::new(None),
+                requests: Arc::new(Mutex::new(None)),
                 ends: Arc::new(Mutex::new(None)),
                 worker: Mutex::new(LaneWorker::Waiting),
                 up: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -784,7 +803,17 @@ impl StorageLane {
     /// named path.
     #[cfg(test)]
     pub(crate) fn of_its_own() -> Self {
-        let lane = Self::fresh().0;
+        Self::with_a_worker_and_wake(wake_documents)
+    }
+
+    /// [`Self::of_its_own`], with `wake` as its wake, so a test hears what the
+    /// loop would.
+    #[cfg(test)]
+    fn with_a_worker_and_wake(wake: impl Fn() + Send + Sync + 'static) -> Self {
+        let (mut lane, _receipts) = Self::fresh();
+        Arc::get_mut(&mut lane.shared)
+            .expect("a lane just made has one owner")
+            .wake = Arc::new(wake);
         SessionWriter::start(&lane);
         lane
     }
@@ -807,10 +836,21 @@ impl StorageLane {
     /// open and again at its own hand-overs ([`SessionWriter::start`]). `false`:
     /// no worker took it, and the caller completes the request as refused.
     fn admit_document_job(&self, job: StorageJob) -> bool {
-        self.shared.up.load(std::sync::atomic::Ordering::Acquire)
-            && lane_lock(&self.shared.requests)
-                .as_ref()
-                .is_some_and(|requests| requests.send(job).is_ok())
+        self.admit_document_job_between(job, || {})
+    }
+
+    /// [`Self::admit_document_job`], with `between` run under the queue's lock
+    /// after admission is decided and before the job is queued — where a
+    /// worker's end would race it, were the decision not made under the lock.
+    fn admit_document_job_between(&self, job: StorageJob, between: impl FnOnce()) -> bool {
+        let requests = lane_lock(&self.shared.requests);
+        if !self.shared.up.load(std::sync::atomic::Ordering::Acquire) {
+            return false;
+        }
+        between();
+        requests
+            .as_ref()
+            .is_some_and(|requests| requests.send(job).is_ok())
     }
 
     /// Hand a document's conditional write over.
@@ -925,10 +965,15 @@ impl SessionWriter {
         let ends = Arc::clone(&lane.shared.ends);
         let up = Arc::clone(&lane.shared.up);
         let wake = Arc::clone(&lane.shared.wake);
-        // Up before the thread can end, so its end is the last word on it.
-        lane.shared
-            .up
-            .store(true, std::sync::atomic::Ordering::Release);
+        let requests = Arc::downgrade(&lane.shared.requests);
+        // Up before the thread can end, so its end is the last word on it; under
+        // the queue's lock, as every write of it is.
+        {
+            let _admission = lane_lock(&lane.shared.requests);
+            lane.shared
+                .up
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         // In the workers' band (§1.4): a session write must never be the reason a frame was late,
         // and it is never the thing anybody is waiting to see.
         let started = bt_platform::spawn_at_priority(
@@ -938,11 +983,13 @@ impl SessionWriter {
                 let Some(ends) = ends.lock().ok().and_then(|mut held| held.take()) else {
                     return;
                 };
-                let _wake_on_end = WakeOnEnd {
+                let end = WorkerEnd {
+                    ends,
+                    requests,
                     up,
                     wake: Arc::clone(&wake),
                 };
-                while let Ok(job) = ends.incoming.recv() {
+                while let Ok(job) = end.ends.incoming.recv() {
                     let request = match job {
                         StorageJob::Session(request) => request,
                         // The answer is in its channel before the wake: the steward's order.
@@ -979,7 +1026,8 @@ impl SessionWriter {
                     };
                     let result = bt_persist::atomic_write(&request.path, &request.bytes)
                         .map_err(|error| error.to_string());
-                    if ends
+                    if end
+                        .ends
                         .outgoing
                         .send(SessionWriteReceipt {
                             generation: request.generation,
@@ -998,6 +1046,7 @@ impl SessionWriter {
                 true
             }
             Err(_) => {
+                let _admission = lane_lock(&lane.shared.requests);
                 lane.shared
                     .up
                     .store(false, std::sync::atomic::Ordering::Release);
@@ -3451,7 +3500,7 @@ pub(crate) mod tests {
             // that is already running is in.
             lane: StorageLane {
                 shared: Arc::new(LaneShared {
-                    requests: Mutex::new(Some(requests)),
+                    requests: Arc::new(Mutex::new(Some(requests))),
                     ends: Arc::new(Mutex::new(None)),
                     worker: Mutex::new(LaneWorker::Running(thread)),
                     up: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -6017,7 +6066,142 @@ mod conditional_write_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// RED (review round 2, blocker 4) — **a restoring exchange that is not
+    /// RED (review round 3, finding 1) — **a re-read while held keeps the hold**:
+    /// only the merge's fold releases it. The person's file read back is nothing;
+    /// the file changed again is the new revision and the newest bytes for the
+    /// merge, against the base the hold began with; and still nothing is written.
+    ///
+    /// MUTATION: let a re-read release the hold (put `self.held_for_merge = false`
+    /// back in `DocumentState::on_read`'s taking branch and let a held read take
+    /// the file) — a write is queued after the pass.
+    #[test]
+    fn a_reread_while_held_keeps_the_hold() {
+        let root = scratch("reread-held");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let base = settings("基线 Base Mono");
+        std::fs::write(&path, bytes(&base)).unwrap();
+        let (lane, jobs) = StorageLane::held();
+        let mut store = SettingsStore::read_at(path.clone(), is_writer_of_document(&path), lane);
+        assert!(store.store(settings("我们的 Ours Mono")));
+        let theirs = bytes(&settings("他们的 Theirs Mono"));
+        serve_crossed(next_write(&jobs), Some(theirs.clone()));
+        store.settle();
+
+        // The person's file, read back: nothing.
+        let news = store
+            .document()
+            .hear_read(StableRead::Bytes(Arc::from(&theirs[..])));
+        assert!(!news.taken);
+        // A press that returns `desired` to the person's document, then the file
+        // changed again: the revision follows the file, the hold stays.
+        assert!(store.store(settings("他们的 Theirs Mono")));
+        let again = bytes(&settings("又改了 Edited Again Mono"));
+        std::fs::write(&path, &again).unwrap();
+        let news = store
+            .document()
+            .hear_read(StableRead::Bytes(Arc::from(&again[..])));
+        assert!(!news.taken, "a held document takes nothing from a re-read");
+        assert_eq!(store.revision().bytes.as_deref(), Some(&again[..]));
+        let merges = store.document().merges().to_vec();
+        assert_eq!(merges.len(), 1);
+        assert_eq!(
+            merges[0].theirs.as_deref(),
+            Some(&again[..]),
+            "the newest file"
+        );
+        assert_eq!(merges[0].base.document, base, "against the hold's own base");
+
+        assert!(store.store(settings("再按 Pressed Mono")));
+        store.release_trial();
+        assert!(
+            jobs.try_recv().is_err(),
+            "nothing is written before the merge"
+        );
+        assert_eq!(file_bytes(&path), again);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// End the storage worker — a session write whose receipt nobody hears —
+    /// and give its end the suite's patience to run to its wake; a wake heard
+    /// here is a wake that came while the request was still being admitted.
+    fn end_the_worker_and_give_it_its_chance(
+        poison: &mpsc::Sender<StorageJob>,
+        session: PathBuf,
+        wakes: &mpsc::Receiver<bool>,
+    ) {
+        poison
+            .send(StorageJob::Session(super::SessionWriteRequest {
+                generation: 1,
+                path: session,
+                bytes: b"{}".to_vec(),
+            }))
+            .expect("the worker takes it");
+        if let Ok(gone) = wakes.recv_timeout(crate::lane::PATIENCE) {
+            panic!(
+                "the worker's end woke the loop during an admission (terminal published: {gone})"
+            );
+        }
+    }
+
+    /// The next wake within the suite's patience, and whether the request's
+    /// terminal was published when it came.
+    fn next_wake(wakes: &mpsc::Receiver<bool>) -> bool {
+        wakes
+            .recv_timeout(crate::lane::PATIENCE)
+            .expect("the worker's end wakes the loop")
+    }
+
+    /// RED (review round 3, finding 2; C2) — **a request that races the worker's
+    /// end gets exactly one terminal, and the wake follows it.** The worker is
+    /// made to end at the moment between the admission's decision and the
+    /// enqueue; because admission is decided under the queue's lock and the
+    /// worker's end takes that lock to mark the lane down and drop what is
+    /// queued, the request is either refused at the door or queued and then
+    /// dropped by the end — and the end's wake comes after.
+    ///
+    /// MUTATION: decide admission before taking the queue's lock (load `up`
+    /// first, no recheck under the lock) — the end runs to its wake between the
+    /// decision and the enqueue, and the request is then refused at the door
+    /// after an admission was decided (or queued after the wake).
+    #[test]
+    fn a_request_racing_the_workers_end_gets_one_terminal_and_a_wake_after_it() {
+        let root = scratch("end-race");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let (answer, answered) = mpsc::channel::<DocumentAnswer>();
+        let answered = Arc::new(std::sync::Mutex::new(answered));
+        let (woke, wakes) = mpsc::channel::<bool>();
+        let seen = Arc::clone(&answered);
+        let lane = StorageLane::with_a_worker_and_wake(move || {
+            // At the wake: was this request's terminal already published?
+            let gone = matches!(
+                seen.lock().expect("the answer").try_recv(),
+                Err(mpsc::TryRecvError::Disconnected)
+            );
+            let _ = woke.send(gone);
+        });
+        let poison = super::lane_lock(&lane.shared.requests)
+            .clone()
+            .expect("the lane is open");
+        let (mut probe, _unused) = job(
+            &path,
+            None,
+            &bytes(&settings("我们的 Ours Mono")),
+            Mode::Restore,
+            1,
+            Vec::new(),
+        );
+        probe.answer = answer;
+        let session = root.join("session.json");
+        let admitted = lane.admit_document_job_between(StorageJob::Document(probe), || {
+            end_the_worker_and_give_it_its_chance(&poison, session, &wakes);
+        });
+        assert!(admitted, "admitted, under the lock, before the end");
+        assert!(
+            next_wake(&wakes),
+            "the wake came after the request's terminal"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
     /// known to be durable keeps what it displaced**: the person's file is back
     /// under its name, and the displaced copy — Folio's own write — stays as an
     /// obligation, never deleted.

@@ -1488,6 +1488,9 @@ impl<T: StoredDocument> DocumentState<T> {
                 // under its own name, and nothing will replace it.
                 eprintln!("BT_PERSIST {file} would not parse: {reason:?}");
                 news.unreadable = Some(true);
+                if self.held_for_merge {
+                    self.held_file_moved(Some(bytes), T::default());
+                }
                 return;
             }
             ReadAnswer::Absent => (None, T::default()),
@@ -1495,6 +1498,10 @@ impl<T: StoredDocument> DocumentState<T> {
         };
         news.unreadable = Some(false);
         if self.is_folios_own_write(bytes.as_ref()) {
+            return;
+        }
+        if self.held_for_merge {
+            self.held_file_moved(bytes, document);
             return;
         }
         if self.desired != self.revision.document {
@@ -1521,9 +1528,25 @@ impl<T: StoredDocument> DocumentState<T> {
             self.desired = document;
             self.version += 1;
             self.merges.clear();
-            self.held_for_merge = false;
             news.taken = true;
         }
+    }
+
+    /// **A held document's file changed again** (review round 3): the revision
+    /// follows the file — the bytes the next merge must not write over — and the
+    /// file bytes stored for the merge become the newest, against the base the
+    /// hold began with. The hold stays: only the merge's fold releases it.
+    fn held_file_moved(&mut self, bytes: Option<Arc<[u8]>>, document: T) {
+        let base = self
+            .merges
+            .last()
+            .map_or_else(|| self.revision.clone(), |merge| merge.base.clone());
+        self.keep_for_the_merge(PendingMerge {
+            base,
+            theirs: bytes.clone(),
+            kept: None,
+        });
+        self.revision = Revision { bytes, document };
     }
 
     /// **Whether a read found the file Folio left**: the revision's bytes, or
