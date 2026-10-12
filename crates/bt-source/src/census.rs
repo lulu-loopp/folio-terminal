@@ -41,6 +41,23 @@
 //! **The module column is the declaring item's module path** — the
 //! [`crate::ItemIdentity`] — and nothing about files: a writer moved into a
 //! newly declared module changes that column and no other.
+//!
+//! What J3 (T-RUNTIME-DEP-MAP, 2026-10-11) adds to the same walk, kept apart
+//! from the four columns so the census's own renderings and judgement read
+//! exactly what they read before:
+//!
+//! * **read** ([`FieldCensus::reads`]) — a field of the facts evaluated where
+//!   nothing mutable is done to it: its value read, a `&` borrow of it, a
+//!   method taking `&self` called on it, a non-`ref mut` pattern binding it,
+//!   or a step on the way to another field that is read. A read-shaped site
+//!   whose receiver the rules do not type is counted
+//!   ([`FieldCensus::unattributed_reads`]), never guessed.
+//! * **calls** ([`FieldCensus::calls`]) — every call site whose callee the
+//!   rules resolve to a callable of the workspace: a method by its receiver's
+//!   declared type (the same resolution a write stands on), `Type::f` by the
+//!   type, and a free function by the declarations and `use` items of the
+//!   module the call is written in. A call that names a callable of the
+//!   subject package and does not resolve is [`FieldCensus::unfollowed`].
 
 mod resolve;
 mod types;
@@ -48,8 +65,9 @@ mod walk;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::path::PathBuf;
 
-use crate::index::Index;
+use crate::index::{Index, ItemRecord};
 use resolve::{Fact, Resolver, Subject};
 pub use walk::Column;
 use walk::Walk;
@@ -57,21 +75,127 @@ use walk::Walk;
 /// fact · column · module · function.
 type RowKey = (String, Column, String, String);
 
+/// A product callable of the workspace, named the way the census names a
+/// function: the declaring item's module, its label (`Runtime::close_pane`,
+/// `<Runtime as PointerHost>::press`, `drain_leaf_pty`) and the `cfg` variant
+/// it stands on (empty when unconditional), with the file it is written in.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Callable {
+    pub package: String,
+    pub module: String,
+    pub function: String,
+    pub variant: String,
+    pub file: PathBuf,
+}
+
+impl Callable {
+    /// `crate::runtime::panes::Runtime::close_pane` — the module and the
+    /// label, without the variant.
+    #[must_use]
+    pub fn key(&self) -> String {
+        format!("{}::{}", self.module, self.function)
+    }
+
+    /// The label as the census's `function` column spells it: with the
+    /// variant after a space when there is one.
+    #[must_use]
+    pub fn census_function(&self) -> String {
+        if self.variant.is_empty() {
+            self.function.clone()
+        } else {
+            format!("{} {}", self.function, self.variant)
+        }
+    }
+
+    /// The census's name for a callable item: its first identity a product
+    /// build can contain, or `None` for an item no product build has.
+    pub(crate) fn of(index: &Index, item: &ItemRecord, package: &str) -> Option<Self> {
+        let identity = item
+            .identities()
+            .find(|identity| identity.variant.permits_product())?;
+        let function = match (&identity.type_owner, &identity.trait_name) {
+            (Some(owner), Some(trait_name)) => {
+                format!("<{owner} as {trait_name}>::{}", identity.name)
+            }
+            (Some(owner), None) => format!("{owner}::{}", identity.name),
+            (None, Some(trait_name)) => format!("{trait_name}::{}", identity.name),
+            (None, None) => identity.name.clone(),
+        };
+        let variant = if identity.variant.is_unconditional() {
+            String::new()
+        } else {
+            identity.variant.to_string()
+        };
+        Some(Self {
+            package: package.to_owned(),
+            module: identity.module_path,
+            function,
+            variant,
+            file: index.file_of(item).path().to_path_buf(),
+        })
+    }
+}
+
+/// One caller × the callables one call site of it reaches, with how many
+/// such sites it has. A site reaches more than one callable only when they
+/// are the `cfg` variants of one item.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CallRow {
+    pub caller: Callable,
+    pub callees: Vec<Callable>,
+    pub sites: usize,
+}
+
+/// A call site that names a callable of the subject package and that the
+/// rules do not follow to one: the caller, the name called, and why.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UnfollowedRow {
+    pub module: String,
+    pub function: String,
+    pub called: String,
+    pub reason: String,
+    pub sites: usize,
+}
+
 /// The rows of one site kind, accumulated while the bodies are walked.
 #[derive(Debug, Default)]
 pub(crate) struct Sink {
     rows: BTreeMap<RowKey, (BTreeSet<String>, usize)>,
+    reads: BTreeMap<RowKey, (BTreeSet<String>, usize)>,
     unknowns: BTreeMap<(String, String, String, String), usize>,
+    unattributed_reads: usize,
+    calls: BTreeMap<(Callable, BTreeSet<Callable>), usize>,
+    unfollowed: BTreeMap<(String, String, String, String), usize>,
 }
 
 impl Sink {
     fn row(&mut self, fact: String, column: Column, module: &str, function: &str, kind: String) {
-        let entry = self
-            .rows
+        let rows = if column == Column::Read {
+            &mut self.reads
+        } else {
+            &mut self.rows
+        };
+        let entry = rows
             .entry((fact, column, module.to_owned(), function.to_owned()))
             .or_default();
         entry.0.insert(kind);
         entry.1 += 1;
+    }
+
+    fn call(&mut self, caller: &Callable, callees: BTreeSet<Callable>) {
+        *self.calls.entry((caller.clone(), callees)).or_default() += 1;
+    }
+
+    fn unfollowed(&mut self, module: &str, function: &str, called: &str, reason: &str) {
+        *self
+            .unfollowed
+            .entry((
+                module.to_owned(),
+                function.to_owned(),
+                called.to_owned(),
+                reason.to_owned(),
+            ))
+            .or_default() += 1;
     }
 
     fn unknown(&mut self, site: String, module: &str, function: &str, reason: String) {
@@ -172,6 +296,13 @@ pub struct FieldCensus {
     rows: Vec<SiteRow>,
     unknowns: Vec<UnknownRow>,
     unparsed: Vec<String>,
+    reads: Vec<SiteRow>,
+    unattributed_reads: usize,
+    calls: Vec<CallRow>,
+    unfollowed: Vec<UnfollowedRow>,
+    /// The subject package's root directory: what a [`Callable`]'s file is
+    /// read relative to.
+    root: PathBuf,
 }
 
 impl FieldCensus {
@@ -237,12 +368,35 @@ impl FieldCensus {
             .map(|(at, fact)| ((fact.owner.clone(), fact.name.clone()), at))
             .collect();
         let names = facts.iter().map(|fact| fact.name.clone()).collect();
+        let in_package =
+            |callable: Option<&Callable>| callable.is_some_and(|it| it.package == package);
+        let functions: BTreeSet<String> = read
+            .functions
+            .iter()
+            .filter(|(_, decls)| decls.iter().any(|decl| in_package(decl.callable.as_ref())))
+            .map(|(name, _)| name.clone())
+            .collect();
+        let methods: BTreeSet<String> = read
+            .methods
+            .iter()
+            .filter(|(_, decls)| decls.iter().any(|decl| in_package(decl.callable.as_ref())))
+            .map(|((_, name), _)| name.clone())
+            .collect();
+        let root = subject
+            .universe()
+            .roots()
+            .first()
+            .and_then(|root| root.file.parent())
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default();
         let subject_facts = Subject {
             package,
             structs: places,
             facts,
             by_name,
             names,
+            functions,
+            methods,
         };
         let resolver = Resolver {
             declarations: &read,
@@ -255,40 +409,54 @@ impl FieldCensus {
             if !item.kind().is_callable() || item.body().is_none() {
                 continue;
             }
-            let Some(identity) = item
-                .identities()
-                .find(|identity| identity.variant.permits_product())
-            else {
+            let Some(caller) = Callable::of(subject, item, &subject_facts.package) else {
                 continue;
             };
-            let mut function = match (&identity.type_owner, &identity.trait_name) {
-                (Some(owner), Some(trait_name)) => {
-                    format!("<{owner} as {trait_name}>::{}", identity.name)
-                }
-                (Some(owner), None) => format!("{owner}::{}", identity.name),
-                (None, Some(trait_name)) => format!("{trait_name}::{}", identity.name),
-                (None, None) => identity.name.clone(),
-            };
-            if !identity.variant.is_unconditional() {
-                function.push(' ');
-                function.push_str(&identity.variant.to_string());
-            }
-            if let Err(why) = Walk::item(
-                &resolver,
-                subject,
-                item,
-                identity.module_path.clone(),
-                function.clone(),
-                &crates,
-                &mut sink,
-            ) {
-                unparsed.push(format!("{}::{function}: {why}", identity.module_path));
+            let named = format!("{}::{}", caller.module, caller.census_function());
+            if let Err(why) = Walk::item(&resolver, subject, item, caller, &crates, &mut sink) {
+                unparsed.push(format!("{named}: {why}"));
             }
         }
-        Ok(Self::assemble(&subject_facts, sink, unparsed))
+        Ok(Self::assemble(&subject_facts, sink, unparsed, root))
     }
 
-    fn assemble(subject: &Subject, sink: Sink, unparsed: Vec<String>) -> Self {
+    fn assemble(subject: &Subject, sink: Sink, unparsed: Vec<String>, root: PathBuf) -> Self {
+        let reads: Vec<SiteRow> = sink
+            .reads
+            .into_iter()
+            .map(
+                |((fact, column, module, function), (kinds, sites))| SiteRow {
+                    fact,
+                    column,
+                    module,
+                    function,
+                    kinds: kinds.into_iter().collect(),
+                    sites,
+                },
+            )
+            .collect();
+        let calls: Vec<CallRow> = sink
+            .calls
+            .into_iter()
+            .map(|((caller, callees), sites)| CallRow {
+                caller,
+                callees: callees.into_iter().collect(),
+                sites,
+            })
+            .collect();
+        let unfollowed: Vec<UnfollowedRow> = sink
+            .unfollowed
+            .into_iter()
+            .map(
+                |((module, function, called, reason), sites)| UnfollowedRow {
+                    module,
+                    function,
+                    called,
+                    reason,
+                    sites,
+                },
+            )
+            .collect();
         let rows: Vec<SiteRow> = sink
             .rows
             .into_iter()
@@ -352,7 +520,46 @@ impl FieldCensus {
             rows,
             unknowns,
             unparsed,
+            reads,
+            unattributed_reads: sink.unattributed_reads,
+            calls,
+            unfollowed,
+            root,
         }
+    }
+
+    /// Every fact × module × function that reads, sorted — the `read`
+    /// column, which the inventory, the site rows and the judgement do not
+    /// carry.
+    #[must_use]
+    pub fn reads(&self) -> &[SiteRow] {
+        &self.reads
+    }
+
+    /// Read-shaped sites that spell a field name of the facts through a
+    /// receiver the rules do not type: counted, never attributed.
+    #[must_use]
+    pub const fn unattributed_reads(&self) -> usize {
+        self.unattributed_reads
+    }
+
+    /// Every caller × the callables one of its call sites reaches, sorted.
+    #[must_use]
+    pub fn calls(&self) -> &[CallRow] {
+        &self.calls
+    }
+
+    /// Every call site that names a callable of the subject package and is
+    /// not followed to one, by caller, name and reason.
+    #[must_use]
+    pub fn unfollowed(&self) -> &[UnfollowedRow] {
+        &self.unfollowed
+    }
+
+    /// The directory the subject package's crate root is written in.
+    #[must_use]
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
     }
 
     /// Every field of the facts, in declaration order.
