@@ -28,8 +28,9 @@
 //! **Children only through the quiet door, by absolute path**
 //! (`crate::quiet_command`): `/usr/bin/codesign` and `/usr/bin/ditto` are
 //! where the system keeps them, so nothing is looked up on `PATH`. Each one is
-//! waited for within a deadline and ended by the pid this call started it
-//! with if it overruns. **Off macOS the call is refused by name**
+//! a contained probe (`crate::spawn_probe`; one that cannot be contained is
+//! not run), waited for within a deadline, and ended with its whole group if
+//! it overruns; what it said before that is kept in the refusal. **Off macOS the call is refused by name**
 //! ([`Refusal::NotHere`]). Worker only: a clone and a verification read the
 //! whole bundle.
 //!
@@ -56,7 +57,7 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Output;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::HostPlatform;
 use crate::file_reads::{self, Lane};
@@ -77,6 +78,10 @@ pub const COPY_WITHIN: Duration = Duration::from_secs(120);
 
 /// How often a child that has not finished is asked again.
 const POLL: Duration = Duration::from_millis(20);
+
+/// How much of what an overrunning child said is kept in its refusal: its
+/// last bytes, which name where it stood.
+const SAID_KEPT: usize = 4096;
 
 /// **Why no verified rescue clone was made.**
 #[derive(Debug)]
@@ -99,11 +104,13 @@ pub enum Refusal {
     NoIdentity { bundle: PathBuf, detail: String },
     /// The clone verified, but it is not the same code as the old bundle.
     Differs { old: String, clone: String },
-    /// A child did not finish within its deadline and was ended by the pid
-    /// this call started it with.
+    /// A child did not finish within its deadline and was ended with its
+    /// whole group; `said` is the end of what it had written by then (at most
+    /// [`SAID_KEPT`] bytes, standard output first), empty when nothing.
     TimedOut {
         program: &'static str,
         within: Duration,
+        said: String,
     },
     /// The directory an image was to be mounted under could not be resolved
     /// (it must exist: `hdiutil -mountrandom` makes its mount point inside it).
@@ -160,11 +167,20 @@ impl fmt::Display for Refusal {
                 f,
                 "macos_update: the clone's cdhash {clone} is not the old bundle's {old}"
             ),
-            Self::TimedOut { program, within } => {
+            Self::TimedOut {
+                program,
+                within,
+                said,
+            } => {
                 write!(
                     f,
                     "macos_update {program}: did not finish within {within:?}"
-                )
+                )?;
+                if said.trim().is_empty() {
+                    Ok(())
+                } else {
+                    write!(f, "; it had said: {}", said.trim())
+                }
             }
             Self::MountDir { path, error } => write!(
                 f,
@@ -249,8 +265,8 @@ fn identity(said: &str) -> Option<Identity> {
 }
 
 /// **Run `program` with `arguments` and wait for it within `within`**, ending
-/// it by the pid this call started if it overruns. The output is charged to
-/// `file_reads`' `Lane::Update`.
+/// it with its whole group if it overruns ([`Refusal::TimedOut`], carrying
+/// what it had said). The output is charged to `file_reads`' `Lane::Update`.
 fn run(program: &'static str, arguments: &[&OsStr], within: Duration) -> Result<Output, Refusal> {
     run_at(program, Path::new(program), arguments, within)
 }
@@ -263,36 +279,56 @@ fn run_at(
     arguments: &[&OsStr],
     within: Duration,
 ) -> Result<Output, Refusal> {
+    let mut command = crate::quiet_command(at);
+    command.args(arguments);
+    let child = crate::spawn_probe(&mut command, crate::ProbeStdio::ANSWER).map_err(|error| {
+        Refusal::Program {
+            program: name,
+            detail: format!("did not start: {error}"),
+        }
+    })?;
+    held_to(name, child, within, &mut || std::thread::sleep(POLL))
+}
+
+/// **Wait for `child` within `within`** — through the one owner of a probe's
+/// deadline (`crate::ProbeChild::wait_within`, a fixed patience), `rest`
+/// between two looks — and collect what it said: its output when it
+/// finished, or [`Refusal::TimedOut`] with the end of what it had written
+/// when it was ended at the deadline.
+fn held_to(
+    name: &'static str,
+    mut child: crate::ProbeChild,
+    within: Duration,
+    rest: &mut dyn FnMut(),
+) -> Result<Output, Refusal> {
     let refused = |detail: String| Refusal::Program {
         program: name,
         detail,
     };
-    let mut command = crate::quiet_command(at);
-    command.args(arguments);
-    let mut child = crate::spawn_probe(&mut command, crate::ProbeStdio::ANSWER)
-        .map_err(|error| refused(format!("did not start: {error}")))?;
-    let deadline = Instant::now() + within;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
-            Ok(None) => {
-                // Only the child this call started is ended.
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(Refusal::TimedOut {
-                    program: name,
-                    within,
-                });
-            }
-            Err(error) => return Err(refused(format!("could not be waited for: {error}"))),
-        }
-    }
+    let waited = child
+        .wait_within(crate::ProbePatience::fixed(within), rest)
+        .map_err(|error| refused(format!("could not be waited for or ended: {error}")))?;
     let output = child
         .wait_with_output()
         .map_err(|error| refused(format!("could not be read: {error}")))?;
     file_reads::pipe_output(Lane::Update, &output);
-    Ok(output)
+    match waited {
+        Ok(_) => Ok(output),
+        Err(_) => Err(Refusal::TimedOut {
+            program: name,
+            within,
+            said: tail_of(&said(&output), SAID_KEPT),
+        }),
+    }
+}
+
+/// The last `at_most` bytes of `text`, cut on a character boundary.
+fn tail_of(text: &str, at_most: usize) -> String {
+    let mut start = text.len().saturating_sub(at_most);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_owned()
 }
 
 /// The text of a finished child's two streams, standard output first.
@@ -1332,6 +1368,83 @@ mod tests {
         # designated => cdhash H\"618d5e3368be265abd51472976742fa902819c8e\" or cdhash H\"1452da50f42f5cbc30828b02498d29a6e4721d4c\"\n\
         CDHash=618d5e3368be265abd51472976742fa902819c8e\n\
         Signature=adhoc\n";
+
+    /// The helper mode [`helper_says_then_waits`] runs in: the path of the
+    /// marker it writes once it has said [`SAID_BEFORE`].
+    const HELPER_MODE: &str = "MACOS_UPDATE_HELPER_MARKER";
+
+    /// What the helper says before it waits: mixed script, so the kept text
+    /// is not ASCII by accident.
+    const SAID_BEFORE: &str = "verifying Folio.app \u{2014} \u{6821}\u{9a8c}\u{4e2d}";
+
+    /// A helper probe: started by
+    /// [`a_child_ended_at_its_deadline_is_refused_with_what_it_said`], it says
+    /// [`SAID_BEFORE`], writes its marker, and waits to be ended.
+    #[test]
+    fn helper_says_then_waits() {
+        use std::io::Write as _;
+        let Ok(marker) = std::env::var(HELPER_MODE) else {
+            return;
+        };
+        println!("{SAID_BEFORE}");
+        std::io::stdout().flush().expect("flush what it said");
+        std::fs::write(&marker, b"said").expect("the marker");
+        loop {
+            std::thread::park();
+        }
+    }
+
+    /// RED (0.4.8 E6, the release read's F7(a)) — **a child ended at its
+    /// deadline is refused with what it had said by then**: the helper says a
+    /// line and waits; the owner's deadline, which this test's seam lets pass
+    /// only once the line is written, ends it, and the `TimedOut` refusal
+    /// carries the line into its sentence.
+    ///
+    /// MUTATION: in `held_to`, answer `TimedOut` with an empty `said` (the
+    /// 0.4.7 refusal, which dropped the output).
+    #[test]
+    fn a_child_ended_at_its_deadline_is_refused_with_what_it_said() {
+        let marker = bt_testpath::temp_path("e6-macos-update-said");
+        let _ = std::fs::remove_file(&marker);
+        let mut command = crate::quiet_command(std::env::current_exe().expect("this test binary"));
+        command
+            .args([
+                "--exact",
+                "macos_update::tests::helper_says_then_waits",
+                "--nocapture",
+            ])
+            .env(HELPER_MODE, &marker);
+        let child =
+            crate::spawn_probe(&mut command, crate::ProbeStdio::ANSWER).expect("start the helper");
+        // The deadline is a millisecond; each rest lasts until the helper has
+        // said its line, so the deadline passes only after it has.
+        let refused = held_to("helper", child, Duration::from_millis(1), &mut || {
+            while !marker.exists() {
+                std::thread::sleep(POLL);
+            }
+        });
+        let _ = std::fs::remove_file(&marker);
+        let Err(Refusal::TimedOut { program, said, .. }) = &refused else {
+            panic!("the helper is ended at its deadline: {refused:?}");
+        };
+        assert_eq!(*program, "helper");
+        assert!(said.contains(SAID_BEFORE), "{said:?}");
+        let sentence = refused.expect_err("a refusal").to_string();
+        assert!(sentence.contains(SAID_BEFORE), "{sentence}");
+    }
+
+    /// RED (0.4.8 E6) — **what a refusal keeps of a long answer is its end,
+    /// cut on a character boundary.**
+    ///
+    /// MUTATION: in `tail_of`, keep the first `at_most` bytes.
+    #[test]
+    fn a_refusal_keeps_the_end_of_what_was_said() {
+        let said = format!("{}\u{6821}\u{9a8c} at the end", "x".repeat(SAID_KEPT));
+        let kept = tail_of(&said, SAID_KEPT);
+        assert!(kept.len() <= SAID_KEPT);
+        assert!(kept.ends_with("\u{6821}\u{9a8c} at the end"), "{kept:?}");
+        assert_eq!(tail_of("\u{6821}\u{9a8c}", 4), "\u{9a8c}");
+    }
 
     /// RED (U-26) — **the identity is read from `codesign`'s own words: the
     /// designated requirement (explicit or implicit), the cdhash and the

@@ -14963,3 +14963,11 @@ A check that got an answer but could not write it to `update-check.json` returne
 **The rule.** RULES §36 as written: every failure is silent and counts as that day's attempt — a failed write of the answer is one.
 
 **Pinned by** `update::tests::an_answer_whose_write_failed_is_still_the_days_attempt` (a test-only refusal of the next write, `OfferState::refuse_next_write`).
+
+### 2026-10-12 — A machine probe that cannot be contained is refused, and an overrunning update tool's refusal says what it had said (0.4.8 E6, F7)
+
+Since T-PROBE-CHILD a probe whose job (Windows) could not be created or limited ran uncontained after one process-wide line on standard error, and a probe whose process group (Unix) could not be registered did the same: a hung `codesign` could then leave a descendant behind past its deadline, with nothing but that one line to say so. `bt_platform::spawn_probe` now refuses such a probe: on Windows before any process is created — for the first job and for the fresh one a refused job list needs — and on Unix by ending and reaping the child it had just started; the error names the containment (`uncontainable`), and every caller's road takes it as its own step's failure — on the update road, the Prepare's or the applier's refusal. The door is shared, so the rule holds for every machine probe, Git's and PowerShell's included. On the update road's macOS tools, a child ended at its deadline is now refused with the last 4 KiB of what it had written (`macos_update::Refusal::TimedOut::said`, through the one owner of a probe's deadline, `ProbeChild::wait_within`), and `macos_identity` quotes the first line of it, where both used to drop it. `/usr/bin/open` stays a hand-off outside any probe, and its doc comment and its row in ARCHITECTURE's child-process table now say why: what it starts must outlive the applier.
+
+**The rule.** No silent degradation: a probe runs contained or not at all.
+
+**Pinned by** `probe_child_tests::a_probe_that_cannot_be_contained_is_refused_and_never_created` (Windows), `a_probe_whose_group_cannot_be_guarded_is_refused` (Unix), `macos_update::tests::a_child_ended_at_its_deadline_is_refused_with_what_it_said` and `a_refusal_keeps_the_end_of_what_was_said`.
