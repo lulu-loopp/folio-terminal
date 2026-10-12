@@ -14979,3 +14979,11 @@ Each completed program walk now publishes the exact `PATH` and `PATHEXT` values 
 **The rule.** The `# completions` row "the Profiles page's environment" says both in its failure and supersession cells and stays `conforms`, as the document rows do, which say nothing of a panic because the process ends with it.
 
 **Pinned by** `shell_integration::tests::every_page_environment_request_ends_once_and_the_newest_wins` (the completed-then-superseded sequence added).
+
+### 2026-10-12 — A worker's panic can be its request's failure: the hook's contained-panic marker (H2-NITS round 5)
+
+**What is built.** The resident panic hook asks one decision, `the_hook_lets_this_panic_unwind`: a formula's render (`bt_math::render_panic_is_contained`, as before) or a worker's unit of work run inside `contained_panic::contain`, a thread marker set for the length of the work and its unwind boundary. When it answers yes the hook writes the report and returns, so the unwind reaches the boundary instead of ending the process. The Profiles page's environment worker runs its read inside it: a panic in the read answers `Failed` and the window is woken, like any failed read. This supersedes the round-4 entry's statement that a panic on that worker ends the process. Structural-debt D-96 records the two protocols that do not use the marker yet (`pty_door::request_shell`, whose row claims a panic is `PtyError::Backend`, and the storage worker's two rows), repaid by T-PANIC-ROWS-HONEST; no `# completions` row names it.
+
+**The rule.** A request's terminal is a value its requester receives (side-effects contract C2, C3); the emergency hook is not one. A unit of work is contained only if it holds no state another thread reads half-written.
+
+**Pinned by** `contained_panic::tests::the_hook_lets_a_contained_workers_panic_unwind` and `shell_integration::tests::a_panic_in_the_page_read_is_a_failed_end_and_a_wake`.

@@ -2203,18 +2203,29 @@ fn complete_page_environment(asked: u64, end: PageEnvironmentEnd) {
 /// (`fresh_logon_environment`, pane birth's read), this process's own where the
 /// platform has none, or the read's error.
 ///
-/// No unwind boundary: under the resident application's panic hook
-/// (`install_panic_log_hook`) a panic on this worker ends the process from
-/// inside the hook, before any unwinding, so no request is left owed — the
-/// convention of the other workers that run under that hook.
+/// The read runs inside `contained_panic::contain`, which the resident panic
+/// hook honours: a panic in it is logged, unwinds to that boundary and answers
+/// `Failed` (C2, C3) instead of ending the process.
 fn read_page_environment(
-    read: std::io::Result<Option<Vec<(OsString, OsString)>>>,
+    read: impl FnOnce() -> std::io::Result<Option<Vec<(OsString, OsString)>>>,
 ) -> PageEnvironmentEnd {
-    match read {
-        Ok(Some(block)) => PageEnvironmentEnd::Done(block),
-        Ok(None) => PageEnvironmentEnd::Done(std::env::vars_os().collect()),
-        Err(error) => PageEnvironmentEnd::Failed(error.to_string()),
+    match crate::contained_panic::contain(read) {
+        Ok(Ok(Some(block))) => PageEnvironmentEnd::Done(block),
+        Ok(Ok(None)) => PageEnvironmentEnd::Done(std::env::vars_os().collect()),
+        Ok(Err(error)) => PageEnvironmentEnd::Failed(error.to_string()),
+        Err(_) => PageEnvironmentEnd::Failed("the read panicked".to_owned()),
     }
+}
+
+/// **A request's worker body**: the read, its end filed under `asked`, then the
+/// wake — every path, a contained panic included, reaches the wake.
+fn answer_page_environment_request(
+    asked: u64,
+    read: impl FnOnce() -> std::io::Result<Option<Vec<(OsString, OsString)>>>,
+    wake: impl FnOnce(),
+) {
+    complete_page_environment(asked, read_page_environment(read));
+    wake();
 }
 
 /// **The Profiles page asks for the environment the next pane is born from**
@@ -2228,13 +2239,15 @@ pub fn request_page_environment() {
         "profiles-page-environment",
         bt_platform::ThreadPriority::BelowNormal,
         move |worker| {
-            complete_page_environment(
+            answer_page_environment_request(
                 asked,
-                read_page_environment(bt_platform::environment::fresh_logon_environment(worker)),
+                || bt_platform::environment::fresh_logon_environment(worker),
+                || {
+                    if let Some(wake) = WAKE.get() {
+                        wake();
+                    }
+                },
             );
-            if let Some(wake) = WAKE.get() {
-                wake();
-            }
         },
     );
     if let Err(error) = started {
@@ -10048,8 +10061,14 @@ mod tests {
     /// no end; (3) file every taken end in `page_environment` without comparing
     /// its number with the newest minted - the previous visit's block shows while
     /// the newest request is out.
+    /// The page environment's cell is one per process: its tests take turns.
+    static PAGE_ENVIRONMENT_TESTS: Mutex<()> = Mutex::new(());
+
     #[test]
     fn every_page_environment_request_ends_once_and_the_newest_wins() {
+        let _alone = PAGE_ENVIRONMENT_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let block =
             |value: &str| vec![(OsString::from("FOLIO_H2_NITS_PIN"), OsString::from(value))];
         let first = mint_page_environment();
@@ -10087,7 +10106,7 @@ mod tests {
         let fifth = mint_page_environment();
         complete_page_environment(
             fifth,
-            read_page_environment(Err(std::io::Error::other("拒绝"))),
+            read_page_environment(|| Err(std::io::Error::other("拒绝"))),
         );
         assert_eq!(
             page_environment(),
@@ -10095,9 +10114,40 @@ mod tests {
             "a failed read composes over this process's environment"
         );
         assert_eq!(
-            read_page_environment(Ok(Some(block("账户")))),
+            read_page_environment(|| Ok(Some(block("账户")))),
             PageEnvironmentEnd::Done(block("账户"))
         );
+    }
+
+    /// RED (H2-NITS round 5) - **a panic in the page's read is that request's
+    /// `Failed`, and the window is still woken.** The scripted read panics inside
+    /// the request's worker body; the request ends `Failed` (C2, C3), the wake
+    /// runs once, and nothing else the page holds changes.
+    ///
+    /// MUTATION: run the read without `contained_panic::contain` - the panic
+    /// escapes the worker body and this test panics.
+    #[test]
+    fn a_panic_in_the_page_read_is_a_failed_end_and_a_wake() {
+        let _alone = PAGE_ENVIRONMENT_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let asked = mint_page_environment();
+        let woken = std::cell::Cell::new(0);
+        answer_page_environment_request(
+            asked,
+            || panic!("scripted: the account's environment block could not be walked"),
+            || woken.set(woken.get() + 1),
+        );
+        assert_eq!(woken.get(), 1, "the window is woken after a panicking read");
+        let ended = page_environment_cell().ended.clone();
+        assert_eq!(
+            ended,
+            [(
+                asked,
+                PageEnvironmentEnd::Failed("the read panicked".to_owned())
+            )]
+        );
+        assert_eq!(page_environment_cell().owed, None, "nothing is left owed");
     }
 
     /// PIN - a profile of the reader's own reaches the spawn path whole, which

@@ -74791,12 +74791,85 @@ fn install_panic_log_hook_at(path: PathBuf, fatal: impl Fn(&Path) + Send + Sync 
         // conversion through the Typst compile and the rasterizer. Its
         // diagnostic belongs in the log above, never in a fatal dialog or a
         // process exit: the formula fails to source and the window lives.
-        if bt_math::render_panic_is_contained() {
+        if the_hook_lets_this_panic_unwind() {
             return;
         }
         previous(info);
         fatal(&path);
     }));
+}
+
+/// **Whether the panic hook returns and lets this thread's panic unwind** to the
+/// boundary that contains it, instead of ending the process: one formula's
+/// render (`bt_math::render_panic_is_contained`), or a worker's unit of work run
+/// inside [`contained_panic::contain`]. The report is written either way.
+fn the_hook_lets_this_panic_unwind() -> bool {
+    bt_math::render_panic_is_contained() || contained_panic::is_contained()
+}
+
+/// **A worker's unit of work whose panic is that request's failure, not the
+/// process's end** (H2-NITS round 5) — the resident panic hook's second contained
+/// kind beside a formula's render, and the one mechanism every worker uses for
+/// it (`docs/plans/structural-debt.md` D-96 names the rows still to adopt it).
+///
+/// [`contain`] marks this thread for the length of `work` and is its unwind
+/// boundary; the hook ([`the_hook_lets_this_panic_unwind`]) asks [`is_contained`]
+/// and, when it answers yes, logs the report and returns, so the unwind reaches
+/// [`contain`], which answers the panic as `Err`. A unit of work that holds no
+/// state another thread reads half-written is the only kind to contain: the
+/// caller turns the `Err` into its request's `Failed` terminal (C2, C3).
+mod contained_panic {
+    use std::cell::Cell;
+
+    thread_local! {
+        static CONTAINED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Run `work` with this thread's panics contained; `Err` carries the panic.
+    pub(crate) fn contain<T>(work: impl FnOnce() -> T) -> std::thread::Result<T> {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                CONTAINED.set(self.0);
+            }
+        }
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _restore = Restore(CONTAINED.replace(true));
+            work()
+        }))
+    }
+
+    /// Whether this thread is inside [`contain`] now.
+    pub(crate) fn is_contained() -> bool {
+        CONTAINED.get()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{contain, is_contained};
+        use crate::the_hook_lets_this_panic_unwind;
+
+        /// RED (H2-NITS round 5) - **the panic hook lets a contained worker's
+        /// panic unwind, and only while it is contained**: outside [`contain`]
+        /// the hook's decision is the fatal one, inside it the hook returns, and
+        /// the marker is put back when the work ends, by a panic or not.
+        ///
+        /// MUTATION: drop `contained_panic::is_contained()` from
+        /// `the_hook_lets_this_panic_unwind` - the decision inside goes red.
+        #[test]
+        fn the_hook_lets_a_contained_workers_panic_unwind() {
+            assert!(!the_hook_lets_this_panic_unwind());
+            assert_eq!(contain(the_hook_lets_this_panic_unwind).ok(), Some(true));
+            assert!(!is_contained(), "the marker ends with the work");
+            let caught = contain(|| -> u8 { panic!("scripted: 一个被包住的错误") });
+            assert!(caught.is_err(), "the panic is the boundary's answer");
+            assert!(
+                !is_contained(),
+                "and the marker is put back after a panic too"
+            );
+            assert!(!the_hook_lets_this_panic_unwind());
+        }
+    }
 }
 
 /// What a run that ended in a fault of its own reports to whoever started it.

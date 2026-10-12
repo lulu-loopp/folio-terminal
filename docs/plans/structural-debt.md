@@ -71,12 +71,12 @@ they answer "what does this machine do" — not by debt.
 | 0.4.5 | 8 | 0 | 8 |
 | 0.4.6 | 4 | 0 | 4 |
 | 0.4.7 | 0 | 0 | 0 |
-| 0.4.8 (plan ticket on the row) | 27 | 27 | 0 |
+| 0.4.8 (plan ticket on the row) | 28 | 28 | 0 |
 | 0.5 (reason on the row; D-1, D-16 and D-33 are its preconditions) | 13 | 13 | 0 |
 | deferred (reason on the row) | 4 | 4 | 0 |
 | unassigned (no 0.4.8 plan ticket; listed for the coordinator) | 37 | 37 | 0 |
 | already repaid | 2 | 0 | 2 |
-| **total** | **95** | **81** | **14** |
+| **total** | **96** | **82** | **14** |
 
 (2026-09-25, A5: D-33 moved from 0.4.5 to 0.4.6 — the owner deferred the
 presentation lane, its second client, and revision (b) R8 of
@@ -119,6 +119,9 @@ unassigned to 0.4.8; D-93 and D-94 are owner questions and stay unassigned.)
 
 (2026-10-11, the merge of S-1 with T-ATTENTION-WINDOW-EXPIRY: D-95, added on 0.4.8 with O-4,
 is counted — 0.4.8 27 rows, total 95/81/14.)
+
+(2026-10-12, H2-NITS round 5: D-96 added on 0.4.8 with T-PANIC-ROWS-HONEST — 0.4.8 28 rows,
+total 96/82/14.)
 
 Parts already repaid inside open rows, by the 0.4.4 tickets: ticket 10
 (`2657e5e3`) — §5.3 row 1, the OS hand-off lane, and the first instance of the
@@ -397,6 +400,7 @@ ledger's.
 | D-93 | the desktop notification is shown on the window thread with no admission (`NotificationDesk::show`: COM initialisation and the toast notifier built on first use) and is not a member of revision (b)6's closed C7 list; whether it becomes a request door or a ruled member is an owner question (revision (c)1) | the side-effects contract (`docs/plans/design/side-effects-contract-2026-10-11.md`, C1–C7); S-1 (T-COMPLETIONS-LEDGER, 2026-10-11), `window_waits.tsv` `# completions` | owner question (revision (c)1, beside Q1): a request door, or a ruled C7 member | unassigned — owner question (2026-10-11) | open |
 | D-94 | `PlaceHidden` and `PlaceExposure` are admitted owner-thread doors (`window_is_hidden`, `window_is_exposed`, through `Runtime::observe_window_place`) that revision (b)6's closed C7 list does not name; a new member needs an owner ruling | the side-effects contract (`docs/plans/design/side-effects-contract-2026-10-11.md`, C1–C7); S-1 (T-COMPLETIONS-LEDGER, 2026-10-11), `window_waits.tsv` `# completions` | owner question (revision (b)6: a new member of the closed C7 list needs a ruling) | unassigned — owner question (2026-10-11) | open |
 | D-95 | the ending step's wiring: the five roads that end a pane (`close_pane`, `close_tab`, `let_go_of_this_window` for a window close and the quit, `abandon_a_window_nothing_arrived_in`, `answer_restore`'s placeholder removal) each call `end_leaves_of` before their shells go, and no test drives those calls — a `Runtime` is a window and no test builds one; the step itself is pinned (`every_road_that_ends_a_pane_emits_leaf_gone_once`), as the 5400 bt-app tests drive `TabState` the same way | T-ATTENTION-WINDOW-EXPIRY (2026-10-11) | O-4 | 0.4.8 — O-4 gives `WindowRuntime` a window-free core the roads can be driven through | open |
+| D-96 | a worker panic under the resident fatal hook (`install_panic_log_hook`) ends the process from inside the hook, before any unwinding, so the request the worker was serving gets no terminal completion (C2) and the panic is never a `Failed` value (C3), on two protocols: `pty_door::request_shell` (its `# completions` row claims a panic is `PtyError::Backend`; its `catch_unwind` runs only where no fatal hook is installed) and the storage worker's two rows, a document's write and re-read (silent on a panic; `WorkerEnd::drop` runs only where no fatal hook is installed) | H2-NITS round 5 (2026-10-12) | T-PANIC-ROWS-HONEST | 0.4.8 — repaid by T-PANIC-ROWS-HONEST using the contained-panic marker H2-NITS introduced (`contained_panic::contain`, which the hook honours) | open |
 
 ---
 
@@ -1708,3 +1712,13 @@ wait on some road, and none has a ruling that it may.
   (`end_leaves_of`: the per-leaf mark, the skip of a handover's cargo, expire before retire) is pinned
   behaviourally; that each of the five roads calls it, once and before its shells, is read by review
   only, because a `Runtime` holds a real window, renderer and compositor and no test constructs one.
+
+## D-96 — the row added on 2026-10-12 by H2-NITS round 5
+
+- **D-96 · a worker panic under the resident fatal hook.** The side-effects contract's emergency panic hook
+  is not a completion: under the resident application's hook a worker panic ends the process before any
+  unwinding, so neither a `catch_unwind` in the worker nor a `Drop` on its way out runs, and the request in
+  flight has no terminal. H2-NITS gave the hook a second contained kind beside a formula's render —
+  `contained_panic::contain`, a thread marker the hook asks before it ends the process — and the Profiles
+  page's environment read runs inside it. The pty birth and the storage worker's two rows are left for
+  T-PANIC-ROWS-HONEST, which applies the same marker (or states an honest failure cell) row by row.
