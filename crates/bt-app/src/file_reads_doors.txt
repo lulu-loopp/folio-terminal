@@ -42,7 +42,6 @@ append_note: .open
 drain: .read_to_end
 append_healed: .open
 append_panic_report: .open
-Runtime::commit_web_page: .open
 open_first_window: GpuContext::open
 open_the_data_directorys_endpoints: attention_wire::open
 open_the_data_directorys_endpoints: launch_wire::open
@@ -54,7 +53,9 @@ Runtime::create: pins::PinsStore::open
 dump_chrome_frame: .open
 dump_overlay_frame: .open
 Runtime::land_page_source_on: .open
-Runtime::land_preview_source_on: .open
+# The pool's find-or-make door that also names what it holds (O-8): `PreviewPool::open`, a
+# domain verb, no file read; its two callers (commit_web_page, land_preview_source_on) moved here.
+PreviewPool::open_held: .open
 new_window_runtime: .open
 Runtime::open_rename: TabRename::open
 Runtime::open_search: .open
