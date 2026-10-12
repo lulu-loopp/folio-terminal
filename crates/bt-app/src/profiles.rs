@@ -18949,9 +18949,8 @@ mod tests {
     /// MUTATION: drop the `cygwin1.dll` question — RED on the Cygwin bash. MUTATION: drop the
     /// system-directory rule — RED on `System32\bash.exe`.
     ///
-    /// **Windows only:** the recognition reads Windows' own layers, and a non-Windows platform
-    /// answers `Native` for every program (asserted below).
-    #[cfg(windows)]
+    /// Every host runs it: the platform is an input and the path is read as Windows text, and a
+    /// non-Windows platform answers `Native` for every program (asserted below).
     #[test]
     fn a_programs_kind_is_read_off_its_path_and_what_stands_beside_it() {
         const UBUNTU_PACKAGE: &str = "CanonicalGroupLimited.Ubuntu22.04LTS_79rhkp1fndgsc";
@@ -19047,7 +19046,15 @@ mod tests {
                 );
             }
         }
-        // The shipped rows, resolved and classified as a walk does.
+    }
+
+    /// PIN (T-WINDOWS-SHELL-NAMESPACES, 2026-10-12) — **the shipped rows' programs, resolved and
+    /// classified as a walk does**, are the kinds `shipped_kind` reads off the rows alone.
+    ///
+    /// **Windows only:** the rows resolve through `Path::join` of Windows variables.
+    #[cfg(windows)]
+    #[test]
+    fn the_shipped_rows_are_the_kinds_a_walk_finds() {
         let equipped = FakeMachine::fully_equipped();
         for (id, expected) in [
             ("wsl", ShellProgram::WslExe),
@@ -28114,17 +28121,6 @@ mod tests {
         }
     }
 
-    /// RED — **a program installed while Folio runs shows in the new-tab menu after the
-    /// environment broadcast, and after a menu opens with no broadcast at all**.
-    ///
-    /// The production lane (`crate::programs_lane`) over a machine the test writes (the fake walk
-    /// door): the first walk finds no `rg`, the menu does not offer the built-in row; `rg` is
-    /// installed; the broadcast's walk answers, the window thread adopts it, and the menu offers
-    /// the row. Then the program goes again and a menu-open walk takes it back off, with no
-    /// broadcast in between.
-    ///
-    /// MUTATION (observed red): `ProgramsLane::serve` returning after its first walk — the lane
-    /// asks only at launch, and the row never appears.
     /// PIN (T-WINDOWS-SHELL-NAMESPACES, 2026-10-12) — **a walk says what kind of program each row
     /// found**, asking the disk on its own worker: a bash with `cygwin1.dll` beside it is Cygwin's,
     /// and becomes so on the walk after the library arrives.
@@ -28163,6 +28159,17 @@ mod tests {
         );
     }
 
+    /// RED — **a program installed while Folio runs shows in the new-tab menu after the
+    /// environment broadcast, and after a menu opens with no broadcast at all**.
+    ///
+    /// The production lane (`crate::programs_lane`) over a machine the test writes (the fake walk
+    /// door): the first walk finds no `rg`, the menu does not offer the built-in row; `rg` is
+    /// installed; the broadcast's walk answers, the window thread adopts it, and the menu offers
+    /// the row. Then the program goes again and a menu-open walk takes it back off, with no
+    /// broadcast in between.
+    ///
+    /// MUTATION (observed red): `ProgramsLane::serve` returning after its first walk — the lane
+    /// asks only at launch, and the row never appears.
     #[test]
     fn a_program_installed_while_folio_runs_appears_in_the_menu_after_the_broadcast_and_after_a_menu_opens()
      {
