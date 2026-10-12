@@ -2729,6 +2729,12 @@ impl KeybindingsStore {
         &self.document.projection().bindings
     }
 
+    /// **The document the file says**, its dialect with it — what the reader
+    /// reads at launch (`settings_bundle::shortcuts_at_start`).
+    pub(crate) fn file_document(&self) -> &KeybindingsV1 {
+        self.document.desired()
+    }
+
     /// What `keybindings.json` is known to hold.
     #[cfg(test)]
     pub(crate) fn revision(&self) -> &Revision<KeybindingsV1> {

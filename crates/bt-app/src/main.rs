@@ -44933,17 +44933,15 @@ impl Runtime<'_> {
         // own words and a build that silently rewrote one it could not read
         // would destroy the copy they could have fixed by hand.
         let mut keybindings_store = persist::KeybindingsStore::open(session_store.lane());
-        let mut shortcuts = shortcuts::Shortcuts::defaults();
-        let overrides: Vec<shortcuts::Override> = keybindings_store
-            .loaded()
-            .iter()
-            .map(|entry| shortcuts::Override {
-                id: entry.action.clone(),
-                chord: entry.chord.clone(),
-            })
-            .collect();
         let mut keybindings_fault = keybindings_store.take_fault();
-        for fault in shortcuts.apply_overrides(&overrides) {
+        // Read in the file's own dialect and carried to this one, the rule an import and a
+        // merge read with; a line naming an action this build has no row for is carried in the
+        // file, never written out of it by a press on another row.
+        let (shortcuts, refused) = settings_bundle::shortcuts_at_start(
+            &mut keybindings_store,
+            bt_platform::host_platform(),
+        );
+        for fault in refused {
             eprintln!(
                 "BT_PERSIST {} refused {}: {}",
                 persist::KEYBINDINGS_FILE_NAME,
@@ -44959,18 +44957,6 @@ impl Runtime<'_> {
                 )
             });
         }
-        // The same for the shortcut table: a line naming an action this build has no row for is
-        // carried in the file, never written out of it by a press on another row.
-        keybindings_store.project(
-            shortcuts
-                .overrides()
-                .into_iter()
-                .map(|entry| bt_persist::BindingOverrideV1 {
-                    action: entry.id,
-                    chord: entry.chord,
-                })
-                .collect(),
-        );
         let theme_mode = startup_theme_mode(settings_store.loaded(), session_store.loaded());
         shell_integration::set_powershell_integration(settings_store.loaded().shell_integration);
         // **The carry-forward's own write, and the only one it ever makes.**

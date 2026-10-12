@@ -55,7 +55,7 @@ use bt_persist::{
 use serde_json::Value;
 
 use crate::settings::SettingsRow;
-use crate::shortcuts::{Override, Shortcuts, translate_command_modifier};
+use crate::shortcuts::{Override, OverrideFault, Shortcuts, format_chord_on, read_chord_in};
 
 /// Something an import could not put in force, named the way the reader would
 /// look for it — a shortcut's id, a scheme's file, a settings row.
@@ -521,29 +521,29 @@ pub(crate) fn dialect_of(platform: KeybindingsPlatformV1) -> Option<bt_platform:
     }
 }
 
-/// **A shortcut part, read the way `keybindings.json` is read at launch**:
-/// this build's table, then the file's lines laid over it by
-/// `Shortcuts::apply_overrides`, every refused line named by its id.
-pub(crate) fn import_shortcuts(
+/// **A shortcut document, read** — the one reader of a `keybindings.json`
+/// document, at launch and on an import (T-STORE-MERGE-KEYBINDINGS round 2,
+/// coordinator ruling 2026-10-12: one document, one reading rule): this build's
+/// table for `platform`, then each line read in the document's own dialect and
+/// carried to this one ([`crate::shortcuts::read_chord_in`], the rule the
+/// keybindings merge reads with too), then laid over the table by the two-pass
+/// reader (`Shortcuts::apply_overrides`). Every refused line, by its id.
+pub(crate) fn read_keybindings(
     file: &KeybindingsV1,
     platform: bt_platform::HostPlatform,
-) -> (Shortcuts, Vec<ImportFault>) {
+) -> (Shortcuts, Vec<OverrideFault>) {
     let source = dialect_of(file.writing_platform);
-    let mut translation_faults = Vec::new();
+    let mut faults = Vec::new();
     let overrides: Vec<Override> = file
         .bindings
         .iter()
         .filter_map(|entry| {
             let chord = match entry.chord.as_deref() {
-                Some(chord) => match translate_command_modifier(chord, source, platform) {
-                    Ok(chord) => Some(chord),
+                Some(chord) => match read_chord_in(chord, source, platform) {
+                    Ok(chord) => Some(format_chord_on(&chord, platform)),
                     Err(reason) => {
-                        translation_faults.push(ImportFault {
-                            what: format!(
-                                "{}: {}",
-                                crate::persist::KEYBINDINGS_FILE_NAME,
-                                entry.action
-                            ),
+                        faults.push(OverrideFault {
+                            id: entry.action.clone(),
                             reason: reason.to_owned(),
                         });
                         return None;
@@ -558,16 +558,47 @@ pub(crate) fn import_shortcuts(
         })
         .collect();
     let mut table = Shortcuts::defaults_for(platform);
-    let mut faults = table
-        .apply_overrides(&overrides)
+    faults.extend(table.apply_overrides(&overrides));
+    (table, faults)
+}
+
+/// **The shortcut table a launch starts with**: the store's document read by
+/// [`read_keybindings`], and the departures the table put in force told to the
+/// store — what a press is measured against; the lines the table refused stay
+/// in the document and out of the projection.
+pub(crate) fn shortcuts_at_start(
+    store: &mut crate::persist::KeybindingsStore,
+    platform: bt_platform::HostPlatform,
+) -> (Shortcuts, Vec<OverrideFault>) {
+    let (table, faults) = read_keybindings(store.file_document(), platform);
+    store.project(
+        table
+            .overrides()
+            .into_iter()
+            .map(|entry| bt_persist::BindingOverrideV1 {
+                action: entry.id,
+                chord: entry.chord,
+            })
+            .collect(),
+    );
+    (table, faults)
+}
+
+/// **A shortcut part, read the way `keybindings.json` is read at launch**
+/// ([`read_keybindings`]), every refused line named by its file and id.
+pub(crate) fn import_shortcuts(
+    file: &KeybindingsV1,
+    platform: bt_platform::HostPlatform,
+) -> (Shortcuts, Vec<ImportFault>) {
+    let (table, faults) = read_keybindings(file, platform);
+    let faults = faults
         .into_iter()
         .map(|fault| ImportFault {
             what: format!("{}: {}", crate::persist::KEYBINDINGS_FILE_NAME, fault.id),
             reason: fault.reason,
         })
-        .collect::<Vec<_>>();
-    translation_faults.append(&mut faults);
-    (table, translation_faults)
+        .collect();
+    (table, faults)
 }
 
 /// What an imported `schemes` part writes into the folder, and what it names.

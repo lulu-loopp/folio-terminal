@@ -11,16 +11,28 @@
 //! now wants on disk.
 //!
 //! **Each side is read as the reader reads it** ((b)8):
-//! - in this platform's dialect: a side written on another platform has each chord
-//!   carried across with `translate_command_modifier`, as an import does; a line that
-//!   cannot be carried across is **carried**;
+//! - in this platform's dialect: each chord is read in its side's own dialect and
+//!   carried across by `shortcuts::read_chord_in`, the launch's and an import's rule; a
+//!   line that cannot be carried across is **carried**;
 //! - one departure per action, the last line about it in force (the reader's rule); the
-//!   earlier lines about it are **carried**;
+//!   earlier lines about it are **carried** while it keeps that line;
 //! - a line naming an action this build has no row for is **carried**.
 //!
 //! **The one rule for what is carried** ((b)8): it is in the merged document verbatim,
-//! in the file's position, and never rewritten, applied or owed. It is the file's — a
-//! line carried in `O` that the file no longer holds is gone with it.
+//! in the file's position, and never rewritten, applied or owed — in this run and at the
+//! next start. It is the file's — a line carried in `O` that the file no longer holds is
+//! gone with it. Two consequences (coordinator rulings 2026-10-12):
+//! - **an earlier duplicate goes with its action's line.** It was carried only as an
+//!   earlier line of an action a later line puts in force; when the merge leaves that
+//!   action no line (Folio set it back to its default, or the chord pass gave it its
+//!   default), the earlier line would be the last about the action and the next reader
+//!   would put it in force, so it is dropped with it. A duplicate whose action keeps its
+//!   line stays carried;
+//! - **a line one dialect cannot carry into another is inert in the document it is
+//!   carried into.** Every side, the launch's reader and an import read a line by one
+//!   rule (`shortcuts::read_chord_in`), and a line it refuses from its own dialect is a
+//!   text this platform's dialect does not read either, so the merged document — written
+//!   in this platform's dialect — keeps it verbatim and its next reader refuses it again.
 //!
 //! **The unit is one action's departure**, merged by §3.3's table
 //! (`settings_merge::unit`): changed on one side takes that side; changed differently
@@ -53,27 +65,38 @@ use crate::persist::KEYBINDINGS_FILE_NAME;
 use crate::settings_bundle::dialect_of;
 use crate::settings_merge::{Account, PassOutcome, Unit, unit};
 use crate::shortcuts::{
-    ChordVerdict, Override, OverrideFault, Shortcuts, format_chord_on, parse_chord,
-    translate_command_modifier,
+    Chord, ChordVerdict, Override, OverrideFault, Shortcuts, format_chord_on, parse_chord,
+    parse_chord_in, read_chord_in,
 };
 
-/// **One action's departure as a side states it**: the chord as the line spells it in
-/// this platform's dialect (`None`: the file's `null`, no chord), and what it means.
+/// **One action's departure as a side states it**: the chord as the merged document
+/// would write it in this platform's dialect (`None`: the file's `null`, no chord), and
+/// what it means.
 #[derive(Clone, Debug)]
 struct Departure {
-    /// What the merged document writes for it.
+    /// What the merged document writes for it: the line's own spelling when this
+    /// platform's reader reads that spelling as the same chord, else this platform's.
     text: Option<String>,
-    /// The chord as this build reads and spells it on this platform; a chord it cannot
-    /// read is its own text.
+    /// The chord as this build spells it on this platform.
     meaning: Option<String>,
 }
 
 impl Departure {
-    fn new(text: Option<String>, platform: bt_platform::HostPlatform) -> Self {
-        let meaning = text.as_ref().map(|text| {
-            parse_chord(text)
-                .map_or_else(|| text.clone(), |chord| format_chord_on(&chord, platform))
-        });
+    /// The departure of a line whose chord text `spelled` reads as `chord` here.
+    fn of(
+        spelled: Option<&str>,
+        chord: Option<&Chord>,
+        platform: bt_platform::HostPlatform,
+    ) -> Self {
+        let meaning = chord.map(|chord| format_chord_on(chord, platform));
+        let text = match (spelled, chord) {
+            (Some(spelled), Some(chord))
+                if parse_chord_in(spelled, Some(platform)).as_ref() == Some(chord) =>
+            {
+                Some(spelled.to_owned())
+            }
+            _ => meaning.clone(),
+        };
         Self { text, meaning }
     }
 }
@@ -90,8 +113,12 @@ impl PartialEq for Departure {
 enum Line {
     /// The line that puts this action's departure in force.
     InForce(String),
-    /// A line the reader does not put in force, kept verbatim.
+    /// A line the reader does not put in force, kept verbatim: an unknown action, or a
+    /// line this platform's dialect cannot read.
     Carried(BindingOverrideV1),
+    /// An earlier line about an action a later line puts in force, kept verbatim — while
+    /// that action keeps a line after it.
+    Shadowed(BindingOverrideV1, String),
 }
 
 /// **A side read as the reader reads it.**
@@ -109,29 +136,26 @@ fn side_of(
     table: &Shortcuts,
     platform: bt_platform::HostPlatform,
 ) -> Side {
-    // A side spelled in this dialect, or in none recorded, is read as it is spelled
-    // (`import_shortcuts`' rule); another platform's is carried across.
-    let from = dialect_of(document.writing_platform).filter(|source| *source != platform);
+    // Each line read in the side's own dialect and carried to this one: the rule the
+    // launch's reader and an import read with (`shortcuts::read_chord_in`).
+    let from = dialect_of(document.writing_platform);
     let mut untranslatable = Vec::new();
     let read: Vec<Option<(String, Departure)>> = document
         .bindings
         .iter()
         .map(|line| {
             table.row(&line.action)?;
-            let text = match (&line.chord, from) {
-                (None, _) => None,
-                (Some(chord), None) => Some(chord.clone()),
-                (Some(chord), Some(from)) => {
-                    match translate_command_modifier(chord, Some(from), platform) {
-                        Ok(chord) => Some(chord),
-                        Err(why) => {
-                            untranslatable.push((line.clone(), why));
-                            return None;
-                        }
+            let departure = match &line.chord {
+                None => Departure::of(None, None, platform),
+                Some(chord) => match read_chord_in(chord, from, platform) {
+                    Ok(read) => Departure::of(Some(chord), Some(&read), platform),
+                    Err(why) => {
+                        untranslatable.push((line.clone(), why));
+                        return None;
                     }
-                }
+                },
             };
-            Some((line.action.clone(), Departure::new(text, platform)))
+            Some((line.action.clone(), departure))
         })
         .collect();
     let mut units = BTreeMap::new();
@@ -148,7 +172,10 @@ fn side_of(
                 units.insert(action.clone(), departure.clone());
                 lines.push(Line::InForce(action.clone()));
             }
-            None => lines.push(Line::Carried(line.clone())),
+            None => lines.push(match departure {
+                Some((action, _)) => Line::Shadowed(line.clone(), action.clone()),
+                None => Line::Carried(line.clone()),
+            }),
         }
     }
     Side {
@@ -288,6 +315,15 @@ pub(crate) fn merge(
                 bindings.push(line.clone());
                 about.carried.push(line.clone());
             }
+            // An earlier line about an action stays carried only while the action keeps
+            // its line after it: with that line gone, the earlier one would be the last
+            // about the action, and the next reader would put it in force.
+            Line::Shadowed(line, action) => {
+                if let Some((Some(_), _)) = merged.get(action) {
+                    bindings.push(line.clone());
+                    about.carried.push(line.clone());
+                }
+            }
             Line::InForce(action) => {
                 if let Some((Some(departure), _)) = merged.get(action) {
                     bindings.push(BindingOverrideV1 {
@@ -390,12 +426,7 @@ fn give_the_files_actions_their_chords(
         }
         let given = row.chord.clone();
         let shipped = table.row(&entry.id).and_then(|row| row.chord.clone());
-        let value = (given != shipped).then(|| {
-            Departure::new(
-                given.as_ref().map(|chord| format_chord_on(chord, platform)),
-                platform,
-            )
-        });
+        let value = (given != shipped).then(|| Departure::of(None, given.as_ref(), platform));
         let loser = name(table, &entry.id);
         about.account.kept -= 1;
         about.account.conflicted += 1;
@@ -439,7 +470,7 @@ pub(crate) fn rebuild(
                 id: action.clone(),
                 chord: departure.meaning.clone(),
             }),
-            Line::Carried(_) => None,
+            Line::Carried(_) | Line::Shadowed(..) => None,
         })
         .collect();
     let faults = table.apply_overrides(&dealt);
@@ -1051,5 +1082,112 @@ mod tests {
             ]
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The table the next launch starts with from `document`, written to a scratch
+    /// `keybindings.json` and read back by the launch's own reader.
+    fn next_start(case: &str, document: &KeybindingsV1) -> (Shortcuts, Vec<OverrideFault>) {
+        let root = scratch(case);
+        let path = root.join(KEYBINDINGS_FILE_NAME);
+        std::fs::write(
+            &path,
+            bt_persist::serialize_keybindings(document).expect("a keybindings document serializes"),
+        )
+        .expect("the scratch file is written");
+        let (lane, _jobs) = StorageLane::scripted();
+        let mut store = KeybindingsStore::at_on(path, lane);
+        let read = crate::settings_bundle::shortcuts_at_start(&mut store, PLATFORM);
+        let _ = std::fs::remove_dir_all(&root);
+        read
+    }
+
+    /// RED (round 2, coordinator ruling 1: one document, one reading rule) — **a file
+    /// written on a Mac reads in this dialect at start**, as an import and a merge read it:
+    /// `Cmd+Shift+Y` from a Mac is `Ctrl+Shift+Y` on Windows.
+    ///
+    /// MUTATION: the raw read (in `settings_bundle::read_keybindings`, read every line as
+    /// spelled, with no recorded dialect) — `Cmd` reads as the Windows key.
+    #[test]
+    fn a_file_written_on_a_mac_reads_in_this_dialect_at_start() {
+        let mac = document(
+            KeybindingsPlatformV1::MacOs,
+            vec![line("new-tab", Some("Cmd+Shift+Y"))],
+        );
+        let (table, faults) = next_start("start-dialect", &mac);
+        assert!(faults.is_empty(), "{faults:?}");
+        assert_eq!(
+            chord_of(&table, "new-tab", PLATFORM).as_deref(),
+            Some("Ctrl+Shift+y")
+        );
+    }
+
+    /// RED (round 2, coordinator ruling 2(a)) — **an earlier duplicate goes with its
+    /// action's line.** The file holds two lines about New tab, the later in force; Folio
+    /// bound New tab to `Ctrl+K`, and the file now gives `Ctrl+K` to Close pane. The chord
+    /// pass gives New tab its default, which the merged file says by having no line for
+    /// it — and so no earlier line either: at the next start New tab has its default.
+    ///
+    /// MUTATION: keep the duplicate (in `merge`, carry a `Line::Shadowed` whatever its
+    /// action came to) — the earlier chord comes back at the next start.
+    #[test]
+    fn a_dropped_actions_earlier_duplicate_is_dropped_with_it() {
+        let file = vec![
+            line("new-tab", Some("Ctrl+Shift+J")),
+            line("new-tab", Some("Ctrl+Shift+K")),
+        ];
+        let base = windows(file.clone());
+        let ours = windows(vec![
+            line("new-tab", Some("Ctrl+Shift+J")),
+            line("new-tab", Some("Ctrl+k")),
+        ]);
+        let mut changed = file;
+        changed.push(line("close-pane", Some("Ctrl+k")));
+        let merged = merge(&base, &ours, &windows(changed), PLATFORM);
+        let (table, faults) = next_start("dropped-duplicate", &merged.document);
+        assert!(faults.is_empty(), "{faults:?}");
+        assert_eq!(
+            chord_of(&table, "new-tab", PLATFORM),
+            chord_of(&Shortcuts::defaults_for(PLATFORM), "new-tab", PLATFORM),
+            "its default at the next start"
+        );
+        assert_eq!(
+            merged.document.bindings,
+            vec![line("close-pane", Some("Ctrl+k"))],
+            "no line for New tab"
+        );
+    }
+
+    /// RED (round 2, coordinator ruling 2(b)) — **a line one dialect cannot carry into
+    /// another stays refused at the next start.** A Mac's `Cmd+Ctrl+K` cannot be carried to
+    /// Windows; the merged file is Windows' and holds it verbatim, and the Windows reader
+    /// refuses it when the file is read again: Zoom pane keeps its default, one refusal.
+    ///
+    /// MUTATION: bind the carried text (in `shortcuts::parse_chord_in`, read every
+    /// dialect's command word in every dialect) — it binds `Win+Ctrl+K`.
+    #[test]
+    fn an_untranslatable_line_stays_refused_at_the_next_start() {
+        let carried = line("zoom-pane", Some("Cmd+Ctrl+K"));
+        let theirs = document(KeybindingsPlatformV1::MacOs, vec![carried.clone()]);
+        let base = windows(Vec::new());
+        let merged = merge(&base, &base, &theirs, PLATFORM);
+        assert_eq!(
+            merged.document.writing_platform,
+            KeybindingsPlatformV1::Windows
+        );
+        assert_eq!(merged.document.bindings, vec![carried], "carried verbatim");
+        let (table, faults) = next_start("untranslatable", &merged.document);
+        assert_eq!(
+            chord_of(&table, "zoom-pane", PLATFORM),
+            chord_of(&Shortcuts::defaults_for(PLATFORM), "zoom-pane", PLATFORM),
+            "its default"
+        );
+        assert_eq!(
+            faults
+                .iter()
+                .map(|fault| fault.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["zoom-pane"],
+            "one refusal"
+        );
     }
 }

@@ -3165,9 +3165,10 @@ pub(crate) fn format_chord_on(chord: &Chord, platform: bt_platform::HostPlatform
     //
     // **The fourth modifier is written by the name of the key it is on** (M1-7),
     // which is the one place the *file* knows there are two platforms. It is not
-    // a second format: `parse_chord` reads both words on both machines, so a
-    // `keybindings.json` carried between them lands whole, and the order does
-    // not move — a file is read left to right by a parser and the caps are what
+    // a second format: a `keybindings.json` records the dialect it was written
+    // in and is read in that dialect's words and carried to this one
+    // (`read_chord_in`), so a file carried between them lands whole, and the
+    // order does not move — a file is read left to right by a parser and the caps are what
     // a person compares it against, which is the sentence above.
     if chord.modifiers.super_key() {
         out.push_str(if platform == bt_platform::HostPlatform::MacOs {
@@ -3194,34 +3195,57 @@ pub(crate) fn format_chord_on(chord: &Chord, platform: bt_platform::HostPlatform
     out
 }
 
-/// Read a chord back, or `None` when the text is not one.
+/// Read a chord back, or `None` when the text is not one — in no recorded
+/// dialect: every spelling of every modifier is read ([`parse_chord_in`] with
+/// `None`).
+#[must_use]
+pub(crate) fn parse_chord(text: &str) -> Option<Chord> {
+    parse_chord_in(text, None)
+}
+
+/// **Read a chord in a keyboard dialect**, or `None` when the text is not one
+/// there.
 ///
 /// Modifiers are stripped one prefix at a time rather than by splitting on `+`,
 /// so a chord *on* the plus key (`Ctrl++`) reads as the key it is rather than as
 /// an empty name between two separators.
+///
+/// **The fourth modifier is read by the name of the key it is on in `dialect`**
+/// (T-STORE-MERGE-KEYBINDINGS round 2, coordinator ruling 2026-10-12): `Win+` on
+/// Windows and the other Unix desktops, `Cmd+` or `Command+` on macOS. A
+/// document that records the dialect it was written in is read in that
+/// dialect's words, and carried to another one by [`read_chord_in`], so a word
+/// of the other keyboard is not a chord here: that is what keeps a line one
+/// dialect could not carry into another (`Cmd+Ctrl+K` from a Mac, whose `Cmd`
+/// is Windows' `Ctrl`) inert in the document it was carried into. `None` — a
+/// document that never said where it was written, or a chord typed by hand
+/// anywhere else — reads all three words, because a file is a thing people copy
+/// between machines. `Ctrl`, `Alt`, `Option` and `Shift` are read everywhere.
 #[must_use]
-pub(crate) fn parse_chord(text: &str) -> Option<Chord> {
+pub(crate) fn parse_chord_in(
+    text: &str,
+    dialect: Option<bt_platform::HostPlatform>,
+) -> Option<Chord> {
+    let super_words: &[&str] = match dialect {
+        None => &["Win+", "Cmd+", "Command+"],
+        Some(bt_platform::HostPlatform::MacOs) => &["Cmd+", "Command+"],
+        Some(bt_platform::HostPlatform::Windows | bt_platform::HostPlatform::OtherUnix) => {
+            &["Win+"]
+        }
+    };
     let mut modifiers = ModifiersState::empty();
     let mut rest = text;
     loop {
-        let candidate = [
-            // **Three words for one flag, read on every platform** (M1-7).
-            // `format_chord` writes whichever one is printed on this machine's
-            // keyboard; this end takes all of them, because a file is a thing
-            // people copy between machines and refusing to read `Cmd+` on
-            // Windows would turn a carried file into a refused line for no
-            // reason a reader could act on. `Command+` is here because it is
-            // what a person who does not know our spelling would type.
-            ("Win+", ModifiersState::SUPER),
-            ("Cmd+", ModifiersState::SUPER),
-            ("Command+", ModifiersState::SUPER),
-            ("Ctrl+", ModifiersState::CONTROL),
-            ("Alt+", ModifiersState::ALT),
-            ("Option+", ModifiersState::ALT),
-            ("Shift+", ModifiersState::SHIFT),
-        ]
-        .into_iter()
-        .find(|(prefix, _)| rest.starts_with(prefix));
+        let candidate = super_words
+            .iter()
+            .map(|word| (*word, ModifiersState::SUPER))
+            .chain([
+                ("Ctrl+", ModifiersState::CONTROL),
+                ("Alt+", ModifiersState::ALT),
+                ("Option+", ModifiersState::ALT),
+                ("Shift+", ModifiersState::SHIFT),
+            ])
+            .find(|(prefix, _)| rest.starts_with(prefix));
         let Some((prefix, flag)) = candidate else {
             break;
         };
@@ -3252,18 +3276,33 @@ pub(crate) fn parse_chord(text: &str) -> Option<Chord> {
     })
 }
 
-/// Carry one chord between keyboard dialects. Command is `SUPER` on macOS and
-/// `CONTROL` elsewhere; an independent destination modifier that would collapse
-/// onto it is a refusal rather than a silently changed chord.
-pub(crate) fn translate_command_modifier(
+/// **One line of a shortcut document, read where it is read** — the one rule
+/// the start-up reader, an import and the keybindings merge share, so the three
+/// cannot read one document two ways (T-STORE-MERGE-KEYBINDINGS round 2,
+/// coordinator ruling 2026-10-12).
+///
+/// `written_in` is the document's recorded dialect (`None`: not recorded, every
+/// spelling read as it is spelled here). A chord the document's own dialect
+/// reads is carried to `here`: command is `SUPER` on macOS and `CONTROL`
+/// elsewhere, and an independent destination modifier that would collapse onto
+/// it is a refusal rather than a silently changed chord. A text its own dialect
+/// does not read is read as `here` reads it: what this platform's reader would
+/// bind is what the line means here, so a line is never refused by one door and
+/// bound by another. Every refusal of a recorded dialect is therefore a text
+/// `here` does not read either — a line carried verbatim into a document of
+/// this dialect stays refused when it is read again.
+pub(crate) fn read_chord_in(
     text: &str,
-    from: Option<bt_platform::HostPlatform>,
-    to: bt_platform::HostPlatform,
-) -> Result<String, &'static str> {
-    let Some(from) = from else {
-        return Ok(text.to_owned());
+    written_in: Option<bt_platform::HostPlatform>,
+    here: bt_platform::HostPlatform,
+) -> Result<Chord, &'static str> {
+    const NOT_UNDERSTOOD: &str = "the chord is not understood";
+    let Some(from) = written_in else {
+        return parse_chord_in(text, None).ok_or(NOT_UNDERSTOOD);
     };
-    let mut chord: Chord = parse_chord(text).ok_or("the chord is not understood")?;
+    let Some(mut chord) = parse_chord_in(text, Some(from)) else {
+        return parse_chord_in(text, Some(here)).ok_or(NOT_UNDERSTOOD);
+    };
     let command = |platform| {
         if platform == bt_platform::HostPlatform::MacOs {
             ModifiersState::SUPER
@@ -3272,7 +3311,7 @@ pub(crate) fn translate_command_modifier(
         }
     };
     let source = command(from);
-    let destination = command(to);
+    let destination = command(here);
     if source != destination && chord.modifiers.contains(source) {
         if chord.modifiers.contains(destination) {
             return Err("the source command modifier collides with a destination modifier");
@@ -3280,7 +3319,7 @@ pub(crate) fn translate_command_modifier(
         chord.modifiers.remove(source);
         chord.modifiers.insert(destination);
     }
-    Ok(format_chord_on(&chord, to))
+    Ok(chord)
 }
 
 /// What one press means to a recorder that is listening.
