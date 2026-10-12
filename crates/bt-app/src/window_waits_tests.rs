@@ -9829,7 +9829,8 @@ fn assert_no_unparsed_bodies(unparsed: &[String]) {
 /// the assertion names the broken one by its file, line and item.
 ///
 /// MUTATIONS: remove the assertion in [`assert_no_unparsed_bodies`] — this test does not panic;
-/// count a body that does not parse as parsed in [`scope_census`] — this test does not panic.
+/// count a body that does not parse as parsed in [`scope_census`] — the count assertion panics
+/// instead, and its message does not name the broken body, so the expected panic is not met.
 #[test]
 #[should_panic(expected = "unparsable bodies:\n  fixtures/broken.rs:3 (`trait_shape_broken`)")]
 fn an_unparsable_shadow_body_is_reported_by_name() {
