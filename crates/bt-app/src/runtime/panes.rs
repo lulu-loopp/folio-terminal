@@ -3645,7 +3645,8 @@ impl Runtime<'_> {
     /// It is what [`bt_transcript::paths::PathNamer::Pane`] carries, and therefore what decides
     /// whether a `\\wsl.localhost\<distro>\…` target printed into *this* pane names a place this
     /// window may read (route D of the untrusted-path audit, 2026-09-08). A seat with no session
-    /// behind it — a folder tab, a file tab — prints nothing at all, and `Windows` is the honest
+    /// behind it — a folder tab, a file tab — prints nothing at all, and this machine's own
+    /// spelling (the namespace's default: `Windows` on Windows, `Posix` elsewhere) is the honest
     /// answer for a pane that has no shell to speak another namespace.
     pub(crate) fn seat_path_namespace(
         &self,
