@@ -17986,7 +17986,8 @@ mod tests {
     /// request, new input, starts it again and is walked (revision (b)5, rule 1).
     ///
     /// MUTATION: fault the lane on a refused start (`lane::Ran::worker_ended` handing
-    /// `NotStarted` to the ledger) — the next request is refused `Faulted`.
+    /// `NotStarted` to the ledger) — the ledger says the worker's end beside the refusal (two
+    /// lines, observed red at "said once"), and the next request would be refused `Faulted`.
     #[test]
     fn a_refused_spawn_refuses_this_request_and_the_next_request_starts_the_worker() {
         let gate = std::sync::Arc::new(crate::lane::Gate::default());

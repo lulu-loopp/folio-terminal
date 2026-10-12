@@ -1570,7 +1570,8 @@ pub(crate) mod tests {
     /// an identity, and the next request walks.
     ///
     /// MUTATION: fault the lane on a refused start (`lane::Ran::worker_ended` handing
-    /// `NotStarted` to the ledger) — the next request is refused `Faulted`.
+    /// `NotStarted` to the ledger) — the ledger says the worker's end beside the refusal (two
+    /// lines, observed red at "said once"), and the next request would be refused `Faulted`.
     #[test]
     fn a_refused_spawn_refuses_this_request_and_the_next_request_starts_the_worker() {
         let gate = Arc::new(Gate::default());
