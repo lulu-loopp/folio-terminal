@@ -300,7 +300,7 @@ mod tests {
             .extra
             .insert("members".to_owned(), json!([1, "二"]));
         let mine = pin("url", "https://example.com/中文?a=b#c");
-        let base = table(&[a.clone()]);
+        let base = table(std::slice::from_ref(&a));
         let ours = table(&[a.clone(), mine.clone()]);
         let theirs = table(&[workspace.clone(), a.clone()]);
         let merged = merge(&base, &ours, &theirs);
