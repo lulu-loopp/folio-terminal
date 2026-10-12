@@ -5105,9 +5105,6 @@ mod tests {
         let reader = std::thread::spawn(|| {
             std::panic::panic_any("scripted: 读取线程 panicked");
         });
-        while !reader.is_finished() {
-            std::thread::yield_now();
-        }
         let joiner = std::thread::spawn(move || join_within(Duration::from_secs(30), reader));
         let carried = joiner
             .join()

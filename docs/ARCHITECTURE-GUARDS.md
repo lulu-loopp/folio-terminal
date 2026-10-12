@@ -281,12 +281,21 @@ not judged; any other is refused unless its handle follows — through `let`s,
 values given to a `self` field in its package, free functions' tails (by
 `FunctionPaths`) and method receivers — to a thread start (`std`'s
 `thread::spawn`, a `spawn` method, or the thread door `spawn_at_priority`
-by its identity) whose closure is a call edge to the boundary. A handle handed
-in as a parameter, or bound by a pattern that is not the whole value, is not
-followed and is refused. Its fixture `tests/fixtures/joined_panic` allows a door
+by its identity) whose closure is a call edge to the boundary. Every shape the
+reading does not support is refused with its site, never passed (round 2): a
+handle handed in as a parameter, bound by a pattern that is not the whole value,
+returned by an associated function or another method, started through a renamed
+`use` of `spawn` or taken out of a collection; a `join()` in a macro's tokens;
+`JoinHandle::join` handed on as a value. A `T::join(x)` through a type other
+than `JoinHandle` passes only when the type is written in full from a foreign
+crate's root (`windows_future::IAsyncOperationWithProgress::join`, the WinRT
+deployment waits); names called `join` that are not called, and `join`s that take
+arguments, are no thread's. Its fixture `tests/fixtures/joined_panic` allows a door
 thread contained through an alias and a contained handle kept in a field, and
 refuses a bare thread's `Err → Panicked` arm, the lookalike, a free function's
-bare handle made a default, a parameter and a helper-mediated body. When red,
+bare handle made a default, a parameter, a helper-mediated body, an associated
+function's handle, a renamed spawn, a collection, a macro's join, a join handed on
+as a value and a foreign type's join through an imported name. When red,
 contain the thread's body and give the panic its failure value, or carry the
 panic on (`expect`) and say the thread's panic ends the process.
 
