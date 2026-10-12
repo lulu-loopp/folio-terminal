@@ -808,6 +808,10 @@ pub struct OfferState {
     /// a racing writer can land. Fires once.
     #[cfg(test)]
     between: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// A test's refusal of the next write of the file: the one write that
+    /// fails, as a full or read-only disk would fail it.
+    #[cfg(test)]
+    refuse_next_write: AtomicBool,
 }
 
 impl OfferState {
@@ -855,6 +859,8 @@ impl OfferState {
             retry_after_ms: AtomicU64::new(0),
             #[cfg(test)]
             between: Mutex::new(None),
+            #[cfg(test)]
+            refuse_next_write: AtomicBool::new(false),
         }
     }
 
@@ -1021,6 +1027,13 @@ impl OfferState {
             }
         }
         if changed {
+            #[cfg(test)]
+            if self.refuse_next_write.swap(false, AtomicOrdering::AcqRel) {
+                return Err(bt_persist::WriteError::Io {
+                    path: self.path.clone(),
+                    source: std::io::Error::other("a test refused this write"),
+                });
+            }
             if crate::update_trial::defer(crate::update_trial::Writer::UpdateCheck) {
                 self.owed.store(true, AtomicOrdering::Release);
             } else {
@@ -1062,8 +1075,8 @@ impl OfferState {
     ///    Everything that reads or writes the stamp happens inside the claim.
     /// 2. **Then read the stamps**, and let go if it is not time yet ([`owed`]).
     /// 3. **Then write what the request did**: an answer with its stamp, or a
-    ///    refusal as the day's attempt (`attempted_at_ms`), which leaves the
-    ///    answer's stamp in place. The claim is held across the request, so a
+    ///    refusal — or an answer whose own write failed — as the day's attempt
+    ///    (`attempted_at_ms`), which leaves the answer's stamp in place. The claim is held across the request, so a
     ///    window that starts meanwhile finds it held and does not ask.
     ///
     /// Step 2 is one transaction and step 3 a second, after the request. The
@@ -1163,6 +1176,21 @@ impl OfferState {
 
         let answer = source.latest_tag();
         let completed_at_ms = completed_at();
+        // **The day's attempt is spent**, across every window and process (the
+        // no-retry-storm rule): written for a request that got no answer, and
+        // for an answer whose own write failed (0.4.8 E6) — the stamp says "we
+        // asked", not "we were answered". A feed's attempt is not written: a
+        // feed is a rehearsal, and nothing it does may hold back an ordinary
+        // start's question to the page (U-42e).
+        let spend_the_attempt = || {
+            if !local {
+                let _ = self.transact(|state| {
+                    state.attempted_at_ms = completed_at_ms;
+                    true
+                });
+            }
+            Outcome::Refused
+        };
         match answer {
             Ok(tag) => {
                 // Only the fields this thread fetched are written; everything
@@ -1179,21 +1207,12 @@ impl OfferState {
                     state.local_tag = local;
                     true
                 });
-                persisted.map_or(Outcome::Refused, |()| Outcome::Answered(tag))
-            }
-            Err(_) => {
-                // **The day's attempt is spent**, across every window and
-                // process (the no-retry-storm rule). A feed's refusal is not
-                // written: a feed is a rehearsal, and nothing it does may hold
-                // back an ordinary start's question to the page (U-42e).
-                if !local {
-                    let _ = self.transact(|state| {
-                        state.attempted_at_ms = completed_at_ms;
-                        true
-                    });
+                match persisted {
+                    Ok(()) => Outcome::Answered(tag),
+                    Err(_) => spend_the_attempt(),
                 }
-                Outcome::Refused
             }
+            Err(_) => spend_the_attempt(),
         }
     }
 
@@ -2115,6 +2134,36 @@ mod tests {
         assert_eq!(answered.checked_at_ms, next_day);
         assert_eq!(answered.attempted_at_ms, 0, "an answer clears the attempt");
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (0.4.8 E6, the release read's F9) — **an answer whose write
+    /// failed is still the day's attempt**: the stamp says the page was asked,
+    /// so a second process opened on the file the same day does not ask
+    /// again, and About still says the last question got no answer.
+    ///
+    /// MUTATION: in `ask`, answer `Outcome::Refused` for a failed answer
+    /// transaction without `spend_the_attempt` (the 0.4.7 asymmetry): the
+    /// second process asks at once and the call count goes to two.
+    #[test]
+    fn an_answer_whose_write_failed_is_still_the_days_attempt() {
+        let root = dir("answer-unwritten");
+        let owner = OfferState::load(&root, true);
+        let source = Counting::ok("v0.4.7");
+        let start = 1_756_000_000_000u64;
+        owner
+            .refuse_next_write
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(owner.run(start, &source), Outcome::Refused);
+        let state = state_of(&root);
+        assert_eq!(state.attempted_at_ms, start, "the attempt is stamped");
+        assert_eq!(state.checked_at_ms, 0, "and no answer's stamp");
+        assert_eq!(state.latest_tag, None, "nor its tag");
+
+        let second = OfferState::load(&root, true);
+        assert_eq!(second.run(start + 60_000, &source), Outcome::TooSoon);
+        assert_eq!(source.calls(), 1, "one question that day, for both");
+        assert_eq!(second.view().answered, Some(false));
         let _ = std::fs::remove_dir_all(&root);
     }
 

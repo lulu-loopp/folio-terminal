@@ -14955,3 +14955,11 @@ The rights table's row for the new build's receipt named only `TrialStarting` an
 **The rule.** The rights table is the contract for the receipt as for every other effect: anything it does not list, nobody does. A journal the writer cannot read whole grants nothing — the receipt roles never accept what they cannot read.
 
 **Pinned by** `update_txn::tests::the_receipt_is_written_only_where_the_rights_table_grants_it` (every phase sample; a planted write outside the rights is red), `update_trial::tests::no_receipt_is_written_over_a_journal_the_writer_cannot_read_whole`, and the corrected pin in `every_phase_is_recorded_only_by_the_writers_the_table_names`.
+
+### 2026-10-12 — An update check whose answer could not be written still counts as that day's attempt (0.4.8 E6, F9)
+
+A check that got an answer but could not write it to `update-check.json` returned *no answer* without writing `attempted_at_ms`, so every other Folio process on the machine found both stamps a day old and asked the releases page once more at its next launch. `update::OfferState::ask` now spends the day's attempt on that road as on a refused request (`spend_the_attempt`): the stamp says the page was asked, not that it answered; `checked_at_ms` and `latest_tag` stay where they were, and About still says the last question got no answer.
+
+**The rule.** RULES §36 as written: every failure is silent and counts as that day's attempt — a failed write of the answer is one.
+
+**Pinned by** `update::tests::an_answer_whose_write_failed_is_still_the_days_attempt` (a test-only refusal of the next write, `OfferState::refuse_next_write`).
