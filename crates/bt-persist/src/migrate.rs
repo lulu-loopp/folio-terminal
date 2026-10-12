@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bt_platform::admission::WorkerCtx;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -1726,6 +1727,82 @@ pub(crate) fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, BoundedRead
         });
     }
     Ok(bytes)
+}
+
+/// **What one stable read of a document found** (`docs/plans/design/settings-reread-2026-10-11.md`,
+/// revision (b)9): the storage worker's read, for a re-read and for a conditional write's
+/// precondition alike.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StableRead {
+    /// No file is under the name.
+    Absent,
+    /// A file is there and its bytes were not obtained: it would not open or read, or it is
+    /// over [`MAX_DOCUMENT_BYTES`]. Nothing is known about what it holds.
+    Unobtained(String),
+    /// The file's bytes, read whole while the file stood still.
+    Bytes(Arc<[u8]>),
+    /// The file changed while it was being read — its length, modified time or birth time
+    /// moved, or it went away. The bytes in hand are not a document anybody saved.
+    MovedDuringRead,
+}
+
+/// **Read `path` while it stands still**: its metadata, the bounded read
+/// ([`read_bounded`], the settings lane), then its metadata again. A writer that changed the
+/// file in between is answered [`StableRead::MovedDuringRead`], never with the bytes it was in
+/// the middle of writing. On the storage worker only: it waits for the disk.
+pub fn read_stable(worker: &WorkerCtx, path: &Path) -> StableRead {
+    read_stable_between(worker, path, || {})
+}
+
+/// [`read_stable`], with `between` run after the bytes are in hand and before the metadata is
+/// asked again — where a racing writer lands. [`read_stable`] passes nothing.
+pub fn read_stable_between(worker: &WorkerCtx, path: &Path, between: impl FnOnce()) -> StableRead {
+    let _ = worker;
+    let before = match std::fs::metadata(path) {
+        Ok(metadata) => Standing::of(&metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return StableRead::Absent,
+        Err(error) => return StableRead::Unobtained(error.to_string()),
+    };
+    let bytes = match read_bounded(path, MAX_DOCUMENT_BYTES) {
+        Ok(bytes) => bytes,
+        // It was there a moment ago: whoever removed it is the writer this read raced.
+        Err(BoundedRead::NotFound) => return StableRead::MovedDuringRead,
+        Err(BoundedRead::Io(message)) => return StableRead::Unobtained(message),
+        Err(BoundedRead::TooLarge { bytes }) => {
+            return StableRead::Unobtained(format!(
+                "{bytes} bytes, more than the {MAX_DOCUMENT_BYTES} a document may be"
+            ));
+        }
+    };
+    between();
+    let after = match std::fs::metadata(path) {
+        Ok(metadata) => Standing::of(&metadata),
+        Err(_) => return StableRead::MovedDuringRead,
+    };
+    if before != after || after.length != bytes.len() as u64 {
+        return StableRead::MovedDuringRead;
+    }
+    StableRead::Bytes(bytes.into())
+}
+
+/// What a file's metadata says about whether it is the same file holding the same bytes: its
+/// length, its modified time and its birth time (where the platform records one — a file
+/// renamed into place is born anew).
+#[derive(PartialEq, Eq)]
+struct Standing {
+    length: u64,
+    modified: Option<SystemTime>,
+    born: Option<SystemTime>,
+}
+
+impl Standing {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            length: metadata.len(),
+            modified: metadata.modified().ok(),
+            born: metadata.created().ok(),
+        }
+    }
 }
 
 /// Put the bytes this read refused beside the file they came from, and answer
