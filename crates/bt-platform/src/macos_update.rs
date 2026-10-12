@@ -1421,9 +1421,8 @@ mod tests {
         CDHash=618d5e3368be265abd51472976742fa902819c8e\n\
         Signature=adhoc\n";
 
-    /// The helper mode [`helper_says_then_waits`] runs in: the path of the
-    /// marker it writes once it has said [`SAID_BEFORE`].
-    const HELPER_MODE: &str = "MACOS_UPDATE_HELPER_MARKER";
+    /// The helper mode [`helper_says_then_waits`] runs in.
+    const HELPER_MODE: &str = "MACOS_UPDATE_HELPER_MODE";
 
     /// What the helper says before it waits: mixed script, so the kept text
     /// is not ASCII by accident.
@@ -1431,16 +1430,18 @@ mod tests {
 
     /// A helper probe: started by
     /// [`a_child_ended_at_its_deadline_is_refused_with_what_it_said`], it says
-    /// [`SAID_BEFORE`], writes its marker, and waits to be ended.
+    /// [`SAID_BEFORE`] on standard error, then `ready` on standard output, and
+    /// waits to be ended.
     #[test]
     fn helper_says_then_waits() {
         use std::io::Write as _;
-        let Ok(marker) = std::env::var(HELPER_MODE) else {
+        if std::env::var(HELPER_MODE).as_deref() != Ok("say") {
             return;
-        };
-        println!("{SAID_BEFORE}");
-        std::io::stdout().flush().expect("flush what it said");
-        std::fs::write(&marker, b"said").expect("the marker");
+        }
+        eprintln!("{SAID_BEFORE}");
+        std::io::stderr().flush().expect("flush what it said");
+        println!("ready");
+        std::io::stdout().flush().expect("flush its readiness");
         loop {
             std::thread::park();
         }
@@ -1456,8 +1457,7 @@ mod tests {
     /// 0.4.7 refusal, which dropped the output).
     #[test]
     fn a_child_ended_at_its_deadline_is_refused_with_what_it_said() {
-        let marker = bt_testpath::temp_path("e6-macos-update-said");
-        let _ = std::fs::remove_file(&marker);
+        use std::io::BufRead as _;
         let mut command = crate::quiet_command(std::env::current_exe().expect("this test binary"));
         command
             .args([
@@ -1465,17 +1465,26 @@ mod tests {
                 "macos_update::tests::helper_says_then_waits",
                 "--nocapture",
             ])
-            .env(HELPER_MODE, &marker);
-        let child =
+            .env(HELPER_MODE, "say");
+        let mut child =
             crate::spawn_probe(&mut command, crate::ProbeStdio::ANSWER).expect("start the helper");
-        // The deadline is a millisecond; each rest lasts until the helper has
-        // said its line, so the deadline passes only after it has.
-        let refused = held_to("helper", child, Duration::from_millis(1), &mut || {
-            while !marker.exists() {
-                std::thread::sleep(POLL);
+        let mut readiness = std::io::BufReader::new(child.take_stdout().expect("stdout is piped"));
+        // The owner's first look comes at once; its first rest lasts until
+        // the helper says it is ready — after it has said its line — so the
+        // deadline is met only after that (a completion signal, not the
+        // clock); later rests yield until it is.
+        let mut ready = false;
+        let refused = held_to("helper", child, Duration::from_millis(200), &mut || {
+            while !ready {
+                let mut line = String::new();
+                let read = readiness
+                    .read_line(&mut line)
+                    .expect("the helper's readiness");
+                assert_ne!(read, 0, "the helper ended before it was ready");
+                ready = line.trim() == "ready";
             }
+            std::thread::yield_now();
         });
-        let _ = std::fs::remove_file(&marker);
         let Err(Refusal::TimedOut { program, said, .. }) = &refused else {
             panic!("the helper is ended at its deadline: {refused:?}");
         };
