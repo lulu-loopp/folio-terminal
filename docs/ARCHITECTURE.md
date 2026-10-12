@@ -1222,7 +1222,7 @@ A2e puts one `expect` on each; revision (k) allocates the rest.
 | # | status | call | where | disposition |
 |---|---|---|---|---|
 | 1 | done | `ShellExecuteW` / `NSWorkspace::openURL:` — synchronous, no timeout; the measured ~1.4 s Ctrl+click stall | `bt-platform::handoff::{windows_handoff,macos_handoff}::hand_over`, reached from `Runtime::open_local_path`, `reveal_in_explorer`, `open_local_path_verified`, `reveal_verified`, `open_preview_link`, `hand_url_to_the_browser`, `activate_local_image_path`, `open_font_settings` | **done** — *a hand-off to the system runs on its own lane, and the window that receives it may take the front* (`DESIGN.md`, 2026-09-22) |
-| 2 | open | the marks lock: a wait with no deadline behind our own writer, then `try_lock` and `sleep` up to `OUR_TURN` = 2 s for a holder in another process (`DESIGN.md`, 2026-09-23), then a dated `$PROFILE` copy, an atomic write and two marks writes | `Runtime::add_to_profile`, `spend_powershell_intent` → `profile_runtime::install_recorded`; the agent hook installs (`Runtime::apply_claude_hooks`, `apply_codex_notify`, `apply_copilot_hooks`) → `attention_ownership::record`; `psreadline::install_recorded`, from `Runtime::apply_psreadline`, `Runtime::create`'s `psreadline::upgrade_recorded` and `App::release_trial_writes` (the thread-door note, revision (k)9 item 1) | **0.4.4** — storage lane; the enable and removal halves are already on workers, the install half is not |
+| 2 | open | the marks lock: a wait with no deadline behind our own writer, then `try_lock` and `sleep` up to `OUR_TURN` = 2 s for a holder in another process (`DESIGN.md`, 2026-09-23), then a dated `$PROFILE` copy, an atomic write and two marks writes | `Runtime::enable_via_profile` → `begin_profile_install` → `profile_runtime::install_recorded`, on the `powershell-profile-install` worker; the agent hook installs (`Runtime::apply_claude_hooks`, `apply_codex_notify`, `apply_copilot_hooks`) → `attention_ownership::record`; `psreadline::install_recorded`, from `Runtime::apply_psreadline`, `Runtime::create`'s `psreadline::upgrade_recorded` and `App::release_trial_writes` (the thread-door note, revision (k)9 item 1) | **0.4.4** — storage lane; the enable and removal halves are already on workers, the install half is not |
 | 3 | open | `psreadline::apply_recorded` — nine files, ~429 KB, under the same lock | `Runtime::apply_psreadline` | **0.4.4** — storage lane; named by the 2026-09-21 history entry |
 | 4 | open | `psreadline::installed_copy` — a recursive walk of the module directory | `Runtime::refresh_psreadline_installed` | **0.4.4** — observation lane |
 | 5 | done | `bt_platform::monospace_font_families()` — the machine's whole font collection, enumerated inline; the traced cause of the frozen gear | `settings::monospace_family_files` ← `apply_stored_terminal_font` | **done** — *the font list is walked only on its lane, by a numbered request; the face in settings.json is found by its name* (`DESIGN.md`, 2026-09-24); what is left on the window thread is `bt_platform::monospace_family_named`, one family asked of the system collection (station `font family lookup`), measured at 2.6–3.4 ms cold against the walk's 71–80 ms on the development machine |
@@ -1384,6 +1384,132 @@ and the present never ask, and the allowance moves no deadline.
 
 Each step retains its existing implementation behind the new door and ships
 independently.
+
+### 5.5 The completion ledger — how every request ends
+
+Every request protocol — an item that puts work on another thread or process, or does an
+effect on the window thread, and later learns the outcome — is one row of the registry's
+`# completions` section (the side-effects contract,
+`docs/plans/design/side-effects-contract-2026-10-11.md`, §3.1 as revised by (b)1 and (c)1;
+ticket S-1): its door as a `bt-source` item key, the threads it runs on, the `AppEvent` that
+announces its end (or `return`, `detached`, `polled`), its failure road, what becomes of a
+request a newer one replaces, where the answer goes when the requester is gone, and its
+status — `conforms`, `owner-thread` (the closed C7 list of the note's revision (b)6), or the
+`D-<n>` rows of `docs/plans/structural-debt.md` and the §5.3 rows that repair it. Three rules
+hold it. **The ledger is the code's**: every `AppEvent` answer, every lane of the lane suite
+and every `open` or `pending` §5.3 row names a row, every member of the C7 list is an
+`owner-thread` row, every worker's door body is reached from a row's door, and every door is an
+item of the product (`hang_watch::window_waits_tests`).
+**A conforming door does not wait in its own body**: no `# vocabulary` entry stands in it —
+an interim check of the door alone, not of what it calls, so it is not C1's gate; the
+transitive guard waits for the call graph (the note's revision (c)2). **Repairs only shrink**:
+against the merge base, a status's repairs may only drop, to `conforms`, and a new row names
+none (`scripts/ci/check-window-waits.ps1`). The table is generated with §5.3's, by the same
+script and the same test.
+
+<!-- window_waits.tsv # completions: generated by scripts/dev/generate-window-waits-table.ps1; edit the registry, not this table -->
+| class | door | thread | signal | failure | supersession | sink | status |
+|---|---|---|---|---|---|---|---|
+| a pane's shell birth | `pty_door::request_shell` | bt-pty-birth | PtyOutput | `Born` carries the error; a panic is `PtyError::Backend`; a refused spawn is the door's error | a generation per request; none coalesced | an abandoned number's shell is retired off the window thread | conforms |
+| the birth-death fallback shell | `Runtime::reap_exited_tabs` | bt-pty-birth | PtyOutput | a refused spawn or a `Born` error keeps the face, one line | a generation per request; one per leaf | abandoned with its leaf, retired off the window thread | conforms |
+| shell retirement | `Runtime::close_pane` | pty-retirement | detached | the retirement thread's own line; a thread that cannot start retires on the caller (D-81); a teardown panic leaves the count up with no line | one thread per session | the retirement thread accepts at once | D-81, D-86 |
+| input to a shell | `offer_pty_input` | window (row 19) | return | `InputRefused` is the terminal; a dead writer is silent and later pushes queue until the ring refuses | none; whole writes in order | held in `PaneBirth` while the pane is in birth | D-86 |
+| a shell's resize | `commit_leaf_resize` | window (row 12) | return | a `PtyError` value | coalesced per leaf; the last size is owed to a shell in birth | — | owner-thread |
+| quit's retirement wait | `pty_door::wait_for_retirements` | window (row 15) | return | the retirements still going at the deadline, one line | the whole process's count | — | owner-thread |
+| PSReadLine version and policy | `psreadline::begin_probe` | psreadline-probe | PsReadLineProbed | `Unknown` is the newest answer; a refused spawn leaves the request standing, one line | numbered; asks while a probe is out are answered by the next probe with no outcome of their own | the process cell | D-86, D-87, D-90 |
+| `$PROFILE` observation | `spawn_profile_observation` | powershell-profile-observation | PowerShellProfileProbed | a refused spawn is discarded | numbered per edition; an older observation is refused | process statics | D-86, D-87 |
+| Copilot version | `attention_copilot::begin_probe` | copilot-version-probe | CopilotProbed | a missing version is the answer; a refused spawn leaves the request standing, one line | numbered; asks while a probe is out are answered by the next probe with no outcome of their own | the process cell | D-86, D-87, D-90 |
+| locale reading | `locale_declaration::ask` | locale-reading | LocaleAnswered | a refused spawn or a dead reading is published as a failed reading | numbered; a waiting ask replaced by a newer one gets no outcome of its own | the cell; births in a closed window are gone | D-90 |
+| foreground program | `foreground_program::request` | bt-foreground-program-worker | MathReady | `Unknown`; a refused spawn fails the start | one in flight per leaf; later asks collapse into one follow-up; a stale incarnation's answer is dropped | an answer for a gone tab is dropped | D-86 |
+| program walk | `programs_lane::request` | program-walk | ProgramsAnswered | a refused spawn leaves the request standing, one line; a dead walk is recorded and asked again | numbered; requests made during a walk get no outcome of their own | the process mailbox | D-85 |
+| font list | `request_font_walk` | font-families | FontsScanned | none: a failed walk is a shorter list | requests made during a walk collapse into one more round with no outcome of their own | process slots | D-72 |
+| taskbar auto-hide | `taskbar_lane::request` | taskbar-state | TaskbarAnswered | none: the question has no error form | only the newest number is served; the ones between get no outcome | the process slot | D-73 |
+| install channel | `install_channel::begin` | bt-install-channel | InstallChannelRead | a refused spawn still wakes and reads `Unknown` | one per process | the process cell | D-86 |
+| recovered edits listing | `recovered::ask` | bt-recovered | RecoveredEditsListed | a refused spawn or a failed listing is one line and no event | one per process | dropped when no window stands; the record is already written | D-86 |
+| Explorer package probe | `explorer_menu::begin_probe` | folio-explorer-probe | ExplorerPackageChanged | a refused spawn panics the caller | its repair takes the deployment latch | the process state | D-86, D-87 |
+| Explorer menu press | `explorer_menu::request` | folio-explorer-deploy | ExplorerPackageChanged | `Result<bool, String>` in one slot; a refused spawn panics the caller | one job at a time; one queued press, the last wins, an overwritten press gets no outcome | one asking window; its card is dropped if it closed | D-86, D-87, D-90 |
+| PSReadLine installed copy | `Runtime::refresh_psreadline_installed` | window (row 4) | return | none represented | — | — | row 4 |
+| keyboard layout tables | `LayoutTables::shifted_character` | folio-layout-tables | LayoutTablesReady | a refused spawn fails the start; a full queue makes the slot `Unavailable`, one line; a dead worker is learned only by a later lookup, with no wake | keyed by layout; a pending layout is not asked twice | one instance for every window | D-86, D-88 |
+| files column listing | `FilesWorker::request` | bt-files-worker | FilesReady | errors are values; a dead worker disables the lane, said once; a refused spawn fails the start | newest per target; a replaced request ends with no outcome | an answer for a gone owner is dropped | D-33 |
+| preview read | `PreviewWorker::request` | bt-preview-worker | PreviewReady | errors are values; a dead worker disables the lane, said once; a refused spawn fails the start | newest per target; a replaced request ends with no outcome; `land_read` refuses a read the buffer has moved past | dropped for a closed tab | D-33 |
+| git questions | `GitWorker::request` | bt-git-worker | GitReady | a fault answer per question; a dead worker disables the lane, said once | reads coalesce newest per target; a replaced read ends with no outcome | dropped for a closed tab | D-33 |
+| git mutations | `GitWorker::request` | bt-git-worker | GitReady | a fault answer | never coalesced; each its own answer | a closed tab drops the answer after the effect | D-92 |
+| palette file index | `IndexWorker::request` | bt-index-worker | FileIndexReady | a walk always answers; a dead worker's disconnection is discarded | an epoch per root; a reopen joins the walk out | dropped for a removed root | D-33 |
+| formula, decode and video glance | `dispatch_decoration_task` | bt-math-worker | MathReady | errors are values; a failed send disables the lane | in order; no request identity | an answer for a stale or closed pane is ignored | D-74, D-75, D-76 |
+| image scale | `dispatch_decoration_task` | bt-image-scale-worker | MathReady | errors are values; a failed send disables the lane | newest per target; no request identity | an answer for a stale or closed pane is ignored | D-74, D-75, D-76 |
+| path verification | `dispatch_decoration_task` | bt-path-verify-worker | MathReady | errors are values; a failed send disables the lane | in order; no request identity | an answer for a stale or closed pane is ignored | D-74, D-75, D-76 |
+| background picture decode | `Runtime::reload_background_picture` | background-picture | BackgroundPictureReady | a refused spawn is discarded; a decode error is a card | a generation per window; an older decode can overwrite a newer answer in the slot | the window's slot, orphaned when it closes | D-86, D-87, D-90 |
+| folder chooser | `bt_platform::FolderPicker::request` | window | polled | the dialog's error is one line; a cancel is silent | a second ask while one is open is refused synchronously | the window's subclass; never collected if the window closes | D-88 |
+| OS hand-off | `Runtime::hand_off` | bt-os-handoff | HandoffAnswered | the hand-off's own `Result`; a full lane or a dead worker answers only a later submission | an id per request; none coalesced | a closed window's answers are claimed by nobody | D-70, D-71 |
+| desktop notification | `NotificationDesk::show` | window | return | a refusal is said once and latched | — | — | D-93 |
+| the session file | `SessionStore::flush_if_due` | session-writer | polled | a failed write is said once per streak and re-armed on the debounce | a generation per write; a stale receipt only advances what landed | — | D-88, D-89 |
+| the launch's session backup | `SessionStore::queue_launch_backup` | session-writer | detached | a refusal is one line; a writer that dies on it says nothing | one per launch | — | D-86 |
+| quit's session write wait | `SessionWriter::wait_for` | window (row 16) | return | a timeout lets the quit go on; a stopped writer stops it | the one generation it waits for | — | owner-thread |
+| the session writer's close | `SessionWriter::close` | window (row 16b) | return | past the budget the writer is let go | — | — | owner-thread |
+| an update quit's session receipt | `SessionStore::hand_over_final` | session-writer | polled | a refused write stops the quit; overdue past `UPDATE_RECEIPT_DEADLINE` | the one generation it waits for | — | D-88 |
+| the trial's receipt | `SessionStore::write_receipt` | session-writer | polled | a failed write is written again on a doubling backoff; a dead writer reads as pending | one per process | — | D-88, D-89 |
+| the update hand-off at quit | `FolioApp::hand_the_update_over` | session-writer | polled | overdue past `HANDOFF_DEADLINE`, one line | one per quit | dropped when the quit ends | D-88 |
+| a document's save | `Runtime::save_preview_on` | window (row 20) | return | `SaveOutcome::{Conflict, Failed}` to the pane | — | — | row 20 |
+| a preview file's rename | `Runtime::rename_preview_file` | window (row 20) | return | a toast | — | — | row 20 |
+| a files row's rename | `Runtime::rename_files_row` | window (row 20) | return | a toast | — | — | row 20 |
+| settings write | `SettingsStore::write_now` | window (row 20) | return | said once per streak; a fault sentence at the fifth | writes held and released together | — | row 20 |
+| keybindings write | `KeybindingsStore::write_now` | window (row 20) | return | said once per streak; a fault sentence at the fifth | — | — | row 20 |
+| profiles write | `ProfilesStore::write_now` | window (row 20) | return | said once per streak; a fault sentence at the fifth | — | — | row 20 |
+| pins write | `PinsStore::write_now` | window (row 20) | return | said once per streak; a fault sentence at the fifth | — | — | row 20 |
+| a diagnostics line | `diagnostics::note` | window (row 20) | return | the append's failure is discarded | — | — | row 20 |
+| Claude's agent hooks | `Runtime::apply_claude_hooks` | window (row 2) | return | `Outcome::Refused` to a toast | — | — | row 2 |
+| Codex's notify hook | `Runtime::apply_codex_notify` | window (row 2) | return | `Outcome::Refused` to a toast | — | — | row 2 |
+| Copilot's agent hooks | `Runtime::apply_copilot_hooks` | window (row 2) | return | `Outcome::Refused` to a toast | — | — | row 2 |
+| PSReadLine apply | `Runtime::apply_psreadline` | window (row 2), window (row 3) | return | `Outcome::Refused`, one line and a toast | — | — | row 2, row 3 |
+| PSReadLine upgrade | `psreadline::upgrade_recorded` | window (row 2) | return | one line; the next launch tries again | — | — | row 2 |
+| shell integration enable and undo | `shell_integration::profile_runtime::begin_profile_install` | powershell-profile-install, powershell-profile-install-undo | PowerShellProfileProbed | a refusal is the outcome; a refused spawn is discarded | each its own answer, addressed to its window | a closed window's answer is dropped | D-86, D-87 |
+| shell integration removal | `shell_integration::profile_runtime::begin_removal` | powershell-profile-removal | PowerShellProfileProbed | the report's fates; a refused spawn is discarded | no identity; the newest report overwrites the slot | unaddressed: the first window takes it | D-86, D-87, D-90 |
+| PowerShell script preparation | `spawn_powershell_preparation` | powershell-script-prepare | PowerShellProfileProbed | a refused spawn is discarded; probe failures are values | a claim before the spawn joins concurrent asks | process-wide answers | D-86, D-87 |
+| a parse probe asked again | `schedule_parse_retry` | powershell-script-prepare | PowerShellProfileProbed | a refused spawn is the answer `Failed(WorkerSpawn)` | a key and an attempt number; only the attempt still owed is published | process-wide answers | D-86 |
+| the terminal's clipboard write | `write_terminal_clipboard_text` | window (row 26) | return | an error string, one line; five opens with sleeps between them | — | — | row 26 |
+| a formula's LaTeX copy | `Runtime::copy_math_latex` | window (row 26) | return | an error string, one line; five opens with sleeps between them | — | — | row 26 |
+| a clipboard line read | `Runtime::clipboard_line` | window (row 26) | return | an error reads as no text | — | — | row 26 |
+| a paste into a field | `Runtime::paste_into_field` | window (row 26) | return | an error reads as no text | — | — | row 26 |
+| a paste into a preview | `Runtime::paste_into_preview` | window (row 26) | return | an error is one line | — | — | row 26 |
+| the terminal's paste | `Runtime::paste_from_clipboard_into` | window (row 26) | return | an error is a notice | — | — | row 26 |
+| a clipboard picture saved | `Runtime::save_clipboard_picture` | clipboard-picture | ClipboardPictureReady | a refused spawn or a failed save is a toast | a generation per window; a superseded answer is refused under the inbox lock | an answer for a gone target is dropped | D-86 |
+| update check | `update::spawn_check` | bt-update-check | UpdateChecked | a refusal stamps the attempt; a refused spawn records an answer and sends no `UpdateChecked` | one check out; a second ask shares it | process state every window reads | D-86 |
+| update download and staging | `Job::answer_verb` | bt-update-job | UpdateJobProgress | `Stopped` becomes `Failed`; a refused spawn is `Failed` | a transaction per offer; a stale report is dropped | the application's job | D-86 |
+| update launch pass | `Job::consider` | bt-update-job | UpdateJobOffer | a refused spawn runs the check and leaves the transaction for the next launch | once per process | the application's job | D-86 |
+| trial watch | `update_trial::begin_watch` | folio-trial-watch | TrialWritesReleased | a refused spawn is one line and the held writes are never released | one per trial | the process slot | D-86, D-87 |
+| trial claim | `update_trial::take_the_claim_within` | main (row 28) | return | not had: one line and the process leaves | — | — | row 28 |
+| update leave guard | `update_handoff::leave_armed` | main (row 29) | return | a timeout or a dead guard is said here, in a box | one per process | — | owner-thread |
+| update transaction sweep | `<Machine as World>::on_a_worker` | bt-update-sweep | detached | a refused spawn keeps the transaction for the next start; a failed step is one line; a panic is silent | one per transaction | — | D-86 |
+| the uninstaller's door process | `uninstall::run` | folio-uninstall-cleanup | return | each entry's fate in the door's report; a refused spawn is a refused entry; a started remover is let go with no handle kept and no completion sink | one per process | the door's report and its exit code | D-86 |
+| the copied native remover | `uninstall::remover_standalone` | folio-uninstall-remove | return | the removal's failure is written beside the plan and is its exit code; the remover is let go once started, with no handle kept and no completion sink | one per process | the plan's folder | D-86 |
+| stale claim sweep | `main` | folio-claim-sweep | detached | a refused spawn is discarded; a sweep is one line | one per start | — | D-86, D-87 |
+| video prewarm | `bt_platform::video::prewarm` | folio-video-prewarm | detached | a refused spawn is discarded | one per start | — | D-87 |
+| a video seat's engine | `VideoSeats::open` | folio-video-engine | polled | a refused spawn, or an engine not built within `OPEN_BUDGET`, reads `Unresponsive` | the newest generation | the seat owns it; a replaced seat's engine is shut down | D-86, D-88 |
+| video seat shutdown | `VideoSeats::close` | window (row 25) | return | past `SHUTDOWN_BUDGET` the engine is let go, one line | — | — | row 25 |
+| media quiet at exit | `bt_platform::video::shutdown_media_session` | main (row 27) | return | a reader still inside at the deadline is one line | — | — | row 27 |
+| trace lines | `trace_sink::stderr_line` | bt-trace-sink | detached | a full queue drops the line and counts it; a writer that never started or died reports nothing | in order | — | D-86, D-87 |
+| trace flush | `trace_sink::flush` | main (row 17) | return | past `FLUSH_TIMEOUT` the writer is let go | — | — | owner-thread |
+| launch hand-over | `launch_wire::hand_over` | main (row 18) | return | every failure opens a window here | — | — | owner-thread |
+| data directory endpoints | `open_the_data_directorys_endpoints` | window (row 24) | return | a failed start is latched as no endpoint | once per process | — | row 24 |
+| web environment | `WebSeat::start_environment` | window (row 21) | WebPageSpoke | an error where it stands or in the callback is the page's fault card; a missing callback meets the start deadline | a generation per seat; a second ask joins the creation out | a gone seat's queue is never drained | owner-thread |
+| web controller | `WebSeat::step` | window (row 21) | WebPageSpoke | an error where it stands or in the callback is the page's fault card | a generation per seat; an orphaned controller is closed when it arrives | an orphaned controller is closed | owner-thread |
+| web rehost | `WebSeat::rehost` | window (row 21) | return | the rehost's report | — | — | owner-thread |
+| web navigation | `WebSeat::step` | window | WebPageSpoke | a refused navigation or a failed load is the page's fault card | no request id: matched by address | a gone seat's queue is never drained | D-91 |
+| web thumbnails | `PageShrinker::send` | folio-web-thumb | WebPageSpoke | a refused spawn panics the window thread; an undecodable page has no picture | a ticket per job; a stale ticket is dropped | per window; a closed window's worker ends | D-86, D-87 |
+| present | `Runtime::present_seats_and_commit` | window (row 9) | return | a render or commit error goes to device recovery | an unchanged frame is not presented | — | owner-thread |
+| device recovery | `FolioApp::recovered_from_a_lost_device` | window (row 10) | return | three attempts with sleeps between them; giving up stops the process | — | — | row 10 |
+| first GPU open | `gpu_door::open_first_window` | window (row 23) | return | an error fails the window's creation | once per process | — | owner-thread |
+| surface and compositor birth | `Runtime::open_window` | window | return | an error fails the window's opening | per window | — | owner-thread |
+| the compositor's window size | `Runtime::resize` | window | return | an error is the caller's | the same size commits nothing | — | owner-thread |
+| window title | `Runtime::flush_title` | window (row 14) | return | a refusal keeps the title wanted | the latest value, at most once a frame | — | owner-thread |
+| IME caret area | `Runtime::apply_ime_cursor_area` | window (row 22) | return | a refusal keeps the area wanted | the latest value, at most once a turn | — | owner-thread |
+| pointer cursor | `Runtime::apply_pointer_cursor` | window | return | a refusal is discarded | the latest value | — | owner-thread |
+| window visibility | `owner_door::set_visible` | window | return | a refusal is the caller's | — | — | owner-thread |
+| window focus | `Runtime::open_from_notification` | window | return | a refusal is discarded | — | — | owner-thread |
+| where the window is | `Runtime::observe_window_place` | window (row 13) | return | a refusal keeps the last answer | once per turn | — | D-94 |
+| font family lookup | `settings::monospace_family_files` | window (row 5) | return | a refusal reads as no files | one per stored face | — | owner-thread |
+| watch steward | `EarHandle::want` | watch-steward | WatchStewardAnswered | a failed start is a member's report; a refused spawn leaves the work marked, one line | the wanted set; the worker serves the current state | a closed ear's reports are removed | D-86 |
+<!-- window_waits.tsv # completions: end -->
 
 ---
 

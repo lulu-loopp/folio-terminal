@@ -1,8 +1,9 @@
 # the_window_threads_checks_that_are_not_rust
 #
-# Four checks the thread-door note 2026-09-26 gives A2a (revisions (j)1, (j)3,
-# (j)11.4-(j)11.6; budget note C-2), each reported under its own name, all run
-# before the script answers:
+# Six checks — four the thread-door note 2026-09-26 gives A2a (revisions (j)1,
+# (j)3, (j)11.4-(j)11.6; budget note C-2) and two the side-effects contract
+# 2026-10-11 gives S-1 — each reported under its own name, all run before the
+# script answers:
 #
 #   1. the bare-site inventory only shrinks (below);
 #   2. the configuration fence: the five clippy.toml locations;
@@ -15,6 +16,12 @@
 #      this script is told (M7e);
 #   4. a registry row added without a ruling is refused, and the rows pending
 #      a ruling only shrink (M9).
+#   5. the completions ledger's repairs only shrink: a status that names a
+#      D-row or a registry row may only lose them, to `conforms` (S-1);
+#   6. the completions doors joined to a thread started elsewhere
+#      (`docs/plans/completions-door-starts.tsv`) and the worker door bodies no
+#      product code calls yet (`docs/plans/completions-uncalled-bodies.tsv`)
+#      only shrink (S-1).
 #
 # ── 1. the_bare_site_inventory_only_shrinks
 #
@@ -56,6 +63,10 @@ $ErrorActionPreference = "Stop"
 if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -ErrorAction SilentlyContinue) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
+
+# `git show` hands the registry back as UTF-8; read it as that, whatever the console's code page
+# (a GBK console swallows the tab after an em dash and shifts every later cell).
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $failures = @()
@@ -284,6 +295,117 @@ foreach ($row in $rowsNow.Keys) {
     }
 }
 
+# ── 5. the completions ledger's repairs only shrink (S-1) ─────────────────────────────────────
+# `# completions` (side-effects contract 2026-10-11, section 3.1): a row's status is `conforms`,
+# `owner-thread`, or the repairs that owe it (`D-<n>`, `row <n>`). The equality half is the
+# source guard's tests in `hang_watch::window_waits_tests`; this is the historical half, the
+# shape rule 4 gives `# rows`: against the merge base, a row's repairs only shrink — a status
+# that names repairs may drop some of them or become `conforms`, never name one it did not; a
+# row that conformed (or was a C7 member) never comes to owe one; and a new row names none.
+# A merge base without the section is the change that introduces it: nothing to compare.
+# Its names are its own (`$repairsNow`, `$repairsBefore`, `$repairsAdded`): `$now`, `$before`
+# and `$grown` are the bare-site inventory's, read again after this block.
+function Read-Completions([string[]]$lines) {
+    $rows = [ordered]@{}
+    $inside = $false
+    $header = $false
+    foreach ($line in $lines) {
+        if ($line.StartsWith("##")) { continue }
+        if ($line.StartsWith("# ")) { $inside = ($line -eq "# completions"); continue }
+        if (-not $inside -or $line.Length -eq 0) { continue }
+        if (-not $header) { $header = $true; continue }
+        $cells = $line -split "`t"
+        $rows[$cells[0]] = $cells[7]
+    }
+    return $rows
+}
+function Get-Repairs([string]$status) {
+    if ($status -eq "conforms" -or $status -eq "owner-thread") { return @() }
+    return @($status -split ", ")
+}
+$ledgerNow = Read-Completions ([IO.File]::ReadAllLines((Join-Path $repo $registry)))
+$ledgerThen = Read-Completions ($then -split "`r?`n")
+if ($ledgerThen.Count -eq 0) {
+    Write-Host "the merge base has no # completions section: this change introduces it ($($ledgerNow.Count) rows), and there is nothing to compare."
+} else {
+    foreach ($class in $ledgerNow.Keys) {
+        $repairsNow = Get-Repairs $ledgerNow[$class]
+        if (-not $ledgerThen.Contains($class)) {
+            if ($repairsNow.Count -gt 0) {
+                $failures += "[completions] '$class' is a new row that names repairs ($($ledgerNow[$class])): a new row conforms or is a ruled C7 member"
+            }
+            continue
+        }
+        $repairsBefore = Get-Repairs $ledgerThen[$class]
+        $repairsAdded = @($repairsNow | Where-Object { $repairsBefore -notcontains $_ })
+        if ($repairsAdded.Count -gt 0) {
+            $failures += "[completions] '$class' was '$($ledgerThen[$class])' at the merge base and is '$($ledgerNow[$class])': a status's repairs only shrink, to conforms ($($repairsAdded -join ', ') added)"
+        }
+    }
+}
+
+# ── 6. the doors joined to a thread started elsewhere only shrink (S-1 round 3) ──────────────
+# `docs/plans/completions-door-starts.tsv` names the `# completions` doors that reach a lane started
+# once with the application by its channel rather than by a call path. The test refuses a stale or
+# unused line; this refuses a (door, starter) pair the merge base does not have.
+$startsRelative = "docs/plans/completions-door-starts.tsv"
+function Read-DoorStarts([string[]]$lines) {
+    $pairs = @()
+    $header = $false
+    foreach ($line in $lines) {
+        if ($line.Length -eq 0 -or $line.StartsWith("#")) { continue }
+        if (-not $header) { $header = $true; continue }
+        $cells = $line -split "`t"
+        $pairs += "$($cells[0])`t$($cells[1])"
+    }
+    return $pairs
+}
+$startsNow = Read-DoorStarts ([IO.File]::ReadAllLines((Join-Path $repo $startsRelative)))
+Push-Location $repo
+try {
+    $startsText = (& git show "${base}:${startsRelative}" 2>$null) | Out-String
+    $startsAtBase = $LASTEXITCODE -eq 0
+    # A file missing at the merge base is the change that introduces it, not a failure: the probe's
+    # status must not become the script's.
+    $global:LASTEXITCODE = 0
+} finally {
+    Pop-Location
+}
+if (-not $startsAtBase) {
+    Write-Host "the merge base has no $startsRelative`: this change introduces it ($($startsNow.Count) lines), and there is nothing to compare."
+} else {
+    $startsBefore = Read-DoorStarts ($startsText -split "`r?`n")
+    foreach ($pair in $startsNow) {
+        if ($startsBefore -notcontains $pair) {
+            $failures += "[door-starts] $startsRelative adds '$($pair -replace "`t", ' -> ')': a door reaches its thread by a call path, and this list only shrinks"
+        }
+    }
+}
+# The bodies no product code calls yet (`docs/plans/completions-uncalled-bodies.tsv`) only shrink
+# too: a line is a body without its door, and a new one is refused against the merge base.
+$uncalledRelative = "docs/plans/completions-uncalled-bodies.tsv"
+$uncalledNow = @(Read-DoorStarts ([IO.File]::ReadAllLines((Join-Path $repo $uncalledRelative))) | ForEach-Object { ($_ -split "`t")[0] })
+Push-Location $repo
+try {
+    $uncalledText = (& git show "${base}:${uncalledRelative}" 2>$null) | Out-String
+    $uncalledAtBase = $LASTEXITCODE -eq 0
+    # A file missing at the merge base is the change that introduces it, not a failure: the probe's
+    # status must not become the script's.
+    $global:LASTEXITCODE = 0
+} finally {
+    Pop-Location
+}
+if (-not $uncalledAtBase) {
+    Write-Host "the merge base has no $uncalledRelative`: this change introduces it ($($uncalledNow.Count) lines), and there is nothing to compare."
+} else {
+    $uncalledBefore = @(Read-DoorStarts ($uncalledText -split "`r?`n") | ForEach-Object { ($_ -split "`t")[0] })
+    foreach ($body in $uncalledNow) {
+        if ($uncalledBefore -notcontains $body) {
+            $failures += "[uncalled] $uncalledRelative adds '$body': a worker's door body has a door, and this list only shrinks"
+        }
+    }
+}
+
 $added = @()
 $grown = @()
 $shrunk = 0
@@ -323,5 +445,10 @@ if ($failures.Count -gt 0) {
 }
 Write-Host "the configuration fence holds: the five clippy.toml locations, no other, no CLIPPY_CONF_DIR, no legacy .cargo/config."
 Write-Host "no workflow, cargo configuration or script flag lowers the lint; its two tables stand at '$WorkspaceLintLevel' and '$PlatformLintLevel'."
+Write-Host "the completions ledger: $($ledgerNow.Count) rows, no repair added against the merge base."
 Write-Host "no registry row was added without a ruling; $(@($rowsNow.Values | Where-Object { $_.status -eq 'pending' }).Count) row(s) pending."
 Write-Host "the window thread's bare sites: $total pending (docs/ARCHITECTURE.md section 6)."
+
+# Every failure above throws with its lines; reaching here is a pass, said as one. No native
+# command's status (a `git show` of a file the merge base lacks) may stand as the exit code.
+exit 0

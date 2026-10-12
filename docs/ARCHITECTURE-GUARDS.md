@@ -63,6 +63,18 @@ wait from the window path or route it through an admitted worker; update the
 registry through `scripts/dev/generate-window-waits-table.ps1`, never by
 hand-editing the generated architecture region.
 
+The registry's `# completions` section (S-1, 2026-10-11) is the side-effects
+contract's ledger, one row per request protocol, held by the
+`every_*completions*` tests (among them `every_worker_door_body_is_reached_from_a_completions_door`) and `every_conforming_request_door_holds_no_wait_of_its_own`
+in `window_waits_tests` and by the fifth and sixth checks of `scripts/ci/check-window-waits.ps1`. A door that
+reaches a lane started elsewhere is listed, with its reason, in
+`docs/plans/completions-door-starts.tsv`, which only shrinks; reachability is a call path to
+the function that starts the thread, never a shared type or module.
+When red, give the new answer, lane, thread or registry row its ledger row (or
+correct the row the code moved past); a status names the D-row or registry row
+that repairs it and only ever becomes `conforms` — never mark a row conforming
+to make a check pass.
+
 ## Timing-bound tests
 
 The rule: a test that depends on wall-clock progress is exceptional, named, and

@@ -1,0 +1,11 @@
+# The `worker-door-body` rows of `crates/bt-app/src/window_waits.tsv` `# effects` that no product
+# code calls yet: compiled into the product, reached from no thread it starts, and so in no
+# `# completions` protocol until the ticket named here gives them a door.
+# `hang_watch::window_waits_tests::every_worker_door_body_is_reached_from_a_completions_door`
+# refuses a line whose body a thread reaches (its caller exists) or that `# effects` no longer
+# has, and `scripts/ci/check-window-waits.ps1` refuses a line added against the merge base:
+# this list only shrinks (side-effects contract 2026-10-11, S-1).
+body	ticket	reason
+bt-platform [windows] crate::elevated_pipe::shell_execute_runas	the admin terminal's parent side (design note admin-terminal-2026-10-04)	the elevated host's launch (`launch_elevated_host`) has no product caller yet
+bt-platform - crate::exchange::flush_directory	T-STORAGE-WORKER-REQUEST (B6 ticket 4)	called by T-STORAGE-WORKER-REQUEST (B6 ticket 4): the storage worker's conditional write is its door
+bt-platform - crate::exchange::replace_keeping_displaced	T-STORAGE-WORKER-REQUEST (B6 ticket 4)	called by T-STORAGE-WORKER-REQUEST (B6 ticket 4): the storage worker's conditional write is its door
