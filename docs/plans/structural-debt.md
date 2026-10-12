@@ -150,6 +150,12 @@ lines before this one read 0.4.8 39/26/13, unassigned 26/26/0 and total 96/69/27
 with T-PANIC-ROWS-HONEST, D-96 repaid); the three rows move from unassigned to 0.4.8 and from
 open to repaid, and no other row changed: 0.4.8 42/26/16, unassigned 23/23/0, total 96/66/30.)
 
+(2026-10-12, S-4 round 2, after the merge of main (the quit-documents ticket): recounted from the rows, each
+row's *Version* and whether its *Status* reads repaid — D-14 and D-15 count as repaid by their
+cells' **repaid on …** clauses. Round 2 rewords D-72, D-73 and D-85 (a refused start no longer
+faults the lane) and moves no row; the merge adds none: 0.4.8 42/26/16, unassigned 23/23/0, total
+96/66/30, unchanged.)
+
 Parts already repaid inside open rows, by the 0.4.4 tickets: ticket 10
 (`2657e5e3`) — §5.3 row 1, the OS hand-off lane, and the first instance of the
 lane contract (D-2, D-33); ticket 34 (`fbfab1ff`) — the marks-lock wait behind
