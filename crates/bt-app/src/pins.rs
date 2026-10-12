@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 
 use bt_persist::{PinEntryV1, PinKind, PinsV1, read_pins, read_pins_keeping_bytes};
 
-use crate::document_request::{DocumentState, ReadNews};
+use crate::document_request::{DocumentState, QuitDocument, ReadNews};
 use crate::persist::{Revision, StorageLane};
 
 /// The name the pin file wears on disk, which is also what a notice about it has
@@ -125,6 +125,41 @@ pub struct PinsStore {
     document: DocumentState<PinsV1>,
     /// Why the file on disk was not usable, if it was not.
     fault: Option<String>,
+}
+
+/// `pins.json` in a quit and on a stop: its [`DocumentState`]'s answers (T-QUIT-DOCUMENTS).
+impl QuitDocument for PinsStore {
+    fn file(&self) -> &'static str {
+        self.document.file()
+    }
+
+    fn quit_begin(&mut self) {
+        self.document.quit_begin();
+    }
+
+    fn quit_turn(&mut self) {
+        self.document.quit_turn();
+    }
+
+    fn standing(&self) -> crate::quit::Standing {
+        self.document.standing()
+    }
+
+    fn keep_copy(&mut self, folder: &std::path::Path, at: std::time::SystemTime) {
+        self.document.keep_copy(folder, at);
+    }
+
+    fn copy_standing(&mut self) -> crate::quit::CopyStanding {
+        self.document.copy_standing()
+    }
+
+    fn drop_owed(&mut self) -> Option<String> {
+        self.document.drop_owed()
+    }
+
+    fn owed_bytes(&self) -> Option<Result<Vec<u8>, String>> {
+        self.document.owed_bytes()
+    }
 }
 
 impl PinsStore {

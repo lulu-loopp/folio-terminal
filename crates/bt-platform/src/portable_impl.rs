@@ -1807,7 +1807,8 @@ pub fn leave_process(code: i32) -> ! {
 /// falls back to itself: `macos_dialogs::message_box` raises an `NSAlert` when
 /// it is on the main thread and an application exists, and says exactly this
 /// when it is not, because a panic hook runs on whichever thread panicked and a
-/// refused launch runs before there is any application at all.
+/// refused launch runs before there is any application at all. A controlled
+/// stop's lost configuration change (T-QUIT-DOCUMENTS) is said here too.
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn message_box(title: &str, text: &str) {
     eprintln!("{title}");
