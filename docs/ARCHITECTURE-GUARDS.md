@@ -138,7 +138,12 @@ says no failure line of its own (the ledger says each failed request once, a
 joined one carrying a failure included, or once per streak); and its
 `LaneUnderTest` adapter hands the real lane `Executor::scripted` and reports
 `sunk` and `said`. The OS hand-off lane (`handoff_lane`, S-5) is the first
-lane built this way. What the proof covers:
+lane built this way; the font, taskbar and program-walk lanes (S-4) followed,
+each on `lane::Coalescing` — the latest-value shape: one run out and at most one
+waiting, a request asked while one waits joined to it when it is the same
+operation and superseding it when it is not, the worker started by the first
+request, every terminal held for the application and taken in mint order
+below the earliest request still owed. What the proof covers:
 `lane_contract_tests::the_ledger_ends_every_identity_exactly_once_in_every_interleaving`
 plays every order of three identities' outcomes (the six terminals, a racing
 answer after a cancel, a terminal published for a joined identity itself),

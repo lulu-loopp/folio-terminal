@@ -1184,8 +1184,8 @@ lane that fails a claim is not declared conformant**: the failure is a row of
 `lane::EXPECTED_FAILURES` with its exact kind and the ledger row that repairs
 it, and the suite is red on an unexpected pass, a different failure, a skipped
 lane and a claim that exercised no request. The hand-off lane is the reference:
-since S-5 it passes every claim (D-70 and D-71 repaid); the font and taskbar lanes fail per-request outcomes and worker
-death (D-72, D-73); the computation lane fails bounds, identity and death
+since S-5 it passes every claim (D-70 and D-71 repaid), and since S-4 so do the font, taskbar and
+program-walk lanes (D-72, D-73 and D-85 repaid); the computation lane fails bounds, identity and death
 (D-74…D-76). Path verification, the ten probes (D-3) and the files, preview,
 index and git workers have no adapter yet. **The completion seam** (S-3,
 2026-10-11; the side-effects contract, revision (b)7) is `bt-app::lane`'s
@@ -1204,9 +1204,15 @@ declared streak); **(12)** an orphaned answer reaches its sink. The OS hand-off
 lane is built on the seam (S-5, 2026-10-12): its `bt-os-handoff` worker is
 started by `Executor::start_worker`, its ledger owes at most 33 identities and
 refuses the next press at the door, each hand-off runs in `lane::task`, and its
-adapter hands the real lane the suite's scripted executor. The rows the new
-claims add for the other lanes name D-72, D-73, D-75, D-76 and D-85, and S-4,
-S-6a and S-7 move those lanes onto it (`docs/ARCHITECTURE-GUARDS.md`, *Lane
+adapter hands the real lane the suite's scripted executor. The font, taskbar and
+program-walk lanes are built on it too (S-4, 2026-10-12), each a latest-value lane on
+`lane::Coalescing`: its worker started by `start_worker` on the first request, one run out and
+one waiting, a request asked while one waits `Joined` to it when it is the same operation (the
+font and taskbar questions always are; the program walk when it asks about the same table) and
+`Superseded { by }` the newer when it is not, every terminal taken by the application in mint
+order, a failure said once per streak and never retried on its own. The rows the new claims
+add for the computation lane name D-75 and D-76, and S-6a and S-7 move the storage worker and
+the clipboard onto the seam (`docs/ARCHITECTURE-GUARDS.md`, *Lane
 contract and the completion seam*).
 **The return rule:** a lane whose
 answer is the latest value of one fact publishes into a slot the window reads
