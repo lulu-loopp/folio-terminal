@@ -2348,6 +2348,14 @@ const START_DELETES: &[PhaseKind] = &[
     PhaseKind::Retired,
 ];
 
+/// Where a trial of the new build runs and may write its receipt.
+const RECEIPT_PHASES: &[PhaseKind] = &[
+    PhaseKind::Moving,
+    PhaseKind::TrialStarting,
+    PhaseKind::Trial,
+    PhaseKind::Stuck,
+];
+
 /// The rights table. Anything it does not list, nobody may do.
 pub(crate) const EFFECT_RIGHTS: &[Right] = &[
     // O, as the job owner, sweeps what a dead preparation left (W1, M1), and
@@ -2505,13 +2513,20 @@ pub(crate) const EFFECT_RIGHTS: &[Right] = &[
         effect: Effect::DeleteJournal,
         during: TERMINAL,
     },
-    // N's receipt, in its recorded `Trial` and in U-35's `TrialStarting`,
-    // which records no process yet. N's one journal write, U-35's
-    // `LastTrialReady`, is in `JOURNAL_WRITERS` and `EventKind::authors`.
+    // N's receipt, wherever a trial of the new build runs: in its recorded
+    // `Trial`; in U-35's `TrialStarting`, which records no process yet; in
+    // `Moving`, where a lock holder launches the trial before it records
+    // `TrialBegan` — and where a holder that did not launch it adopts it by
+    // this very receipt (U-37, `update_apply::survey`); and in `Stuck`, where
+    // U-29b's retrial over a live new set commits forward on it (`next`'s one
+    // road to `Committed` besides `Trial`'s). Enforced at the write
+    // (`update_trial::write_receipt`, 0.4.8 E6). N's one journal write,
+    // U-35's `LastTrialReady`, is in `JOURNAL_WRITERS` and
+    // `EventKind::authors`.
     Right {
         actor: Actor::Trial,
         effect: Effect::WriteReceipt,
-        during: &[PhaseKind::TrialStarting, PhaseKind::Trial],
+        during: RECEIPT_PHASES,
     },
     // An ordinary start retires a terminal transaction, and discards one whose
     // install was replaced by hand while it was preparing or deferred.
@@ -4829,7 +4844,12 @@ mod tests {
     /// exact reserved trial writing `Committed` from its own readiness
     /// receipt. R writes `Trial` since U-29b: it starts N over an exchange a
     /// dead applier left with the new bundle live (the coordinator's ruling
-    /// 1).
+    /// 1). N's one effect, its receipt, is granted wherever a trial of the
+    /// new build runs (0.4.8 E6, the release read's F4: the row named only
+    /// `TrialStarting` and `Trial`, though a retrial over `Stuck` and a trial
+    /// launched over `Moving` write one too).
+    ///
+    /// MUTATION: drop `Stuck` (or `Moving`) from `RECEIPT_PHASES`.
     #[test]
     fn every_phase_is_recorded_only_by_the_writers_the_table_names() {
         // The one phase no transition writes is the first: O creates the
@@ -4873,9 +4893,14 @@ mod tests {
             trial_rights,
             vec![(
                 Effect::WriteReceipt,
-                &[PhaseKind::TrialStarting, PhaseKind::Trial][..]
+                &[
+                    PhaseKind::Moving,
+                    PhaseKind::TrialStarting,
+                    PhaseKind::Trial,
+                    PhaseKind::Stuck
+                ][..]
             )],
-            "N writes its receipt in the reserved or recorded trial phase"
+            "N writes its receipt wherever a trial of the new build runs: launched              before it is recorded, reserved, recorded, or retried over Stuck"
         );
     }
 
@@ -4927,6 +4952,58 @@ mod tests {
                 (Actor::Trial, Effect::WriteReceipt),
             ]
         );
+    }
+
+    /// RED (0.4.8 E6, the release read's F4) — **the rights table is held at
+    /// the receipt's write**: over a journal of every phase, the trial's
+    /// receipt is written exactly where `Actor::Trial` may `WriteReceipt`, and
+    /// anywhere else it is refused with nothing at its name.
+    ///
+    /// MUTATION: in `update_trial::write_receipt`, drop the `receipt_granted`
+    /// check — a receipt is written over `Allocated`, `Committed`,
+    /// `RollbackIntent` and the rest.
+    #[test]
+    fn the_receipt_is_written_only_where_the_rights_table_grants_it() {
+        let root = bt_testpath::temp_path("e6-receipt-rights");
+        let _ = std::fs::remove_dir_all(&root);
+        let mut granted = BTreeSet::new();
+        for (at, phase) in phase_samples().into_iter().enumerate() {
+            let kind = phase.kind();
+            let home = Home::at(root.join(at.to_string()));
+            std::fs::create_dir_all(home.transaction(txn())).expect("the transaction's folder");
+            std::fs::write(home.journal(), journal(phase, members_layout()).encode())
+                .expect("the journal");
+            let trial = nonce(TRIAL_NONCE);
+            let job = crate::update_trial::ReceiptJob {
+                path: home.receipt_path(txn(), &trial),
+                bytes: Receipt {
+                    txn: txn(),
+                    nonce: trial,
+                    pid: std::process::id(),
+                    version: "0.4.8".to_owned(),
+                    started: None,
+                }
+                .encode(),
+                journal: home.journal(),
+                txn: txn(),
+            };
+            let written = crate::update_trial::write_receipt(&job);
+            let allowed = may(Actor::Trial, Effect::WriteReceipt, kind);
+            assert_eq!(written.is_ok(), allowed, "{kind:?}: {written:?}");
+            assert_eq!(job.path.exists(), allowed, "{kind:?}: the receipt on disk");
+            if allowed {
+                granted.insert(format!("{kind:?}"));
+            }
+        }
+        assert_eq!(
+            granted,
+            ["Moving", "Stuck", "Trial", "TrialStarting"]
+                .map(str::to_owned)
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            "every granted phase is met"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// RED (U-10) — **every action `decide` hands out, and every action a
@@ -8078,6 +8155,14 @@ mod parse_sites {
             1,
             Is::OwnBytes,
             "crate::update_trial::tests::a_receipt_this_build_cannot_read_is_never_written_over",
+        ),
+        site(
+            "receipt_granted",
+            "crate::update_trial::receipt_granted",
+            Reads::SightOfRead,
+            1,
+            Is::Reader(Role::ReceiptWrite),
+            "crate::update_trial::tests::no_receipt_is_written_over_a_journal_the_writer_cannot_read_whole",
         ),
         site(
             "sight",
