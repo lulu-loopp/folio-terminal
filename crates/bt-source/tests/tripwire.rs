@@ -129,7 +129,13 @@
 //!        under its `cfg`s — to the constant there, its `use`s and globs, or a
 //!        `thread_local!` (never a path); `Self::NAME`, `Type::NAME` and
 //!        `<Type as Trait>::NAME`, the constants `impl` blocks of that type
-//!        declare. Another crate's item or a primitive's (`u32::MAX`, a
+//!        declare — the named trait's impl only (its path followed through
+//!        `use`s and re-exports); unqualified, the inherent impl, else the one
+//!        trait impl, and several are unreduced. Only what the reading module
+//!        may name resolves: across crates a `pub` item through `pub` modules
+//!        or a `pub use`; within one, a private item from its module and
+//!        those under it, `pub(crate)` crate-wide, `pub(super)`/`pub(in …)` as
+//!        spelled; a path visibility hides is unreduced. Another crate's item or a primitive's (`u32::MAX`, a
 //!        `windows` constant, a glob of another crate's module) is never a
 //!        path into this checkout. A name found nowhere that is spelled
 //!        SCREAMING_SNAKE_CASE is unreduced; any other is a function, a type
@@ -161,12 +167,15 @@
 //!      committed `.tsv` is a reader of the `.tsv` alone.
 //!
 //!      **A path this reading gives up on is never dropped in silence.** It
-//!      is a diagnostic — file, line, item, callee and why, printed by the
-//!      test and counted in its refusal — and not refused, when:
+//!      is a diagnostic — grouped by cause, its exact total and a few
+//!      examples (file, line, item) per cause printed by the test and in its
+//!      refusal — and not refused, when:
 //!      - a rooted path keeps a piece it cannot reduce (`root.join(name)`
 //!        with `name` a parameter, another crate's constant it cannot read);
 //!      - a `concat!` or `format!` holds a rooted piece and, anywhere, a
-//!        piece it cannot reduce (`format!("{}{}/x", unknown, root)`);
+//!        piece it cannot reduce (`format!("{}{}/x", unknown, root)`) —
+//!        and each rooted piece it does reduce to a committed document is a
+//!        reader all the same (both outcomes, never one);
 //!      - a string naming a rooted path is joined onto, or joined onto a
 //!        path; a list or a tuple it cannot pick a part of holds a rooted
 //!        path; a macro it does not expand is handed one;
@@ -1461,7 +1470,7 @@ impl DocumentScan<'_> {
                     })
                     .collect();
                 for why in judgements.iter().filter_map(|judgement| match judgement {
-                    Judgement::Unresolved(why) => Some(*why),
+                    Judgement::Unresolved(why) => Some(why.clone()),
                     Judgement::NotADocument | Judgement::Document(_) => None,
                 }) {
                     unresolved.push(UnresolvedRead {
@@ -1583,27 +1592,46 @@ enum Judgement {
     Unresolved(Why),
 }
 
-/// Why a path handed to a call could not be reduced.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// Why a path handed to a call could not be reduced, and — for a constant —
+/// the path it was written as.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Why {
-    /// Rooted in the package directory, with a piece after the root this
-    /// reading cannot reduce to a literal: a parameter, a `format!`, another
-    /// crate's constant.
+    /// Rooted in the package directory, with a piece this reading cannot
+    /// reduce to a literal beside or after the root: a parameter, a
+    /// `format!` placeholder it cannot fill, another crate's constant.
     Computed,
-    /// A constant or a helper that reaches itself on its own resolution path.
-    Cycle,
-    /// A constant a `self::`, `super::` or `crate::` path names that this
-    /// reading cannot place in the module tree.
-    Elsewhere,
+    /// A constant that reaches itself on its own resolution path.
+    Cycle(String),
+    /// A constant-spelled path this reading cannot place: no constant, `use`,
+    /// glob or `thread_local!` of the module trees holds it, it is not
+    /// visible from where it is written, or several `impl`s offer it.
+    Elsewhere(String),
 }
 
 impl Why {
-    fn said(self) -> &'static str {
+    fn said(&self) -> String {
         match self {
-            Self::Computed => "a rooted path with a piece it cannot reduce",
-            Self::Cycle => "a constant or helper that reaches itself",
-            Self::Elsewhere => "a constant of a module path it cannot place",
+            Self::Computed => "a rooted path with a piece it cannot reduce".to_owned(),
+            Self::Cycle(path) => format!("a constant that reaches itself: {path}"),
+            Self::Elsewhere(path) => format!("a constant it cannot place: {path}"),
         }
+    }
+
+    /// The same cause, with the path it was written as where none is said.
+    fn written(self, path: &str) -> Self {
+        match self {
+            Self::Cycle(said) if said.is_empty() => Self::Cycle(path.to_owned()),
+            Self::Elsewhere(said) if said.is_empty() => Self::Elsewhere(path.to_owned()),
+            other => other,
+        }
+    }
+
+    fn elsewhere() -> Self {
+        Self::Elsewhere(String::new())
+    }
+
+    fn cycle() -> Self {
+        Self::Cycle(String::new())
     }
 }
 
@@ -1616,19 +1644,6 @@ struct UnresolvedRead {
     owners: BTreeSet<String>,
     callee: String,
     why: Why,
-}
-
-impl UnresolvedRead {
-    fn named(&self) -> String {
-        format!(
-            "{}:{} {} — `{}`, {}",
-            self.file,
-            self.line,
-            self.owners.iter().cloned().collect::<Vec<_>>().join(" / "),
-            self.callee,
-            self.why.said()
-        )
-    }
 }
 
 // ─────────────────────────────────────────────── one read call's path ──
@@ -1786,7 +1801,7 @@ impl Value {
 
     fn unreduced(&self) -> Option<Why> {
         match self {
-            Self::Unreduced(why) => Some(*why),
+            Self::Unreduced(why) => Some(why.clone()),
             _ => None,
         }
     }
@@ -2124,6 +2139,82 @@ struct Helper {
 struct Constant {
     inline: Vec<String>,
     value: syn::Expr,
+    visibility: Visibility,
+}
+
+/// Who may name an item, as written on it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Visibility {
+    /// `pub`: anyone who can reach its module.
+    Public,
+    /// `pub(crate)`: its own crate.
+    Crate,
+    /// `pub(super)`, `pub(self)`, `pub(in path)`: the module the path leads
+    /// to from the item's, and its descendants.
+    Within(Vec<String>),
+    /// No `pub`: its own module and its descendants.
+    Private,
+}
+
+impl Visibility {
+    fn of(written: &syn::Visibility) -> Self {
+        match written {
+            syn::Visibility::Public(_) => Self::Public,
+            syn::Visibility::Inherited => Self::Private,
+            syn::Visibility::Restricted(restricted) => {
+                let path: Vec<String> = restricted
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect();
+                if path == ["crate"] {
+                    Self::Crate
+                } else {
+                    Self::Within(path)
+                }
+            }
+        }
+    }
+
+    /// Whether code in `viewer` may name an item with this visibility that
+    /// belongs to the module `owner`, as Rust decides: across a crate's
+    /// boundary only `pub`; inside it, the module the visibility opens.
+    fn admits(&self, owner: &ModuleKey, viewer: Option<&ModuleKey>) -> bool {
+        let Some(viewer) = viewer else {
+            return true;
+        };
+        let same_crate = owner.0 == viewer.0;
+        let inside = |scope: &str| viewer.1 == scope || viewer.1.starts_with(&format!("{scope}::"));
+        match self {
+            Self::Public => true,
+            Self::Crate => same_crate,
+            Self::Private => same_crate && inside(&owner.1),
+            Self::Within(path) => {
+                let mut scope = owner.1.clone();
+                for segment in path {
+                    match segment.as_str() {
+                        "self" | "in" => {}
+                        "crate" => scope = "crate".to_owned(),
+                        "super" => {
+                            if let Some((parent, _)) = scope.rsplit_once("::") {
+                                scope = parent.to_owned();
+                            }
+                        }
+                        child => scope = format!("{scope}::{child}"),
+                    }
+                }
+                same_crate && inside(&scope)
+            }
+        }
+    }
+}
+
+/// A constant an `impl` block declares, and the trait the block implements
+/// (as written), if any.
+struct Associated {
+    implemented: Option<Vec<String>>,
+    constant: Rc<Constant>,
 }
 
 /// What one file's syntax says about the paths its calls are handed: the
@@ -2140,12 +2231,17 @@ struct FileSyntax {
     /// By the inline modules they are written in and their name.
     scoped: BTreeMap<(Vec<String>, String), Vec<Rc<Constant>>>,
     /// The constants an `impl` block declares, by the type and their name.
-    associated: BTreeMap<(String, String), Vec<Rc<Constant>>>,
+    associated: BTreeMap<(String, String), Vec<Rc<Associated>>>,
+    /// The traits the file declares, by the inline modules they are written
+    /// in.
+    traits: BTreeSet<(Vec<String>, String)>,
+    /// Each `mod` the file declares: who may name it.
+    declared: BTreeMap<(Vec<String>, String), Visibility>,
     /// Each `use` binding of a name, by the inline modules it is written in:
     /// the path it names.
-    uses: BTreeMap<(Vec<String>, String), Vec<String>>,
+    uses: BTreeMap<(Vec<String>, String), (Vec<String>, Visibility)>,
     /// Each `use …::*`, by the inline modules it is written in.
-    globs: BTreeMap<Vec<String>, Vec<Vec<String>>>,
+    globs: BTreeMap<Vec<String>, Vec<(Vec<String>, Visibility)>>,
     /// The statics `thread_local!` declares: keys to a thread's own value,
     /// never a path.
     locals: BTreeSet<(Vec<String>, String)>,
@@ -2175,6 +2271,8 @@ impl FileSyntax {
                 constants: BTreeMap::new(),
                 scoped: BTreeMap::new(),
                 associated: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                declared: BTreeMap::new(),
                 uses: BTreeMap::new(),
                 globs: BTreeMap::new(),
                 locals: BTreeSet::new(),
@@ -2213,7 +2311,7 @@ struct Collector {
     /// The inline modules the walk is inside, outermost first.
     modules: Vec<String>,
     /// The type of each `impl` block the walk is inside, innermost last.
-    impls: Vec<String>,
+    impls: Vec<(String, Option<Vec<String>>)>,
     syntax: FileSyntax,
 }
 
@@ -2233,10 +2331,11 @@ impl Collector {
             .expect("the file is the outermost scope")
     }
 
-    fn record_constant(&mut self, name: String, value: &syn::Expr) {
+    fn record_constant(&mut self, name: String, value: &syn::Expr, visibility: Visibility) {
         let constant = Rc::new(Constant {
             inline: self.modules.clone(),
             value: value.clone(),
+            visibility,
         });
         self.syntax
             .constants
@@ -2357,6 +2456,10 @@ fn returned(block: &syn::Block) -> Option<&syn::Expr> {
 
 impl<'ast> syn::visit::Visit<'ast> for Collector {
     fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        self.syntax.declared.insert(
+            (self.modules.clone(), item.ident.to_string()),
+            Visibility::of(&item.vis),
+        );
         if item.content.is_some() {
             self.modules.push(item.ident.to_string());
             syn::visit::visit_item_mod(self, item);
@@ -2369,22 +2472,47 @@ impl<'ast> syn::visit::Visit<'ast> for Collector {
             syn::Type::Path(path) => path.path.segments.last().map(|last| last.ident.to_string()),
             _ => None,
         };
-        self.impls.push(name.unwrap_or_default());
+        let implemented = item.trait_.as_ref().map(|(_, path, _)| {
+            path.segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect()
+        });
+        self.impls.push((name.unwrap_or_default(), implemented));
         syn::visit::visit_item_impl(self, item);
         self.impls.pop();
     }
 
+    fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {
+        self.syntax
+            .traits
+            .insert((self.modules.clone(), item.ident.to_string()));
+        syn::visit::visit_item_trait(self, item);
+    }
+
     fn visit_impl_item_const(&mut self, item: &'ast syn::ImplItemConst) {
-        if let Some(owner) = self.impls.last().filter(|owner| !owner.is_empty()) {
+        if let Some((owner, implemented)) = self.impls.last().filter(|(owner, _)| !owner.is_empty())
+        {
+            // A trait's item is as visible as the trait; an inherent one as
+            // written.
+            let visibility = if implemented.is_some() {
+                Visibility::Public
+            } else {
+                Visibility::of(&item.vis)
+            };
             let constant = Rc::new(Constant {
                 inline: self.modules.clone(),
                 value: item.expr.clone(),
+                visibility,
             });
             self.syntax
                 .associated
                 .entry((owner.clone(), item.ident.to_string()))
                 .or_default()
-                .push(constant);
+                .push(Rc::new(Associated {
+                    implemented: implemented.clone(),
+                    constant,
+                }));
         }
         syn::visit::visit_impl_item_const(self, item);
     }
@@ -2436,7 +2564,11 @@ impl<'ast> syn::visit::Visit<'ast> for Collector {
     }
 
     fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
-        self.record_constant(item.ident.to_string(), &item.expr);
+        self.record_constant(
+            item.ident.to_string(),
+            &item.expr,
+            Visibility::of(&item.vis),
+        );
         syn::visit::visit_item_const(self, item);
     }
 
@@ -2444,18 +2576,25 @@ impl<'ast> syn::visit::Visit<'ast> for Collector {
         let mut names = Vec::new();
         let mut globs = Vec::new();
         use_bindings(&item.tree, &mut Vec::new(), &mut names, &mut globs);
+        let visibility = Visibility::of(&item.vis);
         for (name, path) in names {
-            self.syntax.uses.insert((self.modules.clone(), name), path);
+            self.syntax
+                .uses
+                .insert((self.modules.clone(), name), (path, visibility.clone()));
         }
         self.syntax
             .globs
             .entry(self.modules.clone())
             .or_default()
-            .extend(globs);
+            .extend(globs.into_iter().map(|glob| (glob, visibility.clone())));
     }
 
     fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
-        self.record_constant(item.ident.to_string(), &item.expr);
+        self.record_constant(
+            item.ident.to_string(),
+            &item.expr,
+            Visibility::of(&item.vis),
+        );
         syn::visit::visit_item_static(self, item);
     }
 
@@ -2646,8 +2785,13 @@ fn owner_of<'f>(file: &'f FileRecord, declared: &str) -> Option<&'f bt_source::F
 /// with the module it was looked up in; or nowhere (`super` past the root).
 enum Walk {
     Module(ModuleKey),
-    Item { module: ModuleKey, at: usize },
+    Item {
+        module: ModuleKey,
+        at: usize,
+    },
     Lost,
+    /// Through a module the viewer may not name.
+    Hidden,
 }
 
 impl<'a> World<'a> {
@@ -2753,7 +2897,7 @@ impl<'a> World<'a> {
 
     /// Every constant an `impl` block of the named type declares under a
     /// name, in one index.
-    fn associated(&self, number: usize, owner: &str, name: &str) -> Vec<(FileId, Rc<Constant>)> {
+    fn associated(&self, number: usize, owner: &str, name: &str) -> Vec<(FileId, Rc<Associated>)> {
         let index = &self.indices[number].1;
         let mut files: BTreeSet<FileId> = BTreeSet::new();
         for block in index.impls() {
@@ -2775,16 +2919,36 @@ impl<'a> World<'a> {
                     .get(&(owner.to_owned(), name.to_owned()))
                     .into_iter()
                     .flatten()
-                    .map(|constant| (file, Rc::clone(constant)))
+                    .map(|associated| (file, Rc::clone(associated)))
                     .collect::<Vec<_>>()
             })
             .collect()
     }
 
+    /// Who may name a module: as its `mod` declaration in its parent says.
+    fn declared_visibility(&self, parent: &ModuleKey, child: &str) -> Visibility {
+        for (file, inline) in self.modules.get(parent).into_iter().flatten() {
+            if let Some(visibility) = self
+                .syntax(*file)
+                .declared
+                .get(&(inline.clone(), child.to_owned()))
+            {
+                return visibility.clone();
+            }
+        }
+        Visibility::Private
+    }
+
     /// Where a path of module segments leads from a module: a first-party
     /// crate's name, `self`, `super`, `crate`, and the child modules
-    /// bt-source's module tree declares.
-    fn walk(&self, from: Option<&ModuleKey>, segments: &[String]) -> Walk {
+    /// bt-source's module tree declares — each child only if `viewer` may
+    /// name it.
+    fn walk(
+        &self,
+        from: Option<&ModuleKey>,
+        segments: &[String],
+        viewer: Option<&ModuleKey>,
+    ) -> Walk {
         let (target, mut path, rest) = match segments.first() {
             Some(first) if self.crates.contains_key(first) => (
                 self.crates[first].clone(),
@@ -2811,6 +2975,13 @@ impl<'a> World<'a> {
                             module: (target, path),
                             at: at + segments.len() - rest.len(),
                         };
+                    }
+                    let parent = (target.clone(), path.clone());
+                    if !self
+                        .declared_visibility(&parent, child)
+                        .admits(&parent, viewer)
+                    {
+                        return Walk::Hidden;
                     }
                     path = next;
                 }
@@ -2937,15 +3108,28 @@ impl<'a> Evaluation<'a> {
                     // names.
                     _ => None,
                 });
+                let trait_named: Vec<String> = path
+                    .path
+                    .segments
+                    .iter()
+                    .take(path.qself.as_ref().map_or(0, |qself| qself.position))
+                    .map(|segment| segment.ident.to_string())
+                    .collect();
+                let named = (!trait_named.is_empty()).then_some(trait_named.as_slice());
                 match (owner, path.path.segments.last()) {
                     (Some(owner), Some(name)) => {
-                        match self.associated(self.file.0, &owner, &name.ident.to_string()) {
+                        let written =
+                            format!("<{owner} as {}>::{}", trait_named.join("::"), name.ident);
+                        match self.associated(self.file.0, &owner, &name.ident.to_string(), named) {
                             Resolved::Found(found) => Value::several(
                                 found
                                     .iter()
                                     .map(|(scope, constant)| scope.of(&constant.value))
                                     .collect(),
                             ),
+                            Resolved::Missing(Value::Unreduced(why)) => {
+                                Value::Unreduced(why.written(&written))
+                            }
                             Resolved::Missing(value) => value,
                         }
                     }
@@ -3421,19 +3605,31 @@ impl<'a> Evaluation<'a> {
                     return self.found(name, &here);
                 }
                 match self.module.clone() {
-                    Some(module) => self.constant_in(module, name, &mut BTreeSet::new()),
-                    None => Resolved::Missing(Value::Unreduced(Why::Elsewhere)),
+                    Some(module) => {
+                        let viewer = Some(module.clone());
+                        self.constant_in(module, name, &mut BTreeSet::new(), viewer.as_ref())
+                    }
+                    None => Resolved::Missing(Value::Unreduced(Why::elsewhere())),
                 }
             }
             [owner] if owner == "Self" => match self.world.impl_type_at(self.file, self.position) {
-                Some(owner) => self.associated(self.file.0, &owner, name),
-                None => Resolved::Missing(Value::Unreduced(Why::Elsewhere)),
+                Some(owner) => self.associated(self.file.0, &owner, name, None),
+                None => Resolved::Missing(Value::Unreduced(Why::elsewhere())),
             },
-            _ => self.locate(self.module.clone(), modules, name, &mut BTreeSet::new()),
+            _ => self.locate(
+                self.module.clone(),
+                modules,
+                name,
+                &mut BTreeSet::new(),
+                self.module.as_ref(),
+            ),
         };
         match resolved {
-            Resolved::Missing(Value::Unreduced(Why::Elsewhere)) if !names_a_constant(name) => {
+            Resolved::Missing(Value::Unreduced(Why::Elsewhere(_))) if !names_a_constant(name) => {
                 Resolved::Missing(Value::Opaque)
+            }
+            Resolved::Missing(Value::Unreduced(why)) => {
+                Resolved::Missing(Value::Unreduced(why.written(&segments.join("::"))))
             }
             other => other,
         }
@@ -3442,6 +3638,9 @@ impl<'a> Evaluation<'a> {
     /// The constants found, each entered on the resolution path.
     fn found(&self, name: &str, constants: &[(FileId, Rc<Constant>)]) -> Resolved<'a> {
         let mut found = Vec::new();
+        if constants.is_empty() {
+            return Resolved::Missing(Value::Unreduced(Why::elsewhere()));
+        }
         for (number, (file, constant)) in constants.iter().enumerate() {
             let syntax = if *file == self.file {
                 Rc::clone(&self.syntax)
@@ -3464,22 +3663,24 @@ impl<'a> Evaluation<'a> {
             };
             match self.entering(identity, place, usize::MAX, 0, BTreeMap::new()) {
                 Some(scope) => found.push((scope, Rc::clone(constant))),
-                None => return Resolved::Missing(Value::Unreduced(Why::Cycle)),
+                None => return Resolved::Missing(Value::Unreduced(Why::cycle())),
             }
         }
         Resolved::Found(found)
     }
 
-    /// A constant a path of module segments leads to from a module.
+    /// A constant a path of module segments leads to from a module, named
+    /// from `viewer`.
     fn locate(
         &self,
         from: Option<ModuleKey>,
         modules: &[String],
         name: &str,
         seen: &mut BTreeSet<(ModuleKey, String)>,
+        viewer: Option<&ModuleKey>,
     ) -> Resolved<'a> {
-        match self.world.walk(from.as_ref(), modules) {
-            Walk::Module(key) => self.constant_in(key, name, seen),
+        match self.world.walk(from.as_ref(), modules, viewer) {
+            Walk::Module(key) => self.constant_in(key, name, seen, viewer),
             Walk::Item { module, at } if at + 1 == modules.len() => {
                 let Some(((number, _), _)) = self
                     .world
@@ -3487,28 +3688,145 @@ impl<'a> Evaluation<'a> {
                     .get(&module)
                     .and_then(|placed| placed.first())
                 else {
-                    return Resolved::Missing(Value::Unreduced(Why::Elsewhere));
+                    return Resolved::Missing(Value::Unreduced(Why::elsewhere()));
                 };
-                self.associated(*number, &modules[at], name)
+                self.associated(*number, &modules[at], name, None)
             }
             // A path through an item further down, or through another crate.
             Walk::Item { .. } => Resolved::Missing(Value::Opaque),
-            Walk::Lost => Resolved::Missing(Value::Unreduced(Why::Elsewhere)),
+            Walk::Lost | Walk::Hidden => Resolved::Missing(Value::Unreduced(Why::elsewhere())),
         }
     }
 
-    /// The constants the `impl` blocks of a type declare under a name. A type
-    /// this workspace does not declare is another crate's or a primitive,
-    /// never rooted in the checkout.
-    fn associated(&self, number: usize, owner: &str, name: &str) -> Resolved<'a> {
+    /// The constant the `impl` blocks of a type declare under a name, as Rust
+    /// picks it: with a trait named (`<Type as Trait>::NAME`), the block whose
+    /// trait is that trait; with none, the inherent block, else the one trait
+    /// that offers it. Several traits offering it is ambiguous, unreduced. A
+    /// type this workspace does not declare is another crate's or a
+    /// primitive, never rooted in the checkout.
+    fn associated(
+        &self,
+        number: usize,
+        owner: &str,
+        name: &str,
+        trait_named: Option<&[String]>,
+    ) -> Resolved<'a> {
         if !self.world.declares_type(number, owner) {
             return Resolved::Missing(Value::Opaque);
         }
-        let constants = self.world.associated(number, owner, name);
-        if constants.is_empty() {
-            return Resolved::Missing(Value::Unreduced(Why::Elsewhere));
-        }
+        let viewer = self.module.clone();
+        let offered: Vec<(FileId, Rc<Associated>, Option<String>)> = self
+            .world
+            .associated(number, owner, name)
+            .into_iter()
+            .filter(|(file, associated)| {
+                let module = self
+                    .world
+                    .placed
+                    .get(&(*file, associated.constant.inline.clone()))
+                    .cloned();
+                module.is_none_or(|module| {
+                    associated
+                        .constant
+                        .visibility
+                        .admits(&module, viewer.as_ref())
+                })
+            })
+            .map(|(file, associated)| {
+                let identity = associated.implemented.as_ref().map(|path| {
+                    let module = self
+                        .world
+                        .placed
+                        .get(&(file, associated.constant.inline.clone()))
+                        .cloned();
+                    self.trait_identity(module, path)
+                });
+                (file, associated, identity)
+            })
+            .collect();
+        let chosen: Vec<&(FileId, Rc<Associated>, Option<String>)> = match trait_named {
+            Some(path) => {
+                let wanted = self.trait_identity(self.module.clone(), path);
+                offered
+                    .iter()
+                    .filter(|(_, _, identity)| identity.as_deref() == Some(wanted.as_str()))
+                    .collect()
+            }
+            None => {
+                let inherent: Vec<_> = offered
+                    .iter()
+                    .filter(|(_, _, identity)| identity.is_none())
+                    .collect();
+                if inherent.is_empty() {
+                    let traits: BTreeSet<&Option<String>> =
+                        offered.iter().map(|(_, _, identity)| identity).collect();
+                    if traits.len() > 1 {
+                        return Resolved::Missing(Value::Unreduced(Why::elsewhere()));
+                    }
+                    offered.iter().collect()
+                } else {
+                    inherent
+                }
+            }
+        };
+        let constants: Vec<(FileId, Rc<Constant>)> = chosen
+            .iter()
+            .map(|(file, associated, _)| (*file, Rc::clone(&associated.constant)))
+            .collect();
         self.found(name, &constants)
+    }
+
+    /// Which trait a trait path written in a module names: its module and
+    /// name where a first-party module tree declares it (through `use`s and
+    /// globs), and otherwise — another crate's trait — its last segment.
+    fn trait_identity(&self, from: Option<ModuleKey>, path: &[String]) -> String {
+        let Some((name, modules)) = path.split_last() else {
+            return String::new();
+        };
+        let held = match self.world.walk(from.as_ref(), modules, None) {
+            Walk::Module(key) => self.trait_in(&key, name, &mut BTreeSet::new()),
+            _ => None,
+        };
+        match held {
+            Some((key, name)) => format!("{key:?}::{name}"),
+            None => format!("another crate's {name}"),
+        }
+    }
+
+    /// The trait a module holds under a name: declared there, or brought
+    /// there by a `use` or a glob.
+    fn trait_in(
+        &self,
+        key: &ModuleKey,
+        name: &str,
+        seen: &mut BTreeSet<(ModuleKey, String)>,
+    ) -> Option<(ModuleKey, String)> {
+        if !seen.insert((key.clone(), name.to_owned())) {
+            return None;
+        }
+        for (file, inline) in self.world.modules.get(key).cloned().into_iter().flatten() {
+            let syntax = self.world.syntax(file);
+            let here = (inline.clone(), name.to_owned());
+            if syntax.traits.contains(&here) {
+                return Some((key.clone(), name.to_owned()));
+            }
+            if let Some((path, _)) = syntax.uses.get(&here)
+                && let Some((last, modules)) = path.split_last()
+            {
+                if let Walk::Module(next) = self.world.walk(Some(key), modules, None) {
+                    return self.trait_in(&next, last, seen);
+                }
+                return None;
+            }
+            for (glob, _) in syntax.globs.get(&inline).into_iter().flatten() {
+                if let Walk::Module(next) = self.world.walk(Some(key), glob, None)
+                    && let Some(found) = self.trait_in(&next, name, seen)
+                {
+                    return Some(found);
+                }
+            }
+        }
+        None
     }
 
     /// The constant a module holds under a name: written there, brought
@@ -3520,35 +3838,39 @@ impl<'a> Evaluation<'a> {
         key: ModuleKey,
         name: &str,
         seen: &mut BTreeSet<(ModuleKey, String)>,
+        viewer: Option<&ModuleKey>,
     ) -> Resolved<'a> {
         // Glob imports may lead back to a module already asked (`use
         // super::*` in a child, `pub use child::*` in its parent): the name is
         // not held along that way.
         if !seen.insert((key.clone(), name.to_owned())) {
-            return Resolved::Missing(Value::Unreduced(Why::Elsewhere));
+            return Resolved::Missing(Value::Unreduced(Why::elsewhere()));
         }
         let Some(placements) = self.world.modules.get(&key).cloned() else {
-            return Resolved::Missing(Value::Unreduced(Why::Elsewhere));
+            return Resolved::Missing(Value::Unreduced(Why::elsewhere()));
         };
         // Each file the module is written in answers for its own `cfg`; what
         // any of them holds is held.
         let mut found = Vec::new();
         let mut missing = None;
         for (file, inline) in placements {
-            match self.held_in(&key, file, &inline, name, seen) {
+            match self.held_in(&key, file, &inline, name, seen, viewer) {
                 Resolved::Found(more) => found.extend(more),
-                Resolved::Missing(Value::Unreduced(Why::Elsewhere)) => {}
+                Resolved::Missing(Value::Unreduced(Why::Elsewhere(_))) => {}
                 Resolved::Missing(value) => missing = missing.or(Some(value)),
             }
         }
         if !found.is_empty() {
             Resolved::Found(found)
         } else {
-            Resolved::Missing(missing.unwrap_or(Value::Unreduced(Why::Elsewhere)))
+            Resolved::Missing(missing.unwrap_or(Value::Unreduced(Why::elsewhere())))
         }
     }
 
-    /// What one file of a module holds under a name.
+    /// What one file of a module holds under a name that `viewer` may name:
+    /// a constant visible to it, or a `use` or glob visible to it, followed
+    /// from the module that holds the `use`. One it may not name is
+    /// unreduced, as Rust refuses it.
     fn held_in(
         &self,
         key: &ModuleKey,
@@ -3556,6 +3878,7 @@ impl<'a> Evaluation<'a> {
         inline: &[String],
         name: &str,
         seen: &mut BTreeSet<(ModuleKey, String)>,
+        viewer: Option<&ModuleKey>,
     ) -> Resolved<'a> {
         let syntax = if file == self.file {
             Rc::clone(&self.syntax)
@@ -3566,6 +3889,7 @@ impl<'a> Evaluation<'a> {
         if let Some(constants) = syntax.scoped.get(&here) {
             let constants: Vec<(FileId, Rc<Constant>)> = constants
                 .iter()
+                .filter(|constant| constant.visibility.admits(key, viewer))
                 .map(|constant| (file, Rc::clone(constant)))
                 .collect();
             return self.found(name, &constants);
@@ -3573,22 +3897,29 @@ impl<'a> Evaluation<'a> {
         if syntax.locals.contains(&here) {
             return Resolved::Missing(Value::Opaque);
         }
-        if let Some(path) = syntax.uses.get(&here) {
+        if let Some((path, visibility)) = syntax.uses.get(&here) {
             let Some((last, modules)) = path.split_last() else {
-                return Resolved::Missing(Value::Unreduced(Why::Elsewhere));
+                return Resolved::Missing(Value::Unreduced(Why::elsewhere()));
             };
-            return self.locate(Some(key.clone()), modules, last, seen);
+            if !visibility.admits(key, viewer) {
+                return Resolved::Missing(Value::Unreduced(Why::elsewhere()));
+            }
+            return self.locate(Some(key.clone()), modules, last, seen, Some(key));
         }
         // The first glob that brings the name in decides it: a constant, a
         // thread-local, or a `use` of another crate's item.
         let mut beyond = false;
-        for glob in syntax.globs.get(inline).into_iter().flatten() {
-            match self.world.walk(Some(key), glob) {
-                Walk::Module(next) => match self.constant_in(next, name, seen) {
-                    Resolved::Missing(Value::Unreduced(Why::Elsewhere)) => {}
+        for (glob, visibility) in syntax.globs.get(inline).into_iter().flatten() {
+            if !visibility.admits(key, viewer) {
+                continue;
+            }
+            match self.world.walk(Some(key), glob, Some(key)) {
+                Walk::Module(next) => match self.constant_in(next, name, seen, Some(key)) {
+                    Resolved::Missing(Value::Unreduced(Why::Elsewhere(_))) => {}
                     held => return held,
                 },
                 Walk::Item { .. } | Walk::Lost => beyond = true,
+                Walk::Hidden => {}
             }
         }
         // A glob of another crate's module (`use windows::Win32::…::*`) may
@@ -3597,7 +3928,7 @@ impl<'a> Evaluation<'a> {
         if beyond {
             Resolved::Missing(Value::Opaque)
         } else {
-            Resolved::Missing(Value::Unreduced(Why::Elsewhere))
+            Resolved::Missing(Value::Unreduced(Why::elsewhere()))
         }
     }
 
@@ -3683,12 +4014,22 @@ fn splice(pieces: Vec<Value>) -> Value {
                 .collect(),
         );
     }
-    if let Some(why) = pieces.iter().find_map(Value::unreduced) {
-        return Value::Unreduced(why);
-    }
+    // Every rooted piece written whole is a path the string spells, judged
+    // on its own; a piece this reading cannot reduce beside one is the
+    // Computed diagnostic; a piece already unreduced keeps its cause. All of
+    // them are kept: a value yields every outcome it holds.
     let unreducible = pieces.iter().any(Value::unreducible);
-    if unreducible && pieces.iter().any(Value::holds_root) {
-        return Value::Unreduced(Why::Computed);
+    let mut rooted: Vec<Value> = pieces
+        .iter()
+        .filter(|piece| piece.holds_root())
+        .cloned()
+        .collect();
+    if unreducible && !rooted.is_empty() {
+        rooted.push(Value::Unreduced(Why::Computed));
+        return Value::Within(rooted);
+    }
+    if rooted.iter().any(|piece| piece.unreduced().is_some()) {
+        return Value::Within(rooted);
     }
     if unreducible {
         // No rooted piece: an ordinary string.
@@ -3849,8 +4190,49 @@ fn unlisted_documents<'a>(
         .collect()
 }
 
+/// The diagnostic, grouped by cause — a constant it cannot place, one that
+/// reaches itself, or a computed piece handed to one callee — each cause one
+/// line with its count and a few examples, under the exact total.
+fn diagnostic_summary(unresolved: &[UnresolvedRead]) -> String {
+    const EXAMPLES: usize = 3;
+    let mut causes: BTreeMap<String, Vec<&UnresolvedRead>> = BTreeMap::new();
+    for read in unresolved {
+        let cause = match &read.why {
+            Why::Computed => format!("{} — `{}`", read.why.said(), read.callee),
+            other => other.said(),
+        };
+        causes.entry(cause).or_default().push(read);
+    }
+    let mut causes: Vec<(String, Vec<&UnresolvedRead>)> = causes.into_iter().collect();
+    causes.sort_by(|left, right| right.1.len().cmp(&left.1.len()).then(left.0.cmp(&right.0)));
+    let mut said = String::new();
+    let _ = writeln!(
+        said,
+        "{} path(s) handed to a call this scan could not reduce to a committed file or rule out \
+         are not judged (a diagnostic, not a refusal), in {} cause(s):",
+        unresolved.len(),
+        causes.len()
+    );
+    for (cause, reads) in &causes {
+        let _ = writeln!(said, "  {} × {cause}", reads.len());
+        for read in reads.iter().take(EXAMPLES) {
+            let _ = writeln!(
+                said,
+                "      {}:{} {}",
+                read.file,
+                read.line,
+                read.owners.iter().cloned().collect::<Vec<_>>().join(" / ")
+            );
+        }
+        if reads.len() > EXAMPLES {
+            let _ = writeln!(said, "      … and {} more", reads.len() - EXAMPLES);
+        }
+    }
+    said
+}
+
 /// What the document half says when it fires: each item, its file, both
-/// lists, and how many rooted reads it could not reduce.
+/// lists, and the diagnostic, grouped.
 fn document_complaint(strays: &[&DocumentReader], unresolved: &[UnresolvedRead]) -> String {
     let mut said = String::new();
     let _ = writeln!(
@@ -3868,10 +4250,8 @@ fn document_complaint(strays: &[&DocumentReader], unresolved: &[UnresolvedRead])
          file, owner, mechanism, subject, ticket, disturbed_by_2a and the reason.\n  * \
          {DEBT_LIST} — a reader waiting on a seam. It only shrinks: \
          scripts/ci/check-migration-debt.ps1 refuses an added row.\n\nA reader on both lists is \
-         refused as well.\n\n{} path(s) handed to a call this scan could not reduce to a \
-         committed file or rule out are not judged (a diagnostic, not a refusal; the test prints \
-         each).",
-        unresolved.len()
+         refused as well.\n\n{}",
+        diagnostic_summary(unresolved)
     );
     said
 }
@@ -3904,16 +4284,12 @@ fn every_reader_of_a_committed_document_is_on_a_list() {
     let listed = listed_readers(&root);
     let strays = unlisted_documents(&readers, &listed);
     println!(
-        "{} committed documents; {} readers of them; {} rows on the two lists; {} paths handed \
-         to a call not reduced (the diagnostic):",
+        "{} committed documents; {} readers of them; {} rows on the two lists; {}",
         documents,
         readers.len(),
         listed.len(),
-        unresolved.len()
+        diagnostic_summary(&unresolved)
     );
-    for read in &unresolved {
-        println!("    {}", read.named());
-    }
     assert!(
         strays.is_empty(),
         "{}",
@@ -3960,7 +4336,10 @@ fn every_reader_of_a_committed_document_is_on_a_list() {
 /// `tests::formats_a_label_before_the_path` reads nothing; splice an
 /// unreducible piece before a rooted one into a string that names the path
 /// and `tests::reads_after_an_unknown_prefix` leaves the diagnostic, which
-/// the count shows.
+/// the count shows; let a splice yield one outcome (only the Computed
+/// diagnostic) and `tests::hands_a_script_with_a_computed_word` is no
+/// reader; follow every `impl`'s constant whatever trait is named and
+/// `tests::reads_a_trait_qualified_constant` reads both ledgers.
 ///
 /// It also reads through a chain of nine constants to a committed `.tsv`,
 /// hands two ledgers to a wrapper in a loop over a literal list of tuples,
@@ -3971,7 +4350,10 @@ fn every_reader_of_a_committed_document_is_on_a_list() {
 /// computed name, reads a parent module's constant through `super::`, and one
 /// `super::super::` leads to no constant of. And it shadows a `let` with one
 /// whose initialiser reads the first, formats a path after a `{:?}` label,
-/// and formats an unknown prefix before a rooted path.
+/// and formats an unknown prefix before a rooted path. And it hands on a
+/// string that spells a script and a computed word — a reader of the script
+/// and a diagnostic both — and reads an associated constant named through
+/// one of two traits, and one named through neither.
 #[test]
 fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
     let plot = temporary_directory("planted-documents");
@@ -4035,6 +4417,11 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
             "tests/assets/folio-pdf-test.pdf",
         ),
         (
+            "tests::hands_a_script_with_a_computed_word",
+            Reading::HandedTo("read_fixture".to_owned()),
+            "scripts/shell-integration/folio.ps1",
+        ),
+        (
             "tests::hands_the_outer_fixtures_after_an_inner_loop",
             Reading::HandedTo("read_fixture".to_owned()),
             "docs/plans/MIGRATION-DEBT.tsv;docs/plans/POINTER-DEBT.tsv",
@@ -4063,6 +4450,11 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
             "tests::reads_a_text_with_fs_read",
             Reading::AtRunTime,
             "crates/bt-app/src/file_reads_doors.txt",
+        ),
+        (
+            "tests::reads_a_trait_qualified_constant",
+            Reading::AtRunTime,
+            "docs/plans/SOURCE-READERS.tsv",
         ),
         (
             "tests::reads_its_output_and_a_ledger",
@@ -4099,7 +4491,7 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
             (
                 read.owners.iter().cloned().collect::<Vec<_>>().join(" / "),
                 read.callee.clone(),
-                read.why,
+                read.why.clone(),
             )
         })
         .collect();
@@ -4113,9 +4505,14 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
                 Why::Computed
             ),
             (
+                "tests::hands_a_script_with_a_computed_word".to_owned(),
+                "read_fixture".to_owned(),
+                Why::Computed
+            ),
+            (
                 "tests::inner::reads_a_constant_it_cannot_place".to_owned(),
                 "std::fs::read_to_string".to_owned(),
-                Why::Elsewhere
+                Why::Elsewhere("super::super::NOWHERE".to_owned())
             ),
             (
                 "tests::reads_a_formatted_name".to_owned(),
@@ -4130,12 +4527,17 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
             (
                 "tests::reads_a_self_named_constant".to_owned(),
                 "std::fs::read_to_string".to_owned(),
-                Why::Cycle
+                Why::Cycle("self::SELF_NAMED".to_owned())
             ),
             (
                 "tests::reads_after_an_unknown_prefix".to_owned(),
                 "std::fs::read_to_string".to_owned(),
                 Why::Computed
+            ),
+            (
+                "tests::reads_an_ambiguous_associated_constant".to_owned(),
+                "std::fs::read_to_string".to_owned(),
+                Why::Elsewhere("Fixture::NAME".to_owned())
             ),
         ],
         "the rooted reads with a computed name, handed to a read or to a wrapper, and the \
@@ -4147,15 +4549,15 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
     // in silence instead of diagnosed — changes it.
     assert_eq!(
         unresolved.len(),
-        6,
-        "the planted crate's diagnostic is exactly six paths"
+        8,
+        "the planted crate's diagnostic is exactly eight paths"
     );
 
     let listed = listed_readers(&workspace_root());
     let strays = unlisted_documents(&readers, &listed);
     assert_eq!(
         strays.len(),
-        14,
+        16,
         "a planted reader was taken for a listed one"
     );
     let said = document_complaint(&strays, &unresolved);
@@ -4166,7 +4568,7 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
             && said.contains("tests::LIST")
             && said.contains(DEBT_LIST)
             && said.contains(SOURCE_LIST)
-            && said.contains("6 path(s) handed to a call"),
+            && said.contains("8 path(s) handed to a call"),
         "the refusal names each item, its file, both lists and the diagnostic; it said:\n{said}"
     );
     assert!(
@@ -4181,6 +4583,118 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
         .collect();
     assert!(unlisted_documents(&readers, &rows).is_empty());
 
+    std::fs::remove_dir_all(&plot).expect("the plant is taken away again");
+}
+
+/// RED (T-SOURCE-READERS-TSV-TRIPWIRE round 7) — **a constant of another
+/// first-party crate resolves only as Rust lets it be named**: `pub` and
+/// reached through `pub` modules or a `pub use` from the crate's root. A
+/// private constant, a `pub(crate)` one and a `pub` one in a private module
+/// are unreduced — the diagnostic — while the crate's own test reads its
+/// private constant, and a `pub use` of the one in the private module is a
+/// reader.
+///
+/// MUTATION: let `Visibility::admits` admit everything and
+/// `tests::reads_a_private_constant`, `tests::reads_a_crate_constant` and
+/// `tests::reads_through_a_private_module` become readers.
+#[test]
+fn a_constant_of_another_crate_resolves_only_through_what_it_makes_public() {
+    let plot = temporary_directory("planted-crates");
+    let committed = committed_files(&workspace_root());
+    let mut indices = Vec::new();
+    for (name, text) in [
+        ("planted_lib", planted_library()),
+        ("planted_user", planted_user()),
+    ] {
+        let package = plot.join("crates").join(name);
+        let module = package.join("src");
+        std::fs::create_dir_all(&module).expect("a tree of our own");
+        std::fs::write(module.join("lib.rs"), text).expect("the plant");
+        let universe = Universe::declare(
+            name,
+            vec![TargetRoot {
+                id: TargetId {
+                    package: name.to_owned(),
+                    kind: TargetKind::Library,
+                    name: name.to_owned(),
+                },
+                file: module.join("lib.rs"),
+            }],
+            vec![DiskScope::under(&module)],
+            Vendor::Excluded,
+        )
+        .expect("the plant is there");
+        let index =
+            Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+        indices.push((package, index));
+    }
+    let (readers, unresolved) = document_readers(&indices, &plot, &committed);
+    let found: Vec<(String, String, Vec<String>)> = readers
+        .iter()
+        .map(|reader| {
+            (
+                reader.file.clone(),
+                reader
+                    .owners
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" / "),
+                reader.subjects.iter().cloned().collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (
+                "crates/planted_lib/src/lib.rs",
+                "tests::reads_its_own_private_constant",
+                "docs/plans/MIGRATION-DEBT.tsv",
+            ),
+            (
+                "crates/planted_user/src/lib.rs",
+                "tests::reads_a_public_constant",
+                "docs/plans/TIMING-BOUND-TESTS.tsv",
+            ),
+            (
+                "crates/planted_user/src/lib.rs",
+                "tests::reads_a_reexported_constant",
+                "docs/plans/POINTER-DEBT.tsv",
+            ),
+        ]
+        .map(|(file, owner, subject)| (
+            file.to_owned(),
+            owner.to_owned(),
+            vec![subject.to_owned()]
+        )),
+        "the scan found {readers:#?}"
+    );
+    let diagnosed: Vec<(String, Why)> = unresolved
+        .iter()
+        .map(|read| {
+            (
+                read.owners.iter().cloned().collect::<Vec<_>>().join(" / "),
+                read.why.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        diagnosed,
+        [
+            ("tests::reads_a_private_constant", "planted_lib::DOC"),
+            (
+                "tests::reads_a_crate_constant",
+                "planted_lib::open::CRATE_DOC"
+            ),
+            (
+                "tests::reads_through_a_private_module",
+                "planted_lib::secret::SECRET_DOC"
+            ),
+        ]
+        .map(|(owner, path)| (owner.to_owned(), Why::Elsewhere(path.to_owned()))),
+        "the constants the other crate does not make public are the diagnostic"
+    );
     std::fs::remove_dir_all(&plot).expect("the plant is taken away again");
 }
 
@@ -4357,6 +4871,39 @@ mod tests {
         std::fs::read_to_string(format!("{}{}/docs/DESIGN.md", unknown, env!("CARGO_MANIFEST_DIR"))).unwrap()
     }
 
+    trait Ledger {
+        const NAME: &'static str;
+    }
+
+    trait Corpus {
+        const NAME: &'static str;
+    }
+
+    struct Fixture;
+
+    impl Ledger for Fixture {
+        const NAME: &'static str = "docs/plans/SOURCE-READERS.tsv";
+    }
+
+    impl Corpus for Fixture {
+        const NAME: &'static str = "docs/plans/MIGRATION-DEBT.tsv";
+    }
+
+    #[test]
+    fn reads_a_trait_qualified_constant() {
+        let _ = std::fs::read_to_string(repository_root().join(<Fixture as Ledger>::NAME));
+    }
+
+    #[test]
+    fn reads_an_ambiguous_associated_constant() {
+        let _ = std::fs::read_to_string(repository_root().join(Fixture::NAME));
+    }
+
+    fn hands_a_script_with_a_computed_word(word: &str) -> Vec<u8> {
+        let script = repository_root().join("scripts/shell-integration/folio.ps1");
+        read_fixture(std::path::Path::new(&format!("{} {}", script.display(), word)))
+    }
+
     fn reads_a_formatted_name(name: &str) -> String {
         std::fs::read_to_string(format!("{}/{}", env!("CARGO_MANIFEST_DIR"), name)).unwrap()
     }
@@ -4380,6 +4927,76 @@ mod tests {
     #[test]
     fn compares_a_fixture_path() {
         assert_eq!(repository_root().join("docs/DESIGN.md"), std::path::PathBuf::new());
+    }
+}
+"#
+    .to_owned()
+}
+
+/// A library with constants of every visibility, and its own test that
+/// reads its private one.
+fn planted_library() -> String {
+    r#"//! A planted library.
+const DOC: &str = "docs/plans/MIGRATION-DEBT.tsv";
+pub const OPEN_DOC: &str = "docs/plans/TIMING-BOUND-TESTS.tsv";
+
+mod secret {
+    pub const SECRET_DOC: &str = "docs/plans/POINTER-DEBT.tsv";
+}
+
+pub mod open {
+    pub(crate) const CRATE_DOC: &str = "docs/plans/structural-debt.md";
+}
+
+pub use secret::SECRET_DOC;
+
+#[cfg(test)]
+mod tests {
+    fn root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+    }
+
+    #[test]
+    fn reads_its_own_private_constant() {
+        let _ = std::fs::read_to_string(root().join(super::DOC));
+    }
+}
+"#
+    .to_owned()
+}
+
+/// A crate whose tests name the library's constants of every visibility.
+fn planted_user() -> String {
+    r#"//! A planted user of the planted library.
+#[cfg(test)]
+mod tests {
+    fn root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+    }
+
+    #[test]
+    fn reads_a_private_constant() {
+        let _ = std::fs::read_to_string(root().join(planted_lib::DOC));
+    }
+
+    #[test]
+    fn reads_a_crate_constant() {
+        let _ = std::fs::read_to_string(root().join(planted_lib::open::CRATE_DOC));
+    }
+
+    #[test]
+    fn reads_through_a_private_module() {
+        let _ = std::fs::read_to_string(root().join(planted_lib::secret::SECRET_DOC));
+    }
+
+    #[test]
+    fn reads_a_reexported_constant() {
+        let _ = std::fs::read_to_string(root().join(planted_lib::SECRET_DOC));
+    }
+
+    #[test]
+    fn reads_a_public_constant() {
+        let _ = std::fs::read_to_string(root().join(planted_lib::OPEN_DOC));
     }
 }
 "#
