@@ -976,10 +976,10 @@ mod tests {
     }
 
     /// A press on the window: one row's chord, the table's departures stored — written in
-    /// `PLATFORM`'s dialect, the dialect the window's merge reads in. In the product both are
-    /// the host's; a test that pinned one and not the other would merge a Mac's presses as
-    /// Windows', and `apply_press`, which lays a press over a merged document only within one
-    /// dialect, would take the press's document whole.
+    /// `PLATFORM`'s dialect, the dialect the window's merge reads in, so the test's merge and
+    /// its presses are one dialect on every host, as the product's are. (`apply_press` carries
+    /// a document in another dialect into the press's with `in_dialect` before it lays the
+    /// press; the test pins the dialect so what it states does not depend on the host.)
     fn press(window: &mut Window, action: &str, chord: &str) {
         let chord: Chord = parse_chord(chord).expect("a chord");
         window.table.set(action, Some(chord));
