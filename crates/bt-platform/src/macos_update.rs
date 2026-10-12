@@ -28,8 +28,9 @@
 //! **Children only through the quiet door, by absolute path**
 //! (`crate::quiet_command`): `/usr/bin/codesign` and `/usr/bin/ditto` are
 //! where the system keeps them, so nothing is looked up on `PATH`. Each one is
-//! waited for within a deadline and ended by the pid this call started it
-//! with if it overruns. **Off macOS the call is refused by name**
+//! a contained probe (`crate::spawn_probe`; one that cannot be contained is
+//! not run), waited for within a deadline, and ended with its whole group if
+//! it overruns; what it said before that is kept in the refusal. **Off macOS the call is refused by name**
 //! ([`Refusal::NotHere`]). Worker only: a clone and a verification read the
 //! whole bundle.
 //!
@@ -56,7 +57,7 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Output;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::HostPlatform;
 use crate::file_reads::{self, Lane};
@@ -77,6 +78,10 @@ pub const COPY_WITHIN: Duration = Duration::from_secs(120);
 
 /// How often a child that has not finished is asked again.
 const POLL: Duration = Duration::from_millis(20);
+
+/// How much of what an overrunning child said is kept in its refusal: its
+/// last bytes, which name where it stood.
+const SAID_KEPT: usize = 4096;
 
 /// **Why no verified rescue clone was made.**
 #[derive(Debug)]
@@ -99,11 +104,13 @@ pub enum Refusal {
     NoIdentity { bundle: PathBuf, detail: String },
     /// The clone verified, but it is not the same code as the old bundle.
     Differs { old: String, clone: String },
-    /// A child did not finish within its deadline and was ended by the pid
-    /// this call started it with.
+    /// A child did not finish within its deadline and was ended with its
+    /// whole group; `said` is the end of what it had written by then (at most
+    /// [`SAID_KEPT`] bytes, standard output first), empty when nothing.
     TimedOut {
         program: &'static str,
         within: Duration,
+        said: String,
     },
     /// The directory an image was to be mounted under could not be resolved
     /// (it must exist: `hdiutil -mountrandom` makes its mount point inside it).
@@ -134,6 +141,9 @@ pub enum Refusal {
     /// An extended attribute could not be carried onto a bundle: not
     /// written, not read back, read back different, or not flushed.
     Attribute { name: String, detail: String },
+    /// A name of a staged bundle could not be listed, read, opened or flushed
+    /// to the medium ([`make_durable`]).
+    Durable { path: PathBuf, error: io::Error },
 }
 
 impl fmt::Display for Refusal {
@@ -160,11 +170,20 @@ impl fmt::Display for Refusal {
                 f,
                 "macos_update: the clone's cdhash {clone} is not the old bundle's {old}"
             ),
-            Self::TimedOut { program, within } => {
+            Self::TimedOut {
+                program,
+                within,
+                said,
+            } => {
                 write!(
                     f,
                     "macos_update {program}: did not finish within {within:?}"
-                )
+                )?;
+                if said.trim().is_empty() {
+                    Ok(())
+                } else {
+                    write!(f, "; it had said: {}", said.trim())
+                }
             }
             Self::MountDir { path, error } => write!(
                 f,
@@ -203,6 +222,11 @@ impl fmt::Display for Refusal {
                     "macos_update: the attribute {name} was not carried: {detail}"
                 )
             }
+            Self::Durable { path, error } => write!(
+                f,
+                "macos_update: {} was not made durable: {error}",
+                path.display()
+            ),
         }
     }
 }
@@ -249,8 +273,8 @@ fn identity(said: &str) -> Option<Identity> {
 }
 
 /// **Run `program` with `arguments` and wait for it within `within`**, ending
-/// it by the pid this call started if it overruns. The output is charged to
-/// `file_reads`' `Lane::Update`.
+/// it with its whole group if it overruns ([`Refusal::TimedOut`], carrying
+/// what it had said). The output is charged to `file_reads`' `Lane::Update`.
 fn run(program: &'static str, arguments: &[&OsStr], within: Duration) -> Result<Output, Refusal> {
     run_at(program, Path::new(program), arguments, within)
 }
@@ -263,36 +287,56 @@ fn run_at(
     arguments: &[&OsStr],
     within: Duration,
 ) -> Result<Output, Refusal> {
+    let mut command = crate::quiet_command(at);
+    command.args(arguments);
+    let child = crate::spawn_probe(&mut command, crate::ProbeStdio::ANSWER).map_err(|error| {
+        Refusal::Program {
+            program: name,
+            detail: format!("did not start: {error}"),
+        }
+    })?;
+    held_to(name, child, within, &mut || std::thread::sleep(POLL))
+}
+
+/// **Wait for `child` within `within`** — through the one owner of a probe's
+/// deadline (`crate::ProbeChild::wait_within`, a fixed patience), `rest`
+/// between two looks — and collect what it said: its output when it
+/// finished, or [`Refusal::TimedOut`] with the end of what it had written
+/// when it was ended at the deadline.
+fn held_to(
+    name: &'static str,
+    mut child: crate::ProbeChild,
+    within: Duration,
+    rest: &mut dyn FnMut(),
+) -> Result<Output, Refusal> {
     let refused = |detail: String| Refusal::Program {
         program: name,
         detail,
     };
-    let mut command = crate::quiet_command(at);
-    command.args(arguments);
-    let mut child = crate::spawn_probe(&mut command, crate::ProbeStdio::ANSWER)
-        .map_err(|error| refused(format!("did not start: {error}")))?;
-    let deadline = Instant::now() + within;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
-            Ok(None) => {
-                // Only the child this call started is ended.
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(Refusal::TimedOut {
-                    program: name,
-                    within,
-                });
-            }
-            Err(error) => return Err(refused(format!("could not be waited for: {error}"))),
-        }
-    }
+    let waited = child
+        .wait_within(crate::ProbePatience::fixed(within), rest)
+        .map_err(|error| refused(format!("could not be waited for or ended: {error}")))?;
     let output = child
         .wait_with_output()
         .map_err(|error| refused(format!("could not be read: {error}")))?;
     file_reads::pipe_output(Lane::Update, &output);
-    Ok(output)
+    match waited {
+        Ok(_) => Ok(output),
+        Err(_) => Err(Refusal::TimedOut {
+            program: name,
+            within,
+            said: tail_of(&said(&output), SAID_KEPT),
+        }),
+    }
+}
+
+/// The last `at_most` bytes of `text`, cut on a character boundary.
+fn tail_of(text: &str, at_most: usize) -> String {
+    let mut start = text.len().saturating_sub(at_most);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_owned()
 }
 
 /// The text of a finished child's two streams, standard output first.
@@ -1225,10 +1269,96 @@ pub fn carry_attributes(bundle: &Path, attributes: &[(&str, &[u8])]) -> Result<(
             Err(error) => return Err(refused(format!("not read back: {error}"))),
         }
     }
-    flush_directory(bundle).map_err(|error| Refusal::Attribute {
+    full_fsync(bundle).map_err(|error| Refusal::Attribute {
         name: String::new(),
         detail: format!("the bundle was not flushed: {error}"),
     })
+}
+
+/// **Put the bundle at `bundle` on the medium** (0.4.8 E6, the release read's
+/// F6): every regular file and every folder of it, `bundle` itself included,
+/// flushed (`F_FULLFSYNC`), each folder after what it holds, and then the
+/// folder `bundle` stands in, so its own name is on the medium too. What a
+/// `clonefile` or a `ditto` leaves is in the page cache until each of its
+/// names is flushed; the macOS Prepare calls this for the staged bundle and
+/// the rescue clone before the journal vouches for them (`Prepared`), as the
+/// Windows Prepare flushes each staged file before its name
+/// (`install_txn::durable_copy`). Worker only: the walk is synchronous work on
+/// the update job's own worker.
+///
+/// **Exhaustive or refused**: every name is taken as the operating system
+/// gives it (an `OsString`, never cut to text); a folder that cannot be
+/// listed, an entry that cannot be read, a kind that cannot be read, a name
+/// that is neither a file, a folder nor a link, and a name that cannot be
+/// opened or flushed each refuse the whole call, naming that path. A link is
+/// not followed: it is an entry of its folder, flushed with that folder.
+///
+/// # Errors
+/// [`Refusal::NotHere`] off macOS; [`Refusal::Durable`] naming the first path
+/// that refused.
+pub fn make_durable(worker: &crate::admission::WorkerCtx, bundle: &Path) -> Result<(), Refusal> {
+    if crate::host_platform() != HostPlatform::MacOs {
+        return Err(Refusal::NotHere);
+    }
+    flush_tree_with(worker, bundle, &mut full_fsync)
+        .map_err(|(path, error)| Refusal::Durable { path, error })?;
+    let parent = bundle.parent().unwrap_or(bundle);
+    full_fsync(parent).map_err(|error| Refusal::Durable {
+        path: parent.to_path_buf(),
+        error,
+    })
+}
+
+/// [`make_durable`]'s walk, in post-order — a folder's names before the
+/// folder — with `flush` for each regular file and each folder; the path that
+/// refused, with its error. One explicit stack, so the depth of a tree costs
+/// no thread stack.
+fn flush_tree_with(
+    _worker: &crate::admission::WorkerCtx,
+    root: &Path,
+    flush: &mut dyn FnMut(&Path) -> io::Result<()>,
+) -> Result<(), (PathBuf, io::Error)> {
+    // `(path, listed)`: a folder is pushed back as listed once its names are
+    // on the stack above it, and flushed when it comes off again.
+    let mut stack = vec![(root.to_path_buf(), false)];
+    while let Some((path, listed)) = stack.pop() {
+        if listed {
+            flush(&path).map_err(|error| (path.clone(), error))?;
+            continue;
+        }
+        let kind = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) => return Err((path, error)),
+        };
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_file() {
+            flush(&path).map_err(|error| (path.clone(), error))?;
+            continue;
+        }
+        if !kind.is_dir() {
+            return Err((
+                path,
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "neither a file, a folder nor a link",
+                ),
+            ));
+        }
+        let entries = match std::fs::read_dir(&path) {
+            Ok(entries) => entries,
+            Err(error) => return Err((path, error)),
+        };
+        stack.push((path.clone(), true));
+        for entry in entries {
+            match entry {
+                Ok(entry) => stack.push((entry.path(), false)),
+                Err(error) => return Err((path, error)),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `setxattr(XATTR_NOFOLLOW)`, creating or replacing the value.
@@ -1287,19 +1417,20 @@ fn read_attribute(path: &Path, name: &str) -> io::Result<Vec<u8>> {
     Ok(buffer)
 }
 
-/// `F_FULLFSYNC` on a read-only descriptor of the directory `path`.
+/// `F_FULLFSYNC` on a read-only descriptor of `path`, a file or a directory.
 #[cfg(target_os = "macos")]
-fn flush_directory(path: &Path) -> io::Result<()> {
+fn full_fsync(path: &Path) -> io::Result<()> {
     use std::os::fd::AsRawFd;
-    let directory = std::fs::OpenOptions::new().read(true).open(path)?;
-    // SAFETY: the descriptor is live for the call and owned by `directory`.
-    if unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_FULLFSYNC) } == -1 {
+    let opened = std::fs::OpenOptions::new().read(true).open(path)?;
+    // SAFETY: the descriptor is live for the call and owned by `opened`.
+    if unsafe { libc::fcntl(opened.as_raw_fd(), libc::F_FULLFSYNC) } == -1 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
 }
 
-/// Off macOS [`carry_attributes`] refuses before these would be asked.
+/// Off macOS [`carry_attributes`] and [`make_durable`] refuse before these
+/// would be asked.
 #[cfg(not(target_os = "macos"))]
 fn write_attribute(_path: &Path, _name: &str, _value: &[u8]) -> io::Result<()> {
     Err(io::Error::from(io::ErrorKind::Unsupported))
@@ -1311,7 +1442,7 @@ fn read_attribute(_path: &Path, _name: &str) -> io::Result<Vec<u8>> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn flush_directory(_path: &Path) -> io::Result<()> {
+fn full_fsync(_path: &Path) -> io::Result<()> {
     Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 
@@ -1332,6 +1463,161 @@ mod tests {
         # designated => cdhash H\"618d5e3368be265abd51472976742fa902819c8e\" or cdhash H\"1452da50f42f5cbc30828b02498d29a6e4721d4c\"\n\
         CDHash=618d5e3368be265abd51472976742fa902819c8e\n\
         Signature=adhoc\n";
+
+    /// The helper mode [`helper_says_then_waits`] runs in.
+    const HELPER_MODE: &str = "MACOS_UPDATE_HELPER_MODE";
+
+    /// What the helper says before it waits: mixed script, so the kept text
+    /// is not ASCII by accident.
+    const SAID_BEFORE: &str = "verifying Folio.app \u{2014} \u{6821}\u{9a8c}\u{4e2d}";
+
+    /// A helper probe: started by
+    /// [`a_child_ended_at_its_deadline_is_refused_with_what_it_said`], it says
+    /// [`SAID_BEFORE`] on standard error, then `ready` on standard output, and
+    /// waits to be ended.
+    #[test]
+    fn helper_says_then_waits() {
+        use std::io::Write as _;
+        if std::env::var(HELPER_MODE).as_deref() != Ok("say") {
+            return;
+        }
+        eprintln!("{SAID_BEFORE}");
+        std::io::stderr().flush().expect("flush what it said");
+        println!("ready");
+        std::io::stdout().flush().expect("flush its readiness");
+        loop {
+            std::thread::park();
+        }
+    }
+
+    /// RED (0.4.8 E6, the release read's F7(a)) — **a child ended at its
+    /// deadline is refused with what it had said by then**: the helper says a
+    /// line and waits; the owner's deadline, which this test's seam lets pass
+    /// only once the line is written, ends it, and the `TimedOut` refusal
+    /// carries the line into its sentence.
+    ///
+    /// MUTATION: in `held_to`, answer `TimedOut` with an empty `said` (the
+    /// 0.4.7 refusal, which dropped the output).
+    #[test]
+    fn a_child_ended_at_its_deadline_is_refused_with_what_it_said() {
+        use std::io::BufRead as _;
+        let mut command = crate::quiet_command(std::env::current_exe().expect("this test binary"));
+        command
+            .args([
+                "--exact",
+                "macos_update::tests::helper_says_then_waits",
+                "--nocapture",
+            ])
+            .env(HELPER_MODE, "say");
+        let mut child =
+            crate::spawn_probe(&mut command, crate::ProbeStdio::ANSWER).expect("start the helper");
+        let mut readiness = std::io::BufReader::new(child.take_stdout().expect("stdout is piped"));
+        // The owner's first look comes at once; its first rest lasts until
+        // the helper says it is ready — after it has said its line — so the
+        // deadline is met only after that (a completion signal, not the
+        // clock); later rests yield until it is.
+        let mut ready = false;
+        let refused = held_to("helper", child, Duration::from_millis(200), &mut || {
+            while !ready {
+                let mut line = String::new();
+                let read = readiness
+                    .read_line(&mut line)
+                    .expect("the helper's readiness");
+                assert_ne!(read, 0, "the helper ended before it was ready");
+                ready = line.trim() == "ready";
+            }
+            std::thread::yield_now();
+        });
+        let Err(Refusal::TimedOut { program, said, .. }) = &refused else {
+            panic!("the helper is ended at its deadline: {refused:?}");
+        };
+        assert_eq!(*program, "helper");
+        assert!(said.contains(SAID_BEFORE), "{said:?}");
+        let sentence = refused.expect_err("a refusal").to_string();
+        assert!(sentence.contains(SAID_BEFORE), "{sentence}");
+    }
+
+    /// RED (0.4.8 E6) — **what a refusal keeps of a long answer is its end,
+    /// cut on a character boundary.**
+    ///
+    /// MUTATION: in `tail_of`, keep the first `at_most` bytes.
+    #[test]
+    fn a_refusal_keeps_the_end_of_what_was_said() {
+        let said = format!("{}\u{6821}\u{9a8c} at the end", "x".repeat(SAID_KEPT));
+        let kept = tail_of(&said, SAID_KEPT);
+        assert!(kept.len() <= SAID_KEPT);
+        assert!(kept.ends_with("\u{6821}\u{9a8c} at the end"), "{kept:?}");
+        assert_eq!(tail_of("\u{6821}\u{9a8c}", 4), "\u{9a8c}");
+    }
+
+    /// RED (0.4.8 E6; round 2 plant (ii)) — **the durability walk takes every
+    /// name as the system gives it, in post-order**: a name that is not text
+    /// (a lone surrogate on Windows, a byte that is no UTF-8 elsewhere — where
+    /// the file system takes one) is flushed like any other, every file before
+    /// its folder, every folder before its parent, and a link is not entered.
+    ///
+    /// MUTATION: in `flush_tree_with`, skip an entry whose name is not text
+    /// (`entry.file_name().to_str()` is `None`) — the odd name is never
+    /// flushed.
+    #[test]
+    fn the_durability_walk_flushes_every_name_children_first() {
+        let root = bt_testpath::temp_path("e6-durable-walk");
+        let _ = std::fs::remove_dir_all(&root);
+        let tree = root.join("Folio.app");
+        let inner = tree.join("Contents").join("\u{8d44}\u{6e90}");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("notice.txt"), b"sealed").unwrap();
+        #[cfg(windows)]
+        let odd = {
+            use std::os::windows::ffi::OsStringExt as _;
+            std::ffi::OsString::from_wide(&[u16::from(b'x'), 0xD800])
+        };
+        #[cfg(unix)]
+        let odd = {
+            use std::os::unix::ffi::OsStringExt as _;
+            std::ffi::OsString::from_vec(vec![b'x', 0xff])
+        };
+        let odd = inner.join(odd);
+        // APFS refuses a name that is no UTF-8 (`EILSEQ`): there the walk
+        // cannot meet one, and that half is not asked.
+        let odd_made = std::fs::write(&odd, b"odd").is_ok();
+        let flushed: Vec<PathBuf> =
+            crate::spawn_at_priority("bt-e6-walk-test", crate::ThreadPriority::BelowNormal, {
+                let tree = tree.clone();
+                move |worker| {
+                    let mut flushed = Vec::new();
+                    flush_tree_with(worker, &tree, &mut |path| {
+                        flushed.push(path.to_path_buf());
+                        Ok(())
+                    })
+                    .expect("the walk lists every folder");
+                    flushed
+                }
+            })
+            .expect("the thread door starts a thread")
+            .join()
+            .expect("the walk does not panic");
+        let at = |path: &Path| {
+            flushed
+                .iter()
+                .position(|seen| seen == path)
+                .unwrap_or_else(|| panic!("{} was not flushed: {flushed:?}", path.display()))
+        };
+        assert!(at(&inner.join("notice.txt")) < at(&inner));
+        assert!(at(&inner) < at(&tree.join("Contents")));
+        assert!(at(&tree.join("Contents")) < at(&tree));
+        assert_eq!(flushed.last(), Some(&tree), "the bundle comes last");
+        if odd_made {
+            assert!(at(&odd) < at(&inner), "the name that is not text");
+        } else {
+            assert_eq!(
+                crate::host_platform(),
+                HostPlatform::MacOs,
+                "only APFS refuses the name"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// RED (U-26) — **the identity is read from `codesign`'s own words: the
     /// designated requirement (explicit or implicit), the cdhash and the
@@ -1448,6 +1734,10 @@ mod tests {
                     copy_bundle(worker, bundle, Path::new("copy.app")),
                     Err(Refusal::NotHere)
                 ));
+                assert!(matches!(
+                    make_durable(worker, bundle),
+                    Err(Refusal::NotHere)
+                ));
             },
         )
         .expect("the thread door starts a thread");
@@ -1518,6 +1808,41 @@ mod tests {
                 .output()
                 .unwrap();
             assert!(output.status.success(), "{}", said(&output));
+        }
+
+        /// RED (0.4.8 E6, the release read's F6; round 2 plant (i)) — **a
+        /// staged bundle is made durable whole or refused**: a bundle with a
+        /// link in it answers `Ok`; a folder of it that cannot be listed is a
+        /// refusal naming that folder, never a success that left it out.
+        ///
+        /// MUTATION: in `flush_tree_with`, treat a folder `read_dir` refuses
+        /// as empty (`continue`) — the call answers `Ok`.
+        #[test]
+        fn a_staged_bundle_is_made_durable_whole_or_refused() {
+            use std::os::unix::fs::PermissionsExt;
+            let root = scratch("durable");
+            let bundle = tiny_bundle(&root, "Folio.app");
+            std::os::unix::fs::symlink("MacOS/tiny", bundle.join("Contents/link")).unwrap();
+            let on_worker = |bundle: PathBuf| {
+                crate::spawn_at_priority(
+                    "bt-e6-durable-test",
+                    crate::ThreadPriority::BelowNormal,
+                    move |worker| make_durable(worker, &bundle),
+                )
+                .expect("the thread door starts a thread")
+                .join()
+                .expect("the walk does not panic")
+            };
+            assert!(on_worker(bundle.clone()).is_ok());
+            let sealed = bundle.join("Contents/Resources");
+            std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let refused = on_worker(bundle.clone());
+            std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(
+                matches!(&refused, Err(Refusal::Durable { path, .. }) if *path == sealed),
+                "{refused:?}"
+            );
+            let _ = std::fs::remove_dir_all(&root);
         }
 
         /// RED (U-26) — **a rescue clone on APFS is a bundle whose main
