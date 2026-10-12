@@ -45,7 +45,14 @@ variable over its body; a loop over a literal list is each element in turn),
 a constant through bt-source's module trees across every first-party package
 (bare, `self::`, `super::`, `crate::`, a crate's name, `use` and `use …::*`,
 every file a module is written in, `impl` blocks' constants), and a same-file
-helper with its parameters bound. A constant name is SCREAMING_SNAKE_CASE:
+helper with its parameters bound. A constant resolves only where Rust lets the
+reading module name it: in another crate only a `pub` item reached through
+`pub` modules or a `pub use`, in the same crate a private item from its module
+and the modules under it, `pub(crate)` crate-wide and `pub(super)`/`pub(in …)`
+as spelled; a path that visibility hides is the diagnostic. An associated
+constant written `<Type as Trait>::NAME` is the impl of the trait that path
+names (through `use`s and re-exports); `Type::NAME` is the inherent impl's, or
+the one trait impl's, and several trait impls make it the diagnostic. A constant name is SCREAMING_SNAKE_CASE:
 CI's workspace-wide `clippy -D warnings` makes `non_upper_case_globals` (not in
 the workspace's `Cargo.toml`: rustc's default warn) refuse any other, and a
 snake_case constant that is there is found by its name all the same. A macro is
@@ -71,11 +78,12 @@ reading text is migrated to a `bt-source` query instead, and a debt row is never
 added. The scan never drops a path it gives up on in silence: a rooted path
 handed to any call that it cannot reduce to a literal (a parameter, a constant
 it cannot read), a `concat!`/`format!` holding a rooted piece and an
-unreducible piece anywhere, a constant that reaches itself again (cycles are
+unreducible piece anywhere (both outcomes: each fully reduced rooted piece that
+names a committed document is still a reader), a constant that reaches itself again (cycles are
 detected; acyclic chains are followed to their end), and a constant-spelled
 name the module trees hold no constant, `use`, glob or `thread_local!` of are
-counted and listed by the test as a diagnostic — file, line, item, callee,
-why — not refused. Every place the evaluator answers "nothing" says beside it
+counted and listed by the test as a diagnostic — grouped by cause with the
+exact total and a few examples each — not refused. Every place the evaluator answers "nothing" says beside it
 why that is a resolution, a diagnostic or no path into the checkout. The method
 exclusion is a list of names, so a reading method that shares an excluded name
 is a blind spot, and a new
