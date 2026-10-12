@@ -100,7 +100,14 @@ contract's ledger, one row per request protocol, held by the
 in `window_waits_tests` and by the fifth and sixth checks of `scripts/ci/check-window-waits.ps1`. A door that
 reaches a lane started elsewhere is listed, with its reason, in
 `docs/plans/completions-door-starts.tsv`, which only shrinks; reachability is a call path to
-the function that starts the thread, never a shared type or module.
+the function that starts the thread, never a shared type or module. The path follows a call on
+a receiver stated to be a first-party trait (`dyn Trait` behind `&`, `Box`, `Arc` or `Rc`,
+`impl Trait`, a generic parameter bound by the trait) into every first-party implementation of
+that trait on every platform arm — an over-approximation, which is the conservative direction
+for *is this body reached* — so a body reached only through a trait object (the update job's
+`driver.prepare`) needs no list line. It does not follow a stored closure, a function pointer,
+a standard or third-party trait, a type written through an alias, or an untyped receiver whose
+method name is shared; those are S-2a's call graph.
 When red, give the new answer, lane, thread or registry row its ledger row (or
 correct the row the code moved past); a status names the D-row or registry row
 that repairs it and only ever becomes `conforms` — never mark a row conforming
