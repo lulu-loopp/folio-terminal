@@ -68,30 +68,33 @@ pub const PROGRAM_REFUSED: &str = "the files tree does not run programs";
 /// URL whose path is not there is [`Self::NotFound`], and a URL no application claims
 /// (`URLForApplicationToOpenURL:` answering nil) is [`Self::NoHandler`]. Every refusal a door
 /// makes of its own — [`PROGRAM_REFUSED`], a path of the wrong shape, a platform with no shell —
-/// and every system failure that is none of the first three is [`Self::Other`], in the door's or
-/// the system's own words.
+/// and every system failure that is none of the first three is [`Self::Other`].
+///
+/// **Every kind carries the system's own detail** — on Windows the code and its documented name,
+/// on macOS the path and the operating system's error, or what was asked and found missing —
+/// for the stderr and diagnostics line ([`Self::reason`]). The kind is what a reader is told;
+/// the detail is never shown in the window.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HandOffRefusal {
     /// The system has no program registered to open the target.
-    NoHandler,
+    NoHandler(String),
     /// The target is not there.
-    NotFound,
+    NotFound(String),
     /// The system refused access to the target.
-    AccessDenied,
+    AccessDenied(String),
     /// Any other refusal, in the door's or the system's words.
     Other(String),
 }
 
 impl HandOffRefusal {
-    /// The refusal's words for a log line: the fixed sentence of each kind, or the words
-    /// [`Self::Other`] carries.
+    /// The refusal's detail for a log line, in the door's or the system's own words.
     #[must_use]
     pub fn reason(&self) -> &str {
         match self {
-            Self::NoHandler => "no application is registered to open it",
-            Self::NotFound => "the target does not exist",
-            Self::AccessDenied => "access to the target is denied",
-            Self::Other(words) => words,
+            Self::NoHandler(words)
+            | Self::NotFound(words)
+            | Self::AccessDenied(words)
+            | Self::Other(words) => words,
         }
     }
 }
@@ -1137,10 +1140,11 @@ mod macos_handoff {
     /// process read is [`HandOffRefusal::AccessDenied`], and anything else is the operating
     /// system's own words after the path.
     fn refusal_of_the_disk(path: &Path, error: &std::io::Error) -> HandOffRefusal {
+        let detail = format!("{path:?}: {error}");
         match error.kind() {
-            std::io::ErrorKind::NotFound => HandOffRefusal::NotFound,
-            std::io::ErrorKind::PermissionDenied => HandOffRefusal::AccessDenied,
-            _ => HandOffRefusal::Other(format!("{path:?}: {error}")),
+            std::io::ErrorKind::NotFound => HandOffRefusal::NotFound(detail),
+            std::io::ErrorKind::PermissionDenied => HandOffRefusal::AccessDenied(detail),
+            _ => HandOffRefusal::Other(detail),
         }
     }
 
@@ -1183,14 +1187,27 @@ mod macos_handoff {
         if let Some(file) = file {
             match file.try_exists() {
                 Ok(true) => {}
-                Ok(false) => return Err(HandOffRefusal::NotFound),
+                Ok(false) => return Err(HandOffRefusal::NotFound(format!("{file:?}: not there"))),
                 Err(error) => return Err(refusal_of_the_disk(&file, &error)),
             }
         }
         if !claimed(url) {
-            return Err(HandOffRefusal::NoHandler);
+            return Err(HandOffRefusal::NoHandler(format!(
+                "no application claims {what}"
+            )));
         }
         launched(open(url), what)
+    }
+
+    /// **An application a door names by its bundle identifier, or "no handler"** — the one
+    /// reading of `URLForApplicationWithBundleIdentifier:`'s nil for both roads that name one
+    /// (Finder for a folder, Font Book for the fonts page): the program that would open the
+    /// target is not on this machine, so there is no program to open it, in `missing`'s words.
+    fn the_application(
+        found: Option<Retained<NSURL>>,
+        missing: impl FnOnce() -> String,
+    ) -> Result<Retained<NSURL>, HandOffRefusal> {
+        found.ok_or_else(|| HandOffRefusal::NoHandler(missing()))
     }
 
     /// `openURL:`'s answer as a door's: `YES` is `Ok`, `NO` the system's refusal of `what`.
@@ -1309,7 +1326,7 @@ mod macos_handoff {
         let _ = window;
         openable_unix_path(path)?;
         if !target.exists {
-            return Err(HandOffRefusal::NotFound);
+            return Err(HandOffRefusal::NotFound(format!("{path:?}: not there")));
         }
         if target.executable {
             return Err(HandOffRefusal::Other(PROGRAM_REFUSED.to_owned()));
@@ -1373,7 +1390,7 @@ mod macos_handoff {
     ) -> Result<(), HandOffRefusal> {
         let _ = window;
         if !target.exists {
-            return Err(HandOffRefusal::NotFound);
+            return Err(HandOffRefusal::NotFound(format!("{path:?}: not there")));
         }
         openable_unix_path(path)?;
         show(
@@ -1435,8 +1452,10 @@ mod macos_handoff {
     fn open_folder_in_finder(url: Retained<NSURL>, what: &str) -> Result<(), HandOffRefusal> {
         let workspace = NSWorkspace::sharedWorkspace();
         let finder = workspace
-            .URLForApplicationWithBundleIdentifier(ns_string!("com.apple.finder"))
-            .ok_or_else(|| format!("this machine has no Finder to open {what} in"))?;
+            .URLForApplicationWithBundleIdentifier(ns_string!("com.apple.finder"));
+        let finder = the_application(finder, || {
+            format!("this machine has no Finder to open {what} in")
+        })?;
         let configuration = NSWorkspaceOpenConfiguration::configuration();
         configuration.setActivates(false);
         let handler = RcBlock::new(
@@ -1492,8 +1511,8 @@ mod macos_handoff {
         let _ = window;
         let workspace = NSWorkspace::sharedWorkspace();
         let url = workspace
-            .URLForApplicationWithBundleIdentifier(ns_string!("com.apple.FontBook"))
-            .ok_or(HandOffRefusal::NoHandler)?;
+            .URLForApplicationWithBundleIdentifier(ns_string!("com.apple.FontBook"));
+        let url = the_application(url, || "this machine has no Font Book".to_owned())?;
         launched(workspace.openURL(&url), "the system font settings")
     }
 
@@ -1694,14 +1713,21 @@ mod macos_handoff {
             //    sentence.
             let broken = openable_target(&dangling).expect_err("a link to nothing opens nothing");
             let gone = openable_target(&missing).expect_err("a path that is not there");
-            assert_eq!(
-                broken,
-                HandOffRefusal::NotFound,
-                "a link to nothing is not a program: {broken:?}"
+            let error_after = |refusal: &HandOffRefusal, path: &std::path::Path| match refusal {
+                HandOffRefusal::NotFound(detail) => detail
+                    .strip_prefix(&format!("{path:?}: "))
+                    .map(str::to_owned),
+                _ => None,
+            };
+            assert!(
+                error_after(&broken, &dangling).is_some(),
+                "a link to nothing is not found, and the line names the path the reader gave \
+                 with the system's error: {broken:?}"
             );
             assert_eq!(
-                broken, gone,
-                "a link to nothing is refused as a missing file is"
+                error_after(&broken, &dangling),
+                error_after(&gone, &missing),
+                "a link to nothing is refused as a missing file is, in the same system words"
             );
 
             let _ = std::fs::remove_dir_all(&root);
@@ -1772,7 +1798,9 @@ mod macos_handoff {
             let unclaimed = address("folio-unclaimed-test:%E6%96%87%E6%A1%A3");
             assert_eq!(
                 hand_over_through(&unclaimed, "an address", &|_| false, &open(false)),
-                Err(HandOffRefusal::NoHandler),
+                Err(HandOffRefusal::NoHandler(
+                    "no application claims an address".to_owned()
+                )),
                 "nothing claims it, so nothing can open it"
             );
             assert_eq!(opened.get(), 0, "and it was never handed over");
@@ -1796,8 +1824,8 @@ mod macos_handoff {
                     &|_| panic!("a file that is not there is not asked about"),
                     &open(true),
                 ),
-                Err(HandOffRefusal::NotFound),
-                "a path that is not there is said as one"
+                Err(HandOffRefusal::NotFound(format!("{missing:?}: not there"))),
+                "a path that is not there is said as one, naming the path"
             );
             let present = root.join("文档.txt");
             std::fs::write(&present, b"x").expect("a document");
@@ -1808,6 +1836,34 @@ mod macos_handoff {
             );
             assert_eq!(opened.get(), 2, "only the last two were handed over");
             let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// RED (T-HANDOFF-DOOR-REASON round 2) — **a missing Finder and a missing Font Book are
+        /// both "no handler"**: the program that would open the folder or the fonts page is not
+        /// on this machine, so "no program to open it" is true of both. Both roads read the
+        /// bundle lookup's nil through [`the_application`]; asked here with nil, it answers
+        /// `NoHandler` with each road's own words, and a found application is handed back.
+        ///
+        /// MUTATION: answer `HandOffRefusal::Other` in `the_application` (as the Finder road did
+        /// through `From<String>`), and both rows go red.
+        #[test]
+        fn a_missing_finder_or_font_book_is_no_handler() {
+            for words in [
+                "this machine has no Finder to open 文档 in",
+                "this machine has no Font Book",
+            ] {
+                assert_eq!(
+                    the_application(None, || words.to_owned()),
+                    Err(HandOffRefusal::NoHandler(words.to_owned())),
+                    "{words}"
+                );
+            }
+            let found = NSURL::URLWithString(&NSString::from_str("file:///Applications/"))
+                .expect("an address");
+            assert_eq!(
+                the_application(Some(found.clone()), || unreachable!("it was found")),
+                Ok(found)
+            );
         }
 
         /// RED — **a reveal asks the disk before it asks Finder**, because
@@ -2161,27 +2217,26 @@ mod windows_handoff {
     /// failures (28–30), a missing library (32) — is [`HandOffRefusal::Other`] with the code and
     /// its documented name.
     fn answer_of_shell_execute(code: isize) -> Result<(), HandOffRefusal> {
-        let named = |name: &str| {
-            Err(HandOffRefusal::Other(format!(
-                "ShellExecuteW failed with code {code} ({name})"
-            )))
+        let (kind, name): (fn(String) -> HandOffRefusal, &str) = match code {
+            33.. => return Ok(()),
+            31 => (HandOffRefusal::NoHandler, "SE_ERR_NOASSOC"),
+            2 => (HandOffRefusal::NotFound, "SE_ERR_FNF"),
+            3 => (HandOffRefusal::NotFound, "SE_ERR_PNF"),
+            5 => (HandOffRefusal::AccessDenied, "SE_ERR_ACCESSDENIED"),
+            0 => (HandOffRefusal::Other, "out of memory or resources"),
+            8 => (HandOffRefusal::Other, "SE_ERR_OOM"),
+            11 => (HandOffRefusal::Other, "ERROR_BAD_FORMAT"),
+            26 => (HandOffRefusal::Other, "SE_ERR_SHARE"),
+            27 => (HandOffRefusal::Other, "SE_ERR_ASSOCINCOMPLETE"),
+            28 => (HandOffRefusal::Other, "SE_ERR_DDETIMEOUT"),
+            29 => (HandOffRefusal::Other, "SE_ERR_DDEFAIL"),
+            30 => (HandOffRefusal::Other, "SE_ERR_DDEBUSY"),
+            32 => (HandOffRefusal::Other, "SE_ERR_DLLNOTFOUND"),
+            _ => (HandOffRefusal::Other, "undocumented"),
         };
-        match code {
-            33.. => Ok(()),
-            31 => Err(HandOffRefusal::NoHandler),
-            2 | 3 => Err(HandOffRefusal::NotFound),
-            5 => Err(HandOffRefusal::AccessDenied),
-            0 => named("out of memory or resources"),
-            8 => named("SE_ERR_OOM"),
-            11 => named("ERROR_BAD_FORMAT"),
-            26 => named("SE_ERR_SHARE"),
-            27 => named("SE_ERR_ASSOCINCOMPLETE"),
-            28 => named("SE_ERR_DDETIMEOUT"),
-            29 => named("SE_ERR_DDEFAIL"),
-            30 => named("SE_ERR_DDEBUSY"),
-            32 => named("SE_ERR_DLLNOTFOUND"),
-            _ => named("undocumented"),
-        }
+        Err(kind(format!(
+            "ShellExecuteW failed with code {code} ({name})"
+        )))
     }
 
     /// **The same call in this crate's own tests: written down, never made.**
@@ -2409,7 +2464,7 @@ mod windows_handoff {
         target: VerifiedTarget,
     ) -> Result<(), HandOffRefusal> {
         if !target.exists {
-            return Err(HandOffRefusal::NotFound);
+            return Err(HandOffRefusal::NotFound(format!("{path:?}: not there")));
         }
         open_local_path(window, path)
     }
@@ -2459,7 +2514,7 @@ mod windows_handoff {
         target: VerifiedTarget,
     ) -> Result<(), HandOffRefusal> {
         if !target.exists {
-            return Err(HandOffRefusal::NotFound);
+            return Err(HandOffRefusal::NotFound(format!("{path:?}: not there")));
         }
         // `reveal_arguments`' own order, with its two disk calls already made: it validated the
         // *printed* spelling, then built the argument from the **resolved** one. A `None` there
@@ -3141,24 +3196,24 @@ mod tests {
             move |ctx| {
                 let shell = ShellThread::enter(ctx);
                 let named = |code: isize, name: &str| {
-                    Err(HandOffRefusal::Other(format!(
-                        "ShellExecuteW failed with code {code} ({name})"
-                    )))
+                    format!("ShellExecuteW failed with code {code} ({name})")
                 };
-                let table: [(isize, Result<(), HandOffRefusal>); 14] = [
-                    (31, Err(HandOffRefusal::NoHandler)),
-                    (2, Err(HandOffRefusal::NotFound)),
-                    (3, Err(HandOffRefusal::NotFound)),
-                    (5, Err(HandOffRefusal::AccessDenied)),
-                    (0, named(0, "out of memory or resources")),
-                    (8, named(8, "SE_ERR_OOM")),
-                    (11, named(11, "ERROR_BAD_FORMAT")),
-                    (26, named(26, "SE_ERR_SHARE")),
-                    (27, named(27, "SE_ERR_ASSOCINCOMPLETE")),
-                    (28, named(28, "SE_ERR_DDETIMEOUT")),
-                    (29, named(29, "SE_ERR_DDEFAIL")),
-                    (30, named(30, "SE_ERR_DDEBUSY")),
-                    (32, named(32, "SE_ERR_DLLNOTFOUND")),
+                let table: [(isize, Result<(), HandOffRefusal>); 16] = [
+                    (31, Err(HandOffRefusal::NoHandler(named(31, "SE_ERR_NOASSOC")))),
+                    (2, Err(HandOffRefusal::NotFound(named(2, "SE_ERR_FNF")))),
+                    (3, Err(HandOffRefusal::NotFound(named(3, "SE_ERR_PNF")))),
+                    (5, Err(HandOffRefusal::AccessDenied(named(5, "SE_ERR_ACCESSDENIED")))),
+                    (0, Err(HandOffRefusal::Other(named(0, "out of memory or resources")))),
+                    (8, Err(HandOffRefusal::Other(named(8, "SE_ERR_OOM")))),
+                    (11, Err(HandOffRefusal::Other(named(11, "ERROR_BAD_FORMAT")))),
+                    (26, Err(HandOffRefusal::Other(named(26, "SE_ERR_SHARE")))),
+                    (27, Err(HandOffRefusal::Other(named(27, "SE_ERR_ASSOCINCOMPLETE")))),
+                    (28, Err(HandOffRefusal::Other(named(28, "SE_ERR_DDETIMEOUT")))),
+                    (29, Err(HandOffRefusal::Other(named(29, "SE_ERR_DDEFAIL")))),
+                    (30, Err(HandOffRefusal::Other(named(30, "SE_ERR_DDEBUSY")))),
+                    (32, Err(HandOffRefusal::Other(named(32, "SE_ERR_DLLNOTFOUND")))),
+                    (1, Err(HandOffRefusal::Other(named(1, "undocumented")))),
+                    (7, Err(HandOffRefusal::Other(named(7, "undocumented")))),
                     (33, Ok(())),
                 ];
                 for (code, expected) in table {
@@ -3177,7 +3232,7 @@ mod tests {
                         .iter()
                         .filter(|call| call.starts_with("ShellExecuteW "))
                         .count(),
-                    14 * requests.len(),
+                    16 * requests.len(),
                     "every row was a hand-off the door made: {calls:?}"
                 );
             },

@@ -399,7 +399,8 @@ impl Duty {
     /// The door's or the system's refusal is said by its kind (T-HANDOFF-DOOR-REASON): only
     /// [`HandOffRefusal::NoHandler`] says there is no program to open it; a target that is not
     /// there says not found; one the system kept from this process says access denied; any other
-    /// says it was not opened, its own words left to the stderr line. A full lane says so; a lane
+    /// says it was not opened; every kind's own detail (the code, the path, the system's error) is
+    /// left to the stderr line. A full lane says so; a lane
     /// whose worker has stopped — at the door, or with the hand-off owed — says hand-offs have
     /// stopped; a hand-off that failed, or whose window could not be named, says it could not
     /// run. None claims the system declined what it was never asked.
@@ -803,7 +804,9 @@ mod tests {
             "so does one the stopped worker took"
         );
         assert_eq!(
-            fonts().reply(Answer::Refused(Declined::System(HandOffRefusal::NoHandler))),
+            fonts().reply(Answer::Refused(Declined::System(HandOffRefusal::NoHandler(
+                "this machine has no Font Book".to_owned()
+            )))),
             Reply::Refused {
                 words: RefusalWords {
                     line: None,
@@ -1065,14 +1068,16 @@ mod tests {
             ),
             "a window that could not be named: the hand-off could not run"
         );
-        let system = surfaces(&Declined::System(HandOffRefusal::NoHandler));
+        let no_handler =
+            HandOffRefusal::NoHandler("ShellExecuteW failed with code 31 (SE_ERR_NOASSOC)".into());
+        let system = surfaces(&Declined::System(no_handler.clone()));
         assert_eq!(
             system[0],
             Reply::Refused {
                 words: RefusalWords {
                     line: Some(format!(
                         "recoverable link hand-off failure: hand a link over: {}",
-                        HandOffRefusal::NoHandler.reason()
+                        no_handler.reason()
                     )),
                     notice: None,
                 },
@@ -1092,16 +1097,18 @@ mod tests {
     /// to the window that asked, where [`Duty::reply`] says it on the link's hover line, the
     /// address's notice and the fonts card: no handler — "no program to open it"; not found —
     /// "not found"; access denied — "access denied"; any other — "not opened", with the door's
-    /// or the system's own words on the stderr line only.
+    /// or the system's own detail of every kind on the stderr line only.
     ///
     /// MUTATION: map every `Declined::System` to `LinkRefusal::NoProgram` in [`Duty::reply`] (as
     /// it was before the door said which), and the three other kinds say "no program".
     #[test]
     fn the_doors_refusal_is_said_by_its_kind_on_every_surface() {
         let kinds = [
-            HandOffRefusal::NoHandler,
-            HandOffRefusal::NotFound,
-            HandOffRefusal::AccessDenied,
+            HandOffRefusal::NoHandler("ShellExecuteW failed with code 31 (SE_ERR_NOASSOC)".into()),
+            HandOffRefusal::NotFound("\"/Users/a/文档.md\": not there".to_owned()),
+            HandOffRefusal::AccessDenied(
+                "ShellExecuteW failed with code 5 (SE_ERR_ACCESSDENIED)".to_owned(),
+            ),
             HandOffRefusal::Other("ShellExecuteW failed with code 26 (SE_ERR_SHARE)".to_owned()),
         ];
         // Through the real lane: each address's door answers one kind, and the window that
@@ -1207,7 +1214,7 @@ mod tests {
             );
             assert_eq!(
                 link.word(crate::i18n::Lang::English) == "no program to open it",
-                *kind == HandOffRefusal::NoHandler,
+                matches!(kind, HandOffRefusal::NoHandler(_)),
                 "only no handler says there is no program: {kind:?}"
             );
         }

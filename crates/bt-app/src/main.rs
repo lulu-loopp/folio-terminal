@@ -24429,9 +24429,9 @@ impl LinkRefusal {
     /// The refusal a hand-off door's answer is, by its kind (T-HANDOFF-DOOR-REASON).
     fn of_door(refusal: &bt_platform::HandOffRefusal) -> Self {
         match refusal {
-            bt_platform::HandOffRefusal::NoHandler => Self::NoProgram,
-            bt_platform::HandOffRefusal::NotFound => Self::NotFound,
-            bt_platform::HandOffRefusal::AccessDenied => Self::AccessDenied,
+            bt_platform::HandOffRefusal::NoHandler(_) => Self::NoProgram,
+            bt_platform::HandOffRefusal::NotFound(_) => Self::NotFound,
+            bt_platform::HandOffRefusal::AccessDenied(_) => Self::AccessDenied,
             bt_platform::HandOffRefusal::Other(_) => Self::NotOpened,
         }
     }
