@@ -2911,28 +2911,94 @@ fn enclosing_block_end(src: &Src, toks: &[Tok], at: usize) -> usize {
     toks.len()
 }
 
+/// Words of an expression after which an operand is expected (`in`, `if`, `match`, `let`, …) —
+/// `async`, `unsafe` and `loop` among them, whose block is an operand; any other name is one.
+const EXPECT_AN_OPERAND: [&str; 15] = [
+    "in", "if", "match", "while", "let", "return", "break", "move", "else", "mut", "ref", "box",
+    "async", "unsafe", "loop",
+];
+
 /// The `[from, to)` token range, braces included, of the body of the `if`, `while`, `for` or
-/// `match` whose head starts at `toks[from]` — `None` when there is none. The head is walked at
-/// bracket depth zero, and a `{…}` group that the head goes on after (another `{`, a `.` or a
-/// `?` follows it: `for x in { values() } { … }`, `match { v }.get() { … }`) is a block
-/// expression inside the head, not the body; the first group the head does not go on after is.
+/// `match` whose head starts at `toks[from]` (the keyword, or the `=` or `in` the head's expression
+/// follows) — `None` when there is none.
+///
+/// Rust's own rule: struct literals are not allowed in a head, so a depth-zero `{` met while the
+/// head **expects an operand** opens a block expression inside the head (`{ values }[0]`,
+/// `{ value } as usize`, `{ predicate }()`), and one met while the head **holds an operand** opens
+/// the body. The head expects an operand at its start and after an operator, `=`, `in`, a `,` or
+/// a closure's parameters; it holds one after a name, a literal, a lifetime, a bracketed group (a
+/// call, an index, a parenthesised operand), a block expression, `?`, and a cast's type (`as`
+/// takes a type, which never starts with `{`). An open-ended range (`0..`) holds its operand when
+/// a `{` follows it.
 fn block_from(src: &Src, toks: &[Tok], from: usize) -> Option<(usize, usize)> {
+    let mut expects = true;
     let mut at = from;
-    loop {
-        let open = depth_zero(src, toks, at, &["{"]);
-        if !src.is(toks.get(open), "{") {
-            return None;
+    while let Some(tok) = toks.get(at) {
+        let text = src.text(*tok);
+        match tok.kind {
+            Kind::Literal | Kind::Lifetime => expects = false,
+            Kind::Ident if text == "as" => {
+                at = type_end(src, toks, at + 1);
+                expects = false;
+                continue;
+            }
+            Kind::Ident => expects = EXPECT_AN_OPERAND.contains(&text),
+            Kind::Punct => match text {
+                "{" => {
+                    let close = closing(src, toks, at)?;
+                    if !expects {
+                        return Some((at, close + 1));
+                    }
+                    at = close + 1;
+                    expects = false;
+                    continue;
+                }
+                "(" | "[" => {
+                    at = closing(src, toks, at)? + 1;
+                    expects = false;
+                    continue;
+                }
+                ")" | "]" | "}" | ";" => return None,
+                "?" => expects = false,
+                "|" if expects => {
+                    if let Some(close) = closure_parameters(src, toks, at) {
+                        at = close + 1;
+                        continue;
+                    }
+                }
+                ".." => expects = !src.is(toks.get(at + 1), "{"),
+                _ => expects = true,
+            },
         }
-        let close = closing(src, toks, open)?;
-        if ["{", ".", "?"]
-            .iter()
-            .any(|next| src.is(toks.get(close + 1), next))
-        {
-            at = close + 1;
-            continue;
-        }
-        return Some((open, close + 1));
+        at += 1;
     }
+    None
+}
+
+/// The index just past the type that starts at `toks[at]`: references, pointers, `dyn`/`impl`
+/// and `mut`/`const` qualifiers, a bracketed type, or a path with its `<…>` arguments.
+fn type_end(src: &Src, toks: &[Tok], mut at: usize) -> usize {
+    while ["&", "*", "mut", "const", "dyn", "impl"]
+        .iter()
+        .any(|word| src.is(toks.get(at), word))
+        || toks.get(at).is_some_and(|tok| tok.kind == Kind::Lifetime)
+    {
+        at += 1;
+    }
+    if src.is(toks.get(at), "(") || src.is(toks.get(at), "[") {
+        return closing(src, toks, at).map_or(toks.len(), |close| close + 1);
+    }
+    while toks.get(at).is_some_and(|tok| tok.kind == Kind::Ident) {
+        at += 1;
+        if src.is(toks.get(at), "<") {
+            at = angle_close(src, toks, at).map_or(toks.len(), |close| close + 1);
+        }
+        if !src.is(toks.get(at), "::") {
+            break;
+        }
+        at += 1;
+    }
+    at
 }
 
 /// **Whether a binding of `name` other than the parameter is in scope at the call whose name
@@ -9195,6 +9261,41 @@ mod trait_dispatch_source_shapes {
         }
     }
 
+    fn trait_shape_index_head(driver: &dyn Driver, others: &[Option<&Cache>]) {
+        if let Some(driver) = { others }[0] {
+            let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
+        }
+    }
+
+    fn trait_shape_cast_head(driver: &dyn Driver, other: Option<&Cache>) {
+        match { other } as Option<&Cache> {
+            Some(driver) => drop(driver.prepare(unreachable!(), unreachable!(), unreachable!())),
+            None => {}
+        }
+    }
+
+    fn trait_shape_call_head(driver: &dyn Driver, next: fn() -> Option<&'static Cache>) {
+        while let Some(driver) = { next }() {
+            let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
+        }
+    }
+
+    fn trait_shape_sibling_block(driver: &dyn Driver, other: Option<&Cache>) {
+        if let Some(driver) = other {}
+        {
+            let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
+        }
+    }
+
+    fn trait_shape_unbound_heads(driver: &dyn Driver, others: &[&Cache], value: u8) {
+        for driver in others {}
+        if { value } as usize > 0 {
+            if { others }[0].is_empty() {
+                let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
+            }
+        }
+    }
+
     fn trait_shape_later_shadow(driver: &dyn Driver, other: &crate::preview_wrap::Cache) {
         let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
         let driver = other;
@@ -9548,14 +9649,21 @@ fn a_trait_is_its_identity_and_a_default_runs_only_where_it_is_not_overridden() 
 /// neither binding is in scope at the call, which names the `Driver` implementations. An `if let`,
 /// a `for` and a `match` whose head is a block (`{ other }`) bind `driver` over their body, past
 /// the head's block, so their calls are untyped; in `for driver in others.iter().map(|driver| …)`
-/// the closure's parameter is scoped to the closure, and the loop's pattern shadows the call.
+/// the closure's parameter is scoped to the closure, and the loop's pattern shadows the call. A
+/// block expression the head goes on after by an index, a cast or a call (`{ others }[0]`,
+/// `{ other } as …`, `{ next }()`) is not the body either, so those calls are untyped too. In
+/// `if let Some(driver) = other {} { … }` the empty `{}` is the body and the block after it a
+/// sibling, whose call `driver` (the parameter) types; so does a call under `if { value } as usize
+/// > 0` and `if { others }[0]…`, after a closed `for driver in others {}`.
 ///
 /// MUTATIONS: in [`closure_parameters`], pair every `|` with the next one (round 1's pairing) — the
 /// or-pattern call names nobody; type a parameter whatever binds its name — the shadowed call
 /// names the `Driver` implementations; refuse a parameter's type whenever another binding of its
 /// name stands anywhere in the body (round 2's count, [`binding_count`] `!= 1`) — the closed-block
 /// and the later shadow name nobody; in [`block_from`], take the first depth-zero `{` for the body
-/// (round 3's rule) — the block-headed `if let`, `for` and `match` calls are typed.
+/// (round 3's rule) — the block-headed `if let`, `for` and `match` calls are typed; skip a head
+/// group only when `{`, `.` or `?` follows it (round 4's rule) — the index, cast and call heads are
+/// typed and the sibling block's call is not.
 #[test]
 fn a_match_or_pattern_binds_nothing_and_a_real_shadow_is_not_typed() {
     let world = World::new();
@@ -9589,6 +9697,9 @@ fn a_match_or_pattern_binds_nothing_and_a_real_shadow_is_not_typed() {
         "trait_shape_for_block_head",
         "trait_shape_match_block_head",
         "trait_shape_closure_in_head",
+        "trait_shape_index_head",
+        "trait_shape_cast_head",
+        "trait_shape_call_head",
     ] {
         let (src, record) = fixture(&world, shape);
         let body = Body::new(&world, src, record);
@@ -9602,7 +9713,12 @@ fn a_match_or_pattern_binds_nothing_and_a_real_shadow_is_not_typed() {
             "`{shape}`: the construct's own binding is in scope at the call, past a block in its head"
         );
     }
-    for shape in ["trait_shape_closed_shadow", "trait_shape_later_shadow"] {
+    for shape in [
+        "trait_shape_closed_shadow",
+        "trait_shape_later_shadow",
+        "trait_shape_sibling_block",
+        "trait_shape_unbound_heads",
+    ] {
         assert_eq!(
             named_in_shape(&world, shape, "prepare"),
             implementations,
