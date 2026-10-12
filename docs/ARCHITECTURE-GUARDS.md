@@ -18,6 +18,40 @@ When it is red, classify the read, put it through the correct lane, and re-key a
 moved owner by item identity; do not add a file key unless the collision is an
 explicit row of `docs/plans/MIGRATION-DEBT.tsv`; that coupling is prose, kept equal by review, not by a test.
 
+## Source readers
+
+The rule: a test that reads source text or a committed document is on a list
+that says why. A reader bound to a Rust file is on `bt_source::FileScoped` (the
+permanent allowlist), on `docs/plans/MIGRATION-DEBT.tsv` (readers waiting on a
+seam; it only shrinks, and `scripts/ci/check-migration-debt.ps1` refuses an
+added row against the merge base) or on `docs/plans/SOURCE-READERS.tsv`
+(readers whose subject really is the bytes). Since
+T-SOURCE-READERS-TSV-TRIPWIRE (2026-10-12) every item of test or build-support
+code that reads a **committed non-Rust file** has a row on
+`SOURCE-READERS.tsv` or `MIGRATION-DEBT.tsv`, keyed by its file and its item
+(the `owner` column), and never on both: an `include_str!`/`include_bytes!` of
+a committed path, or a `read_to_string`/`fs::read`/`File::open` in a function
+whose path is rooted at `CARGO_MANIFEST_DIR` (directly or through a helper of
+its own file) or spelled out from the workspace root or the package directory.
+The subject set is what `git ls-files` names minus `.rs` files; generated files
+under `target/` and bytes the shipped program embeds are not subjects.
+
+Where and what to do: `crates/bt-source/tests/tripwire.rs`.
+`no_source_reader_names_a_file_outside_the_two_lists` holds the Rust-source
+readers (four lexical shapes, by file);
+`every_reader_of_a_committed_document_is_on_a_list` holds the document readers
+(by item, through `bt-source`'s index — no script reads Rust for it), and its
+message names the item, the file and both lists;
+`every_source_reader_names_a_reason_and_is_not_also_debt` refuses a reader on
+both. When red, a reader whose subject really is the document gets a
+`SOURCE-READERS.tsv` row (file, owner as the message spells it, mechanism,
+subject, ticket, `no`, reason); a reader that pins a fact about the code by
+reading text is migrated to a `bt-source` query instead, and a debt row is never
+added. Not covered, and said in the test's header: a path handed in as a
+parameter, a root helper in another file or reached through a method, a bare
+file name in an unrooted body, other read calls, and stale rows (a row whose
+item no longer reads is not refused).
+
 ## Platform cfg boundaries
 
 The rule: only the named platform modules and crate-root platform exports decide
