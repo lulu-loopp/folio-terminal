@@ -3635,6 +3635,34 @@ mod tests {
         TxnId::new([0x7a; 16])
     }
 
+    /// **The clean-VM watcher's journal line names the file the build
+    /// writes**: a cross-language contract between two committed texts. Its
+    /// subject is one line of `scripts/release/cleanvm/updater/guest/watch.ps1`,
+    /// `$journalPath = Join-Path $H '<name>'`, held to the file name
+    /// [`Home::journal`] joins onto a home when it runs (taken from the code
+    /// running, never from this file's text). It claims nothing about what the
+    /// watcher does with that path; the clean-VM rows run the watcher.
+    ///
+    /// MUTATION: `Home::journal` joining `journal-2.json` (or `watch.ps1`
+    /// joining another name) goes red here.
+    #[test]
+    fn the_watcher_reads_the_journal_where_the_build_writes_it() {
+        let watch = include_str!("../../../scripts/release/cleanvm/updater/guest/watch.ps1");
+        let home = Home::at(PathBuf::from("家目录"));
+        let journal = home.journal();
+        assert_eq!(journal.parent(), Some(home.root()));
+        let name = journal
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("the journal is a file name joined onto the home");
+        let line = format!("$journalPath = Join-Path $H '{name}'");
+        assert!(
+            watch.lines().any(|written| written.trim() == line),
+            "watch.ps1 has no `{line}` line, so the watcher reads a journal the build does not \
+             write"
+        );
+    }
+
     /// **A registry in memory**, for the entrance's proof: the proof is made
     /// only by `logon_hook::arm_in`, after a write, a flush and a read-back,
     /// and these tests make it that way too.
