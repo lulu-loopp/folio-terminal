@@ -403,6 +403,10 @@ vendor 里曾有 `// IL/DL … deliberately never emit`——**与实际行为�
 
 现状：约 162 个公开声明 vs 23 行 `///`。`missing_docs` 见 §8 阶梯。
 
+### A message literal is one sentence (T-EMBEDDED-SPACES-LITERALS)
+
+A string literal that wraps continues with `\` at the end of the line, so the break and the next line's indentation are not in the string — a run of three or more spaces inside a literal is refused by `scripts/ci/check-embedded-spaces.ps1` unless its row on `docs/plans/embedded-spaces-allowed.txt`, a list that only shrinks, says why the columns are deliberate.
+
 ## 六、【事故】偏离申请
 
 规格与实现冲突时**不要自行偏离**。报告里开一节：

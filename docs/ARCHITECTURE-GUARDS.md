@@ -423,6 +423,32 @@ replace the machine path with a workspace-relative path, a declared fixture, or
 `bt_testpath`; use neutral names such as `alice` for an account example rather
 than adding an exception for the current workstation.
 
+## Embedded spaces in string literals
+
+The rule: a message literal is one sentence; a literal that wraps continues
+with `\` at the end of the line, so the break and the next line's indentation
+are not in the string (`docs/CONVENTIONS.md` §五, T-EMBEDDED-SPACES-LITERALS,
+2026-10-13). A lost `\` leaves a run of spaces inside the message that the
+compiler and rustfmt both accept.
+
+Where and what to do: `scripts/ci/check-embedded-spaces.ps1` lexes every
+tracked `.rs` under `crates/` (comments, character literals and lifetimes
+skipped; every string form, raw ones included) and refuses, by file:line, a
+string literal with three or more spaces between two other characters of one
+source line — the blanks that start or end a source line of the literal are
+not a run — unless `docs/plans/embedded-spaces-allowed.txt` has its row
+(`path:line reason`, the line the literal opens on). The list is exact both
+ways (a row whose line opens no such literal is stale) and only shrinks
+against the merge base: a row is its path and its reason, so a literal that
+moves keeps its row with the line changed, and any other row the base does not
+have is refused. `scripts/ci/check-embedded-spaces-tests.ps1` holds each rule
+on scratch repositories, and `gates-can-fail` plants a literal in the real
+tree. When red, repair the literal as a continuation; a fixture's columns
+(screen captures, tables, code samples after an escaped line break) are the
+only rows, and they were the baseline — a new fixture builds its columns
+another way (`format!` padding, or a `concat!` whose spaces stand in a literal
+of their own, where they start the literal and are no run).
+
 ## Third-party notices
 
 The rule: the dependency graph and the shipped `THIRD-PARTY-NOTICES.md` agree,
