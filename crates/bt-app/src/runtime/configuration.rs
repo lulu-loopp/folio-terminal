@@ -13,7 +13,11 @@
 //! 2026-10-11 §3.3, §5.1; T-STORE-MERGE-SETTINGS): the storage pass's merge
 //! ([`Runtime::merge_documents`], `settings_merge::run_pass` with this window
 //! as its `MergeWindow`) walks each changed row's own apply function with the
-//! store's writes held, exactly as an import's settings part does.
+//! store's writes held, exactly as an import's settings part does. A hand edit
+//! of `keybindings.json` is merged by action, then by chord
+//! (`keybindings_merge::run_pass`), and the table is rebuilt from this build's
+//! defaults and the merged departures by the reader an import's shortcuts part
+//! uses (T-STORE-MERGE-KEYBINDINGS).
 
 use std::path::Path;
 
@@ -21,11 +25,11 @@ use anyhow::Result;
 use bt_persist::{ExportParts, FallbackReason, KeybindingsV1};
 
 use crate::settings_bundle::{self, ImportFault, SettingChange};
-use crate::settings_merge;
 use crate::{
     FilePick, Runtime, document_request, hang_watch, i18n, persist, profiles, schemes, settings,
     shortcuts, toast,
 };
+use crate::{keybindings_merge, settings_merge};
 
 fn keybindings_for_export(
     table: &shortcuts::Shortcuts,
@@ -353,17 +357,54 @@ impl Runtime<'_> {
     }
 
     /// **The storage pass's merges, put in force** (design note 2026-10-11
-    /// §3.3, §3.6): `settings.json`'s, through `settings_merge::run_pass` with
-    /// this window as its doors. Answers what the files' merges replaced and
+    /// §3.3, §3.4, §3.6): `settings.json`'s, through `settings_merge::run_pass`
+    /// with this window as its doors, then `keybindings.json`'s, through
+    /// `keybindings_merge::run_pass` with this window's one shortcut table as its
+    /// door — each pass whole. Each pass's presentation is owed to the turn
+    /// ([`MergeTurn`]), and the window presents once after both: one
+    /// presentation, one answer. Answers what the files' merges replaced and
     /// could not apply, for the pass's one card (T-STORE-NOTICE raises it) —
     /// nothing for a clean hand edit — and, beside it, whether the presentation
-    /// after the merge went through: the data is made first and a failed
+    /// after the merges went through: the data is made first and a failed
     /// presentation never takes it away.
     pub(crate) fn merge_documents(&mut self) -> (document_request::MergeNotice, Result<()>) {
-        let outcome = settings_merge::run_pass(self);
+        let mut turn = MergeTurn {
+            runtime: self,
+            present_owed: false,
+        };
+        let settings = settings_merge::run_pass(&mut turn);
+        let keybindings = keybindings_merge::run_pass(&mut turn);
+        let present_owed = turn.present_owed;
         let mut notice = document_request::MergeNotice::default();
-        notice.files.extend(outcome.replaced);
-        (notice, outcome.presented)
+        notice.files.extend(settings.replaced);
+        notice.files.extend(keybindings.replaced);
+        // The passes answer what the turn answered them — it notes the
+        // presentation it owes — and the one presentation answers for both.
+        let presented = settings
+            .presented
+            .and(keybindings.presented)
+            .and_then(|()| {
+                if present_owed {
+                    self.present_merged()
+                } else {
+                    Ok(())
+                }
+            });
+        (notice, presented)
+    }
+
+    /// **What a merge put in force, shown**: an open Settings dialog re-derived —
+    /// the row a merge moved, and the Shortcuts page's table — and the chrome
+    /// presented.
+    fn present_merged(&mut self) -> Result<()> {
+        let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
+        let content =
+            self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
+        self.window.settings.keep_focus_reachable(content);
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 
     /// **A re-read that found `settings.json` or `keybindings.json` would not
@@ -589,30 +630,39 @@ impl Runtime<'_> {
     }
 }
 
+/// **One storage pass's merges on this window** ([`Runtime::merge_documents`]):
+/// each pass runs through this window's doors, and what each owes the screen is
+/// noted here — the window presents once, after both passes.
+struct MergeTurn<'r, 'a> {
+    runtime: &'r mut Runtime<'a>,
+    present_owed: bool,
+}
+
 /// **This window is the settings merge's** (`settings_merge::run_pass`): the
 /// store's merge steps, what is in force, each row's own door — the import's
-/// `apply_imported_setting` — and the presentation after.
-impl settings_merge::MergeWindow for Runtime<'_> {
+/// `apply_imported_setting` — and the presentation, owed to the turn.
+impl settings_merge::MergeWindow for MergeTurn<'_, '_> {
     fn merge_begin(&mut self) -> Option<settings_merge::SettingsPass> {
-        self.app
+        self.runtime
+            .app
             .settings_store
             .begin_merge(bt_platform::host_platform())
     }
 
     fn merge_in_force(&self) -> &bt_persist::SettingsV1 {
-        self.app.settings_store.loaded()
+        self.runtime.app.settings_store.loaded()
     }
 
     fn merge_door(&mut self, change: &SettingChange) -> Result<()> {
-        self.apply_imported_setting(change.clone())
+        self.runtime.apply_imported_setting(change.clone())
     }
 
     fn merge_store_as_it_came(&mut self, change: &SettingChange) {
-        self.store_imported_value(change);
+        self.runtime.store_imported_value(change);
     }
 
     fn merge_end(&mut self) {
-        self.app.settings_store.end_merge();
+        self.runtime.app.settings_store.end_merge();
     }
 
     fn merge_say(&mut self, line: &str) {
@@ -620,13 +670,46 @@ impl settings_merge::MergeWindow for Runtime<'_> {
     }
 
     fn merge_present(&mut self) -> Result<()> {
-        let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
-        let content =
-            self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
-        self.window.settings.keep_focus_reachable(content);
-        if self.refresh_chrome() {
-            self.present_chrome_change()?;
-        }
+        self.present_owed = true;
+        Ok(())
+    }
+}
+
+/// `keybindings.json`'s merge, with this window as its door (T-STORE-MERGE-KEYBINDINGS).
+impl keybindings_merge::KeybindingsWindow for MergeTurn<'_, '_> {
+    fn keybindings_merge_begin(&mut self) -> Option<keybindings_merge::KeybindingsPass> {
+        self.runtime
+            .app
+            .keybindings_store
+            .begin_merge(bt_platform::host_platform())
+    }
+
+    /// The table a recorded chord edits, replaced whole, and the departures it put in
+    /// force told to the store — what a press is measured against (start-up's order).
+    fn keybindings_put_in_force(&mut self, table: shortcuts::Shortcuts) {
+        self.runtime.app.keybindings_store.project(
+            table
+                .overrides()
+                .into_iter()
+                .map(|entry| bt_persist::BindingOverrideV1 {
+                    action: entry.id,
+                    chord: entry.chord,
+                })
+                .collect(),
+        );
+        self.runtime.app.shortcuts = table;
+    }
+
+    fn keybindings_merge_end(&mut self) {
+        self.runtime.app.keybindings_store.end_merge();
+    }
+
+    fn keybindings_say(&mut self, line: &str) {
+        eprintln!("{line}");
+    }
+
+    fn keybindings_present(&mut self) -> Result<()> {
+        self.present_owed = true;
         Ok(())
     }
 }
