@@ -799,83 +799,6 @@ fn only_leave_without_this_change_leaves_and_drops_only_the_named_documents() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// RED (T-QUIT-DOCUMENTS, carry-forward 1; ticket 4's rule) — **a document held for its
-/// merge is copied, never sent, at quit**: its `desired` goes straight to `recovered`, and
-/// the hold is never "resolved" by writing over the file.
-///
-/// `keybindings.json` has no merge yet: a hand edit crossed its write, was put back
-/// (`Conflict`), and the store is held.
-///
-/// MUTATION: send the held document in the documents phase (in `QuitDocument::quit_begin`
-/// for `DocumentState`, release the hold and send) — a write is queued over the person's
-/// file and the phase waits for it.
-#[test]
-fn a_held_document_is_copied_not_sent_at_quit() {
-    let root = scratch("held");
-    let folder = root.join(preview::RECOVERED_FOLDER);
-    let (lane, jobs) = StorageLane::scripted();
-    let mut disk = Disk::new(jobs);
-    let mut keybindings =
-        KeybindingsStore::at_on(root.join(persist::KEYBINDINGS_FILE_NAME), lane.clone());
-    let mut session =
-        SessionStore::at_on(root.join("session.json"), root.join("session.lock"), lane);
-    let ours = vec![BindingOverrideV1 {
-        action: "new-tab".to_owned(),
-        chord: Some("Ctrl+Shift+Y".to_owned()),
-    }];
-    assert!(keybindings.store(ours));
-    let theirs: Arc<[u8]> = b"{\"schema_version\":1,\"bindings\":[{\"action\":\"close-tab\",\"chord\":\"Ctrl+W\"}]}"[..].into();
-    disk.answer_write(|_| Outcome::Conflict {
-        theirs: Arc::clone(&theirs),
-        kept: None,
-    });
-    let _ = keybindings.take_answers();
-    let desired = keybindings
-        .owed_bytes()
-        .expect("the change is owed")
-        .expect("and serializes");
-    disk.seen.clear();
-
-    let now = Instant::now();
-    let mut quit = Quit::begin(Vec::new());
-    let mut documents: [&mut dyn QuitDocument; 1] = [&mut keybindings];
-    assert_eq!(
-        drive(
-            &mut quit,
-            &mut documents,
-            &mut session,
-            &mut disk,
-            &folder,
-            now
-        ),
-        QuitStep::Recovery,
-        "held is terminal: straight to the copy"
-    );
-    assert!(
-        !disk.seen.iter().any(|seen| matches!(seen, Seen::Write(_))),
-        "nothing is written over the person's file: {:?}",
-        disk.seen
-    );
-    assert_eq!(
-        &disk.copies[0].bytes[..],
-        &desired[..],
-        "the copy is the change"
-    );
-    disk.answer_copy(Ok(folder.join("1970-01-01T000000Z keybindings.json")));
-    assert_eq!(
-        drive(
-            &mut quit,
-            &mut documents,
-            &mut session,
-            &mut disk,
-            &folder,
-            now
-        ),
-        QuitStep::Exit
-    );
-    let _ = std::fs::remove_dir_all(&root);
-}
-
 /// RED (T-STORE-MERGE-PROFILES-PINS; revision (c)2, ticket 5's seam) — **a `Moved` answer for
 /// `profiles.json` or `pins.json` at quit is merged purely, sent again conditional on the file
 /// the merge read, and landed before the session.**
@@ -1015,6 +938,236 @@ fn a_moved_profiles_or_pins_answer_at_quit_is_merged_purely_and_landed_before_th
             PinEntryV1::new(PinKind::Folder, r"D:\我的"),
         ],
         "the file's pins, then Folio's"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// RED (T-STORE-MERGE-PROFILES-PINS round 5; revision (c)2) — **every product store sends
+/// `Merge`, and a `Moved` answer at quit for each of the four documents is merged and lands
+/// before the session.** Each store has a change of Folio's on the worker when the quit
+/// begins, and every write is answered `Moved` with a hand edit. Each store folds the file in
+/// without a door and sends the merged document again, conditional on the file it read;
+/// nothing goes to `recovered`, and the session is queued only after all four have landed.
+///
+/// MUTATION: leave one document unmerged at quit (in `PinsStore::quit_turn`, take the answers
+/// without `merge_at_quit`) — its `Moved` is terminal and its change is copied to `recovered`
+/// instead of written.
+#[test]
+fn every_store_sends_merge_and_each_moved_document_is_merged_and_landed_at_quit() {
+    use bt_persist::{PinEntryV1, PinsV1, ProfileEntryV1, ProfilesV1, ProgramV1};
+
+    use crate::document_request::Mode;
+
+    let root = scratch("four-moved");
+    let folder = root.join(preview::RECOVERED_FOLDER);
+    let (lane, jobs) = StorageLane::scripted();
+    let mut disk = Disk::new(jobs);
+    let mut settings_store =
+        SettingsStore::at_on(root.join(persist::SETTINGS_FILE_NAME), lane.clone());
+    let mut keybindings =
+        KeybindingsStore::at_on(root.join(persist::KEYBINDINGS_FILE_NAME), lane.clone());
+    let mut profiles =
+        persist::ProfilesStore::at_on(root.join(persist::PROFILES_FILE_NAME), lane.clone());
+    let mut pins = PinsStore::at_on(root.join(crate::pins::PINS_FILE_NAME), lane.clone());
+    let mut session =
+        SessionStore::at_on(root.join("session.json"), root.join("session.lock"), lane);
+    let line = |action: &str, chord: &str| BindingOverrideV1 {
+        action: action.to_owned(),
+        chord: Some(chord.to_owned()),
+    };
+    let own = |id: &str, title: &str| ProfileEntryV1 {
+        id: id.to_owned(),
+        display_title: Some(title.to_owned()),
+        program: Some(ProgramV1::Path(format!("{id}-程序"))),
+        ..ProfileEntryV1::default()
+    };
+    let table = |rows: Vec<ProfileEntryV1>| ProfilesV1 {
+        profiles: rows,
+        ..ProfilesV1::default()
+    };
+
+    assert!(settings_store.store(settings("我们的 Ours Mono")));
+    assert!(keybindings.store(vec![line("new-tab", "Ctrl+j")]));
+    assert!(profiles.store(table(vec![own("a", "甲 A")])));
+    assert!(pins.toggle(PinKind::Folder, "我的 mine"));
+
+    let mut theirs_settings = SettingsV1::default();
+    theirs_settings.inline_formulas = !theirs_settings.inline_formulas;
+    let theirs: [Arc<[u8]>; 4] = [
+        bytes(&theirs_settings),
+        bt_persist::serialize_keybindings(&persist::keybindings_document(
+            vec![line("close-pane", "Ctrl+k")],
+            persist::keybindings_platform(),
+        ))
+        .expect("a keybindings document serializes")
+        .into(),
+        bt_persist::serialize_profiles(&table(vec![own("b", "乙 B")]))
+            .expect("a profiles document serializes")
+            .into(),
+        bt_persist::serialize_pins(&PinsV1 {
+            pins: vec![PinEntryV1::new(PinKind::Folder, "他的 theirs")],
+            ..PinsV1::default()
+        })
+        .expect("a pins document serializes")
+        .into(),
+    ];
+
+    let now = Instant::now();
+    let mut quit = Quit::begin(Vec::new());
+    let mut documents: [&mut dyn QuitDocument; 4] = [
+        &mut settings_store,
+        &mut keybindings,
+        &mut profiles,
+        &mut pins,
+    ];
+    assert_eq!(
+        drive(&mut quit, &mut documents, &mut session, &mut disk, &folder, now),
+        QuitStep::Documents
+    );
+    assert_eq!(disk.writes.len(), 4, "one write per document: {:?}", disk.seen);
+    assert!(
+        disk.writes.iter().all(|write| write.mode == Mode::Merge),
+        "every product store sends Merge"
+    );
+    for file in &theirs {
+        disk.answer_write(|_| Outcome::Moved {
+            bytes: Some(Arc::clone(file)),
+        });
+    }
+    assert_eq!(
+        drive(&mut quit, &mut documents, &mut session, &mut disk, &folder, now),
+        QuitStep::Documents,
+        "the merged documents are sent again"
+    );
+    assert_eq!(
+        disk.writes
+            .iter()
+            .map(|write| (write.mode, write.expected.as_deref()))
+            .collect::<Vec<_>>(),
+        theirs
+            .iter()
+            .map(|file| (Mode::Merge, Some(&file[..])))
+            .collect::<Vec<_>>(),
+        "each merged and sent conditional on the file its merge read"
+    );
+    assert_eq!(disk.sessions(), 0, "and the session waits behind them");
+    for _ in 0..4 {
+        disk.answer_write(landed);
+    }
+    assert_eq!(
+        drive(&mut quit, &mut documents, &mut session, &mut disk, &folder, now),
+        QuitStep::Exit
+    );
+    assert!(disk.copies.is_empty(), "nothing went to `recovered`: {:?}", disk.seen);
+    let session_at = disk
+        .seen
+        .iter()
+        .position(|seen| *seen == Seen::Session)
+        .expect("the session is written");
+    assert!(
+        disk.seen
+            .iter()
+            .enumerate()
+            .filter(|(_, seen)| matches!(seen, Seen::Write(_)))
+            .all(|(at, _)| at < session_at),
+        "every document write is queued before the session: {:?}",
+        disk.seen
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// RED (T-STORE-MERGE-KEYBINDINGS, carry-forward 3; revision (c)2) — **a `Moved`
+/// keybindings answer at quit is merged purely, sent again, and landed before the
+/// session.** A press of Folio's is on its way when the quit begins; the disk answers
+/// `Moved` (a hand edit gave Close pane a chord). The documents phase merges the file
+/// into `desired` by action, with no door — the departures in force stay Folio's — and
+/// sends the merged document conditional on the file the merge read.
+///
+/// MUTATION: send the held document outright (in `KeybindingsStore::quit_turn`, fold
+/// Folio's `desired` over the file instead of merging it) — the file's line is not in
+/// the write.
+#[test]
+fn a_moved_keybindings_answer_at_quit_is_merged_purely() {
+    let root = scratch("keybindings-moved");
+    let folder = root.join(preview::RECOVERED_FOLDER);
+    let (lane, jobs) = StorageLane::scripted();
+    let mut disk = Disk::new(jobs);
+    let mut keybindings =
+        KeybindingsStore::at_on(root.join(persist::KEYBINDINGS_FILE_NAME), lane.clone());
+    let mut session =
+        SessionStore::at_on(root.join("session.json"), root.join("session.lock"), lane);
+    let line = |action: &str, chord: &str| BindingOverrideV1 {
+        action: action.to_owned(),
+        chord: Some(chord.to_owned()),
+    };
+    let ours = vec![line("new-tab", "Ctrl+j")];
+    assert!(keybindings.store(ours.clone()));
+    let now = Instant::now();
+    let mut quit = Quit::begin(Vec::new());
+    let mut documents: [&mut dyn QuitDocument; 1] = [&mut keybindings];
+    assert_eq!(
+        drive(
+            &mut quit,
+            &mut documents,
+            &mut session,
+            &mut disk,
+            &folder,
+            now
+        ),
+        QuitStep::Documents,
+        "the write is on the worker"
+    );
+
+    let theirs: Arc<[u8]> = bt_persist::serialize_keybindings(&persist::keybindings_document(
+        vec![line("close-pane", "Ctrl+k")],
+        persist::keybindings_platform(),
+    ))
+    .expect("a keybindings document serializes")
+    .into();
+    disk.answer_write(|_| Outcome::Moved {
+        bytes: Some(Arc::clone(&theirs)),
+    });
+    assert_eq!(
+        drive(
+            &mut quit,
+            &mut documents,
+            &mut session,
+            &mut disk,
+            &folder,
+            now
+        ),
+        QuitStep::Documents,
+        "the merged document is sent again"
+    );
+    assert_eq!(
+        disk.writes[0].expected.as_deref(),
+        Some(&theirs[..]),
+        "conditional on the file the merge read"
+    );
+    assert_eq!(
+        bt_persist::parse_keybindings(&disk.writes[0].bytes)
+            .expect("the merged document parses")
+            .bindings,
+        vec![line("close-pane", "Ctrl+k"), line("new-tab", "Ctrl+j")],
+        "the file's line and Folio's"
+    );
+    assert_eq!(disk.sessions(), 0, "and the session waits behind it");
+    disk.answer_write(landed);
+    assert_eq!(
+        drive(
+            &mut quit,
+            &mut documents,
+            &mut session,
+            &mut disk,
+            &folder,
+            now
+        ),
+        QuitStep::Exit
+    );
+    assert_eq!(
+        keybindings.loaded(),
+        &ours[..],
+        "no door ran: what is in force is Folio's"
     );
     let _ = std::fs::remove_dir_all(&root);
 }

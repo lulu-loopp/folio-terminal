@@ -40,9 +40,9 @@
 //! comparison: a change the store holds but has not written is not undone by a
 //! read of the older file. The pass re-reads every stamped document: all four
 //! are followed live (R33; owner ruling Q3, 2026-10-11) —
-//! `settings.json` merged through its rows' doors, `profiles.json` and
-//! `pins.json` merged and their tables rebuilt after, `keybindings.json` held
-//! for its merge.
+//! `settings.json` merged through its rows' doors, `keybindings.json` merged
+//! by action and chord into the one shortcut table, `profiles.json` and
+//! `pins.json` merged by row and by pin, their tables put in force after.
 //!
 //! # Arming, failure and silence
 //!

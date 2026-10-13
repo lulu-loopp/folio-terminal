@@ -1047,9 +1047,10 @@ with the carried overrides over it.
 **One reload discipline**: `settings.json`, `keybindings.json`, `profiles.json` and
 the pins are followed live by the named storage watch, each re-read compared with
 the revision Folio last read or wrote, every write conditional on it, and a file
-that changed merged against it, the file winning a conflict (`settings.json`,
-`profiles.json` and the pins merge now; until its merge, `keybindings.json` is held),
-with an unparseable mid-run file leaving what is in force untouched.
+that changed merged against it, the file winning a conflict — `settings.json` by
+field, `keybindings.json` by action and then by chord (the file's action keeping a
+chord both sides claim), `profiles.json` by row and field and the pins by pin — with
+an unparseable mid-run file leaving what is in force untouched.
 **From.** The M2 persistence schema document (two files, unknown-field and
 failure policy); §7.2 *the command-line front door* and the `cli.rs` module doc;
 `docs/BT-ENVIRONMENT.md`, held complete in both directions by
@@ -1072,7 +1073,15 @@ migrated, a future part refused whole — and then **each changed value through 
 function a press on its row calls, never by writing `settings.json` and waiting**,
 with the store's writes held so the batch lands as one write. A hand edit enters by
 the same doors: the storage pass's merge puts each value the file gave through its
-row's function, with the writes held the same way. A part the file does
+row's function, with the writes held the same way, and a merged `keybindings.json`
+rebuilds the one table from this build's defaults and the merged departures through
+`Shortcuts::apply_overrides`. A shortcut document has one reading rule — at launch, on
+an import and in the merge each line is read in the dialect its file records and carried
+to this one (`shortcuts::read_chord_in`), and what that refuses is refused by all three;
+the last line about an action that reads is the one in force, and an earlier line about it,
+readable or not, is neither dealt nor reported (`settings_bundle::read_lines`, the one
+selection of all three, of the merge's sides and of a press, which removes an action's
+shadowed lines with the line it takes away). A part the file does
 not carry is left alone. Three keys are receipts about this machine and are not
 imported (`first_run_card`, `cards_gesture_hint_offer`, `web_pages_used`);
 `Focus mode` and `Shell integration` are

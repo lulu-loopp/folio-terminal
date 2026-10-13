@@ -11,7 +11,7 @@
 //!   kind this build cannot name (`bt_persist::pins`' header): it is neither
 //!   dropped nor retagged. A carried duplicate goes with its identity's
 //!   row: when the merge removes that row, the duplicate goes too
-//!   (`document_request::remove_in_force_and_its_duplicates`' rule, the one
+//!   (`document_request::First::alongside`' rule, the one
 //!   an unpin follows). No pin is refused: every row of a kind this build
 //!   names is usable, and a row of a kind it cannot name is carried untouched.
 //! - **A union of the additions, not of the tables.** Per identity, with
@@ -175,7 +175,7 @@ pub(crate) fn merge(base: &PinsV1, ours: &PinsV1, theirs: &PinsV1) -> Merged {
     // The file's rows in the file's order: each identity's first row merged,
     // every other row carried as it stands — unless the merge removed the row
     // of its identity, which it goes with
-    // (`document_request::remove_in_force_and_its_duplicates`' rule): a row the
+    // (`document_request::First::alongside`' rule): a row the
     // menus never read never becomes the pin.
     let mut seen = HashSet::new();
     let mut gone = HashSet::new();

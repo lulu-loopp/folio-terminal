@@ -60,14 +60,10 @@
 //! every one; a generation only keeps a stale answer's visible effect from
 //! landing after a newer one's ((b)4).
 //!
-//! **Two policies per store.** The request's ([`Mode`]): `settings.json`
-//! sends `Merge` requests (T-STORE-MERGE-SETTINGS), and so do `profiles.json`
-//! and `pins.json` (T-STORE-MERGE-PROFILES-PINS); `keybindings.json` still
-//! sends `Restore` ((b)16 item 1) until its merge exists — a crossing hand edit
-//! is put back and kept, its bytes are stored for the merge, and the store is
-//! held against a file it will not write over. And the re-read's ([`Follow`]):
-//! a file that changed is merged (settings, profiles, pins) or held for a merge
-//! still to be built (keybindings, T-STORE-MERGE-KEYBINDINGS).
+//! **One policy for all four stores.** Every store sends `Merge` requests
+//! (T-STORE-MERGE-SETTINGS, T-STORE-MERGE-KEYBINDINGS,
+//! T-STORE-MERGE-PROFILES-PINS): a displaced file is kept for its merge. And a
+//! re-read that found the file changed stores it for the merge (`Follow`).
 //!
 //! **The merge's seam** ([`DocumentState::merge_stored`]): every file stored
 //! for the merge, in the order it was stored, is merged by the document's own
@@ -81,12 +77,14 @@ use std::sync::{Arc, mpsc};
 use std::time::SystemTime;
 
 use bt_persist::{
-    FallbackReason, KeybindingsV1, PinsV1, ProfilesV1, SettingsV1, StableRead, Staging,
+    BindingOverrideV1, FallbackReason, KeybindingsV1, PinsV1, ProfilesV1, SettingsV1, StableRead,
+    Staging,
 };
 use bt_platform::admission::WorkerCtx;
 
 use crate::persist::{DocumentWrites, Revision, StorageLane};
 use crate::quit::{CopyStanding, Standing};
+use crate::settings_bundle::{LineRead, read_lines};
 
 /// **Which semantic policy a request asks for** ((c)3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -755,53 +753,134 @@ where
     serde_json::from_value(Value::Object(desired)).ok()
 }
 
-/// Which of several entries under one key a reader puts in force.
-enum InForce<'a, E> {
-    /// The first entry naming the key that `usable` accepts: `profiles.json`'s
-    /// installer (the first row it can start) and `pins.json`'s menus (the
-    /// first row; every pin is usable). An unusable entry before it is refused
-    /// and stays; every entry after it is its duplicate and goes with it
-    /// ([`remove_in_force_and_its_duplicates`]).
-    First(&'a dyn Fn(&E) -> bool),
-    /// The last line about the key: `keybindings.json`'s reader.
-    Last,
+/// **A document's own reader, as a press needs it**: which entry under a key is
+/// in force, and which entries go with it when a press takes it away — the one
+/// rule the document's readers use, never a second one in the press.
+trait InForce<E, K> {
+    /// The entry under `key` its readers put in force.
+    fn in_force(&self, list: &[E], key: &K) -> Option<usize>;
+    /// The entries that go with it when it goes.
+    fn alongside(&self, list: &[E], key: &K) -> Vec<usize>;
+    /// **Where an entry the press adds under `key` goes, when the list already
+    /// holds entries under it that are not in force**: after the last of them,
+    /// so the reader's rule makes the new entry the one in force. `None`: no
+    /// such entries, and the entry goes after its nearest predecessor.
+    fn last_under(&self, list: &[E], key: &K) -> Option<usize>;
 }
 
-impl<E> Clone for InForce<'_, E> {
-    fn clone(&self) -> Self {
-        *self
+/// **The first usable entry under a key is the one in force** — the installer's
+/// rule for profiles (`usable`: `profiles::installable`, its own test), the
+/// menus' for pins (every pin row is usable) — and **the entries under the key
+/// after it are its duplicates, which go with it**: they were never in force,
+/// and none of them becomes the live entry because the one in force went
+/// (T-STORE-MERGE-PROFILES-PINS, review rounds 3–5). An unusable entry before
+/// it is refused: it is not in force, does not go with it, and stays.
+struct First<F, U> {
+    key: F,
+    usable: U,
+}
+
+impl<E, K: PartialEq, F: Fn(&E) -> K, U: Fn(&E) -> bool> InForce<E, K> for First<F, U> {
+    fn in_force(&self, list: &[E], key: &K) -> Option<usize> {
+        list.iter()
+            .position(|entry| (self.key)(entry) == *key && (self.usable)(entry))
+    }
+
+    fn alongside(&self, list: &[E], key: &K) -> Vec<usize> {
+        let Some(in_force) = self.in_force(list, key) else {
+            return Vec::new();
+        };
+        (in_force + 1..list.len())
+            .filter(|&at| (self.key)(&list[at]) == *key)
+            .collect()
+    }
+
+    /// An entry the press adds goes after its nearest predecessor: the reader
+    /// takes the first usable entry under the key wherever it stands, and a
+    /// refused entry before it stays refused.
+    fn last_under(&self, _: &[E], _: &K) -> Option<usize> {
+        None
     }
 }
 
-impl<E> Copy for InForce<'_, E> {}
+/// **A shortcut document's lines as its readers take them**
+/// (`settings_bundle::read_lines`): an action's line in force is the one that
+/// `Reads`, and its `Shadowed` lines go with it.
+struct ShortcutLines {
+    dialect: bt_persist::KeybindingsPlatformV1,
+    platform: bt_platform::HostPlatform,
+}
 
-/// **A key removed from a first-wins list** (`profiles.json`, `pins.json`;
-/// (b)8's one rule, review rounds 3 and 4): the entry in force — the first
-/// entry naming `wanted` that `usable` accepts — and every entry after it
-/// naming `wanted`, its duplicates, which were never in force and must not
-/// become the live entry because the one in force went. An unusable entry
-/// before it is a refused row: it stays, and stays reported. With no entry in
-/// force, nothing goes. The press road ([`apply_keyed_press`] for these two
-/// documents, `pins::toggle_pin`) follows this rule, and so do the merges
-/// (`profiles_merge`, `pins_merge`) on their own reading of the same model.
-pub(crate) fn remove_in_force_and_its_duplicates<E, K: PartialEq>(
-    list: &mut Vec<E>,
-    key: impl Fn(&E) -> K,
-    wanted: &K,
-    usable: impl Fn(&E) -> bool,
-) {
-    let Some(in_force) = list
-        .iter()
-        .position(|entry| key(entry) == *wanted && usable(entry))
-    else {
+impl ShortcutLines {
+    fn lines(
+        &self,
+        list: &[BindingOverrideV1],
+        action: &str,
+        wanted: fn(&LineRead) -> bool,
+    ) -> Vec<usize> {
+        list.iter()
+            .zip(read_lines(list, self.dialect, self.platform))
+            .enumerate()
+            .filter(|(_, (line, read))| line.action == action && wanted(read))
+            .map(|(index, _)| index)
+            .collect()
+    }
+}
+
+impl InForce<BindingOverrideV1, String> for ShortcutLines {
+    fn in_force(&self, list: &[BindingOverrideV1], action: &String) -> Option<usize> {
+        self.lines(list, action, |read| matches!(read, LineRead::Reads(_)))
+            .into_iter()
+            .next()
+    }
+
+    fn alongside(&self, list: &[BindingOverrideV1], action: &String) -> Vec<usize> {
+        self.lines(list, action, |read| *read == LineRead::Shadowed)
+    }
+
+    /// An action whose only lines do not read: the line a press adds goes after
+    /// them, so the later readable line shadows them and they are silent.
+    fn last_under(&self, list: &[BindingOverrideV1], action: &String) -> Option<usize> {
+        list.iter().rposition(|line| line.action == *action)
+    }
+}
+
+/// **The pins menus' reader**: a pin's identity is its category and target as
+/// the file spells them; the first row of an identity is the pin, and every
+/// row of a category this build names is usable — a row of one it cannot name
+/// has an identity no press asks for, and is never taken.
+fn pin_reader() -> First<
+    impl Fn(&bt_persist::PinEntryV1) -> (String, String),
+    impl Fn(&bt_persist::PinEntryV1) -> bool,
+> {
+    First {
+        key: |pin: &bt_persist::PinEntryV1| (pin.kind.clone(), pin.target.clone()),
+        usable: |_: &bt_persist::PinEntryV1| true,
+    }
+}
+
+/// **The one removal road**: the entry under `name` that `reader` puts in
+/// force, and every entry its reader says goes with it (`alongside`) —
+/// for profiles and pins its duplicates after it, never a refused row before
+/// it; for keybindings the lines it shadows. A press's delta takes an entry
+/// away by this, and so does an unpin.
+fn take_away<E, K>(list: &mut Vec<E>, name: &K, reader: &impl InForce<E, K>) {
+    let Some(at) = reader.in_force(list, name) else {
         return;
     };
-    let mut at = 0;
-    list.retain(|entry| {
-        let keep = at < in_force || key(entry) != *wanted;
-        at += 1;
-        keep
-    });
+    let mut gone = reader.alongside(list, name);
+    gone.push(at);
+    gone.sort_unstable();
+    gone.dedup();
+    for index in gone.into_iter().rev() {
+        list.remove(index);
+    }
+}
+
+/// **Unpin**: the pin `(kind, target)` and its duplicates go, by the menus'
+/// reader ([`take_away`]) — `pins::toggle_pin`'s removal.
+pub(crate) fn unpin(pins: &mut Vec<bt_persist::PinEntryV1>, kind: &str, target: &str) {
+    take_away(pins, &(kind.to_owned(), target.to_owned()), &pin_reader());
 }
 
 /// **A press's delta over a list of entries named by a key** ((b)6, (b)8's
@@ -810,21 +889,20 @@ pub(crate) fn remove_in_force_and_its_duplicates<E, K: PartialEq>(
 /// added after its nearest predecessor in `after` otherwise, removed when
 /// `after` has none — and, when the press reordered the keys both sides hold,
 /// those entries take `after`'s order in the places they hold in `desired`.
+/// Entries `desired` carries that the projection never had (a line a reader
+/// refused, a refused profile row) keep their place — except what the reader
+/// says goes with an entry in force (`alongside`: a keybindings line's earlier
+/// lines about its action; a profile's or a pin's later duplicates), which is
+/// removed with it ([`take_away`]).
 ///
-/// **What a removal takes, per document.** `profiles.json` and `pins.json`
-/// ([`InForce::First`]): the entry in force and its duplicates after it
-/// ([`remove_in_force_and_its_duplicates`]); a refused row before it stays.
-/// `keybindings.json` ([`InForce::Last`]): the line in force alone; every other
-/// line about the action stays (its reading is T-STORE-MERGE-KEYBINDINGS').
-/// Every other entry `desired` carries that the projection never had (a line a
-/// reader refused, a refused profile row, a duplicate whose key stays) keeps
-/// its place.
+/// `in_force` is the document's own reader's answer to "which entry under this
+/// key is in force": the one rule its readers use, never a second one here.
 fn apply_keyed_press<E, K>(
     desired: &mut Vec<E>,
     before: &[E],
     after: &[E],
     key: impl Fn(&E) -> K,
-    in_force: InForce<'_, E>,
+    reader: &impl InForce<E, K>,
 ) where
     E: Clone + PartialEq,
     K: PartialEq + Clone,
@@ -833,17 +911,7 @@ fn apply_keyed_press<E, K>(
         *desired = after.to_vec();
         return;
     }
-    let position = |list: &[E], wanted: &K| -> Option<usize> {
-        let mut found = list
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| key(entry) == *wanted);
-        match in_force {
-            InForce::First(usable) => found.find(|(_, entry)| usable(entry)),
-            InForce::Last => found.last(),
-        }
-        .map(|(index, _)| index)
-    };
+    let position = |list: &[E], wanted: &K| -> Option<usize> { reader.in_force(list, wanted) };
     let mut keys: Vec<K> = Vec::new();
     for entry in before.iter().chain(after) {
         let name = key(entry);
@@ -859,20 +927,15 @@ fn apply_keyed_press<E, K>(
         }
         match (position(desired, name), is) {
             (Some(at), Some(entry)) => desired[at] = entry.clone(),
-            (Some(at), None) => match in_force {
-                InForce::First(usable) => {
-                    remove_in_force_and_its_duplicates(desired, &key, name, usable);
-                }
-                InForce::Last => {
-                    desired.remove(at);
-                }
-            },
+            (Some(_), None) => take_away(desired, name, reader),
             (None, Some(entry)) => {
                 let at = position(after, name).unwrap_or(0);
-                let anchor = after[..at]
-                    .iter()
-                    .rev()
-                    .find_map(|earlier| position(desired, &key(earlier)));
+                let anchor = reader.last_under(desired, name).or_else(|| {
+                    after[..at]
+                        .iter()
+                        .rev()
+                        .find_map(|earlier| position(desired, &key(earlier)))
+                });
                 desired.insert(anchor.map_or(0, |index| index + 1), entry.clone());
             }
             (None, None) => {}
@@ -919,14 +982,35 @@ impl StoredDocument for KeybindingsV1 {
         bt_persist::parse_keybindings(bytes)
     }
 
-    /// The unit is the action, the last line about it in force (the reader's
-    /// rule). A press in another platform's dialect than `desired`'s is the
-    /// whole document: its lines cannot share one `writing_platform`, and their
-    /// translation is the keybindings merge's (T-STORE-MERGE-KEYBINDINGS).
+    /// The unit is the action, and the line in force is the one the readers
+    /// put in force (`settings_bundle::read_lines`, the one selection of the
+    /// launch, an import and the merge): the last line about the action that
+    /// reads. A press that takes an action's departure away removes that line
+    /// and the earlier lines it shadows, which would otherwise be the last about
+    /// the action at the next start.
+    ///
+    /// **A press is laid in the press's dialect** — the one the store writes in
+    /// (`KeybindingsStore::store_on`), which every press records. `desired` in
+    /// another dialect (a file written on the other platform, before any merge
+    /// carried it here) is first carried into it the way the merge carries a
+    /// side (`keybindings_merge::in_dialect`): each line read in its own dialect
+    /// and spelled in this one, what is not in force — an action this build has
+    /// no row for, a shadowed line, a line this dialect cannot read — kept
+    /// verbatim in place. Then the press is a delta, so nothing the projection
+    /// lacks is lost to a dialect difference.
     fn apply_press(desired: &mut Self, before: &Self, after: &Self) {
-        if desired == before || desired.writing_platform != after.writing_platform {
+        // A press always records the dialect it is written in; a document that
+        // records none is a v1 file, never a press.
+        let Some(here) = crate::settings_bundle::dialect_of(after.writing_platform) else {
             *desired = after.clone();
             return;
+        };
+        if desired == before {
+            *desired = after.clone();
+            return;
+        }
+        if desired.writing_platform != after.writing_platform {
+            *desired = crate::keybindings_merge::in_dialect(desired, here);
         }
         desired.schema_version = after.schema_version;
         apply_keyed_press(
@@ -934,7 +1018,10 @@ impl StoredDocument for KeybindingsV1 {
             &before.bindings,
             &after.bindings,
             |binding| binding.action.clone(),
-            InForce::Last,
+            &ShortcutLines {
+                dialect: desired.writing_platform,
+                platform: here,
+            },
         );
     }
 
@@ -956,21 +1043,23 @@ impl StoredDocument for ProfilesV1 {
     }
 
     /// The unit is the row, by id: the first row the installer can start
-    /// (`profiles::installable`, the installer's rule); a removal takes it
-    /// and its duplicates after it, and leaves a refused row before it.
+    /// (`profiles::installable`, the installer's rule). A removal takes it and
+    /// its duplicates after it, and leaves a refused row before it ([`First`]).
     fn apply_press(desired: &mut Self, before: &Self, after: &Self) {
         if desired == before {
             *desired = after.clone();
             return;
         }
         desired.schema_version = after.schema_version;
-        let usable = crate::profiles::installable();
         apply_keyed_press(
             &mut desired.profiles,
             &before.profiles,
             &after.profiles,
             |row| row.id.clone(),
-            InForce::First(&usable),
+            &First {
+                key: |row: &bt_persist::ProfileEntryV1| row.id.clone(),
+                usable: crate::profiles::installable(),
+            },
         );
     }
 
@@ -1013,7 +1102,7 @@ impl StoredDocument for PinsV1 {
             &before.pins,
             &after.pins,
             |pin| (pin.kind.clone(), pin.target.clone()),
-            InForce::First(&|_| true),
+            &pin_reader(),
         );
     }
 
@@ -1130,16 +1219,11 @@ pub(crate) struct PendingMerge<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Follow {
     /// Taken whole when nothing of Folio's is owed; stored for the merge when
-    /// something is. What a store opens with until it names its policies; no
-    /// product store follows this way.
+    /// something is (`profiles.json`, `pins.json`, until their merge).
     Take,
     /// Stored for the merge, always: the document's merge puts it in force
-    /// through its doors (`settings.json`, `profiles.json`, `pins.json`).
+    /// through its doors (`settings.json`, `keybindings.json`).
     Merge,
-    /// Stored for a merge still to be built, and the store held: nothing is
-    /// taken and nothing is written over it (`keybindings.json`, until
-    /// T-STORE-MERGE-KEYBINDINGS).
-    Hold,
 }
 
 /// **What one merge pass replaced in one file** — the data the pass's card
@@ -1773,21 +1857,6 @@ impl<T: StoredDocument> DocumentState<T> {
                     kept: None,
                     written: None,
                 });
-                return;
-            }
-            Follow::Hold => {
-                eprintln!(
-                    "BT_PERSIST {file} changed on disk; it is held until it can be merged, and \
-                     not written over"
-                );
-                self.keep_for_the_merge(PendingMerge {
-                    base: self.revision.clone(),
-                    theirs: bytes.clone(),
-                    kept: None,
-                    written: None,
-                });
-                self.revision = Revision { bytes, document };
-                self.held_for_merge = true;
                 return;
             }
         }

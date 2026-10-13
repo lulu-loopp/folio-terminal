@@ -60,17 +60,12 @@ pub const PINS_FILE_NAME: &str = "pins.json";
 /// touched: this walks for one target under one tag and edits its rows only. An
 /// unpin takes every row of that target and tag — the first, which the menus
 /// read, and the later duplicates they never did, which go with it
-/// (`document_request::remove_in_force_and_its_duplicates`; every pin row is
+/// (`document_request::First::alongside`; every pin row is
 /// usable), so a duplicate never becomes the pin.
 pub fn toggle_pin(table: &mut PinsV1, kind: PinKind, target: &str) -> bool {
     match row_of(table, kind, target) {
         Some(_) => {
-            crate::document_request::remove_in_force_and_its_duplicates(
-                &mut table.pins,
-                |pin| (pin.kind(), pin.target.clone()),
-                &(Some(kind), target.to_owned()),
-                |_| true,
-            );
+            crate::document_request::unpin(&mut table.pins, kind.tag(), target);
             false
         }
         None => {
@@ -869,9 +864,8 @@ mod tests {
     /// the first; unpinning it leaves neither, in the table the press makes and
     /// in the document Folio writes — the later row never becomes the pin.
     ///
-    /// MUTATION: keep the duplicate (in
-    /// `document_request::remove_in_force_and_its_duplicates`, remove only the
-    /// entry in force — the press road before round 3) — the later row is
+    /// MUTATION: keep the duplicate (`document_request::First::alongside`
+    /// answers nothing — the press road before round 3) — the later row is
     /// pinned after the unpin.
     #[test]
     fn an_unpin_takes_the_later_duplicates_of_its_pin() {

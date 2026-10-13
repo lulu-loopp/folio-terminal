@@ -37,7 +37,7 @@
 //!   reading puts in force the row the merge kept. A carried row goes with its
 //!   id's row: when the merge removes that row, the carried rows naming it go
 //!   too — the rule a press's removal follows
-//!   (`document_request::remove_in_force_and_its_duplicates`) — so a row that
+//!   (`document_request::First::alongside`) — so a row that
 //!   was never in force never becomes the live one, and the id meets its
 //!   shipped value or none. The refused rows an id kept stand where their side has
 //!   them — after the nearest row before them the result places — and never
@@ -522,7 +522,7 @@ fn order(
             continue;
         };
         // A carried row goes with its id's row (the rule of
-        // `document_request::remove_in_force_and_its_duplicates`): one the merge
+        // `document_request::First::alongside`): one the merge
         // removed takes it along.
         if !result.contains_key(id) {
             continue;
@@ -987,14 +987,14 @@ mod tests {
 
     /// RED (review round 3, coordinator's ruling) — **a press that removes a
     /// row takes its carried duplicates with it**
-    /// (`document_request::remove_in_force_and_its_duplicates`, the merge road's
+    /// (`document_request::First::alongside`, the merge road's
     /// rule): `desired` holds the row and a later duplicate the
     /// installer refused; the projection, the table in force, has only the row;
     /// the press removes it. The next start shows the id at its shipped value.
     ///
-    /// MUTATION: keep the duplicate (in `remove_in_force_and_its_duplicates`,
-    /// remove only the entry in force — the Delete before round 3) — the duplicate is the row in
-    /// force at the next start.
+    /// MUTATION: keep the duplicate (`document_request::First::alongside`
+    /// answers nothing — the Delete before round 3) — the duplicate is the row
+    /// in force at the next start.
     #[test]
     fn a_press_that_removes_a_row_takes_its_carried_duplicates() {
         use crate::document_request::StoredDocument;
