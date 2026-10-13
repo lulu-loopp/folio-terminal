@@ -568,7 +568,10 @@ impl Drop for WorkerEnd {
     }
 }
 
-/// What a save that ran out of `budget` (the writer's own) says, on `stderr` and to the caller.
+/// What a save that ran out of time says, on `stderr` and to the caller, naming the writer's
+/// `budget`. The bound that ended it may instead have been a quit's `until` or an update's
+/// receipt deadline, and a wait that was not admitted did not wait at all; the sentence names
+/// the writer's budget in every case, the product's three seconds in the product.
 ///
 /// One sentence for both, because they are the same fact: the document in hand did not reach
 /// the disk, and whatever the last completed save left there is still what the next start
@@ -1269,7 +1272,7 @@ impl SessionWriter {
         }
         // **Never past `until`** — a quit's one budget, started by its documents phase
         // (T-QUIT-DOCUMENTS) — and never past this wait's own bound.
-        let deadline = (Instant::now() + self.budget).min(until);
+        let deadline = self.wait_ends(Instant::now()).min(until);
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             match self.receipts.recv_timeout(left) {
@@ -1298,6 +1301,13 @@ impl SessionWriter {
                 }
             }
         }
+    }
+
+    /// **Where a wait on this writer that starts at `now` ends at the latest**: `now` plus this
+    /// writer's budget. Every wait on the writer reads it — [`Self::wait_for`], [`Self::close`]
+    /// and [`SessionStore::flush_judged`]'s `until`.
+    fn wait_ends(&self, now: Instant) -> Instant {
+        now + self.budget
     }
 
     /// The writer thread's id, while one runs.
@@ -1342,7 +1352,7 @@ impl SessionWriter {
         if self.stalled {
             return;
         }
-        let deadline = Instant::now() + self.budget;
+        let deadline = self.wait_ends(Instant::now());
         while !thread.is_finished() {
             if Instant::now() >= deadline {
                 self.stalled = true;
@@ -1887,7 +1897,7 @@ impl SessionStore {
     /// quit where it stands; a budget that ran out does not, because the disk still holds the
     /// last completed save and the reader still asked to leave. [`SaveRefusal`] is which.
     pub fn flush_judged(&mut self) -> Result<(), SaveRefusal> {
-        self.flush_judged_until(Instant::now() + self.writer.budget)
+        self.flush_judged_until(self.writer.wait_ends(Instant::now()))
     }
 
     /// **Tests only: this store's writer waits `budget` instead of [`SESSION_SAVE_BUDGET`]** —
@@ -3887,12 +3897,19 @@ pub(crate) mod tests {
     }
 
     /// RED (T-SESSION-WRITER-BUDGET-SEAM) — **the writer's budget is the product's unless a test
-    /// sets it, and a test sets it for its own store alone.**
+    /// sets it, a test sets it for its own store alone, and every wait on the writer honours
+    /// it.**
     ///
     /// Every store begins with [`SESSION_SAVE_BUDGET`], the product's three seconds, whatever
     /// another store was given before it; [`SessionStore::set_save_budget`] changes the store it
-    /// is called on and no other, made before it or after.
+    /// is called on and no other, made before it or after. Where a wait starting at one instant
+    /// ends is read off the writer at a named `now`, so no clock is in the test. And a real wait
+    /// is driven: a store given no budget at all, over a writer that never answers, comes back
+    /// from `flush_judged` with the timed-out answer naming its own budget — the wait ended on
+    /// it and not on the product's three seconds.
     ///
+    /// MUTATION: in `SessionWriter::wait_ends`, read [`SESSION_SAVE_BUDGET`] instead of the
+    /// field — the store given the suite's patience still ends its waits three seconds out.
     /// MUTATION: keep the budget a test sets in one process-wide value that every writer opens
     /// with — the store made after the setter reads the first store's budget.
     #[test]
@@ -3902,32 +3919,58 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a private directory for this test");
         assert_eq!(SESSION_SAVE_BUDGET, Duration::from_secs(3));
+        let now = Instant::now();
 
         let mut set = SessionStore::at(root.join("会话-set.json"), root.join("set.lock"));
         let mut before = SessionStore::at(root.join("before.json"), root.join("before.lock"));
         assert_eq!(
-            set.writer.budget, SESSION_SAVE_BUDGET,
+            set.writer.wait_ends(now),
+            now + SESSION_SAVE_BUDGET,
             "a store opens with the product's"
         );
         set.set_save_budget(crate::lane::PATIENCE);
         assert_eq!(
-            set.writer.budget,
-            crate::lane::PATIENCE,
-            "the setter sets its store"
+            set.writer.wait_ends(now),
+            now + crate::lane::PATIENCE,
+            "the setter sets its store's waits"
         );
         assert_eq!(
-            before.writer.budget, SESSION_SAVE_BUDGET,
+            before.writer.wait_ends(now),
+            now + SESSION_SAVE_BUDGET,
             "a store made before it keeps the product's"
         );
         let mut after = SessionStore::at(root.join("after.json"), root.join("after.lock"));
         assert_eq!(
-            after.writer.budget, SESSION_SAVE_BUDGET,
+            after.writer.wait_ends(now),
+            now + SESSION_SAVE_BUDGET,
             "and so does a store made after it"
         );
-
         for store in [&mut set, &mut before, &mut after] {
             retire(&mut store.writer);
         }
+
+        // A real wait, ended by the store's own budget.
+        let mut stalled = SessionStore::at(root.join("stalled.json"), root.join("stalled.lock"));
+        retire(&mut stalled.writer);
+        let (never, release) = a_writer_that_never_answers();
+        stalled.writer = never;
+        stalled.set_save_budget(Duration::ZERO);
+        let mut document = SessionV1::default();
+        document
+            .windows
+            .push(bt_persist::SessionWindowV1::default());
+        stalled.record(document, Instant::now());
+        assert_eq!(
+            stalled.flush_judged(),
+            Err(SaveRefusal::TimedOut(save_did_not_finish(Duration::ZERO))),
+            "the wait ends on the store's budget"
+        );
+        assert!(
+            stalled.writer.stalled,
+            "and the writer is known to be stalled"
+        );
+
+        drop(release);
         let _ = std::fs::remove_dir_all(&root);
     }
 
