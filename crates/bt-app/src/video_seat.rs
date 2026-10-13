@@ -336,12 +336,7 @@ impl BarMeta<'_> {
 /// `None` when even play plus a minimum scrubber will not fit, which is a box
 /// too small to be a player and is drawn as a picture with no bar.
 #[must_use]
-pub fn bar_layout(
-    body: [f32; 4],
-    scale: f32,
-    clock_figures: usize,
-    meta_px: f32,
-) -> Option<BarLayout> {
+fn bar_layout(body: [f32; 4], scale: f32, clock_figures: usize, meta_px: f32) -> Option<BarLayout> {
     let px = |logical: f32| logical * scale;
     let height = px(VIDEO_BAR_HEIGHT_LOGICAL_PX).round().max(1.0);
     let body_width = body[2] - body[0];

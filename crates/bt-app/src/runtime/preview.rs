@@ -4880,7 +4880,7 @@ impl Runtime<'_> {
     /// **The bar of one surface, laid out** — `None` when nothing is playing
     /// there or the bar is not up.
     ///
-    /// The same [`video_seat::bar_layout`] the painter used, off the same
+    /// The same [`video_seat::bar_layout_of`] the painter used, off the same
     /// [`Self::video_shape_of`] rectangle: a hit test that derived the boxes a
     /// second way would be a bar that answers a hand somewhere other than where
     /// it was drawn, which is the one defect a control bar cannot have.
