@@ -16,12 +16,14 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- The first formula or picture after Folio starts takes a moment longer (about two seconds on a Mac), because the formula engine now loads when it is first needed rather than at startup. <!-- zh: pending S-8 -->
 - Changes to settings.json saved in another editor while Folio runs take effect without a restart, and a setting changed in Folio at the same time is kept beside them; when both change the same setting, the file wins. <!-- zh: pending T-STORE-MERGE-SETTINGS -->
 - Quitting first saves any change to settings, shortcuts, profiles or pins that is not on disk yet. If one cannot be saved or kept in the recovered folder, Folio stays open and a card names the file, with a button to leave without that change; quitting again tries again. <!-- zh: pending T-QUIT-DOCUMENTS -->
 - If Folio stops after a failure with such a change unsaved, the change is kept in the recovered folder; if it cannot be kept anywhere, the system's own message says so. <!-- zh: pending T-QUIT-DOCUMENTS -->
 
 ### Fixed
 
+- A panic in one picture or formula no longer ends Folio; that picture or formula stays as it was and is tried again after the next change in its pane. <!-- zh: pending S-8 -->
 - On macOS, an update that is ready to install is written fully to disk before Folio records it as ready, so a power cut cannot leave a half-written update behind a ready one. <!-- zh: pending E6 -->
 - When an update check gets an answer but cannot save it, other open copies of Folio no longer ask GitHub again the same day. <!-- zh: pending E6 -->
 - Folio no longer runs a helper program (Git, PowerShell, a macOS update tool) that it could not stop again, so none can be left running behind it; on macOS, an update tool that runs too long is now reported with what it had printed. <!-- zh: pending E6 -->

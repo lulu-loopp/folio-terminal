@@ -1,8 +1,8 @@
 //! **The lane contract's suite, run on every lane** (D-33; `crate::lane`; `docs/plans/design/
 //! window-thread-budget-2026-09-25.md` §R-D).
 //!
-//! Five adapters — the OS hand-off lane (the reference), the font lane, the taskbar lane, the
-//! computation lane and the program-walk lane — each run every [`Claim`]; [`judge`] holds the
+//! Seven adapters — the OS hand-off lane (the reference), the font lane, the taskbar lane, the
+//! computation lane's three shares and the program-walk lane — each run every [`Claim`]; [`judge`] holds the
 //! verdicts to [`EXPECTED_FAILURES`]. Each adapter lives beside its lane, where the lane's private
 //! parts are.
 //!
@@ -25,7 +25,7 @@ use crate::lane::{
 };
 
 /// Every lane's adapter. A lane missing here is a lane [`judge`] reports as skipped.
-fn adapters() -> [Adapter; 5] {
+fn adapters() -> [Adapter; 7] {
     [
         Adapter {
             lane: LaneName::Handoff,
@@ -42,6 +42,14 @@ fn adapters() -> [Adapter; 5] {
         Adapter {
             lane: LaneName::Computation,
             make: crate::computation_lane::contract_adapter::make,
+        },
+        Adapter {
+            lane: LaneName::ComputationScale,
+            make: crate::computation_lane::contract_adapter::make_scale,
+        },
+        Adapter {
+            lane: LaneName::ComputationPath,
+            make: crate::computation_lane::contract_adapter::make_path,
         },
         Adapter {
             lane: LaneName::Programs,

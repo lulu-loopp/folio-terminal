@@ -286,8 +286,11 @@ below the earliest request still owed; and the computation lane (S-8,
 `computation_lane`) on `lane::Queue` — the first-in-first-out shape: every request run in
 the order minted unless a newer one for the same target displaces it while it waits
 (`Superseded { by }`) or is the same operation and joins it, the worker started by the
-first request, a refused request handed back with its job. A lane of several threads
-keeps one ledger per thread, so one thread's end ends only its own requests. What the proof covers:
+first request, a refused request handed back with its job, a supersession announced by
+the wake and its terminal — which carries no answer — taken past the drain mark. A lane of
+several threads keeps one ledger per thread, so one thread's end ends only its own requests,
+and keeps what each request asked, so a `Failed` one is settled (its mark taken down, its
+question asked again only by new input) rather than left in flight. What the proof covers:
 `lane_contract_tests::the_ledger_ends_every_identity_exactly_once_in_every_interleaving`
 plays every order of three identities' outcomes (the six terminals, a racing
 answer after a cancel, a terminal published for a joined identity itself),

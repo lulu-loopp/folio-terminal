@@ -535,12 +535,18 @@ where
         }
     }
 
-    /// The requester takes `id`'s terminal, if it has ended.
-    fn take(&self, id: Id) -> Option<TerminalOf<Id, O>> {
+    /// The requester takes `id`'s terminal, if it has ended and `wanted` says so of it.
+    fn take(
+        &self,
+        id: Id,
+        wanted: impl FnOnce(&TerminalOf<Id, O>) -> bool,
+    ) -> Option<TerminalOf<Id, O>> {
         let mut out = Out::new();
         let terminal = {
             let mut book = lock(&self.book);
-            book.entries.get(&id)?.terminal.as_ref()?;
+            if !wanted(book.entries.get(&id)?.terminal.as_ref()?) {
+                return None;
+            }
             let terminal = book.entries.remove(&id)?.terminal?;
             self.delivered(&mut book, id, &terminal, &mut out);
             terminal
@@ -604,10 +610,19 @@ where
 
     /// The terminal, once the request has ended; `None` before, and after it was taken.
     pub(crate) fn take(&mut self) -> Option<TerminalOf<Id, O>> {
+        self.take_if(|_| true)
+    }
+
+    /// The terminal, once the request has ended, if `wanted` says so of it; left for a later take
+    /// otherwise.
+    pub(crate) fn take_if(
+        &mut self,
+        wanted: impl FnOnce(&TerminalOf<Id, O>) -> bool,
+    ) -> Option<TerminalOf<Id, O>> {
         if self.settled {
             return None;
         }
-        let terminal = self.ledger.take(self.id);
+        let terminal = self.ledger.take(self.id, wanted);
         self.settled = terminal.is_some();
         terminal
     }
@@ -1041,6 +1056,10 @@ pub(crate) enum Relation {
 /// minted ([`Refused::NotStarted`], said once per streak where the lane declares streaks); the
 /// lane is not in fault, and the next request starts it again (revision (b)5, rule 1).
 ///
+/// A request a newer one displaces ends `Superseded { by }` at once, and the lane's wake announces
+/// it, so its consumer can take that terminal — which carries no answer — without waiting for the
+/// run before it.
+///
 /// The requester holds what [`Self::ask`] admitted. The identities end in the order they were
 /// minted — one worker, first in first out, a displaced or joined request ending no later than
 /// the one that ends it, the worker's end ending the rest — so a consumer may take the terminals
@@ -1114,6 +1133,9 @@ where
             }
             line.started = true;
         }
+        // Whether this request displaced one: its terminal is announced by the wake, after the
+        // line's lock is let go, so the consumer can take it at once and free its place.
+        let mut superseded = false;
         let related = line
             .waiting
             .iter()
@@ -1138,6 +1160,7 @@ where
                 if let Some((displaced, _)) = line.waiting.remove(at) {
                     self.ledger
                         .publish(displaced, Terminal::Superseded { by: request.id() });
+                    superseded = true;
                 }
                 request
             }
@@ -1149,6 +1172,9 @@ where
         line.waiting.push_back((request.id(), job));
         drop(line);
         self.asked.notify_one();
+        if superseded {
+            (self.ledger.wake)();
+        }
         Ok(request)
     }
 
@@ -1251,20 +1277,25 @@ pub(crate) enum LaneName {
     Font,
     /// `taskbar_lane`: whether the taskbar hides itself.
     Taskbar,
-    /// `computation_lane`: the formula, decode and glance thread (`bt-math-worker`), beside the
-    /// resample and path-verification threads it shares the lane with.
+    /// `computation_lane`'s formula, decode and glance share (`bt-math-worker`).
     Computation,
+    /// `computation_lane`'s resample share (`bt-image-scale-worker`).
+    ComputationScale,
+    /// `computation_lane`'s path-verification share (`bt-path-verify-worker`).
+    ComputationPath,
     /// `programs_lane`: what this machine can start (T-PROGRAMS-REFRESH).
     Programs,
 }
 
 #[cfg(test)]
 impl LaneName {
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Handoff,
         Self::Font,
         Self::Taskbar,
         Self::Computation,
+        Self::ComputationScale,
+        Self::ComputationPath,
         Self::Programs,
     ];
 }
@@ -1419,10 +1450,10 @@ pub(crate) const TASKBAR: Contract = Contract {
 /// `computation_lane`'s decoration share, on the seam (S-8): one `bt-math-worker` thread; ids
 /// minted by the share's `Ledger`; every request run and answered in the order it was minted, none
 /// coalesced; the asking tab (or window) is the target incarnation, and a closed tab's request ends
-/// in the lane's sink, which ignores it; the ledger owes 196 at once — one pane's whole hand-out
-/// of formula and decode work (`bt_term::DECORATION_TASKS_HELD`), one running and the rest
-/// waiting, an answer not yet taken holding its place — and refuses the rest at the door; a
-/// failure (a panic in one request's work) is said once per streak.
+/// in the lane's sink, which ignores it; the ledger owes 196 at once — a sizing choice, what one
+/// pane's session holds queued for this worker (`bt_term::DECORATION_TASKS_HELD`), one running and
+/// the rest waiting, an answer not yet taken holding its place — and refuses the rest at the door;
+/// a failure (a panic in one request's work) is said once per streak.
 #[cfg(test)]
 pub(crate) const COMPUTATION: Contract = Contract {
     lane: Some(LaneName::Computation),
@@ -1435,6 +1466,49 @@ pub(crate) const COMPUTATION: Contract = Contract {
         waiting: Bound::At(195),
         executing: 1,
         answers_held: Bound::At(196),
+    },
+    cancellation: Cancellation::Abandon,
+    saying: Saying::PerStreak,
+};
+
+/// `computation_lane`'s resample share, on the seam (S-8): one `bt-image-scale-worker` thread;
+/// ids minted by the share's own `Ledger`; run and ended in the order minted, a newer request for
+/// the same picture, pane and surface superseding the one waiting or joining it at the same size;
+/// the asking tab (or window) is the target incarnation, a closed tab's request ending in the
+/// lane's ignoring sink; the ledger owes 68 at once (`bt_term::DECODE_TASKS_HELD`, one hand-out
+/// pass's resamples) and refuses the rest at the door; a failure is said once per streak.
+#[cfg(test)]
+pub(crate) const COMPUTATION_SCALE: Contract = Contract {
+    lane: Some(LaneName::ComputationScale),
+    replacement: Replacement::Fifo,
+    execution: Order::Submission,
+    delivery: Delivery::Submission,
+    bounds: Bounds {
+        // `computation_lane::SCALE_BOUND`, written out rather than read.
+        waiting: Bound::At(67),
+        executing: 1,
+        answers_held: Bound::At(68),
+    },
+    cancellation: Cancellation::Abandon,
+    saying: Saying::PerStreak,
+};
+
+/// `computation_lane`'s path-verification share, on the seam (S-8): one `bt-path-verify-worker`
+/// thread; ids minted by the share's own `Ledger`; run and ended in the order minted, none
+/// coalesced; the asking tab is the target incarnation, a closed tab's request ending in the
+/// lane's ignoring sink; the ledger owes 512 at once (`bt_term::PATH_TASKS_HELD`, one hand-out
+/// pass's printed paths) and refuses the rest at the door; a failure is said once per streak.
+#[cfg(test)]
+pub(crate) const COMPUTATION_PATH: Contract = Contract {
+    lane: Some(LaneName::ComputationPath),
+    replacement: Replacement::Fifo,
+    execution: Order::Submission,
+    delivery: Delivery::Submission,
+    bounds: Bounds {
+        // `computation_lane::PATH_BOUND`, written out rather than read.
+        waiting: Bound::At(511),
+        executing: 1,
+        answers_held: Bound::At(512),
     },
     cancellation: Cancellation::Abandon,
     saying: Saying::PerStreak,

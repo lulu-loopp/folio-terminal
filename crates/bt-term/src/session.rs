@@ -301,10 +301,10 @@ const PATH_VERDICT_LEDGER_CAP: usize = 4096;
 /// How many unanswered printed paths one pane will hold for its worker.
 const PATH_VERIFY_QUEUE_CAP: usize = 512;
 const LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP: usize = 64;
-/// **How much formula and decode work one session can hold for its host's worker at once**: its
-/// frozen and live formula queues ([`WORKER_QUEUE_CAP`] each), its pasted pictures and its printed
-/// picture paths. A host that hands a session's whole queues out in one pass hands out at most
-/// this much of that work.
+/// **How much formula and decode work one session can hold queued for its host's worker at once**:
+/// its frozen and live formula queues ([`WORKER_QUEUE_CAP`] each), its pasted pictures and its
+/// printed picture paths — what one hand-out pass can put out of that work when the queues are
+/// full. Work already out is not counted: a host that sizes a bound by it sizes it for one pass.
 pub const DECORATION_TASKS_HELD: usize =
     2 * crate::WORKER_QUEUE_CAP + INLINE_IMAGE_WORKER_QUEUE_CAP + LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP;
 /// **How many pictures one session can hold for decoding at once** — pasted and printed — and so
@@ -1755,6 +1755,15 @@ pub struct DualPlaneSession {
     /// it arrives, whatever its verdict. Path questions are `path_verify_in_flight`'s. Only
     /// [`Self::outstanding_decoration_work`] reads it.
     decoration_work_out: BTreeSet<DecorationWorkOut>,
+    /// **Tasks whose work failed on the host's worker, held for this session's next new input**
+    /// ([`DualPlaneSession::hold_decoration_task_until_new_input`]). Each still counts as handed
+    /// out — its work-out entry or in-flight path stands, so nothing asks the same question
+    /// again meanwhile — and the next bytes from the shell or the next resize give it back to
+    /// its queue, to be handed out once more.
+    held_for_new_input: Vec<SessionDecorationTask>,
+    /// **The host could not start its worker**: nothing is handed out until this session's next
+    /// new input ([`DualPlaneSession::pause_hand_out_until_new_input`]).
+    hand_out_paused: bool,
     /// What this pane last told its projection, kept so the telling is free on the frames where
     /// nothing has changed — which is nearly all of them.
     printed_path_links: bt_transcript::paths::PrintedPathLinks,
@@ -2313,6 +2322,8 @@ impl DualPlaneSession {
             path_declined: BTreeSet::new(),
             path_declined_order: VecDeque::new(),
             decoration_work_out: BTreeSet::new(),
+            held_for_new_input: Vec::new(),
+            hand_out_paused: false,
             printed_path_links: bt_transcript::paths::PrintedPathLinks::default(),
             reprinted_path_links: bt_transcript::paths::PrintedPathLinks::default(),
             image_placeholders: bt_transcript::paths::ImagePlaceholderTargets::default(),
@@ -4017,6 +4028,7 @@ impl DualPlaneSession {
         // know whether re-reading the grid could give a different answer.
         if !bytes.is_empty() {
             self.screen_revision = self.screen_revision.wrapping_add(1);
+            self.new_input();
         }
         let repaint_controls = self.terminal.repaint_controls(bytes);
         let cursor_memory_reprint_boundary =
@@ -4468,6 +4480,7 @@ impl DualPlaneSession {
         rows: NonZeroU32,
         observed_at: Instant,
     ) -> Result<(), SessionError> {
+        self.new_input();
         self.refresh_semantic_region_witnesses();
         let plan = plan_resize(self.terminal.dimensions(), (columns, rows));
         // Before a single cell moves: what each registered live anchor names. A reflow is about to
@@ -9210,6 +9223,9 @@ impl DualPlaneSession {
     }
 
     pub fn take_decoration_worker_task(&mut self) -> Option<SessionDecorationTask> {
+        if self.hand_out_paused {
+            return None;
+        }
         // The display size a record needs is a pure function of the layout and its native
         // dimensions, and anything can move either — a zoom, a reflow, an anchor migrating into
         // history. Deriving it here, where work is handed out, means no state change has to
@@ -9280,6 +9296,32 @@ impl DualPlaneSession {
                 self.path_verify_in_flight.remove(&path);
                 self.path_verify_tasks.push_front(path);
             }
+        }
+    }
+
+    /// **A task whose work failed on the host's worker, held until this session's next new input**
+    /// — the next bytes from the shell (an edit's echo, new output) or a resize. Until then it
+    /// stays handed out, so the same question is not asked again on its own; then it goes back to
+    /// the head of its queue and the next hand-out hands it out once more. The decoration stands
+    /// as it was meanwhile: a formula on its source text, a path not yet a link.
+    pub fn hold_decoration_task_until_new_input(&mut self, task: SessionDecorationTask) {
+        self.held_for_new_input.push(task);
+    }
+
+    /// **The host could not start the worker this session's tasks go to**: nothing more is handed
+    /// out until this session's next new input, so the start is tried again only by new input,
+    /// once — never by every hand-out that finds the queues as they were.
+    pub fn pause_hand_out_until_new_input(&mut self) {
+        self.hand_out_paused = true;
+    }
+
+    /// **New input reached this session**: hand-outs resume, and every task held for it goes back
+    /// to the head of its queue, in the order it was held.
+    fn new_input(&mut self) {
+        self.hand_out_paused = false;
+        let held = std::mem::take(&mut self.held_for_new_input);
+        for task in held.into_iter().rev() {
+            self.give_back_decoration_worker_task(task);
         }
     }
 
@@ -25838,6 +25880,63 @@ mod tests {
             assert!(record.failed);
             assert_eq!(record.declined_by_host, declined, "{record:?}");
         }
+    }
+
+    /// RED (S-8 round 2) — **a task whose work failed is held until the session's next new input,
+    /// and then handed out once more**; while held, no hand-out asks it again, and a paused
+    /// hand-out (the host's worker could not start) hands out nothing until new input either.
+    ///
+    /// MUTATION: have `new_input` leave `held_for_new_input` where it is — the next bytes do not
+    /// give the path back, and it is never asked again.
+    #[test]
+    fn a_failed_task_waits_for_new_input_and_a_paused_hand_out_resumes_with_it() {
+        let path = bt_testpath::temp_path("bt-term-held").join("\u{622a}\u{56fe}-shot.md");
+        let printed = format!("{}\r\n", path.to_string_lossy());
+        let mut session = DualPlaneSession::new(nz(120), nz(6));
+        enable_path_detection(&mut session);
+        session.feed(printed.as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        let Some(task @ SessionDecorationTask::VerifyPath(_)) =
+            session.take_decoration_worker_task()
+        else {
+            panic!("the printed name is asked about");
+        };
+        session.hold_decoration_task_until_new_input(task);
+        // Idle frames: the same screen drawn again asks nothing.
+        for _ in 0..3 {
+            session.refresh_projection(&mut projection);
+            session.viewport_frame(&mut projection).unwrap();
+            session.absorb_printed_path_probes(&mut projection);
+            assert!(
+                session.take_decoration_worker_task().is_none(),
+                "no new input, no new question"
+            );
+        }
+        assert_eq!(session.outstanding_decoration_work(), 1, "still owed");
+        session.feed(b"x").unwrap();
+        let Some(SessionDecorationTask::VerifyPath(again)) = session.take_decoration_worker_task()
+        else {
+            panic!("new input hands the held name out again");
+        };
+        assert_eq!(again, path);
+        assert!(session.take_decoration_worker_task().is_none(), "once");
+
+        let mut session = DualPlaneSession::new(nz(20), nz(6));
+        session
+            .feed("\u{56fe} \x1b]1337;File=inline=1:AAAA\x07".as_bytes())
+            .unwrap();
+        session.pause_hand_out_until_new_input();
+        assert!(session.take_decoration_worker_task().is_none(), "paused");
+        session.feed(b"\r\n").unwrap();
+        assert!(
+            matches!(
+                session.take_decoration_worker_task(),
+                Some(SessionDecorationTask::InlineImage(_))
+            ),
+            "new input resumes the hand-out"
+        );
     }
 
     /// RED (S-8) — **a task the host's lane refused is given back, and the next hand-out hands it

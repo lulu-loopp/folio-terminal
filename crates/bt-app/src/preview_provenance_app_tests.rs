@@ -152,7 +152,7 @@ fn every_pane_of_a_tab_hands_its_decoration_work_to_the_worker() {
     );
     let (foreground, _foreground_requests) = mpsc::channel();
     let senders = DecorationSenders {
-        computation: Arc::new(watched.lane),
+        computation: watched.lane,
         foreground,
     };
     let mut running = true;

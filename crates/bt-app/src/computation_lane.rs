@@ -38,26 +38,37 @@
 //!   (`Superseded { by }`) and **joins** it when it asks for the same size (`Joined { with }`) —
 //!   revision (b)4. A superseded or joined terminal reaches its asker's bookkeeping and nothing
 //!   on screen (owner ruling Q4): the newer request's answer, or the one it joined, is what lands.
-//! * **Capacity.** Each share's ledger owes at most its bound — one pane's whole hand-out of that
-//!   share's work as `bt-term` holds it ([`DECORATION_BOUND`], [`SCALE_BOUND`], [`PATH_BOUND`]),
-//!   an answer not yet taken holding its place. A request past it is refused at the door,
-//!   synchronously, with no identity minted (revision (b)3), and handed back to its asker: a
-//!   pane's task goes back to the head of its pane's queue
-//!   (`DualPlaneSession::give_back_decoration_worker_task`) and is handed out again by the next
-//!   hand-out; a window's own surface records nothing as asked, so its next resolve asks again.
-//!   Nothing is retried on a clock (revision (b)5, rule 1).
+//!   A supersession is announced by a wake, and the drain takes a superseded terminal at once —
+//!   past the drain mark, since it carries no answer — so it leaves the bound while the run before
+//!   it is still out.
+//! * **Capacity.** Each share's ledger owes at most its bound ([`DECORATION_BOUND`],
+//!   [`SCALE_BOUND`], [`PATH_BOUND`]), an answer not yet taken holding its place. The bounds are
+//!   sizing choices, not derived worst cases: each is what one pane's session can hold queued for
+//!   that share, so one hand-out pass of one pane fits; a second pane or window asking at the same
+//!   time reaches it sooner. A request past it is refused at the door, synchronously, with no
+//!   identity minted (revision (b)3), and handed back to its asker: a pane's task goes back to the
+//!   head of its pane's queue (`DualPlaneSession::give_back_decoration_worker_task`), only that
+//!   share's work stops for that hand-out, and the next hand-out (the next output, frame or
+//!   answer) hands it out again; a window's own surface records nothing as asked, so its next
+//!   resolve asks again. Nothing is retried on a clock (revision (b)5, rule 1).
 //! * **Completion.** `Done` carries the work's answer — an error the work can report (a decode it
 //!   refuses, a formula the engine refuses, a render panic that `bt_math`'s own boundary turns
 //!   into `MathRenderError::Aborted`) is part of that answer. Any other panic in one request's
 //!   work is that request's `Failed`, caught by its [`crate::lane::task`] and said once per streak
-//!   by the share's ledger, and the worker goes on; the asker leaves the decoration as it stands.
+//!   by the share's ledger, and the worker goes on. The window that asked settles it
+//!   (`Runtime::settle_failed_requests`): nothing on screen changes, its in-flight mark comes
+//!   down, and its question is asked again only by new input — a pane holds the task until its
+//!   next bytes or resize, a window surface asks again at its next hover or resolve.
 //!   A worker's end ends every request **of that share** still owed `WorkerGone`, faults that
-//!   share (every later request on it refused at the door) and wakes the loop: the death of one
-//!   thread is seen while the other two live, and the window thread turns the feature off once,
-//!   with its notice, as it always did.
+//!   share (every later request on it refused at the door) and wakes the loop: the death is
+//!   observed per share, the other two threads still answering inside the lane; the product's
+//!   answer to it is the whole feature's, as it always was — the window thread turns the lane off
+//!   once, with its notice, and no surface asks any share again.
 //! * **Start.** Each share's worker is started by the first request made of it; a start the
 //!   thread door refuses refuses that request at the door ([`Refused::NotStarted`]), said once per
-//!   streak, and leaves the share unfaulted — the next request starts it again.
+//!   streak, and leaves the share unfaulted. The pane whose task it was hands nothing more out
+//!   until its next new input, which tries the start once; a window surface asks again at its
+//!   next hover or resolve.
 //! * **Abandonment.** A request whose asker has gone — a tab closed, a window closed — is let go
 //!   by the drain before it takes anything ([`ComputationLane::ended`]); its terminal, now or
 //!   when it comes, goes to the lane's sink, which ignores it by design (C6): what it would have
@@ -75,21 +86,22 @@ use bt_platform::admission::WorkerCtx;
 
 use crate::lane::{self, Executor, Ledger, Owed, Queue, Refused, Relation, Saying, Terminal};
 use crate::{
-    AnswerOwner, MathWorkerRequest, MathWorkerResult, PathWorkerRequest, ScaleWorkerRequest,
+    AnswerOwner, Asked, MathWorkerRequest, MathWorkerResult, PathWorkerRequest, ScaleWorkerRequest,
 };
 
-/// **How many requests the formula and decode share owes at once**: one pane's whole hand-out of
-/// that work — its frozen and live formula queues, its pasted pictures and its printed picture
-/// paths (`bt_term::DECORATION_TASKS_HELD`). A window's own surfaces (the glance card, a preview's
-/// formulas, an animation's frames) ask within the same bound.
+/// **How many requests the formula and decode share owes at once** — a sizing choice: what one
+/// pane's session can hold queued for this worker (its frozen and live formula queues, its pasted
+/// pictures and its printed picture paths, `bt_term::DECORATION_TASKS_HELD`), so one hand-out pass
+/// of one pane fits. A window's own surfaces (the glance card, a preview's formulas, an
+/// animation's frames) and a second pane asking at the same time share it and reach it sooner.
 pub(crate) const DECORATION_BOUND: usize = bt_term::DECORATION_TASKS_HELD;
 
-/// **How many requests the resample share owes at once**: one resample for each picture one
-/// pane's hand-out can have decoded (`bt_term::DECODE_TASKS_HELD`).
+/// **How many requests the resample share owes at once** — a sizing choice: one resample for each
+/// picture one pane's session can hold for decoding (`bt_term::DECODE_TASKS_HELD`).
 pub(crate) const SCALE_BOUND: usize = bt_term::DECODE_TASKS_HELD;
 
-/// **How many requests the path share owes at once**: one pane's whole queue of printed paths
-/// (`bt_term::PATH_TASKS_HELD`).
+/// **How many requests the path share owes at once** — a sizing choice: one pane's whole queue of
+/// printed paths (`bt_term::PATH_TASKS_HELD`).
 pub(crate) const PATH_BOUND: usize = bt_term::PATH_TASKS_HELD;
 
 /// **One request's name**, minted by its share's ledger and unique within that share.
@@ -174,16 +186,21 @@ type Held = lane::Request<ComputationId, Asker>;
 /// [`crate::scale_door`] and [`crate::path_door`].
 pub(crate) type Door<Job> = Box<dyn FnMut(&WorkerCtx, Job) -> MathWorkerResult>;
 
-/// **One request that has ended, taken by the window thread**: its share, its identity and its
-/// terminal.
-pub(crate) type Ended = (Share, ComputationId, ComputationTerminal);
+/// **One request that has ended, taken by the window thread**: its share, its identity, its
+/// terminal, and who asked what ([`crate::Asked`]) — which a `Failed` terminal settles.
+pub(crate) type Ended = (
+    Share,
+    ComputationId,
+    ComputationTerminal,
+    (AnswerOwner, Asked),
+);
 
 /// **One share**: its queue (and with it its ledger), and the requests it holds for their askers,
 /// by identity.
 struct ShareOf<Job> {
     share: Share,
     queue: Arc<Queue<ComputationId, Asker, Job>>,
-    held: Mutex<BTreeMap<ComputationId, (Held, AnswerOwner)>>,
+    held: Mutex<BTreeMap<ComputationId, (Held, AnswerOwner, Asked)>>,
 }
 
 impl<Job: Send + 'static> ShareOf<Job> {
@@ -215,6 +232,7 @@ impl<Job: Send + 'static> ShareOf<Job> {
         &self,
         job: Job,
         owner: AnswerOwner,
+        asked: Asked,
         sink: &Sink,
         relate: impl Fn(&Job, &Job) -> Relation,
         start: impl FnOnce(Arc<lane::Ran<ComputationId, Asker>>) -> Result<(), lane::WorkerEnd>,
@@ -224,7 +242,7 @@ impl<Job: Send + 'static> ShareOf<Job> {
         };
         let request = self.queue.ask(job, asker, relate, start)?;
         let id = request.id();
-        locked(&self.held).insert(id, (request, owner));
+        locked(&self.held).insert(id, (request, owner, asked));
         Ok(id)
     }
 
@@ -245,11 +263,11 @@ impl<Job: Send + 'static> ShareOf<Job> {
             let mut held = locked(&self.held);
             let ids: Vec<ComputationId> = held
                 .iter()
-                .filter(|(_, (_, owner))| gone(*owner))
+                .filter(|(_, (_, owner, _))| gone(*owner))
                 .map(|(id, _)| *id)
                 .collect();
             ids.into_iter()
-                .filter_map(|id| held.remove(&id).map(|(request, _)| request))
+                .filter_map(|id| held.remove(&id).map(|(request, _, _)| request))
                 .collect()
         };
         // Dropped outside the lock: a request's drop hands its terminal to the sink.
@@ -257,19 +275,27 @@ impl<Job: Send + 'static> ShareOf<Job> {
     }
 
     /// **Every terminal below the share's drain mark** ([`Ledger::earliest_owed`], read once,
-    /// before the requests are looked at), in the order the ledger minted them, each taken once.
+    /// before the requests are looked at), in the order the ledger minted them, each taken once —
+    /// and every `Superseded` terminal past the mark too: it carries no answer, so no answer's
+    /// order depends on it, and taking it at once frees its place in the share's bound while the
+    /// run before it is still out (a divider drag during a long resample).
     fn ended(&self, into: &mut Vec<Ended>) {
         let owed = self.queue.ledger().earliest_owed();
         let mut held = locked(&self.held);
-        let taken: Vec<Ended> = held
+        let taken: Vec<(ComputationId, ComputationTerminal)> = held
             .iter_mut()
-            .take_while(|(id, _)| owed.is_none_or(|owed| **id < owed))
-            .filter_map(|(id, (request, _))| Some((self.share, *id, request.take()?)))
+            .filter_map(|(id, (request, _, _))| {
+                let below = owed.is_none_or(|owed| *id < owed);
+                let terminal = request
+                    .take_if(|terminal| below || matches!(terminal, Terminal::Superseded { .. }))?;
+                Some((*id, terminal))
+            })
             .collect();
-        for (_, id, _) in &taken {
-            held.remove(id);
+        for (id, terminal) in taken {
+            if let Some((_, owner, asked)) = held.remove(&id) {
+                into.push((self.share, id, terminal, (owner, asked)));
+            }
         }
-        into.extend(taken);
     }
 
     /// How many requests the share holds for their askers.
@@ -359,11 +385,13 @@ impl ComputationLane {
         make: impl FnOnce(&WorkerCtx) -> Door<MathWorkerRequest> + Send + 'static,
     ) -> Result<ComputationId, (Refused, MathWorkerRequest)> {
         let owner = request.owner();
+        let asked = request.asked();
         let queue = Arc::clone(&self.decoration.queue);
         let wake = Arc::clone(&self.wake);
         self.decoration.ask(
             request,
             owner,
+            asked,
             &self.sink,
             |_, _| Relation::Other,
             |ran| {
@@ -387,18 +415,36 @@ impl ComputationLane {
     /// as one waiting supersedes it, or joins it when it asks for the same size.
     #[expect(
         clippy::result_large_err,
-        reason = "permanent: a refused request is handed back by value to the surface that asked,                   as large as the request it is"
+        reason = "permanent: a refused request is handed back by value to the surface that asked, \
+                  as large as the request it is"
     )]
     pub(crate) fn scale(
         &self,
         request: ScaleWorkerRequest,
     ) -> Result<ComputationId, (Refused, ScaleWorkerRequest)> {
+        self.scale_through(request, crate::scale_door)
+    }
+
+    /// [`Self::scale`], the resample share's worker — when this request is the one that starts
+    /// it — answering through the door `make` makes on its thread.
+    #[expect(
+        clippy::result_large_err,
+        reason = "permanent: a refused request is handed back by value to the surface that asked, \
+                  as large as the request it is"
+    )]
+    pub(crate) fn scale_through(
+        &self,
+        request: ScaleWorkerRequest,
+        make: impl FnOnce(&WorkerCtx) -> Door<ScaleWorkerRequest> + Send + 'static,
+    ) -> Result<ComputationId, (Refused, ScaleWorkerRequest)> {
         let owner = request.owner();
+        let asked = request.asked();
         let queue = Arc::clone(&self.scale.queue);
         let wake = Arc::clone(&self.wake);
         self.scale.ask(
             request,
             owner,
+            asked,
             &self.sink,
             |waiting, asked| {
                 if !waiting.same_target(asked) {
@@ -412,7 +458,7 @@ impl ComputationLane {
             |ran| {
                 self.executor
                     .start_worker("bt-image-scale-worker", ran, move |ctx| {
-                        ShareOf::serve(&queue, ctx, crate::scale_door(ctx), &*wake);
+                        ShareOf::serve(&queue, ctx, make(ctx), &*wake);
                     })
             },
         )
@@ -423,18 +469,30 @@ impl ComputationLane {
         &self,
         request: PathWorkerRequest,
     ) -> Result<ComputationId, (Refused, PathWorkerRequest)> {
+        self.verify_through(request, crate::path_door)
+    }
+
+    /// [`Self::verify`], the path share's worker — when this request is the one that starts it —
+    /// answering through the door `make` makes on its thread.
+    pub(crate) fn verify_through(
+        &self,
+        request: PathWorkerRequest,
+        make: impl FnOnce(&WorkerCtx) -> Door<PathWorkerRequest> + Send + 'static,
+    ) -> Result<ComputationId, (Refused, PathWorkerRequest)> {
         let owner = request.owner();
+        let asked = request.asked();
         let queue = Arc::clone(&self.path.queue);
         let wake = Arc::clone(&self.wake);
         self.path.ask(
             request,
             owner,
+            asked,
             &self.sink,
             |_, _| Relation::Other,
             |ran| {
                 self.executor
                     .start_worker("bt-path-verify-worker", ran, move |ctx| {
-                        ShareOf::serve(&queue, ctx, crate::path_door(ctx), &*wake);
+                        ShareOf::serve(&queue, ctx, make(ctx), &*wake);
                     })
             },
         )
@@ -491,7 +549,7 @@ pub(crate) mod fixtures {
     pub(crate) type Sunk = (ComputationId, ComputationTerminal);
 
     pub(crate) struct Watched {
-        pub(crate) lane: ComputationLane,
+        pub(crate) lane: Arc<ComputationLane>,
         pub(crate) wakes: mpsc::Receiver<()>,
         said: Arc<Mutex<Vec<String>>>,
         sunk: Arc<Mutex<Vec<Sunk>>>,
@@ -506,12 +564,12 @@ pub(crate) mod fixtures {
         let sunk = Arc::new(Mutex::new(Vec::new()));
         let lines = Arc::clone(&said);
         let sink = Arc::clone(&sunk);
-        let lane = ComputationLane::start_with(
+        let lane = Arc::new(ComputationLane::start_with(
             executor,
             wake,
             move |line| locked(&lines).push(line.to_owned()),
             move |id, terminal| locked(&sink).push((id, terminal)),
-        );
+        ));
         Watched {
             lane,
             wakes,
@@ -537,9 +595,26 @@ pub(crate) mod fixtures {
                 if let Some(at) = self
                     .taken
                     .iter()
-                    .position(|(of, taken, _)| *of == share && *taken == id)
+                    .position(|(of, taken, _, _)| *of == share && *taken == id)
                 {
                     return self.taken.remove(at).2;
+                }
+                lane::wait_for_a_wake(&self.wakes, "a computation lane's terminal");
+            }
+        }
+
+        /// **The next terminal `share` ends**, drained as the window thread drains, each wake
+        /// awaited within the lane suite's patience.
+        pub(crate) fn next_ended(
+            &mut self,
+            share: Share,
+            gone: impl Fn(AnswerOwner) -> bool,
+        ) -> Ended {
+            loop {
+                let ended = self.lane.ended(&gone);
+                self.taken.extend(ended);
+                if let Some(at) = self.taken.iter().position(|(of, ..)| *of == share) {
+                    return self.taken.remove(at);
                 }
                 lane::wait_for_a_wake(&self.wakes, "a computation lane's terminal");
             }
@@ -591,13 +666,16 @@ pub(crate) mod fixtures {
     }
 }
 
-/// **The lane contract suite's adapter for the computation lane** (`crate::lane`): the real
-/// [`ComputationLane`], its formula share driven with the suite's scripted executor through its
-/// own admission ([`ComputationLane::decorate_through`]), its real formula and picture door, and
+/// **The lane contract suite's adapters for the computation lane** (`crate::lane`): the real
+/// [`ComputationLane`], one adapter for each of its three shares, each driven with the suite's
+/// scripted executor through the share's own admission ([`ComputationLane::decorate_through`],
+/// [`ComputationLane::scale_through`], [`ComputationLane::verify_through`]) and its real door, and
 /// the product's acceptance.
 ///
-/// A question is a pasted picture whose payload is empty, which the real decoder refuses at once
-/// without touching a disk; the answer is still the lane's answer to that question. The door is
+/// A formula-share question is a pasted picture whose payload is empty, which the real decoder
+/// refuses at once without touching a disk; a resample question is a one-pixel picture named by
+/// the question; a path question is a file, named by the question, that is not there. Each
+/// answer is still the lane's answer to that question. The door is
 /// the product's, with the suite's gate told which question it executes (`Gate::execute`), inside
 /// the request's task, so a panic the suite plants there is that request's failure. Acceptance is
 /// the product's: the drain lets go of a closed tab's requests (`ComputationLane::ended`), and
@@ -606,11 +684,13 @@ pub(crate) mod fixtures {
 #[cfg(test)]
 pub(crate) mod contract_adapter {
     use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
     use crate::lane::{
-        Admission, COMPUTATION, Contract, Delivered, Gate, LaneUnderTest, Outcome, WakeProbe,
+        Admission, COMPUTATION, COMPUTATION_PATH, COMPUTATION_SCALE, Contract, Delivered, Gate,
+        LaneUnderTest, Outcome, WakeProbe,
     };
     use crate::{
         DecorationWorkerCompletion, LeafId, SeatId, ShellAddress, TabId, WindowId, claimed_by,
@@ -618,6 +698,7 @@ pub(crate) mod contract_adapter {
     };
 
     struct Adapter {
+        share: Share,
         lane: ComputationLane,
         gate: Arc<Gate>,
         probe: Arc<WakeProbe>,
@@ -638,6 +719,24 @@ pub(crate) mod contract_adapter {
         TabId(u64::from(target) + 1)
     }
 
+    /// The picture a resample question names: its content key carries the question.
+    fn content_of(question: u64) -> String {
+        format!("截图 q{question}")
+    }
+
+    /// The path a path question names: its file stem carries the question.
+    fn path_of(question: u64) -> PathBuf {
+        PathBuf::from(format!("不在这里/{question}.md"))
+    }
+
+    fn question_of_content(content: &str) -> Option<u64> {
+        content.strip_prefix("截图 q")?.parse().ok()
+    }
+
+    fn question_of_path(path: &Path) -> Option<u64> {
+        path.file_stem()?.to_str()?.parse().ok()
+    }
+
     fn outcome(terminal: &ComputationTerminal) -> Outcome {
         match terminal {
             Terminal::Done(_) => Outcome::Answered,
@@ -655,8 +754,22 @@ pub(crate) mod contract_adapter {
         }
     }
 
-    /// A fresh lane for one claim.
+    /// A fresh lane for one claim, driven through its formula share.
     pub(crate) fn make() -> Box<dyn LaneUnderTest> {
+        make_for(Share::Decoration)
+    }
+
+    /// A fresh lane for one claim, driven through its resample share.
+    pub(crate) fn make_scale() -> Box<dyn LaneUnderTest> {
+        make_for(Share::Scale)
+    }
+
+    /// A fresh lane for one claim, driven through its path share.
+    pub(crate) fn make_path() -> Box<dyn LaneUnderTest> {
+        make_for(Share::Path)
+    }
+
+    fn make_for(share: Share) -> Box<dyn LaneUnderTest> {
         let gate = Arc::new(Gate::default());
         let probe = Arc::new(WakeProbe::default());
         let sunk = Arc::new(Mutex::new(Vec::new()));
@@ -680,6 +793,7 @@ pub(crate) mod contract_adapter {
             },
         );
         Box::new(Adapter {
+            share,
             lane,
             gate,
             probe,
@@ -692,9 +806,98 @@ pub(crate) mod contract_adapter {
         })
     }
 
+    impl Adapter {
+        /// Put `question` on the share the adapter drives, for the tab `leaf` stands in, each
+        /// share's own door wrapped so the suite's gate is told which question it executes.
+        fn ask(&self, leaf: ShellAddress, question: u64) -> Result<ComputationId, Refused> {
+            let gate = Arc::clone(&self.gate);
+            match self.share {
+                Share::Decoration => {
+                    // The decode reaches the host's SVG codec for any payload no raster
+                    // container claims; install it as `main` does, so the lane's answer never
+                    // depends on the payload.
+                    crate::test_support::install_host_answers();
+                    let request = MathWorkerRequest::InlineImage {
+                        leaf,
+                        task: bt_term::InlineImageTask {
+                            occurrence_id: question,
+                            source: bt_term::InlineImageSource::Osc1337(Vec::new()),
+                        },
+                    };
+                    let door = move |ctx: &WorkerCtx| -> Door<MathWorkerRequest> {
+                        let mut real = crate::run_decoration_worker(ctx);
+                        Box::new(move |ctx: &WorkerCtx, request: MathWorkerRequest| {
+                            if let MathWorkerRequest::InlineImage { task, .. } = &request {
+                                gate.execute(task.occurrence_id);
+                            }
+                            real(ctx, request)
+                        })
+                    };
+                    self.lane
+                        .decorate_through(request, door)
+                        .map_err(|(refused, _)| refused)
+                }
+                Share::Scale => {
+                    let request = ScaleWorkerRequest::Preview {
+                        leaf,
+                        task: crate::test_support::scale_task(&content_of(question), 8),
+                    };
+                    let door = move |ctx: &WorkerCtx| -> Door<ScaleWorkerRequest> {
+                        let mut real = crate::scale_door(ctx);
+                        Box::new(move |ctx: &WorkerCtx, request: ScaleWorkerRequest| {
+                            if let ScaleWorkerRequest::Preview { task, .. } = &request
+                                && let Some(question) = question_of_content(&task.content_key)
+                            {
+                                gate.execute(question);
+                            }
+                            real(ctx, request)
+                        })
+                    };
+                    self.lane
+                        .scale_through(request, door)
+                        .map_err(|(refused, _)| refused)
+                }
+                Share::Path => {
+                    let request = PathWorkerRequest {
+                        leaf,
+                        path: path_of(question),
+                    };
+                    let door = move |ctx: &WorkerCtx| -> Door<PathWorkerRequest> {
+                        let mut real = crate::path_door(ctx);
+                        Box::new(move |ctx: &WorkerCtx, request: PathWorkerRequest| {
+                            if let Some(question) = question_of_path(&request.path) {
+                                gate.execute(question);
+                            }
+                            real(ctx, request)
+                        })
+                    };
+                    self.lane
+                        .verify_through(request, door)
+                        .map_err(|(refused, _)| refused)
+                }
+            }
+        }
+    }
+
+    /// The question an answer is for, read off the answer itself.
+    fn question_of(result: &MathWorkerResult) -> Option<u64> {
+        match &result.completion {
+            DecorationWorkerCompletion::InlineImage { task, .. } => Some(task.occurrence_id),
+            DecorationWorkerCompletion::PreviewScaledImage { scaled } => {
+                question_of_content(&scaled.content_key)
+            }
+            DecorationWorkerCompletion::VerifiedPath { path, .. } => question_of_path(path),
+            _ => None,
+        }
+    }
+
     impl LaneUnderTest for Adapter {
         fn contract(&self) -> &'static Contract {
-            &COMPUTATION
+            match self.share {
+                Share::Decoration => &COMPUTATION,
+                Share::Scale => &COMPUTATION_SCALE,
+                Share::Path => &COMPUTATION_PATH,
+            }
         }
 
         fn gate(&self) -> &Gate {
@@ -706,9 +909,6 @@ pub(crate) mod contract_adapter {
         }
 
         fn submit(&mut self, target: u32, question: u64) -> Admission {
-            // The decode reaches the host's SVG codec for any payload no raster container claims;
-            // install it as `main` does, so the lane's answer never depends on the payload.
-            crate::test_support::install_host_answers();
             self.opened.insert(target);
             let leaf = ShellAddress {
                 window: adapter_window(),
@@ -717,31 +917,13 @@ pub(crate) mod contract_adapter {
                     seat: SeatId(1),
                 },
             };
-            let request = MathWorkerRequest::InlineImage {
-                leaf,
-                task: bt_term::InlineImageTask {
-                    occurrence_id: question,
-                    source: bt_term::InlineImageSource::Osc1337(Vec::new()),
-                },
-            };
-            // The product's door, with the suite's gate told which question it executes.
-            let gate = Arc::clone(&self.gate);
-            let door = move |ctx: &WorkerCtx| -> Door<MathWorkerRequest> {
-                let mut real = crate::run_decoration_worker(ctx);
-                Box::new(move |ctx: &WorkerCtx, request: MathWorkerRequest| {
-                    if let MathWorkerRequest::InlineImage { task, .. } = &request {
-                        gate.execute(task.occurrence_id);
-                    }
-                    real(ctx, request)
-                })
-            };
-            match self.lane.decorate_through(request, door) {
+            match self.ask(leaf, question) {
                 Ok(id) => Admission {
                     ticket: Some(id.number()),
                     question,
                     refused: None,
                 },
-                Err((refused, _)) => Admission {
+                Err(refused) => Admission {
                     ticket: None,
                     question,
                     refused: Some(format!("{refused:?}")),
@@ -764,16 +946,10 @@ pub(crate) mod contract_adapter {
                 .ended(|owner| !claimed_by(owner, adapter_window(), open.iter().copied()));
             let mut found = Vec::new();
             let mut worker_gone = false;
-            for (_, id, terminal) in ended {
+            for (_, id, terminal, _) in ended {
                 let delivered = match &terminal {
                     Terminal::Done(answer) => {
                         let result = answer.take().expect("an answer is taken once");
-                        let question = match &result.completion {
-                            DecorationWorkerCompletion::InlineImage { task, .. } => {
-                                Some(task.occurrence_id)
-                            }
-                            _ => None,
-                        };
                         let target =
                             claimed_by(result.owner(), adapter_window(), open.iter().copied())
                                 .then(|| u32::try_from(result.leaf.leaf.tab.0 - 1).ok())
@@ -781,7 +957,7 @@ pub(crate) mod contract_adapter {
                         Delivered {
                             target,
                             ticket: Some(id.number()),
-                            question,
+                            question: question_of(&result),
                             outcome: Outcome::Answered,
                         }
                     }
@@ -1013,9 +1189,10 @@ mod tests {
     /// request comes back as it was asked, to wait in its pane; every admitted one is answered
     /// once the worker is let go.
     ///
-    /// MUTATION: build each share's ledger with no bound (`None` for `Some(bound)` in
-    /// `ShareOf::new`) — the request past the bound is admitted. (A door that waits for room
-    /// instead never returns at all: nothing it waits on can drain while the window thread waits.)
+    /// MUTATION: make `ShareOf::ask` wait while its share is full (a door that blocks on a full
+    /// queue) — its answer never comes, and the wait for it ends red at the suite's patience. Or
+    /// build each share's ledger with no bound (`None` for `Some(bound)` in `ShareOf::new`) — the
+    /// request past the bound is admitted.
     #[test]
     fn a_full_lane_refuses_at_the_door_without_waiting() {
         let (mut lane, gate) = gated();
@@ -1037,11 +1214,24 @@ mod tests {
                     .expect("within the bound"),
             );
         }
-        let Err((refused, handed_back)) = lane.lane.verify(printed(PATH_BOUND)) else {
+        // Asked from a thread of its own, its answer awaited within the lane suite's patience: a
+        // door that waited for room would never answer, and the wait would end in red, not hang.
+        let (told, heard) = std::sync::mpsc::channel();
+        let asking = Arc::clone(&lane.lane);
+        let past = printed(PATH_BOUND);
+        std::thread::spawn(move || {
+            let _ = told.send(
+                asking
+                    .verify(past)
+                    .map_err(|(refused, back)| (refused, back.path)),
+            );
+        });
+        let Err((refused, handed_back)) = lane::receive(&heard, "the door's answer past the bound")
+        else {
             panic!("a request past the bound was admitted");
         };
         assert_eq!(refused, Refused::Full { bound: PATH_BOUND });
-        assert_eq!(handed_back.path, printed(PATH_BOUND).path);
+        assert_eq!(handed_back, printed(PATH_BOUND).path);
         assert_eq!(
             gate.entered(),
             1,
@@ -1160,5 +1350,367 @@ mod tests {
             3,
             "three resamples were run: the first width, the last and the glance's"
         );
+    }
+
+    /// A formula door — the product's — whose first terminal formula's work panics.
+    fn formula_fails_once(ctx: &WorkerCtx) -> Door<MathWorkerRequest> {
+        let mut real = crate::run_decoration_worker(ctx);
+        let mut failed = false;
+        Box::new(move |ctx: &WorkerCtx, request: MathWorkerRequest| {
+            if !failed && matches!(request, MathWorkerRequest::Math { .. }) {
+                failed = true;
+                panic!("the suite fails this formula's work once, on purpose");
+            }
+            real(ctx, request)
+        })
+    }
+
+    /// A path door — the product's — whose first question about a `笔记-notes.md` panics.
+    fn path_fails_once(ctx: &WorkerCtx) -> Door<PathWorkerRequest> {
+        let mut real = crate::path_door(ctx);
+        let mut failed = false;
+        Box::new(move |ctx: &WorkerCtx, request: PathWorkerRequest| {
+            if !failed && request.path.ends_with("笔记-notes.md") {
+                failed = true;
+                panic!("the suite fails this path's work once, on purpose");
+            }
+            real(ctx, request)
+        })
+    }
+
+    /// A pane showing one live formula, settled and ready to be handed out.
+    fn a_pane_with_a_formula() -> bt_term::DualPlaneSession {
+        let start = std::time::Instant::now();
+        let mut session = bt_term::DualPlaneSession::new(
+            std::num::NonZeroU32::new(40).unwrap(),
+            std::num::NonZeroU32::new(4).unwrap(),
+        );
+        session
+            .feed_at("$$x+\u{03b1}$$\x1b[?25l".as_bytes(), start)
+            .unwrap();
+        session.advance_live_stability(start + bt_term::LIVE_MATH_STABLE_INTERVAL);
+        session
+    }
+
+    /// A pane that printed one path (a name in Chinese and Latin), its question queued.
+    fn a_pane_with_a_printed_path(path: &std::path::Path) -> bt_term::DualPlaneSession {
+        let mut session = bt_term::DualPlaneSession::new(
+            std::num::NonZeroU32::new(120).unwrap(),
+            std::num::NonZeroU32::new(6).unwrap(),
+        );
+        session.set_math_layout_options(bt_term::MathLayoutOptions {
+            detect_image_paths: true,
+            ..bt_term::MathLayoutOptions::default()
+        });
+        session
+            .feed(format!("{}\r\n", path.to_string_lossy()).as_bytes())
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        session
+    }
+
+    /// One hand-out of `session`'s work to `lane`, as a frame makes it.
+    fn hand_out(session: &mut bt_term::DualPlaneSession, lane: &ComputationLane) -> bool {
+        let (mut running, mut notice) = (true, false);
+        crate::dispatch_pending_math_tasks(probe_leaf(), session, lane, &mut running, &mut notice)
+    }
+
+    /// RED (S-8 round 2; revision (b)5 rule 1) — **A formula whose work failed is asked again by
+    /// the pane's next new input, and answered; never before.**
+    ///
+    /// The formula's work panics once. Its `Failed` terminal is settled into the pane
+    /// (`settle_failed_in_session`), which holds the task: frames drawn again with nothing new
+    /// hand nothing out, and the next bytes from the shell hand it out once more, to an answer.
+    ///
+    /// MUTATION: make `settle_failed_in_session` leave a pane's task where it is (an empty `Pane`
+    /// arm) — the mark stands, and new input asks nothing.
+    #[test]
+    fn a_failed_formula_is_asked_again_by_new_input_and_answered() {
+        let (mut lane, _gate) = gated();
+        // The formula worker starts with the door that fails a formula once.
+        let started = lane
+            .lane
+            .decorate_through(
+                MathWorkerRequest::PeekImage {
+                    leaf: probe_leaf(),
+                    path: PathBuf::from("不在这里/启动 start.png"),
+                },
+                formula_fails_once,
+            )
+            .ok()
+            .expect("admitted");
+        lane.terminal(Share::Decoration, started, nobody);
+        let mut session = a_pane_with_a_formula();
+        assert!(!hand_out(&mut session, &lane.lane));
+        let (_, _, failed, asking) = lane.next_ended(Share::Decoration, nobody);
+        assert!(matches!(failed, Terminal::Failed(_)), "{failed:?}");
+        let answers =
+            crate::sort_math_terminals(vec![(Share::Decoration, started, failed, asking)]);
+        assert_eq!(answers.failed.len(), 1);
+        for (_, asked) in answers.failed {
+            crate::settle_failed_in_session(&mut session, asked);
+        }
+        for _ in 0..3 {
+            hand_out(&mut session, &lane.lane);
+            assert_eq!(
+                lane.lane.held(Share::Decoration),
+                0,
+                "no new input, no new question"
+            );
+        }
+        session.feed(b" ").unwrap();
+        hand_out(&mut session, &lane.lane);
+        let (_, _, answered, _) = lane.next_ended(Share::Decoration, nobody);
+        let completion = answer(answered)
+            .expect("the formula is answered")
+            .completion;
+        assert!(
+            matches!(
+                completion,
+                DecorationWorkerCompletion::Math { result: Ok(_), .. }
+            ),
+            "the formula asked again is typeset"
+        );
+    }
+
+    /// RED (S-8 round 2; revision (b)5 rule 1) — **A printed path whose check failed is asked again
+    /// by the pane's next new input, and answered; never before.**
+    ///
+    /// MUTATION: as above — an empty `Pane` arm in `settle_failed_in_session`.
+    #[test]
+    fn a_failed_path_is_asked_again_by_new_input_and_answered() {
+        let (mut lane, _gate) = gated();
+        let started = lane
+            .lane
+            .verify_through(
+                PathWorkerRequest {
+                    leaf: probe_leaf(),
+                    path: PathBuf::from("不在这里/启动.md"),
+                },
+                path_fails_once,
+            )
+            .ok()
+            .expect("admitted");
+        assert!(answer(lane.terminal(Share::Path, started, nobody)).is_some());
+        let path = bt_testpath::temp_path("bt-app-path-failed").join("笔记-notes.md");
+        let mut session = a_pane_with_a_printed_path(&path);
+        assert!(!hand_out(&mut session, &lane.lane));
+        let (_, id, failed, asking) = lane.next_ended(Share::Path, nobody);
+        assert!(matches!(failed, Terminal::Failed(_)), "{failed:?}");
+        let answers = crate::sort_math_terminals(vec![(Share::Path, id, failed, asking)]);
+        for (_, asked) in answers.failed {
+            crate::settle_failed_in_session(&mut session, asked);
+        }
+        for _ in 0..3 {
+            hand_out(&mut session, &lane.lane);
+            assert_eq!(
+                lane.lane.held(Share::Path),
+                0,
+                "no new input, no new question"
+            );
+        }
+        session.feed(b" ").unwrap();
+        hand_out(&mut session, &lane.lane);
+        let (_, _, answered, _) = lane.next_ended(Share::Path, nobody);
+        assert!(
+            matches!(
+                answer(answered).expect("answered").completion,
+                DecorationWorkerCompletion::VerifiedPath { path: asked, .. } if asked == path
+            ),
+            "the path asked again is checked"
+        );
+    }
+
+    /// RED (S-8 round 2) — **A glance whose decode failed leaves the window's cache able to ask
+    /// again**: the `Pending` entry the glance wrote is taken down by the failure, so the next
+    /// settled hover finds no entry and asks (an entry the file has answered since is kept).
+    ///
+    /// MUTATION: make `settle_failed_pixels` leave the entry — the glance stays `Pending`.
+    #[test]
+    fn a_failed_glance_leaves_the_cache_able_to_ask_again() {
+        let (mut lane, _gate) = gated();
+        let path = PathBuf::from("不在这里/截图 glance.png");
+        let mut cache = crate::PeekCache::with_budget(1 << 20);
+        let key = bt_term::normalized_local_image_path_key(&path);
+        cache.insert(key.clone(), crate::PeekCacheEntry::Pending);
+        let id = lane
+            .lane
+            .decorate_through(
+                MathWorkerRequest::PeekImage {
+                    leaf: probe_leaf(),
+                    path: path.clone(),
+                },
+                |ctx: &WorkerCtx| -> Door<MathWorkerRequest> {
+                    let _ = ctx;
+                    Box::new(|_: &WorkerCtx, _: MathWorkerRequest| -> MathWorkerResult {
+                        panic!("the suite fails this glance's decode on purpose")
+                    })
+                },
+            )
+            .ok()
+            .expect("admitted");
+        let failed = lane.terminal(Share::Decoration, id, nobody);
+        assert!(matches!(failed, Terminal::Failed(_)), "{failed:?}");
+        let answers = crate::sort_math_terminals(vec![(
+            Share::Decoration,
+            id,
+            failed,
+            (
+                crate::AnswerOwner::Window(probe_leaf().window),
+                MathWorkerRequest::PeekImage {
+                    leaf: probe_leaf(),
+                    path: path.clone(),
+                }
+                .asked(),
+            ),
+        )]);
+        for (_, asked) in answers.failed {
+            let crate::Asked::Pixels { path } = asked else {
+                panic!("a glance asks for a file's pixels");
+            };
+            crate::settle_failed_pixels(&mut cache, &path);
+        }
+        assert!(cache.get(&key).is_none(), "the next hover asks again");
+    }
+
+    /// RED (S-8 round 2; revision (b)5 rule 1) — **A worker the door could not start is tried
+    /// again by the pane's next new input, once — not by every frame.**
+    ///
+    /// The thread door refuses the formula worker's first start. The pane's task is handed back
+    /// and its hand-out paused: frames drawn again with nothing new start nothing; the next
+    /// bytes from the shell start the worker, and the task is admitted.
+    ///
+    /// MUTATION: drop `session.pause_hand_out_until_new_input()` from the `NotStarted` arm of
+    /// `dispatch_pending_math_tasks` — the next idle frame starts the worker.
+    #[test]
+    fn a_refused_start_is_tried_again_only_by_new_input() {
+        let (lane, gate) = gated();
+        gate.hold();
+        gate.refuse_next_start();
+        let mut session = a_pane_with_a_formula();
+        assert!(
+            !hand_out(&mut session, &lane.lane),
+            "a refused start is no fault"
+        );
+        assert_eq!(lane.lane.held(Share::Decoration), 0);
+        for _ in 0..3 {
+            hand_out(&mut session, &lane.lane);
+            assert_eq!(
+                lane.lane.held(Share::Decoration),
+                0,
+                "no new input, no new start"
+            );
+        }
+        session.feed(b" ").unwrap();
+        hand_out(&mut session, &lane.lane);
+        assert_eq!(
+            lane.lane.held(Share::Decoration),
+            1,
+            "new input starts the worker once"
+        );
+        gate.release();
+    }
+
+    /// RED (S-8 round 2) — **A full share stops only its own work for a hand-out**: with the
+    /// formula share full, a pane's formula goes back to the pane while its printed path is still
+    /// handed to the path share — the three bounds exist so the shares do not block each other.
+    ///
+    /// MUTATION: make `dispatch_pending_math_tasks` stop the whole hand-out at the first `Full`
+    /// (the round-1 `break`) — the path waits behind the formula.
+    #[test]
+    fn a_full_formula_share_does_not_hold_back_a_panes_paths() {
+        let (lane, gate) = gated();
+        gate.hold();
+        for at in 0..DECORATION_BOUND {
+            lane.lane
+                .decorate(MathWorkerRequest::PeekImage {
+                    leaf: probe_leaf(),
+                    path: PathBuf::from(format!("不在这里/{at} 图.png")),
+                })
+                .ok()
+                .expect("within the bound");
+        }
+        // A pane with a formula on screen, then the path the program printed after it.
+        let mut session = a_pane_with_a_formula();
+        let path = bt_testpath::temp_path("bt-app-shares-apart").join("笔记-apart.md");
+        session.set_math_layout_options(bt_term::MathLayoutOptions {
+            detect_image_paths: true,
+            ..bt_term::MathLayoutOptions::default()
+        });
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        session
+            .feed(
+                format!(
+                    "
+{}
+",
+                    path.to_string_lossy()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        session.refresh_projection(&mut projection);
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        let outstanding = session.outstanding_decoration_work();
+        assert_eq!(outstanding, 2, "a formula and a path to hand out");
+        assert!(!hand_out(&mut session, &lane.lane));
+        assert_eq!(
+            lane.lane.held(Share::Path),
+            1,
+            "the path went to its own share"
+        );
+        assert_eq!(
+            lane.lane.held(Share::Decoration),
+            DECORATION_BOUND,
+            "the formula share stayed full"
+        );
+        assert_eq!(
+            session.outstanding_decoration_work(),
+            outstanding,
+            "the formula waits in the pane, not lost"
+        );
+        gate.release();
+    }
+
+    /// RED (S-8 round 2) — **A superseded resample is announced and leaves the share's bound at
+    /// once**, while the resample before it is still running: the drain takes its terminal at the
+    /// wake, past the drain mark, because it carries no answer whose order could depend on it.
+    ///
+    /// MUTATION: take only the terminals below the drain mark in `ShareOf::ended` (drop the
+    /// `Superseded` clause) — the superseded request stays held until the running one ends.
+    #[test]
+    fn a_superseded_resample_leaves_the_bound_while_the_run_before_it_is_out() {
+        let (mut lane, gate) = gated();
+        gate.hold();
+        let preview = |width| ScaleWorkerRequest::Preview {
+            leaf: probe_leaf(),
+            task: scale_task("截图 drag.png", width),
+        };
+        let running = lane.lane.scale(preview(1)).ok().expect("admitted");
+        assert!(gate.wait_entered(1), "the first width reaches the worker");
+        let older = lane.lane.scale(preview(2)).ok().expect("admitted");
+        let newer = lane.lane.scale(preview(3)).ok().expect("admitted");
+        lane::wait_for_a_wake(&lane.wakes, "the supersession's wake");
+        let ended = lane.lane.ended(nobody);
+        assert!(
+            ended
+                .iter()
+                .any(|(share, id, terminal, _)| *share == Share::Scale
+                    && *id == older
+                    && matches!(terminal, Terminal::Superseded { by } if *by == newer)),
+            "the superseded width is taken at once"
+        );
+        assert_eq!(
+            lane.lane.held(Share::Scale),
+            2,
+            "the running one and the newest"
+        );
+        gate.release();
+        assert!(answer(lane.terminal(Share::Scale, running, nobody)).is_some());
+        assert!(answer(lane.terminal(Share::Scale, newer, nobody)).is_some());
     }
 }

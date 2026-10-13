@@ -2,16 +2,17 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    AnimationEntry, AnimationFillOutcome, AnswerOwner, DecorationWorkerCompletion, DocumentMath,
-    Layered, MathHoverExit, MathWorkerRequest, MathWorkerResult, ModalBand, Motion, OverlayStack,
-    PasteTarget, Popup, PreviewDocument, PreviewMathArtifact, PreviewMathKey, PreviewMathPicture,
-    PreviewSurface, PreviewTextCommand, Runtime, TabState, adopt_animation_fill,
-    answer_one_formula, answers_for, dispatch_tab_decoration_tasks, document_formulas,
-    dump_overlay_frame, first_run, float_trigger_tip, foreground_program, formula_tools,
-    ground_overlay_layers, hang_watch, i18n, leaf_session_mut, marks, math_copy_window,
-    math_em_milli, new_tab_tip, nonzero_u32, preview, preview_select, preview_text_command,
-    preview_trace, profiles, quit, rail_overlay_layer, restore, retire_spent_math_copy, search,
-    seats, settings, tooltip, trace_sink, window_layout_key,
+    AnimationEntry, AnimationFillOutcome, AnswerOwner, Asked, DecorationWorkerCompletion,
+    DocumentMath, Layered, MarkdownRasterKey, MathHoverExit, MathWorkerRequest, MathWorkerResult,
+    ModalBand, Motion, OverlayStack, PasteTarget, Popup, PreviewDocument, PreviewMathArtifact,
+    PreviewMathKey, PreviewMathPicture, PreviewSurface, PreviewTextCommand, Runtime, TabState,
+    adopt_animation_fill, answer_one_formula, answers_for, dispatch_tab_decoration_tasks,
+    document_formulas, dump_overlay_frame, first_run, float_trigger_tip, foreground_program,
+    formula_tools, ground_overlay_layers, hang_watch, i18n, leaf_session_mut, marks,
+    math_copy_window, math_em_milli, new_tab_tip, nonzero_u32, preview, preview_select,
+    preview_text_command, preview_trace, profiles, quit, rail_overlay_layer, restore,
+    retire_spent_math_copy, search, seats, settings, settle_failed_in_session,
+    settle_failed_pixels, tooltip, trace_sink, window_layout_key,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -932,6 +933,73 @@ impl Runtime<'_> {
             self.redraw()?;
         }
         Ok(())
+    }
+
+    /// **Settle every request of this window's whose work failed** (`computation_lane`; the
+    /// side-effects contract, revision (b)5 rule 1). The ledger has said each failure once; what
+    /// is left is the mark that says an answer is coming, which would otherwise stand for ever.
+    /// Nothing on screen changes — a formula stays on its source text, a path is not yet a link, a
+    /// picture stays as it was — and the question is asked again only by new input: a pane holds
+    /// its task until its next bytes or resize, a window's surface asks again at its next hover or
+    /// resolve. An animation whose next frames failed stands on its last frame, its decoder gone
+    /// with the request, until a surface shows the file again.
+    pub(crate) fn settle_failed_requests(&mut self, failed: &mut Vec<(AnswerOwner, Asked)>) {
+        for (_, asked) in answers_for(failed, |(owner, _)| self.owns(*owner)) {
+            match &asked {
+                Asked::Pane { leaf, .. } | Asked::Pasted { leaf, .. } => {
+                    let index = self
+                        .window
+                        .tabs
+                        .iter()
+                        .position(|tab| tab.id == leaf.leaf.tab);
+                    if let Some(session) = index.and_then(|index| {
+                        leaf_session_mut(&mut self.window.tabs, index, leaf.leaf.seat)
+                    }) {
+                        settle_failed_in_session(session, asked.clone());
+                    }
+                }
+                Asked::Pixels { path } => settle_failed_pixels(&mut self.window.peek_cache, path),
+                Asked::Animation { path } => {
+                    let key = normalized_local_image_path_key(path);
+                    if matches!(
+                        self.window.animations.get(&key),
+                        Some(AnimationEntry::Pending)
+                    ) {
+                        self.window.animations.remove(&key);
+                    }
+                }
+                Asked::AnimationFill => {}
+                Asked::Page { path, page, fit } => {
+                    if let Some(slot) = self
+                        .window
+                        .peek_page
+                        .as_mut()
+                        .filter(|slot| slot.path == *path && slot.fit == *fit)
+                    {
+                        slot.asked.remove(page);
+                    }
+                }
+                Asked::PreviewMath { key } => self.window.preview_math.forget_pending(key),
+                Asked::WindowScale { target } => {
+                    if self.window.peek_card_pending.as_ref() == Some(target) {
+                        self.window.peek_card_pending = None;
+                    }
+                    if self.window.peek_thumbnail_pending.as_ref() == Some(target) {
+                        self.window.peek_thumbnail_pending = None;
+                    }
+                    self.window
+                        .markdown_pictures
+                        .forget_pending(&MarkdownRasterKey {
+                            content: target.0.clone(),
+                            width_px: target.1,
+                            height_px: target.2,
+                        });
+                    for surface in self.preview_picture_hosts() {
+                        self.preview_pane_mut(surface).forget_picture_scale(target);
+                    }
+                }
+            }
+        }
     }
 
     pub(crate) fn apply_math_results(

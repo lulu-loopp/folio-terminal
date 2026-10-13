@@ -1229,10 +1229,16 @@ built on it (S-8, 2026-10-12) as three shares of `bt-app::computation_lane`, eac
 first-in-first-out `lane::Queue` with a ledger of its own — formulas, decodes and glances on
 `bt-math-worker` (bound 196), resamples on `bt-image-scale-worker` (68, a newer size for the same
 picture superseding the one waiting and the same size joining it), printed paths on
-`bt-path-verify-worker` (512) — each bound one pane's whole hand-out of that work as `bt-term`
-holds it, a refused pane task given back to its pane, every request owed to the tab or window
-that asked and a gone asker's request let go by the drain into the lane's ignoring sink, one
-thread's death ending its own share's requests `WorkerGone` while the other two live. S-6a and
+`bt-path-verify-worker` (512) — each bound a sizing choice, what one pane's session holds queued
+for that share (one hand-out pass of one pane; two panes or windows asking at once reach it
+sooner), a refused pane task given back to its pane and only the refusing share's work stopped
+for that hand-out, a refused thread start pausing the pane's hand-out until its next new input,
+a `Failed` request's in-flight mark taken down and its question asked again only by new input,
+every request owed to the tab or window that asked and a gone asker's request let go by the
+drain into the lane's ignoring sink, one thread's death observed per share — its own requests
+`WorkerGone` while the other two keep answering — and then the whole feature turned off once,
+with its notice. Each share has an adapter in the suite (`LaneName::Computation`,
+`ComputationScale`, `ComputationPath`). S-6a and
 S-7 move the storage worker and the clipboard onto the seam (`docs/ARCHITECTURE-GUARDS.md`,
 *Lane contract and the completion seam*).
 **The return rule:** a lane whose
