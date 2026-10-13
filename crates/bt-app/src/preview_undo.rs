@@ -421,9 +421,19 @@ impl UndoLog {
         true
     }
 
-    /// The body sent did not land: nothing in this history moved to the disk.
-    pub fn sent_unanswered(&mut self) {
-        self.sent = Sent::Not;
+    /// **Whether the body a save sent lives only behind the cursor** (S-6a
+    /// round 7, the coordinator's ruling): its position is ahead — the person
+    /// undid past it, so only the redo history holds it — or it was discarded
+    /// from the history. A body at the position, or typed on past it, is simply
+    /// the body or its descendant. The position stays after an answer that did
+    /// not land, until the next press moves it or a landing takes it.
+    #[must_use]
+    pub fn the_body_sent_is_behind(&self) -> bool {
+        match self.sent {
+            Sent::At(at) => self.cursor < at,
+            Sent::Discarded => true,
+            Sent::Not => false,
+        }
     }
 
     /// **Forget everything** — the body under this log has been replaced.
