@@ -505,8 +505,29 @@ fallback path described under **Authority and fallback** rather than on a guess.
 | **`sh` or `dash`** | no | no | no | no | no | — | yes | that shell's own |
 | **Command Prompt** | **yes** | **no** | no | **yes, no code** | **yes** | refused — see below | yes | not promised |
 | **a profile of the reader's own**, no door | no | no | no | no | no | — | yes | not promised |
+| **`bash.exe`** (`System32\bash.exe` or WSL's Store alias) | yes | yes | yes | yes | yes | none, deliberately | yes, via `WSLENV` | bash's own |
+| **a distribution's own launcher** (`ubuntu2204.exe`) | no | no | no | no | no | — | yes, via `WSLENV` | that shell's own |
 
 Several rows need their reasons stated, because each looks like an omission and is not.
+
+**The door follows the program kind; a bash inside WSL is given WSL-spelled paths or no door**
+(T-WSL-LEGACY-BASH-DOOR, 2026-10-12). `wsl.exe -e` executes its program argv for argv, so the
+script crosses as one argument in the distribution's spelling. `System32\bash.exe` and WSL's Store
+`bash.exe` alias have no `-e`: what follows their name is re-read by a shell inside the
+distribution, and the bash it then starts is the one that runs `-c`'s text. So they are handed
+`-c` and one line — `[ -r '<script>' ] && BT_SHELL_INTEGRATION=<mode> exec bash --init-file
+'<script>' …; exec bash …` — with the script in WSL's spelling, single-quoted, inside the double
+quotes the Windows command line wraps it in. A path or a word of the row's that either quoting
+would read differently (`$`, a backtick, `\`, `"`, `'`) opens no door, and a script the
+distribution cannot read starts the bash the row asked for. A distribution's own launcher reads
+only its own verbs (`run`, `config`) and is handed no door. Measured on Ubuntu-24.04: a
+single-quoted path with a space crossed whole; `$HOME` and a backtick inside it were expanded by
+the outer shell; a path carried in a variable listed `/p` in `WSLENV` arrived exactly; the `-c`
+shell's parent is `/init`.
+
+**`WSLENV` lists the terminal's declarations for every pane whose program enters WSL** (owner
+ruling 2026-10-12): `wsl.exe` or another launcher, handed a script or not, together with the
+profile's own variables.
 
 **The two PowerShells are two profiles** (user ruling 2026-08-11), which is Windows Terminal's own
 arrangement and what a machine with both installed makes necessary: 7 and 5.1 are different

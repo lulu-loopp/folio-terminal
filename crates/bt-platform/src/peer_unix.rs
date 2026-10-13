@@ -23,19 +23,28 @@
 //! # The two arms, and why one call is not enough for both platforms
 //!
 //! * **Darwin** answers the user with `getpeereid` — two out-parameters, the uid
-//!   and the gid — and the process id with a `getsockopt` of `LOCAL_PEERPID` at
-//!   the `SOL_LOCAL` level, which is `<sys/un.h>`'s own name for the pid the
-//!   kernel recorded when the peer connected. Two calls, because the first one
-//!   does not answer the second question.
+//!   and the gid, read from the credentials the kernel recorded when the
+//!   connection was made — and the process id with a `getsockopt` of
+//!   `LOCAL_PEERPID` at the `SOL_LOCAL` level. Two calls, because the first one
+//!   does not answer the second question, and **the two are not kept alike**:
+//!   the user is the record and is still answered after the peer has closed its
+//!   end; the process id is answered from the live connection, and once the
+//!   peer has closed, `LOCAL_PEERPID` (and `LOCAL_PEEREPID`, and
+//!   `LOCAL_PEERTOKEN`, which carries a pid too) says `ENOTCONN`.
 //! * **Linux** has no `getpeereid` at all: the kernel hands all three over at
 //!   once through `getsockopt(SOL_SOCKET, SO_PEERCRED)`, which fills in a
-//!   `libc::ucred` — pid, uid and gid, recorded at `connect` in the same way. So
-//!   the user is read out of the answer to the wider question, and the narrow
-//!   door is the wide one with two fields dropped.
+//!   `libc::ucred` — pid, uid and gid, recorded at `connect` and still answered
+//!   after the peer has closed. So the user is read out of the answer to the
+//!   wider question, and the narrow door is the wide one with two fields
+//!   dropped.
 //!
-//! Both are the kernel's record of the peer *at the moment it connected*, which
-//! is the property the two doors rest on: a process that later execs something
-//! else does not change what is written on a connection that is already open.
+//! **So a pid is asked the moment a connection stands, and the end that refuses
+//! does not close first.** The launch door's client asks right after `connect`
+//! and before it writes a byte (`crate::launch_conversation`), and its server,
+//! refusing, holds its end until the client's first move — which is what keeps
+//! Darwin's answer from depending on which of the two ends got there first.
+//! What the answers name is the peer as the connection knows it, not as a
+//! frame says it: a number the peer wrote is not an answer to "who are you".
 //!
 //! **A pid is `Option` rather than a number, because a kernel may have no
 //! process to name.** `SO_PEERCRED` answers `0` for a peer the reader cannot see
@@ -48,7 +57,7 @@ use std::{
     os::unix::{io::AsRawFd, net::UnixStream},
 };
 
-/// The peer of a connected Unix socket, as the kernel recorded it at `connect`.
+/// The peer of a connected Unix socket, as the kernel names it.
 pub(crate) struct Credentials {
     /// The user the process at the other end is running as.
     pub(crate) uid: u32,
@@ -89,12 +98,13 @@ pub(crate) fn uid(stream: &UnixStream) -> io::Result<u32> {
 ///
 /// # Errors
 ///
-/// The kernel's own, for a descriptor that is not a connected socket.
+/// The kernel's own, for a descriptor that is not a connected socket — and,
+/// here, `NotConnected` for one whose peer has already closed its end.
 #[cfg(target_os = "macos")]
 pub(crate) fn credentials(stream: &UnixStream) -> io::Result<Credentials> {
     /// `<sys/un.h>`: the option level for an `AF_UNIX` socket's own options.
     const SOL_LOCAL: libc::c_int = 0;
-    /// `<sys/un.h>`: the pid of the peer, as the kernel recorded it at connect.
+    /// `<sys/un.h>`: the pid of the peer, answered while the connection stands.
     const LOCAL_PEERPID: libc::c_int = 2;
 
     let uid = self::uid(stream)?;
@@ -158,4 +168,72 @@ pub(crate) fn credentials(stream: &UnixStream) -> io::Result<Credentials> {
 /// same thing to a caller — there is no process here to look anything up about.
 fn process_id(pid: libc::pid_t) -> Option<u32> {
     u32::try_from(pid).ok().filter(|pid| *pid != 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    /// What this kernel answers for the process id of a peer that has closed
+    /// its end — the one place the two arms differ in what they keep: the pid
+    /// of the process that connected (this one, in the test below), or that
+    /// the connection is gone.
+    #[cfg(target_os = "macos")]
+    fn the_pid_once_the_peer_has_closed() -> Result<Option<u32>, io::ErrorKind> {
+        Err(io::ErrorKind::NotConnected)
+    }
+    #[cfg(not(target_os = "macos"))]
+    fn the_pid_once_the_peer_has_closed() -> Result<Option<u32>, io::ErrorKind> {
+        Ok(Some(std::process::id()))
+    }
+
+    /// **A scratch directory removed when it is dropped** — after the test, and
+    /// on a red assertion's unwinding too.
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// **PIN (T-LAUNCH-WIRE-PEER-READ) — what each kernel still answers about a
+    /// peer that has closed its end.**
+    ///
+    /// The fact the launch wire's order rests on, measured rather than assumed:
+    /// the user is the record made at connect on both kernels; the process id
+    /// is too on Linux, and on Darwin it is answered only while the connection
+    /// stands — which is why the launch door's client asks first and its
+    /// refusing server does not close first. Here the peer closes before the
+    /// question is asked, deliberately.
+    #[test]
+    fn what_the_kernel_still_answers_after_the_peer_has_closed() {
+        let directory = Scratch(bt_testpath::temp_path("peer-closed 对端"));
+        std::fs::create_dir_all(&directory.0).expect("make the scratch directory");
+        let path = directory.0.join("s");
+        let listener = UnixListener::bind(&path).expect("bind a socket");
+        let client = UnixStream::connect(&path).expect("connect to it");
+        let (server, _) = listener.accept().expect("accept the connection");
+        // SAFETY: `geteuid` reads this process's own credentials and cannot fail.
+        let me = unsafe { libc::geteuid() };
+        assert_eq!(
+            uid(&client).expect("the user is answered while connected"),
+            me
+        );
+        drop(server);
+
+        assert_eq!(
+            uid(&client).expect("the user is the record made at connect"),
+            me,
+            "the peer's user is still named after it has closed"
+        );
+        assert_eq!(
+            credentials(&client)
+                .map(|peer| peer.pid)
+                .map_err(|error| error.kind()),
+            the_pid_once_the_peer_has_closed(),
+            "the peer's process, asked after it has closed"
+        );
+    }
 }

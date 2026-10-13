@@ -16,7 +16,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
-- Changes to settings.json or keybindings.json saved in another editor while Folio runs take effect without a restart, and a setting or shortcut changed in Folio at the same time is kept beside them; when both change the same one, or give one key to two shortcuts, the file wins. <!-- zh: pending T-STORE-MERGE-KEYBINDINGS -->
+- Changes to settings.json, keybindings.json, profiles.json and pins.json saved in another editor while Folio runs take effect without a restart, and a change made in Folio at the same time is kept beside them; when both change the same value, or give one key to two shortcuts, the file wins. <!-- zh: pending T-STORE-MERGE-KEYBINDINGS --> <!-- zh: pending T-STORE-MERGE-PROFILES-PINS -->
 - A keybindings.json that says it was written on Windows or Linux no longer reads `Cmd+` there, and one written on macOS no longer reads `Win+`; such a line now reads as the other system's key on that system, and a file with no recorded system still reads both. <!-- zh: pending T-STORE-MERGE-KEYBINDINGS -->
 - Quitting first saves any change to settings, shortcuts, profiles or pins that is not on disk yet. If one cannot be saved or kept in the recovered folder, Folio stays open and a card names the file, with a button to leave without that change; quitting again tries again. <!-- zh: pending T-QUIT-DOCUMENTS -->
 - If Folio stops after a failure with such a change unsaved, the change is kept in the recovered folder; if it cannot be kept anywhere, the system's own message says so. <!-- zh: pending T-QUIT-DOCUMENTS -->
@@ -26,6 +26,7 @@ All notable changes to Folio are recorded here. The format follows
 - File paths printed by Cygwin's bash (`/cygdrive/c/…`), by a WSL profile without shell integration, and by a WSL distribution's own launcher are now links, as in Git Bash and WSL panes. <!-- zh: pending T-WINDOWS-SHELL-NAMESPACES -->
 - A path pasted into a Cygwin bash pane is now written as `/cygdrive/c/…`, which Cygwin can open. <!-- zh: pending T-WINDOWS-SHELL-NAMESPACES -->
 - A pane whose shell could not start and fell back to another one now reads the paths printed in it in the spelling of the shell that started, not of the one that was asked for. <!-- zh: pending T-WINDOWS-SHELL-NAMESPACES -->
+- A profile that starts WSL through `bash.exe` now gets shell integration, with the script named in a path WSL can open instead of a Windows path. A profile that starts a distribution's own launcher no longer hands it a Windows path it cannot open. In both, the profile's own environment variables and Folio's terminal variables now reach the shell. <!-- zh: pending T-WSL-LEGACY-BASH-DOOR -->
 - On macOS, an update that is ready to install is written fully to disk before Folio records it as ready, so a power cut cannot leave a half-written update behind a ready one. <!-- zh: pending E6 -->
 - When an update check gets an answer but cannot save it, other open copies of Folio no longer ask GitHub again the same day. <!-- zh: pending E6 -->
 - Folio no longer runs a helper program (Git, PowerShell, a macOS update tool) that it could not stop again, so none can be left running behind it; on macOS, an update tool that runs too long is now reported with what it had printed. <!-- zh: pending E6 -->

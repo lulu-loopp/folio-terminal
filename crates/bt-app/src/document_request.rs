@@ -60,14 +60,10 @@
 //! every one; a generation only keeps a stale answer's visible effect from
 //! landing after a newer one's ((b)4).
 //!
-//! **Two policies per store.** The request's ([`Mode`]): `settings.json` and
-//! `keybindings.json` send `Merge` requests (T-STORE-MERGE-SETTINGS,
-//! T-STORE-MERGE-KEYBINDINGS); the other two still send `Restore` ((b)16 item 1)
-//! until their merges exist — a crossing hand edit is put back and kept, its
-//! bytes are stored for the merge, and the store is held against a file it will
-//! not write over. And the re-read's ([`Follow`]): a file that changed is merged
-//! (settings, keybindings) or taken whole (profiles and pins, until
-//! T-STORE-MERGE-PROFILES-PINS).
+//! **One policy for all four stores.** Every store sends `Merge` requests
+//! (T-STORE-MERGE-SETTINGS, T-STORE-MERGE-KEYBINDINGS,
+//! T-STORE-MERGE-PROFILES-PINS): a displaced file is kept for its merge. And a
+//! re-read that found the file changed stores it for the merge.
 //!
 //! **The merge's seam** ([`DocumentState::merge_stored`]): every file stored
 //! for the merge, in the order it was stored, is merged by the document's own
@@ -97,7 +93,15 @@ pub(crate) enum Mode {
     /// for its merge.
     Merge,
     /// The asker has no merge: a displaced file is put back under its name and
-    /// the answer is a conflict.
+    /// the answer is a conflict. No store sends it — all four merge — and it is
+    /// the preview's save's policy on this worker (design note (c)3, J5 S-6a).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T-STORE-MERGE-PROFILES-PINS until 2026-10-31: every store merges; S-6a's preview save sends it"
+        )
+    )]
     Restore,
 }
 
@@ -772,21 +776,36 @@ trait InForce<E, K> {
     fn last_under(&self, list: &[E], key: &K) -> Option<usize>;
 }
 
-/// **The first entry under a key is the one in force** (the installer's rule for
-/// profiles, the menus' for pins), and nothing goes with it when it goes.
-struct First<F>(F);
+/// **The first usable entry under a key is the one in force** — the installer's
+/// rule for profiles (`usable`: `profiles::installable`, its own test), the
+/// menus' for pins (every pin row is usable) — and **the entries under the key
+/// after it are its duplicates, which go with it**: they were never in force,
+/// and none of them becomes the live entry because the one in force went
+/// (T-STORE-MERGE-PROFILES-PINS, review rounds 3–5). An unusable entry before
+/// it is refused: it is not in force, does not go with it, and stays.
+struct First<F, U> {
+    key: F,
+    usable: U,
+}
 
-impl<E, K: PartialEq, F: Fn(&E) -> K> InForce<E, K> for First<F> {
+impl<E, K: PartialEq, F: Fn(&E) -> K, U: Fn(&E) -> bool> InForce<E, K> for First<F, U> {
     fn in_force(&self, list: &[E], key: &K) -> Option<usize> {
-        list.iter().position(|entry| (self.0)(entry) == *key)
+        list.iter()
+            .position(|entry| (self.key)(entry) == *key && (self.usable)(entry))
     }
 
-    fn alongside(&self, _: &[E], _: &K) -> Vec<usize> {
-        Vec::new()
+    fn alongside(&self, list: &[E], key: &K) -> Vec<usize> {
+        let Some(in_force) = self.in_force(list, key) else {
+            return Vec::new();
+        };
+        (in_force + 1..list.len())
+            .filter(|&at| (self.key)(&list[at]) == *key)
+            .collect()
     }
 
-    /// An entry not in force under a key is one after the first; a new key has
-    /// none.
+    /// An entry the press adds goes after its nearest predecessor: the reader
+    /// takes the first usable entry under the key wherever it stands, and a
+    /// refused entry before it stays refused.
     fn last_under(&self, _: &[E], _: &K) -> Option<usize> {
         None
     }
@@ -834,6 +853,44 @@ impl InForce<BindingOverrideV1, String> for ShortcutLines {
     }
 }
 
+/// **The pins menus' reader**: a pin's identity is its category and target as
+/// the file spells them; the first row of an identity is the pin, and every
+/// row of a category this build names is usable — a row of one it cannot name
+/// has an identity no press asks for, and is never taken.
+fn pin_reader() -> First<
+    impl Fn(&bt_persist::PinEntryV1) -> (String, String),
+    impl Fn(&bt_persist::PinEntryV1) -> bool,
+> {
+    First {
+        key: |pin: &bt_persist::PinEntryV1| (pin.kind.clone(), pin.target.clone()),
+        usable: |_: &bt_persist::PinEntryV1| true,
+    }
+}
+
+/// **The one removal road**: the entry under `name` that `reader` puts in
+/// force, and every entry its reader says goes with it (`alongside`) —
+/// for profiles and pins its duplicates after it, never a refused row before
+/// it; for keybindings the lines it shadows. A press's delta takes an entry
+/// away by this, and so does an unpin.
+fn take_away<E, K>(list: &mut Vec<E>, name: &K, reader: &impl InForce<E, K>) {
+    let Some(at) = reader.in_force(list, name) else {
+        return;
+    };
+    let mut gone = reader.alongside(list, name);
+    gone.push(at);
+    gone.sort_unstable();
+    gone.dedup();
+    for index in gone.into_iter().rev() {
+        list.remove(index);
+    }
+}
+
+/// **Unpin**: the pin `(kind, target)` and its duplicates go, by the menus'
+/// reader ([`take_away`]) — `pins::toggle_pin`'s removal.
+pub(crate) fn unpin(pins: &mut Vec<bt_persist::PinEntryV1>, kind: &str, target: &str) {
+    take_away(pins, &(kind.to_owned(), target.to_owned()), &pin_reader());
+}
+
 /// **A press's delta over a list of entries named by a key** ((b)6, (b)8's
 /// units): every key whose entry in force differs between `before` and `after`
 /// takes `after`'s in `desired` — replaced where `desired` has it in force,
@@ -841,9 +898,10 @@ impl InForce<BindingOverrideV1, String> for ShortcutLines {
 /// `after` has none — and, when the press reordered the keys both sides hold,
 /// those entries take `after`'s order in the places they hold in `desired`.
 /// Entries `desired` carries that the projection never had (a line a reader
-/// refused, a shadowed duplicate) keep their place — except what the reader
+/// refused, a refused profile row) keep their place — except what the reader
 /// says goes with an entry in force (`alongside`: a keybindings line's earlier
-/// lines about its action), which is removed with it.
+/// lines about its action; a profile's or a pin's later duplicates), which is
+/// removed with it ([`take_away`]).
 ///
 /// `in_force` is the document's own reader's answer to "which entry under this
 /// key is in force": the one rule its readers use, never a second one here.
@@ -877,15 +935,7 @@ fn apply_keyed_press<E, K>(
         }
         match (position(desired, name), is) {
             (Some(at), Some(entry)) => desired[at] = entry.clone(),
-            (Some(at), None) => {
-                let mut gone = reader.alongside(desired, name);
-                gone.push(at);
-                gone.sort_unstable();
-                gone.dedup();
-                for index in gone.into_iter().rev() {
-                    desired.remove(index);
-                }
-            }
+            (Some(_), None) => take_away(desired, name, reader),
             (None, Some(entry)) => {
                 let at = position(after, name).unwrap_or(0);
                 let anchor = reader.last_under(desired, name).or_else(|| {
@@ -1000,7 +1050,9 @@ impl StoredDocument for ProfilesV1 {
         bt_persist::parse_profiles(bytes)
     }
 
-    /// The unit is the row, by id, the first in force (the installer's rule).
+    /// The unit is the row, by id: the first row the installer can start
+    /// (`profiles::installable`, the installer's rule). A removal takes it and
+    /// its duplicates after it, and leaves a refused row before it ([`First`]).
     fn apply_press(desired: &mut Self, before: &Self, after: &Self) {
         if desired == before {
             *desired = after.clone();
@@ -1012,7 +1064,10 @@ impl StoredDocument for ProfilesV1 {
             &before.profiles,
             &after.profiles,
             |row| row.id.clone(),
-            &First(|row: &bt_persist::ProfileEntryV1| row.id.clone()),
+            &First {
+                key: |row: &bt_persist::ProfileEntryV1| row.id.clone(),
+                usable: crate::profiles::installable(),
+            },
         );
     }
 
@@ -1055,7 +1110,7 @@ impl StoredDocument for PinsV1 {
             &before.pins,
             &after.pins,
             |pin| (pin.kind.clone(), pin.target.clone()),
-            &First(|pin: &bt_persist::PinEntryV1| (pin.kind.clone(), pin.target.clone())),
+            &pin_reader(),
         );
     }
 
@@ -1114,8 +1169,6 @@ impl<T: StoredDocument> ReadAnswer<T> {
 /// **A re-read's news for a reader** ([`DocumentState::take_answers`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ReadNews {
-    /// A read put a new document in force (the projection moved).
-    pub(crate) taken: bool,
     /// Whether the newest read found a file that would not read — `None` when
     /// no read was answered. A stale read's verdict is not said over a newer
     /// one's.
@@ -1126,10 +1179,9 @@ pub(crate) struct ReadNews {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Heard {
-    /// The file is the one Folio left, or holds the document in force, or a
-    /// change made here kept it from being taken.
+    /// The file is the one Folio left, or the pass put nothing new in force.
     Unchanged,
-    /// A new document is in force.
+    /// The pass's merge put a new document in force (a store's `reread`).
     Changed,
     /// The file would not read, and what was in force stays.
     Unreadable,
@@ -1141,8 +1193,6 @@ impl ReadNews {
     pub(crate) fn heard(self) -> Heard {
         if self.unreadable == Some(true) {
             Heard::Unreadable
-        } else if self.taken {
-            Heard::Changed
         } else {
             Heard::Unchanged
         }
@@ -1165,18 +1215,6 @@ pub(crate) struct PendingMerge<T> {
     /// The document the exchange wrote (`Displaced`): the merge's `O` ((c)1).
     /// `None` for every other answer, whose `O` is `desired`.
     pub(crate) written: Option<T>,
-}
-
-/// **What a store does with a re-read that found its file changed** — the
-/// file not Folio's own write, and the store not held.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Follow {
-    /// Taken whole when nothing of Folio's is owed; stored for the merge when
-    /// something is (`profiles.json`, `pins.json`, until their merge).
-    Take,
-    /// Stored for the merge, always: the document's merge puts it in force
-    /// through its doors (`settings.json`, `keybindings.json`).
-    Merge,
 }
 
 /// **What one merge pass replaced in one file** — the data the pass's card
@@ -1227,7 +1265,6 @@ pub(crate) struct DocumentState<T> {
     version: u64,
     generation: u64,
     mode: Mode,
-    follow: Follow,
     outstanding: VecDeque<Outstanding<T>>,
     /// A re-read was asked for while one was on the worker: one more is sent
     /// when it has been answered.
@@ -1282,8 +1319,7 @@ impl<T: StoredDocument> DocumentState<T> {
             revision,
             version: 0,
             generation: 0,
-            mode: Mode::Restore,
-            follow: Follow::Take,
+            mode: Mode::Merge,
             outstanding: VecDeque::new(),
             read_again: false,
             send_again: false,
@@ -1298,14 +1334,6 @@ impl<T: StoredDocument> DocumentState<T> {
             refusal: None,
             recovery: None,
         }
-    }
-
-    /// **This store's two policies**: what its writes ask of the worker, and
-    /// what it does with a file a re-read found changed.
-    pub(crate) fn with_policies(mut self, mode: Mode, follow: Follow) -> Self {
-        self.mode = mode;
-        self.follow = follow;
-        self
     }
 
     /// The document readers read.
@@ -1801,45 +1829,14 @@ impl<T: StoredDocument> DocumentState<T> {
             self.held_file_moved(bytes, document);
             return;
         }
-        match self.follow {
-            Follow::Take => {}
-            Follow::Merge => {
-                self.keep_for_the_merge(PendingMerge {
-                    base: self.revision.clone(),
-                    theirs: bytes,
-                    kept: None,
-                    written: None,
-                });
-                return;
-            }
-        }
-        if self.desired != self.revision.document {
-            // A change of Folio's is not on disk — in flight, refused, or a
-            // process that does not write here — and a re-read does not undo it.
-            // The file's bytes wait for the merge.
-            eprintln!(
-                "BT_PERSIST {file} changed on disk while a change made here is not on it; the \
-                 change made here stays"
-            );
-            self.keep_for_the_merge(PendingMerge {
-                base: self.revision.clone(),
-                theirs: bytes,
-                kept: None,
-                written: None,
-            });
-            return;
-        }
-        let read_bytes = match bytes {
-            Some(bytes) => bt_persist::DocumentBytes::Loaded(bytes),
-            None => bt_persist::DocumentBytes::Absent,
-        };
-        if self.revision.adopt(document.clone(), read_bytes) {
-            self.projection = document.clone();
-            self.desired = document;
-            self.version += 1;
-            self.merges.clear();
-            news.taken = true;
-        }
+        // A file that changed is stored for the merge, which folds it in and
+        // puts it in force through the document's doors.
+        self.keep_for_the_merge(PendingMerge {
+            base: self.revision.clone(),
+            theirs: bytes,
+            kept: None,
+            written: None,
+        });
     }
 
     /// **A held document's file changed again**: the file is stored for the

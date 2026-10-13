@@ -2833,12 +2833,24 @@ mod tests {
         match role {
             "serve" => {
                 let _claim = crate::persist::try_claim(&data).expect("the first copy holds it");
-                let endpoint = LaunchPipe::start(&data, |line| decide(line, || true), park)
-                    .expect("the first copy listens on the data directory's endpoint");
+                let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let hearing = std::sync::Arc::clone(&heard);
+                let endpoint = LaunchPipe::start(
+                    &data,
+                    move |line| {
+                        hearing.lock().unwrap().push(line.to_owned());
+                        decide(line, || true)
+                    },
+                    park,
+                )
+                .expect("the first copy listens on the data directory's endpoint");
                 writeln!(out, "D3 SERVING").unwrap();
                 out.flush().unwrap();
                 let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut Vec::new());
                 drop(endpoint);
+                for line in heard.lock().unwrap().iter() {
+                    writeln!(out, "D3 HEARD {line}").unwrap();
+                }
                 for request in take() {
                     writeln!(out, "D3 LANDED {}", request.encode()).unwrap();
                 }
@@ -2879,9 +2891,11 @@ mod tests {
     }
 
     /// What one [`two_copies`] run came to: the second start's own words (`D3 LEFT 0`, or
-    /// `D3 OPENS <why>`) and every launch the first copy was handed.
+    /// `D3 OPENS <why>`), every request line the first copy's wire heard, and every launch the
+    /// first copy was handed.
     struct TwoCopies {
         second: String,
+        heard: Vec<String>,
         landed: Vec<LaunchRequest>,
     }
 
@@ -2959,13 +2973,23 @@ mod tests {
                 )
             })
             .to_owned();
+        let heard = rest
+            .lines()
+            .filter_map(marked)
+            .filter_map(|line| line.strip_prefix("D3 HEARD "))
+            .map(str::to_owned)
+            .collect();
         let landed = rest
             .lines()
             .filter_map(marked)
             .filter_map(|line| line.strip_prefix("D3 LANDED "))
             .map(|line| LaunchRequest::decode(line).expect("a landed launch is a request"))
             .collect();
-        Some(TwoCopies { second, landed })
+        Some(TwoCopies {
+            second,
+            heard,
+            landed,
+        })
     }
 
     /// **A copy of this binary at `place` under `copies`, named as this one is** — another
@@ -3132,9 +3156,10 @@ mod tests {
         );
     }
 
-    /// **RED (0.4.8 D3) — a launch endpoint held by a program that is not a Folio is a true
-    /// refusal: nothing is written to it, the start opens its own window, and the log line says
-    /// why.**
+    /// **RED (0.4.8 D3; T-LAUNCH-WIRE-PEER-READ) — a launch endpoint held by a program that is
+    /// not a Folio is a true refusal, heard as one even where that program refuses first and
+    /// closes: nothing is said to it, the start opens its own window, and the log line says why,
+    /// naming what held the door.**
     ///
     /// The other side of the narrowed identity: a Folio is this program's name, and a program
     /// of another name holding the door — here a copy of this binary under another name,
@@ -3143,12 +3168,21 @@ mod tests {
     /// the OS's refusal. A copy and not a hard link: macOS names a hard-linked image by
     /// whichever of its links it cached, so the program's name would not be the one it ran as.
     ///
+    /// On Unix both ends ask, so the impostor refuses this start at the same moment this start
+    /// refuses it; the impostor's refusal must not close the connection before this start's own
+    /// question is answered, or Darwin answers that question `NotConnected` (the one macOS CI
+    /// sighting, 2026-10-12). The line names the impostor's program, which this start can only
+    /// know by having asked the kernel who answered.
+    ///
     /// MUTATION (accept any peer): `bt_platform`'s Unix `vet_executable` answers `Ok` whatever
     /// the peer, or Windows' `vetted_server` its pid whatever the image — the start leaves with
-    /// 0 and the folder lands in the impostor.
+    /// 0 and the folder lands in the impostor. MUTATION (ask after the verdict):
+    /// `launch_conversation::hand_over_on` asks `vetted_peer` after `hear` — on Unix the
+    /// refusing impostor closes on the request and the line names an end of file or a reset, not
+    /// the refusal; on Windows the impostor hears the request.
     #[test]
-    fn a_door_held_by_a_program_that_is_not_a_folio_is_refused_and_the_log_says_why() {
-        const SELECTOR: &str = "launch_wire::tests::a_door_held_by_a_program_that_is_not_a_folio_is_refused_and_the_log_says_why";
+    fn a_server_that_refuses_is_heard_as_a_refusal_even_if_it_closes_first() {
+        const SELECTOR: &str = "launch_wire::tests::a_server_that_refuses_is_heard_as_a_refusal_even_if_it_closes_first";
         if copy_half(SELECTOR) {
             return;
         }
@@ -3176,6 +3210,18 @@ mod tests {
                     .contains("did not take this launch (PermissionDenied: "),
             "the start opens its own window and its log line names the refusal: {}",
             run.second
+        );
+        let impostor_name = impostor.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            run.second
+                .contains(&format!("{impostor_name}, which is not a Folio")),
+            "the refusal names the image the kernel said is at the other end: {}",
+            run.second
+        );
+        assert_eq!(
+            run.heard,
+            Vec::<String>::new(),
+            "nothing was said to a program that is not a Folio"
         );
         assert_eq!(
             run.landed,

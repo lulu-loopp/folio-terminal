@@ -457,7 +457,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// from both.
     pub(crate) fn store_profiles(&mut self) -> Result<()> {
         self.app.profiles_store.store(profiles::to_file());
-        self.adopt_profile_table()
+        self.adopt_profile_table(TablePresentation::Now)
     }
 
     /// The two of those three that a table which arrived **from** the file owes
@@ -471,11 +471,14 @@ impl<B: Backend> Runtime<'_, B> {
     /// **The programs are asked for, not probed here** (T-PROGRAMS-REFRESH): every row that is
     /// still there and still names the same program keeps its answer, a new or re-pointed row is
     /// unknown until the program walk answers it, and the walk is asked now.
-    fn adopt_profile_table(&mut self) -> Result<()> {
+    fn adopt_profile_table(&mut self, presentation: TablePresentation) -> Result<()> {
         self.app.profile_programs = self.app.profile_programs.carried_into_live_table();
         self.ask_the_program_walk(programs_lane::Trigger::TableChanged);
         shell_integration::begin_powershell_preparation_for(&self.app.profile_programs);
         self.app.first_run_attempted = false;
+        if presentation == TablePresentation::OwedToTheTurn {
+            return Ok(());
+        }
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
@@ -655,10 +658,12 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(true)
     }
 
-    /// Put in force whatever a re-read of the file changed — the storage
-    /// worker's answer, taken on `AppEvent::DocumentsAnswered`.
+    /// **What a re-read of the file says**, taken on `AppEvent::DocumentsAnswered`:
+    /// a file that will not parse leaves the table in force and raises one card
+    /// (a file that changed is the storage pass's merge, whose door is
+    /// [`Self::install_merged_profile_table`]).
     ///
-    /// **What follows the change, and what deliberately does not.**
+    /// **What follows a change, and what deliberately does not.**
     ///
     /// * **The lists follow, because they are never held.** The Profiles page's
     ///   rows and the `Default profile` picker's options are derived in
@@ -714,13 +719,24 @@ impl<B: Backend> Runtime<'_, B> {
             Some(false) => self.app.profiles_file_broken = false,
             None => {}
         }
-        if !news.taken {
-            return Ok(());
-        }
-        // One card per refused entry, `report_skipped_schemes`' shape: a file
-        // with two bad rows is two things to fix. They are the same sentences
-        // startup prints, because it is the same reader reading the same file.
-        for fault in self.take_profile_table()? {
+        Ok(())
+    }
+
+    /// **The table the store's readers read, installed, and one card per entry
+    /// the installer refused** — `report_skipped_schemes`' shape: a file with two
+    /// bad rows is two things to fix. They are the same sentences startup
+    /// prints, because it is the same reader reading the same file. The door of
+    /// a storage pass's merge (`table_merge`), whose presentation — the dialog
+    /// re-derived, the frame — is owed to the merge turn and made once after
+    /// every pass.
+    ///
+    /// Answers whether the table in force moved (`profiles::profile_revision`
+    /// advances only then): only a table that moved owes the turn a frame.
+    pub(crate) fn install_merged_profile_table(&mut self) -> Result<bool> {
+        let revision = profiles::profile_revision();
+        let faults = self.install_profile_table(TablePresentation::OwedToTheTurn)?;
+        let moved = profiles::profile_revision() != revision;
+        for fault in faults {
             let sentence = i18n::profile_entry_fault(&fault);
             eprintln!("BT_PERSIST {}: {sentence}", persist::PROFILES_FILE_NAME);
             self.toast(
@@ -730,7 +746,7 @@ impl<B: Backend> Runtime<'_, B> {
                 sentence,
             )?;
         }
-        Ok(())
+        Ok(moved)
     }
 
     /// **Put the table the store now holds in force**, and answer the entries it
@@ -739,6 +755,15 @@ impl<B: Backend> Runtime<'_, B> {
     /// through (0.4.4 ticket 05), so a table arriving in an exported file and a
     /// table arriving by a hand edit are put in force by one function.
     pub(crate) fn take_profile_table(&mut self) -> Result<Vec<profiles::ProfileFault>> {
+        self.install_profile_table(TablePresentation::Now)
+    }
+
+    /// [`Self::take_profile_table`], with its presentation made `now` or owed to
+    /// a merge turn that presents once after every pass.
+    fn install_profile_table(
+        &mut self,
+        presentation: TablePresentation,
+    ) -> Result<Vec<profiles::ProfileFault>> {
         // Taken by id *before* the table moves, because after it has moved
         // there is nothing left to ask: an index means whatever the new table
         // says it means.
@@ -774,15 +799,18 @@ impl<B: Backend> Runtime<'_, B> {
         // it; there is no id to follow it by, because it is not a place — it is
         // a gesture, and the gesture was made against a list that is gone.
         self.window.settings.close_row_menu();
-        // The dialog may be standing on a page, a row or a picker that the new
-        // table does not have. Same call the verbs of this dialog make after
-        // they move the list, for the same reason — and **before** the frame
-        // below, because the frame is what draws the ring.
-        let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
-        let content =
-            self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
-        self.window.settings.keep_focus_reachable(content);
-        self.adopt_profile_table()?;
+        if presentation == TablePresentation::Now {
+            // The dialog may be standing on a page, a row or a picker that the
+            // new table does not have. Same call the verbs of this dialog make
+            // after they move the list, for the same reason — and **before** the
+            // frame below, because the frame is what draws the ring. A merge
+            // turn makes the same call once, after every pass.
+            let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
+            let content =
+                self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
+            self.window.settings.keep_focus_reachable(content);
+        }
+        self.adopt_profile_table(presentation)?;
         Ok(faults)
     }
 
@@ -891,4 +919,12 @@ impl<B: Backend> Runtime<'_, B> {
         }
         Ok(true)
     }
+}
+
+/// **When a new profile table is presented**: at once, or owed to a merge turn
+/// that presents once after every pass (`Runtime::merge_documents`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TablePresentation {
+    Now,
+    OwedToTheTurn,
 }
