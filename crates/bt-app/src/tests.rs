@@ -282,9 +282,7 @@ fn a_turn_asks_the_shell_nothing_about_the_taskbar() {
     for turn in 0..1000_u32 {
         let _ = lane.observe(start + taskbar_lane::REFRESH_INTERVAL / 10 * turn, true);
         if turn == 0 {
-            wakes
-                .recv_timeout(Duration::from_secs(30))
-                .expect("the lane's first answer wakes the loop");
+            crate::lane::wait_for_a_wake(&wakes, "the lane's first answer wakes the loop");
         }
     }
     assert!(
@@ -393,8 +391,7 @@ fn a_notification_placed_before_the_first_answer_uses_the_default_and_is_re_plac
     assert!(!flash.contradicted_by(default));
 
     hides.request(Instant::now());
-    woke.recv_timeout(Duration::from_secs(30))
-        .expect("the first answer wakes the loop");
+    crate::lane::wait_for_a_wake(&woke, "the first answer wakes the loop");
     let answer = hides.reading();
     assert!(answer.answered() && answer.auto_hidden);
     assert!(
@@ -418,8 +415,7 @@ fn a_notification_placed_before_the_first_answer_uses_the_default_and_is_re_plac
     TaskbarFlash::record(&mut flash, 0, vec![delivery_on(shows.reading())]);
     let flash = flash.expect("kept");
     shows.request(Instant::now());
-    woke.recv_timeout(Duration::from_secs(30))
-        .expect("the first answer wakes the loop");
+    crate::lane::wait_for_a_wake(&woke, "the first answer wakes the loop");
     assert!(!flash.contradicted_by(shows.reading()));
     // And a pane that has gone meanwhile is called to by nobody.
     assert!(
@@ -674,6 +670,10 @@ fn a_card_torn_off_carries_its_engine_with_it() {
         .expect("a seat on the card");
     let loaded =
         card.state_reaching(|state| state.duration_secs.is_some() || state.error.is_some());
+    assert!(
+        loaded.duration_secs.is_some() || loaded.error.is_some(),
+        "the engine gave neither a length nor an error within the suite's patience: {loaded:?}"
+    );
     assert_eq!(loaded.error, None, "the fixture loads");
     card.seek_to(0.2, now);
     let target = 0.2 * loaded.duration_secs.expect("a length");

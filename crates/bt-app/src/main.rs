@@ -59304,11 +59304,9 @@ mod focus_mode_door_tests {
     // stays a line reading, over every file this package compiles rather than
     // over this one.
     //
-    // **Two owners, not one.** Seven pins are methods of `Runtime`;
-    // `mini_source` is `TabState`'s. The deleted finder took the first
-    // `    fn mini_source` in this file, which is a method of whatever `impl`
-    // happens to come first, and the equivalence commit is what established the
-    // owner rather than assumed it.
+    // The pins here are methods of `Runtime`. `TabState::mini_source`'s red line
+    // is driven, not read: `app_focus_tests::
+    // a_card_quotes_a_body_already_in_memory_and_asks_nothing_of_a_disk`.
     use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Scope, Search, View, needle};
 
     /// **This crate, indexed once per process** — the workspace read, this
@@ -59576,41 +59574,6 @@ mod focus_mode_door_tests {
             "the pane whose picture the stand-in wears is the one the tear-out \
              is aiming to place"
         );
-    }
-
-    /// **The projection layer did not move an inch.**
-    ///
-    /// §7.1.6b′'s red line — a thumbnail takes text only out of a buffer already
-    /// in memory and never goes looking — is right, and the ruling that made a
-    /// card arm a read left it alone on purpose: the projection does not fetch,
-    /// *somebody else* puts the body in memory and the next projection finds it
-    /// there. `Runtime::mini_source` is where that line is drawn, and it names no
-    /// worker.
-    #[test]
-    fn the_projection_still_takes_its_text_only_from_memory() {
-        // The signature carries a lifetime since W2 slice 6 handed the page's
-        // last frame in, so the needle stops at the name: a pin that matched the
-        // parenthesis would fall through to this very literal further down the
-        // file and read a body that is not the one it means to.
-        let source = item_body(&ItemQuery::method("TabState", "mini_source"));
-        assert!(
-            source.contains("buffer.content().is_some()"),
-            "the red line is 'is there text here already, without asking a disk'"
-        );
-        // And the page arm, added by W2 slice 6, is under the same line: a
-        // picture is *handed in*, and nothing here starts a capture.
-        for fetch in [
-            "claim_head_read",
-            "preview_worker",
-            "files_worker",
-            "capture_page",
-            "web_thumbs",
-        ] {
-            assert!(
-                !source.contains(fetch),
-                "the projection reached for {fetch}, which is it going looking"
-            );
-        }
     }
 
     /// RED (§7.21, user ruling 2026-08-27) — **the offer is written in exactly
@@ -78828,7 +78791,10 @@ mod preview_arrows_runtime_tests {
 
     /// RED (T-PREVIEW-ARROWS round 2) — the browsing-key runtime seam keeps
     /// one surface from key classification through opening, and the ordinary
-    /// image landing is what changes the head's source.
+    /// image landing installs the path on that surface. That the installed
+    /// picture names the head is driven, not read:
+    /// `app_preview_tests::the_preview_head_names_the_picture_installed_on_its_pane`.
+    /// The seam itself is `Runtime`'s, which no test can build without a window.
     ///
     /// MUTATION: replace `open_preview_onto(surface, path.clone())` in
     /// `step_preview_neighbour` with the surface-choosing
@@ -78866,11 +78832,6 @@ mod preview_arrows_runtime_tests {
         assert!(
             landing.contains("self.preview_pane_mut(surface).show_picture(path);"),
             "the opened path is not installed on that surface:\n{landing}"
-        );
-        let head = method_body("TabState", "preview_head_name");
-        assert!(
-            head.contains("Some(image) => Some(image.title())"),
-            "the preview head no longer reads the image installed on its pane:\n{head}"
         );
     }
 }

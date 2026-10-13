@@ -3589,7 +3589,14 @@ pub(crate) mod tests {
         let mut store = SessionStore::launched_at(path.clone(), root.join(SENTINEL_FILE_NAME));
         let current = session_with_tabs(1);
         store.record(current.clone(), Instant::now());
-        assert_eq!(store.flush_judged(), Ok(()));
+        // Handed over as the autosave does, and the session write's receipt awaited on the
+        // writer's channel within the suite's patience: the backup is queued ahead of it and
+        // sends no receipt of its own, so the receipt says both have been written. How fast that
+        // is on a loaded disk is not this test's subject, and the session's budget would make it
+        // one.
+        store.hand_over(Instant::now());
+        let landed = crate::lane::receive(&store.writer.receipts, "the session write's receipt");
+        assert_eq!(landed.result, Ok(()));
 
         let backup_path = root.join(PREVIOUS_SESSION_FILE_NAME);
         assert_eq!(read_session(&backup_path).0, previous);
@@ -4008,7 +4015,7 @@ pub(crate) mod tests {
     /// last assertion raises a second writer over a channel the first is already reading.
     #[test]
     fn only_one_thread_ever_takes_the_session_writers_channel() {
-        // The session's waits are owner-thread doors, admitted only on the way out.
+        // `retire` closes the writer through an owner-thread door, admitted only on the way out.
         crate::test_support::on_the_window_thread_exiting();
         let root = bt_testpath::temp_path("bt-app-session-one-writer");
         let _ = std::fs::remove_dir_all(&root);
@@ -4022,19 +4029,17 @@ pub(crate) mod tests {
         let first = writer.send(&path, b"first".to_vec()).expect("queued");
         let second = writer.send(&path, b"second".to_vec()).expect("queued");
         assert_eq!((first, second), (1, 2));
-        let (earlier, landed) = admitted::<doors::SessionWriteWait, _>(|token| {
-            writer.wait_for(token, second, Instant::now() + SESSION_SAVE_BUDGET)
-        })
-        .expect("admitted on the way out");
-        assert_eq!(landed, Ok(()));
+        // The receipts as the writer sends them, each awaited on the channel within the suite's
+        // patience: how fast two atomic writes land on a loaded disk is not this test's subject,
+        // and the session's own budget would make it one.
+        let earlier = crate::lane::receive(&writer.receipts, "the older document's receipt");
+        let landed = crate::lane::receive(&writer.receipts, "the newer document's receipt");
         assert_eq!(
-            earlier
-                .iter()
-                .map(|receipt| receipt.generation)
-                .collect::<Vec<_>>(),
-            vec![first],
+            [earlier.generation, landed.generation],
+            [first, second],
             "the older document answered first, which is what one writer buys"
         );
+        assert_eq!((earlier.result, landed.result), (Ok(()), Ok(())));
         assert_eq!(
             std::fs::read(&path).expect("the file the writer left"),
             b"second".to_vec(),
@@ -4058,6 +4063,44 @@ pub(crate) mod tests {
 
         retire(&mut writer);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (release review X-8) — **a wait for one generation hands back the receipts of the older
+    /// generations it passed on the way**, so the store books them as well; none is lost to the
+    /// wait that read past it. The receipts are put on the channel by the test, so the wait has
+    /// them before it starts and no disk or clock is in it.
+    ///
+    /// MUTATION (observed red): drop `earlier.push(receipt)` in `SessionWriter::wait_for` — the
+    /// older receipt is not handed back.
+    #[test]
+    fn a_wait_for_one_generation_hands_back_the_older_receipts_it_passed() {
+        // The wait is an owner-thread door, admitted only on the way out.
+        crate::test_support::on_the_window_thread_exiting();
+        let mut writer = SessionWriter::open();
+        let (answer, receipts) = mpsc::channel();
+        writer.receipts = receipts;
+        for (generation, result) in [
+            (1, Err("卷已离开 the volume went away".to_owned())),
+            (2, Ok(())),
+        ] {
+            answer
+                .send(SessionWriteReceipt { generation, result })
+                .expect("the test holds the channel");
+        }
+        let (earlier, landed) = admitted::<doors::SessionWriteWait, _>(|token| {
+            writer.wait_for(token, 2, Instant::now() + SESSION_SAVE_BUDGET)
+        })
+        .expect("admitted on the way out");
+        assert_eq!(landed, Ok(()), "the awaited generation's own answer");
+        assert_eq!(
+            earlier
+                .iter()
+                .map(|receipt| (receipt.generation, receipt.result.clone()))
+                .collect::<Vec<_>>(),
+            vec![(1, Err("卷已离开 the volume went away".to_owned()))],
+            "the older generation's receipt comes back beside it"
+        );
+        retire(&mut writer);
     }
 
     /// PIN (release review X-9) — **a store with nowhere to send reports; it does not write
@@ -4186,7 +4229,9 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// PIN — **one writer, and it is not the window thread.**
+    /// GUARD — **one writer, and it is not the window thread.** Its subject is how the session
+    /// file is reached in the source: one raw atomic write in `persist`, inside the writer
+    /// thread's spawn, and no other road (CONVENTIONS, "A test pins behaviour by running it").
     ///
     /// The behavioural half above is about when a verdict is known; this is about there being
     /// only one road to the file at all. Two roads — a thread and a window thread that sometimes

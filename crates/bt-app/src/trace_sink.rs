@@ -516,8 +516,14 @@ impl Drop for StalledWriter {
         // still in its write would leave this thread waiting for a `join` on a
         // thread that cannot return, which is the hang the tests are about.
         drop(self.release.take());
-        while !self.queue.close() {
-            std::thread::yield_now();
+        // A writer that never leaves its write is this helper's red, said by name; while a test
+        // is already failing, its own panic is the red and the writer is left where it stands.
+        if !crate::lane::within_patience(|| self.queue.close()) {
+            assert!(
+                std::thread::panicking(),
+                "the stalled writer was released and never left its write within the lane suite's patience"
+            );
+            return;
         }
         if let Some(writer) = self.writer.take() {
             let _ = writer.join();
