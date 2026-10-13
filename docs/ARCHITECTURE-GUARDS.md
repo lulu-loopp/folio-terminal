@@ -403,6 +403,12 @@ stalled writer of
 `persist::tests::a_write_that_misses_the_budget_still_answers_true_and_keeps_the_last_layout`.
 Every product store keeps the product's budget.
 
+A wait for an engine's terminal answer about a load is not a number of its
+own: it is `LOAD_ANSWER_PATIENCE` (`bt-platform`'s `video_load`), derived from
+the product's `LOAD_BUDGET` and `IDLE_POLL_INTERVAL` so that it cannot end
+before the engine's own refusal lands, and handed to the engine's wait door —
+so it is not a row (T-VIDEO-ENGINE-NO-DURATION).
+
 ## Raw-effect and thread-door exceptions
 
 The rule: `bt-app` and `bt-platform` create workers through the admitted thread
