@@ -127,7 +127,8 @@ pub enum FileScoped {
     /// `.github/workflows/ci.yml`, the gate canaries, naming
     /// `crates/bt-doc/src/lib.rs`, `crates/bt-layout/src/lib.rs`,
     /// `crates/bt-viewport/src/lib.rs`, `crates/bt-compose/src/lib.rs`,
-    /// `crates/bt-platform/src/http.rs` and `crates/bt-lint-probe/src/lib.rs`.
+    /// `crates/bt-platform/src/http.rs`, `crates/bt-lint-probe/src/lib.rs`
+    /// and `crates/bt-app/src/explorer_menu.rs`.
     ///
     /// Each canary proves a gate can fail on the defect it exists for: it
     /// plants that defect into a committed source file, requires the gate to
@@ -139,8 +140,13 @@ pub enum FileScoped {
     /// `http.rs`, must *not* be refused: the scope is the stated set) and "the
     /// embedded-spaces gate can actually fail"; `logic`'s "the ignored-test
     /// gate can actually fail"; and `core-macos`'s "the macOS lint gate can
-    /// actually fail", which keeps the original in a scratch `.rs` under
-    /// `$RUNNER_TEMP`. A scratch copy would not do: the gates read the
+    /// actually fail", which plants into `crates/bt-app/src/explorer_menu.rs`.
+    /// That canary's real read of the source — `cp "$file"` of an unquoted
+    /// `file=crates/bt-app/src/explorer_menu.rs` — is invisible to the scan;
+    /// the step is a finding only because it keeps the original in a scratch
+    /// `.rs` under `$RUNNER_TEMP`, whose interpolated path the scan cannot
+    /// read, and it is listed for the read it really does. A scratch copy would
+    /// not do in place of any of them: the gates read the
     /// committed tree (the source set, the workspace's crates, `git ls-files`),
     /// and what is proved is that a defect in a committed file is refused, so
     /// the committed file is the subject. It is YAML run by GitHub and cannot

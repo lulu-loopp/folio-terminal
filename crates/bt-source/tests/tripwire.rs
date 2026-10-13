@@ -177,30 +177,49 @@
 //! workflow's own line, the unit's line plus the line its value starts after,
 //! so `ci.yml:303` is the line a person reads. Nothing outside a step's
 //! `run:` value is read: a `name:`, an `env:` value, a `with:` input, a
-//! `uses:`, `defaults.run` (a step that runs a script by path has that script
-//! scanned as a file of its own).
+//! `uses:` (a step that runs a script by path has that script scanned as a
+//! file of its own). As in a script, a `.rs` path with no quote on its line
+//! is out of scope, `${{ … }}` or not: `ci.yml`'s macOS lint canary names
+//! `file=crates/bt-app/src/explorer_menu.rs` unquoted and reads it with
+//! `cp "$file"`, which the scan does not see.
 //!
 //! * **The value** is a block scalar (`run: |`, `run: >`, with or without its
 //!   chomping and indentation indicators), its lines with their indentation
 //!   taken off, or a one-line plain value, its YAML comment aside. A folded
 //!   `>` value is read line by line as written, not folded. Any other form —
-//!   a quoted or flow value, an alias (`*name`), an anchor, a tag, a plain
-//!   value continued on further lines, keys nested under `run:` — is the
-//!   diagnostic `UnreadableWorkflowRun` on the `run:` line: write it as a
-//!   block or a one-line plain value, or list the file. A `run:` built from a
-//!   YAML anchor is so never read through: its alias is the diagnostic.
-//! * **The language** is the step's `shell:`, else its job's
-//!   `defaults.run.shell`, else the workflow's `defaults.run.shell` — `pwsh`
-//!   and `powershell` are PowerShell, `bash` and `sh` the shell — and with
-//!   none, GitHub's default on the job's `runs-on`: pwsh on a `windows-`
-//!   runner, bash on an `ubuntu-` or `macos-` one, and on a runner the matrix
-//!   picks (`runs-on: ${{ matrix.<name> }}`) both: the step is judged in each,
-//!   and a finding in either counts, once. Any other shell (`cmd`, `python`,
-//!   a command template, an expression), any other runner (`self-hosted`, a
-//!   list, another expression), a job with neither, and a composite action's
-//!   step without its own `shell:` is the diagnostic `UndecidedWorkflowShell`
-//!   on the `run:` line, whether or not the step reads: give the step a
-//!   `shell:` of pwsh, powershell, bash or sh, or list the file.
+//!   a quoted or flow value, an alias (`run: *name`), an anchor, a tag, a
+//!   plain value continued on further lines, keys nested under `run:` — is
+//!   the diagnostic `UnreadableWorkflowRun` on the `run:` line: write it as a
+//!   block or a one-line plain value.
+//! * **The shape above the values** is read too, and what it does not read is
+//!   the diagnostic `UnreadableWorkflowShape` on its line, so that no job or
+//!   step is skipped in silence: on the mappings the steps hang from (the top
+//!   level, `jobs`, a job, `defaults` and `defaults.run` of the workflow or a
+//!   job, `runs`), a value that is no block mapping (an anchor or tag before
+//!   a job's body, `build: &b`; an alias; a flow value), a `steps:` that is no
+//!   block sequence (`steps: [ … ]`, `steps: *list`), and a merge key
+//!   (`<<: *defaults`); a step that is no block mapping (`- *step`,
+//!   `- { run: … }`, `- &a run: …`); and a `run:` that is no step's. The
+//!   places a `run:` is known to be no step's stay silent: `defaults.run`, a
+//!   job's `defaults.run`, and anything under a step's `with:`. A `run:` on a
+//!   path the scan misreads (a byte-order mark before `jobs:`) is so a `run:`
+//!   in no step. An anchored or aliased job, step or `run:` value is
+//!   therefore never read through: it is one of these diagnostics.
+//! * **The language** is the step's `shell:` (written before or after its
+//!   `run:`), else its job's `defaults.run.shell`, else the workflow's
+//!   `defaults.run.shell` — `pwsh` and `powershell` are PowerShell, `bash`
+//!   and `sh` the shell, `python` Python — and with none, GitHub's default
+//!   on the job's `runs-on`: pwsh on a `windows-` runner, bash on an
+//!   `ubuntu-` or `macos-` one, and on a runner the matrix picks
+//!   (`runs-on: ${{ matrix.<name> }}`) both: the step is judged in each, and
+//!   a finding in either counts, once. Any other shell (`cmd`, a command
+//!   template, an expression), any other runner (`self-hosted`, a list,
+//!   another expression), a job with neither, and a composite action's step
+//!   without its own `shell:` leave the shell undecided. A value that names
+//!   no `.rs` has nothing this scan judges and is nothing, as a `.rs` with no
+//!   quote is; one that names `.rs` is the diagnostic
+//!   `UndecidedWorkflowShell` on the `run:` line, whether or not the step
+//!   reads: give the step a `shell:` of pwsh, powershell, bash, sh or python.
 //! * **A `${{ … }}` expression** in a quoted `.rs` value of a reader unit is
 //!   interpolation (`InterpolatedShellPath`) in either quote: GitHub
 //!   substitutes it before the shell sees the text, so `'${{ matrix.x }}.rs'`
@@ -212,8 +231,13 @@
 //! indented than a value that is not a block (a flow collection, a continued
 //! scalar) are that value's, never keys. Limits, written down: a tab is not
 //! indentation, and several `---` documents in one file are read as one;
-//! neither is a form these files are written in. A workflow is cleared as a
-//! script is, by file.
+//! neither is a form these files are written in.
+//!
+//! A workflow's reader hits, and the path shapes of its reader units, are
+//! cleared as a script's are, by file. The three workflow diagnostics are
+//! not: they are about what the scan can read, not about a source being read,
+//! so no list clears them ([`Kind::cleared_by_a_list`]) and a listed workflow
+//! that has one is refused all the same; the shape is rewritten.
 //!
 //! **It matches by file, not by reader**, because that is the granularity both
 //! lists have: the allowlist is the *file-scoped* one, and a debt row's owning
@@ -583,6 +607,11 @@ enum Kind {
     /// A workflow's or composite action's `run:` value in a YAML form the scan
     /// does not read as one script.
     UnreadableWorkflowRun,
+    /// A workflow's or composite action's shape above its `run:` values that
+    /// the scan does not read: an anchor, alias, tag, flow value or merge key
+    /// on the mappings the steps hang from, a step that is no block mapping, a
+    /// `run:` that is no step's.
+    UnreadableWorkflowShape,
 }
 
 impl Kind {
@@ -606,15 +635,35 @@ impl Kind {
                  spell it as one '…' or \"…\" literal, or list the file"
             }
             Self::UndecidedWorkflowShell => {
-                "runs a `run:` step in a shell the scan cannot decide, so it cannot read the step: \
-                 give the step a `shell:` of pwsh, powershell, bash or sh, or list the file"
+                "runs a `run:` step naming `.rs` in a shell the scan cannot decide, so it cannot \
+                 read the step: give the step a `shell:` of pwsh, powershell, bash, sh or python"
             }
             Self::UnreadableWorkflowRun => {
                 "has a `run:` value the scan cannot read as one script (an alias, an anchor, a \
                  tag, a quoted or flow value, or a value continued on further lines): write it \
-                 as a `run: |` block or a one-line plain value, or list the file"
+                 as a `run: |` block or a one-line plain value"
+            }
+            Self::UnreadableWorkflowShape => {
+                "has a shape above its `run:` steps the scan cannot read (an anchor, alias, tag, \
+                 flow value or merge key on a job, its steps or defaults; a step that is no \
+                 block mapping; a `run:` that is no step's): write it as plain block mappings"
             }
         }
+    }
+
+    /// Whether a list clears this finding by its file. A reader's hit, and a
+    /// path a listed reader spells in a way the scan cannot read, are the
+    /// reader's: the list that holds the file says why it reads. A workflow
+    /// shape the scan cannot read at all — a shell it cannot decide, a `run:`
+    /// value or a shape above the steps it does not read — is about the scan,
+    /// not about a reader, and no list clears it: the shape is rewritten.
+    fn cleared_by_a_list(self) -> bool {
+        !matches!(
+            self,
+            Self::UndecidedWorkflowShell
+                | Self::UnreadableWorkflowRun
+                | Self::UnreadableWorkflowShape
+        )
     }
 }
 
@@ -1436,47 +1485,59 @@ const NOT_PLAIN: [char; 15] = [
 
 /// The `run:` values of a workflow's or composite action's steps, each a
 /// [`Unit`] in the language its step runs in — under a runner the matrix
-/// picks, one unit in each — and the diagnostics of the `run:` values that are
-/// no unit: a shell that cannot be decided, a value in a form not read.
+/// picks, one unit in each — and the diagnostics of what the scan cannot read:
+/// a `run:` value in a form not read, a shell that cannot be decided for a
+/// value naming `.rs`, and a shape above the steps ([`shape_diagnostics`]).
 ///
 /// A step is an item of `jobs.<job>.steps` (a workflow) or of `runs.steps`
-/// (a composite action); a `run:` anywhere else (a `with:` input, `defaults`)
-/// is no step's, and nothing but `run:` values is read. A step's shell is its
-/// own `shell:`, else its job's `defaults.run.shell`, else the workflow's
+/// (a composite action). A `run:` is a step's, or one of the places that are
+/// known to be no step's and stay silent — `defaults.run`,
+/// `jobs.<job>.defaults.run`, and anything under a step's `with:` — and any
+/// other `run:` is a shape the scan cannot read. A step's shell is its own
+/// `shell:`, else its job's `defaults.run.shell`, else the workflow's
 /// `defaults.run.shell` ([`shell_language`]), else GitHub's default for its
 /// job's `runs-on` ([`runner_languages`]); a composite action's step has
 /// only its own.
 fn run_units<'f>(file: &'f str, text: &str, source: Source) -> (Vec<Unit<'f>>, Vec<Hit>) {
-    let keys = yaml_keys(text);
+    let (keys, items) = yaml_keys(text);
     let at =
         |path: &[Segment], name: &str| keys.iter().find(|key| key.path == path && key.name == name);
     let key = |name: &str| Segment::Key(name.to_owned());
+    let diagnose = |line: usize, kind: Kind, subject: String| Hit {
+        file: file.to_owned(),
+        line,
+        kind,
+        subject,
+    };
     let mut units = Vec::new();
-    let mut diagnostics = Vec::new();
+    let mut diagnostics = shape_diagnostics(source, &keys, &items)
+        .into_iter()
+        .map(|(line, subject)| diagnose(line, Kind::UnreadableWorkflowShape, subject))
+        .collect::<Vec<_>>();
     for run in keys.iter().filter(|key| key.name == "run") {
-        let job = match (source, run.path.as_slice()) {
-            (
-                Source::Workflow,
-                [
-                    Segment::Key(jobs),
-                    Segment::Key(job),
-                    Segment::Key(steps),
-                    Segment::Item(_),
-                ],
-            ) if jobs == "jobs" && steps == "steps" => Some(job.as_str()),
-            (Source::Action, [Segment::Key(runs), Segment::Key(steps), Segment::Item(_)])
-                if runs == "runs" && steps == "steps" =>
-            {
-                None
+        let Some(step) = step_at(source, &run.path) else {
+            let defaults_run = match run.path.as_slice() {
+                [Segment::Key(defaults)] => defaults == "defaults",
+                [Segment::Key(jobs), Segment::Key(_), Segment::Key(defaults)] => {
+                    jobs == "jobs" && defaults == "defaults"
+                }
+                _ => false,
+            };
+            let silent = (source == Source::Workflow && defaults_run)
+                || (1..run.path.len()).any(|end| {
+                    step_at(source, &run.path[..end]).is_some()
+                        && run.path[end] == Segment::Key("with".to_owned())
+                });
+            if !silent {
+                diagnostics.push(diagnose(
+                    run.line,
+                    Kind::UnreadableWorkflowShape,
+                    format!("a `run:` in no step: run: {}", run.written),
+                ));
             }
-            _ => continue,
+            continue;
         };
-        let diagnose = |kind: Kind, subject: String| Hit {
-            file: file.to_owned(),
-            line: run.line,
-            kind,
-            subject,
-        };
+        let job = step.job;
         let script = match &run.value {
             YamlValue::Empty => continue,
             YamlValue::Block { first_line, text } => Some((first_line - 1, text.clone())),
@@ -1484,11 +1545,16 @@ fn run_units<'f>(file: &'f str, text: &str, source: Source) -> (Vec<Unit<'f>>, V
                 Some((run.line - 1, text.clone()))
             }
             YamlValue::Line(first) | YamlValue::Continued(first) => {
-                diagnostics.push(diagnose(Kind::UnreadableWorkflowRun, first.clone()));
+                diagnostics.push(diagnose(
+                    run.line,
+                    Kind::UnreadableWorkflowRun,
+                    first.clone(),
+                ));
                 None
             }
             YamlValue::Nested => {
                 diagnostics.push(diagnose(
+                    run.line,
                     Kind::UnreadableWorkflowRun,
                     "keys nested under `run:`".to_owned(),
                 ));
@@ -1513,19 +1579,24 @@ fn run_units<'f>(file: &'f str, text: &str, source: Source) -> (Vec<Unit<'f>>, V
             },
             (None, None) => Err("no shell:".to_owned()),
         };
+        let Some((offset, text)) = script else {
+            continue;
+        };
         match languages {
-            Err(found) => diagnostics.push(diagnose(Kind::UndecidedWorkflowShell, found)),
+            Err(found) => {
+                if text.contains(".rs") {
+                    diagnostics.push(diagnose(run.line, Kind::UndecidedWorkflowShell, found));
+                }
+            }
             Ok(languages) => {
-                if let Some((offset, text)) = script {
-                    for language in languages {
-                        units.push(Unit {
-                            file,
-                            language,
-                            offset,
-                            text: text.clone(),
-                            substituted: true,
-                        });
-                    }
+                for language in languages {
+                    units.push(Unit {
+                        file,
+                        language,
+                        offset,
+                        text: text.clone(),
+                        substituted: true,
+                    });
                 }
             }
         }
@@ -1533,13 +1604,104 @@ fn run_units<'f>(file: &'f str, text: &str, source: Source) -> (Vec<Unit<'f>>, V
     (units, diagnostics)
 }
 
+/// A step: an item of `jobs.<job>.steps` (with its job) or of `runs.steps`.
+struct WorkflowStep<'k> {
+    job: Option<&'k str>,
+}
+
+/// The step `path` is the place of, if it is one.
+fn step_at(source: Source, path: &[Segment]) -> Option<WorkflowStep<'_>> {
+    match (source, path) {
+        (
+            Source::Workflow,
+            [
+                Segment::Key(jobs),
+                Segment::Key(job),
+                Segment::Key(steps),
+                Segment::Item(_),
+            ],
+        ) if jobs == "jobs" && steps == "steps" => Some(WorkflowStep {
+            job: Some(job.as_str()),
+        }),
+        (Source::Action, [Segment::Key(runs), Segment::Key(steps), Segment::Item(_)])
+            if runs == "runs" && steps == "steps" =>
+        {
+            Some(WorkflowStep { job: None })
+        }
+        _ => None,
+    }
+}
+
+/// Whether `path` is a mapping the steps hang from or a step itself: the
+/// top level, `jobs`, a job, `defaults`, `defaults.run` (the workflow's and a
+/// job's), `runs`, or a step.
+fn holds_the_steps(source: Source, path: &[Segment]) -> bool {
+    let named = |segment: &Segment, name: &str| *segment == Segment::Key(name.to_owned());
+    step_at(source, path).is_some()
+        || match (source, path) {
+            (_, []) => true,
+            (Source::Workflow, [first]) => named(first, "jobs") || named(first, "defaults"),
+            (Source::Workflow, [first, second]) => {
+                (named(first, "defaults") && named(second, "run"))
+                    || (named(first, "jobs") && matches!(second, Segment::Key(_)))
+            }
+            (Source::Workflow, [first, Segment::Key(_), third]) => {
+                named(first, "jobs") && named(third, "defaults")
+            }
+            (Source::Workflow, [first, Segment::Key(_), third, fourth]) => {
+                named(first, "jobs") && named(third, "defaults") && named(fourth, "run")
+            }
+            (Source::Action, [first]) => named(first, "runs"),
+            _ => false,
+        }
+}
+
+/// The shapes above the `run:` values that the scan does not read, each as
+/// its line and what it spells: a key of a mapping the steps hang from
+/// ([`holds_the_steps`]) whose value is no block mapping or sequence — an
+/// anchor or tag before its body (`build: &b`), an alias, a flow value — a
+/// merge key (`<<:`) in one of those mappings, and a step that is no block
+/// mapping (`- *step`, `- { run: … }`, `- &a run: …`).
+fn shape_diagnostics(source: Source, keys: &[YamlKey], items: &[YamlItem]) -> Vec<(usize, String)> {
+    let mut found = Vec::new();
+    for key in keys {
+        let mut path = key.path.clone();
+        path.push(Segment::Key(key.name.clone()));
+        let holds = holds_the_steps(source, &key.path);
+        if holds && key.name == "<<" {
+            found.push((key.line, format!("a merge key: <<: {}", key.written)));
+        } else if holds
+            && holds_the_steps(source, &path)
+            && !matches!(key.value, YamlValue::Nested | YamlValue::Empty)
+        {
+            found.push((key.line, format!("{}: {}", key.name, key.written)));
+        } else if holds
+            && key.name == "steps"
+            && !matches!(key.value, YamlValue::Nested | YamlValue::Empty)
+        {
+            found.push((key.line, format!("steps: {}", key.written)));
+        }
+    }
+    let mapped: BTreeSet<&[Segment]> = keys.iter().map(|key| key.path.as_slice()).collect();
+    for item in items {
+        if step_at(source, &item.path).is_some() && !mapped.contains(item.path.as_slice()) {
+            found.push((
+                item.line,
+                format!("a step that is no mapping: - {}", item.written),
+            ));
+        }
+    }
+    found
+}
+
 /// The language of a step's `shell:`: `pwsh` and `powershell` are
-/// PowerShell, `bash` and `sh` the shell; any other (`cmd`, `python`, a
-/// command template, an expression) is not decided.
+/// PowerShell, `bash` and `sh` the shell, `python` Python; any other (`cmd`,
+/// a command template, an expression) is not decided.
 fn shell_language(shell: &str) -> Option<Language> {
     match shell {
         "pwsh" | "powershell" => Some(Language::PowerShell),
         "bash" | "sh" => Some(Language::Shell),
+        "python" => Some(Language::Python),
         _ => None,
     }
 }
@@ -1589,7 +1751,7 @@ fn one_line(value: &YamlValue) -> Option<&str> {
 
 /// A key's place in a YAML file: a key it is nested under, or a sequence
 /// item it is in, named by the file's line its `-` is on.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Segment {
     Key(String),
     Item(usize),
@@ -1605,6 +1767,16 @@ struct YamlKey {
     /// What is written after it on its line, its comment aside.
     written: String,
     value: YamlValue,
+}
+
+/// One sequence item of a YAML file (`- …`).
+struct YamlItem {
+    /// The keys and items it is nested in, itself last.
+    path: Vec<Segment>,
+    /// The file's line its `-` is on.
+    line: usize,
+    /// What is written after its `- `.
+    written: String,
 }
 
 /// What a key holds.
@@ -1632,8 +1804,9 @@ enum YamlValue {
 /// and holds one of [`YamlValue`]'s forms. A block scalar's lines are its
 /// content, not keys; a line that is neither an item nor a key (a scalar
 /// item, a document marker) holds no key, and the lines more indented than
-/// it are its own. Blank lines and comment lines are skipped.
-fn yaml_keys(text: &str) -> Vec<YamlKey> {
+/// it are its own. Blank lines and comment lines are skipped. The sequence
+/// items come back beside the keys, each with its place.
+fn yaml_keys(text: &str) -> (Vec<YamlKey>, Vec<YamlItem>) {
     let lines: Vec<&str> = text.lines().collect();
     let indent = |line: &str| line.len() - line.trim_start_matches(' ').len();
     let blank = |line: &str| line.trim().is_empty();
@@ -1647,6 +1820,7 @@ fn yaml_keys(text: &str) -> Vec<YamlKey> {
             .unwrap_or(lines.len())
     };
     let mut keys = Vec::new();
+    let mut items = Vec::new();
     let mut stack: Vec<(usize, Segment)> = Vec::new();
     let mut at = 0usize;
     while at < lines.len() {
@@ -1669,6 +1843,11 @@ fn yaml_keys(text: &str) -> Vec<YamlKey> {
             let gap = after.len() - after.trim_start_matches(' ').len();
             column += 1 + gap;
             rest = &after[gap..];
+            items.push(YamlItem {
+                path: stack.iter().map(|(_, segment)| segment.clone()).collect(),
+                line: next,
+                written: rest.trim_end().to_owned(),
+            });
         }
         if rest.is_empty() || rest.starts_with('#') {
             at = next;
@@ -1740,7 +1919,7 @@ fn yaml_keys(text: &str) -> Vec<YamlKey> {
             value,
         });
     }
-    keys
+    (keys, items)
 }
 
 /// The mapping entry a line's text starts, if it starts one: its key —
@@ -1918,7 +2097,8 @@ fn allowlist() -> BTreeMap<&'static str, FileScoped> {
         .collect()
 }
 
-/// The hits that are on neither list.
+/// The hits that are on neither list, and every hit no list clears
+/// ([`Kind::cleared_by_a_list`]).
 fn unlisted<'a>(
     hits: &'a [Hit],
     debt: &BTreeSet<String>,
@@ -1927,9 +2107,10 @@ fn unlisted<'a>(
 ) -> Vec<&'a Hit> {
     hits.iter()
         .filter(|hit| {
-            !debt.contains(&hit.file)
-                && !sources.contains(&hit.file)
-                && !allowed.contains_key(hit.file.as_str())
+            !hit.kind.cleared_by_a_list()
+                || (!debt.contains(&hit.file)
+                    && !sources.contains(&hit.file)
+                    && !allowed.contains_key(hit.file.as_str()))
         })
         .collect()
 }
@@ -1942,13 +2123,29 @@ fn complaint(
     allowed: &BTreeMap<&str, FileScoped>,
 ) -> String {
     let mut said = String::new();
-    let _ = writeln!(
-        said,
-        "{} source reader(s) name a file and are on none of the three lists:\n",
-        strays.len()
-    );
-    for stray in strays {
-        let _ = writeln!(said, "    {}", stray.named());
+    let (readers, unread): (Vec<&Hit>, Vec<&Hit>) = strays
+        .iter()
+        .partition(|stray| stray.kind.cleared_by_a_list());
+    if !readers.is_empty() {
+        let _ = writeln!(
+            said,
+            "{} source reader(s) name a file and are on none of the three lists:\n",
+            readers.len()
+        );
+        for stray in &readers {
+            let _ = writeln!(said, "    {}", stray.named());
+        }
+    }
+    if !unread.is_empty() {
+        let _ = writeln!(
+            said,
+            "{} workflow shape(s) the scan cannot read, which no list clears (each is rewritten \
+             as it says, whether or not its file is listed):\n",
+            unread.len()
+        );
+        for stray in &unread {
+            let _ = writeln!(said, "    {}", stray.named());
+        }
     }
     let _ = writeln!(
         said,
@@ -2773,12 +2970,13 @@ const PLANTED_WORKFLOW: &str = ".github/workflows/planted.yml";
 const PLANTED_ACTION: &str = ".github/actions/planted/action.yml";
 
 /// What an undecided shell tells its author to do.
-const SHELL_OR_LIST: &str = "give the step a `shell:` of pwsh, powershell, bash or sh, or list \
-                             the file";
+const SHELL_TO_GIVE: &str = "give the step a `shell:` of pwsh, powershell, bash, sh or python";
 
 /// What a `run:` value the scan cannot read tells its author to do.
-const BLOCK_OR_LIST: &str = "write it as a `run: |` block or a one-line plain value, or list the \
-                             file";
+const BLOCK_TO_WRITE: &str = "write it as a `run: |` block or a one-line plain value";
+
+/// What a shape above the steps the scan cannot read tells its author to do.
+const MAPPINGS_TO_WRITE: &str = "write it as plain block mappings";
 
 /// A YAML text from its lines, each indented by two spaces a level: written
 /// so, a planted workflow's indentation is the sample's own and its line
@@ -2793,10 +2991,15 @@ fn yaml(lines: &[(usize, &str)]) -> String {
 /// RED — **a workflow step that runs pwsh and reads a named source is a hit
 /// on the workflow's own line**, the block scalar's offset added, and the
 /// check refuses it naming `file:line` and what to do; the step's `shell:`
-/// wins over its runner's default.
+/// wins over its runner's default, written before its `run:` or after it,
+/// and a folded `>-` value is read line by line as written.
 ///
 /// MUTATION: `hits_in` without the unit's offset (`file_line` answering
-/// `line_of(text, at)`) puts the hits on lines 1 and 4, and this goes red.
+/// `line_of(text, at)`) puts the hits on lines 1, 4, 1 and 2; the shell found
+/// only among the keys before the `run:` (`at(path, "shell")` filtered to
+/// `shell.line < run.line`) reads line 18 as bash and loses it; a header with
+/// a chomping indicator refused (`block_header` asking `chomping == 0`) makes
+/// line 21 an unreadable value instead of line 23's hit. Each goes red.
 #[test]
 fn a_workflow_pwsh_step_reading_a_source_is_a_hit_at_the_yml_line() {
     let workflow = yaml(&[
@@ -2818,6 +3021,14 @@ fn a_workflow_pwsh_step_reading_a_source_is_a_hit_at_the_yml_line() {
         (5, "Write-Host '中文 mixed'"),
         (0, ""),
         (5, "$other = Get-Content 'crates/y/src/main.rs'"),
+        (3, "- name: the shell written after the run — 后写"),
+        (4, "run: |"),
+        (5, "Get-Content 'crates/z/src/mod.rs'"),
+        (4, "shell: pwsh"),
+        (3, "- shell: pwsh"),
+        (4, "run: >-"),
+        (5, "Get-Content"),
+        (5, "'crates/w/src/a.rs'"),
     ]);
     assert_eq!(
         script_findings(PLANTED_WORKFLOW, &workflow),
@@ -2832,6 +3043,12 @@ fn a_workflow_pwsh_step_reading_a_source_is_a_hit_at_the_yml_line() {
                 Kind::ReadOfANamedSource,
                 "crates/y/src/main.rs".to_owned()
             ),
+            (
+                18,
+                Kind::ReadOfANamedSource,
+                "crates/z/src/mod.rs".to_owned()
+            ),
+            (23, Kind::ReadOfANamedSource, "crates/w/src/a.rs".to_owned()),
         ]
     );
     let said = script_refusal(PLANTED_WORKFLOW, &workflow);
@@ -2844,10 +3061,13 @@ fn a_workflow_pwsh_step_reading_a_source_is_a_hit_at_the_yml_line() {
 
 /// RED — **a workflow step that runs bash or sh and reads a named source is
 /// a hit**: by GitHub's default on an `ubuntu-` runner, by its job's
-/// `defaults.run.shell`, and by its own `shell: sh`.
+/// `defaults.run.shell`, by its own `shell: sh`, and by the workflow's
+/// `defaults.run.shell` on a runner the scan knows no default for.
 ///
 /// MUTATION: `shell_language` without its `"bash" | "sh"` arm leaves the
-/// second job's two steps undecided, and this goes red.
+/// second job's two steps undecided; `run_units` without the workflow's
+/// `defaults.run` among the places a shell is looked for leaves the third
+/// job's step undecided. Each goes red.
 #[test]
 fn a_workflow_bash_step_reading_a_source_is_a_hit() {
     let workflow = yaml(&[
@@ -2869,6 +3089,13 @@ fn a_workflow_bash_step_reading_a_source_is_a_hit() {
         (3, "- shell: sh"),
         (4, "run: |"),
         (5, "cat 'crates/z/src/mod.rs'"),
+        (1, "own:"),
+        (2, "runs-on: self-hosted"),
+        (2, "steps:"),
+        (3, "- run: head 'crates/v/src/lib.rs'  # 工作流默认"),
+        (0, "defaults:"),
+        (1, "run:"),
+        (2, "shell: bash"),
     ]);
     assert_eq!(
         script_findings(PLANTED_WORKFLOW, &workflow),
@@ -2888,6 +3115,11 @@ fn a_workflow_bash_step_reading_a_source_is_a_hit() {
                 Kind::ReadOfANamedSource,
                 "crates/z/src/mod.rs".to_owned()
             ),
+            (
+                22,
+                Kind::ReadOfANamedSource,
+                "crates/v/src/lib.rs".to_owned()
+            ),
         ]
     );
     let said = script_refusal(PLANTED_WORKFLOW, &workflow);
@@ -2898,13 +3130,18 @@ fn a_workflow_bash_step_reading_a_source_is_a_hit() {
     );
 }
 
-/// RED — **a `run:` step whose shell cannot be decided is a diagnostic**, on
-/// its `run:` line, whether or not it reads: a `runs-on` the scan knows no
-/// default for, a `shell:` that is neither PowerShell nor the shell, and a
-/// composite action's step with no `shell:`.
+/// RED — **a `run:` step naming `.rs` whose shell cannot be decided is a
+/// diagnostic**, on its `run:` line, whether or not it reads: a `runs-on`
+/// the scan knows no default for, a `shell:` that is none of the four, and
+/// a composite action's step with no `shell:`. A step that names no `.rs`
+/// has nothing the tripwire judges and is nothing, whatever its shell; and
+/// `shell: python` is Python, whose reader is a hit.
 ///
 /// MUTATION: `run_units` pushing nothing for an undecided shell (its
-/// `Err(found)` arm empty) finds none of the three, and this goes red.
+/// `Err(found)` arm empty) finds none of the three; the same arm without its
+/// `.rs` condition reports lines 10 and 15 and the action's line 6;
+/// `shell_language` without its `"python"` arm makes line 12 undecided in
+/// place of line 13's hit. Each goes red.
 #[test]
 fn a_workflow_step_with_an_undecidable_shell_is_a_diagnostic() {
     let workflow = yaml(&[
@@ -2913,11 +3150,16 @@ fn a_workflow_step_with_an_undecidable_shell_is_a_diagnostic() {
         (2, "runs-on: self-hosted"),
         (2, "steps:"),
         (3, "- name: 自托管 — no default the scan knows"),
-        (4, "run: echo hi"),
+        (4, "run: echo lib.rs"),
         (3, "- shell: cmd"),
         (4, "run: type crates\\x\\src\\lib.rs"),
-        (3, "- shell: pwsh"),
-        (4, "run: Write-Host 中文"),
+        (3, "- shell: cmd"),
+        (4, "run: echo 中文 no source here"),
+        (3, "- shell: python"),
+        (4, "run: |"),
+        (5, "text = open('crates/x/src/lib.rs').read()"),
+        (3, "- name: no source, no shell"),
+        (4, "run: echo hi"),
     ]);
     assert_eq!(
         script_findings(PLANTED_WORKFLOW, &workflow),
@@ -2928,13 +3170,19 @@ fn a_workflow_step_with_an_undecidable_shell_is_a_diagnostic() {
                 "no shell:, runs-on: self-hosted".to_owned()
             ),
             (8, Kind::UndecidedWorkflowShell, "shell: cmd".to_owned()),
+            (
+                13,
+                Kind::ReadOfANamedSource,
+                "crates/x/src/lib.rs".to_owned()
+            ),
         ]
     );
     let said = script_refusal(PLANTED_WORKFLOW, &workflow);
     assert!(
         said.contains(
-            ".github/workflows/planted.yml:6 runs a `run:` step in a shell the scan cannot decide"
-        ) && said.contains(SHELL_OR_LIST),
+            ".github/workflows/planted.yml:6 runs a `run:` step naming `.rs` in a shell the scan \
+             cannot decide"
+        ) && said.contains(SHELL_TO_GIVE),
         "the failure names the workflow's line and what to do: {said}"
     );
     let action = yaml(&[
@@ -2942,6 +3190,7 @@ fn a_workflow_step_with_an_undecidable_shell_is_a_diagnostic() {
         (0, "runs:"),
         (1, "using: composite"),
         (1, "steps:"),
+        (2, "- run: echo main.rs"),
         (2, "- run: echo hi"),
         (2, "- shell: bash"),
         (3, "run: echo ok"),
@@ -2953,7 +3202,7 @@ fn a_workflow_step_with_an_undecidable_shell_is_a_diagnostic() {
     let said = script_refusal(PLANTED_ACTION, &action);
     assert!(
         said.contains(".github/actions/planted/action.yml:5 runs a `run:` step")
-            && said.contains(SHELL_OR_LIST),
+            && said.contains(SHELL_TO_GIVE),
         "the failure names the action's line and what to do: {said}"
     );
 }
@@ -3137,11 +3386,14 @@ fn a_run_value_on_one_line_is_scanned_too() {
 
 /// RED — **a `run:` value in a YAML form the scan does not read as one
 /// script is a diagnostic**, not a pass: a quoted value, an alias, a plain
-/// value continued on the next line.
+/// value continued on the next line, keys nested under `run:`. No list clears
+/// it: the same workflow on every list is refused all the same.
 ///
-/// MUTATION: `run_units` pushing nothing for such a value (its
-/// `YamlValue::Line(first) | YamlValue::Continued(first)` arm answering
-/// `None` alone) finds none of the three, and this goes red.
+/// MUTATION: `run_units` pushing nothing for a one-line or continued value
+/// (its `YamlValue::Line(first) | YamlValue::Continued(first)` arm answering
+/// `None` alone) loses lines 5–7; its `YamlValue::Nested` arm answering `None`
+/// alone loses line 9; `Kind::cleared_by_a_list` answering `true` lets the
+/// listed workflow pass. Each goes red.
 #[test]
 fn a_run_value_the_scan_cannot_read_is_a_diagnostic() {
     let workflow = yaml(&[
@@ -3153,6 +3405,8 @@ fn a_run_value_the_scan_cannot_read_is_a_diagnostic() {
         (3, "- run: *shared"),
         (3, "- run: Get-Content"),
         (5, "'crates/y/src/main.rs'"),
+        (3, "- run:"),
+        (5, "script: Get-Content 'crates/z/src/lib.rs'"),
         (3, "- run: |"),
         (5, "Write-Host '中文 fine'"),
     ]);
@@ -3166,13 +3420,132 @@ fn a_run_value_the_scan_cannot_read_is_a_diagnostic() {
             ),
             (6, Kind::UnreadableWorkflowRun, "*shared".to_owned()),
             (7, Kind::UnreadableWorkflowRun, "Get-Content".to_owned()),
+            (
+                9,
+                Kind::UnreadableWorkflowRun,
+                "keys nested under `run:`".to_owned()
+            ),
         ]
     );
     let said = script_refusal(PLANTED_WORKFLOW, &workflow);
     assert!(
         said.contains(".github/workflows/planted.yml:6 has a `run:` value the scan cannot read")
-            && said.contains(BLOCK_OR_LIST),
+            && said.contains(BLOCK_TO_WRITE),
         "the failure names the workflow's line and what to do: {said}"
+    );
+    let hits = findings(PLANTED_WORKFLOW, &workflow, Source::Workflow);
+    let listed = BTreeSet::from([PLANTED_WORKFLOW.to_owned()]);
+    let strays = unlisted(&hits, &listed, &listed, &BTreeMap::new());
+    assert_eq!(
+        strays.len(),
+        4,
+        "no list clears a value the scan cannot read"
+    );
+    let said = complaint(&strays, &listed, &listed, &BTreeMap::new());
+    assert!(
+        said.contains("which no list clears")
+            && said.contains(".github/workflows/planted.yml:9 has a `run:` value"),
+        "a listed workflow's unreadable value is refused all the same: {said}"
+    );
+}
+
+/// RED — **a shape above the `run:` values that the scan does not read is a
+/// diagnostic**, never a silently skipped job or step: a merge key in a job,
+/// a step that is an alias, a flow mapping or an anchored entry, a job whose
+/// body follows an anchor, `steps:` as a flow sequence or an alias, a `run:`
+/// that is no step's, and a whole file whose `jobs:` carries a byte-order
+/// mark. No list clears it.
+///
+/// MUTATION: `shape_diagnostics` without its merge-key arm loses line 4;
+/// without its arm for a step that is no mapping, lines 6–8; without its arm
+/// for a mapping the steps hang from, line 12; without its `steps:` arm,
+/// lines 18 and 20; `run_units` without its no-step arm (`if !silent` made
+/// `if false`) loses line 23 and the byte-order-marked file's line 5. Each
+/// goes red.
+#[test]
+fn a_yaml_shape_above_the_run_steps_is_a_diagnostic() {
+    let workflow = yaml(&[
+        (0, "jobs:"),
+        (1, "plain:"),
+        (2, "runs-on: windows-2025"),
+        (2, "<<: *common"),
+        (2, "steps:"),
+        (3, "- *step"),
+        (
+            3,
+            "- { run: \"Get-Content 'crates/x/src/lib.rs'\", shell: pwsh }",
+        ),
+        (3, "- &a run: Get-Content 'crates/x/src/lib.rs'"),
+        (3, "- name: 中文 fine"),
+        (4, "shell: pwsh"),
+        (4, "run: Write-Host ok"),
+        (1, "anchored: &b"),
+        (2, "runs-on: windows-2025"),
+        (2, "steps:"),
+        (3, "- run: Get-Content 'crates/y/src/main.rs'"),
+        (1, "flowed:"),
+        (2, "runs-on: windows-2025"),
+        (2, "steps: [ { run: x } ]"),
+        (1, "aliased:"),
+        (2, "steps: *list"),
+        (2, "services:"),
+        (3, "db:"),
+        (4, "run: Get-Content 'crates/z/src/lib.rs'"),
+    ]);
+    let shape =
+        |line: usize, subject: &str| (line, Kind::UnreadableWorkflowShape, subject.to_owned());
+    assert_eq!(
+        script_findings(PLANTED_WORKFLOW, &workflow),
+        vec![
+            shape(4, "a merge key: <<: *common"),
+            shape(6, "a step that is no mapping: - *step"),
+            shape(
+                7,
+                "a step that is no mapping: - { run: \"Get-Content 'crates/x/src/lib.rs'\", \
+                 shell: pwsh }",
+            ),
+            shape(
+                8,
+                "a step that is no mapping: - &a run: Get-Content 'crates/x/src/lib.rs'",
+            ),
+            shape(12, "anchored: &b"),
+            shape(18, "steps: [ { run: x } ]"),
+            shape(20, "steps: *list"),
+            shape(
+                23,
+                "a `run:` in no step: run: Get-Content 'crates/z/src/lib.rs'",
+            ),
+        ]
+    );
+    let said = script_refusal(PLANTED_WORKFLOW, &workflow);
+    assert!(
+        said.contains(".github/workflows/planted.yml:12 has a shape above its `run:` steps")
+            && said.contains(MAPPINGS_TO_WRITE),
+        "the failure names the workflow's line and what to do: {said}"
+    );
+    let hits = findings(PLANTED_WORKFLOW, &workflow, Source::Workflow);
+    let listed = BTreeSet::from([PLANTED_WORKFLOW.to_owned()]);
+    assert_eq!(
+        unlisted(&hits, &listed, &listed, &BTreeMap::new()).len(),
+        8,
+        "no list clears a shape the scan cannot read"
+    );
+    let marked = format!(
+        "\u{feff}{}",
+        yaml(&[
+            (0, "jobs:"),
+            (1, "one:"),
+            (2, "runs-on: windows-2025"),
+            (2, "steps:"),
+            (3, "- run: Get-Content 'crates/x/src/lib.rs'  # 中文"),
+        ])
+    );
+    assert_eq!(
+        script_findings(PLANTED_WORKFLOW, &marked),
+        vec![shape(
+            5,
+            "a `run:` in no step: run: Get-Content 'crates/x/src/lib.rs'"
+        )]
     );
 }
 
@@ -3182,9 +3555,9 @@ fn a_run_value_the_scan_cannot_read_is_a_diagnostic() {
 /// script by path without reading; and a YAML file is read only under
 /// `.github/workflows/` or as a composite action.
 ///
-/// MUTATION: `run_units` taking every `run:` key for a step's (its `_ =>
-/// continue` arm answering `None`) reads the `with:` input and `defaults.run`,
-/// and this goes red.
+/// MUTATION: `run_units` taking no `run:` place for a silent one (`if
+/// !silent` made `if true`) reports the `with:` input and `defaults.run` as
+/// `run:` values in no step, and this goes red.
 #[test]
 fn a_name_or_with_value_naming_rs_is_nothing() {
     let workflow = yaml(&[

@@ -125,21 +125,39 @@ value is a block scalar (`|`/`>` with any indicators, read line by line as
 written, `>` not folded) or a one-line plain value, its YAML comment aside;
 a quoted or flow value, an alias or anchor, a tag, a value continued on
 further lines or keys nested under `run:` is the diagnostic
-`UnreadableWorkflowRun` (rewrite it as a block or a one-line plain value, or
-list the file) — so a `run:` built from a YAML anchor is never read through.
-The language is the step's `shell:`, else the job's `defaults.run.shell`, else
-the workflow's (`pwsh`/`powershell` PowerShell, `bash`/`sh` the shell), else
-GitHub's default on the job's `runs-on` (pwsh on `windows-`, bash on
-`ubuntu-`/`macos-`; a `${{ matrix.<name> }}` runner is judged under both, a
-finding under either counting once); any other shell or runner, a job with
-neither, and a composite action's step without its own `shell:` is the
-diagnostic `UndecidedWorkflowShell` on the `run:` line, reader or not (give
-the step a `shell:`, or list the file). A `${{ … }}` expression in a quoted
-`.rs` value of a reader unit is interpolation in either quote (GitHub
-substitutes it before the shell runs); elsewhere it is ignored. Nothing
-outside a step's `run:` value is read: names, `env:` and `with:` values,
-`uses:` (a step that runs a script by path has that script scanned as a
-file). A line that only looks like a here-string or heredoc opener
+`UnreadableWorkflowRun` (rewrite it as a block or a one-line plain value).
+The shape above the values is read as well, and what it does not read is the
+diagnostic `UnreadableWorkflowShape` on its line, so no job or step is skipped
+in silence: on the mappings the steps hang from (top level, `jobs`, a job,
+the workflow's and a job's `defaults`/`defaults.run`, `runs`) a value that is
+no block mapping (an anchored or tagged job body `build: &b`, an alias, a
+flow value), a `steps:` that is no block sequence (`[ … ]`, `*list`), a merge
+key (`<<:`); a step that is no block mapping (`- *step`, `- { run: … }`,
+`- &a run: …`); and a `run:` that is no step's — only `defaults.run`, a job's
+`defaults.run` and anything under a step's `with:` stay silent, so a misread
+path (a byte-order mark before `jobs:`) is a diagnostic too. An anchored or
+aliased job, step or `run:` value is never read through.
+The language is the step's `shell:` (before or after its `run:`), else the
+job's `defaults.run.shell`, else the workflow's (`pwsh`/`powershell`
+PowerShell, `bash`/`sh` the shell, `python` Python), else GitHub's default on
+the job's `runs-on` (pwsh on `windows-`, bash on `ubuntu-`/`macos-`; a
+`${{ matrix.<name> }}` runner is judged under both, a finding under either
+counting once); any other shell or runner, a job with neither, and a
+composite action's step without its own `shell:` leave it undecided, which is
+the diagnostic `UndecidedWorkflowShell` on the `run:` line when the value
+names `.rs` (reader or not; give the step a `shell:`) and nothing when it
+names none — it has nothing the tripwire judges, as a `.rs` with no quote is
+out of scope. A `${{ … }}` expression in a quoted `.rs` value of a reader
+unit is interpolation in either quote (GitHub substitutes it before the shell
+runs); elsewhere it is ignored, and an unquoted `.rs` path in a `run:`
+(`ci.yml`'s `file=crates/bt-app/src/explorer_menu.rs`) is out of scope as in
+a script. Nothing outside a step's `run:` value is read: names, `env:` and
+`with:` values, `uses:` (a step that runs a script by path has that script
+scanned as a file). The three workflow diagnostics are about what the scan
+can read, not about a source being read: no list clears them, and a listed
+workflow that has one is refused all the same; a workflow's reader hits and
+the path shapes of its reader units are cleared by file, as a script's are.
+A line that only looks like a here-string or heredoc opener
 (`$m = 'a@'`, `$(( 1 << 3 ))`) opens a phantom one whose `.rs` names are
 reported — noise, never a silent pass. A script reader is cleared like a Rust
 one, by file: a gate or tool whose subject really is source files is a

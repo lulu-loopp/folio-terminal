@@ -131,8 +131,8 @@ crates/bt-source/tests/contract.rs:394 code sample: the indentation after an esc
 crates/bt-source/tests/index.rs:458 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/tests/index.rs:487 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/tests/index.rs:1096 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-source/tests/tripwire.rs:8402 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-source/tests/tripwire.rs:8784 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-source/tests/tripwire.rs:8775 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-source/tests/tripwire.rs:9157 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-term/src/session.rs:22444 recorded terminal byte stream: the blank cells a repaint wrote
 crates/bt-term/src/session.rs:22561 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-term/src/session.rs:35696 terminal screen fixture: the columns are where the terminal draws them
