@@ -21235,6 +21235,18 @@ mod tests {
             &mut fake_measure,
         ));
         let in_row = |row: [f32; 4], rect: [f32; 4]| rect[1] >= row[1] && rect[3] <= row[3];
+        let is_a_profile_mark = |worn: ChromeMark| {
+            matches!(
+                worn,
+                ChromeMark::ProfilePowerShell
+                    | ChromeMark::ProfileUbuntu
+                    | ChromeMark::ProfileGit
+                    | ChromeMark::ProfileCmd
+                    | ChromeMark::ProfileAgent { .. }
+                    | ChromeMark::ProfileGeneric { .. }
+                    | ChromeMark::ProfileLine(_)
+            )
+        };
         // Newest first: the shell recorded last is the top row.
         for (index, profile_id) in [shell, other].into_iter().enumerate() {
             let row = layout.recent[index];
@@ -21245,15 +21257,16 @@ mod tests {
                     .any(|label| in_row(row, label.rect) && label.text == "沙盒 sandbox"),
                 "row {index} ({profile_id}) is captioned by the folder's last segment"
             );
-            let worn = layer
+            let worn: Vec<ChromeMark> = layer
                 .sprites
                 .iter()
-                .find(|sprite| in_row(row, sprite.rect))
-                .expect("a recent row wears a mark");
+                .filter(|sprite| in_row(row, sprite.rect) && is_a_profile_mark(sprite.mark))
+                .map(|sprite| sprite.mark)
+                .collect();
             assert_eq!(
-                worn.mark,
-                mark(index_of_id(profile_id)),
-                "row {index} wears {profile_id}'s own mark"
+                worn,
+                [mark(index_of_id(profile_id))],
+                "row {index} wears {profile_id}'s own mark, and no other profile's"
             );
         }
     }

@@ -1676,13 +1676,11 @@ fn a_reopened_recent_row_stands_in_its_folder(profile_id: &str) {
     let root = bt_testpath::temp_path("recent-road");
     let folder = root.join("沙盒 sandbox");
     let home = root.join("家 home");
-    std::fs::create_dir_all(&folder).unwrap();
-    std::fs::create_dir_all(&home).unwrap();
+    // Neither the place a pane is started in nor the card's folder is asked of the disk, so the
+    // two folders are only names.
     let account = HomeIs(home.clone());
     let (leaf, working_directory) = reopened_from_recent(profile_id, &folder, &account);
     let card = PathBuf::from(files_root_of(Some(&leaf.session), &account));
-    // Nothing below reads the disk: the scratch folders go before anything can fail.
-    std::fs::remove_dir_all(&root).unwrap();
     assert_eq!(
         working_directory.as_deref(),
         Some(folder.as_path()),
