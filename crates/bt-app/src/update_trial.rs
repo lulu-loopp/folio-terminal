@@ -753,6 +753,9 @@ pub(crate) fn watch(
     let mut receipt_asks: u32 = 0;
     let mut receipt_refusal = String::new();
     let mut said_commit_refusal = false;
+    // U-35's reserved trial: its receipt's re-ask lives as long as its own
+    // commit is asked, and its give-up says that commit ended.
+    let reserved = commit_itself.is_some();
     let mut said_mark_refusal = false;
     let mut taking_back: Option<Instant> = None;
     let mut acknowledging: Option<Instant> = None;
@@ -810,7 +813,11 @@ pub(crate) fn watch(
                     None => {}
                 }
             } else if gate.give_up_owed_receipt() {
-                if receipt_asks == 0 {
+                if reserved {
+                    eprintln!(
+                        "BT_UPDATE_TRIAL receipt of {txn} still refused after {receipt_asks} asks of the trial's watch: {receipt_refusal}; this trial no longer asks to commit itself, so no receipt can commit it, and it is not asked again"
+                    );
+                } else if receipt_asks == 0 {
                     eprintln!(
                         "BT_UPDATE_TRIAL receipt of {txn} refused by the storage worker after the watchdog was spent: {receipt_refusal}; the watch does not ask it again, and the next start or logon decides"
                     );
@@ -2081,7 +2088,8 @@ mod tests {
         home: &Home,
         job: &ReceiptJob,
         every: Duration,
-        (wake, commit_itself): (&dyn Fn(), Option<&mut CommitItself<'_>>),
+        wake: &dyn Fn(),
+        commit_itself: Option<&mut CommitItself<'_>>,
         between: &mut dyn FnMut(u32, bool),
     ) -> (u32, Vec<bool>) {
         let mut handed = Vec::new();
@@ -2160,7 +2168,8 @@ mod tests {
             &home,
             &job,
             watchdog_asleep().every,
-            (&|| {}, None),
+            &|| {},
+            None,
             &mut |turn, on_disk| {
                 if on_disk && landed_at.is_none() {
                     landed_at = Some(turn);
@@ -2224,7 +2233,8 @@ mod tests {
             &home,
             &job,
             watchdog_asleep().every,
-            (&|| woken.set(woken.get() + 1), None),
+            &|| woken.set(woken.get() + 1),
+            None,
             &mut |turn, on_disk| {
                 if decided.is_some() {
                     return;
@@ -2280,7 +2290,8 @@ mod tests {
             &job,
             // Every due time falls in the first four turns.
             Duration::ZERO,
-            (&|| {}, None),
+            &|| {},
+            None,
             &mut |turn, on_disk| {
                 ever_on_disk |= on_disk;
                 if turn == HAND_BACKS {
@@ -2314,8 +2325,12 @@ mod tests {
     /// the fourth due time, the home then takes it: the receipt lands, the
     /// trial commits itself, and its held writes are released.
     ///
-    /// The commit is played as `update_apply::commit_last_trial` answers it:
-    /// `Pending` while its receipt is not on disk, `Committed` once it is.
+    /// The journal is the reserved trial's own, `TrialStarting` at its nonce.
+    /// The commit is played as `update_apply::commit_last_trial` answers it —
+    /// `Pending` while its receipt is not on disk, `Committed` once it is —
+    /// rather than run: the real one takes `H\lock` and needs this process's
+    /// receipt to name its own start instant, which the commit's own tests
+    /// pin (`update_apply`); the subject here is the watch's re-ask.
     ///
     /// MUTATION: in `watch`, the watchdog's cut applied to the reserved trial
     /// too (ask the owed receipt only while `spent < HAND_BACKS`).
@@ -2324,6 +2339,17 @@ mod tests {
         let root = scratch("receipt-reserved");
         let home = Home::at(root.join("home"));
         let job = refused_receipt(&home);
+        std::fs::write(
+            home.journal(),
+            journal_bytes(
+                TXN,
+                Phase::TrialStarting {
+                    nonce: nonce(),
+                    began_ms: 1_700_000_000_000,
+                },
+            ),
+        )
+        .unwrap();
         let gate = Gate::new();
         assert!(gate.defer(true, Writer::Session));
         gate.adopt_claim();
@@ -2345,7 +2371,8 @@ mod tests {
             &job,
             // Every due time falls in the first four turns.
             Duration::ZERO,
-            (&|| woken.set(woken.get() + 1), Some(&mut commit)),
+            &|| woken.set(woken.get() + 1),
+            Some(&mut commit),
             &mut |turn, _| {
                 if turn == HAND_BACKS + 2 {
                     std::fs::create_dir_all(home.transaction(TXN)).unwrap();
