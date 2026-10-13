@@ -318,10 +318,14 @@ impl World for Fake {
             self.watchers.push(std::thread::spawn(move || {
                 crate::update_trial::watch(
                     gate,
-                    (&journal, &mark, &receipt),
+                    (
+                        &journal,
+                        crate::update_trial::Mark::on_disk(&mark),
+                        &receipt,
+                    ),
                     txn,
                     crate::update_trial::Cadence::every(Duration::from_millis(5)),
-                    &|| {},
+                    crate::update_trial::Told::to_the_log(&|| {}),
                     None,
                     &mut crate::update_trial::watchdog_asleep(),
                 );
@@ -396,10 +400,14 @@ fn watch_receipt_decision(home: Home, txn: TxnId, nonce: Nonce) {
             Box::leak(Box::new(crate::update_trial::Gate::new()));
         crate::update_trial::watch(
             gate,
-            (&journal, &mark, &receipt),
+            (
+                &journal,
+                crate::update_trial::Mark::on_disk(&mark),
+                &receipt,
+            ),
             txn,
             crate::update_trial::Cadence::every(Duration::from_millis(5)),
-            &|| {},
+            crate::update_trial::Told::to_the_log(&|| {}),
             None,
             &mut crate::update_trial::watchdog_asleep(),
         );
@@ -4513,7 +4521,9 @@ fn u35_a_ready_last_trial_commits_itself_without_any_rescue_process() {
     let (home, txn) = (install.home.clone(), install.txn);
     let (me, started) = this_process();
     let (before, held, committed, again) = on_a_worker(move |worker| {
-        let before = commit_last_trial_as(worker, &home, txn, nonce, me, started);
+        let before = commit_last_trial_as(worker, &home, txn, nonce, me, started, &|line| {
+            eprintln!("{line}")
+        });
         let receipt = Receipt {
             txn,
             nonce,
@@ -4525,10 +4535,16 @@ fn u35_a_ready_last_trial_commits_itself_without_any_rescue_process() {
         let lock = install_txn::try_hold(&home.lock(), Hold::Exclusive)
             .unwrap()
             .expect("the test holds the transaction lock");
-        let held = commit_last_trial_as(worker, &home, txn, nonce, me, started);
+        let held = commit_last_trial_as(worker, &home, txn, nonce, me, started, &|line| {
+            eprintln!("{line}")
+        });
         drop(lock);
-        let committed = commit_last_trial_as(worker, &home, txn, nonce, me, started);
-        let again = commit_last_trial_as(worker, &home, txn, nonce, me, started);
+        let committed = commit_last_trial_as(worker, &home, txn, nonce, me, started, &|line| {
+            eprintln!("{line}")
+        });
+        let again = commit_last_trial_as(worker, &home, txn, nonce, me, started, &|line| {
+            eprintln!("{line}")
+        });
         (before, held, committed, again)
     });
     assert_eq!(before, Ok(LastTrialCommit::Pending), "no receipt yet");
@@ -4580,6 +4596,7 @@ fn u35_an_unready_last_trial_commits_nothing_and_the_recovery_ends_it() {
             nonce,
             unready.pid,
             Some(unready.started),
+            &|line| eprintln!("{line}"),
         )
     });
     assert!(
@@ -4684,9 +4701,13 @@ fn u35_a_reserved_trial_that_died_ready_does_not_stop_the_next_from_committing()
     let (me, started) = this_process();
     let job = own_receipt(&install, nonce);
     let (before, written, committed) = on_a_worker(move |worker| {
-        let before = commit_last_trial_as(worker, &home, txn, nonce, me, started);
+        let before = commit_last_trial_as(worker, &home, txn, nonce, me, started, &|line| {
+            eprintln!("{line}")
+        });
         let written = crate::update_trial::write_receipt(&job);
-        let committed = commit_last_trial_as(worker, &home, txn, nonce, me, started);
+        let committed = commit_last_trial_as(worker, &home, txn, nonce, me, started, &|line| {
+            eprintln!("{line}")
+        });
         (before, written, committed)
     });
     assert_eq!(before, Ok(LastTrialCommit::Pending), "an earlier attempt's");
@@ -4715,8 +4736,11 @@ fn u35_a_trial_that_cannot_read_its_start_instant_is_unprovable() {
     let (me, _) = this_process();
     install.receipt(nonce, nonce, std::process::id());
     let (home, txn) = (install.home.clone(), install.txn);
-    let answer =
-        on_a_worker(move |worker| commit_last_trial_as(worker, &home, txn, nonce, me, None));
+    let answer = on_a_worker(move |worker| {
+        commit_last_trial_as(worker, &home, txn, nonce, me, None, &|line| {
+            eprintln!("{line}")
+        })
+    });
     assert_eq!(answer, Ok(LastTrialCommit::Unprovable));
     assert!(matches!(
         install.on_disk().body.phase,
@@ -5900,12 +5924,14 @@ fn trial_part(root: &Path) {
                 gate,
                 (
                     &journal,
-                    &journal.with_file_name(crate::update_txn::UNKEPT_FILE),
+                    crate::update_trial::Mark::on_disk(
+                        &journal.with_file_name(crate::update_txn::UNKEPT_FILE),
+                    ),
                     &home.receipt_path(plan.txn, &Nonce::new([0x7a; 32])),
                 ),
                 plan.txn,
                 crate::update_trial::Cadence::every(Duration::from_millis(20)),
-                &|| {},
+                crate::update_trial::Told::to_the_log(&|| {}),
                 None,
                 &mut watchdog,
             );
