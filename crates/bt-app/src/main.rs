@@ -46549,7 +46549,11 @@ impl Runtime<'_> {
             // **The editor's own length of the same sentence**: this row has the
             // page's whole width, where the list's third line shares its row
             // with an action run.
-            capability: profiles::capability_in_editor(index).text(),
+            capability: profiles::capability_in_editor(
+                index,
+                &self.app.profile_programs.shell(&profiles::id(index)),
+            )
+            .text(),
             // The ghosts are not the reader's and are not counted: they are what
             // this terminal says to a session of this profile.
             env_rows: editor.env.len(),
@@ -46557,7 +46561,10 @@ impl Runtime<'_> {
                 .iter()
                 .position(|choice| *choice == profiles::integration_choice(index))
                 .unwrap_or_default(),
-            integration_auto: profiles::integration_auto_label(index),
+            integration_auto: profiles::integration_auto_label(
+                index,
+                &self.app.profile_programs.shell(&profiles::id(index)),
+            ),
             // **Every variable this terminal sets for a session of this profile,
             // less whatever this profile has already said** (owner ruling
             // 2026-10-11 on H2 Q4): read off the launch's own composition, so a

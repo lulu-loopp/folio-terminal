@@ -3560,22 +3560,28 @@ pub fn integration_name(integration: Integration) -> crate::i18n::Text {
     }
 }
 
-/// `Auto (Bash init file)`, or whichever door the row's program derives — that
-/// picker's **button** while the row is on the rule, interned so the caption can
+/// `Auto (Bash init file)`, or whichever door the row's program derives as a program of the kind
+/// the walk found (`program`, [`auto_door`]) — that picker's **button** while the row is on the rule, interned so the caption can
 /// ride a `Copy` snapshot of the page.
 ///
 /// `None` when the row has named a door: the button then says the word on the
 /// item that is ticked, which is what every other picker in this dialog does.
 #[must_use]
-pub fn integration_auto_label(index: usize) -> Option<&'static str> {
+pub fn integration_auto_label(index: usize, program: &ShellProgram) -> Option<&'static str> {
     with_table(|table| {
         let profile = table.get(index)?;
         if profile.integration != IntegrationChoice::Auto {
             return None;
         }
-        let door = integration_name(derive_integration(&profile.program)).text();
+        let door = integration_name(auto_door(profile, program)).text();
         Some(intern(&crate::i18n::profile_integration_auto(door)))
     })
+}
+
+/// The door the rule picks for `profile` when its program is of kind `program`: the family's,
+/// as that kind can be handed it ([`door_of`]).
+fn auto_door(profile: &Profile, program: &ShellProgram) -> Integration {
+    door_on(derive_integration(&profile.program), program)
 }
 
 /// A path the dialog has to draw, interned — the fixed starting folder, which is
@@ -4210,6 +4216,7 @@ pub fn page_lines(
                     capability: available.then(|| {
                         capability_text_for_launch(
                             profile,
+                            &programs.shell(&profile.id),
                             program,
                             crate::shell_integration::powershell_integration_enabled(),
                         )
@@ -4315,6 +4322,7 @@ fn command_line(profile: &Profile, resolved: Option<&OsStr>) -> String {
 pub fn capability_text(profile: &Profile) -> crate::i18n::Text {
     capability_text_for_launch(
         profile,
+        &ShellProgram::Native,
         Some(Path::new("pwsh")),
         crate::shell_integration::powershell_integration_enabled(),
     )
@@ -4333,13 +4341,16 @@ pub fn launch_arguments_of(index: usize) -> Vec<OsString> {
     })
 }
 
+/// [`capability_text`] for a row whose program a walk found at `program`, of kind `kind`: the
+/// sentence names what the door the row is served through ([`door_of`]) gives.
 #[must_use]
 pub fn capability_text_for_launch(
     profile: &Profile,
+    kind: &ShellProgram,
     program: Option<&Path>,
     powershell_integration: bool,
 ) -> crate::i18n::Text {
-    if served_by(profile) == Integration::PowerShellOptIn {
+    if door_of(profile, kind) == Integration::PowerShellOptIn {
         let fallback =
             power_shell_profile_fallback_for_launch(profile, program, powershell_integration);
         if let Some(sentence) = fallback
@@ -4371,7 +4382,7 @@ pub fn capability_text_for_launch(
         }
     }
     capability_of_parts(
-        served_by(profile),
+        door_of(profile, kind),
         profile.paths,
         crate::shell_integration::declares_hyperlinks(profile),
         false,
@@ -4449,21 +4460,28 @@ pub fn capability_of_parts(
 }
 
 /// The editor's `Shell integration` row: the same sentence the list carries, in
-/// the one length the page has room for.
+/// the one length the page has room for. `program` is the kind of program the walk found for the
+/// row ([`ProfilePrograms::shell`]).
 #[must_use]
-pub fn capability_in_editor(index: usize) -> crate::i18n::Text {
+pub fn capability_in_editor(index: usize, program: &ShellProgram) -> crate::i18n::Text {
     with_table(|table| {
         table
             .get(index)
             .map_or(crate::i18n::Text::CapNone, |profile| {
-                capability_of_parts(
-                    served_by(profile),
-                    profile.paths,
-                    crate::shell_integration::declares_hyperlinks(profile),
-                    true,
-                )
+                editor_capability(profile, program)
             })
     })
+}
+
+/// [`capability_in_editor`] for one row: the long sentence of the door it is served through
+/// ([`door_of`]).
+fn editor_capability(profile: &Profile, program: &ShellProgram) -> crate::i18n::Text {
+    capability_of_parts(
+        door_of(profile, program),
+        profile.paths,
+        crate::shell_integration::declares_hyperlinks(profile),
+        true,
+    )
 }
 
 /// Every spelling of one profile's name that a shell announcing it would use —
@@ -27777,15 +27795,102 @@ mod tests {
         );
     }
 
+    /// PIN — **a WSL launcher's capability sentence is the one `wsl.exe`'s row says for the door
+    /// it is given** (T-WSL-LEGACY-BASH-DOOR): a launcher into WSL that is not `wsl.exe` is served
+    /// by no door ([`door_of`]), so its list line and its editor row say what `wsl.exe`'s row says
+    /// with no door — no shell integration — and its `Auto` picker names that door; `wsl.exe`
+    /// keeps its own sentence, and a Git Bash and a Cygwin bash keep a bash's.
+    ///
+    /// MUTATION: decide by stem (`door_of` answers `served_by(profile)` whatever the kind) and
+    /// `System32\bash.exe`'s editor row says `CapFull`, a bash's whole set of marks.
+    #[test]
+    fn a_wsl_launchers_capability_sentence_is_wsl_exes() {
+        use crate::i18n::Text;
+        let custom = |program: &str, integration: IntegrationChoice| Profile {
+            id: "mine".into(),
+            program: ProgramSource::Path(PathBuf::from(host_spelling(program))),
+            integration,
+            ..windows_row("gitbash")
+        };
+        let wsl = windows_row("wsl");
+        assert_eq!(
+            editor_capability(&wsl, &ShellProgram::WslExe),
+            Text::CapWslBash
+        );
+        let wsl_without_a_door = Profile {
+            integration: IntegrationChoice::Named(Integration::None),
+            ..wsl.clone()
+        };
+        for (program, integration, kind) in [
+            (
+                r"C:\Windows\System32\bash.exe",
+                IntegrationChoice::Auto,
+                ShellProgram::WslLauncher { distribution: None },
+            ),
+            (
+                r"C:\Users\alice\AppData\Local\Microsoft\WindowsApps\bash.exe",
+                IntegrationChoice::Auto,
+                ShellProgram::WslLauncher { distribution: None },
+            ),
+            (
+                r"C:\Users\alice\AppData\Local\Microsoft\WindowsApps\ubuntu2204.exe",
+                IntegrationChoice::Named(Integration::BashInitFile),
+                ShellProgram::WslLauncher {
+                    distribution: Some("Ubuntu-22.04".into()),
+                },
+            ),
+        ] {
+            let row = custom(program, integration);
+            assert_eq!(
+                editor_capability(&row, &kind),
+                editor_capability(&wsl_without_a_door, &ShellProgram::WslExe),
+                "{program}: the editor's sentence"
+            );
+            assert_eq!(
+                editor_capability(&row, &kind),
+                Text::CapNoneLong,
+                "{program}"
+            );
+            assert_eq!(
+                capability_text_for_launch(&row, &kind, Some(Path::new(program)), true),
+                Text::CapNone,
+                "{program}: the list's sentence"
+            );
+            assert_eq!(auto_door(&row, &kind), Integration::None, "{program}");
+        }
+        for (program, kind) in [
+            (r"C:\Program Files\Git\bin\bash.exe", ShellProgram::Native),
+            (r"C:\cygwin64\bin\bash.exe", ShellProgram::Cygwin),
+        ] {
+            let row = custom(program, IntegrationChoice::Auto);
+            assert_eq!(editor_capability(&row, &kind), Text::CapFull, "{program}");
+            assert_eq!(
+                auto_door(&row, &kind),
+                Integration::BashInitFile,
+                "{program}"
+            );
+        }
+    }
+
     #[test]
     fn a_powershell_profile_capability_says_when_process_integration_is_not_provided() {
         let profile = windows_row("pwsh");
         assert_ne!(
-            capability_text_for_launch(&profile, Some(Path::new("pwsh.exe")), true),
+            capability_text_for_launch(
+                &profile,
+                &ShellProgram::Native,
+                Some(Path::new("pwsh.exe")),
+                true
+            ),
             crate::i18n::Text::CapPowerShellNotProvided
         );
         assert_eq!(
-            capability_text_for_launch(&profile, Some(Path::new("pwsh.exe")), false),
+            capability_text_for_launch(
+                &profile,
+                &ShellProgram::Native,
+                Some(Path::new("pwsh.exe")),
+                false
+            ),
             crate::i18n::Text::CapPowerShellNotProvided
         );
         let terminal = Profile {
@@ -27793,11 +27898,21 @@ mod tests {
             ..profile.clone()
         };
         assert_eq!(
-            capability_text_for_launch(&terminal, Some(Path::new("pwsh.exe")), true),
+            capability_text_for_launch(
+                &terminal,
+                &ShellProgram::Native,
+                Some(Path::new("pwsh.exe")),
+                true
+            ),
             crate::i18n::Text::CapPowerShellNotProvided
         );
         assert_eq!(
-            capability_text_for_launch(&profile, Some(Path::new("cmd.exe")), true),
+            capability_text_for_launch(
+                &profile,
+                &ShellProgram::Native,
+                Some(Path::new("cmd.exe")),
+                true
+            ),
             crate::i18n::Text::CapPowerShellNotProvided
         );
     }
