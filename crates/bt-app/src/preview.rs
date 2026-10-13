@@ -8330,7 +8330,7 @@ pub(crate) struct PreviewSaves {
 /// One save on the worker, and who is owed its answer.
 struct OwedSave {
     ticket: u64,
-    incarnation: u64,
+    incarnation: BufferId,
     body: u64,
     asked_from: crate::PreviewSurface,
     answer: mpsc::Receiver<DocumentAnswer>,
@@ -8340,7 +8340,7 @@ struct OwedSave {
 /// pressed last.
 #[derive(Debug)]
 pub(crate) struct SaveAnswer {
-    incarnation: u64,
+    incarnation: BufferId,
     asked_from: crate::PreviewSurface,
     answer: DocumentAnswer,
 }
@@ -8363,7 +8363,7 @@ impl PreviewSaves {
     /// the pane's words.
     fn submit(
         &mut self,
-        incarnation: u64,
+        incarnation: BufferId,
         body: u64,
         asked_from: crate::PreviewSurface,
         job: impl FnOnce(u64, mpsc::Sender<DocumentAnswer>) -> DocumentJob,
@@ -8386,7 +8386,7 @@ impl PreviewSaves {
 
     /// A press while `incarnation`'s save is out: its answer is said where the
     /// newest press was made.
-    fn pressed_again(&mut self, incarnation: u64, asked_from: crate::PreviewSurface) {
+    fn pressed_again(&mut self, incarnation: BufferId, asked_from: crate::PreviewSurface) {
         for owed in &mut self.owed {
             if owed.incarnation == incarnation {
                 owed.asked_from = asked_from;
