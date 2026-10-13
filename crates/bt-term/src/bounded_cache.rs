@@ -158,6 +158,17 @@ where
         Some(&slot.value)
     }
 
+    /// **Read one entry without counting the reading** — for an owner deciding what to do with
+    /// an entry rather than using it: a question about the ledger, as [`Self::contains_key`] is,
+    /// which must not make the entry look wanted to the next eviction.
+    pub fn peek<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
+        self.entries.get(key).map(|slot| &slot.value)
+    }
+
     /// Whether a key is present, **without** counting a reading.
     ///
     /// The one caller is "have I already asked for this", which is a question
@@ -367,6 +378,30 @@ mod tests {
             cache.contains_key("the one on screen"),
             "the picture the window kept drawing is the picture it kept",
         );
+    }
+
+    /// RED (T-ANIMATION-RECORDS-BOUND) — **a peek is not a use**: an owner deciding what to do
+    /// with an entry reads it without making it look wanted, so the entry it peeked at is still
+    /// the oldest and the first to go.
+    ///
+    /// MUTATION: have `peek` set the slot's `used` to `self.tick()` as `get` does — the peeked
+    /// entry outlives the newer one and the first assertion goes red.
+    #[test]
+    fn a_peek_is_not_a_reading_and_leaves_the_eviction_order_alone() {
+        const MEGABYTE: u64 = 1024 * 1024;
+        let mut cache: BoundedCache<String, Pixels> = BoundedCache::with_budget(3 * MEGABYTE);
+        cache.insert("\u{65e7}\u{7684} oldest".to_owned(), Pixels(MEGABYTE));
+        cache.insert("newer".to_owned(), Pixels(MEGABYTE));
+        assert_eq!(
+            cache.peek("\u{65e7}\u{7684} oldest"),
+            Some(&Pixels(MEGABYTE))
+        );
+        cache.insert("newest".to_owned(), Pixels(MEGABYTE));
+        assert!(
+            !cache.contains_key("\u{65e7}\u{7684} oldest"),
+            "the entry only peeked at is still the oldest, and goes first",
+        );
+        assert!(cache.contains_key("newer") && cache.contains_key("newest"));
     }
 
     /// PIN — **the counter tells the truth**: a replaced key is counted once,

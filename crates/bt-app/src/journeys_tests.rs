@@ -69,6 +69,7 @@ use super::{
     PeekClock, RevealTween, SeatId, TabId,
 };
 use crate::pace::{FrameClock, Lanes};
+use crate::test_support::shown_and_opened;
 use crate::{
     animation, cardhint, cmdrail, float, formula_tools, keyhint, seats, termscroll, toast, tooltip,
 };
@@ -1250,7 +1251,13 @@ fn an_elapsed_time_service_is_never_gated_and_the_flood_shows_its_state() {
 
     // ── ① the flood, and a decoded animation serviced on every turn ──────────
     let mut cache = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
-    cache.opened("on the glass".to_owned(), 1, Ok(a_playback_of(64, start)));
+    shown_and_opened(
+        &mut cache,
+        1,
+        "on the glass",
+        1,
+        Ok(a_playback_of(64, start)),
+    );
     cache.present_drawn(&BTreeMap::new(), &drawn, start);
 
     let mut refusals = 0_u32;
@@ -1284,7 +1291,13 @@ fn an_elapsed_time_service_is_never_gated_and_the_flood_shows_its_state() {
 
     // ── ② the same host on the gated schedule, which is the defect ───────────
     let mut gated = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
-    gated.opened("on the glass".to_owned(), 1, Ok(a_playback_of(64, start)));
+    shown_and_opened(
+        &mut gated,
+        1,
+        "on the glass",
+        1,
+        Ok(a_playback_of(64, start)),
+    );
     gated.present_drawn(&BTreeMap::new(), &drawn, start);
     let mut turn = start;
     let mut presented = Some(start - FLOOD);
@@ -1306,7 +1319,13 @@ fn an_elapsed_time_service_is_never_gated_and_the_flood_shows_its_state() {
 
     // ── ③ and it costs nothing when nothing is live ──────────────────────────
     let mut idle = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
-    idle.opened("in another tab".to_owned(), 1, Ok(a_playback_of(64, start)));
+    shown_and_opened(
+        &mut idle,
+        2,
+        "in another tab",
+        1,
+        Ok(a_playback_of(64, start)),
+    );
     let nothing_drawn = BTreeMap::new();
     let mut turn = start;
     while turn <= start + FLOOD_SPAN {
@@ -1650,7 +1669,13 @@ fn a_service_that_finds_nothing_changed_hands_nothing_over() {
     let start = Instant::now();
     let drawn: BTreeMap<String, u64> = [("on the glass".to_owned(), 1)].into();
     let mut cache = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
-    cache.opened("on the glass".to_owned(), 1, Ok(a_playback_of(64, start)));
+    shown_and_opened(
+        &mut cache,
+        1,
+        "on the glass",
+        1,
+        Ok(a_playback_of(64, start)),
+    );
     cache.present_drawn(&BTreeMap::new(), &drawn, start);
     let mut services = 0_u32;
     let mut rebuilds = 0_u32;
