@@ -3264,3 +3264,59 @@ not-kept card. The finalized road is:
 No journal grammar or parse site changes. The receipt is no longer evidence after `Committed`; its
 removal is solely the live watch's acknowledgement to the holder already settling that committed
 transaction.
+
+## Revision 2026-10-13 (m) — a refused receipt is asked again on the watch's own turn (T-TRIAL-RECEIPT-RETRY)
+
+A correction to H.2 step 1 and to H.2's stated bound; H.2 as written above stays the record of what
+0.4.7 built. The side-effects contract (`side-effects-contract-2026-10-11.md`, C5 as revision (b)5
+replaced it) refuses a failed effect retried on a clock of its own; the receipt's doubling pause was one
+(`structural-debt.md` D-89, its trial half).
+
+- **Step 1, amended.** Take the storage worker's answer. While a refused receipt is owed and the
+  watchdog is not spent, ask it again — create-new, by the one rule for what is at its name — **once at
+  each turn of the watch**, the turn the journal read and the watchdog already need, with no pause of
+  its own. Once the watchdog is spent (its fourth due time, 8 × `WATCHDOG`), an owed receipt is given up
+  and said once. The pause of 250 ms doubling to 30 s, `RECEIPT_RETRY_FIRST` and `RECEIPT_RETRY_CAP`, is
+  withdrawn.
+- **Why the turn, not a terminal refusal.** A receipt is handed over only by a ready trial, and a ready
+  trial handed back with no receipt is a candidate the recovery defers beside (H.3 steps 2 and 3): a
+  terminal refusal would not hand the decision to anybody, it would leave the transaction undecided
+  until the trial ends and then roll it back. A live holder rolls back at its deadline (90 s from the
+  launch) with no receipt; the doubling pause asked at 61.75 s and then 91.75 s after a refusal, so a
+  refusal that cleared at 62 s cost the update. Asked at each turn, a refusal that clears costs at most
+  one turn (250 ms). A journal read error is not an answer either (`Unreadable`, step 2).
+- **Why the watchdog's life is the bound.** A landed receipt pays off through a holder that adopts or
+  commits the trial — the live holder, or the recovery each hand-back starts (H.1's adoption). Past the
+  last due time the trial hands nothing back and the next start or logon decides; the repetition then
+  stops. It is C5 rule 3's one declared, bounded repetition inside the trial's one admitted request, on
+  the watch worker, declared in the `# completions` row `the trial's receipt`.
+- **The bound, restated** (replacing "about 127 receipt write attempts" an hour): while a receipt is
+  owed, one more journal read (the rights check) and one create-new attempt per 250 ms turn, for at most
+  880 s — at most 3,520 asks — and none after; one refusal line, then one line at the streak's end:
+  landed, with the number of asks, or given up, with the number and the last refusal.
+- **Accepted, stated.** A home that refuses for longer than 880 s and then takes writes no longer gets
+  the receipt: the next start or logon defers beside the live trial (no receipt names it) and decides
+  once it has ended — a rollback on Windows, a recorded retrial on macOS. The doubling pause would have
+  landed it at its next 30 s ask; an unbounded repetition is what C5 forbids.
+
+Pinned by `update_trial::tests::{a_refused_receipt_is_asked_again_only_on_the_watchs_own_turn,
+a_transient_receipt_refusal_does_not_roll_the_trial_back, a_permanent_receipt_refusal_ends_in_the_hand_back,
+an_unreadable_journal_still_retries_the_receipt_and_is_never_handed_back}`, each counted in the watch's
+own turns through `update_trial::Cadence`, the pause the watch is handed.
+
+### Amendment to revision (m), 2026-10-13 (round 2) — the reserved trial's bound
+
+Revision (m)'s bound — the watchdog's life — is the ordinary trial's. **U-35's reserved trial** is
+the one trial no holder can adopt: every holder runs the rescue copy the operating system refused,
+so its hand-backs cannot pay off, no live holder has a deadline over it, and its one road to a commit
+is its own (`update_apply::commit_last_trial`, asked at each turn of the watch until the journal no
+longer waits for it). Its refused receipt is therefore asked again **for as long as it asks to commit
+itself** — the receipt's re-ask shares `commit_itself`'s life — and is not given up at the fourth due
+time; a home that takes writes again later still lets it commit, and the person's changes are kept.
+Both bounds are declared in the `# completions` row `the trial's receipt` (C5 rule 3).
+
+**The cost of one ask, stated.** A journal read (the rights check) and a create-new write; when the
+refusal comes at the rename or a flush rather than at the create, each ask is a full durable write
+with its flushes — on macOS `F_FULLFSYNC`, which flushes the drive's cache.
+
+Pinned by `update_trial::tests::the_reserved_trial_asks_its_receipt_again_for_as_long_as_it_asks_to_commit_itself`.

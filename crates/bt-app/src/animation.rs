@@ -2200,9 +2200,9 @@ mod tests {
         const SIDE: u16 = 64;
         let animation = decode_bytes(a_gif_of(12, SIDE, 5)).expect("a small capture");
         let canvas = animation.bytes_held() - animation.ring_bytes();
-        let key = "D:/\u{52a8}\u{56fe}/loading.gif".to_owned();
+        let key = "d:\\\u{52a8}\u{56fe}\\loading.gif".to_owned();
         let mut cache = crate::AnimationCache::with_budget(u64::MAX);
-        cache.opened(key.clone(), 7, Ok(animation));
+        crate::test_support::shown_and_opened(&mut cache, 1, &key, 7, Ok(animation));
         let parked = cache.bytes_held();
         cache.send_fill(&key, |serial, cursor, want| {
             assert_eq!(serial, 7);
