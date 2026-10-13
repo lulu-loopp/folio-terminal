@@ -22,8 +22,10 @@ $header = "# the deliberate runs`n#`n"
 # and one before its closing quote, a run in a comment, a run in a doc comment, an escaped quote
 # (which must not close its string), an escaped backslash before a closing quote, a quote in a
 # character literal and in a byte character literal (neither opens a string), an inner quote in a
-# `r#"…"#`, a lifetime, and a raw identifier. Each trap comment holds a run after a quote, so a
-# lexer that misreads the shape before it reads that run as a string's.
+# `r#"…"#`, a lifetime, a raw identifier, and an escaped backslash followed by a continuation
+# (`\\\` at the end of a line: three backslashes, so the line does continue and the indentation
+# after it is dropped). Each trap comment holds a run after a quote, so a lexer that misreads the
+# shape before it reads that run as a string's.
 $clean = @'
 //! A doc comment with a run:   here.
 /// Another   one.
@@ -48,6 +50,8 @@ pub const QUOTED: &str = "an escaped quote \"";
 pub const SLASH: &str = "\\"; // a lexer that read the backslash as escaping the quote:   a " b
 pub const BQUOTE: u8 = b'"'; // a lexer that read the quote as opening a string:   a " b
 pub const INNER: &str = r#"a "quoted" word"#;
+pub const BACKSLASH: &str = "an escaped backslash, then a continuation \\\
+     and the indentation it drops";
 '@
 
 # The fixture whose columns are deliberate: line 3 of this file, as a raw string.
@@ -69,9 +73,25 @@ function Write-Tree([string]$Code, [string]$List, [switch]$Crlf) {
     [IO.File]::WriteAllText($listPath, $List)
 }
 
+# The gate runs as a child process with a deadline, so a lexer that loops (the `'\u` case once
+# did) fails its case instead of hanging the suite; on the deadline the child this function
+# started, and only that one, is ended by its recorded process id.
+$patience = [TimeSpan]::FromSeconds(120)
 function Run-Gate([int]$Want, [string]$Case) {
-    $output = & pwsh -NoProfile -File $gate -Repo $root 2>&1 | Out-String
-    $got = $LASTEXITCODE
+    $out = Join-Path $root ".gate-out.txt"
+    $err = Join-Path $root ".gate-err.txt"
+    $child = Start-Process -FilePath (Get-Process -Id $PID).Path -PassThru -NoNewWindow `
+        -ArgumentList @("-NoProfile", "-File", "`"$gate`"", "-Repo", "`"$root`"") `
+        -RedirectStandardOutput $out -RedirectStandardError $err
+    $null = $child.Handle # keeps the exit code readable after the process ends
+    if (-not $child.WaitForExit([int]$patience.TotalMilliseconds)) {
+        Stop-Process -Id $child.Id -Force
+        throw "$Case did not finish within $patience (the gate's process $($child.Id) was ended)"
+    }
+    $child.WaitForExit()
+    $got = $child.ExitCode
+    $output = [IO.File]::ReadAllText($out) + [IO.File]::ReadAllText($err)
+    Remove-Item -LiteralPath $out, $err
     if ($got -ne $Want) { throw "$Case returned $got, wanted $Want`n$output" }
     return $output
 }
@@ -203,7 +223,7 @@ try {
         $repointed = $clean + "`n" + $fixture.Replace('r"name   value"', 'r"name value"') + "`npub const OTHER: &str = r`"key   word`";`n"
         Write-Tree $repointed ($header + "${source}:$($fixtureLine + 1) a table fixture`n")
         $output = Run-Gate 1 "a row repointed at another literal"
-        if ($output -notmatch "only shrinks" -or $output -notmatch [regex]::Escape('r"key   word"')) {
+        if ($output -notmatch "only shrinks" -or $output -notmatch [regex]::Escape('key   word')) {
             throw "the repointed row was not refused as an added row: $output"
         }
 
@@ -247,6 +267,46 @@ try {
             }
         }
 
+        # A rename of the code beside a listed literal, on its own line, keeps the row: the identity
+        # is the literal's own text, not the line around it.
+        Write-Tree ($clean + "`n" + $fixture.Replace('pub const TABLE: &str', 'pub(crate) const RENAMED_TABLE: &str')) ($header + $row)
+        $output = Run-Gate 0 "a rename beside a listed literal"
+        if ($output -notmatch "1 rows -> 1, 0 added, 0 removed") { throw "the rename made the row look added: $output" }
+
+        # A tab is the character before a run: two spaces, a tab, then three spaces hold a run.
+        Write-Tree ($clean + "`n" + $fixture + "`npub const TAB: &str = `"a  `t   b`";`n") ($header + $row)
+        $output = Run-Gate 1 "a run after a tab that follows a short run"
+        if ($output -notmatch [regex]::Escape("${source}:$($fixtureLine + 1): a string literal carries a run")) {
+            throw "the run after the tab was not refused by its file:line: $output"
+        }
+
+        # A `'\u{` whose brace closes only on the next line is refused by its line, mid-file.
+        Write-Tree ($clean + "`n" + $fixture + "`npub const U2: char = '\u{41`n}';`npub const AFTER: u8 = 2;`n") ($header + $row)
+        $output = Run-Gate 1 "a character escape whose brace is on the next line"
+        if ($output -notmatch [regex]::Escape("${source}:$($fixtureLine + 1): a character literal that does not close")) {
+            throw "the split escape was not refused by its file:line: $output"
+        }
+
+        # A literal whose listed text is not ASCII is read at the base through `git show` and
+        # matched: the same row is no added row.
+        $wide = $clean + "`n" + $fixture + "`npub const NAMES: &str = r`"名字   值`";`n"
+        $wideRows = $header + $row + "${source}:$($fixtureLine + 1) a table fixture with Chinese cells`n"
+        Write-Tree $wide $wideRows
+        Commit-Base "a base whose list names a Chinese literal"
+        $output = Run-Gate 0 "a listed literal with Chinese text"
+        if ($output -notmatch "2 rows -> 2, 0 added, 0 removed") { throw "the Chinese literal's row was not matched at the base: $output" }
+
+        # A base whose listed file does not lex is a failure, said as the base's own file:line.
+        $broken = $clean + "`n" + $fixture + "`n/* never closed`n"
+        Write-Tree $broken ($header + $row)
+        Commit-Base "a base that does not lex"
+        $brokenBase = (& git rev-parse HEAD).Trim()
+        Write-Tree ($clean + "`n" + $fixture) ($header + $row)
+        $output = Run-Gate 1 "a base that does not lex"
+        if ($output -notmatch [regex]::Escape("base ${brokenBase}:${source}:$($fixtureLine + 1): a block comment that does not close")) {
+            throw "the base's lexer fault was not reported: $output"
+        }
+
         # A malformed row is refused rather than read as something else.
         Write-Tree ($clean + "`n" + $fixture) ($header + "${source} a table fixture`n")
         $output = Run-Gate 1 "a malformed row"
@@ -258,5 +318,5 @@ try {
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
 }
 
-Write-Host "check-embedded-spaces: no-base, clean, planted, escaped break, continuation, byte string, removed row, moved row, stale row, added row, reworded row, shrink, shared line, extra row, repointed row, lost continuation at a line break, escaped backslash, C string, raw byte string, hash count, CRLF, four unfinished shapes and malformed-row cases pass"
+Write-Host "check-embedded-spaces: no-base, clean, planted, escaped break, continuation, byte string, removed row, moved row, stale row, added row, reworded row, shrink, shared line, extra row, repointed row, lost continuation at a line break, escaped backslash, C string, raw byte string, hash count, CRLF, four unfinished shapes, rename beside a literal, tab boundary, split escape, Chinese identity, base fault and malformed-row cases pass"
 exit 0

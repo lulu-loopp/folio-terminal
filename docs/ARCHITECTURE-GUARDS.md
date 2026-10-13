@@ -448,17 +448,23 @@ its row of `docs/plans/embedded-spaces-allowed.txt` (`path:line reason`, the
 line the literal opens on; two literals on one line take two rows). The list
 is exact both ways (a row beyond the literals its line opens is stale) and only
 shrinks against the merge base. A row's identity is its path, its literal's
-text (the trimmed source line of the literal's first run, read for the base
-from the base's own copy of the file) and its reason — as the dead-code gate's
-item column pins its site — so a literal that moves keeps its row with the
-line corrected, and a row pointed at another literal is an added row and
-refused. `scripts/ci/check-embedded-spaces-tests.ps1` holds each rule on
-scratch repositories, and `gates-can-fail` plants a literal in the real tree.
-When red, repair the literal as a continuation; a fixture's columns (screen
-captures, tables, code samples after an escaped line break) are the only rows,
-and they were the baseline — a new fixture builds its columns another way
-(`format!` padding, or a `concat!` whose spaces stand in a literal of their
-own, where they start the literal and are no run).
+own text on the source line of its first run (the characters inside the
+literal on that line, trimmed — not the code around it; read for the base from
+the base's own copy of the file, through the same lexer, where a file that does
+not lex fails the check as `base <sha>:<path>:<line>`) and its reason, with
+multiplicity. A literal that moves, or whose surrounding code is renamed or
+rewrapped, keeps its row with the line corrected; a row pointed at another
+literal is an added row and refused; and an edit to a listed literal's pinned
+text is refused too — there is no override and no replacement path. Columns
+that must evolve do not belong in a string literal: take them out (cells in a
+slice joined at run time, or a fixture file read through a listed door).
+`scripts/ci/check-embedded-spaces-tests.ps1` holds each rule on scratch
+repositories, and `gates-can-fail` plants a literal in the real tree. When red,
+repair the literal as a continuation; a fixture's columns (screen captures,
+tables, code samples after an escaped line break) are the only rows, and they
+were the baseline — a new fixture builds its columns another way (`format!`
+padding, cells joined at run time, or a `concat!` whose spaces stand in a
+literal of their own, where they start the literal and are no run).
 
 ## Third-party notices
 

@@ -7,12 +7,14 @@
 # **This list only shrinks.** `scripts/ci/check-embedded-spaces.ps1` refuses a
 # literal with a run that has no row (by its file:line), a row beyond the
 # literals its line opens (stale: remove it), and a row the merge base does not
-# have. A row is its path, its literal's text (the trimmed source line of the
-# literal's first run) and its reason; its line is where the literal opens
-# today, so a literal that moves keeps its row with the line corrected, and a
-# row pointed at another literal is a new row. A message with a run in it is a
-# lost line continuation and is repaired, never listed: end the line with `\`
-# (`docs/CONVENTIONS.md` §五).
+# have. A row is its path, its literal's own text on the line of its first run
+# (inside the quotes, trimmed) and its reason; its line is where the literal
+# opens today, so a literal that moves or whose surrounding code changes keeps
+# its row with the line corrected. A row pointed at another literal, or a listed
+# literal whose text is edited, is a new row and refused: columns that must
+# evolve leave string literals (cells joined at run time, or a fixture file read
+# through a listed door). A message with a run in it is a lost line continuation
+# and is repaired, never listed: end the line with `\` (`docs/CONVENTIONS.md` §五).
 #
 crates/bt-app/examples/video-probe.rs:387 the probe's caption: its fields spaced apart on purpose
 crates/bt-app/src/app_mouse_tests.rs:1547 code sample: the indentation after an escaped line break is the sample's own

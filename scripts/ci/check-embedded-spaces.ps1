@@ -28,10 +28,10 @@
 # in one of two places:
 #
 #   * inside a source line: a character other than a space before them (a tab
-#     counts as such a character) and, after them and any further blanks, a
-#     character that is not a space or a tab, on the same source line - a run
-#     between two words, before a `\` continuation, after an escaped `\n` that
-#     was meant to be a continuation;
+#     counts as such a character, so `a  <tab>   b` holds a run after the tab)
+#     and, after them and any further blanks, a character that is not a space
+#     or a tab, on the same source line - a run between two words, before a `\`
+#     continuation, after an escaped `\n` that was meant to be a continuation;
 #   * at the start of a source line of an escaping (non-raw) literal that
 #     follows a real line break - one with no `\` continuation before it - when
 #     a character that is not a blank follows: the shape a `\` lost at the end
@@ -53,17 +53,25 @@
 # (and the line of the run, when that is a later one), and a row beyond that
 # count is refused as stale.
 #
-# THE IDENTITY of a row is its path, its literal's text - the trimmed source
-# line of the literal's first run - and its reason; its line is where that
-# literal opens today. Rows of one line pair with that line's literals in
-# order. So a literal that moves (an edit above it) keeps its row with the
-# line corrected, and a row pointed at a different literal is a different
-# row: its text is not the one the merge base listed.
+# THE IDENTITY of a row is its path, its literal's own text on the source line
+# of its first run (the characters inside the literal on that line, trimmed -
+# not the code around it) and its reason; its line is where that literal
+# opens today. Rows of one line pair with that line's literals in order. So a
+# literal that moves (an edit above it, a rename of the code beside it, a
+# rustfmt rewrap) keeps its row with the line corrected, and a row pointed at
+# a different literal is a different row. An edit to a listed literal's
+# pinned text is a new row, and refused: the list only shrinks, with no
+# override and no replacement path. Columns that must evolve leave string
+# literals instead - cells in a slice joined at run time, or a fixture file
+# read through a listed door.
 #
 # THE COMPARISON is the dead-code gate's (`check-dead-code.ps1`): against the
 # pull request's merge base with `origin/main`, with multiplicity. The base's
 # identities are read from the base itself: its list, and each listed file as
-# the base holds it (`git show`, decoded as UTF-8), lexed the same way. A row
+# the base holds it (`git show`, decoded as UTF-8), lexed by the same code
+# path as the tree; a shape the lexer cannot finish there is reported as
+# `base <sha>:<path>:<line>: <shape>` and fails the check (the base is main,
+# and main must lex). A row
 # whose identity the merge base does not have is refused: a literal is
 # repaired, never listed - except by the commit that introduces the list. It
 # passes, loudly, when the base has no list - that is how the commit that
@@ -109,7 +117,7 @@ namespace FolioEmbeddedSpacesGate
     {
         public int Opens;     // the line the literal opens on
         public int Line;      // the line of its first run
-        public string Text;   // that source line, trimmed
+        public string Text;   // the literal's own text on that source line, trimmed
     }
 
     public sealed class Scan
@@ -304,16 +312,15 @@ namespace FolioEmbeddedSpacesGate
                     if (s[p] != ' ') { p++; continue; }
                     int run = p;
                     while (p < end && s[p] == ' ') p++;
-                    int width = p - run;
+                    if (p - run < 3) continue; // a tab after a short run is the next run's boundary
                     while (p < end && Blank(s[p])) p++;
-                    found = width >= 3 && p < end;
+                    found = p < end;
                 }
                 if (found)
                 {
-                    int tail = s.IndexOf('\n', k);
-                    if (tail < 0) tail = s.Length;
-                    int head = s.LastIndexOf('\n', k - 1) + 1;
-                    runs.Add(new Run { Opens = line, Line = at, Text = s.Substring(head, tail - head).Trim() });
+                    // The literal's own text on this source line: what stands between the quotes
+                    // (or the line's ends), not the code around it.
+                    runs.Add(new Run { Opens = line, Line = at, Text = s.Substring(k, end - k).Trim() });
                     return;
                 }
                 if (end == to) return;
@@ -441,7 +448,7 @@ foreach ($pair in $paired) {
     if ($pair.Literal) {
         $listed[$pair.Literal.Ordinal] = $true
     } else {
-        $problems.Add("${relative}: $($pair.Row.Key) is stale - no further string literal with a run of spaces opens on that line; remove the row (a literal that moved keeps its row with the line corrected, and the comparison with the merge base holds it to the same literal)")
+        $problems.Add("${relative}: $($pair.Row.Key) is stale - no further string literal with a run of spaces opens on that line; remove the row (a moved literal keeps its row with the line corrected; an edited one is a new row, refused - take deliberate columns out of string literals)")
     }
 }
 foreach ($literal in $found) {
@@ -515,6 +522,11 @@ try {
     Pop-Location
 }
 
+if ($baseProblems.Count -gt 0) {
+    foreach ($problem in $baseProblems) { Write-Host "    base ${base}:$problem" }
+    throw "$($baseProblems.Count) file(s) the merge base's list names do not lex at the base (listed above); the base is main, and main must lex."
+}
+
 # Multiplicity, not membership: two rows of one identity are two rows.
 $allowed = @{}
 foreach ($pair in (Get-Identities $before $baseLiterals)) {
@@ -535,11 +547,12 @@ Write-Host "$relative against $($base.Substring(0, 12)): $($before.Count) rows -
 
 if ($added.Count -gt 0) {
     foreach ($pair in $added) {
-        Write-Host "    added: $($pair.Row.Key) ($($pair.Row.Reason)) for the literal on its line: $($pair.Literal.Text)"
+        Write-Host "    added: $($pair.Row.Key) ($($pair.Row.Reason)) for the literal text: $($pair.Literal.Text)"
     }
     throw (
-        "$($added.Count) row(s) were added to $relative, and this list only shrinks (listed above; a row is its " +
-        "path, its literal's text and its reason, so a row pointed at another literal is an added row). " +
-        "Repair the literal instead: a message is one sentence, continued with ``\`` at the end of a line."
+        "$($added.Count) row(s) were added to $relative, and this list only shrinks (listed above): a row is its path, " +
+        "its literal's own text and its reason, so a row pointed at another literal or a listed literal whose text was " +
+        "edited is a new row - repair a message as one sentence continued with ``\``, and take deliberate columns out " +
+        "of string literals (cells joined at run time, or a fixture file read through a listed door)."
     )
 }
