@@ -1633,3 +1633,77 @@ fn a_refused_final_write_after_a_held_release_still_performs_it() {
     );
     let _ = std::fs::remove_dir_all(&run.root);
 }
+
+/// RED (T-STORE-NOTICE, C2; design note 2026-10-11 §3.6) — **a quit that completes
+/// after a merge says it in `diagnostics.log`.**
+///
+/// Folio changed the terminal face and display formulas, and the write is on its way
+/// when the quit begins. The disk answers `Moved`: a hand edit gave the face another
+/// value. The documents phase merges it without its doors — the file's face, Folio's
+/// formulas — sends the merged document, which lands, and the quit leaves. No window
+/// remains for a card, and the file's win is said once, in the merge's line.
+///
+/// MUTATION: today's code (`SettingsStore::merge_at_quit` answers no line) — nothing
+/// is said.
+#[test]
+fn a_quit_that_completes_after_a_merge_says_it_in_diagnostics() {
+    let (root, mut settings_store, mut session, mut disk) = settings_and_session("said-at-quit");
+    let folder = root.join(preview::RECOVERED_FOLDER);
+    let mut ours = settings("我们的 Ours Mono");
+    ours.display_formulas = !ours.display_formulas;
+    assert!(settings_store.store(ours));
+    let now = Instant::now();
+    let mut quit = Quit::begin(Vec::new());
+    let mut documents: [&mut dyn QuitDocument; 1] = [&mut settings_store];
+    assert_eq!(
+        drive(
+            &mut quit,
+            &mut documents,
+            &mut session,
+            &mut disk,
+            &folder,
+            now
+        ),
+        QuitStep::Documents,
+        "the write is on the worker"
+    );
+    let theirs = bytes(&settings("他们的 Theirs Mono"));
+    disk.answer_write(|_| Outcome::Moved {
+        bytes: Some(Arc::clone(&theirs)),
+    });
+    assert_eq!(
+        drive(
+            &mut quit,
+            &mut documents,
+            &mut session,
+            &mut disk,
+            &folder,
+            now
+        ),
+        QuitStep::Documents,
+        "the merged document is sent again"
+    );
+    disk.answer_write(landed);
+    assert_eq!(
+        drive(
+            &mut quit,
+            &mut documents,
+            &mut session,
+            &mut disk,
+            &folder,
+            now
+        ),
+        QuitStep::Exit
+    );
+    assert_eq!(
+        quit.take_merged_lines(),
+        vec![
+            "BT_PERSIST settings.json merged at quit: took 0 from the file, kept 1 from Folio, \
+             conflicts 1"
+                .to_owned()
+        ],
+        "the merge at quit, said once"
+    );
+    assert!(quit.take_merged_lines().is_empty(), "and not again");
+    let _ = std::fs::remove_dir_all(&root);
+}

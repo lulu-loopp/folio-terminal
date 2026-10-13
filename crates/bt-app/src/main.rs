@@ -54633,10 +54633,11 @@ impl App {
     }
 
     /// **One turn of the quit's documents phase** over the four stores
-    /// ([`quit::Quit::documents_turn`]); `None` without a quit.
+    /// ([`quit::Quit::documents_turn`]), and what it merged said in
+    /// `diagnostics.log`; `None` without a quit.
     fn quit_documents_turn(&mut self, now: Instant) -> Option<quit::QuitStep> {
         let quit = self.quit.as_mut()?;
-        Some(quit.documents_turn(
+        let step = quit.documents_turn(
             &mut [
                 &mut self.settings_store,
                 &mut self.keybindings_store,
@@ -54644,7 +54645,11 @@ impl App {
                 &mut self.pins_store,
             ],
             now,
-        ))
+        );
+        for line in quit.take_merged_lines() {
+            diagnostics::note(&line);
+        }
+        Some(step)
     }
 
     /// **One turn of the quit's recovery phase** over the four stores, the copies

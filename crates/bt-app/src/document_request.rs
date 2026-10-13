@@ -2012,7 +2012,9 @@ pub(crate) trait QuitDocument {
     /// **One turn of the documents phase**: what the storage worker answered is
     /// taken, a file a merge can fold is merged (purely — no door runs, the
     /// windows are leaving), and what is owed with nothing on the worker is sent.
-    fn quit_turn(&mut self);
+    /// Answers the `diagnostics.log` line of what this turn merged, if it merged
+    /// anything — said once, whether the quit completes or is cancelled.
+    fn quit_turn(&mut self) -> Option<String>;
     /// Where the document stands ([`Standing`]).
     fn standing(&self) -> Standing;
     /// **Hand the owed document to the storage worker as a copy into `folder`**,
@@ -2043,11 +2045,12 @@ impl<T: StoredDocument> QuitDocument for DocumentState<T> {
         }
     }
 
-    fn quit_turn(&mut self) {
+    fn quit_turn(&mut self) -> Option<String> {
         let _ = self.take_answers();
         if self.standing() == Standing::Unsent {
             self.send_owed();
         }
+        None
     }
 
     fn standing(&self) -> Standing {

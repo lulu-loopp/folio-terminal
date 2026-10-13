@@ -400,3 +400,114 @@ fn a_failed_presentation_still_raises_the_notice() {
     assert_eq!(rig.cards().len(), 1);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// RED (C2; T-QUIT-DOCUMENTS' hand-off) — **what a cancelled quit merged is
+/// named on the next pass's card**, once, and its line was written once.
+///
+/// Folio set the theme and the terminal's font size, and the write is on its
+/// way when a quit begins. The disk answers `Moved`: the file now holds another
+/// theme. The documents phase merges it without its doors — the file's theme,
+/// Folio's size — says so in one line, sends the merged document again, and,
+/// with no answer by its deadline, is cancelled. The next storage pass puts the
+/// merge in force and its card names the theme; its own line counts only what
+/// it merged itself — nothing.
+///
+/// MUTATIONS: drop `merged_at_quit`'s conflicts from the card (in
+/// `SettingsPass::replaced`, name only the pass's own) — no card; write the
+/// at-quit merge again in the next pass's line (in `SettingsStore::begin_merge`,
+/// fold the quit's account into the pass's) — the pass's line counts the
+/// conflict a second time.
+#[test]
+fn what_a_cancelled_quit_merged_is_named_on_the_next_passs_card() {
+    let root = StoragePassRig::scratch("cancelled-quit");
+    let mut rig = StoragePassRig::open(root.clone());
+    assert!(rig.settings.store(SettingsV1 {
+        theme_mode: ThemeModeV1::Light,
+        terminal_font_size: 19,
+        ..SettingsV1::default()
+    }));
+
+    let start = Instant::now();
+    let mut quit = quit::Quit::begin(Vec::new());
+    let mut lines = Vec::new();
+    let mut turn = |rig: &mut StoragePassRig, quit: &mut quit::Quit, now| {
+        let step = quit.documents_turn(
+            &mut [
+                &mut rig.settings,
+                &mut rig.keybindings,
+                &mut rig.profiles,
+                &mut rig.pins,
+            ],
+            now,
+        );
+        lines.extend(quit.take_merged_lines());
+        step
+    };
+    assert_eq!(
+        turn(&mut rig, &mut quit, start),
+        quit::QuitStep::Documents,
+        "the write is on the worker"
+    );
+    let theirs = settings_with(ThemeModeV1::Dark);
+    let Some(persist::ScriptedJob::Document(write)) = rig.jobs.next() else {
+        panic!("the press's write is queued");
+    };
+    let _ = write.answer.send(document_request::DocumentAnswer {
+        generation: write.generation,
+        version: write.version,
+        asker: write.asker,
+        outcome: document_request::Outcome::Moved {
+            bytes: Some(Arc::from(
+                document_request::StoredDocument::to_bytes(&theirs).expect("serializes"),
+            )),
+        },
+        not_durable: None,
+        retired: Vec::new(),
+        left: None,
+    });
+    assert_eq!(
+        turn(&mut rig, &mut quit, start),
+        quit::QuitStep::Documents,
+        "merged, and sent again"
+    );
+    assert_ne!(
+        turn(&mut rig, &mut quit, start + quit::QUIT_DOCUMENTS_BY),
+        quit::QuitStep::Documents,
+        "no answer by the deadline"
+    );
+    assert!(quit.take_cancelled().is_some(), "the quit is cancelled");
+    assert_eq!(
+        lines,
+        vec![
+            "BT_PERSIST settings.json merged at quit: took 0 from the file, kept 1 from Folio, \
+             conflicts 1"
+                .to_owned()
+        ],
+        "the quit's merge, said once"
+    );
+
+    rig.turn().expect("the next storage pass");
+    assert_eq!(
+        rig.said,
+        vec![
+            "BT_PERSIST settings.json merged: took 0 from the file, kept 0 from Folio, \
+             conflicts 0, doors refused: 0"
+                .to_owned()
+        ],
+        "the pass counts only what it merged"
+    );
+    assert_eq!(
+        rig.raised,
+        vec![MergeNotice {
+            files: vec![ReplacedInFile {
+                file: persist::SETTINGS_FILE_NAME,
+                values: vec![settings::SettingsRow::Theme.title().to_owned()],
+                not_applied: Vec::new(),
+            }]
+        }],
+        "the card names what the quit's merge took from the file"
+    );
+    assert_eq!(rig.settings.loaded().theme_mode, ThemeModeV1::Dark);
+    assert_eq!(rig.settings.loaded().terminal_font_size, 19);
+    let _ = std::fs::remove_dir_all(&root);
+}

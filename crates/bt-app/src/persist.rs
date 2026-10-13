@@ -2482,7 +2482,7 @@ impl SettingsStore {
         if merges.is_empty() && at_quit.is_none() {
             return None;
         }
-        let mut account = at_quit.unwrap_or_default();
+        let mut account = crate::settings_merge::Account::default();
         for merge in merges {
             account.add(merge);
         }
@@ -2495,29 +2495,37 @@ impl SettingsStore {
         Some(crate::settings_merge::SettingsPass::new(
             crate::settings_merge::doors(self.document.projection(), &merged, platform),
             account,
+            at_quit.unwrap_or_default(),
         ))
     }
 
     /// **A quit's merge** (design note 2026-10-11, revision (c)2): every file
     /// stored for the merge is merged and folded into `desired`, as
     /// [`Self::begin_merge`] does, and **nothing is put in force** — no door runs,
-    /// the windows are leaving. What it merged is kept for the next storage pass,
-    /// which puts it in force should the quit be cancelled.
-    fn merge_at_quit(&mut self, platform: bt_platform::HostPlatform) {
+    /// the windows are leaving. Answers its one `diagnostics.log` line, said once
+    /// whether the quit completes or is cancelled (T-STORE-NOTICE); what it merged
+    /// is kept for the next storage pass, which puts it in force and names it on
+    /// its card should the quit be cancelled, without counting it again.
+    fn merge_at_quit(&mut self, platform: bt_platform::HostPlatform) -> Option<String> {
         if !self.document.merge_waits() {
-            return;
+            return None;
         }
         let merges = self.document.merge_stored(|base, ours, theirs| {
             let merged = crate::settings_merge::merge(base, ours, theirs, platform);
             (merged.document, merged.account)
         });
         if merges.is_empty() {
-            return;
+            return None;
         }
-        let account = self.merged_at_quit.get_or_insert_with(Default::default);
+        let mut account = crate::settings_merge::Account::default();
         for merge in merges {
             account.add(merge);
         }
+        let line = account.said(SETTINGS_FILE_NAME, crate::settings_merge::Said::AtQuit);
+        self.merged_at_quit
+            .get_or_insert_with(Default::default)
+            .add(account);
+        Some(line)
     }
 
     /// **A storage pass's merge, its last step**: the writes are released, and
@@ -2562,12 +2570,13 @@ impl QuitDocument for SettingsStore {
         self.document.quit_begin();
     }
 
-    fn quit_turn(&mut self) {
+    fn quit_turn(&mut self) -> Option<String> {
         let _ = self.document.take_answers();
-        self.merge_at_quit(bt_platform::host_platform());
+        let merged = self.merge_at_quit(bt_platform::host_platform());
         if self.document.standing() == crate::quit::Standing::Unsent {
             self.document.send_owed();
         }
+        merged
     }
 
     fn standing(&self) -> crate::quit::Standing {
@@ -2644,12 +2653,13 @@ impl QuitDocument for KeybindingsStore {
 
     /// A `Moved` or `Displaced` answer at quit is merged as the running window
     /// merges it, without the door ([`SettingsStore`]'s turn).
-    fn quit_turn(&mut self) {
+    fn quit_turn(&mut self) -> Option<String> {
         let _ = self.document.take_answers();
-        self.merge_at_quit(bt_platform::host_platform());
+        let merged = self.merge_at_quit(bt_platform::host_platform());
         if self.document.standing() == crate::quit::Standing::Unsent {
             self.document.send_owed();
         }
+        merged
     }
 
     fn standing(&self) -> crate::quit::Standing {
@@ -2840,7 +2850,7 @@ impl KeybindingsStore {
         if merges.is_empty() && at_quit.is_none() {
             return None;
         }
-        let mut about = at_quit.unwrap_or_default();
+        let mut about = crate::keybindings_merge::About::default();
         for merge in merges {
             about.add(merge);
         }
@@ -2848,28 +2858,35 @@ impl KeybindingsStore {
             self.document.desired().clone(),
             platform,
             about,
+            at_quit.unwrap_or_default(),
         ))
     }
 
     /// **A quit's merge** (revision (c)2): [`Self::begin_merge`]'s merge and
     /// fold, and nothing put in force — no door runs, the windows are leaving.
-    /// What it merged is kept for the next storage pass, which puts it in force
-    /// should the quit be cancelled.
-    fn merge_at_quit(&mut self, platform: bt_platform::HostPlatform) {
+    /// Answers its one `diagnostics.log` line ([`SettingsStore`]'s
+    /// `merge_at_quit`, for its reason); what it merged is kept for the next
+    /// storage pass, which puts it in force should the quit be cancelled.
+    fn merge_at_quit(&mut self, platform: bt_platform::HostPlatform) -> Option<String> {
         if !self.document.merge_waits() {
-            return;
+            return None;
         }
         let merges = self.document.merge_stored(|base, ours, theirs| {
             let merged = crate::keybindings_merge::merge(base, ours, theirs, platform);
             (merged.document, merged.about)
         });
         if merges.is_empty() {
-            return;
+            return None;
         }
-        let about = self.merged_at_quit.get_or_insert_with(Default::default);
+        let mut about = crate::keybindings_merge::About::default();
         for merge in merges {
             about.add(merge);
         }
+        let line = about.said_at_quit();
+        self.merged_at_quit
+            .get_or_insert_with(Default::default)
+            .add(about);
+        Some(line)
     }
 
     /// **A storage pass's merge, its last step**: the door has run, and the
@@ -2965,12 +2982,13 @@ impl QuitDocument for ProfilesStore {
     /// A turn that folds a changed file in before it sends: a `Moved` or
     /// `Displaced` answer at quit is merged as the running window merges it,
     /// without the door.
-    fn quit_turn(&mut self) {
+    fn quit_turn(&mut self) -> Option<String> {
         let _ = self.document.take_answers();
-        self.merge_at_quit();
+        let merged = self.merge_at_quit();
         if self.document.standing() == crate::quit::Standing::Unsent {
             self.document.send_owed();
         }
+        merged
     }
 
     fn standing(&self) -> crate::quit::Standing {
@@ -3129,7 +3147,7 @@ impl ProfilesStore {
         if merges.is_empty() && at_quit.is_none() {
             return None;
         }
-        let mut account = at_quit.unwrap_or_default();
+        let mut account = crate::settings_merge::Account::default();
         for merge in merges {
             account.add(merge);
         }
@@ -3137,24 +3155,32 @@ impl ProfilesStore {
         Some(crate::table_merge::MergePass::new(
             PROFILES_FILE_NAME,
             account,
+            at_quit.unwrap_or_default(),
         ))
     }
 
     /// **A quit's merge**: [`Self::begin_merge`]'s fold, and nothing put in
-    /// force — the windows are leaving. What it merged is kept for the next
-    /// storage pass, which installs it should the quit be cancelled.
-    fn merge_at_quit(&mut self) {
+    /// force — the windows are leaving. Answers its one `diagnostics.log` line
+    /// ([`SettingsStore`]'s `merge_at_quit`, for its reason); what it merged is
+    /// kept for the next storage pass, which installs it should the quit be
+    /// cancelled.
+    fn merge_at_quit(&mut self) -> Option<String> {
         if !self.document.merge_waits() {
-            return;
+            return None;
         }
         let merges = self.document.merge_stored(merge_profiles);
         if merges.is_empty() {
-            return;
+            return None;
         }
-        let account = self.merged_at_quit.get_or_insert_with(Default::default);
+        let mut account = crate::settings_merge::Account::default();
         for merge in merges {
             account.add(merge);
         }
+        let line = account.said(PROFILES_FILE_NAME, crate::settings_merge::Said::AtQuit);
+        self.merged_at_quit
+            .get_or_insert_with(Default::default)
+            .add(account);
+        Some(line)
     }
 
     /// **A storage pass's merge, its last step**: the merged document is handed

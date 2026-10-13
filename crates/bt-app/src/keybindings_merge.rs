@@ -73,7 +73,7 @@ use bt_persist::{BindingOverrideV1, KEYBINDINGS_SCHEMA_VERSION, KeybindingsV1};
 use crate::document_request::ReplacedInFile;
 use crate::persist::KEYBINDINGS_FILE_NAME;
 use crate::settings_bundle::{LineRead, read_keybindings, read_lines};
-use crate::settings_merge::{Account, PassOutcome, Unit, unit};
+use crate::settings_merge::{Account, PassOutcome, Said, Unit, conflicts_of, unit};
 use crate::shortcuts::{
     Chord, ChordVerdict, Override, Shortcuts, format_chord_on, parse_chord, parse_chord_in,
 };
@@ -246,6 +246,26 @@ pub(crate) struct About {
 }
 
 impl About {
+    /// **What these merges say in `diagnostics.log`** (§3.6): the counts, then each chord
+    /// Folio's action gave up to the file's, and each line of the file this edit added
+    /// that could not be carried into this platform's dialect — `merged at quit` for a
+    /// quit's merge.
+    pub(crate) fn said(&self, when: Said) -> String {
+        let mut line = self.account.said(KEYBINDINGS_FILE_NAME, when);
+        for sentence in &self.chords_given {
+            line.push_str(&format!("; {sentence}"));
+        }
+        for (name, why) in &self.untranslatable {
+            line.push_str(&format!("; {name} not applied: {why}"));
+        }
+        line
+    }
+
+    /// [`Self::said`] for a quit's merge.
+    pub(crate) fn said_at_quit(&self) -> String {
+        self.said(Said::AtQuit)
+    }
+
     /// Add one merge's account to the pass's.
     pub(crate) fn add(&mut self, other: About) {
         self.account.add(other.account);
@@ -467,38 +487,48 @@ pub(crate) struct KeybindingsPass {
     pub(crate) platform: bt_platform::HostPlatform,
     /// Every merge of the pass, summed.
     pub(crate) about: About,
+    /// **What a cancelled quit's documents phase merged**, put in force by this pass:
+    /// named on the card, and not counted in this pass's line — the quit said it when it
+    /// merged ([`About::said_at_quit`]).
+    pub(crate) at_quit: About,
     /// The departures this pass took from the file that the reader refused, by name,
     /// with why.
     pub(crate) refused: Vec<(String, String)>,
 }
 
 impl KeybindingsPass {
-    /// A pass over `document`, with `about` to say; the door not run yet.
+    /// A pass over `document`, with `about` to say and what a quit merged, `at_quit`, to
+    /// name; the door not run yet.
     pub(crate) fn new(
         document: KeybindingsV1,
         platform: bt_platform::HostPlatform,
         about: About,
+        at_quit: About,
     ) -> Self {
         Self {
             document,
             platform,
             about,
+            at_quit,
             refused: Vec::new(),
         }
+    }
+
+    /// **Whether this pass, or the cancelled quit it puts in force, took `action`'s
+    /// departure from the file** — a refusal of it is the file's line not applied.
+    fn from_the_file(&self, action: &str) -> bool {
+        self.about
+            .from_the_file
+            .iter()
+            .chain(&self.at_quit.from_the_file)
+            .any(|taken| taken == action)
     }
 
     /// **The pass's one line for `diagnostics.log`** (§3.6): the counts, then each chord
     /// Folio's action gave up to the file's, and each line of the file not put in force.
     pub(crate) fn diagnostics(&self) -> String {
-        let mut line = format!(
-            "BT_PERSIST {KEYBINDINGS_FILE_NAME} merged: took {} from the file, kept {} from \
-             Folio, conflicts {}",
-            self.about.account.took, self.about.account.kept, self.about.account.conflicted
-        );
-        for sentence in &self.about.chords_given {
-            line.push_str(&format!("; {sentence}"));
-        }
-        for (name, why) in self.about.untranslatable.iter().chain(&self.refused) {
+        let mut line = self.about.said(Said::InThePass);
+        for (name, why) in &self.refused {
             line.push_str(&format!("; {name} not applied: {why}"));
         }
         line
@@ -510,15 +540,22 @@ impl KeybindingsPass {
     /// once.
     pub(crate) fn replaced(&self) -> Option<ReplacedInFile> {
         let mut not_applied = Vec::new();
-        for (name, _) in self.about.untranslatable.iter().chain(&self.refused) {
+        for (name, _) in self
+            .at_quit
+            .untranslatable
+            .iter()
+            .chain(&self.about.untranslatable)
+            .chain(&self.refused)
+        {
             push_once(&mut not_applied, name.clone());
         }
-        if self.about.account.conflicts.is_empty() && not_applied.is_empty() {
+        let values = conflicts_of(&self.at_quit.account, &self.about.account);
+        if values.is_empty() && not_applied.is_empty() {
             return None;
         }
         Some(ReplacedInFile {
             file: KEYBINDINGS_FILE_NAME,
-            values: self.about.account.conflicts.clone(),
+            values,
             not_applied,
         })
     }
@@ -556,7 +593,7 @@ pub(crate) fn run_pass(window: &mut impl KeybindingsWindow) -> PassOutcome {
     };
     let (table, faults) = read_keybindings(&pass.document, pass.platform);
     for fault in faults {
-        if pass.about.from_the_file.contains(&fault.id) {
+        if pass.from_the_file(&fault.id) {
             pass.refused.push((name(&table, &fault.id), fault.reason));
         }
     }
@@ -777,7 +814,12 @@ mod tests {
             (merged.about.account.kept, merged.about.account.conflicted),
             (0, 1)
         );
-        let pass = KeybindingsPass::new(merged.document.clone(), PLATFORM, merged.about);
+        let pass = KeybindingsPass::new(
+            merged.document.clone(),
+            PLATFORM,
+            merged.about,
+            About::default(),
+        );
         assert_eq!(
             pass.diagnostics(),
             format!(
@@ -1282,7 +1324,12 @@ mod tests {
             Some("Ctrl+k")
         );
         let merged = merge(&base, &base, &edited, PLATFORM);
-        let pass = KeybindingsPass::new(merged.document.clone(), PLATFORM, merged.about.clone());
+        let pass = KeybindingsPass::new(
+            merged.document.clone(),
+            PLATFORM,
+            merged.about.clone(),
+            About::default(),
+        );
         assert_eq!(pass.replaced(), None, "a clean hand edit says nothing");
         assert_eq!(merged.document.bindings, edited.bindings);
         let (door, faults) = read_keybindings(&merged.document, PLATFORM);
