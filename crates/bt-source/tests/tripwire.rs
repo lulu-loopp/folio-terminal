@@ -54,6 +54,37 @@
 //! 4. a directory read rooted at the manifest directory that picks files out by
 //!    the `rs` extension.
 //!
+//! # Shell readers: the literal shapes, and what is a diagnostic
+//!
+//! A `.ps1` file is a reader when its text holds one of the shell read verbs
+//! (`Get-Content`, `Select-String`, `ReadAllText`, `ReadAllLines`,
+//! `ReadAllBytes`), and in a reader a literal naming a `.rs` path is a hit of
+//! shape 2 in exactly two spellings:
+//!
+//! * `"…lib.rs"` — double-quoted;
+//! * `'…lib.rs'` — single-quoted;
+//!
+//! each with a path-shaped value (no spaces, no quotes, nothing but name
+//! characters and separators, something before the dot), its opener the
+//! nearest quote of the same kind on the same line before the closer — the
+//! one-line back-walk, never a pairing from the top of the file.
+//!
+//! Two other spellings in a reader are **diagnostics**: the test fails naming
+//! `file:line` and the shape, and the author either rewrites the literal into
+//! one of the two spellings or lists the file. They are a double-quoted value
+//! ending in `.rs` that is interpolated (an unescaped `$` in it: `"$dir/lib.rs"`,
+//! `"${x}.rs"`, `"$(…)/a.rs"`), and a `.rs` extension on a line inside a
+//! here-string (`@"…"@`, `@'…'@`) that is not the closer of one of the two
+//! spellings. A here-string opens at a line whose code ends in `@"` or `@'`
+//! (the `@` not just after a quote or a backtick) and closes at the next line
+//! that starts with that quote and `@`. Nothing else is read: a `.rs` with no
+//! quote at all on its line outside a here-string (a comment, `-Filter *.rs`,
+//! a glob) is not a literal path and is out of scope, and so is a quoted value
+//! that is neither path-shaped nor interpolated (a sub-expression holding a
+//! quote of its own, `"$(Join-Path $a "b")/a.rs"`, walks back to its inner
+//! quote and is neither). Rust files are read as above; these shapes are the
+//! shell's only.
+//!
 //! **It matches by file, not by reader**, because that is the granularity both
 //! lists have: the allowlist is the *file-scoped* one, and a debt row's owning
 //! item is a test name no lexical scan can attribute to a byte with a straight
@@ -366,6 +397,11 @@ enum Kind {
     ReadOfANamedSource,
     FileScope,
     ManifestDirectoryWalk,
+    /// A shell reader's double-quoted `.rs` value that is interpolated.
+    InterpolatedShellPath,
+    /// A shell reader's `.rs` extension inside a here-string, not a literal of
+    /// either spelling.
+    ShellPathInAHereString,
 }
 
 impl Kind {
@@ -375,6 +411,14 @@ impl Kind {
             Self::ReadOfANamedSource => "reads a named source file at run time",
             Self::FileScope => "builds a scope that names a file",
             Self::ManifestDirectoryWalk => "walks its own manifest directory for `.rs` files",
+            Self::InterpolatedShellPath => {
+                "names a `.rs` path by interpolation, which the scan cannot read: spell it as one \
+                 '…' or \"…\" literal, or list the file"
+            }
+            Self::ShellPathInAHereString => {
+                "names a `.rs` file inside a here-string, which the scan cannot read: spell it as \
+                 one '…' or \"…\" literal, or list the file"
+            }
         }
     }
 }
@@ -457,8 +501,13 @@ fn from_root(path: &Path, root: &Path) -> String {
 fn hits_in(file: &str, text: &str, rust: bool) -> Vec<Hit> {
     let mut found = Vec::new();
     let items = if rust { function_starts(text) } else { vec![0] };
+    let literals = if rust {
+        named_source_literals(text)
+    } else {
+        shell_source_literals(text)
+    };
 
-    for (open, close) in named_source_literals(text) {
+    for &(open, close) in &literals {
         let named = &text[open + 1..close];
         let before = &text[..open];
         let kind = if ends_with_any(strip_raw_marker(before.trim_end()), &INCLUDING) {
@@ -500,6 +549,18 @@ fn hits_in(file: &str, text: &str, rust: bool) -> Vec<Hit> {
         });
     }
 
+    if !rust && reads_a_file(text, rust) {
+        let closers: BTreeSet<usize> = literals.iter().map(|&(_, close)| close).collect();
+        for (at, kind, subject) in diagnostic_source_shapes(text, &closers) {
+            found.push(Hit {
+                file: file.to_owned(),
+                line: line_of(text, at),
+                kind,
+                subject,
+            });
+        }
+    }
+
     found
 }
 
@@ -512,11 +573,25 @@ fn hits_in(file: &str, text: &str, rust: bool) -> Vec<Hit> {
 /// reads the rest of the file inside out; this cannot, because every candidate
 /// is decided within one line.
 fn named_source_literals(text: &str) -> Vec<(usize, usize)> {
+    quoted_source_literals(text, '"')
+}
+
+/// [`named_source_literals`] for a shell file: the double-quoted spelling and
+/// the single-quoted one, each found by the same one-line back-walk, in text
+/// order.
+fn shell_source_literals(text: &str) -> Vec<(usize, usize)> {
+    let mut found = quoted_source_literals(text, '"');
+    found.extend(quoted_source_literals(text, '\''));
+    found.sort_unstable();
+    found
+}
+
+/// Every `quote`-delimited literal whose value is a path ending in `.rs`.
+fn quoted_source_literals(text: &str, quote: char) -> Vec<(usize, usize)> {
     let mut found = Vec::new();
-    for (at, _) in text.match_indices(".rs\"") {
+    for (at, _) in text.match_indices(&format!(".rs{quote}")) {
         let close = at + 3;
-        let line_start = text[..at].rfind('\n').map_or(0, |end| end + 1);
-        let Some(open) = text[line_start..at].rfind('"').map(|at| line_start + at) else {
+        let Some(open) = opener_on_the_line(text, at, quote) else {
             continue;
         };
         if path_shaped(&text[open + 1..close]) {
@@ -524,6 +599,97 @@ fn named_source_literals(text: &str) -> Vec<(usize, usize)> {
         }
     }
     found
+}
+
+/// The nearest `quote` before `at` on `at`'s line.
+fn opener_on_the_line(text: &str, at: usize, quote: char) -> Option<usize> {
+    let line_start = text[..at].rfind('\n').map_or(0, |end| end + 1);
+    text[line_start..at].rfind(quote).map(|at| line_start + at)
+}
+
+/// The two diagnostic shapes of a shell reader, each as the byte position of
+/// its `.rs`, its kind and what it spells: a double-quoted `.rs` value that is
+/// interpolated, and a `.rs` extension inside a here-string that is not the
+/// closer of a literal in `closers` (the closing quotes of the two spellings)
+/// nor already an interpolated value.
+fn diagnostic_source_shapes(text: &str, closers: &BTreeSet<usize>) -> Vec<(usize, Kind, String)> {
+    let mut found = Vec::new();
+    let mut interpolated = BTreeSet::new();
+    for (at, _) in text.match_indices(".rs\"") {
+        let close = at + 3;
+        let Some(open) = opener_on_the_line(text, at, '"') else {
+            continue;
+        };
+        let value = &text[open + 1..close];
+        if !path_shaped(value) && interpolates(value) {
+            interpolated.insert(at);
+            found.push((at, Kind::InterpolatedShellPath, value.to_owned()));
+        }
+    }
+    for lines in here_string_bodies(text) {
+        for (at, _) in text[lines.clone()].match_indices(".rs") {
+            let at = lines.start + at;
+            let extension = !text[at + 3..].starts_with(|character: char| {
+                character.is_ascii_alphanumeric() || character == '_'
+            });
+            if extension && !closers.contains(&(at + 3)) && !interpolated.contains(&at) {
+                let line_start = text[..at].rfind('\n').map_or(0, |end| end + 1);
+                let line_end = text[at..].find('\n').map_or(text.len(), |end| at + end);
+                let line = text[line_start..line_end].trim();
+                found.push((at, Kind::ShellPathInAHereString, line.to_owned()));
+            }
+        }
+    }
+    found.sort_by_key(|&(at, _, _)| at);
+    found
+}
+
+/// Whether a double-quoted PowerShell value expands a variable or a
+/// sub-expression: a `$` no backtick escapes.
+fn interpolates(value: &str) -> bool {
+    value
+        .match_indices('$')
+        .any(|(at, _)| !value[..at].ends_with('`'))
+}
+
+/// The content lines of every here-string, as byte ranges over `text`: from
+/// the line after an opener (a line whose code ends in `@"` or `@'`, the `@`
+/// not just after a quote or a backtick) to the start of the line that closes
+/// it (one starting with that quote and `@`), or to the end of the text.
+fn here_string_bodies(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut bodies = Vec::new();
+    let mut open: Option<(char, usize)> = None;
+    let mut at = 0usize;
+    for line in text.split_inclusive('\n') {
+        let next = at + line.len();
+        match open {
+            Some((quote, start)) => {
+                let mut closer = String::from(quote);
+                closer.push('@');
+                if line.starts_with(&closer) {
+                    bodies.push(start..at);
+                    open = None;
+                }
+            }
+            None => {
+                let code = line.trim_end();
+                for quote in ['"', '\''] {
+                    let mut opener = String::from('@');
+                    opener.push(quote);
+                    if let Some(before) = code.strip_suffix(&opener)
+                        && !before.ends_with(['"', '\'', '`'])
+                    {
+                        open = Some((quote, next));
+                    }
+                }
+            }
+        }
+        at = next;
+    }
+    if let Some((_, start)) = open {
+        bodies.push(start..text.len());
+    }
+    bodies
 }
 
 /// A name a file could have: no spaces, no quotes, and something before the dot.
@@ -918,6 +1084,148 @@ fn a_planted_reader_that_is_on_neither_list_makes_the_tripwire_fire() {
     assert!(unlisted(&hits, &listed, &BTreeSet::new(), &BTreeMap::new()).is_empty());
 
     std::fs::remove_dir_all(&plot).expect("the plant is taken away again");
+}
+
+/// Where the planted shell readers below say they live.
+const PLANTED_SCRIPT: &str = "scripts/planted.ps1";
+
+/// The planted script's hits and diagnostics, as `(line, kind, subject)`.
+fn shell_findings(script: &str) -> Vec<(usize, Kind, String)> {
+    hits_in(PLANTED_SCRIPT, script, false)
+        .into_iter()
+        .map(|hit| (hit.line, hit.kind, hit.subject))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// RED — **a single-quoted `.rs` path in a shell reader is a hit**, as the
+/// double-quoted one always was, and the check refuses it naming the line.
+///
+/// MUTATION: `shell_source_literals` without its single-quoted half (only
+/// `quoted_source_literals(text, '"')`) finds nothing here, and this goes red.
+#[test]
+fn a_single_quoted_source_path_in_a_shell_reader_is_a_hit() {
+    let script = "# 读取一个源文件 — reads one\n\
+                  Write-Host '中文 mixed'; $text = Get-Content 'crates/x/src/lib.rs'\n";
+    assert_eq!(
+        shell_findings(script),
+        vec![(
+            2,
+            Kind::ReadOfANamedSource,
+            "crates/x/src/lib.rs".to_owned()
+        )]
+    );
+    let hits = hits_in(PLANTED_SCRIPT, script, false);
+    let strays = unlisted(&hits, &BTreeSet::new(), &BTreeSet::new(), &BTreeMap::new());
+    let said = complaint(
+        &strays,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        &BTreeMap::new(),
+    );
+    assert!(
+        said.contains("scripts/planted.ps1:2 "),
+        "the refusal names the line: {said}"
+    );
+}
+
+/// RED — **an interpolated `.rs` path in a shell reader is a diagnostic, not a
+/// pass**: the check fails naming the line and the shape.
+///
+/// MUTATION: `diagnostic_source_shapes` without its interpolated loop finds no
+/// failure here, and this goes red.
+#[test]
+fn an_interpolated_source_path_in_a_shell_reader_is_a_diagnostic_not_a_pass() {
+    let script = "$root = Split-Path -Parent $PSScriptRoot  # 根目录\n\
+                  $a = Get-Content \"$root/crates/x/src/lib.rs\"\n\
+                  $b = [IO.File]::ReadAllText(\"${dir}.rs\")\n\
+                  $c = Get-Content \"$(Join-Path $root 'crates')/a.rs\"\n\
+                  $d = \"`$escaped/lib.rs\"\n";
+    assert_eq!(
+        shell_findings(script),
+        vec![
+            (
+                2,
+                Kind::InterpolatedShellPath,
+                "$root/crates/x/src/lib.rs".to_owned()
+            ),
+            (3, Kind::InterpolatedShellPath, "${dir}.rs".to_owned()),
+            (
+                4,
+                Kind::InterpolatedShellPath,
+                "$(Join-Path $root 'crates')/a.rs".to_owned()
+            ),
+        ]
+    );
+    let hits = hits_in(PLANTED_SCRIPT, script, false);
+    let strays = unlisted(&hits, &BTreeSet::new(), &BTreeSet::new(), &BTreeMap::new());
+    let said = complaint(
+        &strays,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        &BTreeMap::new(),
+    );
+    assert!(
+        said.contains("scripts/planted.ps1:2 names a `.rs` path by interpolation"),
+        "the failure names the line and the shape: {said}"
+    );
+    // On a list, the file's diagnostics are cleared as its hits are.
+    let listed = BTreeSet::from([PLANTED_SCRIPT.to_owned()]);
+    assert!(unlisted(&hits, &listed, &BTreeSet::new(), &BTreeMap::new()).is_empty());
+}
+
+/// RED — **a `.rs` file named inside a here-string of a shell reader is a
+/// diagnostic**, unless it is one of the two literal spellings, which is a hit.
+///
+/// MUTATION: `diagnostic_source_shapes` without its here-string loop finds no
+/// failure on lines 3 and 7, and this goes red.
+#[test]
+fn a_here_string_naming_a_source_is_a_diagnostic() {
+    let script = "$body = @\"\n\
+                  first line 中文\n\
+                  crates/x/src/lib.rs\n\
+                  \"@\n\
+                  $quoted = @'\n\
+                  Get-Content 'crates/y/src/main.rs'\n\
+                  then mod.rs, and a .rsx that is no extension\n\
+                  '@\n\
+                  $at = '@'\n\
+                  $text = Get-Content $path\n\
+                  not inside: a.rs\n";
+    assert_eq!(
+        shell_findings(script),
+        vec![
+            (
+                3,
+                Kind::ShellPathInAHereString,
+                "crates/x/src/lib.rs".to_owned()
+            ),
+            (
+                6,
+                Kind::ReadOfANamedSource,
+                "crates/y/src/main.rs".to_owned()
+            ),
+            (
+                7,
+                Kind::ShellPathInAHereString,
+                "then mod.rs, and a .rsx that is no extension".to_owned()
+            ),
+        ]
+    );
+}
+
+/// PIN — **a `.rs` with no quote on its line outside a here-string — a glob, a
+/// comment — is neither a hit nor a diagnostic**: it is not a literal path.
+///
+/// MUTATION: count every `.rs` as a here-string line (`here_string_bodies`
+/// returning the whole text) and this goes red.
+#[test]
+fn a_glob_or_comment_naming_rs_is_neither_hit_nor_diagnostic() {
+    let script = "# reads main.rs — 读取 main.rs\n\
+                  Get-ChildItem -Recurse -Filter *.rs | Get-Content\n\
+                  $files = Select-String -Path src/*.rs -Pattern fn\n";
+    assert_eq!(shell_findings(script), Vec::new());
 }
 
 /// PIN — **every allowlist entry names one file, one reason, and a file the scan

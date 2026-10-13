@@ -75,7 +75,20 @@ under `target/` and bytes the shipped program embeds are not subjects.
 
 Where and what to do: `crates/bt-source/tests/tripwire.rs`.
 `no_source_reader_names_a_file_outside_the_two_lists` holds the Rust-source
-readers (four lexical shapes, by file);
+readers (four lexical shapes, by file). In a PowerShell reader (a `.ps1`
+holding `Get-Content`, `Select-String` or `ReadAll{Text,Lines,Bytes}`) a `.rs`
+path literal is a hit in exactly two spellings, `"…lib.rs"` and `'…lib.rs'`,
+each path-shaped, its opener the nearest quote of its kind on the same line;
+two other spellings are diagnostics that fail naming `file:line` and the shape —
+an interpolated double-quoted value (`"$dir/lib.rs"`, `"${x}.rs"`,
+`"$(…)/a.rs"`) and a `.rs` extension inside a here-string (`@"…"@`, `@'…'@`)
+that is not one of the two spellings — so the author rewrites the literal into
+one of the two or lists the file. A `.rs` with no quote on its line outside a
+here-string (a comment, `-Filter *.rs`) is not a literal path and is out of
+scope. A shell reader is cleared like a Rust one, by file: a gate whose subject
+really is source files is a `FileScoped` variant (the vendor-notice, dead-code
+and lint-probe gates), and a scratch file a script writes into a temporary
+tree is a file key on `SOURCE-READERS.tsv` as an `exception` naming it;
 `every_reader_of_a_committed_document_is_on_a_list` holds the document readers
 (by item, through `bt-source`'s index — no script reads Rust for it), and its
 message names the item, the file and both lists;
