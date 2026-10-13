@@ -237,7 +237,13 @@
 //! cleared as a script's are, by file. The three workflow diagnostics are
 //! not: they are about what the scan can read, not about a source being read,
 //! so no list clears them ([`Kind::cleared_by_a_list`]) and a listed workflow
-//! that has one is refused all the same; the shape is rewritten.
+//! that has one is refused all the same; the shape is rewritten. The split is
+//! deliberate: a listed file is a declared reader of sources, so an
+//! interpolated or unreadable `.rs` path inside it (`InterpolatedShellPath`,
+//! `UnreadableShellPath`, in a script or a workflow's reader step) is part of
+//! what its list vouches for and is cleared with it, while a workflow shape
+//! the scan cannot read hides what the file reads at all, which no list can
+//! vouch for.
 //!
 //! **It matches by file, not by reader**, because that is the granularity both
 //! lists have: the allowlist is the *file-scoped* one, and a debt row's owning
@@ -3447,6 +3453,51 @@ fn a_run_value_the_scan_cannot_read_is_a_diagnostic() {
             && said.contains(".github/workflows/planted.yml:9 has a `run:` value"),
         "a listed workflow's unreadable value is refused all the same: {said}"
     );
+}
+
+/// RED — **a list clears a listed reader's path shapes and never its
+/// workflow diagnostics**: in one listed workflow, a reader step's `.rs`
+/// value that is not one path is cleared with the file, and its unreadable
+/// `run:` value is refused; a listed script's unreadable path is cleared.
+///
+/// MUTATION: `Kind::cleared_by_a_list` answering `false` for every kind
+/// refuses line 5 too; answering `true` for every kind lets line 6 pass. Each
+/// goes red.
+#[test]
+fn a_listed_reader_clears_its_path_shapes_and_not_its_workflow_diagnostics() {
+    let workflow = yaml(&[
+        (0, "jobs:"),
+        (1, "mixed:"),
+        (2, "runs-on: windows-2025"),
+        (2, "steps:"),
+        (3, "- run: Get-Content 'crates/a b/lib.rs'  # 中文"),
+        (3, "- run: *shared"),
+    ]);
+    let hits = findings(PLANTED_WORKFLOW, &workflow, Source::Workflow);
+    let found: Vec<(usize, Kind)> = hits.iter().map(|hit| (hit.line, hit.kind)).collect();
+    assert_eq!(
+        found,
+        vec![
+            (5, Kind::UnreadableShellPath),
+            (6, Kind::UnreadableWorkflowRun)
+        ]
+    );
+    let listed = BTreeSet::from([PLANTED_WORKFLOW.to_owned()]);
+    let strays = unlisted(&hits, &listed, &BTreeSet::new(), &BTreeMap::new());
+    let refused: Vec<(usize, Kind)> = strays.iter().map(|hit| (hit.line, hit.kind)).collect();
+    assert_eq!(refused, vec![(6, Kind::UnreadableWorkflowRun)]);
+    let said = complaint(&strays, &listed, &BTreeSet::new(), &BTreeMap::new());
+    assert!(
+        said.contains(".github/workflows/planted.yml:6 has a `run:` value the scan cannot read")
+            && said.contains(BLOCK_TO_WRITE)
+            && !said.contains("planted.yml:5"),
+        "only the workflow diagnostic is refused, with what to do: {said}"
+    );
+    let script = "# 中文\n$a = Get-Content 'crates/a b/lib.rs'\n";
+    let hits = findings(PLANTED_SCRIPT, script, Source::Script(Language::PowerShell));
+    let listed = BTreeSet::from([PLANTED_SCRIPT.to_owned()]);
+    assert_eq!(hits.len(), 1);
+    assert!(unlisted(&hits, &listed, &BTreeSet::new(), &BTreeMap::new()).is_empty());
 }
 
 /// RED — **a shape above the `run:` values that the scan does not read is a

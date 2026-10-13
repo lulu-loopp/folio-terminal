@@ -157,6 +157,11 @@ scanned as a file). The three workflow diagnostics are about what the scan
 can read, not about a source being read: no list clears them, and a listed
 workflow that has one is refused all the same; a workflow's reader hits and
 the path shapes of its reader units are cleared by file, as a script's are.
+The split is deliberate: a listed file is a declared reader of sources, so an
+interpolated or unreadable `.rs` path in it (`InterpolatedShellPath`,
+`UnreadableShellPath`) is part of what its list vouches for, while an
+undecided shell, an unreadable `run:` value or an unread workflow shape hides
+what the file reads at all, which no list can vouch for.
 A line that only looks like a here-string or heredoc opener
 (`$m = 'a@'`, `$(( 1 << 3 ))`) opens a phantom one whose `.rs` names are
 reported — noise, never a silent pass. A script reader is cleared like a Rust
