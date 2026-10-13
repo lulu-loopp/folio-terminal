@@ -53,6 +53,7 @@ mod cli;
 mod clipboard_picture;
 mod cmdrail;
 mod coalesce;
+mod computation_lane;
 mod context_menu;
 mod diagnostics;
 mod dir_news;
@@ -1864,6 +1865,196 @@ struct PathWorkerRequest {
     path: PathBuf,
 }
 
+/// **What one computation-lane request asked, kept beside it** (`computation_lane`) — so that a
+/// request whose work failed (`Failed`, a panic its task caught) can be settled: nothing on screen
+/// changes, and the question is asked again only by new input to the surface that asked
+/// (side-effects contract revision (b)5, rule 1), never on its own and never by an unrelated
+/// redraw.
+///
+/// A pane's task is kept as the session's own task (a formula's scan, a path, a resample's shared
+/// pixels), so the pane can hold it for its next new input. A window surface's request is
+/// settled down the road its own error already takes: its failure is answered as the error answer
+/// that surface knows ([`settle_failure`]), so the surface keeps its "asked, and failed" mark and
+/// asks again on its own new input — a new hover, a newly opened file, a new size, new formula
+/// content.
+#[derive(Clone, Debug)]
+enum Asked {
+    /// A pane's task: held by its session until new input that could change its answer.
+    Pane {
+        leaf: ShellAddress,
+        task: SessionDecorationTask,
+    },
+    /// A pasted picture's decode: its bytes went with the request, so it is a failed decode.
+    Pasted {
+        leaf: ShellAddress,
+        occurrence_id: u64,
+    },
+    /// A file's pixels for the window's decode cache (the glance, a preview, a page's picture).
+    Pixels { leaf: ShellAddress, path: PathBuf },
+    /// An animation opened.
+    Animation { path: PathBuf },
+    /// An animation's next frames: its decoder went with the request.
+    AnimationFill { path: PathBuf, serial: u64 },
+    /// One page of the glance card: it stays counted as asked while the card is up; the card
+    /// coming down lets go of its asked pages (`hide_file_peek`), so the next hover asks again.
+    Page,
+    /// A preview's formula.
+    PreviewMath {
+        leaf: ShellAddress,
+        key: Box<PreviewMathKey>,
+    },
+    /// A resample for the glance, a preview or a markdown page: its pending target stays, so the
+    /// surface asks again for a new size (a refit, a resize); the card coming down and the flyout's
+    /// dismissal let go of theirs, so the next hover asks again.
+    WindowScale,
+}
+
+/// **What a failed request comes to** ([`settle_failure`]).
+enum Settled {
+    /// The error answer the asking surface already knows, delivered as an answer.
+    Answer(MathWorkerResult),
+    /// A pane's task, to be held by its session until new input that could change its answer.
+    Hold {
+        leaf: ShellAddress,
+        task: SessionDecorationTask,
+    },
+    /// An animation's fill: its reservation released, the animation standing on its last frame.
+    FillLost { path: PathBuf, serial: u64 },
+    /// An animation's open: asked and unanswered, until the file's next open asks again.
+    AnimationUnanswered { path: PathBuf },
+    /// Nothing to do: the surface's mark stays and its own new input asks again.
+    Nothing,
+}
+
+/// What a decode that failed on the worker says, in the decode error's own words.
+const DECODE_FAULT: &str = "the decode stopped on a fault";
+
+/// What a decode whose thread could not be started says, in the decode error's own words.
+const DECODE_UNSTARTED: &str = "the decoder could not be started";
+
+/// **A failed request, settled as its surface's own failure** — pure, so the mapping is the one
+/// the tests read:
+///
+/// - a pane's task is held by its session ([`Settled::Hold`]);
+/// - a pasted picture is a failed decode (`InlineImageDecodeError::Decode`);
+/// - a file's pixels are a failed decode filed in the window's cache (`PeekCacheEntry::Failed`,
+///   the waiting preview panes refusing the picture), which the flyout's next settled hover reads
+///   again and the card's coming down lets go of, so its next hover asks again;
+/// - an animation's open is unanswered (`AnimationEntry::Unanswered`): no redraw asks again, and
+///   the file's next open lets go of it and asks;
+/// - an animation's fill releases its reservation, and the animation stands on its last frame;
+/// - a preview formula is refused (`MathRenderError::Aborted`): the page draws its source text,
+///   and new content is a new formula, asked anew;
+/// - a card page and a resample keep their marks until the surface's next hover (or a new size).
+fn settle_failure(asked: Asked) -> Settled {
+    match asked {
+        Asked::Pane { leaf, task } => Settled::Hold { leaf, task },
+        Asked::Pasted {
+            leaf,
+            occurrence_id,
+        } => Settled::Answer(MathWorkerResult {
+            leaf,
+            completion: DecorationWorkerCompletion::InlineImage {
+                task: bt_term::InlineImageTask {
+                    occurrence_id,
+                    source: bt_term::InlineImageSource::Osc1337(Vec::new()),
+                },
+                result: Err(bt_term::InlineImageDecodeError::Decode(
+                    DECODE_FAULT.to_owned(),
+                )),
+            },
+        }),
+        Asked::Pixels { leaf, path } => Settled::Answer(MathWorkerResult {
+            leaf,
+            completion: DecorationWorkerCompletion::PeekImage {
+                path,
+                result: Err(bt_term::InlineImageDecodeError::Decode(
+                    DECODE_FAULT.to_owned(),
+                )),
+            },
+        }),
+        Asked::Animation { path } => Settled::AnimationUnanswered { path },
+        Asked::AnimationFill { path, serial } => Settled::FillLost { path, serial },
+        Asked::PreviewMath { leaf, key } => Settled::Answer(MathWorkerResult {
+            leaf,
+            completion: DecorationWorkerCompletion::PreviewMath {
+                key,
+                result: Err(MathRenderError::Aborted),
+            },
+        }),
+        Asked::Page | Asked::WindowScale => Settled::Nothing,
+    }
+}
+
+impl PathWorkerRequest {
+    /// What this request asked ([`Asked`]).
+    fn asked(&self) -> Asked {
+        Asked::Pane {
+            leaf: self.leaf,
+            task: SessionDecorationTask::VerifyPath(self.path.clone()),
+        }
+    }
+
+    /// **Who asked** — the tab whose pane printed the path, as its answer's
+    /// [`MathWorkerResult::owner`] says.
+    fn owner(&self) -> AnswerOwner {
+        AnswerOwner::Tab(self.leaf.leaf.tab)
+    }
+}
+
+impl MathWorkerRequest {
+    /// What this request asked ([`Asked`]).
+    fn asked(&self) -> Asked {
+        match self {
+            Self::Math { leaf, task, .. } => Asked::Pane {
+                leaf: *leaf,
+                task: SessionDecorationTask::Math(task.clone()),
+            },
+            Self::InlineImage { leaf, task } => match &task.source {
+                bt_term::InlineImageSource::LocalPath(_) => Asked::Pane {
+                    leaf: *leaf,
+                    task: SessionDecorationTask::InlineImage(task.clone()),
+                },
+                bt_term::InlineImageSource::Osc1337(_) => Asked::Pasted {
+                    leaf: *leaf,
+                    occurrence_id: task.occurrence_id,
+                },
+            },
+            Self::PeekImage { leaf, path } | Self::PeekVideoFrame { leaf, path } => Asked::Pixels {
+                leaf: *leaf,
+                path: path.clone(),
+            },
+            Self::PeekAnimation { path, .. } => Asked::Animation { path: path.clone() },
+            Self::AnimationFill { path, serial, .. } => Asked::AnimationFill {
+                path: path.clone(),
+                serial: *serial,
+            },
+            Self::PeekPage { .. } => Asked::Page,
+            Self::PreviewMath { leaf, key } => Asked::PreviewMath {
+                leaf: *leaf,
+                key: key.clone(),
+            },
+        }
+    }
+
+    /// **Who asked**: the owner its answer will name ([`MathWorkerResult::owner`]) — a pane's
+    /// formula and decode are its tab's; every glance, animation, page and preview formula is the
+    /// window's.
+    fn owner(&self) -> AnswerOwner {
+        match self {
+            Self::Math { leaf, .. } | Self::InlineImage { leaf, .. } => {
+                AnswerOwner::Tab(leaf.leaf.tab)
+            }
+            Self::PeekImage { leaf, .. }
+            | Self::PeekVideoFrame { leaf, .. }
+            | Self::PeekAnimation { leaf, .. }
+            | Self::AnimationFill { leaf, .. }
+            | Self::PeekPage { leaf, .. }
+            | Self::PreviewMath { leaf, .. } => AnswerOwner::Window(leaf.window),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ScalePurpose {
     InlineImage(u64),
@@ -1923,6 +2114,38 @@ impl ScaleWorkerRequest {
         }
     }
 
+    /// **Who asked**: the owner its answer will name ([`MathWorkerResult::owner`]) — a pane's
+    /// picture and a preview's are their tab's; the glance and a markdown page's are the window's.
+    fn owner(&self) -> AnswerOwner {
+        match self {
+            Self::InlineImage { leaf, .. } | Self::Preview { leaf, .. } => {
+                AnswerOwner::Tab(leaf.leaf.tab)
+            }
+            Self::Peek { leaf, .. } | Self::MarkdownImage { leaf, .. } => {
+                AnswerOwner::Window(leaf.window)
+            }
+        }
+    }
+
+    /// What this request asked ([`Asked`]).
+    fn asked(&self) -> Asked {
+        match self {
+            Self::InlineImage { leaf, task } => Asked::Pane {
+                leaf: *leaf,
+                task: SessionDecorationTask::ScaleInlineImage(task.clone()),
+            },
+            Self::Peek { .. } | Self::Preview { .. } | Self::MarkdownImage { .. } => {
+                Asked::WindowScale
+            }
+        }
+    }
+
+    /// The size it asks the picture to be drawn at.
+    fn size(&self) -> (u32, u32) {
+        let task = self.task();
+        (task.display_width_px, task.display_height_px)
+    }
+
     /// Coalescing is per leaf: two panes asking for the same picture at the same size are two
     /// answers owed, and letting one stand in for the other is how a pane ends up waiting forever
     /// for a raster that was delivered next door.
@@ -1958,61 +2181,6 @@ impl ScaleWorkerRequest {
                     scaled: bt_term::scale_inline_image(&task),
                 },
             ),
-        }
-    }
-}
-
-#[derive(Default)]
-struct PendingScaleRequests {
-    requests: std::collections::VecDeque<ScaleWorkerRequest>,
-}
-
-impl PendingScaleRequests {
-    fn push_latest(&mut self, request: ScaleWorkerRequest) {
-        if let Some(index) = self
-            .requests
-            .iter()
-            .position(|queued| queued.same_target(&request))
-        {
-            self.requests.remove(index);
-        }
-        self.requests.push_back(request);
-    }
-
-    fn pop_front(&mut self) -> Option<ScaleWorkerRequest> {
-        self.requests.pop_front()
-    }
-
-    fn contains_target(&self, request: &ScaleWorkerRequest) -> bool {
-        self.requests
-            .iter()
-            .any(|queued| queued.same_target(request))
-    }
-
-    fn drain_channel(&mut self, receiver: &mpsc::Receiver<ScaleWorkerRequest>) {
-        while let Ok(request) = receiver.try_recv() {
-            self.push_latest(request);
-        }
-    }
-}
-
-/// Run the CPU-heavy resample lane. Before each Lanczos3 pass, absorb every request already in the
-/// channel and discard a dequeued question if a newer size for the same content/purpose exists.
-/// A request that arrives after the pass begins is a new question and will be serviced next.
-fn run_scale_worker(
-    receiver: mpsc::Receiver<ScaleWorkerRequest>,
-    mut execute: impl FnMut(ScaleWorkerRequest),
-) {
-    let mut pending = PendingScaleRequests::default();
-    while let Ok(request) = receiver.recv() {
-        pending.push_latest(request);
-        pending.drain_channel(&receiver);
-        while let Some(request) = pending.pop_front() {
-            pending.drain_channel(&receiver);
-            if pending.contains_target(&request) {
-                continue;
-            }
-            execute(request);
         }
     }
 }
@@ -2288,233 +2456,161 @@ fn peek_pixels(
     )
 }
 
-struct MathWorker {
-    tasks: mpsc::Sender<MathWorkerRequest>,
-    scale_tasks: mpsc::Sender<ScaleWorkerRequest>,
-    /// The path-verification lane — see [`PathWorkerRequest`] for why it is not the queue above.
-    path_tasks: mpsc::Sender<PathWorkerRequest>,
-    results: mpsc::Receiver<MathWorkerResult>,
+/// **The resample share's door** (`computation_lane`, `bt-image-scale-worker`): one Lanczos3 pass
+/// per request. A newer size for the same picture on the same pane and surface replaces one still
+/// waiting at the lane's door (`ComputationLane::scale`), so a divider drag runs the size it ends
+/// at, not every size it passed through.
+fn scale_door(
+    _ctx: &bt_platform::admission::WorkerCtx,
+) -> computation_lane::Door<ScaleWorkerRequest> {
+    // Read here rather than handed down: the lane is made before there is a `Runtime` to own the
+    // flag, and this is the same question [`Runtime::trace_perf`] asks of the same variable.
+    let trace_perf = diagnostics::switched_on(std::env::var_os("BT_PERF_TRACE"));
+    Box::new(
+        move |_ctx: &bt_platform::admission::WorkerCtx, request: ScaleWorkerRequest| {
+            // **What a Lanczos3 pass actually costs on this machine**, beside the size that provoked
+            // it. The lane is the one suspect in a sticky zoom that the event thread cannot time for
+            // itself, because it runs on another thread and answers whenever it answers.
+            let started = trace_perf.then(Instant::now);
+            let purpose = request.purpose();
+            let (width, height) = request.size();
+            let (leaf, completion) = request.completion();
+            if let Some(started) = started {
+                trace_sink::stderr_line(format!(
+                    "BT_PERF_TRACE image_scale purpose={purpose:?} size={width}x{height} lanczos_us={}",
+                    started.elapsed().as_micros(),
+                ));
+            }
+            MathWorkerResult { leaf, completion }
+        },
+    )
 }
 
-impl MathWorker {
-    /// **Start the three threads** and return their senders and the one answer channel.
-    ///
-    /// `wake` brings the event loop round after an answer is published; the product's sends
-    /// `AppEvent::MathReady`. It is a parameter rather than the proxy so that the lane contract's
-    /// computation adapter (`lane_contract_tests`) runs these very threads, with the answer sender
-    /// shared the way the product shares it.
-    fn spawn(wake: impl Fn() + Clone + Send + 'static) -> Result<Self> {
-        let (task_tx, task_rx) = mpsc::channel::<MathWorkerRequest>();
-        let (scale_tx, scale_rx) = mpsc::channel::<ScaleWorkerRequest>();
-        let (path_tx, path_rx) = mpsc::channel::<PathWorkerRequest>();
-        let (result_tx, result_rx) = mpsc::channel::<MathWorkerResult>();
-        let scale_result_tx = result_tx.clone();
-        let scale_wake = wake.clone();
-        let path_result_tx = result_tx.clone();
-        let path_wake = wake.clone();
-        bt_platform::spawn_at_priority(
-            "bt-path-verify-worker",
-            bt_platform::ThreadPriority::BelowNormal,
-            move |_ctx| {
-                run_path_verify_worker(path_rx, path_result_tx, path_wake);
-            },
-        )
-        .context("spawn path verification worker")?;
-        // Read here rather than handed down: the lane is spawned before there is
-        // a `Runtime` to own the flag, and this is the same question
-        // [`Runtime::trace_perf`] asks of the same variable.
-        let trace_perf = diagnostics::switched_on(std::env::var_os("BT_PERF_TRACE"));
-        bt_platform::spawn_at_priority(
-            "bt-image-scale-worker",
-            bt_platform::ThreadPriority::BelowNormal,
-            move |_ctx| {
-                run_scale_worker(scale_rx, |request| {
-                    // **What a Lanczos3 pass actually costs on this machine**,
-                    // beside the size that provoked it. The lane is the one
-                    // suspect in a sticky zoom that the event thread cannot time
-                    // for itself, because it runs on another thread and answers
-                    // whenever it answers.
-                    let started = trace_perf.then(Instant::now);
-                    let purpose = request.purpose();
-                    let (width, height) = {
-                        let task = request.task();
-                        (task.display_width_px, task.display_height_px)
-                    };
-                    let (leaf, completion) = request.completion();
-                    if let Some(started) = started {
-                        trace_sink::stderr_line(format!(
-                            "BT_PERF_TRACE image_scale purpose={purpose:?} size={width}x{height} lanczos_us={}",
-                            started.elapsed().as_micros(),
-                        ));
-                    }
-                    if scale_result_tx
-                        .send(MathWorkerResult { leaf, completion })
-                        .is_ok()
-                    {
-                        scale_wake();
-                    }
-                });
-            },
-        )
-        .context("spawn image resampling worker")?;
-        // **This thread says how much stack it wants** (`bt_math::MATH_WORKER_STACK_BYTES`). One
-        // formula's render descends through a LaTeX parser, then a LaTeX-to-Typst converter, then
-        // Typst's parser, math layout and SVG writer, all over text a program printed into a
-        // terminal; a stack overflow is not a panic and would take the window with it, so the depth
-        // that is refused and the stack it is refused against are chosen together, in `bt-math`, and
-        // this is where the second half of that pair is spent.
-        bt_platform::spawn_at_priority_with_stack(
-            "bt-math-worker",
-            bt_platform::ThreadPriority::BelowNormal,
-            Some(bt_math::MATH_WORKER_STACK_BYTES),
-            move |ctx| {
-                run_decoration_worker(ctx, task_rx, result_tx, wake);
-            },
-        )
-        .context("spawn math rendering worker")?;
-        Ok(Self {
-            tasks: task_tx,
-            scale_tasks: scale_tx,
-            path_tasks: path_tx,
-            results: result_rx,
-        })
-    }
-}
-
-/// **The path-verification lane** (audit 3 C-2).
+/// **The path-verification share's door** (audit 3 C-2; `computation_lane`,
+/// `bt-path-verify-worker`).
 ///
-/// One question, one call, one answer, and nothing else runs here — which is the whole of the
-/// design: a `verify_path` that blocks inside the SMB redirector holds up nothing but the next
-/// path question, and the window thread was never waiting on either.
+/// One question, one call, one answer, and nothing else runs on its thread — which is the whole
+/// of the design: a `verify_path` that blocks inside the SMB redirector holds up nothing but the
+/// next path question, and the window thread was never waiting on either.
+fn path_door(
+    _ctx: &bt_platform::admission::WorkerCtx,
+) -> computation_lane::Door<PathWorkerRequest> {
+    Box::new(run_path_verify_worker)
+}
+
+/// One path question, answered.
 fn run_path_verify_worker(
-    task_rx: mpsc::Receiver<PathWorkerRequest>,
-    result_tx: mpsc::Sender<MathWorkerResult>,
-    mut wake: impl FnMut(),
-) {
-    while let Ok(PathWorkerRequest { leaf, path }) = task_rx.recv() {
-        let verdict = bt_term::verify_path(&path, &bt_platform::resolved_for_a_door);
-        if result_tx
-            .send(MathWorkerResult {
-                leaf,
-                completion: DecorationWorkerCompletion::VerifiedPath { path, verdict },
-            })
-            .is_err()
-        {
-            return;
-        }
-        wake();
+    _ctx: &bt_platform::admission::WorkerCtx,
+    PathWorkerRequest { leaf, path }: PathWorkerRequest,
+) -> MathWorkerResult {
+    let verdict = bt_term::verify_path(&path, &bt_platform::resolved_for_a_door);
+    MathWorkerResult {
+        leaf,
+        completion: DecorationWorkerCompletion::VerifiedPath { path, verdict },
     }
 }
 
-/// The production decoration queue, also exercised without a window by regression tests.
+/// **The formula and picture worker** (`computation_lane`, `bt-math-worker`): the engine and the
+/// decoder are made once, on the worker, and the door it returns answers each request — the
+/// production decoration work, also exercised without a window by regression tests.
 fn run_decoration_worker(
     worker: &bt_platform::admission::WorkerCtx,
-    task_rx: mpsc::Receiver<MathWorkerRequest>,
-    result_tx: mpsc::Sender<MathWorkerResult>,
-    mut wake: impl FnMut(),
-) {
+) -> computation_lane::Door<MathWorkerRequest> {
+    // The door is made on the worker; each request is handed the same capability again.
+    let _ = worker;
     let engine = MathEngine::new();
     let mut image_decoder = InlineImageDecoder::default();
-    while let Ok(work) = task_rx.recv() {
-        let completion = match work {
-            MathWorkerRequest::Math {
-                leaf,
-                mut task,
-                foreground_rgb,
-            } => {
-                let result = bt_compose::typeset(&engine, &mut task, foreground_rgb);
-                (leaf, DecorationWorkerCompletion::Math { task, result })
-            }
-            MathWorkerRequest::InlineImage { leaf, task } => {
-                let result = image_decoder.decode(task.clone());
-                (
+    Box::new(
+        move |worker: &bt_platform::admission::WorkerCtx, work: MathWorkerRequest| {
+            let (leaf, completion) = match work {
+                MathWorkerRequest::Math {
                     leaf,
-                    DecorationWorkerCompletion::InlineImage { task, result },
-                )
-            }
-            MathWorkerRequest::PreviewMath { leaf, key } => {
-                let result = bt_math::key_for_em_px(
-                    key.em_milli_px as f32 / 1000.0,
-                    key.foreground_rgb,
-                    key.mode,
-                )
-                .ok_or(MathRenderError::InvalidDimensions)
-                .and_then(|render_key| engine.render(&key.source, render_key));
-                (
+                    mut task,
+                    foreground_rgb,
+                } => {
+                    let result = bt_compose::typeset(&engine, &mut task, foreground_rgb);
+                    (leaf, DecorationWorkerCompletion::Math { task, result })
+                }
+                MathWorkerRequest::InlineImage { leaf, task } => {
+                    let result = image_decoder.decode(task.clone());
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::InlineImage { task, result },
+                    )
+                }
+                MathWorkerRequest::PreviewMath { leaf, key } => {
+                    let result = bt_math::key_for_em_px(
+                        key.em_milli_px as f32 / 1000.0,
+                        key.foreground_rgb,
+                        key.mode,
+                    )
+                    .ok_or(MathRenderError::InvalidDimensions)
+                    .and_then(|render_key| engine.render(&key.source, render_key));
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::PreviewMath { key, result },
+                    )
+                }
+                MathWorkerRequest::PeekImage { leaf, path } => {
+                    let result = peek_pixels(&mut image_decoder, &path);
+                    (leaf, DecorationWorkerCompletion::PeekImage { path, result })
+                }
+                MathWorkerRequest::PeekVideoFrame { leaf, path } => {
+                    let glance = read_video_glance(worker, &path);
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::PeekVideoFrame { path, glance },
+                    )
+                }
+                MathWorkerRequest::PeekAnimation { leaf, path } => {
+                    let frames = animation::decode(&path);
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::PeekAnimation { path, frames },
+                    )
+                }
+                // **This is the thread `AnimationCursor::next_frames` exists for.** Composing a frame is
+                // the whole logical screen, and the window has one thread that must not spend that.
+                MathWorkerRequest::AnimationFill {
                     leaf,
-                    DecorationWorkerCompletion::PreviewMath { key, result },
-                )
-            }
-            MathWorkerRequest::PeekImage { leaf, path } => {
-                let result = peek_pixels(&mut image_decoder, &path);
-                (leaf, DecorationWorkerCompletion::PeekImage { path, result })
-            }
-            MathWorkerRequest::PeekVideoFrame { leaf, path } => {
-                let glance = read_video_glance(worker, &path);
-                (
+                    path,
+                    serial,
+                    mut cursor,
+                    want,
+                } => {
+                    let frames = cursor.next_frames(want);
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::AnimationFill {
+                            path,
+                            serial,
+                            cursor,
+                            frames,
+                        },
+                    )
+                }
+                MathWorkerRequest::PeekPage {
                     leaf,
-                    DecorationWorkerCompletion::PeekVideoFrame { path, glance },
-                )
-            }
-            MathWorkerRequest::PeekAnimation { leaf, path } => {
-                let frames = animation::decode(&path);
-                (
-                    leaf,
-                    DecorationWorkerCompletion::PeekAnimation { path, frames },
-                )
-            }
-            // **This is the thread `AnimationCursor::next_frames`
-            // exists for.** Composing a frame is the whole logical
-            // screen, and the window has one thread that must not
-            // spend that.
-            MathWorkerRequest::AnimationFill {
-                leaf,
-                path,
-                serial,
-                mut cursor,
-                want,
-            } => {
-                let frames = cursor.next_frames(want);
-                (
-                    leaf,
-                    DecorationWorkerCompletion::AnimationFill {
-                        path,
-                        serial,
-                        cursor,
-                        frames,
-                    },
-                )
-            }
-            MathWorkerRequest::PeekPage {
-                leaf,
-                path,
-                page,
-                fit,
-                known,
-            } => {
-                let outcome = raster_peek_page(&path, page, fit, known);
-                (
-                    leaf,
-                    DecorationWorkerCompletion::PeekPage {
-                        path,
-                        page,
-                        fit,
-                        outcome,
-                    },
-                )
-            }
-        };
-        if result_tx
-            .send(MathWorkerResult {
-                leaf: completion.0,
-                completion: completion.1,
-            })
-            .is_err()
-        {
-            break;
-        }
-        wake();
-    }
+                    path,
+                    page,
+                    fit,
+                    known,
+                } => {
+                    let outcome = raster_peek_page(&path, page, fit, known);
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::PeekPage {
+                            path,
+                            page,
+                            fit,
+                            outcome,
+                        },
+                    )
+                }
+            };
+            MathWorkerResult { leaf, completion }
+        },
+    )
 }
 
 /// What a press on one node of a files tree does to that column's durable state.
@@ -11753,55 +11849,193 @@ fn take_math_worker_notice(notice_pending: &mut bool) -> Option<&'static str> {
     }
 }
 
+/// **The computation lane's request door for a pane's decoration work** (C1): the task goes to
+/// the share that runs its kind — a formula or a decode to `bt-math-worker`, a resample to
+/// `bt-image-scale-worker`, a printed path to `bt-path-verify-worker` — and is admitted there, or
+/// refused at that share's door and handed back as the task it was.
 fn dispatch_decoration_task(
     leaf: ShellAddress,
     task: SessionDecorationTask,
-    tasks: &mpsc::Sender<MathWorkerRequest>,
-    scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
-    path_tasks: &mpsc::Sender<PathWorkerRequest>,
-) -> bool {
+    lane: &computation_lane::ComputationLane,
+) -> std::result::Result<(), (lane::Refused, SessionDecorationTask)> {
     match task {
-        SessionDecorationTask::Math(task) => tasks
-            .send(MathWorkerRequest::Math {
+        SessionDecorationTask::Math(task) => lane
+            .decorate(MathWorkerRequest::Math {
                 leaf,
                 task,
                 foreground_rgb: foreground_rgb(),
             })
-            .is_ok(),
-        SessionDecorationTask::InlineImage(task) => tasks
-            .send(MathWorkerRequest::InlineImage { leaf, task })
-            .is_ok(),
-        SessionDecorationTask::ScaleInlineImage(task) => scale_tasks
-            .send(ScaleWorkerRequest::InlineImage { leaf, task })
-            .is_ok(),
-        // **Its own lane** — see [`PathWorkerRequest`]. A stat that blocks for the redirector's
+            .map(|_| ())
+            .map_err(|(refused, request)| (refused, session_task_of(request))),
+        SessionDecorationTask::InlineImage(task) => lane
+            .decorate(MathWorkerRequest::InlineImage { leaf, task })
+            .map(|_| ())
+            .map_err(|(refused, request)| (refused, session_task_of(request))),
+        SessionDecorationTask::ScaleInlineImage(task) => lane
+            .scale(ScaleWorkerRequest::InlineImage { leaf, task })
+            .map(|_| ())
+            .map_err(|(refused, request)| match request {
+                ScaleWorkerRequest::InlineImage { task, .. } => {
+                    (refused, SessionDecorationTask::ScaleInlineImage(task))
+                }
+                _ => unreachable!("the door hands back the request it was given"),
+            }),
+        // **Its own share** — see [`PathWorkerRequest`]. A stat that blocks for the redirector's
         // timeout must not stand in front of a formula the reader is waiting on.
-        SessionDecorationTask::VerifyPath(path) => {
-            path_tasks.send(PathWorkerRequest { leaf, path }).is_ok()
-        }
+        SessionDecorationTask::VerifyPath(path) => lane
+            .verify(PathWorkerRequest { leaf, path })
+            .map(|_| ())
+            .map_err(|(refused, request)| {
+                (refused, SessionDecorationTask::VerifyPath(request.path))
+            }),
     }
 }
 
-/// Drain the real session queue into the renderer channel. A dead optional-decoration worker is
-/// a one-way feature downgrade, never a terminal/runtime error.
+/// The session's task a pane's formula or decode request was made of, handed back.
+fn session_task_of(request: MathWorkerRequest) -> SessionDecorationTask {
+    match request {
+        MathWorkerRequest::Math { task, .. } => SessionDecorationTask::Math(task),
+        MathWorkerRequest::InlineImage { task, .. } => SessionDecorationTask::InlineImage(task),
+        _ => unreachable!("the door hands back the request it was given"),
+    }
+}
+
+/// **What one drain of the computation lane hands the windows**: the answers — a failed window
+/// request's settled as its surface's own error answer among them ([`settle_failure`]) — the
+/// failed pane tasks to hold and the animation fills to release, each with who asked (each window
+/// settles its own, [`Runtime::settle_failed_requests`]), and whether a worker has ended.
+#[derive(Default)]
+struct MathAnswers {
+    done: Vec<MathWorkerResult>,
+    failed: Vec<(AnswerOwner, Settled)>,
+    lane_gone: bool,
+}
+
+/// **The terminals one drain took, sorted for the windows**: an answer joins `done`; a failed
+/// request — its own failure, or the one it joined — is settled ([`settle_failure`]): an error
+/// answer joins `done`, a pane task or an animation fill joins `failed` for the window that holds
+/// its asker (the ledger has said the failure); a superseded request, or one joined to an answer,
+/// leaves the answer to the request that ended it; `WorkerGone` says the lane has lost a worker.
+fn sort_math_terminals(ended: Vec<computation_lane::Ended>) -> MathAnswers {
+    let mut answers = MathAnswers::default();
+    for (_, _, terminal, (owner, asked)) in ended {
+        let failed = match terminal {
+            lane::Terminal::Done(answer) => {
+                answers.done.extend(answer.take());
+                false
+            }
+            lane::Terminal::Failed(_) => true,
+            lane::Terminal::Joined { outcome, .. } => {
+                matches!(*outcome, lane::Terminal::Failed(_))
+            }
+            lane::Terminal::WorkerGone => {
+                answers.lane_gone = true;
+                false
+            }
+            lane::Terminal::Superseded { .. } => false,
+            lane::Terminal::Cancelled => unreachable!("the computation lane cancels nothing"),
+        };
+        if failed {
+            match settle_failure(asked) {
+                Settled::Answer(answer) => answers.done.push(answer),
+                Settled::Nothing => {}
+                settled @ (Settled::Hold { .. }
+                | Settled::FillLost { .. }
+                | Settled::AnimationUnanswered { .. }) => {
+                    answers.failed.push((owner, settled));
+                }
+            }
+        }
+    }
+    answers
+}
+
+/// **Hold a failed pane task in the pane that asked**, if that pane is still there: its session
+/// holds it until new input that could change its answer. Answers whether a pane took it.
+fn hold_failed_in_tabs(
+    tabs: &mut [TabState],
+    leaf: ShellAddress,
+    task: SessionDecorationTask,
+) -> bool {
+    let Some(index) = tabs.iter().position(|tab| tab.id == leaf.leaf.tab) else {
+        return false;
+    };
+    let Some(session) = leaf_session_mut(tabs, index, leaf.leaf.seat) else {
+        return false;
+    };
+    session.hold_decoration_task_until_new_input(task);
+    true
+}
+
+/// **Which of the computation lane's shares a pane's task goes to.**
+fn share_of(task: &SessionDecorationTask) -> computation_lane::Share {
+    match task {
+        SessionDecorationTask::Math(_) | SessionDecorationTask::InlineImage(_) => {
+            computation_lane::Share::Decoration
+        }
+        SessionDecorationTask::ScaleInlineImage(_) => computation_lane::Share::Scale,
+        SessionDecorationTask::VerifyPath(_) => computation_lane::Share::Path,
+    }
+}
+
+/// **Hand a pane's queued decoration work to the computation lane.**
+///
+/// - A share that refuses because it is full stops only its own work for this hand-out: the
+///   rest of the pane's tasks for that share are kept in the pane, and the other two shares are
+///   still handed theirs — the three bounds exist so that the shares do not block each other.
+///   What a full share refused waits at the head of the pane's queues for the next hand-out (the
+///   next output, frame or answer).
+/// - A share whose thread the door could not start refuses the task, which goes back to the
+///   pane, and the pane hands nothing more out until its next new input
+///   (`DualPlaneSession::pause_hand_out_until_new_input`): the start is tried again by new input,
+///   once, never by every hand-out that finds the queues as they were.
+/// - A share whose worker has ended turns the lane off: a one-way feature downgrade, never a
+///   terminal/runtime error.
 fn dispatch_pending_math_tasks(
     leaf: ShellAddress,
     session: &mut DualPlaneSession,
-    tasks: &mpsc::Sender<MathWorkerRequest>,
-    scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
-    path_tasks: &mpsc::Sender<PathWorkerRequest>,
+    lane: &computation_lane::ComputationLane,
     running: &mut bool,
     notice_pending: &mut bool,
 ) -> bool {
     if !*running {
         return false;
     }
+    let mut full = BTreeSet::new();
+    let mut kept = Vec::new();
+    let mut disabled = false;
     while let Some(task) = session.take_decoration_worker_task() {
-        if !dispatch_decoration_task(leaf, task, tasks, scale_tasks, path_tasks) {
-            return disable_math_worker_state(running, notice_pending);
+        let share = share_of(&task);
+        if full.contains(&share) {
+            kept.push(task);
+            continue;
+        }
+        match dispatch_decoration_task(leaf, task, lane) {
+            Ok(()) => {}
+            Err((lane::Refused::Full { .. }, task)) => {
+                full.insert(share);
+                kept.push(task);
+            }
+            Err((lane::Refused::NotStarted(_), task)) => {
+                kept.push(task);
+                session.pause_hand_out_until_new_input();
+                break;
+            }
+            Err((lane::Refused::Faulted(_), task)) => {
+                kept.push(task);
+                disabled = disable_math_worker_state(running, notice_pending);
+                break;
+            }
+            Err((lane::Refused::TwinEnded, _)) => {
+                unreachable!("a request joins only one still waiting in line")
+            }
         }
     }
-    false
+    // Back at the head of their queues, in the order they were taken.
+    for task in kept.into_iter().rev() {
+        session.give_back_decoration_worker_task(task);
+    }
+    disabled
 }
 
 /// The session filed under one seat of one tab, or nothing if that pane has since closed.
@@ -11819,9 +12053,7 @@ fn leaf_session_mut(
 /// The worker lanes a tab's decoration dispatch hands work to, cloned out of [`App`] so the
 /// dispatch can borrow the tab and the worker flags mutably at the same time.
 struct DecorationSenders {
-    math: mpsc::Sender<MathWorkerRequest>,
-    scale: mpsc::Sender<ScaleWorkerRequest>,
-    path: mpsc::Sender<PathWorkerRequest>,
+    computation: Arc<computation_lane::ComputationLane>,
     foreground: mpsc::Sender<foreground_program::Request>,
 }
 
@@ -11855,9 +12087,7 @@ fn dispatch_tab_decoration_tasks(
         disabled |= dispatch_pending_math_tasks(
             address,
             &mut leaf.session,
-            &senders.math,
-            &senders.scale,
-            &senders.path,
+            &senders.computation,
             running,
             notice_pending,
         );
@@ -12441,7 +12671,8 @@ fn deliver_held_input(
     birth.deliver(|held| match target {
         PtyTarget::Nowhere => {
             note(&format!(
-                "a pane born with no shell (no program here, or its shell did not start) dropped                  the {} byte(s) typed into it while it waited",
+                "a pane born with no shell (no program here, or its shell did not start) dropped \
+                 the {} byte(s) typed into it while it waited",
                 held.len()
             ));
             Ok(())
@@ -12976,7 +13207,9 @@ struct App {
     /// Registry reads and layout-DLL loads happen only on that worker; key
     /// events read this map and never wait.
     layout_tables: layout_tables::LayoutTables,
-    math_worker: MathWorker,
+    /// The computation lane (`computation_lane`): formulas, decodes, glances, resamples and
+    /// printed paths.
+    math_worker: Arc<computation_lane::ComputationLane>,
     foreground_program_worker: foreground_program::Worker,
     math_worker_running: bool,
     math_worker_notice_pending: bool,
@@ -14243,22 +14476,6 @@ struct WindowRuntime {
     /// tween that has landed cannot become live again, and an idle window still
     /// hands over nothing.
     picture_boxes_were_moving: bool,
-    /// **What each surface is showing, so that opening a file can be told from
-    /// revealing one** (adversarial review 2026-09-11, B8).
-    ///
-    /// The ruling is two sentences and the difference between them is this map:
-    /// a file **opened** — picked in the files column, or a pane handed another
-    /// document — starts at its first frame, and a pane merely **obscured and
-    /// revealed** resumes where it was. Drawn-ness cannot tell those apart: a
-    /// pane in a background tab is not drawn and neither is one whose file just
-    /// changed.
-    ///
-    /// So the entry is about the *subject*, not about the glass. It is written
-    /// and cleared only for surfaces this window can currently see the subject
-    /// of, which is why a background tab's pane keeps its entry and resumes: no
-    /// walk touched it. A surface that stops existing loses its entry in
-    /// [`Runtime::sweep_preview_panes`], beside the view it is retired with.
-    animation_presence: BTreeMap<PreviewSurface, String>,
     /// **The files this window's preview seats are showing, watched** (W2 slice
     /// 5, `preview_watch`).
     ///
@@ -17341,15 +17558,19 @@ mod tab_identity_tests {
         let layer = method_body("Runtime", "preview_float_layer");
         assert!(
             layer.contains("let footless = !geometry.wears_a_foot();"),
-            "the chassis is asked whether there is a strip, rather than a second              reader working it out from the rail"
+            "the chassis is asked whether there is a strip, rather than a second \
+             reader working it out from the rail"
         );
         assert!(
             layer.contains("let rail = self.dress_preview_rail(surface, scale);"),
-            "the window's row is dressed somewhere other than the one dressing both              hosts go through, so a pane and the window torn off it can say two              things about one file"
+            "the window's row is dressed somewhere other than the one dressing both \
+             hosts go through, so a pane and the window torn off it can say two \
+             things about one file"
         );
         assert!(
             !layer.contains("seats::push_corner_tag("),
-            "the window flashes its confirmation in a corner of its own as well as in              the pill, which is the same word twice"
+            "the window flashes its confirmation in a corner of its own as well as in \
+             the pill, which is the same word twice"
         );
         assert!(
             layer.contains("seats::dress_foot("),
@@ -31887,14 +32108,25 @@ enum AnimationEntry {
     /// line in the foot of the pane — see [`Runtime::preview_standing_fact`] and
     /// [`animation::AnimationRefusal::is_worth_saying`].
     Refused(animation::AnimationRefusal),
+    /// **Asked, and no answer came**: the open's work failed on the worker, or its thread could
+    /// not be started. Drawn as a refusal is (the picture lane's still, no notice), and — unlike a
+    /// refusal, which is a fact about the file — let go of by the file's next open
+    /// ([`animations_opened`]), which asks again.
+    Unanswered,
 }
 
 impl bt_term::Weighed for AnimationEntry {
     fn bytes_held(&self) -> u64 {
         match self {
-            Self::Pending | Self::Refused(_) => 0,
+            Self::Pending | Self::Refused(_) | Self::Unanswered => 0,
             Self::Ready { animation, .. } => animation.bytes_held(),
         }
+    }
+
+    /// Only a playback is let go of by weight: the other three are the records of questions —
+    /// see [`AnimationCache`] for why one evicted would be asked again with no open to ask it.
+    fn evictable(&self) -> bool {
+        matches!(self, Self::Ready { .. })
     }
 }
 
@@ -31928,8 +32160,402 @@ fn animation_refusal_notice(refusal: animation::AnimationRefusal) -> Option<&'st
     })
 }
 
-/// **What this window's animations live in** — see [`MAX_ANIMATION_CACHE_BYTES`].
-type AnimationCache = bt_term::BoundedCache<String, AnimationEntry>;
+/// **What this window's animations live in** — see [`MAX_ANIMATION_CACHE_BYTES`] — **and every
+/// door to them** (S-8 round 6).
+///
+/// A type of its own rather than the bare map, so that each change an entry can go through is one
+/// method here and no caller lends the map out or writes an entry by hand: an open is asked only by
+/// [`Self::ask_for_showing`], the one writer of `Pending`; its answer is filed only by
+/// [`Self::opened`]; an open that never answered is written only by [`Self::open_unanswered`] and
+/// let go of only by [`Self::let_go_on_open`], on the file's next open; and a playback is reached
+/// into only by the fill, advance and present doors, each of which takes the entry out and puts it
+/// back, so the map re-weighs it.
+///
+/// **An entry that holds no pixels is never let go of by weight.** A request in flight, a refusal
+/// and an open that never answered are the records of questions: each still counts its entry's
+/// overhead toward the budget, but none is ever chosen by eviction
+/// ([`bt_term::Weighed::evictable`]), because a walk asks the worker for every file shown that
+/// this map holds nothing for — an evicted record would be asked again on the next redraw, with no
+/// open to ask it. So such records number at most the animated files this window has opened, and
+/// leave only by the doors above.
+struct AnimationCache {
+    playbacks: bt_term::BoundedCache<String, AnimationEntry>,
+    /// **What each surface is showing, so that opening a file can be told from
+    /// revealing one** (adversarial review 2026-09-11, B8).
+    ///
+    /// The ruling is two sentences and the difference between them is this map:
+    /// a file **opened** — picked in the files column, or a pane handed another
+    /// document — starts at its first frame, and a pane merely **obscured and
+    /// revealed** resumes where it was. Drawn-ness cannot tell those apart: a
+    /// pane in a background tab is not drawn and neither is one whose file just
+    /// changed.
+    ///
+    /// So the entry is about the *subject*, not about the glass. It is written
+    /// and cleared only for surfaces this window can currently see the subject
+    /// of, which is why a background tab's pane keeps its entry and resumes: no
+    /// walk touched it. A surface that stops existing loses its entry
+    /// ([`Self::forget_surface`]), beside the view it is retired with.
+    presence: BTreeMap<PreviewSurface, String>,
+}
+
+/// **What asking the worker to open one file came to** — see [`AnimationCache::ask_for_showing`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpenAsked {
+    /// In the lane: the file is `Pending` until its answer.
+    Asked,
+    /// Its thread could not be started: asked, and unanswered until the file's next open.
+    Unstarted,
+    /// Turned away at the door (the lane is full): nothing is filed, so the next walk asks again.
+    TurnedAway,
+}
+
+/// **What sending one fill came to** — see [`AnimationCache::send_fill`].
+enum FillSent {
+    /// In the lane: the cursor is away until the fill comes home.
+    Sent,
+    /// Turned away at the door (the lane is full): the cursor comes home with no frames, and the
+    /// next frame that draws the animation asks again.
+    TurnedAway(Box<animation::AnimationCursor>),
+    /// Its thread could not be started: the fill is lost as a failed one is — the reservation
+    /// released, the animation on its last frame until a surface begins showing the file again.
+    Lost,
+}
+
+impl AnimationCache {
+    fn with_budget(budget: u64) -> Self {
+        Self {
+            playbacks: bt_term::BoundedCache::with_budget(budget),
+            presence: BTreeMap::new(),
+        }
+    }
+
+    /// One file's entry. A reading is a use — see [`bt_term::BoundedCache::get`].
+    fn get(&self, key: &str) -> Option<&AnimationEntry> {
+        self.playbacks.get(key)
+    }
+
+    /// Whether this window holds anything for the file, **without** counting a use.
+    #[cfg(test)]
+    fn contains_key(&self, key: &str) -> bool {
+        self.playbacks.contains_key(key)
+    }
+
+    /// Whether this window holds nothing for any file.
+    fn is_empty(&self) -> bool {
+        self.playbacks.is_empty()
+    }
+
+    /// What the map is holding, counted as it was inserted.
+    #[cfg(test)]
+    fn bytes_held(&self) -> u64 {
+        self.playbacks.bytes_held()
+    }
+
+    /// The ceiling the map was built with.
+    #[cfg(test)]
+    fn budget(&self) -> u64 {
+        self.playbacks.budget()
+    }
+
+    /// **One walk of the surfaces this window can see the subject of**, and the opens it asks for
+    /// (adversarial review 2026-09-11, B8; S-8 rounds 4 and 6).
+    ///
+    /// What each surface is showing is brought up to date ([`animations_opened`]). A file a surface
+    /// has just begun showing is let go of ([`Self::let_go_on_open`]) — its playback, so the open
+    /// starts again on frame zero, and an open that never answered, so the open asks again. Then
+    /// each file shown that this window holds nothing for is asked of the worker through `ask`,
+    /// once however many surfaces show it. A file this window holds anything for — a playback, a
+    /// decode in flight, a refusal, an open that never answered — is not asked again by a walk: a
+    /// redraw is no new input.
+    fn ask_for_showing(
+        &mut self,
+        showing: &[(PreviewSurface, Option<PathBuf>)],
+        mut ask: impl FnMut(&Path) -> OpenAsked,
+    ) {
+        let named: Vec<(PreviewSurface, Option<String>)> = showing
+            .iter()
+            .map(|(surface, path)| {
+                (
+                    *surface,
+                    path.as_deref().map(normalized_local_image_path_key),
+                )
+            })
+            .collect();
+        for key in animations_opened(&mut self.presence, &named) {
+            self.let_go_on_open(&key);
+        }
+        for (_, path) in showing {
+            let Some(path) = path else {
+                continue;
+            };
+            let key = normalized_local_image_path_key(path);
+            if self.playbacks.contains_key(&key) {
+                continue;
+            }
+            match ask(path) {
+                OpenAsked::Asked => self.playbacks.insert(key, AnimationEntry::Pending),
+                OpenAsked::Unstarted => self.open_unanswered(key),
+                OpenAsked::TurnedAway => {}
+            }
+        }
+    }
+
+    /// **A surface that has stopped existing**: what it was showing is forgotten. The record is
+    /// deliberately kept while a surface is merely not drawn — that is how a tab switch resumes
+    /// rather than restarts — so the one moment it may be dropped is the moment the surface goes.
+    fn forget_surface(&mut self, surface: PreviewSurface) {
+        self.presence.remove(&surface);
+    }
+
+    /// **A file a surface has just begun showing**: its playback is let go of, so the open starts
+    /// again on frame zero, and so is an open that never answered, so the open asks again — the one
+    /// remover of [`AnimationEntry::Unanswered`]. A refusal is kept, because whether a file can be
+    /// animated is a fact about the file, and so is a decode already in flight, which is this
+    /// open's answer.
+    fn let_go_on_open(&mut self, key: &str) {
+        if matches!(
+            self.playbacks.get(key),
+            Some(AnimationEntry::Ready { .. } | AnimationEntry::Unanswered)
+        ) {
+            self.playbacks.remove(key);
+        }
+    }
+
+    /// **An open that was asked and not answered** — its work failed on the worker, or its thread
+    /// could not be started: the file's entry becomes [`AnimationEntry::Unanswered`], which no walk
+    /// asks again and the file's next open lets go of. The one writer of `Unanswered`. An entry the
+    /// file has answered since — a playback, a refusal — is left as it is.
+    fn open_unanswered(&mut self, key: String) {
+        if matches!(
+            self.playbacks.get(&key),
+            None | Some(AnimationEntry::Pending)
+        ) {
+            self.playbacks.insert(key, AnimationEntry::Unanswered);
+        }
+    }
+
+    /// **The worker's answer to an open**, filed whether or not it decoded: a playback under the
+    /// serial minted for it ([`AnimationEntry::Ready`]), or the refusal with its reason
+    /// ([`AnimationEntry::Refused`]) — a refusal is an answer.
+    fn opened(
+        &mut self,
+        key: String,
+        serial: u64,
+        frames: Result<animation::Animation, animation::AnimationRefusal>,
+    ) {
+        self.playbacks.insert(
+            key,
+            match frames {
+                Ok(animation) => AnimationEntry::Ready {
+                    serial,
+                    animation: Box::new(animation),
+                },
+                Err(refusal) => AnimationEntry::Refused(refusal),
+            },
+        );
+    }
+
+    /// **A failed request of this window's animations, settled** ([`settle_failure`]): an open is
+    /// unanswered ([`Self::open_unanswered`]), a fill is lost ([`Self::release_failed_fill`]). The
+    /// other settlements are not this map's.
+    fn settle(&mut self, settled: Settled) {
+        match settled {
+            Settled::AnimationUnanswered { path } => {
+                self.open_unanswered(normalized_local_image_path_key(&path));
+            }
+            Settled::FillLost { path, serial } => {
+                self.release_failed_fill(&normalized_local_image_path_key(&path), serial);
+            }
+            Settled::Hold { .. } | Settled::Answer(_) | Settled::Nothing => {}
+        }
+    }
+
+    /// **An animation fill that failed**: its reservation is released (the bytes it stood for will
+    /// never come), re-weighed by taking the entry out and putting it back; the decoder went with
+    /// the request, so the animation stands on its last frame until a surface begins showing the
+    /// file again. A fill for a playback the window has moved on from changes nothing.
+    fn release_failed_fill(&mut self, key: &str, serial: u64) {
+        let answers_this_playback = matches!(
+            self.playbacks.get(key),
+            Some(AnimationEntry::Ready { serial: held, .. }) if *held == serial
+        );
+        if !answers_this_playback {
+            return;
+        }
+        if let Some(AnimationEntry::Ready {
+            serial,
+            mut animation,
+        }) = self.playbacks.remove(key)
+        {
+            animation.fill_lost();
+            self.playbacks
+                .insert(key.to_owned(), AnimationEntry::Ready { serial, animation });
+        }
+    }
+
+    /// **Send one playing animation's decoder for as many frames as its ring has room for** —
+    /// through `send`, which answers what became of it; see `Runtime::request_animation_fill` for
+    /// when.
+    ///
+    /// Nothing happens for an animation that wants nothing, and that needs no flag: the cursor *is*
+    /// the record that a fill is in flight, so an animation whose cursor is away wants no frames.
+    /// The entry is taken out and put back once, after `send` has answered, so the map weighs the
+    /// reservation `take_cursor` made — or, for a fill turned away or lost, the cursor home again
+    /// or the reservation released.
+    fn send_fill(
+        &mut self,
+        key: &str,
+        send: impl FnOnce(u64, Box<animation::AnimationCursor>, usize) -> FillSent,
+    ) {
+        let wants = matches!(
+            self.playbacks.get(key),
+            Some(AnimationEntry::Ready { animation, .. }) if animation.frames_wanted() > 0
+        );
+        if !wants {
+            return;
+        }
+        let Some(AnimationEntry::Ready {
+            serial,
+            mut animation,
+        }) = self.playbacks.remove(key)
+        else {
+            return;
+        };
+        if let Some((cursor, want)) = animation.take_cursor() {
+            match send(serial, cursor, want) {
+                FillSent::Sent => {}
+                FillSent::TurnedAway(cursor) => animation.park_cursor(cursor, Vec::new()),
+                FillSent::Lost => animation.fill_lost(),
+            }
+        }
+        self.playbacks
+            .insert(key.to_owned(), AnimationEntry::Ready { serial, animation });
+    }
+
+    /// **Move the animations that are on the glass to the frame that is due**, and
+    /// say whether any of them changed (adversarial review 2026-09-11, B8).
+    ///
+    /// `drawn` is what was actually presented last frame, by key and playback. An
+    /// animation outside it is one no surface is drawing: it does not advance,
+    /// because the refills that keep a ring full are asked only for what is drawn,
+    /// and a clock running where no decoder follows it is how a `.gif` in a
+    /// background tab drained its ring and resumed mid-file.
+    ///
+    /// The entry goes out of the map and back rather than being reached into, for
+    /// `bt_term::BoundedCache`'s own reason: `advance` **pops** frames, so an
+    /// animation advanced under the map leaves the ceiling counting pixels that have
+    /// been let go of.
+    fn advance_drawn(&mut self, drawn: &BTreeMap<String, u64>, now: Instant) -> bool {
+        let mut moved = false;
+        for key in drawn.keys() {
+            // **Asked before it is taken.** A key in last frame's drawn set may hold
+            // `Pending` by now — a surface that opened the file again let go of the
+            // playback and asked the worker for it — and a `remove` that ran anyway
+            // would throw that ledger entry away, which is this window asking for the
+            // same decode on every frame until one of them lands.
+            if !matches!(self.playbacks.get(key), Some(AnimationEntry::Ready { .. })) {
+                continue;
+            }
+            let Some(AnimationEntry::Ready {
+                serial,
+                mut animation,
+            }) = self.playbacks.remove(key)
+            else {
+                continue;
+            };
+            moved |= animation.advance(now);
+            self.playbacks
+                .insert(key.clone(), AnimationEntry::Ready { serial, animation });
+        }
+        moved
+    }
+
+    /// **Start the clock of every animation that has just come onto the glass**
+    /// (adversarial review 2026-09-11, B8) — see [`animation::Animation::present`]
+    /// for the two defects that one sentence closes.
+    ///
+    /// A playback already in `was_drawn` under the same serial has been on the glass
+    /// since last frame and keeps the clock its own delays built; anything else is
+    /// arriving, and its next frame is due a delay from now.
+    fn present_drawn(
+        &mut self,
+        was_drawn: &BTreeMap<String, u64>,
+        drawn: &BTreeMap<String, u64>,
+        now: Instant,
+    ) {
+        for (key, serial) in drawn {
+            if was_drawn.get(key) == Some(serial) {
+                continue;
+            }
+            // Asked before it is taken, for [`AnimationCache::advance_drawn`]'s reason: a
+            // `Pending` lifted out of the map and dropped is a request this window
+            // has forgotten it made.
+            if !matches!(self.playbacks.get(key), Some(AnimationEntry::Ready { .. })) {
+                continue;
+            }
+            let Some(AnimationEntry::Ready {
+                serial,
+                mut animation,
+            }) = self.playbacks.remove(key)
+            else {
+                continue;
+            };
+            animation.present(now);
+            self.playbacks
+                .insert(key.clone(), AnimationEntry::Ready { serial, animation });
+        }
+    }
+
+    /// **Take one fill home, or drop it** — `true` when the frames were adopted
+    /// (adversarial review 2026-09-11, B10).
+    ///
+    /// Two ways a fill can arrive for nobody, and both end the same way. The key may
+    /// be gone, which is an animation the map has evicted: re-inserting it would be
+    /// an eviction undone by its own answer. Or the key may hold a **different
+    /// playback** — since B8 a surface that begins showing a file opens it again, so
+    /// the entry under that name can be a second playback standing on frame zero,
+    /// and parking the old cursor into it would hand a fresh animation a decoder
+    /// halfway through the file and a ring of frames from the middle of it. The
+    /// serial is what makes those two answers distinguishable at all; the key names
+    /// the file, and the file is not the playback.
+    ///
+    /// **And a third way, which is not "for nobody" but "of nothing"** (user report
+    /// 2026-09-12): the file was rewritten under the loop. The cursor noticed it at
+    /// the moment the loop came round, which is the only moment a change can be
+    /// acted on rather than decoded into the middle of a picture; this window's part
+    /// is to let the playback go, key and all, so that the next pass over the drawn
+    /// animations opens the file again down the ordinary path and shows whatever is
+    /// there now.
+    fn adopt_fill(
+        &mut self,
+        key: String,
+        serial: u64,
+        cursor: Box<animation::AnimationCursor>,
+        frames: Vec<animation::AnimationFrame>,
+    ) -> AnimationFillOutcome {
+        let answers_this_playback = matches!(
+            self.playbacks.get(&key),
+            Some(AnimationEntry::Ready { serial: held, .. }) if *held == serial
+        );
+        if !answers_this_playback {
+            return AnimationFillOutcome::ForNobody;
+        }
+        let Some(AnimationEntry::Ready {
+            serial,
+            mut animation,
+        }) = self.playbacks.remove(&key)
+        else {
+            return AnimationFillOutcome::ForNobody;
+        };
+        animation.park_cursor(cursor, frames);
+        if animation.file_changed() {
+            return AnimationFillOutcome::FileChanged;
+        }
+        self.playbacks
+            .insert(key, AnimationEntry::Ready { serial, animation });
+        AnimationFillOutcome::Parked
+    }
+}
 
 /// **What the renderer is to call one animation's picture** (adversarial review
 /// 2026-09-11, B3).
@@ -31948,82 +32574,6 @@ type AnimationCache = bt_term::BoundedCache<String, AnimationEntry>;
 /// spell it differently there.
 fn animation_layer_key(surface: PreviewSurface, serial: u64) -> String {
     format!("gif:{surface:?}:{serial}")
-}
-
-/// **Move the animations that are on the glass to the frame that is due**, and
-/// say whether any of them changed (adversarial review 2026-09-11, B8).
-///
-/// `drawn` is what was actually presented last frame, by key and playback. An
-/// animation outside it is one no surface is drawing: it does not advance,
-/// because the refills that keep a ring full are asked only for what is drawn,
-/// and a clock running where no decoder follows it is how a `.gif` in a
-/// background tab drained its ring and resumed mid-file.
-///
-/// The entry goes out of the map and back rather than being reached into, for
-/// `bt_term::BoundedCache`'s own reason: `advance` **pops** frames, so an
-/// animation advanced under the map leaves the ceiling counting pixels that have
-/// been let go of.
-fn advance_drawn_animations(
-    animations: &mut AnimationCache,
-    drawn: &BTreeMap<String, u64>,
-    now: Instant,
-) -> bool {
-    let mut moved = false;
-    for key in drawn.keys() {
-        // **Asked before it is taken.** A key in last frame's drawn set may hold
-        // `Pending` by now — a surface that opened the file again let go of the
-        // playback and asked the worker for it — and a `remove` that ran anyway
-        // would throw that ledger entry away, which is this window asking for the
-        // same decode on every frame until one of them lands.
-        if !matches!(animations.get(key), Some(AnimationEntry::Ready { .. })) {
-            continue;
-        }
-        let Some(AnimationEntry::Ready {
-            serial,
-            mut animation,
-        }) = animations.remove(key)
-        else {
-            continue;
-        };
-        moved |= animation.advance(now);
-        animations.insert(key.clone(), AnimationEntry::Ready { serial, animation });
-    }
-    moved
-}
-
-/// **Start the clock of every animation that has just come onto the glass**
-/// (adversarial review 2026-09-11, B8) — see [`animation::Animation::present`]
-/// for the two defects that one sentence closes.
-///
-/// A playback already in `was_drawn` under the same serial has been on the glass
-/// since last frame and keeps the clock its own delays built; anything else is
-/// arriving, and its next frame is due a delay from now.
-fn present_drawn_animations(
-    animations: &mut AnimationCache,
-    was_drawn: &BTreeMap<String, u64>,
-    drawn: &BTreeMap<String, u64>,
-    now: Instant,
-) {
-    for (key, serial) in drawn {
-        if was_drawn.get(key) == Some(serial) {
-            continue;
-        }
-        // Asked before it is taken, for [`advance_drawn_animations`]'s reason: a
-        // `Pending` lifted out of the map and dropped is a request this window
-        // has forgotten it made.
-        if !matches!(animations.get(key), Some(AnimationEntry::Ready { .. })) {
-            continue;
-        }
-        let Some(AnimationEntry::Ready {
-            serial,
-            mut animation,
-        }) = animations.remove(key)
-        else {
-            continue;
-        };
-        animation.present(now);
-        animations.insert(key.clone(), AnimationEntry::Ready { serial, animation });
-    }
 }
 
 /// **Which animated files this walk of the surfaces has just opened**, and the
@@ -32061,56 +32611,7 @@ fn animations_opened(
     opened
 }
 
-/// **Take one fill home, or drop it** — `true` when the frames were adopted
-/// (adversarial review 2026-09-11, B10).
-///
-/// Two ways a fill can arrive for nobody, and both end the same way. The key may
-/// be gone, which is an animation the map has evicted: re-inserting it would be
-/// an eviction undone by its own answer. Or the key may hold a **different
-/// playback** — since B8 a surface that begins showing a file opens it again, so
-/// the entry under that name can be a second playback standing on frame zero,
-/// and parking the old cursor into it would hand a fresh animation a decoder
-/// halfway through the file and a ring of frames from the middle of it. The
-/// serial is what makes those two answers distinguishable at all; the key names
-/// the file, and the file is not the playback.
-///
-/// **And a third way, which is not "for nobody" but "of nothing"** (user report
-/// 2026-09-12): the file was rewritten under the loop. The cursor noticed it at
-/// the moment the loop came round, which is the only moment a change can be
-/// acted on rather than decoded into the middle of a picture; this window's part
-/// is to let the playback go, key and all, so that the next pass over the drawn
-/// animations opens the file again down the ordinary path and shows whatever is
-/// there now.
-fn adopt_animation_fill(
-    animations: &mut AnimationCache,
-    key: String,
-    serial: u64,
-    cursor: Box<animation::AnimationCursor>,
-    frames: Vec<animation::AnimationFrame>,
-) -> AnimationFillOutcome {
-    let answers_this_playback = matches!(
-        animations.get(&key),
-        Some(AnimationEntry::Ready { serial: held, .. }) if *held == serial
-    );
-    if !answers_this_playback {
-        return AnimationFillOutcome::ForNobody;
-    }
-    let Some(AnimationEntry::Ready {
-        serial,
-        mut animation,
-    }) = animations.remove(&key)
-    else {
-        return AnimationFillOutcome::ForNobody;
-    };
-    animation.park_cursor(cursor, frames);
-    if animation.file_changed() {
-        return AnimationFillOutcome::FileChanged;
-    }
-    animations.insert(key, AnimationEntry::Ready { serial, animation });
-    AnimationFillOutcome::Parked
-}
-
-/// **What became of one fill coming home** — see [`adopt_animation_fill`].
+/// **What became of one fill coming home** — see [`AnimationCache::adopt_fill`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AnimationFillOutcome {
     /// The frames went into the ring they were decoded for.
@@ -44114,7 +44615,6 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         animations_drawn: BTreeMap::new(),
         pictures_owe_a_frame: false,
         picture_boxes_were_moving: false,
-        animation_presence: BTreeMap::new(),
         preview_watch: preview_watch::PreviewWatch::default(),
         files_watch: files_watch::FilesWatch::default(),
         web_cursor: None,
@@ -45595,12 +46095,12 @@ impl Runtime<'_> {
             trace_sink::stderr_line(format!("BT_CONPTY_SOURCE sources={conpty_sources:?}"));
         }
         let pty_time = phase_started.elapsed();
-        let math_worker = MathWorker::spawn({
+        let math_worker = Arc::new(computation_lane::ComputationLane::new({
             let proxy = proxy.clone();
             move || {
                 let _ = proxy.send_event(AppEvent::MathReady);
             }
-        })?;
+        }));
         let foreground_program_worker = foreground_program::Worker::spawn({
             let proxy = proxy.clone();
             move || {
@@ -54440,9 +54940,7 @@ impl App {
 
     fn decoration_senders(&self) -> DecorationSenders {
         DecorationSenders {
-            math: self.math_worker.tasks.clone(),
-            scale: self.math_worker.scale_tasks.clone(),
-            path: self.math_worker.path_tasks.clone(),
+            computation: Arc::clone(&self.math_worker),
             foreground: self.foreground_program_worker.requests.clone(),
         }
     }
@@ -55491,7 +55989,8 @@ mod launch_landing_tests {
         let tear_out = door.find("self.settle_tear_out(errand, id)?");
         assert!(
             matches!((insert, publish, tear_out), (Some(i), Some(p), Some(t)) if i < p && p < t),
-            "a window opened this turn is missing from the directory the doors              after it read:
+            "a window opened this turn is missing from the directory the doors \
+             after it read:
 {door}"
         );
         let first =
@@ -55500,7 +55999,8 @@ mod launch_landing_tests {
         let publish = first.find("self.publish_window_directory();");
         assert!(
             matches!((insert, publish), (Some(i), Some(p)) if i < p),
-            "the first window is missing from the directory until the turn's              head walks it:
+            "the first window is missing from the directory until the turn's \
+             head walks it:
 {first}"
         );
         let tell = method_body("FolioApp", "tell_the_update_job");
@@ -56900,7 +57400,8 @@ mod files_locate_door_tests {
         // other acknowledgement in this window is.
         assert!(
             method_body("Runtime", "turn").contains("self.preview_refusal_deadline(),"),
-            "nothing wakes the window when the reason is due to go, so the pill stands until              something else happens to repaint"
+            "nothing wakes the window when the reason is due to go, so the pill stands until \
+             something else happens to repaint"
         );
         // ④ The way out, first among what the pill can say.
         let say = method_body("Runtime", "preview_pill_say");
@@ -58000,7 +58501,8 @@ mod file_peek_fade_tests {
         );
         assert!(
             !layer.contains(".opacity *=") && !layer.contains(".opacity ="),
-            "and no layer wears it in its own opacity: a layer faded for a reason              of its own keeps that reason as a surface inside this one"
+            "and no layer wears it in its own opacity: a layer faded for a reason \
+             of its own keeps that reason as a surface inside this one"
         );
 
         assert!(
@@ -64286,28 +64788,42 @@ impl FolioApp {
         (batch, gone)
     }
 
-    /// [`Self::drain_preview_answers`] for the decoration lane — the formulas,
+    /// [`Self::drain_preview_answers`] for the computation lane — the formulas,
     /// the decoded pictures, the resampled rasters and the verified paths.
-    fn drain_math_answers(&mut self) -> (Vec<MathWorkerResult>, bool) {
-        let mut batch = Vec::new();
-        let Some(app) = self.app.as_mut() else {
-            return (batch, false);
-        };
-        let mut gone = false;
-        loop {
-            match app.math_worker.results.try_recv() {
-                Ok(result) => batch.push(result),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    gone = disable_math_worker_state(
-                        &mut app.math_worker_running,
-                        &mut app.math_worker_notice_pending,
-                    );
-                    break;
-                }
+    ///
+    /// **Every request the lane admitted ends here, by its identity**
+    /// (`computation_lane`). A request whose asker no open window holds — a
+    /// closed tab, a closed window — is let go first, and its terminal reaches
+    /// the lane's sink, which ignores it. Of the rest, each share's terminals
+    /// below its drain mark are taken (and a superseded one wherever it stands),
+    /// and sorted ([`sort_math_terminals`]): an answer joins the batch the
+    /// windows take theirs from; a superseded or joined request leaves the
+    /// answer to the request that ended it; a failure — said once by the lane —
+    /// is settled as its surface's own error answer, or as a pane task held for
+    /// new input that could change its answer, or an animation fill released;
+    /// and a worker that has ended turns the lane off, once, with its notice.
+    fn drain_math_answers(&mut self) -> MathAnswers {
+        let mut windows = BTreeSet::new();
+        let mut tabs = BTreeSet::new();
+        for window in self.windows.values() {
+            if window.leaving.is_none() {
+                windows.insert(window.window.id());
+                tabs.extend(window.tabs.iter().map(|tab| tab.id));
             }
         }
-        (batch, gone)
+        let Some(app) = self.app.as_mut() else {
+            return MathAnswers::default();
+        };
+        let mut answers = sort_math_terminals(app.math_worker.ended(|owner| match owner {
+            AnswerOwner::Tab(tab) => !tabs.contains(&tab),
+            AnswerOwner::Window(window) => !windows.contains(&window),
+        }));
+        answers.lane_gone = answers.lane_gone
+            && disable_math_worker_state(
+                &mut app.math_worker_running,
+                &mut app.math_worker_notice_pending,
+            );
+        answers
     }
 
     fn drain_foreground_program_answers(&mut self) -> Vec<foreground_program::Answer> {
@@ -68218,9 +68734,14 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 Ok(())
             }
             AppEvent::MathReady => {
-                let (mut batch, gone) = self.drain_math_answers();
+                let MathAnswers {
+                    done: mut batch,
+                    mut failed,
+                    lane_gone: gone,
+                } = self.drain_math_answers();
                 let mut foreground = self.drain_foreground_program_answers();
                 self.for_each_window(|runtime| {
+                    runtime.settle_failed_requests(&mut failed);
                     runtime.apply_math_results(&mut batch, gone)?;
                     runtime.apply_foreground_program_results(&mut foreground)
                 })
@@ -71747,13 +72268,15 @@ mod floated_page_tests {
         assert_eq!(
             chrome_over(&stack, None, Some(body)),
             vec![over],
-            "a docked page's hole stands under the whole stack, so a layer over              it covers it and a layer beside it does not"
+            "a docked page's hole stands under the whole stack, so a layer over \
+             it covers it and a layer beside it does not"
         );
         let nothing: Vec<[f32; 4]> = Vec::new();
         assert_eq!(
             chrome_over(&stack, Some(0), Some(body)),
             nothing,
-            "a float's page is drawn over its own float's face, so that layer is              not something standing on it"
+            "a float's page is drawn over its own float's face, so that layer is \
+             not something standing on it"
         );
         assert_eq!(
             chrome_over(&[Some(beside)], None, Some(body)),
@@ -76070,7 +76593,7 @@ fn main() -> Result<()> {
     //
     // **The same question `Runtime::trace_perf` asks, asked here** because the
     // watchdog starts before there is an `App` to hold the answer — the reading
-    // `MathWorker::spawn` takes for the same reason one lane over. What it
+    // the resampling share's door (`scale_door`) takes for the same reason one lane over. What it
     // decides is the silence a report is written for: a run somebody started in
     // order to measure it is worth suspending at two seconds, and a run nobody
     // asked anything of is not. See `hang_watch::TRACED_HANG_THRESHOLD`.
@@ -79024,7 +79547,8 @@ mod edit_menu_clipboard_tests {
         ] {
             assert!(
                 !verb.contains(its_own),
-                "the Edit menu touches the pasteboard itself through `{its_own}` instead of                  going through the door the keystroke uses"
+                "the Edit menu touches the pasteboard itself through `{its_own}` instead of \
+                 going through the door the keystroke uses"
             );
         }
     }
@@ -79917,7 +80441,9 @@ mod live_markdown_edit_tests {
         );
         assert!(
             method_body("Runtime", "leave_preview_buffer_in").contains(".leave_document()"),
-            "and handing this surface a different file still leaves the page:              the view, and whether its caret stands on the page, go with the              document",
+            "and handing this surface a different file still leaves the page: \
+             the view, and whether its caret stands on the page, go with the \
+             document",
         );
         assert_eq!(
             in_product_items(&found(
@@ -79925,7 +80451,8 @@ mod live_markdown_edit_tests {
                 View::Raw
             )),
             1,
-            "one door, counted here on purpose; the file swap takes the whole              view with the document",
+            "one door, counted here on purpose; the file swap takes the whole \
+             view with the document",
         );
         assert!(
             !method_body("Runtime", "leave_preview_page").contains("pane.caret ="),
@@ -81273,11 +81800,15 @@ mod clipboard_path_tests {
             ),
             (
                 ".paste_paths_into(target, batch.paths, \"write dropped paths to PTY\")",
-                "a dropped batch reaches a shell through one door, and takes the                  whole batch with it — which is what makes the focus and the                  raise behind its answer happen once per drop and not once per                  file",
+                "a dropped batch reaches a shell through one door, and takes the \
+                 whole batch with it — which is what makes the focus and the \
+                 raise behind its answer happen once per drop and not once per \
+                 file",
             ),
             (
                 "self.bring_this_window_forward();",
-                "and a drop brings this window to the front, from the one place                  that spends a whole batch (owner's ruling 2026-09-17)",
+                "and a drop brings this window to the front, from the one place \
+                 that spends a whole batch (owner's ruling 2026-09-17)",
             ),
             (
                 "self.paste_target(seat)",
@@ -81356,12 +81887,14 @@ mod clipboard_path_tests {
             flushing.contains("if written {")
                 && flushing.contains("self.focus_the_pane_a_path_landed_in(target.seat)?;")
                 && flushing.contains("self.bring_this_window_forward();"),
-            "a drop no longer takes the keyboard and the window with it, or does              so without asking whether anything was written:
+            "a drop no longer takes the keyboard and the window with it, or does \
+             so without asking whether anything was written:
 {flushing}"
         );
         assert!(
             flushing.find("paste_paths_into") < flushing.find("focus_the_pane_a_path_landed_in"),
-            "the focus moved before the write, so where the bytes went could              depend on it:
+            "the focus moved before the write, so where the bytes went could \
+             depend on it:
 {flushing}"
         );
         for forbidden in ["platform_pointer_now", "pointer_position"] {
@@ -81650,7 +82183,9 @@ mod clipboard_path_tests {
         assert_eq!(
             kept(GlassHere::Ours, promised),
             promised.map(|offer| offer.target),
-            "the control: a hand that let go on our own glass, where the box was              drawn, over the shell the box named, pastes — and pastes into that              shell by name"
+            "the control: a hand that let go on our own glass, where the box was \
+             drawn, over the shell the box named, pastes — and pastes into that \
+             shell by name"
         );
 
         // ① The hand moved to another pane and no motion was delivered before
@@ -81703,16 +82238,19 @@ mod clipboard_path_tests {
             assert_eq!(
                 kept(covered, promised),
                 None,
-                "{covered:?}: the path was typed into a terminal behind another                  window, with every identity in the offer unchanged"
+                "{covered:?}: the path was typed into a terminal behind another \
+                 window, with every identity in the offer unchanged"
             );
         }
         assert!(
             !glass_allows_a_text_write(GlassHere::Unknown),
-            "a text write on an answer the window manager would not give is a              guess, and this one cannot be seen or undone"
+            "a text write on an answer the window manager would not give is a \
+             guess, and this one cannot be seen or undone"
         );
         assert!(
             glass_allows_a_drop(GlassHere::Unknown),
-            "and the pane-moving drag keeps the opposite default, which is F2's:              with no answer the payload stays in the window holding it"
+            "and the pane-moving drag keeps the opposite default, which is F2's: \
+             with no answer the payload stays in the window holding it"
         );
 
         // ⑥ P1-b: the box was a refusal — the window is below what its own tree

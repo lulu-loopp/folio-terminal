@@ -1454,7 +1454,8 @@ mod tests {
         assert_eq!(
             temporary_directory_from(Some(PathBuf::from("T")), 501),
             Path::new("/tmp/folio-501"),
-            "an answer that is not rooted would be a different folder for every              directory a Folio was started in"
+            "an answer that is not rooted would be a different folder for every \
+             directory a Folio was started in"
         );
         assert_ne!(
             temporary_directory_from(Some(PathBuf::from("/var/folders/8x/T")), 501),

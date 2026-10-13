@@ -483,6 +483,32 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-migration-debt-tests.ps1
 
+      # The embedded-spaces gate refuses a run of spaces inside a literal by its
+      # file:line: plant one in a tracked crate file and require exactly that
+      # refusal, then run its scratch-repository suite (the allow-list's
+      # exactness, its shrink, a moved row, and the lexer's own cases).
+      - name: the embedded-spaces gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "crates/bt-lint-probe/src/lib.rs"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "`npub const _EMBEDDED_SPACES_PROBE: &str = `"a planted          continuation`";`n")
+            $line = ([IO.File]::ReadAllText($file) -split "`n").Count - 1
+            $said = & pwsh -NoProfile -File ./scripts/ci/check-embedded-spaces.ps1 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            if ($code -eq 0) {
+              throw "the embedded-spaces gate accepted a planted run of spaces"
+            }
+            if ($said -notmatch [regex]::Escape("${file}:${line}: a string literal carries a run")) {
+              throw "the planted literal was refused for another reason, or not by its file:line: $said"
+            }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          & ./scripts/ci/check-embedded-spaces-tests.ps1
+          exit 0
+
       # `lane::EXPECTED_FAILURES` only shrinks: a lane does not gain a declared
       # failure for a claim the merge base already had. Planting one proves the
       # comparison against the merge base is one.
@@ -685,6 +711,16 @@ jobs:
       - name: crate dependencies go down the layers
         shell: pwsh
         run: ./scripts/ci/check-crate-edges.ps1
+
+      # A message literal is one sentence (docs/CONVENTIONS.md section 5): a
+      # string literal of first-party Rust with a run of three or more spaces
+      # between two characters of one source line is a lost `\` continuation,
+      # refused by file:line unless `docs/plans/embedded-spaces-allowed.txt`
+      # lists it - a list of deliberate columns that only shrinks against the
+      # merge base.
+      - name: no string literal carries a lost line continuation
+        shell: pwsh
+        run: ./scripts/ci/check-embedded-spaces.ps1
 
       # Each vendored crate must stay a workspace member: its own upstream suite
       # is our regression line against our patches breaking its semantics, and it

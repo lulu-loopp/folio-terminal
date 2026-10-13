@@ -147,8 +147,8 @@ fn shell_fixture(directory: &Path, home: &str, name: &str) -> String {
         name,
         &format!(
             "echo 'shell={name}'\necho \"argv=$*\"\n\
-             echo \"BT_SHELL_INTEGRATION=${{BT_SHELL_INTEGRATION-<unset>}}\"
-             echo \"ZDOTDIR=${{ZDOTDIR-<unset>}}\"
+             echo \"BT_SHELL_INTEGRATION=${{BT_SHELL_INTEGRATION-<unset>}}\"\n\
+             echo \"ZDOTDIR=${{ZDOTDIR-<unset>}}\"\n\
              echo \"BT_USER_ZDOTDIR=${{BT_USER_ZDOTDIR-<unset>}}\""
         ),
     );
@@ -268,7 +268,8 @@ fn bash_is_handed_the_init_file_and_every_other_login_shell_is_left_alone() {
         );
         assert!(
             said.contains("BT_SHELL_INTEGRATION=login"),
-            "{home}: the script is told which chain it owes, and `wsl.exe` starts a login shell:              {said}"
+            "{home}: the script is told which chain it owes, and `wsl.exe` starts a login shell: \
+             {said}"
         );
     }
 

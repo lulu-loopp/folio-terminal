@@ -2,6 +2,8 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use super::pointer::CaptureOwner;
+use crate::computation_lane::Asking;
+use crate::lane::Refused;
 use crate::{
     DragLatch, FilePeek, FilePeekPress, FilePeekSubject, FloatDrag, FloatDragKind, FloatGrasp,
     LeafId, MathWorkerRequest, PeekBodyKind, PeekCacheEntry, PeekCandidate, PeekClock, PeekFacts,
@@ -26,6 +28,32 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::dpi::PhysicalPosition;
 use winit::event::MouseButton;
+
+/// **What became of a request for a file's pixels** ([`Runtime::request_peek_pixels`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::runtime) enum PeekAsk {
+    /// The computation lane admitted it; its answer is on its way.
+    Asked,
+    /// The lane was full: nothing is out, and the surface's next resolve asks again (the answers
+    /// that free the lane are the next hand-out).
+    NotNow,
+    /// The lane's thread could not be started: the file is filed as failed
+    /// ([`unstarted_pixels`]), so it is asked again only by new input to the surface — a new
+    /// hover, the file opened again.
+    Unstarted,
+    /// It was not asked and will not be: a file this window does not open, or a lane that has
+    /// stopped.
+    Refused,
+}
+
+/// **What a file's pixels are filed as when the lane's thread could not be started**: a failed
+/// decode, in the decoder error's words, so every surface reading the window's cache agrees and
+/// asks again only on its own new input.
+pub(in crate::runtime) fn unstarted_pixels() -> PeekCacheEntry {
+    PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Decode(
+        crate::DECODE_UNSTARTED.to_owned(),
+    ))
+}
 
 impl Runtime<'_> {
     /// Whether this tab has a layout worth showing, and whether now is a moment
@@ -354,9 +382,8 @@ impl Runtime<'_> {
     /// The name is read with [`preview::path_names_a_video`], which is the very predicate
     /// [`preview_open_lane`] forks on, so a file that opened as a video is decoded as one.
     ///
-    /// Answers whether the question went out. `false` is a worker that has stopped or a channel
-    /// that has closed, which each caller turns into its own kind of silence.
-    pub(in crate::runtime) fn request_peek_pixels(&self, path: &Path) -> bool {
+    /// Answers whether the question went out ([`PeekAsk`]).
+    pub(in crate::runtime) fn request_peek_pixels(&self, path: &Path) -> PeekAsk {
         // **The door itself asks whether this is a file to read** (routes A and E of the
         // untrusted-path audit, 2026-09-08). Three surfaces reach this line — the preview pane,
         // the glance card and a markdown page's own pictures — and each of them used to decide
@@ -364,10 +391,10 @@ impl Runtime<'_> {
         // the three had not asked. One door, one question: what goes out of here is a request to
         // open a file, and a request nobody may make is one this window does not send.
         if !preview::is_readable_unasked(path) {
-            return false;
+            return PeekAsk::Refused;
         }
         if !self.app.math_worker_running {
-            return false;
+            return PeekAsk::Refused;
         }
         let leaf = self.focused_shell_address();
         let path = path.to_owned();
@@ -376,7 +403,12 @@ impl Runtime<'_> {
         } else {
             MathWorkerRequest::PeekImage { leaf, path }
         };
-        self.app.math_worker.tasks.send(request).is_ok()
+        match self.app.math_worker.decorate(request) {
+            Ok(_) => PeekAsk::Asked,
+            Err((Refused::Full { .. }, _)) => PeekAsk::NotNow,
+            Err((Refused::NotStarted(_), _)) => PeekAsk::Unstarted,
+            Err(_) => PeekAsk::Refused,
+        }
     }
 
     /// The pointer is resting on this row — arm the 350ms, or leave a running
@@ -932,6 +964,24 @@ impl Runtime<'_> {
         if !self.window.video_carried_off_the_card {
             self.window.video.close(PreviewSurface::Peek);
         }
+        // **A card that comes down lets go of what failed for it**, so the next hover over the
+        // same file — the card's own new input — asks again: its file's failed decode and the
+        // resample it was owed. A page it asked about is asked again too (below).
+        if let Some(path) = self
+            .window
+            .file_peek
+            .as_ref()
+            .and_then(|peek| peek.source.file_path())
+        {
+            let key = normalized_local_image_path_key(path);
+            if matches!(
+                self.window.peek_cache.get(&key),
+                Some(PeekCacheEntry::Failed(_))
+            ) {
+                self.window.peek_cache.remove(&key);
+            }
+        }
+        self.window.peek_card_pending = None;
         self.window.file_peek = None;
         // And the hand that was on its head. A press whose card has gone has
         // nothing left to promote, and a promotion that fired afterwards would
@@ -1151,8 +1201,14 @@ impl Runtime<'_> {
                 }) => (key.clone(), Arc::clone(rgba), *width_px, *height_px),
                 Some(PeekCacheEntry::Pending | PeekCacheEntry::Failed(_)) => return None,
                 None => {
-                    if self.request_peek_pixels(path) {
-                        self.window.peek_cache.insert(key, PeekCacheEntry::Pending);
+                    match self.request_peek_pixels(path) {
+                        PeekAsk::Asked => {
+                            self.window.peek_cache.insert(key, PeekCacheEntry::Pending);
+                        }
+                        PeekAsk::Unstarted => {
+                            self.window.peek_cache.insert(key, unstarted_pixels());
+                        }
+                        PeekAsk::NotNow | PeekAsk::Refused => {}
                     }
                     return None;
                 }
@@ -1179,13 +1235,14 @@ impl Runtime<'_> {
         if self
             .app
             .math_worker
-            .scale_tasks
-            .send(ScaleWorkerRequest::Peek {
+            .scale(ScaleWorkerRequest::Peek {
                 leaf: self.focused_shell_address(),
                 task: peek_scale_task(&target, rgba, native_width, native_height),
             })
-            .is_ok()
+            .is_ok_or_unstarted()
         {
+            // Asked — or its thread not started, which marks it asked too: the next hover, a new
+            // size, asks again; a redraw does not.
             self.window.peek_card_pending = Some(target);
         }
         None
@@ -1320,19 +1377,19 @@ impl Runtime<'_> {
             if self
                 .app
                 .math_worker
-                .tasks
-                .send(MathWorkerRequest::PeekPage {
+                .decorate(MathWorkerRequest::PeekPage {
                     leaf,
                     path: path.to_owned(),
                     page: index,
                     fit,
                     known,
                 })
-                .is_err()
+                .is_full()
                 && let Some(slot) = self.window.peek_page.as_mut()
             {
-                // Nobody is going to answer, so nothing is out: leave the slot able to ask again
-                // rather than waiting for ever on a lane that has gone.
+                // The lane was full, so nothing is out: leave the slot able to ask again on the
+                // next frame. A thread not started leaves the page asked: the card asks again
+                // when it is shown again.
                 slot.asked.remove(&index);
             }
         }
@@ -2612,6 +2669,9 @@ impl Runtime<'_> {
     /// (pointer off the span, pointer left, wheel, click, any key).
     pub(in crate::runtime) fn dismiss_peek(&mut self) -> Result<()> {
         self.window.peek_hover.clear();
+        // The next hover is the flyout's new input: a resample still owed — answered late, or
+        // failed on the worker, or never started — is asked again by it rather than waited on.
+        self.window.peek_thumbnail_pending = None;
         self.present_peek_overlay(None)
     }
 
@@ -2674,8 +2734,7 @@ impl Runtime<'_> {
                     if self
                         .app
                         .math_worker
-                        .tasks
-                        .send(MathWorkerRequest::PeekImage {
+                        .decorate(MathWorkerRequest::PeekImage {
                             leaf: self.focused_shell_address(),
                             path,
                         })
@@ -2716,8 +2775,7 @@ impl Runtime<'_> {
         if self
             .app
             .math_worker
-            .scale_tasks
-            .send(ScaleWorkerRequest::Peek {
+            .scale(ScaleWorkerRequest::Peek {
                 leaf: ShellAddress {
                     window: self.window.window.id(),
                     leaf: LeafId {
@@ -2727,8 +2785,9 @@ impl Runtime<'_> {
                 },
                 task: peek_scale_task(&target, native_rgba, native_width_px, native_height_px),
             })
-            .is_ok()
+            .is_ok_or_unstarted()
         {
+            // Asked, or its thread not started: either way the flyout's next new input asks.
             self.window.peek_thumbnail_pending = Some(target);
         }
         Ok(())

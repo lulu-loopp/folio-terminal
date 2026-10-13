@@ -8288,11 +8288,13 @@ fn every_answering_app_event_is_the_signal_of_a_completions_row() {
 }
 
 /// The door each lane of the lane suite enters by, by its `LaneName` variant.
-const LANE_DOORS: [(&str, &str); 5] = [
+const LANE_DOORS: [(&str, &str); 7] = [
     ("Handoff", "Runtime::hand_off"),
     ("Font", "request_font_walk"),
     ("Taskbar", "taskbar_lane::request"),
     ("Computation", "dispatch_decoration_task"),
+    ("ComputationScale", "dispatch_decoration_task"),
+    ("ComputationPath", "dispatch_decoration_task"),
     ("Programs", "programs_lane::request"),
 ];
 

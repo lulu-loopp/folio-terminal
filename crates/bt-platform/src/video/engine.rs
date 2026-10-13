@@ -1863,7 +1863,8 @@ mod tests {
         let reached = engines_outstanding_reaching(target, PATIENCE);
         assert_eq!(
             reached, target,
-            "the engine ledger did not reach {target} within this module's patience              ({PATIENCE:?}); {reached} engines stood"
+            "the engine ledger did not reach {target} within this module's patience \
+             ({PATIENCE:?}); {reached} engines stood"
         );
         reached
     }
