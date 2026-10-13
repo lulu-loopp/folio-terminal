@@ -304,25 +304,6 @@ pub fn durable_remove(path: &Path) -> Result<(), Failure> {
     durable_remove_with(&mut arm::Os, path)
 }
 
-/// **The last step of a durable write, alone: flush the directory `target`
-/// is in** — for a caller whose [`durable_write`] failed at
-/// [`Stage::OpenDirectory`] or [`Stage::FlushDirectory`], after its rename put
-/// the bytes at `target`: what is still owed is this flush, not a second
-/// temporary, a second flush of the file and a second rename over `target`.
-/// It writes nothing; `target` itself is neither opened nor read.
-///
-/// # Errors
-/// A [`Failure`] at [`Stage::OpenDirectory`] or [`Stage::FlushDirectory`]; on
-/// a platform with no arm, one at [`Stage::OpenDirectory`] whose error is
-/// `Unsupported` and names this door.
-pub fn flush_directory_of(target: &Path) -> Result<(), Failure> {
-    flush_directory_of_with(&mut arm::Os, target)
-}
-
-fn flush_directory_of_with<S: Surface>(surface: &mut S, target: &Path) -> Result<(), Failure> {
-    flush_directory(surface, directory_of(target))
-}
-
 /// **Create the directory `path`, which must not exist yet, and flush the
 /// directory it is in** — the installation home and a transaction's folders
 /// (the macOS Prepare, U-27: `H/`, `H/<txn>/` and its `stage/`, `rescue/` and
@@ -382,7 +363,8 @@ const COPY_CHUNK: usize = 64 * 1024;
 static TEMP_SERIAL: AtomicU64 = AtomicU64::new(0);
 
 /// The directory a path is in; `.` for a bare file name.
-pub(crate) fn directory_of(path: &Path) -> &Path {
+#[must_use]
+pub fn directory_of(path: &Path) -> &Path {
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
@@ -531,13 +513,22 @@ pub(crate) fn durable_create_dir_with<S: Surface>(
 }
 
 /// **The directory flush, alone, with the operating system's calls** — the
-/// step every durable effect here ends with, lent to the exchange door
-/// (`crate::exchange::flush_directory`) so a document's exchange is made
-/// durable by the same calls an update's journal is: `FlushFileBuffers` on a
-/// handle opened with `FILE_FLAG_BACKUP_SEMANTICS`, `F_FULLFSYNC` on the
-/// directory's descriptor.
-#[cfg(any(windows, target_os = "macos"))]
-pub(crate) fn flush_directory_on_disk(directory: &Path) -> Result<(), Failure> {
+/// step every durable effect here ends with: `FlushFileBuffers` on a handle
+/// opened with `FILE_FLAG_BACKUP_SEMANTICS`, `F_FULLFSYNC` on the directory's
+/// descriptor. Lent to the exchange door (`crate::exchange::flush_directory`),
+/// so a document's exchange is made durable by the same calls an update's
+/// journal is, and to the trial's watch for its `unkept` mark: a
+/// [`durable_write`] refused at [`Stage::OpenDirectory`] or
+/// [`Stage::FlushDirectory`] already put its bytes at its name, so what it
+/// still owes is this flush of [`directory_of`] its target, not a second
+/// temporary, file flush and rename (T-TRIAL-WATCH-REPEATS-BOUND). It writes
+/// nothing.
+///
+/// # Errors
+/// A [`Failure`] at [`Stage::OpenDirectory`] or [`Stage::FlushDirectory`]; on
+/// a platform with no arm, one at [`Stage::OpenDirectory`] whose error is
+/// `Unsupported` and names this door.
+pub fn flush_directory_on_disk(directory: &Path) -> Result<(), Failure> {
     flush_directory(&mut arm::Os, directory)
 }
 
@@ -1567,19 +1558,19 @@ mod tests {
         );
     }
 
-    /// RED (T-TRIAL-WATCH-REPEATS-BOUND) — **the folder flush alone opens the
-    /// target's folder and flushes that handle, and nothing else**: no
-    /// temporary, no write, no rename, and the target itself never opened —
-    /// what a durable write refused after its rename still owes.
+    /// RED (T-TRIAL-WATCH-REPEATS-BOUND) — **the directory flush alone opens
+    /// the directory and flushes that handle, and nothing else** — no
+    /// temporary, no write, no rename: what a durable write refused after its
+    /// rename still owes — **and a failure names its own stage**, so a caller
+    /// tells a refused open from a refused flush.
     ///
-    /// MUTATION: in `flush_directory_of_with`, flush `target` instead of
-    /// `directory_of(target)`.
+    /// MUTATION: in `flush_directory`, name a refused flush
+    /// `Stage::OpenDirectory`.
     #[test]
-    fn the_folder_flush_alone_flushes_the_targets_folder_and_writes_nothing() {
-        let target = home().join("txn").join("unkept");
-        let mut fake = Recorder::default();
-        flush_directory_of_with(&mut fake, &target).unwrap();
+    fn the_directory_flush_alone_writes_nothing_and_names_its_stage() {
         let folder = home().join("txn");
+        let mut fake = Recorder::default();
+        flush_directory(&mut fake, &folder).unwrap();
         assert_eq!(
             fake.calls,
             vec![
@@ -1596,7 +1587,7 @@ mod tests {
             (Fail::FlushDirectory, Stage::FlushDirectory),
         ] {
             let mut fake = Recorder::failing(fail);
-            let failure = flush_directory_of_with(&mut fake, &target).unwrap_err();
+            let failure = flush_directory(&mut fake, &folder).unwrap_err();
             assert_eq!((failure.stage, &failure.path), (stage, &folder));
         }
     }
@@ -2094,7 +2085,7 @@ mod tests {
         assert_eq!(held.stage, Stage::OpenLockFile);
         let removed = durable_remove(&target).unwrap_err();
         assert_eq!(removed.stage, Stage::Remove);
-        let flushed = flush_directory_of(&target).unwrap_err();
+        let flushed = flush_directory_on_disk(directory_of(&target)).unwrap_err();
         assert_eq!(flushed.stage, Stage::OpenDirectory);
         for (failure, operation) in [
             (write, "durable write"),

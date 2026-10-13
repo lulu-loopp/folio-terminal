@@ -733,7 +733,7 @@ pub(crate) trait MarkDisk {
     /// The step it stopped at.
     fn write(&self, mark: &Path, bytes: &[u8]) -> Result<(), install_txn::Failure>;
 
-    /// `install_txn::flush_directory_of(mark)`.
+    /// `install_txn::flush_directory_on_disk` of the folder `mark` is in.
     ///
     /// # Errors
     /// The step it stopped at.
@@ -749,7 +749,7 @@ impl MarkDisk for OnDisk {
     }
 
     fn flush_folder(&self, mark: &Path) -> Result<(), install_txn::Failure> {
-        install_txn::flush_directory_of(mark)
+        install_txn::flush_directory_on_disk(install_txn::directory_of(mark))
     }
 }
 
@@ -873,18 +873,22 @@ enum Read {
 /// one trial no holder can adopt — every holder runs the rescue copy the
 /// operating system refused — so without it a healthy trial would keep
 /// nothing. A refused ask says its first refusal, with what the ask said on
-/// its way; the asks after it in the same streak are quiet, and the streak's
-/// end is said once (T-TRIAL-WATCH-REPEATS-BOUND). **And the mark** (0.4.8
+/// its way; the asks after it in the same streak are quiet — a change of
+/// refusal among them is summarised by the streak's end, which names the last
+/// — except the ask that ends the streak, which says what it said on its way
+/// before the streak's end is said, once (T-TRIAL-WATCH-REPEATS-BOUND). With
+/// no decision in this process, both repetitions last as long as the process.
+/// **And the mark** (0.4.8
 /// E4): after step 1, while a person's change is held and the transaction
 /// undecided, `unkept` is written once, naming this build's version (0.4.8
 /// E5: what a rollback's card names), asked again at each turn while it is
 /// refused, until the decision — no count and no clock: the mark is read only
-/// at or after the decision, the card is lost without it, and a home that
-/// refuses it refuses the decision's own journal write too. A write refused
+/// at or after the decision, and the card is lost without it. A write refused
 /// after its rename (at its folder's open or flush) left the bytes at the
 /// mark's name: from then on only the folder's flush is asked, never the whole
-/// write again (T-TRIAL-WATCH-REPEATS-BOUND). The first refusal is said, and
-/// the streak's end once. A commit read takes a mark at its name back, flushed
+/// write again (T-TRIAL-WATCH-REPEATS-BOUND). The first refusal is said, the
+/// ask whose rename put the bytes at its name is said too, and the streak's
+/// end once, naming the last refusal. A commit read takes a mark at its name back, flushed
 /// or not, then removes the receipt as the holder's acknowledgement that this
 /// decision is final.
 pub(crate) fn watch(
@@ -999,17 +1003,26 @@ pub(crate) fn watch(
                 && let Some(commit) = commit_itself.as_deref_mut()
             {
                 // An ask after the first of a refused streak says nothing on
-                // its way: its refusal is the first's, said once.
+                // its way unless it ends the streak: its refusal is
+                // summarised by the streak's end.
                 let quiet = commit_refusals.is_open();
+                let held_back = std::cell::RefCell::new(Vec::new());
                 let answer = commit(&|line: &str| {
-                    if !quiet {
+                    if quiet {
+                        held_back.borrow_mut().push(line.to_owned());
+                    } else {
                         say(line);
                     }
                 });
+                // The ask that ends a refused streak says what it said on its
+                // way (the hold it outlasted), then the streak's end.
                 if let Ok(answered) = &answer
                     && *answered != LastTrialCommit::Pending
                     && let Some((refused, last)) = commit_refusals.end()
                 {
+                    for line in held_back.take() {
+                        say(&line);
+                    }
                     say(&format!(
                         "BT_UPDATE_TRIAL transaction {txn}: its own commit was refused at {refused} asks of the trial's watch, the last: {last}; then it answered {answered:?}"
                     ));
@@ -1174,7 +1187,12 @@ fn ask_unkept_mark(
                 gate.mark_unkept(Unkept::AtItsName);
             }
             let refusal = failure.to_string();
-            if refusals.refused(refusal.clone()) {
+            let first = refusals.refused(refusal.clone());
+            // Said at the streak's first refusal, and at the ask whose rename
+            // put the bytes at the mark's name: what is asked changes then,
+            // to its folder's flush alone. Other changes of refusal within a
+            // streak are summarised by its end, which names the last.
+            if first || (at_its_name && ask == MarkAsk::Write) {
                 let next = if at_its_name {
                     "its bytes are at its name, and the watch asks its folder's flush again at each of its turns until the transaction is decided"
                 } else {
@@ -2829,33 +2847,42 @@ mod tests {
 
     /// RED (T-TRIAL-WATCH-REPEATS-BOUND) — **a home that refuses the mark's
     /// folder flush costs one folder flush a turn, not a whole write**: the
-    /// first ask's rename put the bytes at the mark's name and only its
-    /// folder's flush was refused, so every later turn asks that flush alone —
-    /// no second temporary, file flush and rename over the mark — until it
-    /// lands; the rollback then finds the mark.
+    /// first ask is refused at its first step (the transaction folder is not
+    /// there yet); the second's rename puts the bytes at the mark's name and
+    /// only its folder's flush is refused — said, because what is asked
+    /// changes then — and every later turn asks that flush alone, no second
+    /// temporary, file flush and rename over the mark, until it lands; the
+    /// rollback then finds the mark.
     ///
-    /// MUTATION: in `ask_unkept_mark`, answer `MarkAsk::FolderFlush` with the
-    /// whole write again.
+    /// MUTATIONS: in `ask_unkept_mark`, answer `MarkAsk::FolderFlush` with the
+    /// whole write again; say only a streak's first refusal (the change to the
+    /// folder's flush goes unsaid).
     #[test]
     fn a_refusing_home_costs_one_folder_flush_per_turn_not_a_full_write() {
         const FLUSHES_FROM: u32 = 5;
         let root = scratch("mark-folder-flush");
         let home = Home::at(root.join("home"));
         let job = refused_receipt(&home);
-        std::fs::create_dir_all(home.transaction(TXN)).unwrap();
         let gate = Gate::new();
         assert!(gate.defer(true, Writer::Keybindings));
         let disk = CountedDisk::default();
         disk.refusing_its_folder_flush.set(true);
+        let said = std::cell::RefCell::new(Vec::new());
+        let say = |line: &str| said.borrow_mut().push(line.to_owned());
         let (turns, _) = watch_by_turns(
             &gate,
             (&home, &disk),
             &job,
             watchdog_asleep().every,
-            Told::to_the_log(&|| {}),
+            Told {
+                wake: &|| {},
+                say: &say,
+            },
             None,
             &mut |turn, _| {
-                if turn == FLUSHES_FROM {
+                if turn == 1 {
+                    std::fs::create_dir_all(home.transaction(TXN)).unwrap();
+                } else if turn == FLUSHES_FROM {
                     disk.refusing_its_folder_flush.set(false);
                 } else if turn == FLUSHES_FROM + 2 {
                     rolled_back(&home);
@@ -2863,16 +2890,63 @@ mod tests {
             },
         );
         assert_eq!(turns, FLUSHES_FROM + 2);
-        assert_eq!(disk.writes.get(), 1, "one whole write");
+        assert_eq!(
+            disk.writes.get(),
+            2,
+            "two whole writes: refused at the create, then at the folder's flush"
+        );
         assert_eq!(
             disk.flushes.get(),
-            FLUSHES_FROM,
+            FLUSHES_FROM - 1,
             "then its folder's flush alone, once a turn, until it landed"
         );
         assert_eq!(
             std::fs::read(home.unkept(TXN)).unwrap(),
             crate::version::VERSION.as_bytes()
         );
+        let said = said.take();
+        assert_eq!(
+            lines_with(&said, "a change made in this trial is held and"),
+            2,
+            "the first refusal, and the ask that left the bytes at its name: {said:#?}"
+        );
+        assert_eq!(
+            lines_with(
+                &said,
+                "its bytes are at its name, and the watch asks its folder's flush again"
+            ),
+            1,
+            "{said:#?}"
+        );
+        assert_eq!(
+            lines_with(
+                &said,
+                &format!(
+                    "at the watch's ask {} after {FLUSHES_FROM} refused",
+                    FLUSHES_FROM + 1
+                )
+            ),
+            1,
+            "{said:#?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-TRIAL-WATCH-REPEATS-BOUND) — **the product's folder flush of the
+    /// mark flushes the folder it is in, not the mark**: with the folder there
+    /// and the mark not yet, the flush is answered.
+    ///
+    /// MUTATION: in `OnDisk::flush_folder`, flush `mark` itself.
+    #[test]
+    fn the_marks_folder_flush_is_its_folders() {
+        let root = scratch("mark-folder-of-标记");
+        let home = Home::at(root.join("home"));
+        std::fs::create_dir_all(home.transaction(TXN)).unwrap();
+        let mark = home.unkept(TXN);
+        assert!(!mark.exists());
+        OnDisk
+            .flush_folder(&mark)
+            .expect("the mark's folder is flushed");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2921,12 +2995,13 @@ mod tests {
     /// held journal's rounds); the asks after it in the streak — a `Pending`
     /// among them does not end it — say nothing; its end says once how many
     /// asks were refused and the last refusal, whether the trial then commits
-    /// itself or the journal decides first. Nothing gives the asking up: it
+    /// itself or the journal decides first; an ask that ends the streak by
+    /// committing says what it said on its way (the hold it outlasted) first. Nothing gives the asking up: it
     /// is the trial's one road to its own commit.
     ///
     /// MUTATIONS: in `watch`, give the asking up at a refusal
     /// (`commit_itself = None` on `Err`); let every ask speak (`quiet` always
-    /// `false`).
+    /// `false`); drop what the ending ask said on its way.
     #[test]
     fn a_reserved_trials_self_commit_is_asked_until_the_decision_and_said_once_per_streak() {
         const ROUND: &str = "BT_UPDATE_JOURNAL held by another program (the test's round, 日志)";
@@ -2988,8 +3063,8 @@ mod tests {
         let said = said.take();
         assert_eq!(
             lines_with(&said, ROUND),
-            1,
-            "the first ask's rounds alone: {said:#?}"
+            2,
+            "the first ask's rounds and the ending ask's, no others: {said:#?}"
         );
         assert_eq!(lines_with(&said, REFUSED), 1, "{said:#?}");
         assert_eq!(
