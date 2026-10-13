@@ -24,7 +24,7 @@ use bt_persist::{
     read_settings, read_settings_keeping, read_settings_keeping_bytes, remove_sentinel,
 };
 
-use crate::document_request::{DocumentState, Follow, Mode, QuitDocument, ReadNews};
+use crate::document_request::{DocumentState, QuitDocument, ReadNews};
 
 /// The name the session document wears on disk, which is also what a notice
 /// about it has to say out loud — [`KEYBINDINGS_FILE_NAME`]'s rule, one file
@@ -2299,8 +2299,7 @@ impl SettingsStore {
                 writer_of_record,
                 crate::update_trial::Writer::Settings,
                 lane,
-            )
-            .with_policies(Mode::Merge, Follow::Merge),
+            ),
             fault,
             missing: report == ReadReport::NotFound,
             held: None,
@@ -2366,8 +2365,7 @@ impl SettingsStore {
                 writer_of_record,
                 crate::update_trial::Writer::Settings,
                 lane,
-            )
-            .with_policies(Mode::Merge, Follow::Merge),
+            ),
             fault: None,
             missing: true,
             held: None,
@@ -2703,8 +2701,7 @@ impl KeybindingsStore {
                 writer_of_record,
                 crate::update_trial::Writer::Keybindings,
                 lane,
-            )
-            .with_policies(Mode::Merge, Follow::Merge),
+            ),
             fault,
             merged_at_quit: None,
         }
@@ -2939,6 +2936,10 @@ pub struct ProfilesStore {
     document: DocumentState<ProfilesV1>,
     /// Why the file on disk was not usable, if it was not.
     fault: Option<String>,
+    /// **What a quit merged and did not put in force** ([`SettingsStore`]'s
+    /// rule, one file over): the next storage pass installs the table and says
+    /// it, should the quit be cancelled.
+    merged_at_quit: Option<crate::settings_merge::Account>,
 }
 
 /// `profiles.json` in a quit and on a stop: its [`DocumentState`]'s answers (T-QUIT-DOCUMENTS).
@@ -2951,8 +2952,15 @@ impl QuitDocument for ProfilesStore {
         self.document.quit_begin();
     }
 
+    /// A turn that folds a changed file in before it sends: a `Moved` or
+    /// `Displaced` answer at quit is merged as the running window merges it,
+    /// without the door.
     fn quit_turn(&mut self) {
-        self.document.quit_turn();
+        let _ = self.document.take_answers();
+        self.merge_at_quit();
+        if self.document.standing() == crate::quit::Standing::Unsent {
+            self.document.send_owed();
+        }
     }
 
     fn standing(&self) -> crate::quit::Standing {
@@ -3012,6 +3020,7 @@ impl ProfilesStore {
                 lane,
             ),
             fault,
+            merged_at_quit: None,
         }
     }
 
@@ -3064,10 +3073,11 @@ impl ProfilesStore {
     ///   store holds but has not written is not undone by a read of the older
     ///   file. A file with new bytes and the revision's document — an editor that
     ///   re-indents — is no news either, and its bytes become the revision's;
-    /// * a document that parses and differs is taken, and becomes the revision,
-    ///   which is what makes the next re-read quiet — unless a change made here is
-    ///   not yet on disk, which the re-read does not undo: the file's bytes are
-    ///   kept for the merge;
+    /// * a document that parses and differs is stored for the merge
+    ///   ([`Self::begin_merge`]), which folds it in and makes it the revision —
+    ///   what makes the next re-read quiet — and the store holds its writes until
+    ///   then; a change made here that is not yet on disk is merged with it, by
+    ///   id and by field, never undone;
     /// * a document that will not parse is **not** taken, and what was already
     ///   in force stays in force — with no copy of it kept beside it: the file is
     ///   the person's, under its own name, and nothing will replace it. Falling
@@ -3088,6 +3098,57 @@ impl ProfilesStore {
         self.document.store(file, false)
     }
 
+    /// **A storage pass's merge, the store's half** (design note 2026-10-11
+    /// §3.4, (b)8, (c)1): every file stored for the merge is merged by id, by
+    /// field and by order ([`crate::profiles_merge::merge`]) and folded into
+    /// `desired`, which moves the revision to the file the merge read; the
+    /// merged document is then what the installer reads — the door,
+    /// `Runtime::install_merged_profile_table`, which runs after this and
+    /// re-points nothing by position. `None` when nothing was merged.
+    pub(crate) fn begin_merge(&mut self) -> Option<crate::table_merge::MergePass> {
+        let at_quit = self.merged_at_quit.take();
+        if !self.document.merge_waits() && at_quit.is_none() {
+            return None;
+        }
+        let merges = self.document.merge_stored(merge_profiles);
+        if merges.is_empty() && at_quit.is_none() {
+            return None;
+        }
+        let mut account = at_quit.unwrap_or_default();
+        for merge in merges {
+            account.add(merge);
+        }
+        self.document.project(self.document.desired().clone());
+        Some(crate::table_merge::MergePass::new(
+            PROFILES_FILE_NAME,
+            account,
+        ))
+    }
+
+    /// **A quit's merge**: [`Self::begin_merge`]'s fold, and nothing put in
+    /// force — the windows are leaving. What it merged is kept for the next
+    /// storage pass, which installs it should the quit be cancelled.
+    fn merge_at_quit(&mut self) {
+        if !self.document.merge_waits() {
+            return;
+        }
+        let merges = self.document.merge_stored(merge_profiles);
+        if merges.is_empty() {
+            return;
+        }
+        let account = self.merged_at_quit.get_or_insert_with(Default::default);
+        for merge in merges {
+            account.add(merge);
+        }
+    }
+
+    /// **A storage pass's merge, its last step**: the merged document is handed
+    /// to the worker, conditional on the file the merge read, if it differs
+    /// from it — the units that kept Folio's value.
+    pub(crate) fn end_merge(&mut self) {
+        self.document.send_owed();
+    }
+
     /// **An update's trial was committed: the table as it stands is handed
     /// over** (`update_trial`).
     pub fn release_trial(&mut self) {
@@ -3106,11 +3167,36 @@ impl ProfilesStore {
         self.document.settle()
     }
 
-    /// Read the file again on the worker and take the answer — a pass, in a test.
+    /// **A storage pass, in a test**: the file read again on the worker, the
+    /// answer taken, and the store's merge run with the send after it (the
+    /// door is the window's). `Changed` when the pass moved what the readers
+    /// read.
     #[cfg(test)]
     pub(crate) fn reread(&mut self) -> crate::document_request::Heard {
         self.ask_reread();
-        self.settle().heard()
+        let news = self.settle();
+        let before = self.document.projection().clone();
+        if self.begin_merge().is_some() {
+            self.end_merge();
+        }
+        match news.heard() {
+            crate::document_request::Heard::Unchanged if *self.document.projection() != before => {
+                crate::document_request::Heard::Changed
+            }
+            heard => heard,
+        }
+    }
+
+    /// A read answer handed in as if the worker had served it now.
+    #[cfg(test)]
+    pub(crate) fn hear_read(&mut self, read: bt_persist::StableRead) -> ReadNews {
+        self.document.hear_read(read)
+    }
+
+    /// Whether a file's bytes wait for the merge.
+    #[cfg(test)]
+    pub(crate) fn merge_waits(&self) -> bool {
+        self.document.merge_waits()
     }
 }
 
@@ -3160,6 +3246,19 @@ pub(crate) fn hear_documents(
         pins: pins_news,
         faults,
     }
+}
+
+/// **`profiles.json`'s merge, as the store's seam takes it**: a built-in row no
+/// side titles is named by the title the table in force draws for it.
+fn merge_profiles(
+    base: &ProfilesV1,
+    ours: &ProfilesV1,
+    theirs: &ProfilesV1,
+) -> (ProfilesV1, crate::settings_merge::Account) {
+    let shipped_title = |id: &str| crate::profiles::row_of(id).map(|row| row.display_title);
+    let usable = crate::profiles::installable();
+    let merged = crate::profiles_merge::merge(base, ours, theirs, &shipped_title, &usable);
+    (merged.document, merged.account)
 }
 
 /// `profiles.json` read again with a refused file's copy kept — what an update's
@@ -6516,7 +6615,11 @@ mod conditional_write_tests {
         let news = store
             .document()
             .hear_read(StableRead::Bytes(Arc::from(&hand[..])));
-        assert!(!news.taken, "nothing is taken");
+        assert_eq!(
+            news.unreadable,
+            Some(false),
+            "it read, and nothing is taken"
+        );
         assert_eq!(store.loaded(), &in_force[..], "the table in force stays");
         assert_eq!(store.document().merges().len(), 1, "stored for the merge");
         assert!(store.store(vec![line("new-tab", "Ctrl+j"), line("quit", "Ctrl+u")]));
@@ -7142,7 +7245,7 @@ mod conditional_write_tests {
         let news = store
             .document()
             .hear_read(StableRead::Bytes(Arc::from(&theirs[..])));
-        assert!(!news.taken);
+        assert_eq!(news.unreadable, Some(false));
         // A press that returns `desired` to the person's document, then the file
         // changed again: the revision follows the file, the hold stays.
         assert!(store.store(settings("他们的 Theirs Mono")));
@@ -7151,7 +7254,11 @@ mod conditional_write_tests {
         let news = store
             .document()
             .hear_read(StableRead::Bytes(Arc::from(&again[..])));
-        assert!(!news.taken, "a held document takes nothing from a re-read");
+        assert_eq!(
+            news.unreadable,
+            Some(false),
+            "a held document takes nothing from a re-read"
+        );
         assert_eq!(store.revision().bytes.as_deref(), Some(&again[..]));
         let merges = store.document().merges().to_vec();
         assert_eq!(merges.len(), 2, "the conflict's file, then the newest");

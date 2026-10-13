@@ -124,6 +124,7 @@ mod pdf;
 mod peek_strip;
 mod persist;
 mod pins;
+mod pins_merge;
 mod present_diagnostics;
 mod present_gate;
 mod preview;
@@ -142,6 +143,7 @@ mod preview_viewport;
 mod preview_watch;
 mod preview_wrap;
 mod profiles;
+mod profiles_merge;
 mod programs_ear;
 mod programs_lane;
 mod psreadline;
@@ -172,6 +174,7 @@ mod shortcuts;
 mod source_pin;
 mod storage_watch;
 mod table_block;
+mod table_merge;
 mod taskbar_lane;
 mod termscroll;
 mod text_field;
@@ -49433,12 +49436,11 @@ impl Runtime<'_> {
         self.take_pins_news(heard.pins)
     }
 
-    /// Put in force what a re-read of `pins.json` changed.
-    ///
-    /// [`Self::take_profiles_news`]'s answers, and what follows each is the
-    /// same shape: the two PINNED sections are derived from the store every time
-    /// a menu is built, never held, so installing a new table *is* refreshing
-    /// them — what is owed is a frame.
+    /// **What a re-read of `pins.json` says** — [`Self::take_profiles_news`]'s
+    /// shape: a file that will not parse leaves the pins in force and raises one
+    /// card. A file that changed is the storage pass's merge; the two PINNED
+    /// sections are derived from the store every time a menu is built, never
+    /// held, so the merged table is in force once the store holds it.
     fn take_pins_news(&mut self, news: document_request::ReadNews) -> Result<()> {
         match news.unreadable {
             Some(true) => {
@@ -49453,9 +49455,6 @@ impl Runtime<'_> {
             }
             Some(false) => self.app.pins_file_broken = false,
             None => {}
-        }
-        if news.taken && self.refresh_chrome() {
-            self.present_chrome_change()?;
         }
         Ok(())
     }
