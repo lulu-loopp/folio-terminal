@@ -196,6 +196,13 @@ fix the routing or regenerate with `scripts/generate-ownership-census.ps1` and
 justify each real multi-writer or unknown row; do not edit generated census rows
 as a substitute for changing the code.
 
+A limit of the reading, since the window seam (T-HEADLESS-RUNTIME-SEAM): a call
+on a backend's associated type (`B::Glass`) is resolved through the bounds its
+declaring trait gives that name, and those bounds are keyed by the bare names of
+the associated type and of the trait — not by trait identity, as the
+completions guard's `TraitResolver` keys them. Two traits declaring an
+associated type of one name would be read as one; `bt-app` has one today.
+
 ## Runtime dependency map
 
 The rule: the measured dependency graph inside `bt-app` that the field moves
@@ -447,27 +454,39 @@ door cannot own it and record that reason in the exception ledger.
 
 ## Window seam
 
-The rule: a window's own code reaches the window only through
-`crate::window_seam` (T-HEADLESS-RUNTIME-SEAM, 2026-10-13; `ARCHITECTURE.md`
-§4.5). The structs that hold a backend — a type parameter bounded by the seam's
-`Backend` — are written for that parameter, so the compiler sees every call a
-`Runtime` method makes to the window as a call on a seam trait. The two
-exceptions are listed by name: `Runtime::create` and `Runtime::open_window`,
-which build the native window that the parameter is instantiated with, and the
-`winit` adapter `impl ApplicationHandler for FolioApp`. Every door trait of the
-seam is implemented in the seam (the headless backend is test-only and is not
-read).
+The rule: a window's own code reaches the window through `crate::window_seam`
+(T-HEADLESS-RUNTIME-SEAM, 2026-10-13; `ARCHITECTURE.md` §4.5). The types that
+hold a backend — a type parameter bounded by the seam's `Backend` or by a trait
+that has it among its supertraits — are written for that parameter, so the
+compiler sees every call that code makes to the window as a call on a seam
+trait. A holder named for the **native** backend — its backend argument left to
+its default or a concrete type — is refused wherever it is written (an `impl`
+of it, any other function's signature or body, a `const` or `static`) unless
+`docs/plans/window-seam-native.tsv` names the place with its reason; a type
+alias of a holder, and an `impl` whose self type names a holder natively without
+being its path, are shapes the guard does not read and are refused by name.
+Every door trait of the seam is implemented in the seam (the headless backend is
+test-only and is not read).
+
+**What the guard does not hold**: the platform handle. `WindowHost::native_handle`
+and `CompositorDoor::platform_tree` hand generic code a `bt_platform` value that
+reaches the platform past every door — the call sites are listed in
+`ARCHITECTURE.md` §4.5, and moving them behind doors is
+T-NATIVE-HANDLE-BEHIND-THE-SEAM. A new use of either is a new crossing; say it
+there.
 
 Where and what to do: `crates/bt-source/tests/window_seam.rs`
 (`bt_app_reaches_its_window_only_through_the_seam`) reads `bt-app` by item
-identity — the `Backend` bound resolved through `use` items, globs and renames
-by `TraitResolver`, the backend's position read from the struct's own
-parameters — and its fixture (`tests/fixtures/window_seam/`) plants each refusal
-(`every_road_around_the_window_seam_is_named`). When red, write the new block
-for the backend parameter and add the door it needs to the seam's trait (with
-its `Native` impl beside the others and its headless impl in `headless.rs`);
-never widen the native list for a method that only reads or tells the window.
-A list entry nothing writes any more is named too, and is taken off.
+identity — every bound resolved through `use` items, globs and renames by
+`TraitResolver`, the backend's position read from the holder's own parameters —
+and its fixture (`tests/fixtures/window_seam/`) plants each refusal
+(`every_road_around_the_window_seam_is_named`). The native list only shrinks:
+`scripts/ci/check-window-seam-native.ps1` refuses a row the merge base does not
+have (`gates-can-fail` plants one). When red, write the new code for the backend
+parameter and add the door it needs to the seam's trait (with its `Native` impl
+beside the others and its headless impl in `headless.rs`); never add a native
+row for code that only reads or tells the window. A row nothing writes any more
+is named too, and is taken off.
 
 ## Machine-independent paths
 
