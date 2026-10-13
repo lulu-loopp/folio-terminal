@@ -24,6 +24,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- A GIF caught while it was being written plays once the write finishes. <!-- zh: pending T-ANIMATION-RECORDS-BOUND -->
 - A panic in one picture or formula no longer ends Folio; that picture or formula stays as it was and is tried again after the next change in its pane. <!-- zh: pending S-8 -->
 - A video that never finishes loading now says so after ten seconds instead of showing a player that never starts, and a video that declares no length shows "No length" on its bar instead of a clock stuck at 0:00. <!-- zh: pending T-VIDEO-ENGINE-NO-DURATION -->
 - File paths printed by Cygwin's bash (`/cygdrive/c/…`), by a WSL profile without shell integration, and by a WSL distribution's own launcher are now links, as in Git Bash and WSL panes. <!-- zh: pending T-WINDOWS-SHELL-NAMESPACES -->

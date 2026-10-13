@@ -10349,15 +10349,11 @@ impl Runtime<'_> {
         // **The surfaces a tab took with it.** A tab closed, carried to another window or folded
         // into another tab leaves by roads that never name its surfaces, so each walk forgets what
         // a surface no longer in the window was showing ([`AnimationCache::forget_surfaces_gone`]).
-        // A surface is in the window while some tab holds its view; the card is the window's own.
+        // What counts as still in the window is [`animation_surface_exists`].
         let window = &mut *self.window;
-        window.animations.forget_surfaces_gone(|surface| {
-            surface == PreviewSurface::Peek
-                || window
-                    .tabs
-                    .iter()
-                    .any(|tab| tab.preview_panes.get(surface).is_some())
-        });
+        window
+            .animations
+            .forget_surfaces_gone(|surface| crate::animation_surface_exists(&window.tabs, surface));
         if !self.app.math_worker_running {
             return;
         }
