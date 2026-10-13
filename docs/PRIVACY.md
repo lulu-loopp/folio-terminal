@@ -138,6 +138,12 @@ diagnosed from the log alone. These paths can contain your account name or the
 names of your folders. They stay on this computer; review the log before you
 share it.
 
+When a settings, shortcuts, profiles or pins file edited outside Folio replaces a
+value set in Folio, `diagnostics.log` names each such value: a setting or a
+shortcut by its name, a profile by the title you gave it, a pin by its target —
+a full path or URL. These lines stay on this computer; review the log before you
+share it.
+
 ### The web preview's profile
 
 A separate place from the directory above, and where it is depends on the
@@ -387,6 +393,13 @@ rm -rf ~/Library/Application\ Support/Folio/diagnostics*.log \
 ```
 
 更新的某一步未能启动程序时，`diagnostics.log` 会记录该程序的完整路径、Folio 的安装位置，以及启动失败的进程所在的文件夹（它的工作目录），以便仅凭日志就能定位故障。这些路径里可能带有你的账户名或文件夹名称。它们留在本机；分享日志前先看一遍。
+
+<!-- zh: pending T-STORE-NOTICE -->
+When a settings, shortcuts, profiles or pins file edited outside Folio replaces a
+value set in Folio, `diagnostics.log` names each such value: a setting or a
+shortcut by its name, a profile by the title you gave it, a pin by its target —
+a full path or URL. These lines stay on this computer; review the log before you
+share it.
 
 ### 网页预览的 profile
 

@@ -2392,6 +2392,18 @@ text_entries! {
     ListLast,
     /// A list cut at its bound: `{names}` shown, then how many more, `{count}`.
     ListMore,
+    /// **One file's line on the storage pass's card** (T-STORE-NOTICE; design note
+    /// 2026-10-11 §3.6, (b)11): `{file}`, then its clauses, filled by
+    /// [`merge_notice_in`].
+    MergeFileLine,
+    /// The clause naming the values a file's merge took from the file over Folio's:
+    /// `{names}`, at most [`NAMES_ON_A_CARD`] of them.
+    MergeFromDisk,
+    /// The clause naming the values the file gave that were not put in force:
+    /// `{names}`, at most [`NAMES_ON_A_CARD`] of them.
+    MergeNotApplied,
+    /// Between a file's two clauses.
+    MergeClauseSeparator,
     /// **The line the system's shutdown screen shows for a Folio window while the layout is
     /// being written** (B-ENDSESSION): `ShutdownBlockReasonCreate`'s reason, up for at most the
     /// session write's budget. A state, so a few words.
@@ -4808,6 +4820,24 @@ impl Text {
                 "{names} and {count} more",
                 "{names} and {count} more", // zh: pending T-QUIT-DOCUMENTS
             ),
+            Self::MergeFileLine => pick(
+                lang,
+                "{file}: {clauses}.",
+                "{file}: {clauses}.", // zh: pending T-STORE-NOTICE
+            ),
+            Self::MergeFromDisk => pick(
+                lang,
+                "{names} came from disk",
+                "{names} came from disk", // zh: pending T-STORE-NOTICE
+            ),
+            Self::MergeNotApplied => pick(
+                lang,
+                "{names} not applied",
+                "{names} not applied", // zh: pending T-STORE-NOTICE
+            ),
+            Self::MergeClauseSeparator => pick(
+                lang, "; ", "; ", // zh: pending T-STORE-NOTICE
+            ),
 
             // ── the preview pane's lock (§7.7 ⑧) ───────────────────────────
             Self::PreviewLock => pick(
@@ -6506,6 +6536,16 @@ impl Text {
         (Self::VideoDidNotLoad, HostPlatform::MacOs),
         (Self::VideoNoLength, HostPlatform::Windows),
         (Self::VideoNoLength, HostPlatform::MacOs),
+        // zh: pending T-STORE-NOTICE — the storage pass's card: what the files' values
+        // replaced and what was not applied.
+        (Self::MergeFileLine, HostPlatform::Windows),
+        (Self::MergeFileLine, HostPlatform::MacOs),
+        (Self::MergeFromDisk, HostPlatform::Windows),
+        (Self::MergeFromDisk, HostPlatform::MacOs),
+        (Self::MergeNotApplied, HostPlatform::Windows),
+        (Self::MergeNotApplied, HostPlatform::MacOs),
+        (Self::MergeClauseSeparator, HostPlatform::Windows),
+        (Self::MergeClauseSeparator, HostPlatform::MacOs),
     ];
 }
 
@@ -7708,6 +7748,49 @@ pub fn quit_documents_not_saved_in(lang: Lang, files: &[&str]) -> String {
         "{files}",
         &files_listed_in(lang, files, Some(NAMES_ON_A_CARD)),
     )
+}
+
+/// **The storage pass's card** (T-STORE-NOTICE; design note 2026-10-11 §3.6,
+/// (b)11): one line per file, in the notice's order —
+/// `settings.json: Theme and Font size came from disk.` — each clause naming at
+/// most [`NAMES_ON_A_CARD`] values, then how many more. A statement, with nothing
+/// to choose: the file has already won.
+#[must_use]
+pub fn merge_notice(notice: &crate::document_request::MergeNotice) -> String {
+    merge_notice_in(current(), notice)
+}
+
+/// [`merge_notice`] in a named language.
+#[must_use]
+pub fn merge_notice_in(lang: Lang, notice: &crate::document_request::MergeNotice) -> String {
+    let clause = |text: Text, names: &[String]| {
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        text.in_lang(lang).replace(
+            "{names}",
+            &files_listed_in(lang, &names, Some(NAMES_ON_A_CARD)),
+        )
+    };
+    notice
+        .files
+        .iter()
+        .map(|file| {
+            let mut clauses = Vec::new();
+            if !file.values.is_empty() {
+                clauses.push(clause(Text::MergeFromDisk, &file.values));
+            }
+            if !file.not_applied.is_empty() {
+                clauses.push(clause(Text::MergeNotApplied, &file.not_applied));
+            }
+            Text::MergeFileLine
+                .in_lang(lang)
+                .replace("{file}", file.file)
+                .replace(
+                    "{clauses}",
+                    &clauses.join(Text::MergeClauseSeparator.in_lang(lang)),
+                )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// **What the system's message box says when a stop kept a change nowhere**

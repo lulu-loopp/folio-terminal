@@ -3089,3 +3089,267 @@ pub(crate) fn alone_in_a_process(selector: &str, stdin: &[u8]) -> bool {
     );
     false
 }
+
+// ── the storage pass's window, over the four real stores (T-STORE-NOTICE)
+
+/// **A window for the storage pass, with the four real stores on one scripted
+/// lane and a toast host of its own.** A real `Runtime` needs a window, which a
+/// test may not open, so the pass's seams are driven here with doors that do
+/// what the real ones do to the stores: a setting the file gave is stored as it
+/// came (the door that took it), the shortcut table's departures are told to
+/// the keybindings store, and the profile and pin tables are what their stores'
+/// readers read. The batch's notice is held here as the application holds it,
+/// and its card is the product's own ([`merge_notice_card`]), raised as
+/// `Runtime::toast` raises it.
+pub(crate) struct StoragePassRig {
+    pub(crate) settings: persist::SettingsStore,
+    pub(crate) keybindings: persist::KeybindingsStore,
+    pub(crate) profiles: persist::ProfilesStore,
+    pub(crate) pins: pins::PinsStore,
+    /// The storage worker's queue, which the test serves.
+    pub(crate) jobs: persist::ScriptedJobs,
+    pub(crate) toasts: toast::ToastHost,
+    /// The batch's notice, until its card is raised (`App::merge_notice`).
+    pending: document_request::MergeNotice,
+    /// Each pass's `diagnostics.log` line, in order.
+    pub(crate) said: Vec<String>,
+    /// Each notice a card was raised for, in order.
+    pub(crate) raised: Vec<document_request::MergeNotice>,
+    /// How many presentations the turns made.
+    pub(crate) presented: usize,
+    /// Whether the one presentation after the passes fails.
+    pub(crate) presentation_fails: bool,
+}
+
+impl StoragePassRig {
+    /// The four stores over the files in `root`, as they stand now.
+    pub(crate) fn open(root: PathBuf) -> Self {
+        let (lane, jobs) = persist::StorageLane::scripted();
+        Self {
+            settings: persist::SettingsStore::at_on(
+                root.join(persist::SETTINGS_FILE_NAME),
+                lane.clone(),
+            ),
+            keybindings: persist::KeybindingsStore::at_on(
+                root.join(persist::KEYBINDINGS_FILE_NAME),
+                lane.clone(),
+            ),
+            profiles: persist::ProfilesStore::at_on(
+                root.join(persist::PROFILES_FILE_NAME),
+                lane.clone(),
+            ),
+            pins: pins::PinsStore::at_on(root.join(pins::PINS_FILE_NAME), lane),
+            jobs,
+            toasts: toast::ToastHost::default(),
+            pending: document_request::MergeNotice::default(),
+            said: Vec::new(),
+            raised: Vec::new(),
+            presented: 0,
+            presentation_fails: false,
+        }
+    }
+
+    /// **A private storage folder** for `case`.
+    pub(crate) fn scratch(case: &str) -> PathBuf {
+        let root = bt_testpath::temp_path(&format!("bt-app-storage-pass-{case}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a private storage folder for this test");
+        root
+    }
+
+    /// Write `document` to `file` in `root`, as an editor does.
+    pub(crate) fn write<T: document_request::StoredDocument>(
+        root: &Path,
+        file: &str,
+        document: &T,
+    ) {
+        std::fs::write(
+            root.join(file),
+            document.to_bytes().expect("the document serializes"),
+        )
+        .expect("the file is written");
+    }
+
+    /// **The disk refuses every write queued now**: what Folio set stays owed,
+    /// in memory and not in its file.
+    pub(crate) fn refuse_writes(&mut self) {
+        while let Some(job) = self.jobs.next() {
+            if let persist::ScriptedJob::Document(job) = job {
+                let _ = job.answer.send(document_request::DocumentAnswer {
+                    generation: job.generation,
+                    version: job.version,
+                    asker: job.asker,
+                    outcome: document_request::Outcome::Refused {
+                        cause: document_request::Refusal::Disk(
+                            "磁盘已满 the disk is full".to_owned(),
+                        ),
+                    },
+                    not_durable: None,
+                    retired: Vec::new(),
+                    left: None,
+                });
+            }
+        }
+    }
+
+    /// **Every read the stores have asked of the worker, in the order asked**;
+    /// a write queued among them stays unanswered.
+    pub(crate) fn reads(&mut self) -> Vec<document_request::ReadJob> {
+        let mut reads = Vec::new();
+        while let Some(job) = self.jobs.next() {
+            if let persist::ScriptedJob::Read(read) = job {
+                reads.push(read);
+            }
+        }
+        reads
+    }
+
+    /// **The worker serves one read**: the file's bytes as they stand on disk.
+    pub(crate) fn serve(read: document_request::ReadJob) {
+        let bytes = std::fs::read(&read.which).expect("the file is there");
+        (read.answer)(
+            read.generation,
+            bt_persist::StableRead::Bytes(std::sync::Arc::from(bytes)),
+        );
+    }
+
+    /// **One `DocumentsAnswered` turn**, as `Runtime::take_document_answers`
+    /// takes it: every store takes its answers, then the storage pass runs.
+    pub(crate) fn turn(&mut self) -> anyhow::Result<()> {
+        let _ = persist::hear_documents(
+            &mut self.settings,
+            &mut self.keybindings,
+            &mut self.profiles,
+            &mut self.pins,
+        );
+        storage_pass::take_merges(self)
+    }
+
+    /// The cards raised, oldest first.
+    pub(crate) fn cards(&self) -> &[toast::Toast] {
+        self.toasts.toasts()
+    }
+}
+
+impl settings_merge::MergeWindow for StoragePassRig {
+    fn merge_begin(&mut self) -> Option<settings_merge::SettingsPass> {
+        self.settings.begin_merge(bt_platform::host_platform())
+    }
+
+    fn merge_in_force(&self) -> &bt_persist::SettingsV1 {
+        self.settings.loaded()
+    }
+
+    fn merge_door(&mut self, change: &settings_bundle::SettingChange) -> anyhow::Result<()> {
+        self.merge_store_as_it_came(change);
+        Ok(())
+    }
+
+    fn merge_store_as_it_came(&mut self, change: &settings_bundle::SettingChange) {
+        let mut settings = self.settings.loaded().clone();
+        change.write_into(&mut settings);
+        self.settings.store(settings);
+    }
+
+    fn merge_end(&mut self) {
+        self.settings.end_merge();
+    }
+
+    fn merge_say(&mut self, line: &str) {
+        self.said.push(line.to_owned());
+    }
+
+    fn merge_present(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+impl keybindings_merge::KeybindingsWindow for StoragePassRig {
+    fn keybindings_merge_begin(&mut self) -> Option<keybindings_merge::KeybindingsPass> {
+        self.keybindings.begin_merge(bt_platform::host_platform())
+    }
+
+    fn keybindings_put_in_force(&mut self, table: shortcuts::Shortcuts) {
+        self.keybindings.project(
+            table
+                .overrides()
+                .into_iter()
+                .map(|entry| bt_persist::BindingOverrideV1 {
+                    action: entry.id,
+                    chord: entry.chord,
+                })
+                .collect(),
+        );
+    }
+
+    fn keybindings_merge_end(&mut self) {
+        self.keybindings.end_merge();
+    }
+
+    fn keybindings_say(&mut self, line: &str) {
+        self.said.push(line.to_owned());
+    }
+
+    fn keybindings_present(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+impl table_merge::TableMergeWindow for StoragePassRig {
+    fn table_merge_begin(&mut self, table: table_merge::Table) -> Option<table_merge::MergePass> {
+        match table {
+            table_merge::Table::Profiles => self.profiles.begin_merge(),
+            table_merge::Table::Pins => self.pins.begin_merge(),
+        }
+    }
+
+    fn table_door(&mut self, _: table_merge::Table) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn table_merge_end(&mut self, table: table_merge::Table) {
+        match table {
+            table_merge::Table::Profiles => self.profiles.end_merge(),
+            table_merge::Table::Pins => self.pins.end_merge(),
+        }
+    }
+
+    fn table_merge_say(&mut self, line: &str) {
+        self.said.push(line.to_owned());
+    }
+}
+
+impl storage_pass::StoragePassWindow for StoragePassRig {
+    fn present_merges(&mut self) -> anyhow::Result<()> {
+        self.presented += 1;
+        if self.presentation_fails {
+            anyhow::bail!("呈现失败 the chrome could not be presented");
+        }
+        Ok(())
+    }
+
+    fn merge_notice_due(
+        &mut self,
+        turn: document_request::MergeNotice,
+    ) -> Option<document_request::MergeNotice> {
+        storage_pass::notice_due(
+            &mut self.pending,
+            turn,
+            &self.settings,
+            &self.keybindings,
+            &self.profiles,
+            &self.pins,
+        )
+    }
+
+    fn raise_merge_notice(&mut self, notice: &document_request::MergeNotice) -> anyhow::Result<()> {
+        // `Runtime::raise_merge_notice`'s card, raised as `Runtime::toast` raises
+        // one: no title, no verb.
+        if let Some((kind, anchor, body)) = merge_notice_card(notice) {
+            self.toasts
+                .raise(kind, anchor, None, body, None, Motion::Full, Instant::now());
+            self.raised.push(notice.clone());
+        }
+        Ok(())
+    }
+}

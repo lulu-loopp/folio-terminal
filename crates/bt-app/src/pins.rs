@@ -148,12 +148,13 @@ impl QuitDocument for PinsStore {
     /// A turn that folds a changed file in before it sends: a `Moved` or
     /// `Displaced` answer at quit is merged as the running window merges it,
     /// without the door.
-    fn quit_turn(&mut self) {
+    fn quit_turn(&mut self) -> Option<String> {
         let _ = self.document.take_answers();
-        self.merge_at_quit();
+        let merged = self.merge_at_quit();
         if self.document.standing() == crate::quit::Standing::Unsent {
             self.document.send_owed();
         }
+        merged
     }
 
     fn standing(&self) -> crate::quit::Standing {
@@ -290,6 +291,11 @@ impl PinsStore {
         self.document.ask_read();
     }
 
+    /// Whether a re-read of `pins.json` is still to be answered.
+    pub(crate) fn reading(&self) -> bool {
+        self.document.reading()
+    }
+
     /// Record the table as it stands now and hand it to the storage worker.
     ///
     /// Returns whether anything changed, so a press that moved nothing costs no
@@ -313,29 +319,40 @@ impl PinsStore {
         if merges.is_empty() && at_quit.is_none() {
             return None;
         }
-        let mut account = at_quit.unwrap_or_default();
+        let mut account = crate::settings_merge::Account::default();
         for merge in merges {
             account.add(merge);
         }
         self.document.project(self.document.desired().clone());
-        Some(crate::table_merge::MergePass::new(PINS_FILE_NAME, account))
+        Some(crate::table_merge::MergePass::new(
+            PINS_FILE_NAME,
+            account,
+            at_quit.unwrap_or_default(),
+        ))
     }
 
     /// **A quit's merge**: [`Self::begin_merge`]'s fold, and nothing put in
-    /// force — the windows are leaving. What it merged is kept for the next
-    /// storage pass, which puts it in force should the quit be cancelled.
-    fn merge_at_quit(&mut self) {
+    /// force — the windows are leaving. Answers its one `diagnostics.log` line
+    /// (`SettingsStore`'s `merge_at_quit`, for its reason); what it merged is
+    /// kept for the next storage pass, which puts it in force should the quit be
+    /// cancelled.
+    fn merge_at_quit(&mut self) -> Option<String> {
         if !self.document.merge_waits() {
-            return;
+            return None;
         }
         let merges = self.document.merge_stored(merge_pins);
         if merges.is_empty() {
-            return;
+            return None;
         }
-        let account = self.merged_at_quit.get_or_insert_with(Default::default);
+        let mut account = crate::settings_merge::Account::default();
         for merge in merges {
             account.add(merge);
         }
+        let line = account.said(PINS_FILE_NAME, crate::settings_merge::Said::AtQuit);
+        self.merged_at_quit
+            .get_or_insert_with(Default::default)
+            .add(account);
+        Some(line)
     }
 
     /// **A storage pass's merge, its last step**: the merged table is handed to
