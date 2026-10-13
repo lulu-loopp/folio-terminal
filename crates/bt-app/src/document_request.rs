@@ -63,7 +63,7 @@
 //! **One policy for all four stores.** Every store sends `Merge` requests
 //! (T-STORE-MERGE-SETTINGS, T-STORE-MERGE-KEYBINDINGS,
 //! T-STORE-MERGE-PROFILES-PINS): a displaced file is kept for its merge. And a
-//! re-read that found the file changed stores it for the merge (`Follow`).
+//! re-read that found the file changed stores it for the merge.
 //!
 //! **The merge's seam** ([`DocumentState::merge_stored`]): every file stored
 //! for the merge, in the order it was stored, is merged by the document's own
@@ -93,7 +93,15 @@ pub(crate) enum Mode {
     /// for its merge.
     Merge,
     /// The asker has no merge: a displaced file is put back under its name and
-    /// the answer is a conflict.
+    /// the answer is a conflict. No store sends it — all four merge — and it is
+    /// the preview's save's policy on this worker (design note (c)3, J5 S-6a).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T-STORE-MERGE-PROFILES-PINS until 2026-10-31: every store merges; S-6a's preview save sends it"
+        )
+    )]
     Restore,
 }
 
@@ -1161,8 +1169,6 @@ impl<T: StoredDocument> ReadAnswer<T> {
 /// **A re-read's news for a reader** ([`DocumentState::take_answers`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ReadNews {
-    /// A read put a new document in force (the projection moved).
-    pub(crate) taken: bool,
     /// Whether the newest read found a file that would not read — `None` when
     /// no read was answered. A stale read's verdict is not said over a newer
     /// one's.
@@ -1173,10 +1179,9 @@ pub(crate) struct ReadNews {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Heard {
-    /// The file is the one Folio left, or holds the document in force, or a
-    /// change made here kept it from being taken.
+    /// The file is the one Folio left, or the pass put nothing new in force.
     Unchanged,
-    /// A new document is in force.
+    /// The pass's merge put a new document in force (a store's `reread`).
     Changed,
     /// The file would not read, and what was in force stays.
     Unreadable,
@@ -1188,8 +1193,6 @@ impl ReadNews {
     pub(crate) fn heard(self) -> Heard {
         if self.unreadable == Some(true) {
             Heard::Unreadable
-        } else if self.taken {
-            Heard::Changed
         } else {
             Heard::Unchanged
         }
@@ -1212,18 +1215,6 @@ pub(crate) struct PendingMerge<T> {
     /// The document the exchange wrote (`Displaced`): the merge's `O` ((c)1).
     /// `None` for every other answer, whose `O` is `desired`.
     pub(crate) written: Option<T>,
-}
-
-/// **What a store does with a re-read that found its file changed** — the
-/// file not Folio's own write, and the store not held.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Follow {
-    /// Taken whole when nothing of Folio's is owed; stored for the merge when
-    /// something is (`profiles.json`, `pins.json`, until their merge).
-    Take,
-    /// Stored for the merge, always: the document's merge puts it in force
-    /// through its doors (`settings.json`, `keybindings.json`).
-    Merge,
 }
 
 /// **What one merge pass replaced in one file** — the data the pass's card
@@ -1274,7 +1265,6 @@ pub(crate) struct DocumentState<T> {
     version: u64,
     generation: u64,
     mode: Mode,
-    follow: Follow,
     outstanding: VecDeque<Outstanding<T>>,
     /// A re-read was asked for while one was on the worker: one more is sent
     /// when it has been answered.
@@ -1329,8 +1319,7 @@ impl<T: StoredDocument> DocumentState<T> {
             revision,
             version: 0,
             generation: 0,
-            mode: Mode::Restore,
-            follow: Follow::Take,
+            mode: Mode::Merge,
             outstanding: VecDeque::new(),
             read_again: false,
             send_again: false,
@@ -1345,14 +1334,6 @@ impl<T: StoredDocument> DocumentState<T> {
             refusal: None,
             recovery: None,
         }
-    }
-
-    /// **This store's two policies**: what its writes ask of the worker, and
-    /// what it does with a file a re-read found changed.
-    pub(crate) fn with_policies(mut self, mode: Mode, follow: Follow) -> Self {
-        self.mode = mode;
-        self.follow = follow;
-        self
     }
 
     /// The document readers read.
@@ -1848,45 +1829,14 @@ impl<T: StoredDocument> DocumentState<T> {
             self.held_file_moved(bytes, document);
             return;
         }
-        match self.follow {
-            Follow::Take => {}
-            Follow::Merge => {
-                self.keep_for_the_merge(PendingMerge {
-                    base: self.revision.clone(),
-                    theirs: bytes,
-                    kept: None,
-                    written: None,
-                });
-                return;
-            }
-        }
-        if self.desired != self.revision.document {
-            // A change of Folio's is not on disk — in flight, refused, or a
-            // process that does not write here — and a re-read does not undo it.
-            // The file's bytes wait for the merge.
-            eprintln!(
-                "BT_PERSIST {file} changed on disk while a change made here is not on it; the \
-                 change made here stays"
-            );
-            self.keep_for_the_merge(PendingMerge {
-                base: self.revision.clone(),
-                theirs: bytes,
-                kept: None,
-                written: None,
-            });
-            return;
-        }
-        let read_bytes = match bytes {
-            Some(bytes) => bt_persist::DocumentBytes::Loaded(bytes),
-            None => bt_persist::DocumentBytes::Absent,
-        };
-        if self.revision.adopt(document.clone(), read_bytes) {
-            self.projection = document.clone();
-            self.desired = document;
-            self.version += 1;
-            self.merges.clear();
-            news.taken = true;
-        }
+        // A file that changed is stored for the merge, which folds it in and
+        // puts it in force through the document's doors.
+        self.keep_for_the_merge(PendingMerge {
+            base: self.revision.clone(),
+            theirs: bytes,
+            kept: None,
+            written: None,
+        });
     }
 
     /// **A held document's file changed again**: the file is stored for the

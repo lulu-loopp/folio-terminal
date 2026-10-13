@@ -4,16 +4,20 @@
 //! completed by (b)8; ticket T-STORE-MERGE-PROFILES-PINS).
 //!
 //! Each table's pass is one order, [`run_pass`], behind a seam the window
-//! implements ([`TableMergeWindow`], `runtime/profiles.rs`):
+//! implements ([`TableMergeWindow`]; the window's merge turn, `MergeTurn` in
+//! `runtime/configuration.rs`, which runs the settings, keybindings, profiles
+//! and pins passes in that order and presents once after all four):
 //!
 //! 1. **the store's half** — every file stored for the merge merged and folded
 //!    into `desired` (`DocumentState::merge_stored`, purely), and the merged
 //!    document made what the readers read;
 //! 2. **the door, after it** — `profiles.json`: the installer reads the merged
-//!    table (`Runtime::take_profile_table`), which follows the editor's draft by
-//!    its id and re-points no pane, because a pane holds its profile's id;
-//!    `pins.json`: the two PINNED sections, derived from the store whenever a
-//!    menu is built, and the chrome presented;
+//!    table and raises a card per refused entry
+//!    (`Runtime::install_merged_profile_table`), following the editor's draft
+//!    by its id and re-pointing no pane, because a pane holds its profile's id;
+//!    `pins.json`: nothing to install — the two PINNED sections are derived
+//!    from the store whenever a menu is built; each door owes the turn its
+//!    presentation;
 //! 3. **the store's last step** — the merged document sent, conditional on the
 //!    file the merge read, when it differs from it;
 //! 4. **the pass's one line** for `diagnostics.log`, counted as the settings

@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 
 use bt_persist::{PinEntryV1, PinKind, PinsV1, read_pins, read_pins_keeping_bytes};
 
-use crate::document_request::{DocumentState, Follow, Mode, QuitDocument, ReadNews};
+use crate::document_request::{DocumentState, QuitDocument, ReadNews};
 use crate::persist::{Revision, StorageLane};
 
 /// The name the pin file wears on disk, which is also what a notice about it has
@@ -210,8 +210,7 @@ impl PinsStore {
                 writer_of_record,
                 crate::update_trial::Writer::Pins,
                 lane,
-            )
-            .with_policies(Mode::Merge, Follow::Merge),
+            ),
             fault,
             merged_at_quit: None,
         }
@@ -303,8 +302,8 @@ impl PinsStore {
     /// §3.4, (b)8, (c)1): every file stored for the merge is merged by
     /// identity and by key ([`crate::pins_merge::merge`]) and folded into
     /// `desired`, which moves the revision to the file the merge read; the
-    /// merged table is then what the menus read. The door — the chrome rebuilt
-    /// from it — runs after this. `None` when nothing was merged.
+    /// merged table is then what the menus read, built from it whenever one
+    /// opens; the turn presents once after every pass. `None` when nothing was merged.
     pub(crate) fn begin_merge(&mut self) -> Option<crate::table_merge::MergePass> {
         let at_quit = self.merged_at_quit.take();
         if !self.document.merge_waits() && at_quit.is_none() {
@@ -376,11 +375,12 @@ impl PinsStore {
         if self.begin_merge().is_some() {
             self.end_merge();
         }
-        crate::document_request::ReadNews {
-            taken: news.taken || *self.document.projection() != before,
-            ..news
+        match news.heard() {
+            crate::document_request::Heard::Unchanged if *self.document.projection() != before => {
+                crate::document_request::Heard::Changed
+            }
+            heard => heard,
         }
-        .heard()
     }
 }
 

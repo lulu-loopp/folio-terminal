@@ -862,7 +862,7 @@ mod tests {
     /// after `b`, ahead of `a`, and is put in force.
     #[test]
     fn a_carried_row_never_stands_before_its_ids_row() {
-        let shadow = |first: ProfileEntryV1| {
+        let shadow = |first: ProfileEntryV1, refused: bool| {
             let b = own("b", "乙 B");
             let later = own("a", "后来的 a′ later");
             let base = table(&[first.clone(), b.clone(), later.clone()]);
@@ -871,10 +871,16 @@ mod tests {
             let theirs = table(&[first.clone(), b_there.clone(), later.clone()]);
             let ours = table(&[b.clone(), first.clone(), later.clone()]);
             let merged = merge(&base, &ours, &theirs, &no_titles);
+            // A usable first row is the id's row in force and takes Folio's place;
+            // an unusable one is refused and stays where the file has it.
+            let expected = if refused {
+                vec![first.clone(), b_there.clone(), later.clone()]
+            } else {
+                vec![b_there.clone(), first.clone(), later.clone()]
+            };
             assert_eq!(
-                merged.document.profiles,
-                vec![b_there.clone(), first.clone(), later.clone()],
-                "Folio's order of the rows, the carried row after its id's row"
+                merged.document.profiles, expected,
+                "the carried row after its id's row, never before it"
             );
             assert_eq!(
                 in_force(&merged.document, "a"),
@@ -884,7 +890,7 @@ mod tests {
             in_force(&merged.document, "a").0
         };
         assert_eq!(
-            shadow(own("a", "甲 A")),
+            shadow(own("a", "甲 A"), false),
             Some("甲 A".to_owned()),
             "the first row is the one in force"
         );
@@ -893,7 +899,7 @@ mod tests {
             ..own("a", "不能启动 cannot start")
         };
         assert_eq!(
-            shadow(unusable),
+            shadow(unusable, true),
             Some("后来的 a′ later".to_owned()),
             "an unusable first row leaves the later one in force, as in the file"
         );
@@ -1032,7 +1038,9 @@ mod tests {
         let file = table(&[first.clone(), second.clone(), c.clone(), third.clone()]);
         let ours = table(&[c.clone(), first.clone(), second.clone(), third.clone()]);
         let merged = merge(&file, &ours, &file, &no_titles);
-        assert_eq!(merged.document.profiles, vec![c, first, second, third]);
+        // The refused `a` stays where the file has it; the row in force follows
+        // Folio's order, and its duplicate stays after it.
+        assert_eq!(merged.document.profiles, vec![first, c, second, third]);
         assert_eq!(
             in_force(&merged.document, "a"),
             in_force(&file, "a"),

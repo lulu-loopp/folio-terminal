@@ -24,7 +24,7 @@ use bt_persist::{
     read_settings, read_settings_keeping, read_settings_keeping_bytes, remove_sentinel,
 };
 
-use crate::document_request::{DocumentState, Follow, Mode, QuitDocument, ReadNews};
+use crate::document_request::{DocumentState, QuitDocument, ReadNews};
 
 /// The name the session document wears on disk, which is also what a notice
 /// about it has to say out loud — [`KEYBINDINGS_FILE_NAME`]'s rule, one file
@@ -2299,8 +2299,7 @@ impl SettingsStore {
                 writer_of_record,
                 crate::update_trial::Writer::Settings,
                 lane,
-            )
-            .with_policies(Mode::Merge, Follow::Merge),
+            ),
             fault,
             missing: report == ReadReport::NotFound,
             held: None,
@@ -2366,8 +2365,7 @@ impl SettingsStore {
                 writer_of_record,
                 crate::update_trial::Writer::Settings,
                 lane,
-            )
-            .with_policies(Mode::Merge, Follow::Merge),
+            ),
             fault: None,
             missing: true,
             held: None,
@@ -2703,8 +2701,7 @@ impl KeybindingsStore {
                 writer_of_record,
                 crate::update_trial::Writer::Keybindings,
                 lane,
-            )
-            .with_policies(Mode::Merge, Follow::Merge),
+            ),
             fault,
             merged_at_quit: None,
         }
@@ -3021,8 +3018,7 @@ impl ProfilesStore {
                 writer_of_record,
                 crate::update_trial::Writer::Profiles,
                 lane,
-            )
-            .with_policies(Mode::Merge, Follow::Merge),
+            ),
             fault,
             merged_at_quit: None,
         }
@@ -3107,8 +3103,8 @@ impl ProfilesStore {
     /// field and by order ([`crate::profiles_merge::merge`]) and folded into
     /// `desired`, which moves the revision to the file the merge read; the
     /// merged document is then what the installer reads — the door,
-    /// `Runtime::take_profile_table`, which runs after this and re-points
-    /// nothing by position. `None` when nothing was merged.
+    /// `Runtime::install_merged_profile_table`, which runs after this and
+    /// re-points nothing by position. `None` when nothing was merged.
     pub(crate) fn begin_merge(&mut self) -> Option<crate::table_merge::MergePass> {
         let at_quit = self.merged_at_quit.take();
         if !self.document.merge_waits() && at_quit.is_none() {
@@ -3183,11 +3179,12 @@ impl ProfilesStore {
         if self.begin_merge().is_some() {
             self.end_merge();
         }
-        crate::document_request::ReadNews {
-            taken: news.taken || *self.document.projection() != before,
-            ..news
+        match news.heard() {
+            crate::document_request::Heard::Unchanged if *self.document.projection() != before => {
+                crate::document_request::Heard::Changed
+            }
+            heard => heard,
         }
-        .heard()
     }
 
     /// A read answer handed in as if the worker had served it now.
@@ -6573,7 +6570,7 @@ mod conditional_write_tests {
         let news = store
             .document()
             .hear_read(StableRead::Bytes(Arc::from(&hand[..])));
-        assert!(!news.taken, "nothing is taken");
+        assert_eq!(news.unreadable, Some(false), "it read, and nothing is taken");
         assert_eq!(store.loaded(), &in_force[..], "the table in force stays");
         assert_eq!(store.document().merges().len(), 1, "stored for the merge");
         assert!(store.store(vec![line("new-tab", "Ctrl+j"), line("quit", "Ctrl+u")]));
@@ -7199,7 +7196,7 @@ mod conditional_write_tests {
         let news = store
             .document()
             .hear_read(StableRead::Bytes(Arc::from(&theirs[..])));
-        assert!(!news.taken);
+        assert_eq!(news.unreadable, Some(false));
         // A press that returns `desired` to the person's document, then the file
         // changed again: the revision follows the file, the hold stays.
         assert!(store.store(settings("他们的 Theirs Mono")));
@@ -7208,7 +7205,7 @@ mod conditional_write_tests {
         let news = store
             .document()
             .hear_read(StableRead::Bytes(Arc::from(&again[..])));
-        assert!(!news.taken, "a held document takes nothing from a re-read");
+        assert_eq!(news.unreadable, Some(false), "a held document takes nothing from a re-read");
         assert_eq!(store.revision().bytes.as_deref(), Some(&again[..]));
         let merges = store.document().merges().to_vec();
         assert_eq!(merges.len(), 2, "the conflict's file, then the newest");
