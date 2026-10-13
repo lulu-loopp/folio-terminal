@@ -6,6 +6,9 @@
 //! runtime       the generic road (named directly, through a glob and through a rename), the
 //!               native-only road on the list, and the PLANTED native block with a method off it
 //! elsewhere     the PLANTED door implemented outside the seam
+//!               (runtime also plants: a native block of a holder bound through a supertrait, a
+//!               type alias of a holder, an impl for a reference to a native holder, a free
+//!               function over native holders, and a `const` naming one)
 //! ```
 
 mod elsewhere;
@@ -25,6 +28,11 @@ where
     window: B::Window,
 }
 
+/// A holder whose bound is the backend's supertrait.
+pub struct Indirect<B: window_seam::ShellBackend> {
+    backend: B,
+}
+
 pub struct Plain;
 
 impl Plain {
@@ -40,6 +48,14 @@ impl<B: Backend> Runtime<'_, B> {
 impl Runtime<'_, Native> {
     fn create() {}
 }
+
+fn generic_over<B: Backend>(_runtime: &Runtime<'_, B>) {}
+
+/// Listed: a native function over native holders.
+fn listed_rebuild(_windows: Vec<&mut Runtime<'_>>) {}
+
+/// Listed: a compile-time check of a native holder.
+const _: fn(Runtime<'_>) = |Runtime { window: _ }| ();
 
 #[cfg(test)]
 mod tests {

@@ -507,6 +507,13 @@ pub(crate) struct Declarations {
     pub(crate) trait_declarations: BTreeMap<(String, String), Vec<MethodDecl>>,
     /// The traits each associated type name is bounded by, over every workspace trait that
     /// declares one (`type Glass: Glass<..>;` gives `Glass` → `{Glass}`).
+    ///
+    /// **A limit, by bare name** (T-HEADLESS-RUNTIME-SEAM round 2): both the associated type and
+    /// its bounds are keyed by their names alone, not by the trait that declares them or the
+    /// trait identity a bound resolves to. Two traits declaring an associated type of one name are
+    /// one entry, and a bound named like another trait is that trait's methods; a call is then
+    /// resolved to every candidate's declaration, and only agreeing ones answer. `bt-app` declares
+    /// each name once (the window seam's `Backend`), so nothing is merged there today.
     pub(crate) associated_bounds: BTreeMap<String, BTreeSet<String>>,
     /// Crate (library target) names, mapped to their packages.
     pub(crate) crates: BTreeMap<String, String>,

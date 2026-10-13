@@ -6,6 +6,8 @@ pub trait Backend {
     type Window: WindowHost;
 }
 
+pub trait ShellBackend: Backend {}
+
 pub struct Native;
 
 pub struct NativeWindow;
