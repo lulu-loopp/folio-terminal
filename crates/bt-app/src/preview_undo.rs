@@ -421,6 +421,13 @@ impl UndoLog {
         true
     }
 
+    /// **The body sent was written over by this body or a later one** (S-6a
+    /// round 8: a quit's or a stop's writer put the body at or past its
+    /// position in the file): no position names a body owed any more.
+    pub fn forget_the_body_sent(&mut self) {
+        self.sent = Sent::Not;
+    }
+
     /// **Whether the body a save sent lives only behind the cursor** (S-6a
     /// round 7, the coordinator's ruling): its position is ahead — the person
     /// undid past it, so only the redo history holds it — or it was discarded
