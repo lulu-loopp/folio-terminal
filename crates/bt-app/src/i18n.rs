@@ -956,6 +956,16 @@ text_entries! {
     SettingsFileKept,
     /// The same, for `keybindings.json` ([`keybindings_file_kept_in`]).
     KeybindingsFileKept,
+    /// A value of one profile the file won over Folio's, `{profile}` and
+    /// `{field}` filled by [`merged_profile_value_in`] (T-STORE-MERGE-PROFILES-PINS).
+    MergedProfileValue,
+    /// The order of the profiles, as a value the file won over Folio's
+    /// (T-STORE-MERGE-PROFILES-PINS).
+    MergedProfilesOrder,
+    /// Whether a profile is kept out of the pickers, as a field a profiles
+    /// merge names: the editor has a verb for it (Hide / Show), not a row
+    /// (T-STORE-MERGE-PROFILES-PINS).
+    MergedProfileHidden,
     /// The tail line of a crowded pane strip, for one seat it has no row for
     /// (AUDIT-hardcode SEAT-1; filled by [`seat_overflow_notice_in`]).
     SeatOverflowOne,
@@ -3889,6 +3899,21 @@ impl Text {
                 "{file} could not be read; the shortcuts already in force were kept",
                 "{file} could not be read; the shortcuts already in force were kept", // zh: pending T-STORE-MERGE-SETTINGS
             ),
+            Self::MergedProfileValue => pick(
+                lang,
+                "{profile}: {field}",
+                "{profile}: {field}", // zh: pending T-STORE-MERGE-PROFILES-PINS
+            ),
+            Self::MergedProfilesOrder => pick(
+                lang,
+                "Order of the profiles",
+                "Order of the profiles", // zh: pending T-STORE-MERGE-PROFILES-PINS
+            ),
+            Self::MergedProfileHidden => pick(
+                lang,
+                "Hidden from the pickers",
+                "Hidden from the pickers", // zh: pending T-STORE-MERGE-PROFILES-PINS
+            ),
             Self::SeatOverflowOne => pick(
                 lang,
                 "1 more does not fit",
@@ -6406,6 +6431,13 @@ impl Text {
         (Self::SettingsFileKept, HostPlatform::MacOs),
         (Self::KeybindingsFileKept, HostPlatform::Windows),
         (Self::KeybindingsFileKept, HostPlatform::MacOs),
+        // zh: pending T-STORE-MERGE-PROFILES-PINS — what a profiles merge names on its card.
+        (Self::MergedProfileValue, HostPlatform::Windows),
+        (Self::MergedProfileValue, HostPlatform::MacOs),
+        (Self::MergedProfilesOrder, HostPlatform::Windows),
+        (Self::MergedProfilesOrder, HostPlatform::MacOs),
+        (Self::MergedProfileHidden, HostPlatform::Windows),
+        (Self::MergedProfileHidden, HostPlatform::MacOs),
         // 0.4.8 E5: the card of a rollback that did not keep what a Folio ran over it changed.
         (Self::UpdateFailedUndone, HostPlatform::Windows),
         (Self::UpdateFailedUndone, HostPlatform::MacOs),
@@ -9096,6 +9128,20 @@ fn keybindings_file_kept_in(lang: Lang, file: &str) -> String {
     Text::KeybindingsFileKept
         .in_lang(lang)
         .replace("{file}", file)
+}
+
+/// **One value of one profile, named the way its card says it** — the row's
+/// title and the field's label (T-STORE-MERGE-PROFILES-PINS).
+#[must_use]
+pub fn merged_profile_value(profile: &str, field: &str) -> String {
+    merged_profile_value_in(current(), profile, field)
+}
+
+fn merged_profile_value_in(lang: Lang, profile: &str, field: &str) -> String {
+    Text::MergedProfileValue
+        .in_lang(lang)
+        .replace("{profile}", profile)
+        .replace("{field}", field)
 }
 
 /// **A switcher row the pin would not keep** (§7.7 ⑤, 2026-08-24).
