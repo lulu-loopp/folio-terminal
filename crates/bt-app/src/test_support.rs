@@ -3373,7 +3373,45 @@ pub(crate) fn shown_and_opened(
         "a key the walk names as it is"
     );
     cache.ask_for_showing(&[(seat_of(TAB_ONE, SeatId(seat)), Some(path))], |_| {
-        OpenAsked::Asked
+        admitted()
     });
-    cache.opened(key.to_owned(), serial, frames);
+    answer_awaited(cache, key, serial, frames);
+}
+
+/// **An animation open admitted under an identity of its own**, as the computation lane admits
+/// each request — for a walk a test answers by hand. No two calls in the process share one.
+pub(crate) fn admitted() -> OpenAsked {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    OpenAsked::Asked(computation_lane::ComputationId::from(
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    ))
+}
+
+/// **The worker's answer to the open the window awaits for `key`**, filed as the drain files it
+/// ([`AnimationCache::opened`]) — for the tests whose subject is not which open an answer is for.
+/// Answers whether it was filed.
+pub(crate) fn answer_awaited(
+    cache: &mut AnimationCache,
+    key: &str,
+    serial: u64,
+    frames: Result<animation::Animation, animation::AnimationRefusal>,
+) -> bool {
+    let asked = cache
+        .awaited(key)
+        .expect("the window awaits a decode of the file");
+    cache.opened(key.to_owned(), asked, serial, frames)
+}
+
+/// **The open the window awaits for `path`, failed on the worker** and settled down the road the
+/// window's settlement takes it (`settle_failure` → [`AnimationCache::settle`]).
+pub(crate) fn fail_awaited(cache: &mut AnimationCache, path: &Path) {
+    let asked = cache
+        .awaited(&normalized_local_image_path_key(path))
+        .expect("the window awaits a decode of the file");
+    cache.settle(crate::settle_failure(
+        asked,
+        crate::Asked::Animation {
+            path: path.to_path_buf(),
+        },
+    ));
 }

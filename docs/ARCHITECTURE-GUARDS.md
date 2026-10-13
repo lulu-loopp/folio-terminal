@@ -317,7 +317,7 @@ never the thread door itself — the completions reachability guard's
 `worker_roots` reads that call as the thread's start, so the lane's thread name
 and the worker-door bodies its body reaches are seen as a thread door's are);
 it builds its `lane::Ledger` with its own wake, which the ledger calls when the
-worker ends, after every owed identity has its terminal; it admits each request
+worker ends owing any request, after every owed identity has its terminal (a worker that ends owing nothing wakes nobody); it admits each request
 through the ledger (`admit`, or `admit_joined` for the same operation asked
 again), which mints the identity or refuses at the door, and records the sink
 the identity is owed when its requester goes; it runs each request's work
@@ -344,7 +344,10 @@ below the earliest request still owed; and the computation lane (S-8,
 the order minted unless a newer one for the same target displaces it while it waits
 (`Superseded { by }`) or is the same operation and joins it, the worker started by the
 first request, a refused request handed back with its job, a supersession announced by
-the wake and its terminal — which carries no answer — taken past the drain mark. A lane of
+the wake and its terminal — which carries no answer — taken past the drain mark; and the git
+mutation lane (T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER, `git_mutation_lane`) on `lane::Queue` too,
+one share per repository, made by its first request and let go once nothing of it is held or owed, its
+identities the share's generation beside the minted number so a later share never repeats one. A lane of
 several threads keeps one ledger per thread, so one thread's end ends only its own requests,
 and keeps what each request asked, so a `Failed` one is settled — as its surface's own error,
 or held by its pane — and asked again only by new input to that surface, rather than left in
