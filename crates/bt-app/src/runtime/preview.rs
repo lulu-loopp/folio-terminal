@@ -1,10 +1,10 @@
 //! `preview` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
-use crate::input::Keystroke;
-use crate::window_seam::prelude::*;
 use super::peek::{PeekAsk, unstarted_pixels};
 use crate::computation_lane::Asking;
+use crate::input::Keystroke;
+use crate::window_seam::prelude::*;
 use crate::{
     ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD, AnimationEntry, AnimationWork, AppEvent, AttentionDelivery,
     BackgroundDecode, BlockScrollPaint, ClipboardPictureAnswer, ClipboardPictureJob,
