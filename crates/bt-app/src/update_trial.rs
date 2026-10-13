@@ -69,7 +69,8 @@
 //! otherwise defers. **The trial never ends itself.** An unreadable journal is
 //! never handed back. A receipt the storage worker could not write is asked
 //! again by the watch at each of its turns until it lands — no clock of its
-//! own — and no longer once the watchdog is spent (T-TRIAL-RECEIPT-RETRY).
+//! own — and no longer once the watchdog is spent, or for U-35's reserved
+//! trial once it no longer asks to commit itself (T-TRIAL-RECEIPT-RETRY).
 //!
 //! # Readiness and the receipt (F-14, (b).2)
 //!
@@ -709,7 +710,9 @@ enum Read {
 /// own — while the watchdog is not spent, and given up, said once, when it is:
 /// the watchdog's life is the re-ask's declared bound, past which the watch
 /// makes no hand-back a landed receipt would commit and the next start or
-/// logon decides (T-TRIAL-RECEIPT-RETRY); (2) the
+/// logon decides (T-TRIAL-RECEIPT-RETRY); for U-35's reserved trial, which no
+/// holder adopts, the bound is instead the life of `commit_itself`, the one
+/// road its receipt pays off on (round 2); (2) the
 /// journal read — a header decides, `NotFound` is the end, **any other error
 /// is `Unreadable`** and skips neither step 1 nor step 3; (3) the watchdog —
 /// at each of its [`HAND_BACKS`] due times, an `Undecided` transaction is
@@ -780,7 +783,7 @@ pub(crate) fn watch(
                     ),
                     Err(error) => {
                         eprintln!(
-                            "BT_UPDATE_TRIAL receipt of {txn} not written by {:?}: {error}; the watch asks again at each of its turns until its watchdog is spent",
+                            "BT_UPDATE_TRIAL receipt of {txn} not written by {:?}: {error}; the watch asks again at each of its turns, while its watchdog runs or, for the reserved trial, while it asks to commit itself",
                             written.by
                         );
                         receipt_refusal = error;
@@ -788,7 +791,11 @@ pub(crate) fn watch(
                     }
                 }
             }
-            if spent < HAND_BACKS {
+            // The bound: the watchdog's life for an ordinary trial, whose
+            // landed receipt a holder or a hand-back's recovery adopts; for
+            // U-35's reserved trial, which no holder adopts, the life of its
+            // own commit — asked while `commit_itself` is.
+            if spent < HAND_BACKS || commit_itself.is_some() {
                 match gate.write_owed_receipt() {
                     Some(Ok(())) => {
                         receipt_asks += 1;
@@ -803,9 +810,15 @@ pub(crate) fn watch(
                     None => {}
                 }
             } else if gate.give_up_owed_receipt() {
-                eprintln!(
-                    "BT_UPDATE_TRIAL receipt of {txn} still refused after {receipt_asks} asks of the trial's watch: {receipt_refusal}; the watchdog is spent, so it is not asked again, and the next start or logon decides"
-                );
+                if receipt_asks == 0 {
+                    eprintln!(
+                        "BT_UPDATE_TRIAL receipt of {txn} refused by the storage worker after the watchdog was spent: {receipt_refusal}; the watch does not ask it again, and the next start or logon decides"
+                    );
+                } else {
+                    eprintln!(
+                        "BT_UPDATE_TRIAL receipt of {txn} still refused after {receipt_asks} asks of the trial's watch: {receipt_refusal}; the watchdog is spent, so it is not asked again, and the next start or logon decides"
+                    );
+                }
             }
             // The mark that a person's change is held until the commit.
             if gate.owes_unkept_mark() {
@@ -2060,14 +2073,15 @@ mod tests {
     /// `job` owed or awaited as the caller left `gate`: the world's moves
     /// between two turns are `between`'s, given the turn's number and whether
     /// the receipt is on disk; the watchdog's period is `every`, and each
-    /// hand-back's `ready` word is recorded. The turns taken, and the
-    /// hand-backs.
+    /// hand-back's `ready` word is recorded; `commit_itself` is U-35's
+    /// reserved trial's own commit, or `None` for an ordinary trial. The turns
+    /// taken, and the hand-backs.
     fn watch_by_turns(
         gate: &Gate,
         home: &Home,
         job: &ReceiptJob,
         every: Duration,
-        wake: &dyn Fn(),
+        (wake, commit_itself): (&dyn Fn(), Option<&mut CommitItself<'_>>),
         between: &mut dyn FnMut(u32, bool),
     ) -> (u32, Vec<bool>) {
         let mut handed = Vec::new();
@@ -2090,7 +2104,7 @@ mod tests {
                 between: Some(&mut each_turn),
             },
             wake,
-            None,
+            commit_itself,
             &mut Watchdog {
                 every,
                 hand_back: &mut hand_back,
@@ -2146,7 +2160,7 @@ mod tests {
             &home,
             &job,
             watchdog_asleep().every,
-            &|| {},
+            (&|| {}, None),
             &mut |turn, on_disk| {
                 if on_disk && landed_at.is_none() {
                     landed_at = Some(turn);
@@ -2210,7 +2224,7 @@ mod tests {
             &home,
             &job,
             watchdog_asleep().every,
-            &|| woken.set(woken.get() + 1),
+            (&|| woken.set(woken.get() + 1), None),
             &mut |turn, on_disk| {
                 if decided.is_some() {
                     return;
@@ -2266,7 +2280,7 @@ mod tests {
             &job,
             // Every due time falls in the first four turns.
             Duration::ZERO,
-            &|| {},
+            (&|| {}, None),
             &mut |turn, on_disk| {
                 ever_on_disk |= on_disk;
                 if turn == HAND_BACKS {
@@ -2290,6 +2304,64 @@ mod tests {
         assert!(gate.take_released().is_empty());
         assert!(gate.pending().is_empty(), "dropped");
         assert!(gate.defers(true), "shut for the rest of the process");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-TRIAL-RECEIPT-RETRY round 2) — **U-35's reserved trial asks
+    /// its refused receipt again for as long as it asks to commit itself, past
+    /// the watchdog's end**: no holder adopts it, so its hand-backs cannot pay
+    /// off and its own commit is the one road its receipt has. Refused past
+    /// the fourth due time, the home then takes it: the receipt lands, the
+    /// trial commits itself, and its held writes are released.
+    ///
+    /// The commit is played as `update_apply::commit_last_trial` answers it:
+    /// `Pending` while its receipt is not on disk, `Committed` once it is.
+    ///
+    /// MUTATION: in `watch`, the watchdog's cut applied to the reserved trial
+    /// too (ask the owed receipt only while `spent < HAND_BACKS`).
+    #[test]
+    fn the_reserved_trial_asks_its_receipt_again_for_as_long_as_it_asks_to_commit_itself() {
+        let root = scratch("receipt-reserved");
+        let home = Home::at(root.join("home"));
+        let job = refused_receipt(&home);
+        let gate = Gate::new();
+        assert!(gate.defer(true, Writer::Session));
+        gate.adopt_claim();
+        assert!(gate.hand_receipt());
+        gate.keep_receipt(job.clone());
+        gate.owe_receipt();
+        let woken = std::cell::Cell::new(0_usize);
+        let mut commit = || {
+            Ok(if job.path.exists() {
+                LastTrialCommit::Committed
+            } else {
+                LastTrialCommit::Pending
+            })
+        };
+        let mut writable_at = None;
+        let (_, handed) = watch_by_turns(
+            &gate,
+            &home,
+            &job,
+            // Every due time falls in the first four turns.
+            Duration::ZERO,
+            (&|| woken.set(woken.get() + 1), Some(&mut commit)),
+            &mut |turn, _| {
+                if turn == HAND_BACKS + 2 {
+                    std::fs::create_dir_all(home.transaction(TXN)).unwrap();
+                    writable_at = Some(turn);
+                }
+            },
+        );
+        assert_eq!(
+            writable_at,
+            Some(HAND_BACKS + 2),
+            "refused past the watchdog's end"
+        );
+        assert_eq!(handed.len(), HAND_BACKS as usize);
+        assert_eq!(woken.get(), 1, "committed by itself");
+        assert_eq!(gate.take_released(), vec![Writer::Session]);
+        assert!(!gate.defers(true));
         let _ = std::fs::remove_dir_all(&root);
     }
 

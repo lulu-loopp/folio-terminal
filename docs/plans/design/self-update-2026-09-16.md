@@ -3303,3 +3303,20 @@ Pinned by `update_trial::tests::{a_refused_receipt_is_asked_again_only_on_the_wa
 a_transient_receipt_refusal_does_not_roll_the_trial_back, a_permanent_receipt_refusal_ends_in_the_hand_back,
 an_unreadable_journal_still_retries_the_receipt_and_is_never_handed_back}`, each counted in the watch's
 own turns through `update_trial::Cadence`, the pause the watch is handed.
+
+### Amendment to revision (m), 2026-10-13 (round 2) — the reserved trial's bound
+
+Revision (m)'s bound — the watchdog's life — is the ordinary trial's. **U-35's reserved trial** is
+the one trial no holder can adopt: every holder runs the rescue copy the operating system refused,
+so its hand-backs cannot pay off, no live holder has a deadline over it, and its one road to a commit
+is its own (`update_apply::commit_last_trial`, asked at each turn of the watch until the journal no
+longer waits for it). Its refused receipt is therefore asked again **for as long as it asks to commit
+itself** — the receipt's re-ask shares `commit_itself`'s life — and is not given up at the fourth due
+time; a home that takes writes again later still lets it commit, and the person's changes are kept.
+Both bounds are declared in the `# completions` row `the trial's receipt` (C5 rule 3).
+
+**The cost of one ask, stated.** A journal read (the rights check) and a create-new write; when the
+refusal comes at the rename or a flush rather than at the create, each ask is a full durable write
+with its flushes — on macOS `F_FULLFSYNC`, which flushes the drive's cache.
+
+Pinned by `update_trial::tests::the_reserved_trial_asks_its_receipt_again_for_as_long_as_it_asks_to_commit_itself`.
