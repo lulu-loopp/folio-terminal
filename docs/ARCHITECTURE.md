@@ -1297,9 +1297,13 @@ The read worker's questions take turns with the verbs through the lane's `RepoTu
 waits for the verbs its repository's share had minted when it was asked and for a verb running
 there — at most those verbs, each one git child under `GIT_COMMAND_TIMEOUT` — and a verb pressed
 after it waits for it, so later presses never lengthen a read's wait; a verb starts only while no
-read of its repository runs. A reading is never taken in the middle of a verb. While a question
-waits, the one read worker answers no other repository (T-GIT-READS-PER-REPOSITORY may give reads
-a turn of their own per repository). Its adapter is `LaneName::GitMutation`. S-6a and
+read of its repository runs. A reading is never taken in the middle of a verb. A question waits
+in the read worker's line, never on its thread (T-GIT-READS-PER-REPOSITORY): one whose turn has
+not come is parked (`ReadTicket::begin`), keeping its place in the turnstile so later presses still
+wait for it, and the one read worker answers other repositories' questions — draining and
+coalescing its channel — meanwhile; a verb's end that may bring a parked read's turn nudges the
+worker, which takes the parked reads whose turn has come before the questions not yet asked, a
+repository's reads in the order they were asked. Its adapter is `LaneName::GitMutation`. S-6a and
 S-7 move the storage worker and the clipboard onto the seam (`docs/ARCHITECTURE-GUARDS.md`,
 *Lane contract and the completion seam*).
 **The return rule:** a lane whose

@@ -15477,3 +15477,14 @@ Records are never evicted, so they grow with the distinct animated files one win
 
 **Pinned by**
 - `git_mutation_lane::tests::a_column_closed_in_a_tab_that_stays_open_has_its_receipt_sunk`
+
+
+### 2026-10-13 — A git read waiting for its repository's verbs no longer holds the read worker for every other repository (T-GIT-READS-PER-REPOSITORY)
+
+**What the person sees.** A slow checkout (or any long git action) in one repository no longer freezes the Files view and the Git page of another: their status, branches and history are read while the checkout runs. The repository being changed is still read only after the actions pressed before the read, and never in the middle of one.
+
+**What is built.** The read worker (`bt-git-worker`) no longer waits on the turnstile. It asks it as it takes a question from its line (`RepoTurns::ask`, which fixes the verbs the read waits for: those its repository's share had minted then) and takes the turn without waiting (`ReadTicket::begin`): a question whose turn has not come is parked in the worker's own line, keeping its place in the turnstile — a verb pressed after it still waits for it — and the worker answers the next question, of any repository, meanwhile, draining and coalescing its channel between every two. A verb's end that may bring a parked read's turn (a terminal published, a share's worker ended, a verb's mark coming off) nudges the worker through its own channel (`git::read_inbox`), and the worker takes the parked reads whose turn has come before the questions not yet asked, the earliest parked first, so a repository's reads run in the order they were asked. A newer ask of a parked question replaces it, as it replaces one still in line. A read dropped unrun (replaced, or the worker gone) takes its place out of the turnstile with its ticket, so no verb waits on it. One read worker remains; nothing new lives per repository. The turnstile's `# effects` row for the read's wait is gone; the share workers' wait (`RepoTurns::verb_turn`) is unchanged.
+
+**Pinned by**
+- `git_mutation_lane::tests::{a_read_of_another_repository_is_answered_while_this_ones_verbs_run, a_waiting_read_runs_after_its_watermark_verbs_and_before_later_presses, reads_waiting_on_two_repositories_keep_their_order_within_each, coalescing_keeps_working_while_a_read_waits, a_newer_ask_replaces_a_parked_read_of_the_same_question}`, through the product's read loop (`git::run_git_worker`) and its nudge
+- the earlier turn tests, now through the same loop: `a_read_of_a_repository_waits_behind_its_in_flight_mutation`, `a_read_waits_for_the_verbs_owed_when_it_was_asked_not_for_later_presses`, `a_verb_waits_for_the_read_running_in_its_repository`, `a_closed_pages_running_verb_keeps_its_repositorys_one_share_and_turn`
