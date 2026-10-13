@@ -6,7 +6,7 @@
 use super::*;
 use crate::test_support::{
     a_decode, a_held_raster, chevron_button, glance_fixture, method_body, peek_open,
-    the_three_chevrons,
+    tab_with_a_picture, the_three_chevrons,
 };
 use std::time::Duration;
 
@@ -1108,4 +1108,242 @@ fn a_ctrl_click_on_the_foot_reveals_the_file() {
         "a printed reference is handed over off its ledger"
     );
     let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// RED (T-PEEK-CACHE-QUESTION-RECORDS) — **the peek cache's records of questions outlive weight
+/// pressure, and no redraw asks them again.**
+///
+/// A `Pending`, a `Failed` and the unstarted record each hold no pixels, and an evicted one reads
+/// as *never asked*: the pane's resolve ([`surface_pixels`]) answered
+/// [`SurfacePixels::Nothing`] with `asked: false`, the page's ([`answer_one_picture`]) set
+/// `needs_pixels`, and the flyout's re-entry read the file ([`peek_reads_the_file`]) — a
+/// question asked again with no new input. The budget is sized so every decode that lands
+/// evicts the one before it.
+///
+/// MUTATION (observed red): `PeekCacheEntry::evictable` answering `true` for every entry — the
+/// records are the oldest entries, the first decodes evict them, and the first record assertion
+/// goes red.
+#[test]
+fn a_peek_records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them() {
+    const PIXELS: usize = 3 * 1024 * 1024;
+    const BUDGET: u64 = 4 * 1024 * 1024;
+    let reading = PathBuf::from(r"D:\截图\正在读 shot.png");
+    let broken = PathBuf::from(r"D:\截图\坏图.png");
+    let unstarted = PathBuf::from(r"D:\截图\未开工.png");
+    let key = |path: &Path| normalized_local_image_path_key(path);
+    let mut cache = PeekCache::with_budget(BUDGET);
+    cache.insert(key(&reading), PeekCacheEntry::Pending);
+    cache.insert(
+        key(&broken),
+        PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::UnsupportedFormat),
+    );
+    cache.insert(
+        key(&unstarted),
+        PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Decode(
+            DECODE_UNSTARTED.to_owned(),
+        )),
+    );
+    let shots: Vec<String> = (0..4)
+        .map(|n| key(&PathBuf::from(format!(r"D:\shots\{n}.png"))))
+        .collect();
+    for (n, shot) in shots.iter().enumerate() {
+        cache.insert(
+            shot.clone(),
+            a_decode(&format!("content-{n}"), (1024, 768), PIXELS),
+        );
+    }
+    assert!(
+        !cache.contains_key(&shots[2]) && cache.contains_key(&shots[3]),
+        "the fixture is a store whose every decode evicts the one before it"
+    );
+
+    assert!(
+        matches!(cache.peek(&key(&reading)), Some(PeekCacheEntry::Pending)),
+        "a decode in flight is the record of a question, and weight never takes it"
+    );
+    assert!(
+        matches!(cache.peek(&key(&broken)), Some(PeekCacheEntry::Failed(_))),
+        "nor a failure"
+    );
+    assert!(
+        matches!(
+            cache.peek(&key(&unstarted)),
+            Some(PeekCacheEntry::Failed(_))
+        ),
+        "nor an open whose thread could not be started"
+    );
+
+    // A redraw of a pane showing each file, with no raster of its own on the glass.
+    for path in [&broken, &unstarted] {
+        let pixels = surface_pixels(&mut cache, None, None, None, &key(path));
+        assert!(
+            matches!(pixels, SurfacePixels::Failed(_)),
+            "a pane's redraw reads the failure and asks nothing: {pixels:?}"
+        );
+    }
+    let pixels = surface_pixels(&mut cache, None, None, None, &key(&reading));
+    assert!(
+        matches!(pixels, SurfacePixels::Nothing { asked: true }),
+        "and waits on the read already out: {pixels:?}"
+    );
+    // A page's redraw, and the flyout's re-entry.
+    let mut pictures = MarkdownPictures::default();
+    for path in [&reading, &broken, &unstarted] {
+        let mut needs_pixels = false;
+        answer_one_picture(
+            &mut cache,
+            &mut pictures,
+            None,
+            path,
+            false,
+            640.0,
+            Instant::now(),
+            &mut needs_pixels,
+        );
+        assert!(!needs_pixels, "a page's redraw asks nothing for {path:?}");
+        assert!(
+            !peek_reads_the_file(cache.peek(&key(path)), true, false),
+            "nor does the flyout's re-entry for {path:?}"
+        );
+    }
+}
+
+/// RED (T-PEEK-CACHE-QUESTION-RECORDS) — **a failed peek's record leaves with the last surface
+/// that named its file**, and not before.
+///
+/// While any surface names the file — a picture pane in this tab or another, the glance card,
+/// the flyout — the failure stays and a redraw reads it; when the last has gone, the file's next
+/// showing is new input and asks. A decode in flight is kept until its answer whoever names it.
+///
+/// MUTATION (observed red): [`let_go_unnamed_peek_records`] lets go of nothing — the last
+/// assertion on the failed file goes red.
+#[test]
+fn a_failed_peeks_record_leaves_with_the_last_surface_that_named_it() {
+    let shot = r"D:\截图\坏图 one.png";
+    let key = normalized_local_image_path_key(Path::new(shot));
+    let reading = normalized_local_image_path_key(Path::new(r"D:\截图\正在读.png"));
+    let card = PreviewPane::default();
+    let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+    cache.insert(
+        key.clone(),
+        PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Io(
+            "系统找不到指定的文件".to_owned(),
+        )),
+    );
+    cache.insert(reading.clone(), PeekCacheEntry::Pending);
+    let failed = |cache: &PeekCache| matches!(cache.peek(&key), Some(PeekCacheEntry::Failed(_)));
+
+    let mut tabs = vec![tab_with_a_picture(1, shot).0, tab_with_a_picture(2, shot).0];
+    let_go_unnamed_peek_records(&mut cache, &peek_files_named(&tabs, &card, None, None));
+    assert!(failed(&cache), "two tabs' panes show the file");
+    tabs.remove(0);
+    let_go_unnamed_peek_records(&mut cache, &peek_files_named(&tabs, &card, None, None));
+    assert!(
+        failed(&cache),
+        "a background tab's pane still names it, and a redraw is no new input"
+    );
+    tabs.clear();
+    let_go_unnamed_peek_records(
+        &mut cache,
+        &peek_files_named(&tabs, &card, Some(Path::new(shot)), None),
+    );
+    assert!(failed(&cache), "the glance card over the file names it");
+    let_go_unnamed_peek_records(
+        &mut cache,
+        &peek_files_named(&tabs, &card, None, Some(key.as_str())),
+    );
+    assert!(failed(&cache), "and so does the flyout over it");
+
+    let_go_unnamed_peek_records(&mut cache, &peek_files_named(&tabs, &card, None, None));
+    assert!(
+        !cache.contains_key(&key),
+        "the last surface naming the file is gone, and the record with it"
+    );
+    assert!(
+        matches!(cache.peek(&reading), Some(PeekCacheEntry::Pending)),
+        "a decode in flight is kept until its answer"
+    );
+}
+
+/// RED (T-PEEK-CACHE-QUESTION-RECORDS) — **a failure that comes home for a file no surface names
+/// files no record**, and lets the decode it answers go.
+///
+/// MUTATION (observed red): [`file_peek_failure`] filing the failure whoever names the file — the
+/// second assertion goes red.
+#[test]
+fn a_failure_for_a_file_no_surface_names_files_no_record() {
+    let shown = normalized_local_image_path_key(Path::new(r"D:\截图\还在看.png"));
+    let left = normalized_local_image_path_key(Path::new(r"D:\截图\走开了.png"));
+    let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+    cache.insert(shown.clone(), PeekCacheEntry::Pending);
+    cache.insert(left.clone(), PeekCacheEntry::Pending);
+    let named = BTreeSet::from([shown.clone()]);
+    for key in [&shown, &left] {
+        file_peek_failure(
+            &mut cache,
+            &named,
+            key.clone(),
+            bt_term::InlineImageDecodeError::UnsupportedFormat,
+        );
+    }
+    assert!(
+        matches!(cache.peek(&shown), Some(PeekCacheEntry::Failed(_))),
+        "a surface still shows the file: its failure is filed with its reason"
+    );
+    assert!(
+        !cache.contains_key(&left),
+        "nobody shows the other one: its read is answered, and nothing is filed"
+    );
+}
+
+/// RED (T-PEEK-CACHE-QUESTION-RECORDS round 2) — **a glance card coming down leaves the failure a
+/// picture pane still shows, and the pane's next walk asks nothing**; a card opening over the file
+/// is new input and reads it again.
+///
+/// The card's teardown used to remove its file's `Failed` whoever else named the file, so a pane
+/// showing the same failed picture found nothing at its next refit and read the file again with no
+/// input of its own. The re-read belongs to the card's opening ([`peek_card_opened`]); its
+/// teardown is a surface leaving ([`let_go_unnamed_peek_records`] over the window's set with the
+/// card already down).
+///
+/// MUTATIONS (observed red): ① the old unconditional removal — `let_go_unnamed_peek_records`
+/// without `!named.contains(..)` — the first assertion goes red; ② `peek_card_opened` removing
+/// nothing — the opening assertion goes red.
+#[test]
+fn a_card_coming_down_leaves_the_failure_a_pane_still_shows() {
+    let shot = r"D:\截图\坏图 card.png";
+    let key = normalized_local_image_path_key(Path::new(shot));
+    let failure =
+        || PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Io("拒绝访问".to_owned()));
+    let tabs = vec![tab_with_a_picture(1, shot).0];
+    let card = PreviewPane::default();
+    let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+    cache.insert(key.clone(), failure());
+
+    // The card was up over the file a pane is showing, and comes down.
+    let_go_unnamed_peek_records(&mut cache, &peek_files_named(&tabs, &card, None, None));
+    assert!(
+        matches!(cache.peek(&key), Some(PeekCacheEntry::Failed(_))),
+        "the pane still shows the file, so its failure stays"
+    );
+    let pixels = surface_pixels(&mut cache, None, None, None, &key);
+    assert!(
+        matches!(pixels, SurfacePixels::Failed(_)),
+        "and the pane's next walk reads it and asks nothing: {pixels:?}"
+    );
+
+    // With no pane on it, the card was the last surface naming the file.
+    let_go_unnamed_peek_records(&mut cache, &peek_files_named(&[], &card, None, None));
+    assert!(
+        !cache.contains_key(&key),
+        "the last surface naming the file is gone, and the record with it"
+    );
+
+    // A new card over a file that failed is the card's own new input.
+    cache.insert(key.clone(), failure());
+    peek_card_opened(&mut cache, Path::new(shot));
+    assert!(
+        !cache.contains_key(&key),
+        "a card opening over the file reads it again"
+    );
 }

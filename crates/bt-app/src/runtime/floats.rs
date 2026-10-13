@@ -2764,13 +2764,18 @@ impl<B: Backend> Runtime<'_, B> {
             // pressing the same commit again draws its files without a second
             // subprocess.
             if let Some(hash) = opened {
-                question = files.git.begin_commit_files(&hash);
+                let asker = files.git.id();
+                question = files
+                    .git
+                    .begin_commit_files(&hash)
+                    .map(|question| (asker, question));
             }
         }
-        if let Some(question) = question
+        if let Some((asker, question)) = question
             && !self.app.git_worker.request(git::GitRequest {
                 window: self.window_id(),
                 host: git::GitHost::Float { id, tab },
+                asker,
                 question,
             })
         {
@@ -2785,18 +2790,19 @@ impl<B: Backend> Runtime<'_, B> {
     /// The next fifty commits, for a floating page (R16).
     pub(in crate::runtime) fn load_more_float_commits(&mut self, id: float::FloatId) -> Result<()> {
         let tab = self.window.tabs[self.window.active_tab].id;
-        let Some(question) = self
+        let Some((asker, question)) = self
             .window
             .float
             .live_mut(id)
             .and_then(float::FloatWin::files_mut)
-            .and_then(|files| files.git.more_commits())
+            .and_then(|files| Some((files.git.id(), files.git.more_commits()?)))
         else {
             return Ok(());
         };
         if !self.app.git_worker.request(git::GitRequest {
             window: self.window_id(),
             host: git::GitHost::Float { id, tab },
+            asker,
             question,
         }) {
             self.disable_git_worker();

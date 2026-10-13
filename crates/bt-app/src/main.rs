@@ -75,6 +75,7 @@ mod foreground_program;
 mod formula_tools;
 mod git;
 mod git_graph;
+mod git_mutation_lane;
 mod git_panel;
 mod git_watch;
 mod glyph_trace;
@@ -1924,8 +1925,12 @@ enum Settled {
     },
     /// An animation's fill: its reservation released, the animation standing on its last frame.
     FillLost { path: PathBuf, serial: u64 },
-    /// An animation's open: asked and unanswered, until the file's next open asks again.
-    AnimationUnanswered { path: PathBuf },
+    /// An animation's open — the request `asked`: asked and unanswered, until the file's next
+    /// open asks again.
+    AnimationUnanswered {
+        path: PathBuf,
+        asked: computation_lane::ComputationId,
+    },
     /// Nothing to do: the surface's mark stays and its own new input asks again.
     Nothing,
 }
@@ -1950,7 +1955,10 @@ const DECODE_UNSTARTED: &str = "the decoder could not be started";
 /// - a preview formula is refused (`MathRenderError::Aborted`): the page draws its source text,
 ///   and new content is a new formula, asked anew;
 /// - a card page and a resample keep their marks until the surface's next hover (or a new size).
-fn settle_failure(asked: Asked) -> Settled {
+///
+/// `id` is the failed request's identity, which an animation's open is settled under: the window
+/// files the failure only for the open it awaits ([`AnimationCache::open_unanswered`]).
+fn settle_failure(id: computation_lane::ComputationId, asked: Asked) -> Settled {
     match asked {
         Asked::Pane { leaf, task } => Settled::Hold { leaf, task },
         Asked::Pasted {
@@ -1977,7 +1985,7 @@ fn settle_failure(asked: Asked) -> Settled {
                 )),
             },
         }),
-        Asked::Animation { path } => Settled::AnimationUnanswered { path },
+        Asked::Animation { path } => Settled::AnimationUnanswered { path, asked: id },
         Asked::AnimationFill { path, serial } => Settled::FillLost { path, serial },
         Asked::PreviewMath { leaf, key } => Settled::Answer(MathWorkerResult {
             leaf,
@@ -2007,6 +2015,37 @@ impl PathWorkerRequest {
 }
 
 impl MathWorkerRequest {
+    /// **How a request asked of the formula and picture share relates to one waiting there**
+    /// (`lane::Queue::ask`; T-ANIMATION-ANSWER-IDENTITY). One case is not [`lane::Relation::Other`]:
+    /// a newer open of the same animated file for the same window **displaces** the open waiting
+    /// for it (`Superseded { by }`). A window asks a file it awaits a decode for only after it let
+    /// that decode go — the file changed under it ([`AnimationCache::let_go_changed_file`]) — and
+    /// its record then awaits exactly one id, the newer one. A waiting open has read no bytes, so
+    /// running it would answer the same question; it is still superseded rather than joined
+    /// (revision (b)4's `Joined { with }`), because a joined request's answer is delivered under
+    /// the id it joined, and the drain hands the window each answer under its own request's id
+    /// only — the record would await an id whose answer never comes. The cost: the newer open
+    /// takes the back of the line instead of the older one's place. Another window's open of the
+    /// same file is its own question and waits its turn. Everything else waits behind what is in
+    /// line: nothing else on this share is coalesced.
+    fn relate(waiting: &Self, asked: &Self) -> lane::Relation {
+        match (waiting, asked) {
+            (
+                Self::PeekAnimation {
+                    leaf: waiting_leaf,
+                    path: waiting_path,
+                },
+                Self::PeekAnimation { leaf, path },
+            ) if waiting_leaf.window == leaf.window
+                && normalized_local_image_path_key(waiting_path)
+                    == normalized_local_image_path_key(path) =>
+            {
+                lane::Relation::Displaces
+            }
+            _ => lane::Relation::Other,
+        }
+    }
+
     /// What this request asked ([`Asked`]).
     fn asked(&self) -> Asked {
         match self {
@@ -11904,13 +11943,14 @@ fn session_task_of(request: MathWorkerRequest) -> SessionDecorationTask {
     }
 }
 
-/// **What one drain of the computation lane hands the windows**: the answers — a failed window
-/// request's settled as its surface's own error answer among them ([`settle_failure`]) — the
-/// failed pane tasks to hold and the animation fills to release, each with who asked (each window
-/// settles its own, [`Runtime::settle_failed_requests`]), and whether a worker has ended.
+/// **What one drain of the computation lane hands the windows**: the answers, each under the
+/// identity of the request it answers — a failed window request's settled as its surface's own
+/// error answer among them ([`settle_failure`]) — the failed pane tasks to hold and the animation
+/// fills to release, each with who asked (each window settles its own,
+/// [`Runtime::settle_failed_requests`]), and whether a worker has ended.
 #[derive(Default)]
 struct MathAnswers {
-    done: Vec<MathWorkerResult>,
+    done: Vec<(computation_lane::ComputationId, MathWorkerResult)>,
     failed: Vec<(AnswerOwner, Settled)>,
     lane_gone: bool,
 }
@@ -11922,10 +11962,12 @@ struct MathAnswers {
 /// leaves the answer to the request that ended it; `WorkerGone` says the lane has lost a worker.
 fn sort_math_terminals(ended: Vec<computation_lane::Ended>) -> MathAnswers {
     let mut answers = MathAnswers::default();
-    for (_, _, terminal, (owner, asked)) in ended {
+    for (_, id, terminal, (owner, asked)) in ended {
         let failed = match terminal {
             lane::Terminal::Done(answer) => {
-                answers.done.extend(answer.take());
+                answers
+                    .done
+                    .extend(answer.take().map(|result| (id, result)));
                 false
             }
             lane::Terminal::Failed(_) => true,
@@ -11940,8 +11982,8 @@ fn sort_math_terminals(ended: Vec<computation_lane::Ended>) -> MathAnswers {
             lane::Terminal::Cancelled => unreachable!("the computation lane cancels nothing"),
         };
         if failed {
-            match settle_failure(asked) {
-                Settled::Answer(answer) => answers.done.push(answer),
+            match settle_failure(id, asked) {
+                Settled::Answer(answer) => answers.done.push((id, answer)),
                 Settled::Nothing => {}
                 settled @ (Settled::Hold { .. }
                 | Settled::FillLost { .. }
@@ -13260,6 +13302,12 @@ struct App<B: Backend = Native> {
     /// two `AppEvent`s are separate: a directory read and a file read are both
     /// disk questions but they are not each other's queue, and a preview of a
     /// large file must not be what a tree waits behind to draw its next row.
+    /// **The preview's saves on the storage worker**, each owed its answer
+    /// (S-6a): every interactive save is a request on the one storage worker the
+    /// four hand-editable documents write through, heard on
+    /// `AppEvent::DocumentsAnswered` by the buffer that asked, in whichever
+    /// window its tab now stands.
+    preview_saves: preview::PreviewSaves,
     preview_worker: preview::PreviewWorker,
     preview_worker_running: bool,
     preview_worker_notice_pending: bool,
@@ -13272,6 +13320,11 @@ struct App<B: Backend = Native> {
     git_worker: git::GitWorker,
     git_worker_running: bool,
     git_worker_notice_pending: bool,
+    /// **The Git pages' writes and checkouts** (`git_mutation_lane`): a worker
+    /// per repository with verbs owed, each verb run after the one pressed
+    /// before it, and the repository's reads on `git_worker` waiting their turn
+    /// behind them.
+    git_mutations: git_mutation_lane::GitMutationLane,
     /// Whether this Windows knows what a system backdrop is, asked once
     /// (`bt_platform::system_backdrop_available`).
     acrylic_available: bool,
@@ -13835,6 +13888,8 @@ struct AppParts<B: Backend> {
     recent_folders: recent_folders::RecentFolders,
     window_pictures: Vec<(WindowId, SessionWindowV1)>,
     update_job: update_job::Job<WindowId>,
+    preview_saves: preview::PreviewSaves,
+    git_mutations: git_mutation_lane::GitMutationLane,
 }
 
 impl<B: Backend> App<B> {
@@ -13887,8 +13942,12 @@ impl<B: Backend> App<B> {
             recent_folders,
             window_pictures,
             update_job,
+            preview_saves,
+            git_mutations,
         } = parts;
         Self {
+            preview_saves,
+            git_mutations,
             gpu,
             tab_ids,
             event_proxy,
@@ -17403,6 +17462,7 @@ mod worker_answer_routing_tests {
         let column = git::GitResponse {
             window: window_a(),
             host: git::GitHost::Column(leaf),
+            asker: git::GitCacheId::mint(),
             answer: git::GitAnswer::Repo {
                 dir: PathBuf::from("/repo"),
                 outcome: Ok(PathBuf::from("/repo")),
@@ -25302,12 +25362,116 @@ fn peek_reads_the_file(entry: Option<&PeekCacheEntry>, readable: bool, settled: 
         }
 }
 
+/// **What an entry weighs, and which entries weight pressure may take** (T-PEEK-CACHE-QUESTION-RECORDS).
+///
+/// A `Ready` weighs its native decode's pixels and is the one thing eviction chooses: the cost of
+/// having let it go is one worker read of a file that is still on the disk, and the surfaces
+/// drawing it keep the answer they were given (§7.1.3u). A `Pending` and a `Failed` — the
+/// unstarted record ([`DECODE_UNSTARTED`]) is a `Failed` — hold no pixels: each counts only the
+/// map's flat overhead per entry (`bt_term::BoundedCache`'s `ENTRY_OVERHEAD_BYTES`, 128 B), and
+/// neither is ever evicted, because each is the record of a question and an evicted record
+/// reads as *never asked*: the pane's, the page's and the flyout's next resolve would ask the
+/// worker again with no new input. A `Pending` leaves by its answer; a `Failed` leaves with the
+/// last surface that names its file ([`let_go_unnamed_peek_records`]), by
+/// the file-change road ([`forget_a_picture`]), or by a new peek over its file — a hover that
+/// settles ([`peek_reads_the_file`]) or a glance card that opens ([`peek_card_opened`]).
 impl bt_term::Weighed for PeekCacheEntry {
     fn bytes_held(&self) -> u64 {
         match self {
             Self::Pending | Self::Failed(_) => 0,
             Self::Ready { rgba, .. } => rgba.len() as u64,
         }
+    }
+
+    fn evictable(&self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
+}
+
+/// **Every file a surface of this window names to the peek cache** (T-PEEK-CACHE-QUESTION-RECORDS),
+/// by the key the cache files it under.
+///
+/// The surfaces whose resolve files a record of a question are four, and each names its file in
+/// the state it already keeps: a picture pane — a seat or a float of any tab, in the background as
+/// much as on the glass — by the picture it holds ([`PreviewPane::image`]); a markdown page, on
+/// any of those panes or on the card, by every picture in reach it asked about
+/// ([`DocumentPictures::files`]); the glance card by its file (`card_file`); and the hover flyout
+/// by its subject while it is up (`flyout`). A free function over the tabs for
+/// [`animation_surface_exists`]' reason: the set is derived from what the window holds, rather
+/// than kept beside it as a second record that could disagree, and tabs are what a test can build.
+fn peek_files_named(
+    tabs: &[TabState],
+    peek_pane: &PreviewPane,
+    card_file: Option<&Path>,
+    flyout: Option<&str>,
+) -> BTreeSet<String> {
+    let mut named = BTreeSet::new();
+    for pane in documents_held_in(tabs, peek_pane) {
+        if let Some(picture) = pane.image() {
+            named.insert(bt_term::normalized_local_image_path_key(&picture.path));
+        }
+        if let PreviewDocument::Markdown { pictures, .. } = pane.doc() {
+            named.extend(
+                pictures
+                    .files
+                    .iter()
+                    .map(|file| bt_term::normalized_local_image_path_key(file)),
+            );
+        }
+    }
+    named.extend(card_file.map(bt_term::normalized_local_image_path_key));
+    named.extend(flyout.map(str::to_owned));
+    named
+}
+
+/// **A failed peek no surface names any more is let go of** (T-PEEK-CACHE-QUESTION-RECORDS) —
+/// [`AnimationCache::let_go_unnamed`]'s rule, for the peek cache.
+///
+/// A `Failed` record is kept exactly as long as some surface names its file (`named`, from
+/// [`peek_files_named`]): while one does, its redraws read the failure and ask nothing; when the
+/// last one has gone, the file's next showing is new input and asks. A decode in flight is kept
+/// until its answer, which [`file_peek_failure`] files nowhere if the file is unnamed by then. A
+/// decode is weight, which the budget governs.
+fn let_go_unnamed_peek_records(peek_cache: &mut PeekCache, named: &BTreeSet<String>) {
+    let unnamed: Vec<String> = peek_cache
+        .iter()
+        .filter(|(key, entry)| {
+            matches!(entry, PeekCacheEntry::Failed(_)) && !named.contains(key.as_str())
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in &unnamed {
+        peek_cache.remove(key);
+    }
+}
+
+/// **A failure that came home for one file — its decode's, or a video's with no frame — filed
+/// only for a file some surface names** (T-PEEK-CACHE-QUESTION-RECORDS;
+/// [`AnimationCache::answered_for_nobody`]'s rule, for the peek cache). For a file no surface names
+/// by the time it lands, its decode in flight is let go of and nothing is filed: a record nobody
+/// is showing would be one [`let_go_unnamed_peek_records`] exists to end.
+fn file_peek_failure(
+    peek_cache: &mut PeekCache,
+    named: &BTreeSet<String>,
+    key: String,
+    failure: bt_term::InlineImageDecodeError,
+) {
+    if named.contains(&key) {
+        peek_cache.insert(key, PeekCacheEntry::Failed(failure));
+    } else if matches!(peek_cache.peek(&key), Some(PeekCacheEntry::Pending)) {
+        peek_cache.remove(&key);
+    }
+}
+
+/// **A glance card opening over a file** (T-PEEK-CACHE-QUESTION-RECORDS round 2): a new card is
+/// the card's own new input, so a failure filed for its file is let go of and the card's body
+/// asks again — [`peek_reads_the_file`]'s rule for a hover that settles, said for the card. The
+/// moment is the opening and not the teardown: a card coming down is a surface leaving, which
+/// lets a failure go only when no other surface names the file ([`let_go_unnamed_peek_records`]).
+fn peek_card_opened(peek_cache: &mut PeekCache, card_file: &Path) {
+    let key = bt_term::normalized_local_image_path_key(card_file);
+    if matches!(peek_cache.peek(&key), Some(PeekCacheEntry::Failed(_))) {
+        peek_cache.remove(&key);
     }
 }
 
@@ -32295,7 +32459,14 @@ fn hole_for(
 /// things with, and an `Option` would make the second one indistinguishable from
 /// "never asked" — which is how a refused decode gets re-sent on every frame.
 enum AnimationEntry {
-    Pending,
+    /// **Asked, and the answer awaited is the one to the request `asked`** — the identity the
+    /// computation lane minted for the open (T-ANIMATION-ANSWER-IDENTITY). An answer is filed only
+    /// for the question that asked it: one that comes home under another identity answers a
+    /// question this window no longer asks — the file changed under the decode, and the open
+    /// asked again — and is superseded, never filed ([`AnimationCache::awaits`]).
+    Pending {
+        asked: computation_lane::ComputationId,
+    },
     /// **One playback of one file, and the number that says which playback it
     /// is** (adversarial review 2026-09-11, B3).
     ///
@@ -32333,18 +32504,22 @@ enum AnimationEntry {
     /// work. The picture is still the same picture; what the reason buys is the
     /// line in the foot of the pane — see [`Runtime::preview_standing_fact`] and
     /// [`animation::AnimationRefusal::is_worth_saying`].
+    ///
+    /// A refusal is a fact about the file's bytes: it is kept while some surface of the window
+    /// names the file, and let go of when the file changes on disk
+    /// ([`AnimationCache::let_go_changed_file`]), so the next showing asks about the new bytes.
     Refused(animation::AnimationRefusal),
     /// **Asked, and no answer came**: the open's work failed on the worker, or its thread could
     /// not be started. Drawn as a refusal is (the picture lane's still, no notice), and — unlike a
     /// refusal, which is a fact about the file — let go of by the file's next open
-    /// ([`animations_opened`]), which asks again.
+    /// ([`animations_opened`]), which asks again, or when no surface names the file any more.
     Unanswered,
 }
 
 impl bt_term::Weighed for AnimationEntry {
     fn bytes_held(&self) -> u64 {
         match self {
-            Self::Pending | Self::Refused(_) | Self::Unanswered => 0,
+            Self::Pending { .. } | Self::Refused(_) | Self::Unanswered => 0,
             Self::Ready { animation, .. } => animation.bytes_held(),
         }
     }
@@ -32390,20 +32565,43 @@ fn animation_refusal_notice(refusal: animation::AnimationRefusal) -> Option<&'st
 /// door to them** (S-8 round 6).
 ///
 /// A type of its own rather than the bare map, so that each change an entry can go through is one
-/// method here and no caller lends the map out or writes an entry by hand: an open is asked only by
-/// [`Self::ask_for_showing`], the one writer of `Pending`; its answer is filed only by
-/// [`Self::opened`]; an open that never answered is written only by [`Self::open_unanswered`] and
-/// let go of only by [`Self::let_go_on_open`], on the file's next open; and a playback is reached
-/// into only by the fill, advance and present doors, each of which takes the entry out and puts it
-/// back, so the map re-weighs it.
+/// method here and no caller lends the map out or writes an entry by hand. One writer per state,
+/// and every remover named:
+///
+/// | state | its one writer | removed by |
+/// |---|---|---|
+/// | `Pending` | [`Self::ask_for_showing`], under the identity of the request it awaits | the answer to that request ([`Self::opened`], [`Self::open_unanswered`]), which files nothing for a file no surface names ([`Self::answered_for_nobody`]); [`Self::let_go_changed_file`] |
+/// | `Unanswered` | [`Self::open_unanswered`] — an open whose work failed, or whose thread could not be started ([`Self::ask_for_showing`]) | [`Self::let_go_on_open`], the file's next open; [`Self::let_go_unnamed`] |
+/// | `Refused` | [`Self::opened`] | [`Self::let_go_unnamed`]; [`Self::let_go_changed_file`] |
+/// | `Ready` | [`Self::opened`] | [`Self::let_go_on_open`]; [`Self::let_go_unnamed`]; [`Self::let_go_changed_file`]; [`Self::adopt_fill`], when the cursor finds the file changed; weight |
+///
+/// A playback is reached into only by the fill, advance and present doors, each of which takes the
+/// entry out and puts it back, so the map re-weighs it.
 ///
 /// **An entry that holds no pixels is never let go of by weight.** A request in flight, a refusal
 /// and an open that never answered are the records of questions: each still counts its entry's
 /// overhead toward the budget, but none is ever chosen by eviction
 /// ([`bt_term::Weighed::evictable`]), because a walk asks the worker for every file shown that
 /// this map holds nothing for — an evicted record would be asked again on the next redraw, with no
-/// open to ask it. So such records number at most the animated files this window has opened, and
-/// leave only by the doors above.
+/// open to ask it.
+///
+/// **What this window holds for a file is kept exactly as long as some surface names the file**
+/// (`presence`). When the last surface naming the file leaves — it stops existing, or it is
+/// handed another subject — its refusal, its unanswered open and its playback are let go of
+/// ([`Self::let_go_unnamed`]); its decode in flight is kept until the answer, which is then filed
+/// nowhere. The next showing of that file is an open, whose ask is new input and not a re-ask. So
+/// the records number at most one per file `presence` names, plus the decodes in flight (which the
+/// computation lane bounds), and weight pressure past the budget is reached only by playbacks,
+/// which it governs.
+///
+/// **An answer is filed only for the question that asked it** (T-ANIMATION-ANSWER-IDENTITY;
+/// ARCHITECTURE §4.2, asynchronous publication). A decode in flight is recorded under the identity
+/// the computation lane minted for its request, and an answer — a playback, a refusal, a failed
+/// open — is taken only under that identity ([`Self::awaits`]). Any other answer for the file is
+/// superseded: the question it answers was let go of — the file changed under the decode
+/// ([`Self::let_go_changed_file`]) and the next walk asked about the bytes there now — and it is
+/// never filed, so no frame of it reaches the glass. Identity decides, not the order answers come
+/// home in.
 struct AnimationCache {
     playbacks: bt_term::BoundedCache<String, AnimationEntry>,
     /// **What each surface is showing, so that opening a file can be told from
@@ -32427,12 +32625,31 @@ struct AnimationCache {
 /// **What asking the worker to open one file came to** — see [`AnimationCache::ask_for_showing`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OpenAsked {
-    /// In the lane: the file is `Pending` until its answer.
-    Asked,
+    /// In the lane under this identity: the file is `Pending` until the answer to it.
+    Asked(computation_lane::ComputationId),
     /// Its thread could not be started: asked, and unanswered until the file's next open.
     Unstarted,
     /// Turned away at the door (the lane is full): nothing is filed, so the next walk asks again.
     TurnedAway,
+}
+
+/// **Ask the computation lane to open one animated file for the window at `leaf`** — what
+/// [`AnimationCache::ask_for_showing`] hears of each file it asks: admitted under the identity the
+/// lane minted, which the decode in flight is recorded under and its answer is filed by; its thread
+/// not started; or turned away at the door.
+fn ask_to_open(
+    computation: &computation_lane::ComputationLane,
+    leaf: ShellAddress,
+    path: &Path,
+) -> OpenAsked {
+    match computation.decorate(MathWorkerRequest::PeekAnimation {
+        leaf,
+        path: path.to_owned(),
+    }) {
+        Ok(asked) => OpenAsked::Asked(asked),
+        Err((lane::Refused::NotStarted(_), _)) => OpenAsked::Unstarted,
+        Err(_) => OpenAsked::TurnedAway,
+    }
 }
 
 /// **What sending one fill came to** — see [`AnimationCache::send_fill`].
@@ -32466,6 +32683,16 @@ impl AnimationCache {
         self.playbacks.contains_key(key)
     }
 
+    /// The identity of the open the file's decode in flight awaits, if one is in flight — without
+    /// counting a use.
+    #[cfg(test)]
+    fn awaited(&self, key: &str) -> Option<computation_lane::ComputationId> {
+        match self.playbacks.peek(key) {
+            Some(AnimationEntry::Pending { asked }) => Some(*asked),
+            _ => None,
+        }
+    }
+
     /// Whether this window holds nothing for any file.
     fn is_empty(&self) -> bool {
         self.playbacks.is_empty()
@@ -32488,7 +32715,9 @@ impl AnimationCache {
     ///
     /// What each surface is showing is brought up to date ([`animations_opened`]). A file a surface
     /// has just begun showing is let go of ([`Self::let_go_on_open`]) — its playback, so the open
-    /// starts again on frame zero, and an open that never answered, so the open asks again. Then
+    /// starts again on frame zero, and an open that never answered, so the open asks again. A file
+    /// a surface has stopped showing is let go of if no surface names it any more
+    /// ([`Self::let_go_unnamed`]). Then
     /// each file shown that this window holds nothing for is asked of the worker through `ask`,
     /// once however many surfaces show it. A file this window holds anything for — a playback, a
     /// decode in flight, a refusal, an open that never answered — is not asked again by a walk: a
@@ -32507,8 +32736,22 @@ impl AnimationCache {
                 )
             })
             .collect();
+        // What each surface named before this walk, where the walk hands it another subject: the
+        // file it leaves may now be named by no surface.
+        let replaced: Vec<String> = named
+            .iter()
+            .filter_map(|(surface, key)| {
+                self.presence
+                    .get(surface)
+                    .filter(|standing| key.as_ref() != Some(*standing))
+                    .cloned()
+            })
+            .collect();
         for key in animations_opened(&mut self.presence, &named) {
             self.let_go_on_open(&key);
+        }
+        for key in replaced {
+            self.let_go_unnamed(&key);
         }
         for (_, path) in showing {
             let Some(path) = path else {
@@ -32519,25 +32762,122 @@ impl AnimationCache {
                 continue;
             }
             match ask(path) {
-                OpenAsked::Asked => self.playbacks.insert(key, AnimationEntry::Pending),
-                OpenAsked::Unstarted => self.open_unanswered(key),
+                OpenAsked::Asked(asked) => {
+                    self.playbacks
+                        .insert(key, AnimationEntry::Pending { asked });
+                }
+                // Asked, and no request was admitted to answer it.
+                OpenAsked::Unstarted => self.open_unanswered(key, None),
                 OpenAsked::TurnedAway => {}
             }
         }
     }
 
-    /// **A surface that has stopped existing**: what it was showing is forgotten. The record is
-    /// deliberately kept while a surface is merely not drawn — that is how a tab switch resumes
-    /// rather than restarts — so the one moment it may be dropped is the moment the surface goes.
+    /// **A surface that has stopped existing**: what it was showing is forgotten, and what this
+    /// window holds for that file with it when no other surface names the file
+    /// ([`Self::let_go_unnamed`]). The entry is deliberately kept while a surface is merely not
+    /// drawn — that is how a tab switch resumes rather than restarts — so the one moment it may be
+    /// dropped is the moment the surface goes.
     fn forget_surface(&mut self, surface: PreviewSurface) {
-        self.presence.remove(&surface);
+        if let Some(key) = self.presence.remove(&surface) {
+            self.let_go_unnamed(&key);
+        }
+    }
+
+    /// **Every surface that has stopped existing by a road that does not name it** — a tab closed,
+    /// carried to another window or folded into another tab takes its surfaces with it, and none
+    /// of those roads passes through [`Self::forget_surface`]. `exists` answers whether the window
+    /// still has the surface; each one it does not is forgotten as [`Self::forget_surface`] forgets.
+    fn forget_surfaces_gone(&mut self, exists: impl Fn(PreviewSurface) -> bool) {
+        let gone: Vec<PreviewSurface> = self
+            .presence
+            .keys()
+            .copied()
+            .filter(|surface| !exists(*surface))
+            .collect();
+        for surface in gone {
+            self.forget_surface(surface);
+        }
+    }
+
+    /// Whether some surface of this window names the file.
+    fn names(&self, key: &str) -> bool {
+        self.presence.values().any(|named| named == key)
+    }
+
+    /// **A file no surface names any more**: whatever this window holds for it is let go of — a
+    /// refusal or an open that never answered, so the file's next showing is an open and asks, and
+    /// a playback, which can never be resumed: a surface that names the file again does so by an
+    /// open ([`animations_opened`]), and an open lets go of the playback anyway
+    /// ([`Self::let_go_on_open`]), so keeping it would only hold frames and push out a playback
+    /// that a background tab can resume. A decode in flight is kept until its answer, which is
+    /// filed only if a surface names the file by then ([`Self::opened`]) — so a surface that goes
+    /// to another file and back during one decode asks for it once.
+    fn let_go_unnamed(&mut self, key: &str) {
+        if self.names(key) {
+            return;
+        }
+        if matches!(
+            self.playbacks.peek(key),
+            Some(
+                AnimationEntry::Ready { .. }
+                    | AnimationEntry::Unanswered
+                    | AnimationEntry::Refused(_)
+            )
+        ) {
+            self.playbacks.remove(key);
+        }
+    }
+
+    /// **Whether the file's decode in flight awaits the answer to the request `asked`** — the
+    /// one question an answer may be filed for. An answer under any other identity is superseded:
+    /// its question was let go of, and a newer one asked in its place, or none.
+    fn awaits(&self, key: &str, asked: computation_lane::ComputationId) -> bool {
+        matches!(
+            self.playbacks.peek(key),
+            Some(AnimationEntry::Pending { asked: awaited }) if *awaited == asked
+        )
+    }
+
+    /// **The awaited answer, come home for a file no surface names**: its decode in flight is let
+    /// go of and nothing is filed — a record nobody is showing, or frames nobody can resume
+    /// ([`Self::let_go_unnamed`]'s rule, for the decode it keeps). `true` when the file is unnamed
+    /// and the answer is therefore for nobody.
+    fn answered_for_nobody(&mut self, key: &str) -> bool {
+        if self.names(key) {
+            return false;
+        }
+        self.playbacks.remove(key);
+        true
+    }
+
+    /// **A file that changed on disk** — the preview's file-change news
+    /// ([`Runtime::refresh_preview_file`]): its playback, its refusal and its decode in flight are
+    /// let go of, so the next walk that shows the file asks about the bytes there now. A refusal is
+    /// a fact about the bytes, and new bytes are a new question; so is a decode that may have read
+    /// the old ones — its answer, when it comes, is awaited by no record and is superseded
+    /// ([`Self::awaits`]), and the walk's new open is the one filed. `true` when anything was let
+    /// go of. An open that never answered is no fact about the bytes and waits for the file's next
+    /// open as before.
+    fn let_go_changed_file(&mut self, key: &str) -> bool {
+        let changed = matches!(
+            self.playbacks.peek(key),
+            Some(
+                AnimationEntry::Ready { .. }
+                    | AnimationEntry::Refused(_)
+                    | AnimationEntry::Pending { .. }
+            )
+        );
+        if changed {
+            self.playbacks.remove(key);
+        }
+        changed
     }
 
     /// **A file a surface has just begun showing**: its playback is let go of, so the open starts
-    /// again on frame zero, and so is an open that never answered, so the open asks again — the one
-    /// remover of [`AnimationEntry::Unanswered`]. A refusal is kept, because whether a file can be
-    /// animated is a fact about the file, and so is a decode already in flight, which is this
-    /// open's answer.
+    /// again on frame zero, and so is an open that never answered, so the open asks again. A
+    /// refusal is kept, because whether a file can be animated is a fact about the file, and so is
+    /// a decode already in flight, which is this open's answer.
     fn let_go_on_open(&mut self, key: &str) {
         if matches!(
             self.playbacks.get(key),
@@ -32547,28 +32887,41 @@ impl AnimationCache {
         }
     }
 
-    /// **An open that was asked and not answered** — its work failed on the worker, or its thread
-    /// could not be started: the file's entry becomes [`AnimationEntry::Unanswered`], which no walk
-    /// asks again and the file's next open lets go of. The one writer of `Unanswered`. An entry the
-    /// file has answered since — a playback, a refusal — is left as it is.
-    fn open_unanswered(&mut self, key: String) {
-        if matches!(
-            self.playbacks.get(&key),
-            None | Some(AnimationEntry::Pending)
-        ) {
-            self.playbacks.insert(key, AnimationEntry::Unanswered);
+    /// **An open that was asked and not answered** — the one writer of
+    /// [`AnimationEntry::Unanswered`], which no walk asks again and the file's next open lets go
+    /// of. `asked` is the request whose work failed on the worker, filed only for the decode in
+    /// flight that awaits it ([`Self::awaits`]): the failure of a superseded open changes nothing.
+    /// `None` is an open no request was admitted for — its thread could not be started — filed
+    /// for a file the walk holds nothing for. Either way a failure for a file no surface names
+    /// files nothing ([`Self::answered_for_nobody`]).
+    fn open_unanswered(&mut self, key: String, asked: Option<computation_lane::ComputationId>) {
+        let answers_this_open = match asked {
+            Some(asked) => self.awaits(&key, asked),
+            None => self.playbacks.peek(&key).is_none(),
+        };
+        if !answers_this_open || self.answered_for_nobody(&key) {
+            return;
         }
+        self.playbacks.insert(key, AnimationEntry::Unanswered);
     }
 
-    /// **The worker's answer to an open**, filed whether or not it decoded: a playback under the
-    /// serial minted for it ([`AnimationEntry::Ready`]), or the refusal with its reason
-    /// ([`AnimationEntry::Refused`]) — a refusal is an answer.
+    /// **The worker's answer to the open `asked`**, filed whether or not it decoded: a playback
+    /// under the serial minted for it ([`AnimationEntry::Ready`]), or the refusal with its reason
+    /// ([`AnimationEntry::Refused`]) — a refusal is an answer. Filed only for the decode in flight
+    /// that awaits `asked` ([`Self::awaits`]): the answer to a superseded open is never filed, and
+    /// an answer for a file no surface names any more is filed nowhere
+    /// ([`Self::answered_for_nobody`]). `true` when it was filed — the one case that changes what
+    /// the glass shows.
     fn opened(
         &mut self,
         key: String,
+        asked: computation_lane::ComputationId,
         serial: u64,
         frames: Result<animation::Animation, animation::AnimationRefusal>,
-    ) {
+    ) -> bool {
+        if !self.awaits(&key, asked) || self.answered_for_nobody(&key) {
+            return false;
+        }
         self.playbacks.insert(
             key,
             match frames {
@@ -32579,6 +32932,7 @@ impl AnimationCache {
                 Err(refusal) => AnimationEntry::Refused(refusal),
             },
         );
+        true
     }
 
     /// **A failed request of this window's animations, settled** ([`settle_failure`]): an open is
@@ -32586,8 +32940,8 @@ impl AnimationCache {
     /// other settlements are not this map's.
     fn settle(&mut self, settled: Settled) {
         match settled {
-            Settled::AnimationUnanswered { path } => {
-                self.open_unanswered(normalized_local_image_path_key(&path));
+            Settled::AnimationUnanswered { path, asked } => {
+                self.open_unanswered(normalized_local_image_path_key(&path), Some(asked));
             }
             Settled::FillLost { path, serial } => {
                 self.release_failed_fill(&normalized_local_image_path_key(&path), serial);
@@ -32835,6 +33189,21 @@ fn animations_opened(
         }
     }
     opened
+}
+
+/// **Whether a surface is still in the window**, for [`AnimationCache::forget_surfaces_gone`].
+///
+/// A surface is in the window while some tab holds its view — a seat of a tab in the background
+/// as much as one on the glass, and a float filed under whichever tab it was torn from — and the
+/// card is the window's own. Asked of every tab and not of the tree on the glass, because a
+/// background tab's panes are exactly the ones that resume, and a surface the walk wrongly
+/// thought gone would make every walk an open. A free function over the tabs for
+/// [`files_a_tab_stands_on`]'s reason: it is the rule, and tabs are what a test can build.
+fn animation_surface_exists(tabs: &[TabState], surface: PreviewSurface) -> bool {
+    surface == PreviewSurface::Peek
+        || tabs
+            .iter()
+            .any(|tab| tab.preview_panes.get(surface).is_some())
 }
 
 /// **What became of one fill coming home** — see [`AnimationCache::adopt_fill`].
@@ -43362,12 +43731,17 @@ fn move_seat_content(
 /// another one, so the tab it left is still open, still drawing, and the answers
 /// it drops are silently gone.
 ///
-/// **Liveness** is this. Four ledgers say "already asked" and all four travel
-/// with the pane — a `Pending` directory node, a `Pending` git slot, a claimed
-/// head read, and a session's own in-flight sets — so each of them would go on
-/// suppressing the question that would have been re-asked, for the rest of the
-/// session. Cleared here, at the one moment the address changes, they let the
-/// ordinary per-frame asking ask again under the leaf the pane now is.
+/// **Liveness** is this. Three ledgers say "already asked" and all three travel
+/// with the pane — a `Pending` directory node, a claimed head read, and a
+/// session's own in-flight sets — so each of them would go on suppressing the
+/// question that would have been re-asked, for the rest of the session. Cleared
+/// here, at the one moment the address changes, they let the ordinary per-frame
+/// asking ask again under the leaf the pane now is.
+///
+/// **The pane's repository cache is not among them.** Its questions are owed to
+/// the cache's own identity ([`git::GitCacheId`]), never to the leaf, so they
+/// reach it under the leaf it lands under and its dimmed rows and its running
+/// checkout stay held until git's receipt says otherwise.
 ///
 /// **The seat given here is the one it landed under**, never the one it left:
 /// the whole point is to reach the tables *after* they have been re-keyed.
@@ -43376,9 +43750,6 @@ fn forget_work_in_flight_for_seat(tab: &mut TabState, seat: SeatId) {
         leaf.session.forget_work_in_flight();
     }
     if let Some(cache) = tab.file_trees.get_mut(&seat) {
-        cache.forget_pending();
-    }
-    if let Some(cache) = tab.git_trees.get_mut(&seat) {
         cache.forget_pending();
     }
     // A preview pane's question is held by the *buffer* it is showing, which is
@@ -46352,7 +46723,14 @@ impl Runtime<'_, Native> {
         let files_worker = files::FilesWorker::spawn(proxy.clone())?;
         let file_index_worker = palette_index::IndexWorker::spawn(proxy.clone())?;
         let preview_worker = preview::PreviewWorker::spawn(proxy.clone())?;
-        let git_worker = git::GitWorker::spawn(proxy.clone())?;
+        let git_mutations =
+            git_mutation_lane::GitMutationLane::new(git_mutation_lane::RepoTurns::new(), {
+                let proxy = proxy.clone();
+                move || {
+                    let _ = proxy.send_event(AppEvent::GitReady);
+                }
+            });
+        let git_worker = git::GitWorker::spawn(proxy.clone(), Arc::clone(git_mutations.turns()))?;
         // **One read per family, and both of the row's facts come out of it**: whether this copy's
         // marks are in that file, and — when the file is one this build will not edit — the reason
         // the row has to say instead of `Off` (closure review R1).
@@ -46369,8 +46747,10 @@ impl Runtime<'_, Native> {
             foreground_program_worker,
             files_worker,
             file_index_worker,
+            preview_saves: preview::PreviewSaves::on(session_store.lane()),
             preview_worker,
             git_worker,
+            git_mutations,
             acrylic_available,
             startup_started,
             trace_startup,
@@ -51801,10 +52181,13 @@ impl<B: Backend> Runtime<'_, B> {
         // the same commit again draws its files without a second subprocess.
         if let Some(hash) = opened
             && let Some(cache) = self.window.tabs[active].git_trees.get_mut(&seat)
-            && let Some(question) = cache.begin_commit_files(&hash)
+            && let Some((asker, question)) = cache
+                .begin_commit_files(&hash)
+                .map(|question| (cache.id(), question))
             && !self.app.git_worker.request(git::GitRequest {
                 window: self.window_id(),
                 host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
+                asker,
                 question,
             })
         {
@@ -51831,12 +52214,14 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(cache) = self.window.tabs[active].git_trees.get(&seat) else {
             return Ok(());
         };
+        let asker = cache.id();
         let Some(question) = cache.more_commits() else {
             return Ok(());
         };
         if !self.app.git_worker.request(git::GitRequest {
             window: self.window_id(),
             host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
+            asker,
             question,
         }) {
             self.disable_git_worker();
@@ -64736,16 +65121,72 @@ impl<B: Backend> FolioApp<B> {
         (batch, gone)
     }
 
-    /// [`Self::drain_preview_answers`] for the repository lane.
+    /// [`Self::drain_preview_answers`] for the repository lanes — the read
+    /// worker's answers and the mutation lane's receipts, in one batch.
+    ///
+    /// **The receipts are taken first and filed last.** A read of a repository
+    /// sends its answer before any later mutation of it can start
+    /// (`git_mutation_lane::RepoTurns`), so every read answer older than a
+    /// receipt taken here is already in the channel when the channel is drained
+    /// after it — and filing the receipts after the answers means a reading
+    /// taken before a verb never lands after the verb's receipt has asked the
+    /// repository again.
+    ///
+    /// **Every answer is owed to the cache that asked** (`git::GitCacheId`),
+    /// found where it stands now among the caches the open windows hold
+    /// (`git_mutation_lane::OpenPages`): a page's answer is addressed there, so a
+    /// Files view docked into a column or popped out into a float while git ran
+    /// still receives it. A receipt whose cache no open window holds is let go
+    /// first, and ends in the lane's sink; a read answer whose cache is gone is
+    /// dropped.
     fn drain_git_answers(&mut self) -> (Vec<git::GitResponse>, bool) {
         let mut batch = Vec::new();
+        let mut open = git_mutation_lane::OpenPages::default();
+        for window in self.windows.values() {
+            if window.leaving.is_none() {
+                let id = window.window.id();
+                for tab in &window.tabs {
+                    for (seat, cache) in &tab.git_trees {
+                        let leaf = LeafId {
+                            tab: tab.id,
+                            seat: *seat,
+                        };
+                        open.stand(cache.id(), id, git_mutation_lane::Place::Column(leaf));
+                    }
+                    for (root, graph) in &tab.git_graphs {
+                        let place = git_mutation_lane::Place::Graph {
+                            tab: tab.id,
+                            root: root.clone(),
+                        };
+                        open.stand(graph.cache.id(), id, place);
+                    }
+                }
+                for win in window.float.live_windows() {
+                    if let Some(files) = win.files() {
+                        open.stand(
+                            files.git.id(),
+                            id,
+                            git_mutation_lane::Place::Float(win.epoch),
+                        );
+                    }
+                }
+            }
+        }
         let Some(app) = self.app.as_mut() else {
             return (batch, false);
         };
+        let receipts: Vec<git::GitResponse> = app
+            .git_mutations
+            .ended(|request| open.gone(request))
+            .into_iter()
+            .filter_map(|(_, terminal, request)| {
+                open.address(git_mutation_lane::receipt(terminal, request))
+            })
+            .collect();
         let mut gone = false;
         loop {
             match app.git_worker.responses.try_recv() {
-                Ok(response) => batch.push(response),
+                Ok(response) => batch.extend(open.address(response)),
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     gone = git::disable_git_worker_state(
@@ -64756,6 +65197,7 @@ impl<B: Backend> FolioApp<B> {
                 }
             }
         }
+        batch.extend(receipts);
         (batch, gone)
     }
 
@@ -66410,6 +66852,7 @@ impl<B: Backend> FolioApp<B> {
     /// the storage pass's are. With no window standing the answers wait in their
     /// channels for the next wake.
     fn take_document_answers(&mut self) -> Result<()> {
+        self.take_preview_save_answers()?;
         // **Not while a quit holds the storage worker** (T-QUIT-DOCUMENTS): its documents and
         // recovery phases take the answers themselves, on the turn this wake brings, and merge
         // without the doors.
@@ -66431,6 +66874,37 @@ impl<B: Backend> FolioApp<B> {
             return runtime.take_document_answers();
         }
         Ok(())
+    }
+
+    /// **The storage worker's answers about preview saves** (S-6a): each heard by
+    /// the buffer that asked, in whichever standing window its tab is in now
+    /// (`Runtime::hear_preview_saves`); an answer no buffer is waiting for — its
+    /// tab, pane or edits gone, or its window leaving — goes to the sink,
+    /// recorded and then ignored (C6). Not held back by a quit: these answers are
+    /// the buffers', and the quit's documents phase takes only the stores'.
+    fn take_preview_save_answers(&mut self) -> Result<()> {
+        let Some(mut answers) = self.app.as_mut().map(App::take_preview_save_answers) else {
+            return Ok(());
+        };
+        if answers.is_empty() {
+            return Ok(());
+        }
+        // Every standing window hears its buffers' answers whatever another
+        // window's repaint answered, and every answer taken is ended — heard,
+        // or sunk — before the first error is passed on (C6).
+        let mut first_error = None;
+        for index in 0..self.windows.len() {
+            if let Some(mut runtime) = self.runtime_at(index)
+                && runtime.window.leaving.is_none()
+                && let Err(error) = runtime.hear_preview_saves(&mut answers)
+            {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Some(app) = self.app.as_mut() {
+            app.sink_preview_save_answers(answers);
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     fn announce_recovered_edits(&mut self) -> Result<()> {
@@ -72458,8 +72932,8 @@ mod floated_page_tests {
     /// false; }` back at the top of `preview_is_editable` and the source-reading
     /// assertion fails — which on screen is the defect verbatim. RED GATE ②:
     /// drop the same question from `page_with_the_keyboard` and block ② fails.
-    /// RED GATE ③: make `PreviewBuffer::save` write in place instead of
-    /// atomically, or stop `refresh_preview_file` reloading pages, and block ③
+    /// RED GATE ③: make the save's request (`PreviewBuffer::request_save`) write
+    /// nothing, or stop `refresh_preview_file` reloading pages, and block ③
     /// fails.
     #[test]
     fn the_source_face_of_a_page_is_the_editor_and_a_save_reloads_the_page() {
@@ -72496,7 +72970,11 @@ mod floated_page_tests {
             text.push_str("<p>two</p>\n");
             true
         }));
-        assert_eq!(buffer.save(), SaveOutcome::Saved);
+        let mut saves = crate::test_support::a_save_desk();
+        assert_eq!(
+            crate::test_support::save_through(&mut buffer, &mut saves),
+            Some(SaveOutcome::Saved)
+        );
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "<p>one</p>\n<p>two</p>\n",

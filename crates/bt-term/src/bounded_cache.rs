@@ -41,6 +41,20 @@
 //! in and took out, and past the budget every over-budget insert walks them all.
 //! A cache tuned to hold hundreds of thousands of tiny entries would want a
 //! linked order instead of this. None of the three is: they hold pictures.
+//!
+//! # Who answers `false`
+//!
+//! Two of the three hold records of questions beside their pixels, and both
+//! bound them by the same rule — a record is kept exactly as long as some
+//! surface of the window names its file, and an answer for a file nobody names
+//! is filed nowhere: the window's animations (`bt-app`'s `AnimationCache` — a
+//! decode in flight, a refusal, an open that never answered) and the window's
+//! peek cache (`bt-app`'s `PeekCacheEntry` — a decode in flight and a failed
+//! decode). The decoration worker's local-path memo
+//! ([`crate::inline_image`]'s `CachedLocalImage`) answers `true` for every
+//! value: a decode and a failed read alike are memos of answers, consulted only
+//! when a request for the file has already arrived, so letting one go costs that
+//! request a read and asks nobody anything.
 
 use std::borrow::Borrow;
 use std::cell::Cell;
@@ -156,6 +170,17 @@ where
         let slot = self.entries.get(key)?;
         slot.used.set(self.tick());
         Some(&slot.value)
+    }
+
+    /// **Read one entry without counting the reading** — for an owner deciding what to do with
+    /// an entry rather than using it: a question about the ledger, as [`Self::contains_key`] is,
+    /// which must not make the entry look wanted to the next eviction.
+    pub fn peek<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
+        self.entries.get(key).map(|slot| &slot.value)
     }
 
     /// Whether a key is present, **without** counting a reading.
@@ -367,6 +392,30 @@ mod tests {
             cache.contains_key("the one on screen"),
             "the picture the window kept drawing is the picture it kept",
         );
+    }
+
+    /// RED (T-ANIMATION-RECORDS-BOUND) — **a peek is not a use**: an owner deciding what to do
+    /// with an entry reads it without making it look wanted, so the entry it peeked at is still
+    /// the oldest and the first to go.
+    ///
+    /// MUTATION: have `peek` set the slot's `used` to `self.tick()` as `get` does — the peeked
+    /// entry outlives the newer one and the first assertion goes red.
+    #[test]
+    fn a_peek_is_not_a_reading_and_leaves_the_eviction_order_alone() {
+        const MEGABYTE: u64 = 1024 * 1024;
+        let mut cache: BoundedCache<String, Pixels> = BoundedCache::with_budget(3 * MEGABYTE);
+        cache.insert("\u{65e7}\u{7684} oldest".to_owned(), Pixels(MEGABYTE));
+        cache.insert("newer".to_owned(), Pixels(MEGABYTE));
+        assert_eq!(
+            cache.peek("\u{65e7}\u{7684} oldest"),
+            Some(&Pixels(MEGABYTE))
+        );
+        cache.insert("newest".to_owned(), Pixels(MEGABYTE));
+        assert!(
+            !cache.contains_key("\u{65e7}\u{7684} oldest"),
+            "the entry only peeked at is still the oldest, and goes first",
+        );
+        assert!(cache.contains_key("newer") && cache.contains_key("newest"));
     }
 
     /// PIN — **the counter tells the truth**: a replaced key is counted once,

@@ -412,6 +412,43 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 
+    /// **Every file a surface of this window names to the peek cache** — [`crate::peek_files_named`]
+    /// over this window's tabs, its card and its flyout.
+    pub(in crate::runtime) fn peek_files_named(&self) -> BTreeSet<String> {
+        crate::peek_files_named(
+            &self.window.tabs,
+            &self.window.peek_pane,
+            self.window
+                .file_peek
+                .as_ref()
+                .and_then(|peek| peek.source.file_path()),
+            self.window
+                .peek_hover
+                .active
+                .as_ref()
+                .map(|active| active.subject.key.as_str()),
+        )
+    }
+
+    /// **The failed peeks no surface names any more, let go of**
+    /// ([`crate::let_go_unnamed_peek_records`]; T-PEEK-CACHE-QUESTION-RECORDS). Run by the walk of
+    /// the surfaces ([`Self::refresh_preview_for_layout`]), by the flyout's new peek before it files
+    /// anything, and when the flyout comes down — the surfaces that leave by a road that names no
+    /// file (a tab closed, a pane handed another subject, a page scrolled on) are caught by the
+    /// next of these.
+    pub(in crate::runtime) fn let_go_unnamed_peek_records(&mut self) {
+        if !self
+            .window
+            .peek_cache
+            .iter()
+            .any(|(_, entry)| matches!(entry, PeekCacheEntry::Failed(_)))
+        {
+            return;
+        }
+        let named = self.peek_files_named();
+        crate::let_go_unnamed_peek_records(&mut self.window.peek_cache, &named);
+    }
+
     /// The pointer is resting on this row — arm the 350ms, or leave a running
     /// intent alone (P146).
     ///
@@ -863,6 +900,10 @@ impl<B: Backend> Runtime<'_, B> {
         if let Some(peek) = self.window.file_peek.as_mut() {
             peek.clock = PeekClock::Shown(now);
         }
+        // **A new card is new input**: what failed for its file is read again by its body.
+        if let Some(path) = source.file_path() {
+            crate::peek_card_opened(&mut self.window.peek_cache, path);
+        }
         // The card's surface is pointed at the file here, once, rather than on
         // every frame that draws it: [`PreviewSurface::Peek`]'s pane is what
         // holds the parsed document, and re-aiming it per frame would be a
@@ -911,11 +952,13 @@ impl<B: Backend> Runtime<'_, B> {
         // and its answer comes home through `apply_git_results`.
         if let Some(seat) = git_seat
             && let Some(question) = git_document_question(&source, None)
+            && let Some(asker) = self.git_trees.get(&seat).map(git::GitCache::id)
         {
             let tab = self.id;
             if !self.app.git_worker.request(git::GitRequest {
                 window: self.window_id(),
                 host: git::GitHost::Column(LeafId { tab, seat }),
+                asker,
                 question,
             }) {
                 self.disable_git_worker();
@@ -965,23 +1008,12 @@ impl<B: Backend> Runtime<'_, B> {
         if !self.window.video_carried_off_the_card {
             self.window.video.close(PreviewSurface::Peek);
         }
-        // **A card that comes down lets go of what failed for it**, so the next hover over the
-        // same file — the card's own new input — asks again: its file's failed decode and the
-        // resample it was owed. A page it asked about is asked again too (below).
-        if let Some(path) = self
-            .window
-            .file_peek
-            .as_ref()
-            .and_then(|peek| peek.source.file_path())
-        {
-            let key = normalized_local_image_path_key(path);
-            if matches!(
-                self.window.peek_cache.get(&key),
-                Some(PeekCacheEntry::Failed(_))
-            ) {
-                self.window.peek_cache.remove(&key);
-            }
-        }
+        // **A card that comes down is a surface leaving**: what failed for its file or its page's
+        // pictures alone goes with it, and a failure another surface still shows stays
+        // ([`Self::let_go_unnamed_peek_records`], below, once the card names nothing) — before a
+        // next card is matured in the same turn, with no walk between. The next card over the
+        // file asks again on opening ([`crate::peek_card_opened`]). A page it asked about is asked
+        // again too (below).
         self.window.peek_card_pending = None;
         self.window.file_peek = None;
         // And the hand that was on its head. A press whose card has gone has
@@ -994,6 +1026,7 @@ impl<B: Backend> Runtime<'_, B> {
         // markdown layout for a file nobody is looking at.
         self.window.peek_pane = PreviewPane::default();
         self.window.peek_picture = None;
+        self.let_go_unnamed_peek_records();
         // And the facts with it: they are about the file the card was over, and
         // the next card asks for its own.
         self.window.peek_facts = None;
@@ -2669,7 +2702,12 @@ impl<B: Backend> Runtime<'_, B> {
     /// Drop peek hover state and hide the flyout. Idempotent; used by every dismiss gesture
     /// (pointer off the span, pointer left, wheel, click, any key).
     pub(in crate::runtime) fn dismiss_peek(&mut self) -> Result<()> {
-        self.window.peek_hover.clear();
+        // A flyout that was up was a surface naming its file: what failed for it alone goes with
+        // it. A dismiss with no flyout up (a keystroke, a wheel over the terminal) is no surface
+        // leaving.
+        if self.window.peek_hover.clear() {
+            self.let_go_unnamed_peek_records();
+        }
         // The next hover is the flyout's new input: a resample still owed — answered late, or
         // failed on the worker, or never started — is asked again by it rather than waited on.
         self.window.peek_thumbnail_pending = None;
@@ -2708,6 +2746,11 @@ impl<B: Backend> Runtime<'_, B> {
         candidate: &PeekCandidate,
         settled: bool,
     ) -> Result<()> {
+        // A new peek: the flyout it replaced named its file until now, and a failure filed for
+        // that one alone goes before this one files anything.
+        if settled {
+            self.let_go_unnamed_peek_records();
+        }
         let cache_key = candidate.subject.key.clone();
         let (content_key, native_rgba, native_width_px, native_height_px) =
             match self.window.peek_cache.get(&cache_key) {

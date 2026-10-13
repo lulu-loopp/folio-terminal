@@ -95,16 +95,77 @@ pub enum FileScoped {
     /// list. The pattern stays quoted so that `git` expands it, not the shell.
     /// It is a PowerShell gate and cannot ask this crate's index.
     TheEmbeddedSpacesGate,
+    /// `scripts/dev/bt-app-graph.py`, the module-graph generator behind
+    /// `docs/plans/bt-app-split.md`'s measurements, naming `mod.rs` and
+    /// `<name>.rs`.
+    ///
+    /// It rebuilds `bt-app`'s module graph by resolving each `mod`
+    /// declaration to the file the compiler loads for it (`foo.rs` or
+    /// `foo/mod.rs`) and parsing that file's text, so files and their text are
+    /// its subject, as they are the dead-code gate's. It is a Python
+    /// documentation tool that re-runs a plan's numbers and cannot ask this
+    /// crate's index.
+    TheModuleGraphGenerator,
+    /// `scripts/dev/bt-app-reader-shapes.py`, the measurement behind
+    /// `docs/plans/bt-app-reader-shapes-2026-09-21.md`, naming `.rs` files.
+    ///
+    /// It reads the debt list, the source files its rows name and the files
+    /// their readings name, and classifies the text each reading slices: the
+    /// text of named files is what it measures. It is a Python measurement
+    /// whose dated output is a record, and cannot ask this crate's index.
+    TheReaderShapesMeasurement,
+    /// `scripts/dev/bt-app-move-topic.py`, the tool that moved each 2a topic
+    /// out of `main.rs`, naming `main.rs`, `mod.rs` and `<topic>.rs`.
+    ///
+    /// Step 2a is finished (`docs/DESIGN.md`, 2026-09-22); the script is the
+    /// retained `--check` proof of those moves, a record. It moved a topic's
+    /// methods as text from one file into another, and `--check` compares the
+    /// pre-move text from Git with the topic file: the files it moved text
+    /// between are its subject, and a move of text has no item to ask about.
+    /// It is a Python tool and cannot ask this crate's index.
+    TheTopicMover,
+    /// `.github/workflows/ci.yml`, the gate canaries, naming
+    /// `crates/bt-doc/src/lib.rs`, `crates/bt-layout/src/lib.rs`,
+    /// `crates/bt-viewport/src/lib.rs`, `crates/bt-compose/src/lib.rs`,
+    /// `crates/bt-platform/src/http.rs`, `crates/bt-lint-probe/src/lib.rs`
+    /// and `crates/bt-app/src/explorer_menu.rs`.
+    ///
+    /// Each canary proves a gate can fail on the defect it exists for: it
+    /// plants that defect into a committed source file, requires the gate to
+    /// refuse it (by that file, where the gate names files), and writes the
+    /// file's original text back. The steps are `gates-can-fail`'s "the
+    /// portable-core gate can actually fail", "the lint gate can actually
+    /// fail", "the wasm-floor gate can actually fail", "the clock guard can
+    /// actually fail, and its scope is the stated one" (whose fifth plant,
+    /// `http.rs`, must *not* be refused: the scope is the stated set) and "the
+    /// embedded-spaces gate can actually fail"; `logic`'s "the ignored-test
+    /// gate can actually fail"; and `core-macos`'s "the macOS lint gate can
+    /// actually fail", which plants into `crates/bt-app/src/explorer_menu.rs`.
+    /// That canary's real read of the source — `cp "$file"` of an unquoted
+    /// `file=crates/bt-app/src/explorer_menu.rs` — is invisible to the scan;
+    /// the step is a finding only because it keeps the original in a scratch
+    /// `.rs` under `$RUNNER_TEMP`, whose interpolated path the scan cannot
+    /// read, and it is listed for the read it really does. A scratch copy would
+    /// not do in place of any of them: the gates read the
+    /// committed tree (the source set, the workspace's crates, `git ls-files`),
+    /// and what is proved is that a defect in a committed file is refused, so
+    /// the committed file is the subject. It is YAML run by GitHub and cannot
+    /// ask this crate's index.
+    TheGateCanaries,
 }
 
 impl FileScoped {
     /// Every entry. The allowlist is small enough to be an array and only shrinks.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 9] = [
         Self::VendoredAddedFiles,
         Self::TheTripwireItself,
         Self::TheDeadCodeGate,
         Self::TheLintProbeIsGenerated,
         Self::TheEmbeddedSpacesGate,
+        Self::TheModuleGraphGenerator,
+        Self::TheReaderShapesMeasurement,
+        Self::TheTopicMover,
+        Self::TheGateCanaries,
     ];
 
     /// Where the reader lives, from the workspace root, with forward slashes.
@@ -116,6 +177,10 @@ impl FileScoped {
             Self::TheDeadCodeGate => "scripts/ci/check-dead-code.ps1",
             Self::TheLintProbeIsGenerated => "scripts/ci/check-lint-probe.ps1",
             Self::TheEmbeddedSpacesGate => "scripts/ci/check-embedded-spaces.ps1",
+            Self::TheModuleGraphGenerator => "scripts/dev/bt-app-graph.py",
+            Self::TheReaderShapesMeasurement => "scripts/dev/bt-app-reader-shapes.py",
+            Self::TheTopicMover => "scripts/dev/bt-app-move-topic.py",
+            Self::TheGateCanaries => ".github/workflows/ci.yml",
         }
     }
 
@@ -144,6 +209,23 @@ impl FileScoped {
             Self::TheEmbeddedSpacesGate => {
                 "how every first-party string literal is written is read from the files \
                  themselves, by file and line; a PowerShell gate that lexes them"
+            }
+            Self::TheModuleGraphGenerator => {
+                "the module graph is rebuilt by resolving each `mod` declaration to the file the \
+                 compiler loads and parsing its text; a Python tool behind the split plan's numbers"
+            }
+            Self::TheReaderShapesMeasurement => {
+                "what the debt list's readings slice is measured in the text of the files they \
+                 name; a Python measurement whose dated output is a record"
+            }
+            Self::TheTopicMover => {
+                "the retained `--check` proof of step 2a's moves, a record: a topic's methods moved \
+                 as text between files, proved against the text in Git; a Python tool"
+            }
+            Self::TheGateCanaries => {
+                "each canary plants a gate's defect into a committed source file, requires the \
+                 refusal and writes the file back: a defect in a committed file is the proof's \
+                 subject; CI's YAML"
             }
         }
     }

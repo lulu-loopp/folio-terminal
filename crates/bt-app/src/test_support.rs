@@ -2072,6 +2072,77 @@ pub(crate) fn ruler(text: &str, size: f32) -> f32 {
 
 // ── slice 3: quick edit ─────────────────────────────────────────────────
 
+/// The surface a test's save is pressed on — any one will do: the answer is
+/// said wherever the press was made.
+pub(crate) const PRESSED_ON: PreviewSurface = PreviewSurface::Peek;
+
+/// **One preview save on the request road, waited for** (S-6a): the press
+/// (`PreviewBuffer::request_save`), the storage worker's answer within the
+/// suite's patience (`PreviewSaves::settle`), and the answer heard by the
+/// buffer — what `Ctrl+S` and the `DocumentsAnswered` turn after it do.
+/// Answers what the pane that pressed is told; `None` for a press that was the
+/// pending slot.
+pub(crate) fn save_through(
+    buffer: &mut preview::PreviewBuffer,
+    saves: &mut preview::PreviewSaves,
+) -> Option<preview::SaveOutcome> {
+    match buffer.request_save(saves, PRESSED_ON) {
+        preview::SaveAsked::Sent => {}
+        preview::SaveAsked::Pending => return None,
+        preview::SaveAsked::Refused(why) => return Some(preview::SaveOutcome::Failed(why)),
+    }
+    let mut said = None;
+    for answer in saves.settle() {
+        said = buffer.hear_save_answer(answer, saves);
+    }
+    said
+}
+
+/// **Serve one document request on a thread the thread door started** — the
+/// storage worker's own step (`document_request::serve_document_between`) —
+/// with `crossing` written into the file between the precondition read and the
+/// exchange: a writer that crosses the save. Answers the role of the thread the
+/// write ran on — this helper's own thread, a worker by construction, so the
+/// answer says where the test ran the step and proves nothing about the
+/// product's thread. Waits within the suite's patience.
+pub(crate) fn serve_on_a_worker(
+    job: document_request::DocumentJob,
+    crossing: Option<Vec<u8>>,
+) -> bt_platform::admission::Role {
+    let path = job.which.clone();
+    let (done, served) = std::sync::mpsc::channel();
+    bt_platform::spawn_at_priority(
+        "bt-preview-save-test",
+        bt_platform::ThreadPriority::BelowNormal,
+        move |worker| {
+            document_request::serve_document_between(worker, job, &mut |step| {
+                if step == document_request::Step::Read
+                    && let Some(crossing) = &crossing
+                {
+                    std::fs::write(&path, crossing).expect("the crossing writer writes");
+                }
+            });
+            let _ = done.send(bt_platform::admission::role());
+        },
+    )
+    .expect("the thread door starts a thread");
+    lane::receive(&served, "the storage worker's write")
+}
+
+/// The next request a scripted storage lane holds, which must be a document's
+/// write.
+pub(crate) fn next_document(jobs: &persist::ScriptedJobs) -> document_request::DocumentJob {
+    let Some(persist::ScriptedJob::Document(job)) = jobs.next() else {
+        panic!("a document's write is on the lane");
+    };
+    job
+}
+
+/// A desk for preview saves on a storage worker of its own.
+pub(crate) fn a_save_desk() -> preview::PreviewSaves {
+    preview::PreviewSaves::on(persist::StorageLane::of_its_own())
+}
+
 /// A buffer with a body, for the document tests below.
 pub(crate) fn text_buffer(name: &str, body: &str) -> preview::PreviewBuffer {
     let mut buffer = preview::PreviewBuffer::new(
@@ -2082,6 +2153,7 @@ pub(crate) fn text_buffer(name: &str, body: &str) -> preview::PreviewBuffer {
         text: body.to_owned(),
         truncated: false,
         mtime: None,
+        bytes: Some(std::sync::Arc::from(body.as_bytes())),
         content_says_text: true,
         encoding: preview::HeadEncoding::Utf8,
         lossy: false,
@@ -2119,6 +2191,7 @@ pub(crate) fn buffer_saying(path: &str, name: &str, body: &str) -> preview::Prev
         text: body.to_owned(),
         truncated: false,
         mtime: None,
+        bytes: Some(std::sync::Arc::from(body.as_bytes())),
         content_says_text: true,
         encoding: preview::HeadEncoding::Utf8,
         lossy: false,
@@ -3352,4 +3425,66 @@ impl storage_pass::StoragePassWindow for StoragePassRig {
         }
         Ok(())
     }
+}
+
+/// **One file shown on a surface of its own and its open answered**, the way the window files an
+/// answer: a walk names the file on seat `seat` of [`TAB_ONE`] and asks for it, and the worker's
+/// answer comes home ([`AnimationCache::opened`] files nothing for a file no surface names). `key`
+/// is already in the form the window keys files by (lower case, back slashes), so the walk names
+/// exactly it. For the tests whose subject is a playback rather than the open.
+pub(crate) fn shown_and_opened(
+    cache: &mut AnimationCache,
+    seat: u64,
+    key: &str,
+    serial: u64,
+    frames: Result<animation::Animation, animation::AnimationRefusal>,
+) {
+    let path = PathBuf::from(key);
+    assert_eq!(
+        normalized_local_image_path_key(&path),
+        key,
+        "a key the walk names as it is"
+    );
+    cache.ask_for_showing(&[(seat_of(TAB_ONE, SeatId(seat)), Some(path))], |_| {
+        admitted()
+    });
+    answer_awaited(cache, key, serial, frames);
+}
+
+/// **An animation open admitted under an identity of its own**, as the computation lane admits
+/// each request — for a walk a test answers by hand. No two calls in the process share one.
+pub(crate) fn admitted() -> OpenAsked {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    OpenAsked::Asked(computation_lane::ComputationId::from(
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    ))
+}
+
+/// **The worker's answer to the open the window awaits for `key`**, filed as the drain files it
+/// ([`AnimationCache::opened`]) — for the tests whose subject is not which open an answer is for.
+/// Answers whether it was filed.
+pub(crate) fn answer_awaited(
+    cache: &mut AnimationCache,
+    key: &str,
+    serial: u64,
+    frames: Result<animation::Animation, animation::AnimationRefusal>,
+) -> bool {
+    let asked = cache
+        .awaited(key)
+        .expect("the window awaits a decode of the file");
+    cache.opened(key.to_owned(), asked, serial, frames)
+}
+
+/// **The open the window awaits for `path`, failed on the worker** and settled down the road the
+/// window's settlement takes it (`settle_failure` → [`AnimationCache::settle`]).
+pub(crate) fn fail_awaited(cache: &mut AnimationCache, path: &Path) {
+    let asked = cache
+        .awaited(&normalized_local_image_path_key(path))
+        .expect("the window awaits a decode of the file");
+    cache.settle(crate::settle_failure(
+        asked,
+        crate::Asked::Animation {
+            path: path.to_path_buf(),
+        },
+    ));
 }

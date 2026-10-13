@@ -17,6 +17,7 @@ All notable changes to Folio are recorded here. The format follows
 ### Changed
 
 - The first formula or picture after Folio starts takes a moment longer (about two seconds on a Mac), because the formula engine now loads when it is first needed rather than at startup. <!-- zh: pending S-8 -->
+- A preview cannot be saved on a drive that cannot replace a file in one step (such as some USB sticks and memory cards). The save says so and nothing is written; your edits stay in the preview, and Folio keeps a copy of them if it has to stop. <!-- zh: pending S-6a -->
 - Changes to settings.json, keybindings.json, profiles.json and pins.json saved in another editor while Folio runs take effect without a restart, and a change made in Folio at the same time is kept beside them; when both change the same value, or give one key to two shortcuts, the file wins, and one card names what came from disk. <!-- zh: pending T-STORE-MERGE-KEYBINDINGS --> <!-- zh: pending T-STORE-MERGE-PROFILES-PINS --> <!-- zh: pending T-STORE-NOTICE -->
 - A keybindings.json that says it was written on Windows or Linux no longer reads `Cmd+` there, and one written on macOS no longer reads `Win+`; such a line now reads as the other system's key on that system, and a file with no recorded system still reads both. <!-- zh: pending T-STORE-MERGE-KEYBINDINGS -->
 - Quitting first saves any change to settings, shortcuts, profiles or pins that is not on disk yet. If one cannot be saved or kept in the recovered folder, Folio stays open and a card names the file, with a button to leave without that change; quitting again tries again. <!-- zh: pending T-QUIT-DOCUMENTS -->
@@ -24,7 +25,15 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- A picture that could not be loaded is no longer read again and again while the window holds many other pictures. <!-- zh: pending T-PEEK-CACHE-QUESTION-RECORDS -->
+- A GIF caught while it was being written plays once the write finishes. <!-- zh: pending T-ANIMATION-RECORDS-BOUND -->
+- A GIF that changes while it is being opened shows its new contents, not the old ones. <!-- zh: pending T-ANIMATION-ANSWER-IDENTITY -->
+- An update is no longer undone because the new version's note that it started properly was refused for a moment (another program holding the folder, say); Folio tries again about four times a second, for up to about fifteen minutes, or for as long as it takes when the new version has to confirm the update itself. <!-- zh: pending T-TRIAL-RECEIPT-RETRY -->
+- On the Git page, presses in one repository run one after another and never wait for work in another repository, and a press Folio could not carry out says so and lets its row go instead of leaving it dimmed. <!-- zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER -->
+- After an update, Folio no longer says that changes made while the new version was being tried were not kept when they were, in a rare case where the disk took the note but would not confirm it. <!-- zh: pending T-TRIAL-WATCH-REPEATS-BOUND -->
+- A Git page that is docked, popped out or moved to another tab while git is still working on it now gets the answer: its dimmed rows come back and a checkout it started no longer blocks the next one. <!-- zh: pending T-GIT-RECEIPTS-FOLLOW-A-MOVED-HOST -->
 - A panic in one picture or formula no longer ends Folio; that picture or formula stays as it was and is tried again after the next change in its pane. <!-- zh: pending S-8 -->
+- Saving a preview no longer holds the window while the disk writes, and a save over a file another program changed within the same second now notices it and leaves that program's text on the disk instead of writing over it. <!-- zh: pending S-6a -->
 - A video that never finishes loading now says so after ten seconds instead of showing a player that never starts, and a video that declares no length shows "No length" on its bar instead of a clock stuck at 0:00. <!-- zh: pending T-VIDEO-ENGINE-NO-DURATION -->
 - File paths printed by Cygwin's bash (`/cygdrive/c/…`), by a WSL profile without shell integration, and by a WSL distribution's own launcher are now links, as in Git Bash and WSL panes. <!-- zh: pending T-WINDOWS-SHELL-NAMESPACES -->
 - A path pasted into a Cygwin bash pane is now written as `/cygdrive/c/…`, which Cygwin can open. <!-- zh: pending T-WINDOWS-SHELL-NAMESPACES -->

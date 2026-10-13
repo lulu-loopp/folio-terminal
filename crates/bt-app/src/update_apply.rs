@@ -805,6 +805,11 @@ pub(crate) enum LastTrialCommit {
 /// wins. The trial's shared `H\admission` keeps every rollback move off the
 /// install while it runs.
 ///
+/// What the ask says on its way — each round of a journal write another
+/// program's hold refuses ([`write_journal`]) — goes through `say`: the
+/// trial's watch hands it the log, and quiets it for the asks of a refused
+/// streak after the first (T-TRIAL-WATCH-REPEATS-BOUND).
+///
 /// # Errors
 /// The journal or the receipt could not be read, or the protocol refused the
 /// event (a receipt of another process); nothing was recorded.
@@ -813,9 +818,18 @@ pub(crate) fn commit_last_trial(
     home: &Home,
     txn: TxnId,
     nonce: Nonce,
+    say: &dyn Fn(&str),
 ) -> Result<LastTrialCommit, String> {
     let me = std::process::id();
-    commit_last_trial_as(worker, home, txn, nonce, me, install_flip::started_of(me))
+    commit_last_trial_as(
+        worker,
+        home,
+        txn,
+        nonce,
+        me,
+        install_flip::started_of(me),
+        say,
+    )
 }
 
 /// [`commit_last_trial`] as the process `pid`, started at `started` — the
@@ -827,6 +841,7 @@ pub(crate) fn commit_last_trial_as(
     nonce: Nonce,
     pid: u32,
     started: Option<u64>,
+    say: &dyn Fn(&str),
 ) -> Result<LastTrialCommit, String> {
     commit_last_trial_reading(
         worker,
@@ -838,6 +853,7 @@ pub(crate) fn commit_last_trial_as(
             bt_platform::wait::sleep_within(worker, pause);
             true
         },
+        say,
     )
 }
 
@@ -855,6 +871,7 @@ fn commit_last_trial_reading(
     (pid, started): (u32, Option<u64>),
     mut journal_bytes: impl FnMut() -> io::Result<Vec<u8>>,
     mut wait: impl FnMut(Duration) -> bool,
+    say: &dyn Fn(&str),
 ) -> Result<LastTrialCommit, String> {
     // Its own start instant is half of what its receipt must name (H.1): a
     // process that cannot read it wrote a receipt that names nobody, which
@@ -909,13 +926,13 @@ fn commit_last_trial_reading(
     {
         return Ok(LastTrialCommit::Pending);
     }
-    // On the trial's watch worker, whose lines go to this process's
-    // diagnostics like the watch's own.
+    // On the trial's watch worker, whose lines it says through the watch's
+    // own `say`.
     let mut journaled = Journaled::of(home, worker, journal, JOURNAL_HELD_WITHIN);
     journaled.record(
         Actor::Trial,
         &Event::LastTrialReady { receipt, process },
-        &mut |line| eprintln!("{line}"),
+        &mut |line| say(line),
     )?;
     Ok(LastTrialCommit::Committed)
 }
@@ -3178,7 +3195,9 @@ mod beyond_tests {
             install_txn::durable_write(&home.journal(), &bytes).unwrap();
             let at = home.clone();
             let committed = on_a_worker(move |worker| {
-                commit_last_trial_as(worker, &at, TXN, nonce(), 4242, Some(7))
+                commit_last_trial_as(worker, &at, TXN, nonce(), 4242, Some(7), &|line| {
+                    eprintln!("{line}");
+                })
             });
             assert_eq!(committed, Ok(LastTrialCommit::StoodAside), "{what}");
             assert_eq!(std::fs::read(home.journal()).unwrap(), bytes, "{what}");
@@ -3229,6 +3248,7 @@ mod beyond_tests {
                     }
                 },
                 |_| true,
+                &|line| eprintln!("{line}"),
             );
             (answer, reads)
         });
@@ -3252,6 +3272,7 @@ mod beyond_tests {
                     pauses += 1;
                     pauses < 3
                 },
+                &|line| eprintln!("{line}"),
             );
             (answer, pauses)
         });

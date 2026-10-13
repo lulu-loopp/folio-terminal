@@ -58,10 +58,13 @@
 //! different kind, on a lane or claim that was not run, and on a claim that exercised no request.
 //! The OS hand-off lane (`handoff_lane`, S-5) is built on the seam, and so are the font, taskbar
 //! and program-walk lanes (`settings::FontLane`, `taskbar_lane`, `programs_lane`; S-4), each a
-//! latest-value lane on [`Coalescing`], and the computation lane (`computation_lane`, S-8), three
-//! first-in-first-out shares on [`Queue`], each with its own ledger; each adapter hands its real
-//! lane a scripted [`Executor`], and every lane keeps every claim. S-6a (the storage worker) and
-//! S-7 (the clipboard) each move one more onto it, the same way.
+//! latest-value lane on [`Coalescing`], the computation lane (`computation_lane`, S-8), three
+//! first-in-first-out shares on [`Queue`], each with its own ledger, and the git mutation lane
+//! (`git_mutation_lane`), a first-in-first-out share on [`Queue`] per repository; each adapter
+//! hands its real lane a scripted [`Executor`], and every lane keeps every claim. S-7 (the
+//! clipboard) moves one more onto it, the same way. The storage worker is not on it: its requests
+//! end once through their own answer channels and the worker's end (`persist`'s `WorkerEnd`), and
+//! its move onto the seam is T-STORAGE-WORKER-ON-THE-SEAM (`docs/plans/structural-debt.md` D-97).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -97,10 +100,10 @@ pub(crate) enum Terminal<Id, T, E> {
         not(test),
         expect(
             dead_code,
-            reason = "T-DOCUMENT-SAVE-LANE until 2026-11-30: no lane on the seam cancels a \
-                      request yet; the contract's terminal set keeps it (C2), and the storage \
-                      worker's document saves (S-6a) are the first lane that may drop one at its \
-                      requester's word"
+            reason = "T-STORAGE-WORKER-ON-THE-SEAM until 2026-12-31: no lane on the seam \
+                      cancels a request yet; the contract's terminal set keeps it (C2), and the \
+                      storage worker, once on the seam, is the first lane that may drop one at \
+                      its requester's word"
         )
     )]
     Cancelled,
@@ -362,11 +365,14 @@ where
     /// **The executor's hook: the worker has ended.** Every operation still owed ends as
     /// `WorkerGone`, and every identity joined to one as `Joined { with, outcome: WorkerGone }`;
     /// the lane is in fault from now on ([`Self::fault`]), and every later admission is refused
-    /// with it. Said once, unless the body returned owing nothing; and the consumer is woken after
-    /// the terminals are recorded, since no publication of the lane's will announce them.
+    /// with it. Said once, unless the body returned owing nothing; and when it owed anything, the
+    /// consumer is woken after the terminals are recorded, since no publication of the lane's will
+    /// announce them. A worker that ends owing nothing — a lane let go, a body that returned — ends
+    /// no request, so it wakes nobody: there is nothing to take, and the fault is answered at the
+    /// next admission.
     pub(crate) fn worker_ended(&self, cause: WorkerEnd) {
         let mut out = Out::new();
-        {
+        let owed = {
             let mut book = lock(&self.book);
             let owed = book
                 .entries
@@ -389,9 +395,12 @@ where
                 self.end_with_twins(&mut book, id, Terminal::WorkerGone, &mut out);
             }
             book.fault.get_or_insert(cause);
-        }
+            owed
+        };
         self.release(out);
-        (self.wake)();
+        if owed > 0 {
+            (self.wake)();
+        }
     }
 
     /// End the operation `id` with `terminal`, and every identity joined to it with
@@ -457,6 +466,14 @@ where
             .iter()
             .find(|(_, entry)| entry.terminal.is_none())
             .map(|(id, _)| *id)
+    }
+
+    /// **The last identity this ledger minted**, or `None` before its first. On a lane that ends
+    /// its identities in the order it minted them, every identity owed now that will end before a
+    /// later admission is at or below it.
+    pub(crate) fn last_minted(&self) -> Option<Id> {
+        let minted = lock(&self.book).minted;
+        (minted > 0).then(|| Id::from(minted))
     }
 
     /// The fault the lane is in: how its worker ended, once it has. A lane's consumer learns it
@@ -1222,6 +1239,13 @@ where
         lock(&self.line).closed = true;
         self.asked.notify_all();
     }
+
+    /// How many requests wait in line, admitted and not yet taken by the worker — where a test
+    /// sees a request wait for the one before it.
+    #[cfg(test)]
+    pub(crate) fn in_line(&self) -> usize {
+        lock(&self.line).waiting.len()
+    }
 }
 
 /// The answer a terminal carries, its own or — for a request that joined another — its twin's.
@@ -1285,11 +1309,14 @@ pub(crate) enum LaneName {
     ComputationPath,
     /// `programs_lane`: what this machine can start (T-PROGRAMS-REFRESH).
     Programs,
+    /// `git_mutation_lane`: one repository's share of the Git pages' writes and checkouts
+    /// (`bt-git-mutation`).
+    GitMutation,
 }
 
 #[cfg(test)]
 impl LaneName {
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::Handoff,
         Self::Font,
         Self::Taskbar,
@@ -1297,6 +1324,7 @@ impl LaneName {
         Self::ComputationScale,
         Self::ComputationPath,
         Self::Programs,
+        Self::GitMutation,
     ];
 }
 
@@ -1449,11 +1477,13 @@ pub(crate) const TASKBAR: Contract = Contract {
 
 /// `computation_lane`'s decoration share, on the seam (S-8): one `bt-math-worker` thread; ids
 /// minted by the share's `Ledger`; every request run and answered in the order it was minted, none
-/// coalesced; the asking tab (or window) is the target incarnation, and a closed tab's request ends
-/// in the lane's sink, which ignores it; the ledger owes 196 at once — a sizing choice, what one
-/// pane's session holds queued for this worker (`bt_term::DECORATION_TASKS_HELD`), one running and
-/// the rest waiting, an answer not yet taken holding its place — and refuses the rest at the door;
-/// a failure (a panic in one request's work) is said once per streak.
+/// coalesced but a window's animation open, which a newer open of the same file by the same window
+/// supersedes while it waits (T-ANIMATION-ANSWER-IDENTITY); the asking tab (or window) is the
+/// target incarnation, and a closed tab's request ends in the lane's sink, which ignores it; the
+/// ledger owes 196 at once — a sizing choice, what one pane's session holds queued for this worker
+/// (`bt_term::DECORATION_TASKS_HELD`), one running and the rest waiting, an answer not yet taken
+/// holding its place — and refuses the rest at the door; a failure (a panic in one request's work)
+/// is said once per streak.
 #[cfg(test)]
 pub(crate) const COMPUTATION: Contract = Contract {
     lane: Some(LaneName::Computation),
@@ -1536,6 +1566,31 @@ pub(crate) const PROGRAMS: Contract = Contract {
     },
     cancellation: Cancellation::Never,
     saying: Saying::PerStreak,
+};
+
+/// `git_mutation_lane`, on the seam: one repository's share, one `bt-git-mutation` thread; ids
+/// minted by the share's `Ledger`; every write and checkout run and ended in the order it was
+/// minted, none coalesced; the asking page's tab (or window) is the target incarnation, and a
+/// closed page's request ends in the lane's sink, which ignores it; the ledger owes 2001 at once —
+/// what one Git page can hand it (`git::GIT_STATUS_CAP` rows, each with one write in flight, and
+/// its one checkout), one running and the rest waiting, a receipt not yet taken holding its place —
+/// and refuses the rest at the door; a failure (a panic in one request's work) is said once per
+/// request.
+#[cfg(test)]
+pub(crate) const GIT_MUTATION: Contract = Contract {
+    lane: Some(LaneName::GitMutation),
+    replacement: Replacement::Fifo,
+    execution: Order::Submission,
+    delivery: Delivery::Submission,
+    bounds: Bounds {
+        // `git_mutation_lane::MUTATION_BOUND`, written out rather than read, so that a change to
+        // either the declaration or the lane is a disagreement the suite reports.
+        waiting: Bound::At(2000),
+        executing: 1,
+        answers_held: Bound::At(2001),
+    },
+    cancellation: Cancellation::Abandon,
+    saying: Saying::PerRequest,
 };
 
 /// The obligations of §R-D, one each.

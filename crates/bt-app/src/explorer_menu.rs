@@ -2968,12 +2968,14 @@ mod tests {
             &gate,
             (
                 &path,
-                &path.with_file_name(crate::update_txn::UNKEPT_FILE),
+                crate::update_trial::Mark::on_disk(
+                    &path.with_file_name(crate::update_txn::UNKEPT_FILE),
+                ),
                 &path.with_file_name("health-test"),
             ),
             txn,
-            Duration::from_millis(5),
-            &|| {},
+            crate::update_trial::Cadence::every(Duration::from_millis(5)),
+            crate::update_trial::Told::to_the_log(&|| {}),
             None,
             &mut crate::update_trial::watchdog_asleep(),
         );

@@ -3264,3 +3264,94 @@ not-kept card. The finalized road is:
 No journal grammar or parse site changes. The receipt is no longer evidence after `Committed`; its
 removal is solely the live watch's acknowledgement to the holder already settling that committed
 transaction.
+
+## Revision 2026-10-13 (m) — a refused receipt is asked again on the watch's own turn (T-TRIAL-RECEIPT-RETRY)
+
+A correction to H.2 step 1 and to H.2's stated bound; H.2 as written above stays the record of what
+0.4.7 built. The side-effects contract (`side-effects-contract-2026-10-11.md`, C5 as revision (b)5
+replaced it) refuses a failed effect retried on a clock of its own; the receipt's doubling pause was one
+(`structural-debt.md` D-89, its trial half).
+
+- **Step 1, amended.** Take the storage worker's answer. While a refused receipt is owed and the
+  watchdog is not spent, ask it again — create-new, by the one rule for what is at its name — **once at
+  each turn of the watch**, the turn the journal read and the watchdog already need, with no pause of
+  its own. Once the watchdog is spent (its fourth due time, 8 × `WATCHDOG`), an owed receipt is given up
+  and said once. The pause of 250 ms doubling to 30 s, `RECEIPT_RETRY_FIRST` and `RECEIPT_RETRY_CAP`, is
+  withdrawn.
+- **Why the turn, not a terminal refusal.** A receipt is handed over only by a ready trial, and a ready
+  trial handed back with no receipt is a candidate the recovery defers beside (H.3 steps 2 and 3): a
+  terminal refusal would not hand the decision to anybody, it would leave the transaction undecided
+  until the trial ends and then roll it back. A live holder rolls back at its deadline (90 s from the
+  launch) with no receipt; the doubling pause asked at 61.75 s and then 91.75 s after a refusal, so a
+  refusal that cleared at 62 s cost the update. Asked at each turn, a refusal that clears costs at most
+  one turn (250 ms). A journal read error is not an answer either (`Unreadable`, step 2).
+- **Why the watchdog's life is the bound.** A landed receipt pays off through a holder that adopts or
+  commits the trial — the live holder, or the recovery each hand-back starts (H.1's adoption). Past the
+  last due time the trial hands nothing back and the next start or logon decides; the repetition then
+  stops. It is C5 rule 3's one declared, bounded repetition inside the trial's one admitted request, on
+  the watch worker, declared in the `# completions` row `the trial's receipt`.
+- **The bound, restated** (replacing "about 127 receipt write attempts" an hour): while a receipt is
+  owed, one more journal read (the rights check) and one create-new attempt per 250 ms turn, for at most
+  880 s — at most 3,520 asks — and none after; one refusal line, then one line at the streak's end:
+  landed, with the number of asks, or given up, with the number and the last refusal.
+- **Accepted, stated.** A home that refuses for longer than 880 s and then takes writes no longer gets
+  the receipt: the next start or logon defers beside the live trial (no receipt names it) and decides
+  once it has ended — a rollback on Windows, a recorded retrial on macOS. The doubling pause would have
+  landed it at its next 30 s ask; an unbounded repetition is what C5 forbids.
+
+Pinned by `update_trial::tests::{a_refused_receipt_is_asked_again_only_on_the_watchs_own_turn,
+a_transient_receipt_refusal_does_not_roll_the_trial_back, a_permanent_receipt_refusal_ends_in_the_hand_back,
+an_unreadable_journal_still_retries_the_receipt_and_is_never_handed_back}`, each counted in the watch's
+own turns through `update_trial::Cadence`, the pause the watch is handed.
+
+### Amendment to revision (m), 2026-10-13 (round 2) — the reserved trial's bound
+
+Revision (m)'s bound — the watchdog's life — is the ordinary trial's. **U-35's reserved trial** is
+the one trial no holder can adopt: every holder runs the rescue copy the operating system refused,
+so its hand-backs cannot pay off, no live holder has a deadline over it, and its one road to a commit
+is its own (`update_apply::commit_last_trial`, asked at each turn of the watch until the journal no
+longer waits for it). Its refused receipt is therefore asked again **for as long as it asks to commit
+itself** — the receipt's re-ask shares `commit_itself`'s life — and is not given up at the fourth due
+time; a home that takes writes again later still lets it commit, and the person's changes are kept.
+Both bounds are declared in the `# completions` row `the trial's receipt` (C5 rule 3).
+
+**The cost of one ask, stated.** A journal read (the rights check) and a create-new write; when the
+refusal comes at the rename or a flush rather than at the create, each ask is a full durable write
+with its flushes — on macOS `F_FULLFSYNC`, which flushes the drive's cache.
+
+Pinned by `update_trial::tests::the_reserved_trial_asks_its_receipt_again_for_as_long_as_it_asks_to_commit_itself`.
+
+### Amendment to revision (m), 2026-10-13 (T-TRIAL-WATCH-REPEATS-BOUND) — the watch's two other repetitions
+
+H.2's loop asks two more things again on its turn, besides the receipt; both are bounded by the
+transaction's decision in this process — and when no decision comes while the process lives, by the
+process's life — not by a count or a clock, and both are declared in the `# completions` row
+`trial watch` (C5 rule 3).
+
+- **The `unkept` mark** (E4) is asked once a turn while a person's change is held, until it is durable or
+  the transaction is decided. It is not given up at the watchdog's end: its readers — the holder that
+  retires a rollback, a commit writer when the trial is gone, the holder that re-reads it after the
+  acknowledgement (revision (l)) — all act at or after the decision, and without it the not-kept card is
+  lost. Writing it once at the
+  decision is impossible: the trial neither makes nor first sees the decision. **The cost of an ask:** the
+  whole durable write — a failing create when the home takes no new file, a write with its file flush when
+  refused at that flush or the rename — or, once a write's rename put the bytes at the mark's name and only
+  the folder's open or flush was refused, that folder flush alone (`install_txn::flush_directory_of`). A
+  mark at its name, flushed or not, is what every reader sees, so the commit takes it back. A `metadata`
+  probe of the folder before each write is not built: it passes for every refusal that costs a flush and
+  catches only the refusals that already fail at the create, for the same price.
+- **U-35's reserved trial's own commit** is asked once a turn after a refusal until it commits, the journal
+  no longer waits for it, or the decision — its one road to a commit. **The cost of an ask:** a
+  non-blocking take of `H\lock`, a journal read asked again for up to 2 s (`JOURNAL_WRITE_WITHIN`) while it
+  fails, a receipt read, and a journal write whose hold is asked again within `JOURNAL_HELD_WITHIN` (10 s)
+  through the wait door, with `H\lock` held all the while — so held asks come at most once per 10 s.
+- **Said once per streak.** Each streak's first refusal is said — for the commit, with the rounds its first
+  ask said on its way; later asks of the streak are quiet (the watch hands the ask its own `say`), except the
+  ask that ends the streak, whose rounds are said before the end — and so is the mark's ask whose rename left
+  its bytes at its name, because what is asked changes then. Any other change of refusal within a streak is
+  summarised by the streak's end, said once with the number of refused asks and the last refusal.
+
+Pinned by `update_trial::tests::{a_refused_unkept_mark_is_asked_again_each_turn_until_the_decision_and_said_once,
+a_refusing_home_costs_one_folder_flush_per_turn_not_a_full_write,
+a_mark_at_its_name_is_taken_back_by_the_commit_though_its_folder_never_flushed,
+a_reserved_trials_self_commit_is_asked_until_the_decision_and_said_once_per_streak}`.

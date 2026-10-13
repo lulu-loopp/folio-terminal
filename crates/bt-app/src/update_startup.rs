@@ -2239,12 +2239,14 @@ mod tests {
                 &gate,
                 (
                     &journal,
-                    &journal.with_file_name(crate::update_txn::UNKEPT_FILE),
+                    crate::update_trial::Mark::on_disk(
+                        &journal.with_file_name(crate::update_txn::UNKEPT_FILE),
+                    ),
                     &journal.with_file_name("health-test"),
                 ),
                 txn(),
-                std::time::Duration::from_millis(5),
-                &|| woke.set(true),
+                crate::update_trial::Cadence::every(std::time::Duration::from_millis(5)),
+                crate::update_trial::Told::to_the_log(&|| woke.set(true)),
                 None,
                 &mut crate::update_trial::watchdog_asleep(),
             );

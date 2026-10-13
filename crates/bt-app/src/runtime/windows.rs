@@ -1643,7 +1643,7 @@ impl<B: Backend> Runtime<'_, B> {
             .flat_map(|tab| {
                 let where_ = tab.display_title();
                 tab.preview_pool
-                    .dirty_names(None)
+                    .quit_names()
                     .map(|name| unsaved_line(name, &where_))
                     .collect::<Vec<_>>()
             })

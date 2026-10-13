@@ -963,7 +963,7 @@ impl<B: Backend> Runtime<'_, B> {
 
     pub(crate) fn apply_math_results(
         &mut self,
-        batch: &mut Vec<MathWorkerResult>,
+        batch: &mut Vec<(crate::computation_lane::ComputationId, MathWorkerResult)>,
         lane_gone: bool,
     ) -> Result<()> {
         let mut changed = lane_gone;
@@ -984,7 +984,7 @@ impl<B: Backend> Runtime<'_, B> {
         // completion: a page of forty formulas answers forty times, and forty
         // rebuilds of every layer in the window would be the cost of one card.
         let mut picture_landed = false;
-        for completion in answers_for(batch, |result| self.owns(result.owner())) {
+        for (asked, completion) in answers_for(batch, |(_, result)| self.owns(result.owner())) {
             let leaf = completion.leaf.leaf;
             let target_index = self.window.tabs.iter().position(|tab| tab.id == leaf.tab);
             let target_active = target_index == Some(self.window.active_tab);
@@ -1088,15 +1088,22 @@ impl<B: Backend> Runtime<'_, B> {
                     // the first time this window looked inside it, or a surface
                     // that has just begun showing it — so every arrival is a new
                     // playback and gets a number no other playback in this
-                    // process has.
+                    // process has; an answer that is not filed leaves its number unused.
                     let serial = self.app.next_animation_serial();
                     // A refusal is **said where a reader is standing**, and
                     // not only to a console nobody has open: it is filed with
                     // its reason and the foot of the pane prints the two that
                     // are worth printing — see [`AnimationEntry::Refused`].
-                    self.window.animations.opened(key, serial, frames);
-                    self.refresh_video_layers();
-                    self.present_chrome_change()?;
+                    //
+                    // **And filed only for the open the window awaits**
+                    // (T-ANIMATION-ANSWER-IDENTITY): the answer to an open the
+                    // window has let go of — its file changed under the decode,
+                    // and the walk asked about the bytes there now — is
+                    // superseded, and the glass is not touched for it.
+                    if self.window.animations.opened(key, asked, serial, frames) {
+                        self.refresh_video_layers();
+                        self.present_chrome_change()?;
+                    }
                     false
                 }
                 // **An animation's next frames, and its decoder** (user report
