@@ -274,6 +274,7 @@ impl<B: Backend> Runtime<'_, B> {
             FormulaSwitches::from_settings(self.app.settings_store.loaded()),
             scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
             self.app.settings_store.loaded().line_wrapping,
+            &bt_pty::SystemShellEnvironment,
         )?;
         // What was typed meanwhile moves to the new pane — into its own birth's queue while its
         // shell is being made, or to its shell or nowhere when it has none to wait for — ahead of
@@ -1704,6 +1705,7 @@ impl<B: Backend> Runtime<'_, B> {
             formulas,
             scrollback,
             self.app.settings_store.loaded().line_wrapping,
+            &bt_pty::SystemShellEnvironment,
         )?;
         self.sessions.insert(arriving, leaf);
         debug_assert!(

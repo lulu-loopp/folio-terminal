@@ -708,6 +708,7 @@ impl<B: Backend> Runtime<'_, B> {
             formulas,
             scrollback,
             self.app.settings_store.loaded().line_wrapping,
+            &bt_pty::SystemShellEnvironment,
         )?;
         // **A replacement still being born waits beside the shell it replaces** (T-BIRTH-OFF-WINDOW):
         // the old shell goes on being the one typed into until the new one lands

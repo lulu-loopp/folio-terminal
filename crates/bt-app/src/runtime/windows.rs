@@ -794,28 +794,8 @@ impl<B: Backend> Runtime<'_, B> {
                 manual_name,
             } => {
                 let seats = seats::Seats::lone_terminal();
-                // The seed's own profile, never the default one — H66's contract
-                // read for a Recent row: the shell you are asking back is the
-                // shell you had, and "whatever the default is today" is a
-                // different tab wearing this one's folder.
-                // The saved id, or the fallback's when this build has no such row —
-                // `revive_plan`'s own reading, for the same reason.
-                let (profile, unknown_profile_id) = revived_profile(&profile_id);
-                let leaves = BTreeMap::from([(
-                    seats.identity(),
-                    LeafSeed {
-                        profile,
-                        // Whether the folder still stands is asked by the pane's birth
-                        // (`profiles::BirthPlace`), never this thread.
-                        cwd: Some(cwd)
-                            .filter(|cwd| !cwd.is_empty())
-                            .map(|cwd| profiles::SeedPlace::Carried(PathBuf::from(cwd))),
-                        unknown_profile_id,
-                        card_skip: 0,
-                        prefill: None,
-                        carried_environment: None,
-                    },
-                )]);
+                let leaves =
+                    BTreeMap::from([(seats.identity(), recent_term_leaf_seed(&profile_id, cwd))]);
                 (seats, manual_name, leaves, BTreeMap::new())
             }
             // A folder tab comes back as the column it was, rooted where it was
@@ -2216,5 +2196,27 @@ impl<B: Backend> Runtime<'_, B> {
         self.app
             .recent
             .record(seed::Seed::Window { seeds }, Vec::new(), at);
+    }
+}
+
+/// **The shell a Recent row asks back** (the `Term` arm of `Runtime::reopen_recent`), as the
+/// seed its one pane is born from.
+///
+/// The seed's own profile, never the default one — H66's contract read for a Recent row: the
+/// shell you are asking back is the shell you had, and "whatever the default is today" is a
+/// different tab wearing this one's folder. The saved id, or the fallback's when this build has
+/// no such row — `revive_plan`'s own reading, for the same reason. Whether the folder still
+/// stands is asked by the pane's birth (`profiles::BirthPlace`), never this thread.
+pub(crate) fn recent_term_leaf_seed(profile_id: &str, cwd: String) -> LeafSeed {
+    let (profile, unknown_profile_id) = revived_profile(profile_id);
+    LeafSeed {
+        profile,
+        cwd: Some(cwd)
+            .filter(|cwd| !cwd.is_empty())
+            .map(|cwd| profiles::SeedPlace::Carried(PathBuf::from(cwd))),
+        unknown_profile_id,
+        card_skip: 0,
+        prefill: None,
+        carried_environment: None,
     }
 }

@@ -12056,6 +12056,7 @@ impl<B: Backend> Runtime<'_, B> {
                 formulas,
                 scrollback,
                 self.app.settings_store.loaded().line_wrapping,
+                &bt_pty::SystemShellEnvironment,
             )?;
             let Some(arrived) = self.seats.stand_in_terminal(&metrics, seat) else {
                 *self.preview_panes.entry(surface) = pane;

@@ -40091,6 +40091,7 @@ mod shell_birth_tests {
             FormulaSwitches::from_settings(&bt_persist::SettingsV1::default()),
             NonZeroUsize::new(1_000).unwrap(),
             true,
+            &bt_pty::SystemShellEnvironment,
         )
     }
 
@@ -40878,6 +40879,9 @@ fn create_leaf_session(
     // is a `settings.json` answer a new pane must be born obeying, and a pane split off a
     // neighbour that read the file for itself would be a second place for the answer to live.
     line_wrapping: bool,
+    // **The machine a shell is composed for**: its variables and its files, as the place, the
+    // command line and the paste recipient read them — the system's own in the product.
+    environment: &dyn bt_pty::ShellEnvironment,
 ) -> Result<LeafSession> {
     // **Born without a rail**: a shell that has not started has sent no mark, and
     // [`LeafSession::has_rail`] is turned on only by one (owner, 2026-09-23).
@@ -40926,9 +40930,8 @@ fn create_leaf_session(
     let locale_waits = !rows_wait
         && probe_input.is_none()
         && programs.program(spawn_profile).is_some()
-        && profiles::row_of(spawn_profile).is_some_and(|row| {
-            shell_integration::listens_for_a_locale(&bt_pty::SystemShellEnvironment, &row.env)
-        })
+        && profiles::row_of(spawn_profile)
+            .is_some_and(|row| shell_integration::listens_for_a_locale(environment, &row.env))
         && locale_declaration::at_birth() == locale_declaration::AtBirth::Waiting;
     let in_birth = rows_wait || locale_waits;
     // **The one trigger.** A user who only ever opens WSL or `pwsh` never starts
@@ -40974,7 +40977,7 @@ fn create_leaf_session(
     let profiles::BirthPlace { place, unless_gone } = profiles::spawn_place(
         profiles::index_of_id(spawn_profile),
         seed.cwd.clone(),
-        &bt_pty::SystemShellEnvironment,
+        environment,
     );
     let spawn_place = place.directory.clone();
     let wake = LeafWake::bound_to(wake);
@@ -41024,7 +41027,7 @@ fn create_leaf_session(
             row,
             &place.arguments,
             shell_integration::Scripts::installed(),
-            &bt_pty::SystemShellEnvironment,
+            environment,
         );
         // The same row composed for the place the pane opens in when its folder is gone: the
         // birth worker takes this command line and working directory instead, having asked.
@@ -41034,7 +41037,7 @@ fn create_leaf_session(
                 row,
                 &gone.place.arguments,
                 shell_integration::Scripts::installed(),
-                &bt_pty::SystemShellEnvironment,
+                environment,
             )
             .arguments,
             working_directory: gone.place.working_directory.clone(),
@@ -41121,6 +41124,7 @@ fn create_leaf_session(
         formulas,
         scrollback,
         line_wrapping,
+        environment,
     );
     match shell {
         // **Born later, standing where its shell will stand.** The place is said now, from the
@@ -41165,6 +41169,7 @@ fn bare_leaf(
     formulas: FormulaSwitches,
     scrollback: NonZeroUsize,
     line_wrapping: bool,
+    environment: &dyn bt_pty::ShellEnvironment,
 ) -> LeafSession {
     let LeafView {
         text_scale,
@@ -41214,7 +41219,7 @@ fn bare_leaf(
         paste_recipient: profiles::paste_recipient(
             profiles::index_of_id(&decision.spawn_profile),
             &decision.program_kind,
-            &bt_pty::SystemShellEnvironment,
+            environment,
         ),
         integration: profiles::row_of(&decision.spawn_profile)
             .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
@@ -41957,6 +41962,7 @@ fn create_tab_state<G: Glass>(
             formulas,
             scrollback,
             line_wrapping,
+            &bt_pty::SystemShellEnvironment,
         )?;
         sessions.insert(seat, leaf);
     }
