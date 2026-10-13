@@ -8694,6 +8694,12 @@ pub mod attention_pipe;
 #[path = "peer_unix.rs"]
 pub(crate) mod peer;
 
+/// **A second launch's side of the launch wire, in the one order both transports speak it**
+/// (T-LAUNCH-WIRE-PEER-READ): ask who answered, then say the request, hear the reply, confirm.
+/// Each real arm of [`launch_pipe`] hands it a connection; the arm without a channel has none.
+#[cfg(any(windows, unix))]
+mod launch_conversation;
+
 /// **The second launch's door into the first** — one well-known named pipe per data directory
 /// (`docs/DESIGN.md` §7.59).
 ///
