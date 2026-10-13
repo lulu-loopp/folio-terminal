@@ -17344,7 +17344,8 @@ mod tests {
         );
         assert!(
             !matches!(floor.program, ProgramSource::PowerShellSeven),
-            "and never the row that is allowed to answer `no` — a fallback chain              whose bottom can be greyed has a hole in it"
+            "and never the row that is allowed to answer `no` — a fallback chain \
+             whose bottom can be greyed has a hole in it"
         );
         // And the macOS floor is the shell POSIX puts at `/bin/sh`, which no Mac
         // is without.
@@ -24488,7 +24489,8 @@ mod tests {
         let centre = |rect: [f32; 4]| (rect[0] + rect[2]) / 2.0;
         assert!(
             (centre(cross) - centre(folder)).abs() <= 0.5,
-            "both are centred in the one 14px column, so the names line up:              {} against {}",
+            "both are centred in the one 14px column, so the names line up: \
+             {} against {}",
             centre(cross),
             centre(folder),
         );

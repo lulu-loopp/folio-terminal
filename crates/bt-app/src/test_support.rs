@@ -2833,7 +2833,8 @@ pub(crate) fn engines_settling_to(target: u64) -> u64 {
     assert_eq!(
         reached,
         target,
-        "the engine ledger did not reach {target} within the lane suite's patience ({:?});          {reached} engines stood",
+        "the engine ledger did not reach {target} within the lane suite's patience ({:?}); \
+         {reached} engines stood",
         crate::lane::PATIENCE
     );
     reached

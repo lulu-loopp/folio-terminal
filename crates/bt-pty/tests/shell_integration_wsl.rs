@@ -268,7 +268,8 @@ fn bash_is_handed_the_init_file_and_every_other_login_shell_is_left_alone() {
         );
         assert!(
             said.contains("BT_SHELL_INTEGRATION=login"),
-            "{home}: the script is told which chain it owes, and `wsl.exe` starts a login shell:              {said}"
+            "{home}: the script is told which chain it owes, and `wsl.exe` starts a login shell: \
+             {said}"
         );
     }
 

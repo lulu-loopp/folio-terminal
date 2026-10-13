@@ -5513,7 +5513,9 @@ mod tests {
                 )
                 .as_str()
             ),
-            "and it wears the scope tag its row carries — which since 2026-08-22              is the one that covers both of the capsule's hosts — and, since its              chord is a bare Ctrl+letter, the shell note (0.4.4 ticket 04)"
+            "and it wears the scope tag its row carries — which since 2026-08-22 \
+             is the one that covers both of the capsule's hosts — and, since its \
+             chord is a bare Ctrl+letter, the shell note (0.4.4 ticket 04)"
         );
 
         // **And the palette is a line again** (DESIGN.md §7.55). It was off
@@ -6397,7 +6399,9 @@ mod tests {
         assert_eq!(
             written, "Win+Ctrl+Shift+k",
             "the Windows key is written first, which is the order Microsoft's own \
-             documentation writes it in - and the key is written as the table              holds it, which is the cap the reader pressed rather than the glyph              Shift would have made of it"
+             documentation writes it in - and the key is written as the table \
+             holds it, which is the cap the reader pressed rather than the glyph \
+             Shift would have made of it"
         );
         assert_eq!(
             parse_chord(&written).as_ref(),

@@ -18285,7 +18285,8 @@ mod tests {
                 SettingsRow::Uninstall,
                 SettingsRow::UninstallData,
             ],
-            "what this is, then where to go about it, then the configuration doors, then              the uninstaller and its switch"
+            "what this is, then where to go about it, then the configuration doors, then \
+             the uninstaller and its switch"
         );
 
         assert_eq!(
@@ -19458,7 +19459,8 @@ mod tests {
         const {
             assert!(
                 CONTENT_PADDING_TOP_LOGICAL_PX >= 10.0,
-                "an inset of two pixels is not an inset a reader can see, which                  is the whole of the report"
+                "an inset of two pixels is not an inset a reader can see, which \
+                 is the whole of the report"
             );
         }
         // At rest nothing is lost to the inset: the first heading begins exactly
@@ -19482,7 +19484,8 @@ mod tests {
             .unwrap_or_else(|| end.rows.last().expect("the page has rows").band);
         assert!(
             (foot[3] - end.clip[3]).abs() < 0.5,
-            "scrolled to the end the page's foot sits on the fold: {foot:?} in              {:?}",
+            "scrolled to the end the page's foot sits on the fold: {foot:?} in \
+             {:?}",
             end.clip
         );
     }
@@ -20614,7 +20617,10 @@ mod tests {
         // nothing asks for.
         assert_eq!(
             ROW_DESC_MAX_LINES, needed,
-            "the tolerance is one line past the floor pins'              {SETTINGS_DESCRIPTION_FLOOR_MAX_LINES}, or the longest ruled              exception if that is longer: {needed} is needed and the constant              says {ROW_DESC_MAX_LINES}"
+            "the tolerance is one line past the floor pins' \
+             {SETTINGS_DESCRIPTION_FLOOR_MAX_LINES}, or the longest ruled \
+             exception if that is longer: {needed} is needed and the constant \
+             says {ROW_DESC_MAX_LINES}"
         );
     }
 
@@ -21364,7 +21370,8 @@ mod tests {
         let body = straddling.menu_body().expect("the picker is open");
         assert!(
             cut[1] < body[1] && cut[3] > body[1],
-            "this fixture depends on an item lying across the body's edge:              {cut:?} in {body:?}"
+            "this fixture depends on an item lying across the body's edge: \
+             {cut:?} in {body:?}"
         );
         let (x, y) = centre(cut);
         assert_eq!(
@@ -21798,7 +21805,8 @@ mod tests {
         let box_of = open.items[action];
         assert!(
             open.shows_item(box_of),
-            "and its last item is inside the body it is drawn in: {box_of:?} in              {:?}",
+            "and its last item is inside the body it is drawn in: {box_of:?} in \
+             {:?}",
             open.menu_body()
         );
         let (x, y) = centre(box_of);
@@ -22095,7 +22103,9 @@ mod tests {
         assert_eq!(
             moved[0].as_ptr(),
             first[0].as_ptr(),
-            "a name that was already there is the very same string: the interning              is what keeps a folder edited all afternoon from leaking a copy of              every unchanged name"
+            "a name that was already there is the very same string: the interning \
+             is what keeps a folder edited all afternoon from leaking a copy of \
+             every unchanged name"
         );
     }
 
@@ -22141,7 +22151,8 @@ mod tests {
                 // colours.
                 SettingsRow::WebPages
             ],
-            "the group the 2026-08-18 ruling leaves standing, plus the contrast floor and the              web pages' scheme"
+            "the group the 2026-08-18 ruling leaves standing, plus the contrast floor and the \
+             web pages' scheme"
         );
         // **`Sidebar` came back out** (user ruling 2026-08-18). It is an
         // everyday row again and it is back where it was born — directly under
@@ -23303,7 +23314,8 @@ mod tests {
             "the mock-up's own measurement of two rows under one heading — 211 \
              when `.content` had 2px of top padding, and eight more since \
              §7.1.6c-5 gave the scrollport an inset a scrolled row can \
-             disappear under, and two fewer since ticket 24 took the bottom \n             padding back to the spec's 16"
+             disappear under, and two fewer since ticket 24 took the bottom \
+             padding back to the spec's 16"
         );
         let placed = open(1.0, false);
         assert_eq!(width(placed.frame), 720.0, "min(720px, 92%) at 1280 wide");
@@ -25621,7 +25633,8 @@ mod tests {
         );
         assert!(
             group.band[0] < heading,
-            "which puts the band outside the heading column rather than on it:              band {:?}, heading {heading}",
+            "which puts the band outside the heading column rather than on it: \
+             band {:?}, heading {heading}",
             group.band
         );
         let title = placed
@@ -25631,7 +25644,8 @@ mod tests {
             .fold(f32::INFINITY, f32::min);
         assert!(
             heading < title,
-            "the heading column is the rows' own less `.row`'s padding:              heading {heading} against title {title}"
+            "the heading column is the rows' own less `.row`'s padding: \
+             heading {heading} against title {title}"
         );
         let control = placed
             .rows
@@ -25654,14 +25668,16 @@ mod tests {
         );
         assert!(
             group.label[2] <= group.mark[0],
-            "nothing is drawn between the word and the mark, and nothing at all              stands left of the word: label {:?}, mark {:?}",
+            "nothing is drawn between the word and the mark, and nothing at all \
+             stands left of the word: label {:?}, mark {:?}",
             group.label,
             group.mark
         );
         assert_eq!(
             height(group.band),
             2.0 * ROW_PADDING_Y_LOGICAL_PX + GROUP_LABEL_LINE_LOGICAL_PX,
-            "the band is the group label's line box between the row's own              paddings, which is what changed when the type did"
+            "the band is the group label's line box between the row's own \
+             paddings, which is what changed when the type did"
         );
         assert!(
             MOCKUP.contains(
@@ -25676,7 +25692,8 @@ mod tests {
         );
         assert!(
             !MOCKUP.contains("data-adv"),
-            "and the three-variant scaffolding is gone from it: one form is              chosen, so there is one form drawn"
+            "and the three-variant scaffolding is gone from it: one form is \
+             chosen, so there is one form drawn"
         );
     }
 
@@ -25746,7 +25763,9 @@ mod tests {
                 over[..hair]
                     .iter()
                     .any(|quad| quad.color == face && quad.alpha == 1.0),
-                "x = {x}: the panel's own ground goes down before its edge does,                  so the edge is composited over the panel and never over what                  the panel covers: {over:?}"
+                "x = {x}: the panel's own ground goes down before its edge does, \
+                 so the edge is composited over the panel and never over what \
+                 the panel covers: {over:?}"
             );
         }
         assert!(
@@ -25882,7 +25901,8 @@ mod tests {
                 };
                 assert!(
                     !thinner.nav_items().contains(&absent),
-                    "{absent:?} keeps its word in the rail with nothing on its                      page — a door onto an empty room"
+                    "{absent:?} keeps its word in the rail with nothing on its \
+                     page — a door onto an empty room"
                 );
             }
             assert_eq!(
@@ -26645,7 +26665,8 @@ mod tests {
                 sprite.mark,
                 ChromeMark::TabClose | ChromeMark::Chevron { .. }
             )),
-            "the overlay's marks are the close and the disclosure's chevron,              and nothing has quietly joined them: {:?}",
+            "the overlay's marks are the close and the disclosure's chevron, \
+             and nothing has quietly joined them: {:?}",
             sprites.iter().map(|sprite| sprite.mark).collect::<Vec<_>>()
         );
         let glyph = closes[0].rect;
@@ -27126,11 +27147,13 @@ mod tests {
         assert_eq!(SCROLLBACK_OPTIONS, [25_000, 50_000, 100_000, 200_000]);
         assert!(
             SCROLLBACK_OPTIONS.contains(&bt_persist::DEFAULT_SCROLLBACK_LINES),
-            "the capacity every reader arrives holding has to be one of the rungs,              or an untouched machine opens this picker with nothing ticked"
+            "the capacity every reader arrives holding has to be one of the rungs, \
+             or an untouched machine opens this picker with nothing ticked"
         );
         assert!(
             SCROLLBACK_OPTIONS.windows(2).all(|pair| pair[0] < pair[1]),
-            "ascending, which is how a list of quantities with no privileged              member reads — the font size picker's order, not the height cap's"
+            "ascending, which is how a list of quantities with no privileged \
+             member reads — the font size picker's order, not the height cap's"
         );
         assert_eq!(
             SettingsRow::Scrollback.category(),
@@ -27161,7 +27184,10 @@ mod tests {
                 SettingsRow::MultilinePaste,
                 SettingsRow::Notifications
             ],
-            "the Terminal page begins with the PSReadLine fact and process-scoped integration \n             switch, then the pane's two axes — what it keeps of what has gone past, and what it \n             does with a line wider than itself — and last the only row on this page whose answer \n             shows up outside this window; the legacy-line remover is inserted only when observed"
+            "the Terminal page begins with the PSReadLine fact and process-scoped integration \
+             switch, then the pane's two axes — what it keeps of what has gone past, and what it \
+             does with a line wider than itself — and last the only row on this page whose answer \
+             shows up outside this window; the legacy-line remover is inserted only when observed"
         );
     }
 
@@ -27215,7 +27241,8 @@ mod tests {
         assert_eq!(
             SettingsRow::Scrollback.selected_index(&odd),
             None,
-            "a capacity this build's list does not offer ticks nothing rather              than the nearest thing to it"
+            "a capacity this build's list does not offer ticks nothing rather \
+             than the nearest thing to it"
         );
     }
 
@@ -28556,11 +28583,17 @@ mod tests {
         assert_eq!(
             page[start - 1],
             SettingsRow::FocusCardHeight,
-            "the ground opens the Advanced group, and the everyday row above it              is the last of the ones the ruling kept on top. It used to follow              `Dark scheme` directly; §7.1.6c-5 moved the two font rows up into              that gap and the whole ground down under the disclosure, §7.1.6b′              then added focus mode's own row to the end of that run, and              2026-08-21 added the card-height row directly under it"
+            "the ground opens the Advanced group, and the everyday row above it \
+             is the last of the ones the ruling kept on top. It used to follow \
+             `Dark scheme` directly; §7.1.6c-5 moved the two font rows up into \
+             that gap and the whole ground down under the disclosure, §7.1.6b′ \
+             then added focus mode's own row to the end of that run, and \
+             2026-08-21 added the card-height row directly under it"
         );
         assert!(
             ground.iter().all(|row| row.advanced()),
-            "every one of the six is inside the group, so the group is what a              reader opens to reach any of them"
+            "every one of the six is inside the group, so the group is what a \
+             reader opens to reach any of them"
         );
     }
 
@@ -33134,7 +33167,8 @@ mod tests {
         assert_eq!(
             adopted.ghosts().next().and_then(EnvGhost::adoptable),
             Some("truecolor"),
-            "the adopted name leaves the list rather than standing beside its              own override"
+            "the adopted name leaves the list rather than standing beside its \
+             own override"
         );
         let mine = placed
             .env_rows
@@ -34343,7 +34377,8 @@ mod tests {
                     SettingsTarget::ProfileMore(index),
                 ])
                 .collect::<Vec<_>>()[..],
-            "the row, then up, down, Edit and the `⋯` — the run's own visual              order, row by row"
+            "the row, then up, down, Edit and the `⋯` — the run's own visual \
+             order, row by row"
         );
     }
 

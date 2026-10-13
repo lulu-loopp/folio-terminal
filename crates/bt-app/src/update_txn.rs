@@ -4891,7 +4891,8 @@ mod tests {
                     PhaseKind::Stuck
                 ][..]
             )],
-            "N writes its receipt wherever a trial of the new build runs: launched              before it is recorded, reserved, recorded, or retried over Stuck"
+            "N writes its receipt wherever a trial of the new build runs: launched \
+             before it is recorded, reserved, recorded, or retried over Stuck"
         );
     }
 

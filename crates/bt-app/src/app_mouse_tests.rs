@@ -267,7 +267,8 @@ fn a_wheel_notch_belongs_to_the_pane_it_is_over_on_either_screen() {
                 assert_eq!(
                     answer(held | shift_held),
                     Some(wheel_route(shift, modes, scrolled)),
-                    "{platform:?} {held:?} keeps the original route, shift={shift}                      modes={modes:?} scrolled={scrolled}"
+                    "{platform:?} {held:?} keeps the original route, shift={shift} \
+                     modes={modes:?} scrolled={scrolled}"
                 );
             }
         }

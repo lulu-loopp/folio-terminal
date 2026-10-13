@@ -12440,7 +12440,8 @@ fn deliver_held_input(
     birth.deliver(|held| match target {
         PtyTarget::Nowhere => {
             note(&format!(
-                "a pane born with no shell (no program here, or its shell did not start) dropped                  the {} byte(s) typed into it while it waited",
+                "a pane born with no shell (no program here, or its shell did not start) dropped \
+                 the {} byte(s) typed into it while it waited",
                 held.len()
             ));
             Ok(())
@@ -17333,15 +17334,19 @@ mod tab_identity_tests {
         let layer = method_body("Runtime", "preview_float_layer");
         assert!(
             layer.contains("let footless = !geometry.wears_a_foot();"),
-            "the chassis is asked whether there is a strip, rather than a second              reader working it out from the rail"
+            "the chassis is asked whether there is a strip, rather than a second \
+             reader working it out from the rail"
         );
         assert!(
             layer.contains("let rail = self.dress_preview_rail(surface, scale);"),
-            "the window's row is dressed somewhere other than the one dressing both              hosts go through, so a pane and the window torn off it can say two              things about one file"
+            "the window's row is dressed somewhere other than the one dressing both \
+             hosts go through, so a pane and the window torn off it can say two \
+             things about one file"
         );
         assert!(
             !layer.contains("seats::push_corner_tag("),
-            "the window flashes its confirmation in a corner of its own as well as in              the pill, which is the same word twice"
+            "the window flashes its confirmation in a corner of its own as well as in \
+             the pill, which is the same word twice"
         );
         assert!(
             layer.contains("seats::dress_foot("),
@@ -55458,7 +55463,8 @@ mod launch_landing_tests {
         let tear_out = door.find("self.settle_tear_out(errand, id)?");
         assert!(
             matches!((insert, publish, tear_out), (Some(i), Some(p), Some(t)) if i < p && p < t),
-            "a window opened this turn is missing from the directory the doors              after it read:
+            "a window opened this turn is missing from the directory the doors \
+             after it read:
 {door}"
         );
         let first =
@@ -55467,7 +55473,8 @@ mod launch_landing_tests {
         let publish = first.find("self.publish_window_directory();");
         assert!(
             matches!((insert, publish), (Some(i), Some(p)) if i < p),
-            "the first window is missing from the directory until the turn's              head walks it:
+            "the first window is missing from the directory until the turn's \
+             head walks it:
 {first}"
         );
         let tell = method_body("FolioApp", "tell_the_update_job");
@@ -56867,7 +56874,8 @@ mod files_locate_door_tests {
         // other acknowledgement in this window is.
         assert!(
             method_body("Runtime", "turn").contains("self.preview_refusal_deadline(),"),
-            "nothing wakes the window when the reason is due to go, so the pill stands until              something else happens to repaint"
+            "nothing wakes the window when the reason is due to go, so the pill stands until \
+             something else happens to repaint"
         );
         // ④ The way out, first among what the pill can say.
         let say = method_body("Runtime", "preview_pill_say");
@@ -57967,7 +57975,8 @@ mod file_peek_fade_tests {
         );
         assert!(
             !layer.contains(".opacity *=") && !layer.contains(".opacity ="),
-            "and no layer wears it in its own opacity: a layer faded for a reason              of its own keeps that reason as a surface inside this one"
+            "and no layer wears it in its own opacity: a layer faded for a reason \
+             of its own keeps that reason as a surface inside this one"
         );
 
         assert!(
@@ -71714,13 +71723,15 @@ mod floated_page_tests {
         assert_eq!(
             chrome_over(&stack, None, Some(body)),
             vec![over],
-            "a docked page's hole stands under the whole stack, so a layer over              it covers it and a layer beside it does not"
+            "a docked page's hole stands under the whole stack, so a layer over \
+             it covers it and a layer beside it does not"
         );
         let nothing: Vec<[f32; 4]> = Vec::new();
         assert_eq!(
             chrome_over(&stack, Some(0), Some(body)),
             nothing,
-            "a float's page is drawn over its own float's face, so that layer is              not something standing on it"
+            "a float's page is drawn over its own float's face, so that layer is \
+             not something standing on it"
         );
         assert_eq!(
             chrome_over(&[Some(beside)], None, Some(body)),
@@ -78986,7 +78997,8 @@ mod edit_menu_clipboard_tests {
         ] {
             assert!(
                 !verb.contains(its_own),
-                "the Edit menu touches the pasteboard itself through `{its_own}` instead of                  going through the door the keystroke uses"
+                "the Edit menu touches the pasteboard itself through `{its_own}` instead of \
+                 going through the door the keystroke uses"
             );
         }
     }
@@ -79879,7 +79891,9 @@ mod live_markdown_edit_tests {
         );
         assert!(
             method_body("Runtime", "leave_preview_buffer_in").contains(".leave_document()"),
-            "and handing this surface a different file still leaves the page:              the view, and whether its caret stands on the page, go with the              document",
+            "and handing this surface a different file still leaves the page: \
+             the view, and whether its caret stands on the page, go with the \
+             document",
         );
         assert_eq!(
             in_product_items(&found(
@@ -79887,7 +79901,8 @@ mod live_markdown_edit_tests {
                 View::Raw
             )),
             1,
-            "one door, counted here on purpose; the file swap takes the whole              view with the document",
+            "one door, counted here on purpose; the file swap takes the whole \
+             view with the document",
         );
         assert!(
             !method_body("Runtime", "leave_preview_page").contains("pane.caret ="),
@@ -81235,11 +81250,15 @@ mod clipboard_path_tests {
             ),
             (
                 ".paste_paths_into(target, batch.paths, \"write dropped paths to PTY\")",
-                "a dropped batch reaches a shell through one door, and takes the                  whole batch with it — which is what makes the focus and the                  raise behind its answer happen once per drop and not once per                  file",
+                "a dropped batch reaches a shell through one door, and takes the \
+                 whole batch with it — which is what makes the focus and the \
+                 raise behind its answer happen once per drop and not once per \
+                 file",
             ),
             (
                 "self.bring_this_window_forward();",
-                "and a drop brings this window to the front, from the one place                  that spends a whole batch (owner's ruling 2026-09-17)",
+                "and a drop brings this window to the front, from the one place \
+                 that spends a whole batch (owner's ruling 2026-09-17)",
             ),
             (
                 "self.paste_target(seat)",
@@ -81318,12 +81337,14 @@ mod clipboard_path_tests {
             flushing.contains("if written {")
                 && flushing.contains("self.focus_the_pane_a_path_landed_in(target.seat)?;")
                 && flushing.contains("self.bring_this_window_forward();"),
-            "a drop no longer takes the keyboard and the window with it, or does              so without asking whether anything was written:
+            "a drop no longer takes the keyboard and the window with it, or does \
+             so without asking whether anything was written:
 {flushing}"
         );
         assert!(
             flushing.find("paste_paths_into") < flushing.find("focus_the_pane_a_path_landed_in"),
-            "the focus moved before the write, so where the bytes went could              depend on it:
+            "the focus moved before the write, so where the bytes went could \
+             depend on it:
 {flushing}"
         );
         for forbidden in ["platform_pointer_now", "pointer_position"] {
@@ -81612,7 +81633,9 @@ mod clipboard_path_tests {
         assert_eq!(
             kept(GlassHere::Ours, promised),
             promised.map(|offer| offer.target),
-            "the control: a hand that let go on our own glass, where the box was              drawn, over the shell the box named, pastes — and pastes into that              shell by name"
+            "the control: a hand that let go on our own glass, where the box was \
+             drawn, over the shell the box named, pastes — and pastes into that \
+             shell by name"
         );
 
         // ① The hand moved to another pane and no motion was delivered before
@@ -81665,16 +81688,19 @@ mod clipboard_path_tests {
             assert_eq!(
                 kept(covered, promised),
                 None,
-                "{covered:?}: the path was typed into a terminal behind another                  window, with every identity in the offer unchanged"
+                "{covered:?}: the path was typed into a terminal behind another \
+                 window, with every identity in the offer unchanged"
             );
         }
         assert!(
             !glass_allows_a_text_write(GlassHere::Unknown),
-            "a text write on an answer the window manager would not give is a              guess, and this one cannot be seen or undone"
+            "a text write on an answer the window manager would not give is a \
+             guess, and this one cannot be seen or undone"
         );
         assert!(
             glass_allows_a_drop(GlassHere::Unknown),
-            "and the pane-moving drag keeps the opposite default, which is F2's:              with no answer the payload stays in the window holding it"
+            "and the pane-moving drag keeps the opposite default, which is F2's: \
+             with no answer the payload stays in the window holding it"
         );
 
         // ⑥ P1-b: the box was a refusal — the window is below what its own tree

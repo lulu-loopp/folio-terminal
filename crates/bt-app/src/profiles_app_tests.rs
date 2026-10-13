@@ -1420,7 +1420,8 @@ fn the_new_tab_button_names_the_profile_it_would_start() {
     assert_eq!(
         new_tab_tip(second.0),
         second.1,
-        "the two PowerShells are told apart by the only thing that differs \n             — their version, which is why both titles carry one"
+        "the two PowerShells are told apart by the only thing that differs \
+         — their version, which is why both titles carry one"
     );
     assert_eq!(
         new_tab_tip(third.0),
