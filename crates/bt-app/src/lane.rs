@@ -363,11 +363,14 @@ where
     /// **The executor's hook: the worker has ended.** Every operation still owed ends as
     /// `WorkerGone`, and every identity joined to one as `Joined { with, outcome: WorkerGone }`;
     /// the lane is in fault from now on ([`Self::fault`]), and every later admission is refused
-    /// with it. Said once, unless the body returned owing nothing; and the consumer is woken after
-    /// the terminals are recorded, since no publication of the lane's will announce them.
+    /// with it. Said once, unless the body returned owing nothing; and when it owed anything, the
+    /// consumer is woken after the terminals are recorded, since no publication of the lane's will
+    /// announce them. A worker that ends owing nothing — a lane let go, a body that returned — ends
+    /// no request, so it wakes nobody: there is nothing to take, and the fault is answered at the
+    /// next admission.
     pub(crate) fn worker_ended(&self, cause: WorkerEnd) {
         let mut out = Out::new();
-        {
+        let owed = {
             let mut book = lock(&self.book);
             let owed = book
                 .entries
@@ -390,9 +393,12 @@ where
                 self.end_with_twins(&mut book, id, Terminal::WorkerGone, &mut out);
             }
             book.fault.get_or_insert(cause);
-        }
+            owed
+        };
         self.release(out);
-        (self.wake)();
+        if owed > 0 {
+            (self.wake)();
+        }
     }
 
     /// End the operation `id` with `terminal`, and every identity joined to it with
@@ -458,6 +464,14 @@ where
             .iter()
             .find(|(_, entry)| entry.terminal.is_none())
             .map(|(id, _)| *id)
+    }
+
+    /// **The last identity this ledger minted**, or `None` before its first. On a lane that ends
+    /// its identities in the order it minted them, every identity owed now that will end before a
+    /// later admission is at or below it.
+    pub(crate) fn last_minted(&self) -> Option<Id> {
+        let minted = lock(&self.book).minted;
+        (minted > 0).then(|| Id::from(minted))
     }
 
     /// The fault the lane is in: how its worker ended, once it has. A lane's consumer learns it

@@ -15341,3 +15341,13 @@ Records are never evicted, so they grow with the distinct animated files one win
 **Pinned by**
 - `git_mutation_lane::tests::{two_mutations_on_one_repository_run_in_order_with_two_terminals, mutations_on_two_repositories_do_not_wait_for_each_other, a_read_of_a_repository_waits_behind_its_in_flight_mutation, a_closed_git_pages_answer_reaches_the_ignoring_sink, a_full_git_lane_refuses_at_the_door_without_waiting, the_git_workers_death_ends_its_owed_mutations_as_worker_gone}`
 - `lane_contract_tests::every_lane_runs_every_claim_and_fails_only_where_the_ledger_says`, with `LaneName::GitMutation`.
+
+
+### 2026-10-13 — A Git page's verbs, round 2: a closed page's running verb keeps its repository's turn, a read waits only for the verbs before it, and a verb Folio could not finish reads the page again (T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER)
+
+**Corrections to the entry above.** A share was let go once the window thread held none of its requests; a closed page's verb still running was then forgotten by the turnstile, and the next press started a second worker on the same repository. A share is now let go only when it holds nothing **and its ledger owes nothing**: the closed page's terminal reaches the sink, and its wake brings the drain that lets the share go. A read waited while its repository's share owed anything, so presses made after it lengthened its wait without end; it now waits only for the verbs the share had minted when it was asked, and a verb pressed after it waits for the read. The wait is at most those verbs, each one git child under `GIT_COMMAND_TIMEOUT`; while a read waits, the one read worker answers no other repository — the follow-up T-GIT-READS-PER-REPOSITORY may give reads a turn of their own. A verb whose task failed is no longer "not run": git may have run it before the panic, so its receipt is `GitFault::Unfinished` and the page reads the repository again; `GitFault::NotRun` is kept for a verb refused at the door or still in line when its worker ended. A dismissed floating page's receipt now ends in the lane's sink like a closed tab's. The seam's ledger no longer wakes its consumer when its worker ends owing nothing (a share let go, a body that returned): nothing ended, so there is nothing to take.
+
+**Pinned by**
+- `git_mutation_lane::tests::{a_closed_pages_running_verb_keeps_its_repositorys_one_share_and_turn, a_read_waits_for_the_verbs_owed_when_it_was_asked_not_for_later_presses, a_verb_waits_for_the_read_running_in_its_repository, a_verbs_panic_is_contained_under_the_resident_hook}`
+- `git::tests::a_verb_folio_could_not_finish_reads_the_repository_again_and_one_never_run_does_not`
+- `lane_contract_tests::every_lane_runs_every_claim_and_fails_only_where_the_ledger_says`, every lane.

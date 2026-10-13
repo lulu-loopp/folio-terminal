@@ -975,7 +975,8 @@ impl GitRequest {
 
     /// **Who this request's answer belongs to** — [`GitResponse::owner`], asked
     /// before there is an answer: the tab a column or a graph stands in, or the
-    /// window a float's epoch was minted by.
+    /// window a float's epoch was minted by — what the lane suite claims a receipt by.
+    #[cfg(test)]
     pub fn owner(&self) -> crate::AnswerOwner {
         owner_of(self.window, &self.host)
     }
@@ -1141,25 +1142,42 @@ pub enum GitFault {
     Refused(String),
     /// git did not finish inside [`GIT_COMMAND_TIMEOUT`] and was killed.
     TimedOut,
-    /// **Folio did not carry the verb out**, and git was never asked or never
-    /// answered (`crate::git_mutation_lane`): the repository's mutation lane was
-    /// full, its worker ended with the verb owed, or the verb's work failed
-    /// inside Folio. Only a write or a checkout ends this way; the rows it dimmed
-    /// undim on it, and nothing is tried again until the next press.
+    /// **Folio never ran the verb** (`crate::git_mutation_lane`): git was not
+    /// started for it — the repository's mutation lane was full, its worker
+    /// ended with the verb still in line, or the worker could not be started.
+    /// Only a write or a checkout ends this way; the rows it dimmed undim on it,
+    /// nothing changed in the repository, and nothing is tried again until the
+    /// next press.
     NotRun(NotRun),
+    /// **The verb's work failed inside Folio, and git may have run it**
+    /// (`crate::git_mutation_lane`: a panic in the verb's task, which may come
+    /// after the child exited). The rows undim and — unlike [`Self::NotRun`] —
+    /// the page reads the repository again, because what is there now is git's
+    /// to say.
+    Unfinished,
 }
 
-/// Why Folio did not carry a git verb out ([`GitFault::NotRun`]).
+/// Why Folio never ran a git verb ([`GitFault::NotRun`]).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NotRun {
     /// The repository's mutation lane already owed as many verbs as it holds;
     /// refused at the press.
     Full,
-    /// The worker that runs this repository's verbs ended with this one owed,
-    /// or had ended when it was pressed.
+    /// The worker that runs this repository's verbs ended with this one still
+    /// in line, or had ended when it was pressed.
     WorkerGone,
-    /// The verb's work failed inside Folio, or its worker could not be started.
-    Failed,
+    /// The worker that would run it could not be started.
+    NotStarted,
+}
+
+impl GitFault {
+    /// Whether the repository may have changed although the verb did not
+    /// answer `Ok` — what a write's or a checkout's receipt asks before it reads
+    /// the repository again.
+    #[must_use]
+    pub fn may_have_run(&self) -> bool {
+        matches!(self, Self::Unfinished)
+    }
 }
 
 // ── The model ──────────────────────────────────────────────────────────────
@@ -3904,10 +3922,12 @@ impl GitCache {
                 true
             }
             // **The receipt** (R13). Two things happen and their order is the
-            // point: the rows stop being dimmed, and — only on success —
+            // point: the rows stop being dimmed, and — on success —
             // everything is asked again. Re-asking on a *failure* would be
             // spending three subprocesses to re-learn a status that by definition
-            // did not change.
+            // did not change. The one failure that *is* re-asked is
+            // `GitFault::Unfinished`: Folio's own work failed after git may have
+            // run the verb, so what the repository holds now is git's to say.
             //
             // The refusal itself is no longer filed here (toast ruling,
             // 2026-08-16). It used to be kept as `write_error` until the *next*
@@ -3934,7 +3954,7 @@ impl GitCache {
                 if let Some(name) = verb.ref_subject() {
                     self.pending_refs.remove(name);
                 }
-                if outcome.is_ok() {
+                if outcome.as_ref().err().is_none_or(GitFault::may_have_run) {
                     self.refresh();
                 }
                 true
@@ -3987,7 +4007,9 @@ impl GitCache {
             // status and the whole history the page is drawn from, so everything
             // is asked again; one that git refused changed *nothing at all* —
             // that is what "refused" means here — so the page it was asked from
-            // is still true, and all that is added to it is git's sentence.
+            // is still true, and all that is added to it is git's sentence. A
+            // checkout Folio could not finish (`GitFault::Unfinished`) may have
+            // moved the tree, so it is asked again like a success.
             GitAnswer::Checkout {
                 root,
                 target,
@@ -4000,7 +4022,7 @@ impl GitCache {
                     return false;
                 }
                 self.checkout = None;
-                if outcome.is_ok() {
+                if outcome.as_ref().err().is_none_or(GitFault::may_have_run) {
                     self.refresh();
                 }
                 true
@@ -4042,9 +4064,10 @@ pub fn fault_sentence_in(fault: &GitFault, lang: crate::i18n::Lang) -> String {
         GitFault::NotRun(NotRun::WorkerGone) => crate::i18n::Text::GitNotRunWorkerGone
             .in_lang(lang)
             .to_owned(),
-        GitFault::NotRun(NotRun::Failed) => {
-            crate::i18n::Text::GitNotRunFailed.in_lang(lang).to_owned()
-        }
+        GitFault::NotRun(NotRun::NotStarted) => crate::i18n::Text::GitNotRunNotStarted
+            .in_lang(lang)
+            .to_owned(),
+        GitFault::Unfinished => crate::i18n::Text::GitUnfinished.in_lang(lang).to_owned(),
     }
 }
 
@@ -7427,6 +7450,48 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
             "and the runtime is told so, which is what makes every other surface on this \
              repository re-read too"
         );
+    }
+
+    /// RED (T-GIT-MUTATIONS round 2) — **a verb Folio could not finish reads the repository again;
+    /// a verb Folio never ran does not.**
+    ///
+    /// A stage of `说明 notes.md` whose task panicked after git may have run it comes back
+    /// `GitFault::Unfinished`: its row undims and the page asks for the status again, because what
+    /// the index holds now is git's to say. A stage that never ran (`NotRun::WorkerGone`) undims
+    /// too and asks nothing: nothing in the repository changed.
+    ///
+    /// MUTATION: have `GitFault::may_have_run` answer `false` — the unfinished stage leaves the
+    /// page on its old status.
+    #[test]
+    fn a_verb_folio_could_not_finish_reads_the_repository_again_and_one_never_run_does_not() {
+        let root = PathBuf::from(r"D:\repo");
+        let path = "说明 notes.md".to_owned();
+        for (fault, reads_again) in [
+            (GitFault::Unfinished, true),
+            (GitFault::NotRun(NotRun::WorkerGone), false),
+        ] {
+            let mut cache = rooted_cache(&root);
+            for question in cache.pending_questions() {
+                cache.mark_pending(&question);
+            }
+            cache
+                .begin_write(GitWriteVerb::Stage, vec![path.clone()])
+                .expect("a rooted cache takes the write");
+            assert!(cache.accept(GitAnswer::Write {
+                root: root.clone(),
+                verb: GitWriteVerb::Stage,
+                paths: vec![path.clone()],
+                outcome: Err(fault.clone()),
+            }));
+            assert!(!cache.write_pending(&path), "{fault:?}: the row undims");
+            assert_eq!(
+                cache
+                    .pending_questions()
+                    .contains(&GitQuestion::Status { root: root.clone() }),
+                reads_again,
+                "{fault:?}: whether the page asks for the status again"
+            );
+        }
     }
 
     /// PIN (v2 ④) — **a refusal changes nothing and unpends anyway.**

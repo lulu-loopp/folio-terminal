@@ -324,9 +324,11 @@ impl Runtime<'_> {
             // subsystem was built to prevent. Noted before the answer is
             // filed, because filing moves it.
             let moved = match &answer {
+                // A checkout Folio could not finish (`GitFault::Unfinished`)
+                // may have moved too, and is the same claim.
                 git::GitAnswer::Checkout {
                     root,
-                    outcome: Ok(()),
+                    outcome: Ok(()) | Err(git::GitFault::Unfinished),
                     ..
                 } => Some(root.clone()),
                 // **A ref write is the same claim** (v2 ④): a branch
@@ -338,7 +340,7 @@ impl Runtime<'_> {
                 git::GitAnswer::Write {
                     root,
                     verb,
-                    outcome: Ok(()),
+                    outcome: Ok(()) | Err(git::GitFault::Unfinished),
                     ..
                 } if verb.moves_refs() => Some(root.clone()),
                 _ => None,

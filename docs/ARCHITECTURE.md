@@ -810,7 +810,7 @@ per row.
 |---|---|---|
 | **Window** | native windows, input routing, focus and IME, native view placement, the compositor tree, and applying accepted results | never waits for another lane; work is budgeted across all windows |
 | **OS hand-off** | opening and revealing paths, URLs and system pages; executing an already-decided hand-off | request id plus target incarnation; completion means accepted or refused by the OS, never "the other application finished" |
-| **Storage and integration transactions** | profile and marks changes, registration mutations, document saves and renames, configuration writes | serialize by affected resource; retain operation identity and the durable outcome; do not coalesce commands because their results share a slot |
+| **Storage and integration transactions** | profile and marks changes, registration mutations, document saves and renames, configuration writes; a Git page's writes and checkouts, on their own lane (`git_mutation_lane`, one share per repository) | serialize by affected resource; retain operation identity and the durable outcome; do not coalesce commands because their results share a slot |
 | **Observation and computation** | font and machine probes, file, index and git observations, search, decoding, scaling | versioned requests; bounded queues and memory; latest-result replacement only where the semantics permit; math keeps its stack; potentially stuck filesystem calls stay isolated |
 | **Session transport and lifecycle** | PTY birth, input and output transport, ordered resize, close, retirement | per-session incarnation and operation order; bounded input admission; no driver call while holding a lock the window needs |
 | **Presentation** | surface acquisition, submission and presentation of an admitted frame | surface lease and frame identity; bounded pending picture; asynchronous completion; shared GPU preparation lifetime explicitly serialized |
@@ -1246,17 +1246,24 @@ with its notice. Each share has an adapter in the suite (`LaneName::Computation`
 (T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER, 2026-10-13): a Git page's writes and checkouts left the
 read worker for `bt-app::git_mutation_lane`, one first-in-first-out `lane::Queue` share per
 repository with a ledger and a `bt-git-mutation` worker of its own, made by the repository's first
-press and let go once the window thread holds none of its requests. It keeps the storage rule of
-the table above for git — **serialised per repository**, an identity per verb, every verb's
-outcome kept as its receipt, nothing coalesced — beside the storage worker and not on it: a git
-verb is a command to a program that owns its own files and locks, not a conditional write of bytes
-Folio owns (B6). Its bound is what one Git page can hand it (`MUTATION_BOUND`: a write for each
-status row, `git::GIT_STATUS_CAP`, each held to one in flight, and the page's one checkout); a
-failure, a worker's end and a refusal at the door reach the page as its receipt with
-`GitFault::NotRun`; a closed page's receipt ends in the lane's ignoring sink. The read worker's
-questions take their turn through the lane's `RepoTurns`: a question about a repository runs only
-while its share owes nothing, and a verb starts only while no read of its repository runs, so a
-reading is never taken in the middle of a verb; its adapter is `LaneName::GitMutation`. S-6a and
+press and let go once the window thread holds none of its requests and its ledger owes none — a
+closed page's verb still running keeps its repository's one share, worker and turn. It keeps the
+storage rule of the table above for git — **serialised per repository**, an identity per verb,
+every verb's outcome kept as its receipt, nothing coalesced — beside the storage worker and not on
+it: a git verb is a command to a program that owns its own files and locks, not a conditional
+write of bytes Folio owns (B6). Its bound is what one Git page can hand it (`MUTATION_BOUND`: a
+write for each status row, `git::GIT_STATUS_CAP`, each held to one in flight, and the page's one
+checkout). A verb that never ran — refused at the door, or still in line when its worker ended —
+reaches the page as its receipt with `GitFault::NotRun`; a verb whose task failed, after git may
+have run it, as `GitFault::Unfinished`, and the page reads the repository again; a page that has
+gone — its tab, its floating page or its window — has its receipt end in the lane's ignoring sink.
+The read worker's questions take turns with the verbs through the lane's `RepoTurns`: a question
+waits for the verbs its repository's share had minted when it was asked and for a verb running
+there — at most those verbs, each one git child under `GIT_COMMAND_TIMEOUT` — and a verb pressed
+after it waits for it, so later presses never lengthen a read's wait; a verb starts only while no
+read of its repository runs. A reading is never taken in the middle of a verb. While a question
+waits, the one read worker answers no other repository (T-GIT-READS-PER-REPOSITORY may give reads
+a turn of their own per repository). Its adapter is `LaneName::GitMutation`. S-6a and
 S-7 move the storage worker and the clipboard onto the seam (`docs/ARCHITECTURE-GUARDS.md`,
 *Lane contract and the completion seam*).
 **The return rule:** a lane whose

@@ -1753,9 +1753,12 @@ text_entries! {
     /// A write or checkout whose repository's worker ended before it ran
     /// (`git::NotRun::WorkerGone`).
     GitNotRunWorkerGone,
-    /// A write or checkout whose work failed inside Folio
-    /// (`git::NotRun::Failed`).
-    GitNotRunFailed,
+    /// A write or checkout whose worker could not be started
+    /// (`git::NotRun::NotStarted`).
+    GitNotRunNotStarted,
+    /// A write or checkout whose work failed inside Folio after git may have
+    /// run it (`git::GitFault::Unfinished`); the page is read again.
+    GitUnfinished,
     /// The fifth of the worker sentences, in the shape the other four wear: a
     /// worker dying is a feature going away, and the line has to say which half
     /// still works.
@@ -4619,10 +4622,15 @@ impl Text {
                 "Git actions in this repository stopped; this one was not run",
                 "Git actions in this repository stopped; this one was not run", // zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER
             ),
-            Self::GitNotRunFailed => pick(
+            Self::GitNotRunNotStarted => pick(
                 lang,
-                "Folio could not finish this git action",
-                "Folio could not finish this git action", // zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER
+                "Folio could not start this git action",
+                "Folio could not start this git action", // zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER
+            ),
+            Self::GitUnfinished => pick(
+                lang,
+                "Folio could not finish this git action; the page was read again",
+                "Folio could not finish this git action; the page was read again", // zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER
             ),
             Self::GitWorkerStopped => pick(
                 lang,
@@ -6571,13 +6579,15 @@ impl Text {
         (Self::MergeClauseSeparator, HostPlatform::Windows),
         (Self::MergeClauseSeparator, HostPlatform::MacOs),
         // zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER — a Git page's write or checkout Folio
-        // did not run: the repository's lane full, its worker gone, or the work failed.
+        // did not run (the repository's lane full, its worker gone or not started) or did not finish.
         (Self::GitNotRunFull, HostPlatform::Windows),
         (Self::GitNotRunFull, HostPlatform::MacOs),
         (Self::GitNotRunWorkerGone, HostPlatform::Windows),
         (Self::GitNotRunWorkerGone, HostPlatform::MacOs),
-        (Self::GitNotRunFailed, HostPlatform::Windows),
-        (Self::GitNotRunFailed, HostPlatform::MacOs),
+        (Self::GitNotRunNotStarted, HostPlatform::Windows),
+        (Self::GitNotRunNotStarted, HostPlatform::MacOs),
+        (Self::GitUnfinished, HostPlatform::Windows),
+        (Self::GitUnfinished, HostPlatform::MacOs),
     ];
 }
 

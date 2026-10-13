@@ -26,11 +26,15 @@
 //! * **Ordering.** First in, first out per repository: a request runs, and ends, after every request
 //!   of its repository minted before it. **Nothing is coalesced**: two presses are two requests,
 //!   two runs and two terminals, and a checkout after a write waits for the write.
-//! * **Reads wait their turn** ([`RepoTurns`]). A question on the read worker about a repository
-//!   runs only while that repository's share owes nothing — a request is owed from its admission,
-//!   so a read asked after a press never runs in the middle of the verb — and a verb starts only
-//!   while no read of its repository is running. Both waits are on workers; each is as long as the
-//!   other side's one git child, which [`crate::git::GIT_COMMAND_TIMEOUT`] bounds.
+//! * **Reads take turns with verbs** ([`RepoTurns`]). A question on the read worker about a
+//!   repository waits for the verbs its share had minted when the question was asked — a request
+//!   is minted at the press, so a read asked after a press never runs in the middle of that verb —
+//!   and for a verb running there; a verb pressed after the read was asked waits for the read
+//!   instead, so later presses never lengthen a read's wait. A verb starts only while no read of
+//!   its repository runs. Both waits are on workers. A read waits at most the verbs owed when it
+//!   was asked, each one git child bounded by [`crate::git::GIT_COMMAND_TIMEOUT`] (up to
+//!   [`MUTATION_BOUND`] of them); while it waits, the one read worker answers no other repository
+//!   either. A verb waits at most the one read running, or the reads asked before it was pressed.
 //! * **Capacity.** A share owes at most [`MUTATION_BOUND`] requests, a terminal not yet taken
 //!   holding its place: what one Git page can hand it at once. A request past it — or asked of a
 //!   share whose worker has ended — is refused at the door, synchronously, with no identity minted
@@ -39,22 +43,27 @@
 //! * **Completion.** `Done` carries git's receipt (`GitAnswer::Write` / `::Checkout`): a verb git
 //!   refused is that receipt's own error, in git's words. A panic in one request's work is that
 //!   request's `Failed`, caught by its [`crate::lane::task`] and said once by the share's ledger;
-//!   the worker goes on. A worker's end ends every request of that share still owed `WorkerGone`,
-//!   faults the share and wakes the loop. Each of those, and a refusal at the door, reaches the page
-//!   as the receipt of its question with [`GitFault::NotRun`] ([`receipt`]): the rows undim and
-//!   the notice says Folio did not run it.
+//!   the worker goes on, and the page files it as [`GitFault::Unfinished`] — git may have run the
+//!   verb before the panic, so the rows undim and the page reads the repository again. A worker's
+//!   end ends every request of that share still in line `WorkerGone`, faults the share and wakes
+//!   the loop; those, and a refusal at the door, never ran, and reach the page as
+//!   [`GitFault::NotRun`] ([`receipt`]): the rows undim and the notice says Folio did not run it.
 //! * **Abandonment.** A request whose page has gone — its tab closed, its floating window
-//!   dismissed — is let go by the drain before it takes anything; its terminal, now or when it
-//!   comes, goes to the lane's sink, which ignores it (C6): the verb has run, nobody is left to
-//!   undim, and a failure in it was said by the ledger. A column closed inside a tab that stays open
-//!   is the tab's: its receipt reaches the tab, which finds no column to file it in.
+//!   dismissed or its window closed — is let go by the drain before it takes anything; its
+//!   terminal, now or when it comes, goes to the lane's sink, which ignores it (C6): nobody is left
+//!   to undim, and a failure in it was said by the ledger. A column closed inside a tab that stays
+//!   open is the tab's: its receipt reaches the tab, which finds no column to file it in.
 //! * **Lifetime.** A share is made by the first request for its repository and let go by the drain
-//!   once the window thread holds none of its requests: its worker runs what is in line — nothing —
-//!   and returns. The next press on that repository makes a new share, of a new generation.
+//!   once the window thread holds none of its requests **and its ledger owes none** — a let-go
+//!   request still running or in line keeps its share, its one worker and its place in the
+//!   turnstile until its terminal has reached the sink, and that terminal's wake brings the drain
+//!   that lets the share go. Its worker then runs what is in line — nothing — and returns, and the
+//!   next press on that repository makes a new share, of a new generation; one repository never has
+//!   two workers with verbs.
 //! * **Wake.** Each worker publishes the terminal first and then wakes the loop
 //!   (`AppEvent::GitReady`, the read worker's own wake); each ledger wakes it the same way when its
-//!   worker ends. Every wake also tells the read worker's turn ([`RepoTurns`]) that what a
-//!   repository owes may have changed.
+//!   worker ends with requests owed. Every wake also tells the read worker's turn ([`RepoTurns`])
+//!   that what a repository owes may have changed.
 
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
@@ -62,7 +71,6 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use bt_platform::admission::WorkerCtx;
 
-use crate::AnswerOwner;
 use crate::git::{self, GitAnswer, GitFault, GitQuestion, GitRequest, GitResponse, NotRun};
 use crate::lane::{self, Executor, Ledger, Owed, Queue, Refused, Relation, Saying, Terminal};
 
@@ -172,42 +180,95 @@ pub(crate) struct RepoTurns {
 struct TurnState {
     /// Each repository's share's ledger, while it has a share.
     shares: Vec<(PathBuf, Arc<MutationLedger>)>,
+    /// The reads asked and not yet run, each with the verbs it waits for.
+    asked: Vec<Asked>,
+    /// How many reads have been asked: the last read's number.
+    reads: u64,
     /// The folders a read is running in.
     reading: Vec<PathBuf>,
-    /// How many reads wait their turn now — where a test sees a read wait.
+    /// The folders a verb is running in.
+    running: Vec<PathBuf>,
+    /// How many verbs wait their turn now — where a test sees a verb wait.
     #[cfg(test)]
-    reads_waiting: usize,
+    verbs_waiting: usize,
+}
+
+/// **A read asked and not yet run**: its folder, and the verbs it waits for — every one its
+/// folder's share had minted when the read was asked, named by that share's ledger and the last
+/// number it had minted; none when the folder had no share or the share had minted nothing.
+struct Asked {
+    read: u64,
+    folder: PathBuf,
+    behind: Option<(Arc<MutationLedger>, Minted)>,
+}
+
+impl Asked {
+    /// Whether a verb this read waits for is still owed.
+    fn behind_a_verb(&self) -> bool {
+        self.behind
+            .as_ref()
+            .is_some_and(|(ledger, last)| ledger.earliest_owed().is_some_and(|owed| owed <= *last))
+    }
+
+    /// Whether the verb `running` — the earliest `ledger` owes — is one this read waits for.
+    fn waits_for(&self, ledger: &Arc<MutationLedger>, running: Option<Minted>) -> bool {
+        self.behind.as_ref().is_some_and(|(behind, last)| {
+            Arc::ptr_eq(behind, ledger) && running.is_some_and(|running| running <= *last)
+        })
+    }
 }
 
 impl TurnState {
-    fn owes(&self, folder: &Path) -> bool {
+    fn share(&self, folder: &Path) -> Option<&Arc<MutationLedger>> {
         self.shares
             .iter()
-            .any(|(root, ledger)| same_folder(root, folder) && ledger.earliest_owed().is_some())
+            .find(|(root, _)| same_folder(root, folder))
+            .map(|(_, ledger)| ledger)
     }
 
     fn reading(&self, folder: &Path) -> bool {
         self.reading.iter().any(|at| same_folder(at, folder))
     }
+
+    fn running(&self, folder: &Path) -> bool {
+        self.running.iter().any(|at| same_folder(at, folder))
+    }
+
+    /// Whether the read numbered `read` must still wait: a verb it waits for is owed, or a verb
+    /// runs in its folder.
+    fn read_waits(&self, read: u64) -> bool {
+        self.asked
+            .iter()
+            .find(|asked| asked.read == read)
+            .is_some_and(|asked| asked.behind_a_verb() || self.running(&asked.folder))
+    }
+
+    /// Whether the verb `ledger` runs now in `folder` must still wait: a read of the folder runs, or
+    /// a read of it was asked before the verb was pressed (one that does not wait for it).
+    fn verb_waits(&self, folder: &Path, ledger: &Arc<MutationLedger>) -> bool {
+        let running = ledger.earliest_owed();
+        self.reading(folder)
+            || self.asked.iter().any(|asked| {
+                same_folder(&asked.folder, folder) && !asked.waits_for(ledger, running)
+            })
+    }
 }
 
-/// A read's mark in the turnstile, taken off when the read is over — its answer sent, or its work
-/// unwound.
-struct Reading<'a> {
+/// A turn's mark in the turnstile — a read or a verb running in a folder — taken off when it is
+/// over, or its work unwound.
+struct Turn<'a> {
     turns: &'a RepoTurns,
     folder: &'a Path,
+    of: fn(&mut TurnState) -> &mut Vec<PathBuf>,
 }
 
-impl Drop for Reading<'_> {
+impl Drop for Turn<'_> {
     fn drop(&mut self) {
         {
             let mut state = locked(&self.turns.state);
-            if let Some(at) = state
-                .reading
-                .iter()
-                .position(|at| same_folder(at, self.folder))
-            {
-                state.reading.remove(at);
+            let marks = (self.of)(&mut state);
+            if let Some(at) = marks.iter().position(|at| same_folder(at, self.folder)) {
+                marks.remove(at);
             }
         }
         self.turns.changed.notify_all();
@@ -223,9 +284,10 @@ impl RepoTurns {
     }
 
     /// **The read worker's turn on `folder`** (`worker`, the capability the thread door lent it):
-    /// waits while the folder's share owes a mutation, then runs `question` — the question and the
-    /// sending of its answer — with the folder marked as being read, so no mutation of it starts
-    /// until `question` is over.
+    /// waits until every verb the folder's share had minted when the read was asked has ended and
+    /// no verb runs there, then runs `question` — the question and the sending of its answer — with
+    /// the folder marked as being read, so no verb of it starts until `question` is over. A verb
+    /// pressed after the read was asked does not lengthen the wait: it waits for the read.
     pub(crate) fn question_turn<T>(
         &self,
         worker: &WorkerCtx,
@@ -235,43 +297,70 @@ impl RepoTurns {
         let _ = worker;
         {
             let mut state = locked(&self.state);
-            #[cfg(test)]
-            {
-                state.reads_waiting += 1;
-            }
-            while state.owes(folder) {
+            state.reads += 1;
+            let read = state.reads;
+            let behind = state
+                .share(folder)
+                .and_then(|ledger| ledger.last_minted().map(|last| (Arc::clone(ledger), last)));
+            state.asked.push(Asked {
+                read,
+                folder: folder.to_path_buf(),
+                behind,
+            });
+            while state.read_waits(read) {
                 state = self
                     .changed
                     .wait(state)
                     .unwrap_or_else(PoisonError::into_inner);
             }
-            #[cfg(test)]
-            {
-                state.reads_waiting -= 1;
-            }
+            state.asked.retain(|asked| asked.read != read);
             state.reading.push(folder.to_path_buf());
         }
-        let _reading = Reading {
+        // Verbs waiting on this read as asked look again: it is running now.
+        self.changed.notify_all();
+        let _reading = Turn {
             turns: self,
             folder,
+            of: |state| &mut state.reading,
         };
         question()
     }
 
-    /// **A share worker's turn on `folder`**: waits while a read of the folder is running, then
-    /// runs `verb`. No read of the folder starts meanwhile: the request running is owed until its
-    /// terminal is published.
-    fn verb_turn<T>(&self, worker: &WorkerCtx, folder: &Path, verb: impl FnOnce() -> T) -> T {
+    /// **A share worker's turn on `folder`** for the verb its ledger owes first (`ledger`): waits
+    /// while a read of the folder runs, or while a read of it asked before the verb was pressed
+    /// waits its own turn; then runs `verb` with the folder marked as running a verb, so no read of
+    /// it starts until `verb` is over.
+    fn verb_turn<T>(
+        &self,
+        worker: &WorkerCtx,
+        folder: &Path,
+        ledger: &Arc<MutationLedger>,
+        verb: impl FnOnce() -> T,
+    ) -> T {
         let _ = worker;
         {
             let mut state = locked(&self.state);
-            while state.reading(folder) {
+            #[cfg(test)]
+            {
+                state.verbs_waiting += 1;
+            }
+            while state.verb_waits(folder, ledger) {
                 state = self
                     .changed
                     .wait(state)
                     .unwrap_or_else(PoisonError::into_inner);
             }
+            #[cfg(test)]
+            {
+                state.verbs_waiting -= 1;
+            }
+            state.running.push(folder.to_path_buf());
         }
+        let _running = Turn {
+            turns: self,
+            folder,
+            of: |state| &mut state.running,
+        };
         verb()
     }
 
@@ -301,7 +390,13 @@ impl RepoTurns {
     /// How many reads wait their turn now.
     #[cfg(test)]
     fn reads_waiting(&self) -> usize {
-        locked(&self.state).reads_waiting
+        locked(&self.state).asked.len()
+    }
+
+    /// How many verbs wait their turn now.
+    #[cfg(test)]
+    fn verbs_waiting(&self) -> usize {
+        locked(&self.state).verbs_waiting
     }
 }
 
@@ -320,11 +415,11 @@ struct Share {
 
 impl Share {
     /// Let go of every request whose page has `gone`: each one's terminal goes to the sink.
-    fn let_go(&mut self, gone: &impl Fn(AnswerOwner) -> bool) {
+    fn let_go(&mut self, gone: &impl Fn(&GitRequest) -> bool) {
         let numbers: Vec<Minted> = self
             .held
             .iter()
-            .filter(|(_, (_, request))| gone(request.owner()))
+            .filter(|(_, (_, request))| gone(request))
             .map(|(minted, _)| *minted)
             .collect();
         // Each request dropped hands its terminal to the sink, now or when it comes.
@@ -353,22 +448,6 @@ impl Share {
                 };
                 into.push((id, terminal, request));
             }
-        }
-    }
-}
-
-/// **How a share's worker reports its end** to the share's ledger ([`lane::Ran`]): a worker that
-/// panicked, or was never started, is reported as the seam reports it — every request it owed
-/// ends `WorkerGone` and the loop is woken. A body that returned did so because the drain let its
-/// share go ([`GitMutationLane::ended`], [`Queue::close`]) with nothing held and nothing owed: no
-/// request ends with it and nobody is left to tell, so it is not reported, and its share — gone
-/// from the lane already — wakes nobody.
-struct Ending(Arc<lane::Ran<Minted, Asker>>);
-
-impl lane::Ends for Ending {
-    fn worker_ended(&self, cause: lane::WorkerEnd) {
-        if cause != lane::WorkerEnd::Returned {
-            lane::Ends::worker_ended(&*self.0, cause);
         }
     }
 }
@@ -482,6 +561,7 @@ impl GitMutationLane {
             sink: Arc::clone(&self.sink),
         };
         let queue = Arc::clone(&share.queue);
+        let ledger = Arc::clone(share.queue.ledger());
         let turns = Arc::clone(&self.turns);
         let wake = Arc::clone(&self.wake);
         let held = match share.queue.ask(
@@ -490,15 +570,14 @@ impl GitMutationLane {
             |_, _| Relation::Other,
             |ran| {
                 self.executor
-                    .start_worker("bt-git-mutation", Arc::new(Ending(ran)), move |ctx| {
+                    .start_worker("bt-git-mutation", ran, move |ctx| {
                         let mut door = make(ctx);
                         queue.serve(
                             ctx,
                             |ctx, question| {
-                                Ok(
-                                    turns
-                                        .verb_turn(ctx, question.folder(), || door(ctx, &question)),
-                                )
+                                Ok(turns.verb_turn(ctx, question.folder(), &ledger, || {
+                                    door(ctx, &question)
+                                }))
                             },
                             &*wake,
                         );
@@ -538,9 +617,12 @@ impl GitMutationLane {
 
     /// **The window thread's drain**: first every request whose page has `gone` is let go — its
     /// terminal, now or when it comes, goes to the sink — then every terminal each share holds
-    /// below its drain mark is taken, share by share, each in mint order; a share left holding
-    /// nothing is let go (its worker returns, owing nothing). One lock; never waits for a worker.
-    pub(crate) fn ended(&self, gone: impl Fn(AnswerOwner) -> bool) -> Vec<Ended> {
+    /// below its drain mark is taken, share by share, each in mint order. A share that holds
+    /// nothing **and owes nothing** is let go (its worker returns, owing nothing): a let-go request
+    /// still running or in line is still owed, and its share — its one worker, and its place in the
+    /// turnstile — stays until the request's terminal has reached the sink, whose wake brings the
+    /// drain that lets it go. One lock; never waits for a worker.
+    pub(crate) fn ended(&self, gone: impl Fn(&GitRequest) -> bool) -> Vec<Ended> {
         let mut shares = locked(&self.shares);
         let mut ended = Vec::new();
         for share in &mut shares.live {
@@ -549,7 +631,9 @@ impl GitMutationLane {
         }
         let (idle, live): (Vec<Share>, Vec<Share>) = std::mem::take(&mut shares.live)
             .into_iter()
-            .partition(|share| share.held.is_empty());
+            .partition(|share| {
+                share.held.is_empty() && share.queue.ledger().earliest_owed().is_none()
+            });
         shares.live = live;
         drop(shares);
         for share in idle {
@@ -582,14 +666,16 @@ impl Drop for GitMutationLane {
 }
 
 /// **The receipt a terminal is, for the page that asked**: git's own receipt when the verb ran
-/// (`Done`, or the receipt a request joined to it carries); otherwise the receipt of its question
-/// with [`GitFault::NotRun`] — `Failed` for a panic in its work, `WorkerGone` for a worker that
-/// ended with it owed — so the rows it dimmed undim, and the notice says Folio did not run it.
+/// (`Done`, or the receipt a request joined to it carries); `Failed` — a panic in its task, which
+/// may come after git ran it — is the receipt with [`GitFault::Unfinished`], so the rows undim and
+/// the page reads the repository again; `WorkerGone` — a verb still in line when its worker ended,
+/// never started — is the receipt with [`GitFault::NotRun`], so the rows undim and the notice says
+/// Folio did not run it.
 pub(crate) fn receipt(terminal: MutationTerminal, request: GitRequest) -> GitResponse {
     let answer = match terminal {
         Terminal::Done(answer) => answer,
         Terminal::Joined { outcome, .. } => return receipt(*outcome, request),
-        Terminal::Failed(_) => git::faulted(&request.question, GitFault::NotRun(NotRun::Failed)),
+        Terminal::Failed(_) => git::faulted(&request.question, GitFault::Unfinished),
         Terminal::WorkerGone => {
             git::faulted(&request.question, GitFault::NotRun(NotRun::WorkerGone))
         }
@@ -605,13 +691,13 @@ pub(crate) fn receipt(terminal: MutationTerminal, request: GitRequest) -> GitRes
 }
 
 /// **The receipt a refusal at the door is**: the request's question with [`GitFault::NotRun`] —
-/// `Full` past the bound, `WorkerGone` for a share whose worker has ended, `Failed` for a worker
+/// `Full` past the bound, `WorkerGone` for a share whose worker has ended, `NotStarted` for a worker
 /// the thread door would not start — filed by the page at once, so its rows undim.
 pub(crate) fn refusal(refused: &Refused, request: GitRequest) -> GitResponse {
     let why = match refused {
         Refused::Full { .. } => NotRun::Full,
         Refused::Faulted(_) => NotRun::WorkerGone,
-        Refused::NotStarted(_) => NotRun::Failed,
+        Refused::NotStarted(_) => NotRun::NotStarted,
         Refused::TwinEnded => unreachable!("the git mutation lane joins nothing"),
     };
     GitResponse {
@@ -822,7 +908,9 @@ pub(crate) mod contract_adapter {
                 .map(|target| tab_of(*target))
                 .collect();
             self.lane
-                .ended(|owner| !claimed_by(owner, adapter_window(), open.iter().copied()))
+                .ended(|request| {
+                    !claimed_by(request.owner(), adapter_window(), open.iter().copied())
+                })
                 .into_iter()
                 .map(|(id, terminal, request)| match &terminal {
                     Terminal::Done(GitAnswer::Write { paths, .. }) => {
@@ -911,7 +999,7 @@ mod tests {
         fn terminal(
             &mut self,
             id: MutationId,
-            gone: impl Fn(AnswerOwner) -> bool,
+            gone: impl Fn(&GitRequest) -> bool,
         ) -> (MutationTerminal, GitRequest) {
             loop {
                 let ended = self.lane.ended(&gone);
@@ -933,7 +1021,7 @@ mod tests {
         }
     }
 
-    fn nobody(_: AnswerOwner) -> bool {
+    fn nobody(_: &GitRequest) -> bool {
         false
     }
 
@@ -1199,7 +1287,7 @@ mod tests {
             .ask_through(stage(3, root, "三 three.md"), through)
             .expect("admitted");
         gate.release();
-        let gone = |owner| owner == AnswerOwner::Tab(TabId(2));
+        let gone = |request: &GitRequest| request.host == column(2);
         for id in [running, open] {
             let (_, asked) = lane.terminal(id, gone);
             assert_ne!(
@@ -1291,8 +1379,8 @@ mod tests {
     /// left waiting on a share that can no longer answer, and the next press on the repository —
     /// a new request, not a retry — is run by a new worker.
     ///
-    /// MUTATION: hand `start_worker` an `Ends` that ignores the worker's end in place of `ran`
-    /// (`GitMutationLane::ask_through`) — no terminal comes, and the read waits.
+    /// MUTATION: in `GitMutationLane::ask_through`, hand `start_worker` an `Ends` that ignores every
+    /// end in place of `ran` — no terminal comes within the lane suite's patience.
     #[test]
     fn the_git_workers_death_ends_its_owed_mutations_as_worker_gone() {
         let gate = Arc::new(Gate::default());
@@ -1325,9 +1413,13 @@ mod tests {
                 "the page files Folio's refusal: {receipt:?}"
             );
         }
-        assert!(
-            lane.said().iter().any(|line| line.contains("WorkerGone")),
-            "the death is said once"
+        assert_eq!(
+            lane.said()
+                .iter()
+                .filter(|line| line.contains("WorkerGone"))
+                .count(),
+            1,
+            "the death is said exactly once"
         );
         let log = Arc::new(Mutex::new(Vec::new()));
         let (done, read) = mpsc::channel();
@@ -1338,5 +1430,238 @@ mod tests {
             .ask_through(stage(1, root, "丁 d.md"), through)
             .expect("the next press is a new request");
         assert!(matches!(lane.terminal(next, nobody).0, Terminal::Done(_)));
+    }
+
+    /// A read's turn on `folder`, taken on a worker of its own, that logs `read start`, stands in
+    /// `hold`, then logs `read end` — a read whose git child is still running — and says so on
+    /// `done`.
+    fn standing_read(
+        turns: Arc<RepoTurns>,
+        folder: &str,
+        log: Arc<Mutex<Vec<String>>>,
+        hold: Arc<Hold>,
+        done: mpsc::Sender<()>,
+    ) {
+        let folder = PathBuf::from(folder);
+        bt_platform::spawn_at_priority(
+            "git-mutation-lane-test-read",
+            bt_platform::ThreadPriority::Normal,
+            move |ctx| {
+                turns.question_turn(ctx, &folder, || {
+                    locked(&log).push("read start".to_owned());
+                    hold.pass();
+                    locked(&log).push("read end".to_owned());
+                });
+                let _ = done.send(());
+            },
+        )
+        .expect("the test's reader starts");
+    }
+
+    /// RED (T-GIT-MUTATIONS round 2, B1) — **A closed page's verb still running keeps its
+    /// repository's one share: a read of the repository waits for it, and the next press runs
+    /// after it, on the same worker.**
+    ///
+    /// The page in tab 2 stages `草稿 draft.md` and closes while git is at it; the drain lets the
+    /// request go to the sink. The share still owes the verb, so it is not let go: a read of the
+    /// repository asked now waits, and a press from tab 3 — `终稿 final.md`, after the read — is
+    /// minted in the same share (one worker) and runs after the read, which runs after the
+    /// closed page's verb. The closed page's receipt reaches the sink once.
+    ///
+    /// MUTATION: let a share go when it holds nothing, whatever its ledger owes (drop
+    /// `&& share.queue.ledger().earliest_owed().is_none()` in `GitMutationLane::ended`) — the next
+    /// press is minted in a new share, with a second worker.
+    #[test]
+    fn a_closed_pages_running_verb_keeps_its_repositorys_one_share_and_turn() {
+        let mut lane = watched(Executor::scripted(Arc::new(Gate::default())));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let hold = Arc::new(Hold::default());
+        hold.hold();
+        let root = "仓库 repo";
+        let door = || logging(Arc::clone(&log), Arc::clone(&hold), PathBuf::from(root));
+        let closed = lane
+            .lane
+            .ask_through(stage(2, root, "草稿 draft.md"), door())
+            .expect("admitted");
+        hold.wait_standing("the closed page's verb running");
+        assert!(
+            lane.lane
+                .ended(|request| request.host == column(2))
+                .is_empty(),
+            "nothing has ended yet"
+        );
+        let (done, read) = mpsc::channel();
+        read_on_a_worker(Arc::clone(lane.lane.turns()), root, Arc::clone(&log), done);
+        lane::wait_until("the read waiting its turn, or run", || {
+            lane.lane.turns().reads_waiting() == 1 || locked(&log).iter().any(|line| line == "read")
+        });
+        let next = lane
+            .lane
+            .ask_through(stage(3, root, "终稿 final.md"), door())
+            .expect("admitted");
+        assert_eq!(
+            next.share, closed.share,
+            "the next press is minted in the repository's one share, run by its one worker"
+        );
+        hold.release();
+        lane::receive(&read, "the read's turn");
+        let gone = |request: &GitRequest| request.host == column(2);
+        assert!(matches!(lane.terminal(next, gone).0, Terminal::Done(_)));
+        assert_eq!(
+            *locked(&log),
+            [
+                "start 草稿 draft.md",
+                "end 草稿 draft.md",
+                "read",
+                "start 终稿 final.md",
+                "end 终稿 final.md",
+            ],
+            "the read after the closed page's verb, the next press after the read"
+        );
+        assert_eq!(
+            lane.sunk().iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            [closed],
+            "the closed page's receipt reaches the sink, once"
+        );
+    }
+
+    /// RED (T-GIT-MUTATIONS round 2, B2) — **A read waits for the verbs owed when it was asked,
+    /// and not for presses made after it.**
+    ///
+    /// A stage of `一 one.md` runs; a read of the repository is asked; then `二 two.md` and
+    /// `三 three.md` are pressed. The read runs as soon as the first verb has ended, before the two
+    /// pressed after it: later presses never lengthen a read's wait.
+    ///
+    /// MUTATION: have `Asked::behind_a_verb` answer while the share owes anything
+    /// (`ledger.earliest_owed().is_some()`, round 1's rule) — the read waits for the later presses,
+    /// which wait for the read, and nothing comes within the lane suite's patience.
+    #[test]
+    fn a_read_waits_for_the_verbs_owed_when_it_was_asked_not_for_later_presses() {
+        let mut lane = watched(Executor::scripted(Arc::new(Gate::default())));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let hold = Arc::new(Hold::default());
+        hold.hold();
+        let root = "仓库 repo";
+        let door = || logging(Arc::clone(&log), Arc::clone(&hold), PathBuf::from(root));
+        let first = lane
+            .lane
+            .ask_through(stage(1, root, "一 one.md"), door())
+            .expect("admitted");
+        hold.wait_standing("the first verb running");
+        let (done, read) = mpsc::channel();
+        read_on_a_worker(Arc::clone(lane.lane.turns()), root, Arc::clone(&log), done);
+        lane::wait_until("the read waiting its turn, or run", || {
+            lane.lane.turns().reads_waiting() == 1 || locked(&log).iter().any(|line| line == "read")
+        });
+        let later: Vec<MutationId> = ["二 two.md", "三 three.md"]
+            .into_iter()
+            .map(|path| {
+                lane.lane
+                    .ask_through(stage(1, root, path), door())
+                    .expect("admitted")
+            })
+            .collect();
+        hold.release();
+        lane::receive(&read, "the read's turn");
+        for id in std::iter::once(first).chain(later) {
+            assert!(matches!(lane.terminal(id, nobody).0, Terminal::Done(_)));
+        }
+        assert_eq!(
+            *locked(&log),
+            [
+                "start 一 one.md",
+                "end 一 one.md",
+                "read",
+                "start 二 two.md",
+                "end 二 two.md",
+                "start 三 three.md",
+                "end 三 three.md",
+            ],
+            "the read after the verb owed when it was asked, before the presses after it"
+        );
+    }
+
+    /// RED (T-GIT-MUTATIONS round 2, B3) — **A verb pressed while a read of its repository runs
+    /// starts only after the read's answer is sent.**
+    ///
+    /// A read of the repository is running — its git child not yet done — when a checkout of
+    /// `修复/fix` is pressed. The checkout is seen waiting its turn, and its child starts only
+    /// after the read has ended: a checkout under a running `status` would tear the reading.
+    ///
+    /// MUTATION: have `RepoTurns::verb_turn` not wait (drop its `while state.verb_waits(…)` loop)
+    /// — the checkout starts while the read stands.
+    #[test]
+    fn a_verb_waits_for_the_read_running_in_its_repository() {
+        let mut lane = watched(Executor::scripted(Arc::new(Gate::default())));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let hold = Arc::new(Hold::default());
+        hold.hold();
+        let root = "仓库 repo";
+        let (done, read) = mpsc::channel();
+        standing_read(
+            Arc::clone(lane.lane.turns()),
+            root,
+            Arc::clone(&log),
+            Arc::clone(&hold),
+            done,
+        );
+        hold.wait_standing("the read running");
+        let checkout = lane
+            .lane
+            .ask_through(
+                checkout(1, root, "修复/fix"),
+                logging(
+                    Arc::clone(&log),
+                    Arc::clone(&hold),
+                    PathBuf::from("别处 elsewhere"),
+                ),
+            )
+            .expect("admitted");
+        lane::wait_until("the checkout waiting its turn, or started", || {
+            lane.lane.turns().verbs_waiting() == 1
+                || locked(&log).iter().any(|line| line == "start 修复/fix")
+        });
+        hold.release();
+        lane::receive(&read, "the read's end");
+        assert!(matches!(
+            lane.terminal(checkout, nobody).0,
+            Terminal::Done(_)
+        ));
+        assert_eq!(
+            *locked(&log),
+            ["read start", "read end", "start 修复/fix", "end 修复/fix"],
+            "the checkout's child started after the read had ended"
+        );
+    }
+
+    /// RED (T-GIT-MUTATIONS round 2) — **a verb's panic is contained under the resident panic
+    /// hook.** The product's hook ends the process for a panic it is not told is contained, before
+    /// any catch runs; the lane's door is called inside the seam's task, so the hook's decision
+    /// there is yes and a panicking verb is that request's `Failed`, not the end of Folio.
+    ///
+    /// MUTATION: run both the seam's task and its worker body under `catch_unwind` instead of
+    /// `contained_panic::contain` (`lane::task`, `Executor::start_worker`), and the decision at the
+    /// door is no.
+    #[test]
+    fn a_verbs_panic_is_contained_under_the_resident_hook() {
+        let (told, heard) = mpsc::channel();
+        let told = Mutex::new(told);
+        let mut lane = watched(Executor::thread_door(
+            bt_platform::ThreadPriority::BelowNormal,
+        ));
+        let id = lane
+            .lane
+            .ask_through(stage(1, "仓库 repo", "钩子 hook.md"), move |_| {
+                Box::new(move |_: &WorkerCtx, question: &GitQuestion| {
+                    let _ = locked(&told).send(crate::the_hook_lets_this_panic_unwind());
+                    went_through(question)
+                })
+            })
+            .expect("admitted");
+        assert!(
+            lane::receive(&heard, "the door's decision"),
+            "the door runs where the hook lets a panic unwind"
+        );
+        assert!(matches!(lane.terminal(id, nobody).0, Terminal::Done(_)));
     }
 }
