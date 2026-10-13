@@ -75,7 +75,8 @@ pub(crate) struct Account {
     pub(crate) kept: usize,
     /// How many units both sides changed to two values; the file won each.
     pub(crate) conflicted: usize,
-    /// Those units, named.
+    /// Those units, named. Units that share a row (the terminal font's three)
+    /// are named once, so [`Self::conflicted`] can exceed the names.
     pub(crate) conflicts: Vec<String>,
 }
 
@@ -379,6 +380,10 @@ pub(crate) struct SettingsPass {
     pub(crate) doors: SettingsPlan,
     /// Every merge of the pass, summed.
     pub(crate) account: Account,
+    /// **What a cancelled quit's documents phase merged**, put in force by this
+    /// pass: named on the card, and not counted in this pass's line — the quit
+    /// said it when it merged ([`Account::said`]).
+    pub(crate) at_quit: Account,
     /// The units a door did not put in force, named by row, with why
     /// ([`run_pass`]).
     pub(crate) refused: Vec<(String, String)>,
@@ -388,11 +393,13 @@ pub(crate) struct SettingsPass {
 }
 
 impl SettingsPass {
-    /// A pass over `doors`, with `account` to say; no door walked yet.
-    pub(crate) fn new(doors: SettingsPlan, account: Account) -> Self {
+    /// A pass over `doors`, with `account` to say and what a quit merged,
+    /// `at_quit`, to name; no door walked yet.
+    pub(crate) fn new(doors: SettingsPlan, account: Account, at_quit: Account) -> Self {
         Self {
             doors,
             account,
+            at_quit,
             refused: Vec::new(),
             noted: Vec::new(),
         }
@@ -403,12 +410,9 @@ impl SettingsPass {
     /// answered after putting its unit in force.
     pub(crate) fn diagnostics(&self) -> String {
         let mut line = format!(
-            "BT_PERSIST {} merged: took {} from the file, kept {} from Folio, conflicts {}, \
-             doors refused: {}",
-            crate::persist::SETTINGS_FILE_NAME,
-            self.account.took,
-            self.account.kept,
-            self.account.conflicted,
+            "{}, doors refused: {}",
+            self.account
+                .said(crate::persist::SETTINGS_FILE_NAME, Said::InThePass),
             self.refused.len()
         );
         for (name, why) in &self.refused {
@@ -422,9 +426,11 @@ impl SettingsPass {
 
     /// **What the pass replaced and could not apply, for its card** (§3.6):
     /// nothing for a clean hand edit; otherwise the file, each value it won
-    /// over Folio's, and each value whose door refused it, each named once.
+    /// over Folio's — in this pass, or in the cancelled quit this pass puts in
+    /// force — and each value whose door refused it, each named once.
     pub(crate) fn replaced(&self) -> Option<ReplacedInFile> {
-        if self.account.conflicts.is_empty() && self.refused.is_empty() {
+        let values = conflicts_of(&self.at_quit, &self.account);
+        if values.is_empty() && self.refused.is_empty() {
             return None;
         }
         let mut not_applied = Vec::new();
@@ -433,7 +439,7 @@ impl SettingsPass {
         }
         Some(ReplacedInFile {
             file: crate::persist::SETTINGS_FILE_NAME,
-            values: self.account.conflicts.clone(),
+            values,
             not_applied,
         })
     }
@@ -532,7 +538,45 @@ pub(crate) fn run_pass(window: &mut impl MergeWindow) -> PassOutcome {
     }
 }
 
+/// **When a merge's counts are said**: in a storage pass, or in a quit's
+/// documents phase, which merges without its doors (T-STORE-NOTICE).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Said {
+    InThePass,
+    AtQuit,
+}
+
+/// **Each value the file won**, named once: what a cancelled quit merged first,
+/// then what the pass merged.
+pub(crate) fn conflicts_of(at_quit: &Account, pass: &Account) -> Vec<String> {
+    let mut values = at_quit.conflicts.clone();
+    for name in &pass.conflicts {
+        push_once(&mut values, name.clone());
+    }
+    values
+}
+
 impl Account {
+    /// **The counts, as `diagnostics.log` says them** (§3.6, (b)11): `BT_PERSIST
+    /// <file> merged: took <n> from the file, kept <m> from Folio, conflicts
+    /// <k> (<names>)` — every value the file won, named as the card names it, so
+    /// the names a card cuts at its bound are here in full — and `merged at
+    /// quit` for a quit's merge, which no card may follow.
+    pub(crate) fn said(&self, file: &str, when: Said) -> String {
+        let merged = match when {
+            Said::InThePass => "merged",
+            Said::AtQuit => "merged at quit",
+        };
+        let mut line = format!(
+            "BT_PERSIST {file} {merged}: took {} from the file, kept {} from Folio, conflicts {}",
+            self.took, self.kept, self.conflicted
+        );
+        if !self.conflicts.is_empty() {
+            line.push_str(&format!(" ({})", self.conflicts.join(", ")));
+        }
+        line
+    }
+
     /// Add one merge's account to the pass's.
     pub(crate) fn add(&mut self, other: Account) {
         self.took += other.took;

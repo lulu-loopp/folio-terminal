@@ -148,3 +148,101 @@ fn a_press_outside_an_open_dropdown_closes_it_and_still_lands() {
              dialog — one layer per gesture, which is what the first Esc does"
     );
 }
+
+/// RED (owner ruling Q2; design note 2026-10-11 §3.6, §9.5; T-STORE-NOTICE) — **a
+/// clean hand edit raises no card.**
+///
+/// Each of the four files is edited by hand while Folio owes none of them
+/// anything: `settings.json` changes the theme, `keybindings.json` gives Zoom pane
+/// a chord, `profiles.json` renames a profile, `pins.json` pins a folder. Each
+/// read is answered on a turn of its own; each pass merges and puts the file's
+/// value in force, and no card is raised — the person is looking at the file they
+/// saved.
+///
+/// MUTATION: raise the card on every merge (in `table_merge::MergePass::replaced`,
+/// answer the file whatever the pass won) — a card about nothing.
+#[test]
+fn a_clean_hand_edit_raises_no_card() {
+    use crate::test_support::StoragePassRig;
+    use bt_persist::{PinEntryV1, PinKind, ProfileEntryV1, ProfilesV1, ProgramV1};
+    let profiles = |title: &str| ProfilesV1 {
+        schema_version: bt_persist::PROFILES_SCHEMA_VERSION,
+        profiles: vec![ProfileEntryV1 {
+            id: "a".to_owned(),
+            display_title: Some(title.to_owned()),
+            program: Some(ProgramV1::Path("C:\\工具\\a.exe".to_owned())),
+            ..ProfileEntryV1::default()
+        }],
+    };
+    let folder = r"C:\项目 folio";
+    let root = StoragePassRig::scratch("clean-edit");
+    StoragePassRig::write(&root, persist::PROFILES_FILE_NAME, &profiles("甲 A"));
+    let mut rig = StoragePassRig::open(root.clone());
+
+    StoragePassRig::write(
+        &root,
+        persist::SETTINGS_FILE_NAME,
+        &bt_persist::SettingsV1 {
+            theme_mode: bt_persist::ThemeModeV1::Dark,
+            ..bt_persist::SettingsV1::default()
+        },
+    );
+    StoragePassRig::write(
+        &root,
+        persist::KEYBINDINGS_FILE_NAME,
+        &persist::keybindings_document(
+            vec![bt_persist::BindingOverrideV1 {
+                action: "zoom-pane".to_owned(),
+                chord: Some("Ctrl+u".to_owned()),
+            }],
+            persist::keybindings_platform(),
+        ),
+    );
+    StoragePassRig::write(
+        &root,
+        persist::PROFILES_FILE_NAME,
+        &profiles("甲 改名 renamed"),
+    );
+    StoragePassRig::write(
+        &root,
+        pins::PINS_FILE_NAME,
+        &bt_persist::PinsV1 {
+            schema_version: bt_persist::PINS_SCHEMA_VERSION,
+            pins: vec![PinEntryV1::new(PinKind::Folder, folder)],
+            extra: serde_json::Map::new(),
+        },
+    );
+    rig.settings.ask_reread();
+    rig.keybindings.ask_reread();
+    rig.profiles.ask_reread();
+    rig.pins.ask_reread();
+    for read in rig.reads() {
+        crate::test_support::StoragePassRig::serve(read);
+        rig.turn().expect("a turn of the storage pass");
+    }
+
+    assert_eq!(rig.said.len(), 4, "four merges: {:?}", rig.said);
+    assert!(
+        rig.said.iter().all(|line| line.contains("conflicts 0")),
+        "{:?}",
+        rig.said
+    );
+    assert_eq!(
+        rig.settings.loaded().theme_mode,
+        bt_persist::ThemeModeV1::Dark
+    );
+    assert!(
+        rig.keybindings
+            .loaded()
+            .iter()
+            .any(|line| line.action == "zoom-pane")
+    );
+    assert_eq!(
+        rig.profiles.loaded().profiles[0].display_title.as_deref(),
+        Some("甲 改名 renamed")
+    );
+    assert_eq!(rig.pins.targets(PinKind::Folder), vec![folder.to_owned()]);
+    assert!(rig.raised.is_empty(), "{:?}", rig.raised);
+    assert!(rig.cards().is_empty(), "no card: {:?}", rig.cards());
+    let _ = std::fs::remove_dir_all(&root);
+}
