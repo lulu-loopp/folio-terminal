@@ -4,8 +4,8 @@
 use crate::{
     AttentionDelivery, NoticeHost, NoticeStrip, OVER_IN_PANE_TOP_FIRST, OverInPane, PointerTarget,
     PreviewSurface, Runtime, TaskbarFlash, UserInputKind, WindowRuntime, answer_attention_in,
-    attention, attention_trace, emit_attention_lines, float, i18n, marks, native_window,
-    merge_notice_card, next_attention_stop, notice, notify, profiles, quit,
+    attention, attention_trace, emit_attention_lines, float, i18n, marks, merge_notice_card,
+    native_window, next_attention_stop, notice, notify, profiles, quit,
     raise_cancelled_quit_card_on, seats, taskbar_lane, toast,
 };
 use anyhow::Result;

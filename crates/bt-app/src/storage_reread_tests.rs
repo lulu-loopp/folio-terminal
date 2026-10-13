@@ -360,7 +360,13 @@ fn the_merge_notice_names_each_file_bounded_with_no_choice() {
 #[test]
 fn the_names_a_card_cuts_are_in_the_merge_line() {
     use settings_merge::{Account, Said};
-    let names = ["甲 A: Name", "乙 B: Name", "丙 C: Name", "丁 D: Name", "戊 E: Name"];
+    let names = [
+        "甲 A: Name",
+        "乙 B: Name",
+        "丙 C: Name",
+        "丁 D: Name",
+        "戊 E: Name",
+    ];
     let mut account = Account::default();
     for name in names {
         account.count(settings_merge::Unit::Conflict, || name.to_owned());
