@@ -3635,9 +3635,13 @@ mod tests {
         TxnId::new([0x7a; 16])
     }
 
-    /// **The clean-VM watcher reads the journal where the build writes it**:
-    /// `watch.ps1` joins onto the home the one file name [`Home::journal`]
-    /// joins, taken from the running code, never from this file's text.
+    /// **The clean-VM watcher's journal line names the file the build
+    /// writes**: a cross-language contract between two committed texts. Its
+    /// subject is one line of `scripts/release/cleanvm/updater/guest/watch.ps1`,
+    /// `$journalPath = Join-Path $H '<name>'`, held to the file name
+    /// [`Home::journal`] joins onto a home when it runs (taken from the code
+    /// running, never from this file's text). It claims nothing about what the
+    /// watcher does with that path; the clean-VM rows run the watcher.
     ///
     /// MUTATION: `Home::journal` joining `journal-2.json` (or `watch.ps1`
     /// joining another name) goes red here.

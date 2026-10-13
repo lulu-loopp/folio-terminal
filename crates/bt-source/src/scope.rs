@@ -123,10 +123,12 @@ impl FileScoped {
                  without this crate's query layer on purpose"
             }
             Self::TheDeadCodeGate => {
-                "which file is product code is decided by Rust's module file names and the                  declarations reaching a file; a PowerShell gate that walks the files themselves"
+                "which file is product code is decided by Rust's module file names and the \
+                 declarations reaching a file; a PowerShell gate that walks the files themselves"
             }
             Self::TheLintProbeIsGenerated => {
-                "the committed probe source must be byte for byte its generator's output, a fact                  about a generated file"
+                "the committed probe source must be byte for byte its generator's output, a fact \
+                 about a generated file"
             }
         }
     }

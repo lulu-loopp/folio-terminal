@@ -78,17 +78,26 @@ Where and what to do: `crates/bt-source/tests/tripwire.rs`.
 readers (four lexical shapes, by file). In a PowerShell reader (a `.ps1`
 holding `Get-Content`, `Select-String` or `ReadAll{Text,Lines,Bytes}`) a `.rs`
 path literal is a hit in exactly two spellings, `"…lib.rs"` and `'…lib.rs'`,
-each path-shaped, its opener the nearest quote of its kind on the same line;
-two other spellings are diagnostics that fail naming `file:line` and the shape —
-an interpolated double-quoted value (`"$dir/lib.rs"`, `"${x}.rs"`,
-`"$(…)/a.rs"`) and a `.rs` extension inside a here-string (`@"…"@`, `@'…'@`)
-that is not one of the two spellings — so the author rewrites the literal into
-one of the two or lists the file. A `.rs` with no quote on its line outside a
-here-string (a comment, `-Filter *.rs`) is not a literal path and is out of
-scope. A shell reader is cleared like a Rust one, by file: a gate whose subject
-really is source files is a `FileScoped` variant (the vendor-notice, dead-code
-and lint-probe gates), and a scratch file a script writes into a temporary
-tree is a file key on `SOURCE-READERS.tsv` as an `exception` naming it;
+each path-shaped, its opener the nearest quote of its kind on the same line.
+Three other spellings are diagnostics that fail naming `file:line`, the shape
+and what to do: a `.rs` extension inside a here-string (`@"…"@`, `@'…'@`) that
+is not one of the two spellings; an interpolated double-quoted value
+(`"$dir/lib.rs"`, `"${x}.rs"`, `"$(…)/a.rs"`, a `$` after an even run of
+backticks); and any other quoted `.rs` value with its opener on its line that
+is not path-shaped (`'crates/a b/lib.rs'`, an escaped `` `$ ``, a
+sub-expression holding a quote of its own). The author rewrites the literal
+into one of the two spellings or lists the file. Out of scope, as limits: a
+`.rs` with no quote on its line outside a here-string (a comment,
+`-Filter *.rs`), a closer with no opener on its line (a string spanning lines),
+and `.RS` in upper case; a line that only looks like a here-string opener
+(`$m = 'a@'`) opens a phantom one whose `.rs` names are reported — noise, never
+a silent pass. A shell reader is cleared like a Rust one, by file: a gate whose
+subject really is source files is a `FileScoped` variant (the vendor-notice,
+dead-code and lint-probe gates). A suite that writes a scratch `.rs` file into
+a temporary tree is no reader of a committed source and gets no row: it spells
+the scratch name so that the script holds no `.rs` literal (or gives
+the scratch file another extension), and a single-quoted scratch path the scan
+reports is a false positive the author rewrites;
 `every_reader_of_a_committed_document_is_on_a_list` holds the document readers
 (by item, through `bt-source`'s index — no script reads Rust for it), and its
 message names the item, the file and both lists;
