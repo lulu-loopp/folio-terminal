@@ -405,6 +405,30 @@ Where and what to do: the raw-effect half of
 `spawn_at_priority` with a named worker/effect; retain a bare site only when the
 door cannot own it and record that reason in the exception ledger.
 
+## Window seam
+
+The rule: a window's own code reaches the window only through
+`crate::window_seam` (T-HEADLESS-RUNTIME-SEAM, 2026-10-13; `ARCHITECTURE.md`
+§4.5). The structs that hold a backend — a type parameter bounded by the seam's
+`Backend` — are written for that parameter, so the compiler sees every call a
+`Runtime` method makes to the window as a call on a seam trait. The two
+exceptions are listed by name: `Runtime::create` and `Runtime::open_window`,
+which build the native window that the parameter is instantiated with, and the
+`winit` adapter `impl ApplicationHandler for FolioApp`. Every door trait of the
+seam is implemented in the seam (the headless backend is test-only and is not
+read).
+
+Where and what to do: `crates/bt-source/tests/window_seam.rs`
+(`bt_app_reaches_its_window_only_through_the_seam`) reads `bt-app` by item
+identity — the `Backend` bound resolved through `use` items, globs and renames
+by `TraitResolver`, the backend's position read from the struct's own
+parameters — and its fixture (`tests/fixtures/window_seam/`) plants each refusal
+(`every_road_around_the_window_seam_is_named`). When red, write the new block
+for the backend parameter and add the door it needs to the seam's trait (with
+its `Native` impl beside the others and its headless impl in `headless.rs`);
+never widen the native list for a method that only reads or tells the window.
+A list entry nothing writes any more is named too, and is taken off.
+
 ## Machine-independent paths
 
 The rule: committed code, tests, and documentation do not carry one developer's

@@ -786,6 +786,47 @@ does not have to find it later.
 
 Committed-trial decision acknowledgement is part of the existing self-update transaction ownership above. The trial watch owns taking back or leaving the trial mark and then durably removing its accepted health receipt; the platform holder owns waiting for that acknowledgement, re-reading the mark, and atomically recording the final `unkept` fact before retiring the transaction (and, on macOS, before deleting `H/<txn>`).
 
+### 4.5 The window seam — the one road from a window's code to the window (0.4.8)
+
+**Everything `bt-app` does to a window, it does through `crate::window_seam`** (T-HEADLESS-RUNTIME-SEAM,
+2026-10-13). `App`, `WindowRuntime`, `Runtime`, `FolioApp`, `NewWindowParts` and the helpers built
+from them hold their window through one type parameter, `B: window_seam::Backend`, whose associated
+types are the window's parts — the `winit` window (`WindowHost`: redraw, title, visibility, cursor,
+IME area, clipboard, the system hand-off), the GPU device (`DeviceLayer`), the renderer (`Glass`:
+every setter a frame is built from, the measuring it answers, the present), the compositor
+(`CompositorDoor`), the custom frame (`FrameDoor`), the pickers and the formula menu, the IME caret
+and the event loop (`LoopDoor`: exit, control flow, a new window). The traits keep the inherent
+methods' names and signatures, so a call site reads as it did; `bt-render` contributes the measuring
+that needs no device (`DeviceFreeMeasure`) and the hit tests as free functions over a frame.
+
+* **The product backend is `Native`**: `Arc<winit::Window>`, `GpuContext`, `WindowRenderer`, the
+  `bt-platform` compositor, frame, pickers and caret, and the `ActiveEventLoop`. Its trait impls are
+  the inherent methods, called through; every product call goes through the same code as before,
+  and no product code asks whether it is under test.
+* **Two blocks are written for `Native` alone**, because they build what the parameter is then
+  instantiated with: `Runtime::create` (the device, the first window, its renderer and compositor)
+  and `Runtime::open_window` (a further window); and the `winit` adapter
+  (`impl ApplicationHandler<AppEvent> for FolioApp`) hands each event to the generic doors
+  (`FolioApp::on_window_event`, `settle_quit` with the loop door). Everything else is generic, so the
+  compiler is the reader of what a `Runtime` method may do to the window: it sees the seam's traits
+  and nothing more.
+* **The headless backend is test-only** (`crate::headless`, `#[cfg(test)]`): a window that records
+  what it was told as typed values (`WindowEffect`, read from a `Ledger`), a renderer that keeps the
+  frame's inputs for a test to read back and measures text with the production font environment, and
+  a loop door that records exit and control flow. `HeadlessFolio` builds a `Runtime` over it from
+  ordinary tab fixtures; `HeadlessApplication` drives `FolioApp`'s event and quit doors. It is never
+  compiled into the product.
+
+Three product seams were cut beside it, for the same reason and with no change of behaviour: a pane's
+terminal seed for a recent folder is the pure `recent_term_leaf_seed(profile_id, cwd)`;
+`create_leaf_session` and `bare_leaf` take the shell environment they spawn in
+(`&dyn bt_pty::ShellEnvironment`, the product handing `SystemShellEnvironment`); and the PTY wake a
+shell-less leaf is built with is buildable over a test's `LoopProxy`.
+
+**Guarded** by `bt-source`'s `window_seam` test (`ARCHITECTURE-GUARDS.md`, "Window seam"): every block
+of a backend holder is written for the backend parameter or is on the native list, and every door of
+the seam is implemented in the seam.
+
 ## 5. Execution lanes
 
 ### 5.1 The seven lanes
