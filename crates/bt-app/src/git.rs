@@ -148,11 +148,50 @@ pub fn git_not_found() -> &'static str {
 /// [`GitHost`] is minted by a counter that starts again in every window — a
 /// `TabId` on its own, one inside a [`crate::LeafId`], a float's epoch — so none
 /// of them names one surface across the process. The pair does.
+///
+/// **And the cache that asked** ([`GitCacheId`]): the place is where the
+/// question was asked *from*; the cache is who its answer is owed to. A Files
+/// view can move between the two — a float docked into a column, a column
+/// popped out into a float, a pane carried into another tab — and its cache
+/// moves with it, so the answer is filed wherever that cache stands when the
+/// answer is taken (`git_mutation_lane::OpenPages::resolve`), not where it
+/// stood when it asked.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitRequest {
     pub window: WindowId,
     pub host: GitHost,
+    pub asker: GitCacheId,
     pub question: GitQuestion,
+}
+
+/// **The identity of one [`GitCache`]** — who a repository question is asked
+/// by, and so who its answer is owed to.
+///
+/// Minted when the cache is made, from one count for the whole process (a
+/// page can be carried into another window, so two windows' counts could meet),
+/// and carried by the cache wherever it goes: a float's `DOCK` moves its cache
+/// into a column, a pop-out moves a column's into a float, a pane carried into
+/// another tab takes its own. Nothing about a move re-addresses an answer,
+/// because no answer to a page is addressed by its place. A copy of a cache is
+/// a frame's snapshot of a page and is never stood on a surface, so no two
+/// surfaces hold one identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct GitCacheId(u64);
+
+impl GitCacheId {
+    /// A new identity, never handed out before in this process.
+    #[must_use]
+    pub fn mint() -> Self {
+        static MINTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self(MINTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+impl Default for GitCacheId {
+    /// A cache made by default is a new asker, so it is a new identity.
+    fn default() -> Self {
+        Self::mint()
+    }
 }
 
 /// **Who is asking**, and therefore where the answer is filed.
@@ -967,29 +1006,29 @@ impl GitQuestion {
 }
 
 impl GitRequest {
+    /// The same question from the same cache: the newer answer makes the older
+    /// worthless. Two caches are two askers wherever they stand — the cache, not
+    /// its place, is who is waiting.
     fn same_target(&self, other: &Self) -> bool {
-        self.window == other.window
-            && self.host == other.host
-            && self.question.same_target(&other.question)
-    }
-
-    /// **Who this request's answer belongs to** — [`GitResponse::owner`], asked
-    /// before there is an answer: the tab a column or a graph stands in, or the
-    /// window a float's epoch was minted by — what the lane suite claims a receipt by.
-    #[cfg(test)]
-    pub fn owner(&self) -> crate::AnswerOwner {
-        owner_of(self.window, &self.host)
+        self.asker == other.asker && self.question.same_target(&other.question)
     }
 }
 
 // ── The answers ────────────────────────────────────────────────────────────
 
 /// What the worker learned, addressed back to the seat that asked.
+///
+/// `window` and `host` say where the asking cache stood when it asked until the
+/// drain takes the answer; the drain then addresses a page's answer to where
+/// that cache stands now (`git_mutation_lane::OpenPages::address`), so when a
+/// window files it they name the cache's place in that turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitResponse {
     /// The window the asking surface was in — see [`GitRequest::window`].
     pub window: WindowId,
     pub host: GitHost,
+    /// The cache that asked — see [`GitRequest::asker`].
+    pub asker: GitCacheId,
     pub answer: GitAnswer,
 }
 
@@ -1000,12 +1039,18 @@ impl GitResponse {
     /// windows. A **float** belongs to the window that minted its epoch, which is
     /// `codex-final.md` §2's instruction read literally: a host that is not a tab
     /// keeps the window routing it already had rather than being pressed into the
-    /// `TabId` branch. That is also what the applying end already checks first —
-    /// "is this float still live in me" — and it holds for the float's two
-    /// *document* answers too, even though those land in a tab's pool: a diff
-    /// asked from a float and answered after the tab it recorded has been carried
-    /// into another window is dropped, which is the same cancellation a float
-    /// dismissed mid-read already was.
+    /// `TabId` branch. It holds for the float's two *document* answers too, even
+    /// though those land in a tab's pool: a diff asked from a float and answered
+    /// after the tab it recorded has been carried into another window is not
+    /// claimed by any window.
+    ///
+    /// Read off the address the drain gave the answer
+    /// (`git_mutation_lane::OpenPages::address`): a page's answer names where
+    /// its cache stands now, so a Files view docked or popped out while git ran
+    /// is claimed by the window or the tab it stands in. Whether the asker is
+    /// still there at all — a float dismissed mid-read, a column closed — is
+    /// the drain's to decide, by the cache's identity, before any window is
+    /// asked; an answer whose cache is gone never reaches one.
     pub fn owner(&self) -> crate::AnswerOwner {
         owner_of(self.window, &self.host)
     }
@@ -1114,6 +1159,21 @@ pub enum GitAnswer {
         target: String,
         outcome: GitOutcome<()>,
     },
+}
+
+impl GitAnswer {
+    /// **Whether this answer is a document** — a diff, a file at a commit or a
+    /// diff between two commits — which goes to the preview pool of the tab it
+    /// was asked in, keyed by its own source, and never into the cache that
+    /// asked ([`GitCache::accept`] has no slot for one). Every other answer is
+    /// the page's, filed into that cache.
+    #[must_use]
+    pub fn is_document(&self) -> bool {
+        matches!(
+            self,
+            Self::Diff { .. } | Self::Show { .. } | Self::DiffRange { .. }
+        )
+    }
 }
 
 /// An answer or the reason there is none. A plain [`Result`] because that is
@@ -3087,14 +3147,6 @@ pub enum GitSlot<T> {
 }
 
 impl<T> GitSlot<T> {
-    /// **A question that was asked and will never be answered was not asked**
-    /// (F1b) — see [`GitCache::forget_pending`], the one caller.
-    fn forget_pending(&mut self) {
-        if matches!(self, Self::Pending) {
-            *self = Self::Idle;
-        }
-    }
-
     #[must_use]
     pub fn ready(&self) -> Option<&T> {
         match self {
@@ -3227,6 +3279,9 @@ pub struct GitCache {
     checkout: Option<String>,
     /// What this cache is for, and therefore what it asks (R31).
     role: GitRole,
+    /// **Who this cache is** ([`GitCacheId`]) — what every question it asks is
+    /// owed back to, wherever the page carrying it is moved.
+    id: GitCacheId,
 }
 
 /// Which surface a cache feeds, and therefore which questions it owes.
@@ -3321,6 +3376,13 @@ impl GitCache {
             ..Self::default()
         }
     }
+
+    /// Who this cache is: what its questions are asked as.
+    #[must_use]
+    pub fn id(&self) -> GitCacheId {
+        self.id
+    }
+
     /// Point this cache at a folder, forgetting everything if it is a different
     /// one. Answers whether anything was forgotten.
     pub fn retarget(&mut self, dir: &Path) -> bool {
@@ -3332,6 +3394,9 @@ impl GitCache {
             // What a cache is *for* survives what it is *about*: a column that
             // moves to another folder is still a page.
             role: self.role,
+            // And it is still the same asker: an answer about the folder it left
+            // comes back to it, and is refused by its subject.
+            id: self.id,
             ..Self::default()
         };
         true
@@ -3781,29 +3846,6 @@ impl GitCache {
     }
 
     /// Record that a question has been sent, so that it is not sent again.
-    /// **Give up on every question that is still out** (F1b, `plan.md` v4 增补
-    /// ②) — [`crate::files::DirCache::forget_pending`]'s twin, for the same
-    /// reason and at the same moment.
-    ///
-    /// The pane this cache belongs to has been given a new [`crate::LeafId`], so
-    /// every answer in flight is addressed to a surface that no longer exists and
-    /// will be dropped where it lands. `Pending` therefore goes back to `Idle`,
-    /// which is what [`Self::pending_questions`] reads as "owed", and the three
-    /// one-shot ledgers are cleared so the rows they dim can be pressed again.
-    ///
-    /// **Only the pending slots.** An answer already in hand stays: a column that
-    /// merely changed tabs must not blink back to "Loading …" and re-run the
-    /// `git status` that told it where it is standing.
-    pub fn forget_pending(&mut self) {
-        self.repo.forget_pending();
-        self.status.forget_pending();
-        self.refs.forget_pending();
-        self.log.forget_pending();
-        self.pending_writes.clear();
-        self.pending_refs.clear();
-        self.checkout = None;
-    }
-
     pub fn mark_pending(&mut self, question: &GitQuestion) {
         match question {
             GitQuestion::RepoProbe { .. } => self.repo = GitSlot::Pending,
@@ -4263,6 +4305,7 @@ impl GitWorker {
                             .send(GitResponse {
                                 window: request.window,
                                 host: request.host.clone(),
+                                asker: request.asker,
                                 answer,
                             })
                             .is_ok()
@@ -4879,9 +4922,11 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     #[test]
     fn a_staged_diff_and_an_unstaged_diff_are_not_the_same_question() {
         let (tx, rx) = mpsc::channel();
+        let asker = GitCacheId::mint();
         let diff = |against: crate::preview::GitDiffAgainst| GitRequest {
             window: winit::window::WindowId::from(1_u64),
             host: GitHost::Column(seat(1)),
+            asker,
             question: GitQuestion::Diff {
                 root: PathBuf::from(r"D:\repo"),
                 path: "src/main.rs".to_owned(),
@@ -4911,9 +4956,11 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     #[test]
     fn two_pages_of_history_are_two_questions_and_one_page_asked_twice_is_one() {
         let (tx, rx) = mpsc::channel();
+        let asker = GitCacheId::mint();
         let page = |skip: usize, count: usize| GitRequest {
             window: winit::window::WindowId::from(1_u64),
             host: GitHost::Column(seat(1)),
+            asker,
             question: GitQuestion::Log {
                 root: PathBuf::from(r"D:\repo"),
                 refs: Vec::new(),
@@ -4936,9 +4983,11 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     #[test]
     fn two_columns_asking_the_same_thing_both_get_answered() {
         let (tx, rx) = mpsc::channel();
+        // Each column asks as its own cache.
         let ask = |host: LeafId| GitRequest {
             window: winit::window::WindowId::from(1_u64),
             host: GitHost::Column(host),
+            asker: GitCacheId::mint(),
             question: GitQuestion::Status {
                 root: PathBuf::from(r"D:\repo"),
             },
@@ -4956,9 +5005,11 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     #[test]
     fn a_status_superseded_during_a_slow_read_is_never_run() {
         let (tx, rx) = mpsc::channel();
+        let asker = GitCacheId::mint();
         let ask = |root: &str| GitRequest {
             window: winit::window::WindowId::from(1_u64),
             host: GitHost::Column(seat(1)),
+            asker,
             question: GitQuestion::Status {
                 root: PathBuf::from(root),
             },

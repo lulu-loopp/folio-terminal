@@ -17249,6 +17249,7 @@ mod worker_answer_routing_tests {
         let column = git::GitResponse {
             window: window_a(),
             host: git::GitHost::Column(leaf),
+            asker: git::GitCacheId::mint(),
             answer: git::GitAnswer::Repo {
                 dir: PathBuf::from("/repo"),
                 outcome: Ok(PathBuf::from("/repo")),
@@ -43655,12 +43656,17 @@ fn move_seat_content(
 /// another one, so the tab it left is still open, still drawing, and the answers
 /// it drops are silently gone.
 ///
-/// **Liveness** is this. Four ledgers say "already asked" and all four travel
-/// with the pane — a `Pending` directory node, a `Pending` git slot, a claimed
-/// head read, and a session's own in-flight sets — so each of them would go on
-/// suppressing the question that would have been re-asked, for the rest of the
-/// session. Cleared here, at the one moment the address changes, they let the
-/// ordinary per-frame asking ask again under the leaf the pane now is.
+/// **Liveness** is this. Three ledgers say "already asked" and all three travel
+/// with the pane — a `Pending` directory node, a claimed head read, and a
+/// session's own in-flight sets — so each of them would go on suppressing the
+/// question that would have been re-asked, for the rest of the session. Cleared
+/// here, at the one moment the address changes, they let the ordinary per-frame
+/// asking ask again under the leaf the pane now is.
+///
+/// **The pane's repository cache is not among them.** Its questions are owed to
+/// the cache's own identity ([`git::GitCacheId`]), never to the leaf, so they
+/// reach it under the leaf it lands under and its dimmed rows and its running
+/// checkout stay held until git's receipt says otherwise.
 ///
 /// **The seat given here is the one it landed under**, never the one it left:
 /// the whole point is to reach the tables *after* they have been re-keyed.
@@ -43669,9 +43675,6 @@ fn forget_work_in_flight_for_seat(tab: &mut TabState, seat: SeatId) {
         leaf.session.forget_work_in_flight();
     }
     if let Some(cache) = tab.file_trees.get_mut(&seat) {
-        cache.forget_pending();
-    }
-    if let Some(cache) = tab.git_trees.get_mut(&seat) {
         cache.forget_pending();
     }
     // A preview pane's question is held by the *buffer* it is showing, which is
@@ -52157,10 +52160,13 @@ impl Runtime<'_> {
         // the same commit again draws its files without a second subprocess.
         if let Some(hash) = opened
             && let Some(cache) = self.window.tabs[active].git_trees.get_mut(&seat)
-            && let Some(question) = cache.begin_commit_files(&hash)
+            && let Some((asker, question)) = cache
+                .begin_commit_files(&hash)
+                .map(|question| (cache.id(), question))
             && !self.app.git_worker.request(git::GitRequest {
                 window: self.window_id(),
                 host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
+                asker,
                 question,
             })
         {
@@ -52187,12 +52193,14 @@ impl Runtime<'_> {
         let Some(cache) = self.window.tabs[active].git_trees.get(&seat) else {
             return Ok(());
         };
+        let asker = cache.id();
         let Some(question) = cache.more_commits() else {
             return Ok(());
         };
         if !self.app.git_worker.request(git::GitRequest {
             window: self.window_id(),
             host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
+            asker,
             question,
         }) {
             self.disable_git_worker();
@@ -65307,21 +65315,46 @@ impl FolioApp {
     /// receipt taken here is already in the channel when the channel is drained
     /// after it — and filing the receipts after the answers means a reading
     /// taken before a verb never lands after the verb's receipt has asked the
-    /// repository again. A receipt whose page no open window holds is let go
-    /// first, and ends in the lane's sink.
+    /// repository again.
+    ///
+    /// **Every answer is owed to the cache that asked** (`git::GitCacheId`),
+    /// found where it stands now among the caches the open windows hold
+    /// (`git_mutation_lane::OpenPages`): a page's answer is addressed there, so a
+    /// Files view docked into a column or popped out into a float while git ran
+    /// still receives it. A receipt whose cache no open window holds is let go
+    /// first, and ends in the lane's sink; a read answer whose cache is gone is
+    /// dropped.
     fn drain_git_answers(&mut self) -> (Vec<git::GitResponse>, bool) {
         let mut batch = Vec::new();
         let mut open = git_mutation_lane::OpenPages::default();
         for window in self.windows.values() {
             if window.leaving.is_none() {
-                open.tabs.extend(window.tabs.iter().map(|tab| tab.id));
-                open.floats.extend(
-                    window
-                        .float
-                        .live_windows()
-                        .filter(|win| win.files().is_some())
-                        .map(|win| (window.window.id(), win.epoch)),
-                );
+                let id = window.window.id();
+                for tab in &window.tabs {
+                    for (seat, cache) in &tab.git_trees {
+                        let leaf = LeafId {
+                            tab: tab.id,
+                            seat: *seat,
+                        };
+                        open.stand(cache.id(), id, git_mutation_lane::Place::Column(leaf));
+                    }
+                    for (root, graph) in &tab.git_graphs {
+                        let place = git_mutation_lane::Place::Graph {
+                            tab: tab.id,
+                            root: root.clone(),
+                        };
+                        open.stand(graph.cache.id(), id, place);
+                    }
+                }
+                for win in window.float.live_windows() {
+                    if let Some(files) = win.files() {
+                        open.stand(
+                            files.git.id(),
+                            id,
+                            git_mutation_lane::Place::Float(win.epoch),
+                        );
+                    }
+                }
             }
         }
         let Some(app) = self.app.as_mut() else {
@@ -65331,12 +65364,14 @@ impl FolioApp {
             .git_mutations
             .ended(|request| open.gone(request))
             .into_iter()
-            .map(|(_, terminal, request)| git_mutation_lane::receipt(terminal, request))
+            .filter_map(|(_, terminal, request)| {
+                open.address(git_mutation_lane::receipt(terminal, request))
+            })
             .collect();
         let mut gone = false;
         loop {
             match app.git_worker.responses.try_recv() {
-                Ok(response) => batch.push(response),
+                Ok(response) => batch.extend(open.address(response)),
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     gone = git::disable_git_worker_state(
