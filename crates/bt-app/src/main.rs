@@ -76513,7 +76513,10 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 26] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 27] = [
+        // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
+        // from a Recent row, beside its every-platform twin on the host's fallback shell.
+        "app_files_tests.rs",
         // Windows-only test fixtures: a share named by a document (`\\server\share`).
         "app_preview_tests.rs",
         // Windows-only test fixtures: UNC shares, WSL distribution shares and device and

@@ -21176,6 +21176,102 @@ mod tests {
         );
     }
 
+    /// PIN (issue #28) — **one folder opened under two profiles is two Recent rows**, each
+    /// captioned by the folder's last segment and each wearing its own profile's mark. The rows
+    /// go into the vault through its one door ([`crate::seed::SeedVault::record`]), whose
+    /// de-duplication key is `profile_id|cwd|manual_name`, and are drawn by the menu the reader
+    /// opens them from.
+    ///
+    /// MUTATION: `Seed::recent_key` leaving the profile out of the key (`|{cwd}|{name}`) — RED
+    /// (the second recording replaces the first: one row).
+    #[test]
+    fn one_folder_under_two_profiles_is_two_recent_rows_each_with_its_own_mark() {
+        let scale = 1.0;
+        let shell = fallback_profile_id();
+        let other = shipped_order()
+            .iter()
+            .copied()
+            .find(|id| {
+                has_id(id) && *id != shell && mark(index_of_id(id)) != mark(index_of_id(shell))
+            })
+            .expect("a shipped row whose mark is not the fallback's");
+        let folder = bt_testpath::temp_path("recent-rows").join("沙盒 sandbox");
+        let cwd = folder.display().to_string();
+        let mut vault = crate::seed::SeedVault::default();
+        for (profile_id, seconds) in [(other, 99_000), (shell, 99_940)] {
+            vault.record(
+                Seed::Term {
+                    profile_id: profile_id.to_owned(),
+                    cwd: cwd.clone(),
+                    manual_name: None,
+                },
+                Vec::new(),
+                at(seconds),
+            );
+        }
+        let rows = vault.entries();
+        assert_eq!(
+            rows.len(),
+            2,
+            "two profiles in one folder are two rows: {rows:?}"
+        );
+        let layout = layout(
+            anchor(scale),
+            MenuSide::Below,
+            &equipped(),
+            (960.0, 600.0),
+            scale,
+            rows,
+            &chord_table(),
+            &mut fake_measure,
+        );
+        let layer = one_layer(build(
+            &layout,
+            &equipped(),
+            Some(fallback_profile()),
+            None,
+            rows,
+            now(),
+            &crate::favicon::Favicons::default(),
+            &mut fake_measure,
+        ));
+        let in_row = |row: [f32; 4], rect: [f32; 4]| rect[1] >= row[1] && rect[3] <= row[3];
+        let is_a_profile_mark = |worn: ChromeMark| {
+            matches!(
+                worn,
+                ChromeMark::ProfilePowerShell
+                    | ChromeMark::ProfileUbuntu
+                    | ChromeMark::ProfileGit
+                    | ChromeMark::ProfileCmd
+                    | ChromeMark::ProfileAgent { .. }
+                    | ChromeMark::ProfileGeneric { .. }
+                    | ChromeMark::ProfileLine(_)
+            )
+        };
+        // Newest first: the shell recorded last is the top row.
+        for (index, profile_id) in [shell, other].into_iter().enumerate() {
+            let row = layout.recent[index];
+            assert!(
+                layer
+                    .labels
+                    .iter()
+                    .any(|label| in_row(row, label.rect) && label.text == "沙盒 sandbox"),
+                "row {index} ({profile_id}) is captioned by the folder's last segment"
+            );
+            let worn: Vec<ChromeMark> = layer
+                .sprites
+                .iter()
+                .filter(|sprite| in_row(row, sprite.rect) && is_a_profile_mark(sprite.mark))
+                .map(|sprite| sprite.mark)
+                .collect();
+            assert_eq!(
+                worn,
+                [mark(index_of_id(profile_id))],
+                "row {index} wears {profile_id}'s own mark, and no other profile's"
+            );
+        }
+    }
+
     /// PIN — hovering a recent row lights that row and only that row.
     ///
     /// Red gate: the untagged index again, this time in ink — `Some(0)` used to
