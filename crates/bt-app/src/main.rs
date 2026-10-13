@@ -61581,37 +61581,6 @@ mod quit_transaction_tests {
         );
     }
 
-    /// PIN (方案 ③) — **the quit judges the write, and the ordinary paths do
-    /// not have to.**
-    ///
-    /// `flush_judged` exists for exactly one caller and this is the check that it
-    /// still is that caller: the `Write` arm hands its answer to
-    /// `Quit::written`, which is where "a document that did not reach the disk
-    /// keeps the windows open" is decided (pinned in `quit.rs`).
-    ///
-    /// Red gate: swallow the result with `let _ =` and this goes red one line
-    /// before the process starts hiding windows over a file it never wrote.
-    #[test]
-    fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
-        let settle = method_body("FolioApp", "settle_quit");
-        assert!(
-            settle.contains("app.session_store.flush_for_quit(until, now)"),
-            "the quit's write is the judged one"
-        );
-        assert!(
-            settle.contains("quit.written(verdict)"),
-            "and the answer is what the transaction is told"
-        );
-        assert!(
-            settle.contains("refusal.quit_may_proceed()"),
-            "and a save that ran out of its budget is not read as one that was refused"
-        );
-        assert!(
-            settle.contains("i18n::Text::QuitSessionNotWritten"),
-            "a write that was refused is said out loud on every window"
-        );
-    }
-
     /// RED (0.4.6 U-21) — **from the photograph on, neither of the two readers
     /// that assumed only a person quits is served: no launch is taken and the
     /// restore card neither rises nor is answered.**

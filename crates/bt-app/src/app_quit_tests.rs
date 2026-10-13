@@ -67,3 +67,134 @@ fn the_cancelled_quits_card_names_the_files_and_carries_one_choice() {
         "Leave without this change"
     );
 }
+
+/// A headless application whose quit has come to its session write: the documents and the
+/// recovery phases walked with nothing to do (the recovery folder is this test's own), the
+/// picture taken, and a session document recorded and not yet written — into a store at `store`
+/// whose save budget is the suite's patience, with the documents phase begun at `begun`.
+fn a_quit_at_its_write(
+    tag: &str,
+    store: impl FnOnce(&std::path::Path) -> std::path::PathBuf,
+    begun: Instant,
+) -> crate::headless::HeadlessApplication {
+    let folio = crate::headless::HeadlessFolio::with_tabs(
+        tag,
+        vec![crate::test_support::ringing_tab(1, 1)],
+        0,
+    );
+    let root = folio.scratch.0.clone();
+    let mut application = crate::headless::HeadlessApplication::of(folio);
+    let app = application.folio.app.as_mut().expect("the application");
+    let place = store(&root);
+    app.session_store =
+        persist::SessionStore::at(place.join("session.json"), place.join("session.lock"));
+    app.session_store.set_save_budget(crate::lane::PATIENCE);
+    app.session_store.record(
+        crate::test_support::shells_document(&root, 1),
+        Instant::now(),
+    );
+    let mut quit = quit::Quit::begin(Vec::new());
+    let mut none: [&mut dyn crate::document_request::QuitDocument; 0] = [];
+    quit.documents_turn(&mut none, begun);
+    quit.recovery_turn(&mut none, &root.join("recovered"), SystemTime::now(), begun);
+    assert_eq!(
+        quit.photographed(),
+        quit::QuitStep::Write,
+        "the fixture's own precondition: the quit is at its write"
+    );
+    app.quit = Some(quit);
+    application
+}
+
+/// Whether the window carries the card that says the session was not written.
+fn says_not_written(application: &mut crate::headless::HeadlessApplication) -> bool {
+    let words = i18n::Text::QuitSessionNotWritten.text();
+    application
+        .runtime()
+        .window
+        .toasts
+        .toasts()
+        .iter()
+        .any(|toast| toast.body() == words)
+}
+
+/// RED (方案 ③) — **the quit judges its final write, and the verdict is what decides**: a
+/// write the disk refused is said on every window and keeps them open, while a write that
+/// landed — or a save that ran out of the quit's one budget — leaves, with nothing said.
+///
+/// MUTATION: swallow the store's answer in `FolioApp::settle_quit`'s `Write` arm
+/// (`let landed: Result<(), persist::SaveRefusal> = Ok(());` over the flush's own) — the refused
+/// write goes on to hide the windows over a session file it never wrote; read every refusal as
+/// one that may proceed — the same.
+#[test]
+fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
+    crate::test_support::on_the_window_thread();
+    let now = Instant::now();
+
+    // Refused: the store's folder is not there to be written into.
+    let mut refused = a_quit_at_its_write(
+        "headless-quit-refused",
+        |root| root.join("这里没有 not-here"),
+        now,
+    );
+    refused
+        .folio
+        .settle_quit(&refused.event_loop)
+        .expect("the turn is answered");
+    assert!(
+        says_not_written(&mut refused),
+        "a refused write is said on the window"
+    );
+    let quit = refused.folio.app.as_ref().unwrap().quit.as_ref();
+    assert!(
+        quit.is_none_or(|quit| !quit.is_retiring()),
+        "and the windows stay"
+    );
+
+    // Landed: the store's folder is there.
+    let mut landed = a_quit_at_its_write("headless-quit-landed", |root| root.to_path_buf(), now);
+    landed
+        .folio
+        .settle_quit(&landed.event_loop)
+        .expect("the turn is answered");
+    assert!(
+        !says_not_written(&mut landed),
+        "a landed write says nothing"
+    );
+    assert!(
+        landed
+            .folio
+            .app
+            .as_ref()
+            .unwrap()
+            .quit
+            .as_ref()
+            .is_some_and(|quit| quit.document_is_written()),
+        "and the quit goes on its way out"
+    );
+
+    // Out of budget: the documents phase began longer ago than the quit's one budget.
+    let long_ago = now
+        .checked_sub(persist::SESSION_SAVE_BUDGET + std::time::Duration::from_secs(1))
+        .expect("the process is older than the budget");
+    let mut spent = a_quit_at_its_write("headless-quit-spent", |root| root.to_path_buf(), long_ago);
+    spent
+        .folio
+        .settle_quit(&spent.event_loop)
+        .expect("the turn is answered");
+    assert!(
+        !says_not_written(&mut spent),
+        "a save that ran out of its budget is not read as one that was refused"
+    );
+    assert!(
+        spent
+            .folio
+            .app
+            .as_ref()
+            .unwrap()
+            .quit
+            .as_ref()
+            .is_some_and(|quit| quit.document_is_written()),
+        "and it leaves anyway"
+    );
+}
