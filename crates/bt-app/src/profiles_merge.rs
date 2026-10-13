@@ -33,14 +33,16 @@
 //! - **A carried row never stands before its id's row.** It is placed last,
 //!   in the file's order, immediately after the last row of its own id placed
 //!   so far — the id's row in force or an earlier carried row naming it — so
-//!   the rows of one id stand together in the file's order and the installer's
+//!   an id's duplicates stand together in the file's order and the installer's
 //!   reading puts in force the row the merge kept. A carried row goes with its
 //!   id's row: when the merge removes that row, the carried rows naming it go
 //!   too — the rule a press's removal follows
 //!   (`document_request::remove_in_force_and_its_duplicates`) — so a row that
 //!   was never in force never becomes the live one, and the id meets its
-//!   shipped value or none. The refused rows an id kept stand right before its
-//!   row in force, where the installer meets and refuses them today.
+//!   shipped value or none. The refused rows an id kept stand where their side has
+//!   them — after the nearest row before them the result places — and never
+//!   after their id's row in force: the installer meets and refuses them at
+//!   their own place, so a clean hand edit leaves them where the file has them.
 //! - **Shipped ids the file never names** are appended by the installer as
 //!   always; they are not units here.
 //!
@@ -529,31 +531,28 @@ fn order(
         placed.insert(last_of_its_id.map_or(0, |at| at + 1), slot.clone());
     }
 
-    // The refused rows each id kept: right before its row in force, in their
-    // order — where the installer reads them, and refuses them, today; an id
-    // with no row in force in the result keeps them after the nearest row
-    // before them, in the sequence of the side they came from.
+    // The refused rows each id kept, in their order, where they stand in the
+    // sequence of the side they came from: after the nearest row before them
+    // that the result places — and never after their id's row in force, which
+    // the installer reaches only past them. A clean hand edit therefore keeps
+    // them where the file has them.
     for (k, kept) in refused.iter().enumerate() {
         let slots = (0..kept.rows.len()).map(|l| Slot::Refused(k, l, kept.id.clone()));
-        let at = match placed
+        let first = kept
+            .source
+            .profiles
             .iter()
-            .position(|placed| *placed == Slot::Row(kept.id.clone()))
-        {
-            Some(row) => row,
-            None => {
-                let first = kept
-                    .source
-                    .profiles
-                    .iter()
-                    .position(|entry| entry.id == kept.id)
-                    .unwrap_or(0);
-                kept.source.profiles[..first]
-                    .iter()
-                    .rev()
-                    .find_map(|earlier| placed.iter().rposition(|placed| placed.id() == earlier.id))
-                    .map_or(0, |at| at + 1)
-            }
-        };
+            .position(|entry| entry.id == kept.id)
+            .unwrap_or(0);
+        let anchor = kept.source.profiles[..first]
+            .iter()
+            .rev()
+            .find_map(|earlier| placed.iter().rposition(|placed| placed.id() == earlier.id))
+            .map_or(0, |at| at + 1);
+        let its_row = placed
+            .iter()
+            .position(|placed| *placed == Slot::Row(kept.id.clone()));
+        let at = its_row.map_or(anchor, |row| anchor.min(row));
         placed.splice(at..at, slots);
     }
     placed
@@ -1127,5 +1126,25 @@ mod tests {
             ),
             "the next start refuses `a` as before, and puts nothing of it in force"
         );
+    }
+
+    /// RED (review round 5) — **a refused row stays where the file has it**:
+    /// the file holds `a` (refused), `x`, then `a′` (the row in force); the
+    /// file edits only `x`'s title, and nothing is owed here. The merge is the
+    /// file, row for row — a clean hand edit never rewrites the file.
+    ///
+    /// MUTATION: place an id's refused rows right before its row in force
+    /// (round 4's rule) — `a` moves after `x`.
+    #[test]
+    fn a_refused_row_stays_where_the_file_has_it() {
+        let refused = cannot_start("a", "不能启动 cannot start");
+        let (x, live) = (own("x", "叉 X"), own("a", "活的 live"));
+        let mut x_there = x.clone();
+        x_there.display_title = Some("叉 改名 renamed".to_owned());
+        let base = table(&[refused.clone(), x, live.clone()]);
+        let theirs = table(&[refused, x_there, live]);
+        let merged = merge(&base, &base, &theirs, &no_titles);
+        assert_eq!(merged.document, theirs, "the clean hand edit is the file");
+        assert_eq!(merged.account.conflicted, 0);
     }
 }

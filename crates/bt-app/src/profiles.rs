@@ -2543,16 +2543,19 @@ fn merge(shipped: Vec<Profile>, file: &ProfilesV1) -> (Vec<Profile>, Vec<Profile
     merge_on(shipped, file, SeedPlatform::of_this_build())
 }
 
-/// **Whether the installer can put an entry in force** — [`merge_on`]'s test,
-/// read without installing: a built-in id this build ships, whose row the
-/// entry edits, or a row of the reader's own that names a program. An entry
-/// it cannot is refused (`ProfileFault::Unusable`); the first one it can is
-/// its id's row in force, and every later row of that id is a duplicate. The
-/// profiles merge and a press's delta read a document by this (review round
-/// 4).
+/// **Whether the installer can put an entry in force** — [`merge_on`]'s own
+/// test, [`compose_on`] over this build's shipped table, read without
+/// installing. An entry it cannot is refused (`ProfileFault::Unusable`); the
+/// first one it can is its id's row in force, and every later row of that id
+/// is a duplicate. The profiles merge and a press's delta read a document by
+/// this (review rounds 4 and 5).
 pub(crate) fn installable() -> impl Fn(&ProfileEntryV1) -> bool {
-    let shipped_ids: Vec<String> = shipped().into_iter().map(|profile| profile.id).collect();
-    move |entry: &ProfileEntryV1| entry.program.is_some() || shipped_ids.contains(&entry.id)
+    let shipped = shipped();
+    let platform = SeedPlatform::of_this_build();
+    move |entry: &ProfileEntryV1| {
+        let seed = shipped.iter().find(|profile| profile.id == entry.id);
+        compose_on(seed, entry, platform).is_some()
+    }
 }
 
 /// **The table [`install`] would put in force from `file`**, and what it
