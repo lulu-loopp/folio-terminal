@@ -963,7 +963,8 @@ mod tests {
             assert_eq!(
                 server,
                 std::process::id(),
-                "the server this client vetted is the process it is actually talking to, and the                  pid it grants the foreground to comes from the kernel and not from the reply"
+                "the server this client vetted is the process it is actually talking to, and the \
+                 pid it grants the foreground to comes from the kernel and not from the reply"
             );
             let _ = heard.send(reply.to_owned());
         })

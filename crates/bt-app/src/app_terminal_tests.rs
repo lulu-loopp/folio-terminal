@@ -41,12 +41,14 @@ fn a_pane_is_born_with_the_capacity_a_fresh_settings_file_names() {
     assert_eq!(
         super::scrollback_quota(0),
         super::DEFAULT_FROZEN_LINE_QUOTA,
-        "a hand-edited zero falls to the product's own answer rather than              leaving a pane that forgets each line as it prints"
+        "a hand-edited zero falls to the product's own answer rather than \
+         leaving a pane that forgets each line as it prints"
     );
     assert_eq!(
         super::scrollback_quota(7).get(),
         7,
-        "and every other number the file can carry is honoured as written,              because `bt_persist` deliberately does not clamp this key"
+        "and every other number the file can carry is honoured as written, \
+         because `bt_persist` deliberately does not clamp this key"
     );
 }
 
@@ -720,7 +722,8 @@ fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
             &no_directories
         ),
         HyperlinkActivation::Page("https://example.test/path".to_owned()),
-        "and plainly it is this window's own seat (2026-08-29): the cell that              read `None` here for as long as nothing in this window drew a page"
+        "and plainly it is this window's own seat (2026-08-29): the cell that \
+         read `None` here for as long as nothing in this window drew a page"
     );
     assert_eq!(
         hyperlink_activation(

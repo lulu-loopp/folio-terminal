@@ -237,7 +237,8 @@ fn a_chinese_line_folds_at_the_columns_the_wrap_names() {
     assert_eq!(
         wrap.row_span(1),
         Some((0, 10, 19)),
-        "and the rest is the second, whose far end runs one column past the \n             line to stand the break in",
+        "and the rest is the second, whose far end runs one column past the \
+         line to stand the break in",
     );
     let palette = bt_render::chrome_palette();
     let mut quads = Vec::new();

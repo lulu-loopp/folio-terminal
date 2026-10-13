@@ -196,6 +196,7 @@ use super::engine::{
 };
 use super::macos_video::displayed_size;
 use crate::macos_files::file_url;
+use crate::video_load::{Load, LoadDeadline};
 
 /// **The timescale an arbitrary number of seconds is asked for in.**
 ///
@@ -261,6 +262,9 @@ impl Engine {
     /// the item, the player and the video output are all on the far side of that
     /// thread's first instruction.
     pub fn open(path: &Path) -> Result<Self, EngineError> {
+        // The open request: what `OPEN_BUDGET` is read against here, and what
+        // `LOAD_BUDGET` is measured from on the engine thread.
+        let asked_at = Instant::now();
         let shared = Arc::new(Shared::default());
         let (commands, inbox) = mpsc::channel();
         let source = path.to_path_buf();
@@ -272,7 +276,13 @@ impl Engine {
                 "folio-video-engine",
                 crate::ThreadPriority::Normal,
                 move |_ctx| {
-                    run(&url, &shared, &commands, &inbox);
+                    run(
+                        &url,
+                        LoadDeadline::from_open(asked_at),
+                        &shared,
+                        &commands,
+                        &inbox,
+                    );
                     // Last of all, and read by `Engine::shutdown` to know
                     // whether joining this thread will return — see there.
                     shared.stopped.store(true, Ordering::Release);
@@ -288,7 +298,7 @@ impl Engine {
             thread: Some(thread),
             source,
             seen_generation: 0,
-            opened_at: Instant::now(),
+            opened_at: asked_at,
         })
     }
 
@@ -560,11 +570,12 @@ enum Command {
 /// everything playback made.
 fn run(
     path: &Path,
+    deadline: LoadDeadline,
     shared: &Arc<Shared>,
     commands: &mpsc::Sender<Command>,
     inbox: &mpsc::Receiver<Command>,
 ) {
-    autoreleasepool(|_pool| match Machinery::build(path, commands) {
+    autoreleasepool(|_pool| match Machinery::build(path, deadline, commands) {
         Ok(mut machinery) => {
             // Before the pump and after the player: this is what stops
             // `Engine::state` charging a working engine with having missed
@@ -619,6 +630,10 @@ struct Machinery {
     ended: bool,
     generation: u64,
     error: Option<EngineError>,
+    /// When the load is over without having said anything: `LOAD_BUDGET`
+    /// after the open request. Past it, a player that is still not ready is
+    /// refused by this module itself — see [`Self::publish_state`].
+    deadline: LoadDeadline,
 }
 
 impl Machinery {
@@ -627,7 +642,11 @@ impl Machinery {
         reason = "the synchronous track accessor is what a thread of one's own wants; see \
                   `macos_video.rs`'s note, which this file inherits"
     )]
-    fn build(path: &Path, commands: &mpsc::Sender<Command>) -> Result<Self, EngineError> {
+    fn build(
+        path: &Path,
+        deadline: LoadDeadline,
+        commands: &mpsc::Sender<Command>,
+    ) -> Result<Self, EngineError> {
         let url = file_url(path, false).map_err(|_| EngineError::Other("the path has no URL"))?;
         // SAFETY: every call below is an Objective-C message to an object this
         // function created and holds, on the thread that created it. The statics
@@ -709,6 +728,7 @@ impl Machinery {
                 ended: false,
                 generation: 0,
                 error: None,
+                deadline,
             })
         }
     }
@@ -860,37 +880,59 @@ impl Machinery {
             let presentation = self.item.presentationSize();
             let natural_size = size_of(presentation).or(self.native_size);
             let rate = self.player.rate();
+            // **The size, not a status** — the Windows arm's spelling, and on
+            // this platform it is the only one that is true.
+            //
+            // `ready` means "the metadata has arrived": the moment
+            // `natural_size` and `duration_secs` are answerable and a layout can
+            // be solved. Both are answered off the **asset**, which
+            // `macos_video.rs` already reads synchronously, so both are true
+            // from this engine's first published state for every file whose
+            // track says its size. A length is not part of it: a source that
+            // declares none has still loaded.
+            //
+            // `AVPlayerItem.status` was the first spelling of this and it is
+            // wrong here, measured on the venue machine 2026-09-12: in a process
+            // whose main queue nobody drains it stays
+            // `AVPlayerItemStatusUnknown` for ever, because that property is one
+            // of the "changes that occur dynamically during playback" the
+            // class's own header says are serialized onto a dispatch queue that
+            // is the main queue by default. Spelling `ready` as the status would
+            // make this flag a statement about the caller's run loop rather than
+            // about the file — see §13.35 ⑤.
+            let ready = natural_size.is_some() || self.has_audio;
+            // **The load's deadline**, decided by `LoadDeadline::judge` for both
+            // arms. A video track whose size the asset does not say is answered
+            // only by the item's presentation size, which arrives on that same
+            // main queue — so a player can stand not ready for ever here too.
+            // A refusal is `NotLoaded`, not ready, with no length or size, and
+            // it is the terminal: what the item says afterwards is not
+            // published.
+            let refused = match self.deadline.judge(
+                Instant::now(),
+                ready,
+                self.error.is_some(),
+                self.error == Some(EngineError::NotLoaded),
+            ) {
+                Load::AsSaid => false,
+                Load::Refused => {
+                    self.error.get_or_insert(EngineError::NotLoaded);
+                    true
+                }
+            };
             EngineState {
-                duration_secs,
+                duration_secs: duration_secs.filter(|_| !refused),
                 position_secs: seconds_or_zero(self.player.currentTime()),
                 // **Not "a frame changed recently".** A video paused on its last
                 // picture is `false` here and still has a picture on the glass.
                 playing: rate != 0.0 && !self.ended,
-                natural_size,
+                natural_size: natural_size.filter(|_| !refused),
                 ended: self.ended,
                 error: self.error,
                 muted: self.player.isMuted(),
                 volume: f64::from(self.player.volume()),
                 rate: self.wanted_rate,
-                // **The size, not a status** — the Windows arm's spelling, and
-                // on this platform it is the only one that is true.
-                //
-                // `ready` means "the metadata has arrived": the moment
-                // `natural_size` and `duration_secs` are answerable and a layout
-                // can be solved. Both are answered off the **asset**, which
-                // `macos_video.rs` already reads synchronously, so both are true
-                // from this engine's first published state.
-                //
-                // `AVPlayerItem.status` was the first spelling of this and it is
-                // wrong here, measured on the venue machine 2026-09-12: in a
-                // process whose main queue nobody drains it stays
-                // `AVPlayerItemStatusUnknown` for ever, because that property is
-                // one of the "changes that occur dynamically during playback"
-                // the class's own header says are serialized onto a dispatch
-                // queue that is the main queue by default. Spelling `ready` as
-                // the status would make this flag a statement about the caller's
-                // run loop rather than about the file — see §13.35 ⑤.
-                ready: natural_size.is_some() || self.has_audio,
+                ready: ready && !refused,
                 has_video: self.has_video,
                 has_audio: self.has_audio,
             }

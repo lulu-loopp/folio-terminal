@@ -392,6 +392,12 @@ stalled writer of
 `persist::tests::a_write_that_misses_the_budget_still_answers_true_and_keeps_the_last_layout`.
 Every product store keeps the product's budget.
 
+A wait for an engine's terminal answer about a load is not a number of its
+own: it is `LOAD_ANSWER_PATIENCE` (`bt-platform`'s `video_load`), derived from
+the product's `LOAD_BUDGET` and `IDLE_POLL_INTERVAL` so that it cannot end
+before the engine's own refusal lands, and handed to the engine's wait door —
+so it is not a row (T-VIDEO-ENGINE-NO-DURATION).
+
 ## Raw-effect and thread-door exceptions
 
 The rule: `bt-app` and `bt-platform` create workers through the admitted thread
@@ -440,6 +446,49 @@ Where and what to do: `scripts/check-machine-paths.ps1` is the gate. When red,
 replace the machine path with a workspace-relative path, a declared fixture, or
 `bt_testpath`; use neutral names such as `alice` for an account example rather
 than adding an exception for the current workstation.
+
+## Embedded spaces in string literals
+
+The rule: a message literal is one sentence; a literal that wraps continues
+with `\` at the end of the line, so the break and the next line's indentation
+are not in the string (`docs/CONVENTIONS.md` §五, T-EMBEDDED-SPACES-LITERALS,
+2026-10-13). A lost `\` leaves a run of spaces inside the message that the
+compiler and rustfmt both accept.
+
+Where and what to do: `scripts/ci/check-embedded-spaces.ps1` lexes every
+tracked `.rs` under `crates/` (comments, character literals and lifetimes
+skipped; every string form, raw ones included) and refuses, by file:line, a
+string literal with a run of three or more spaces: inside a source line, with
+a character other than a space before it and a non-blank after it; or, in an
+escaping (non-raw) literal, at the start of a source line that follows a real
+line break (no `\` continuation before it) when a non-blank follows — the
+shape a `\` lost at the end of a wrapped line leaves. Blanks after the opening
+quote, after a continuation, at the end of a source line, and a raw literal's
+indentation are not runs; a fixture that keeps its own line breaks is a raw
+string. A shape the lexer cannot finish (a string, raw string or block comment
+that does not close, a character literal whose escape or quote is missing) is
+refused by its file:line, never passed. A literal with a run passes only on
+its row of `docs/plans/embedded-spaces-allowed.txt` (`path:line reason`, the
+line the literal opens on; two literals on one line take two rows). The list
+is exact both ways (a row beyond the literals its line opens is stale) and only
+shrinks against the merge base. A row's identity is its path, its literal's
+own text on the source line of its first run (the characters inside the
+literal on that line, trimmed — not the code around it; read for the base from
+the base's own copy of the file, through the same lexer, where a file that does
+not lex fails the check as `base <sha>:<path>:<line>`) and its reason, with
+multiplicity. A literal that moves, or whose surrounding code is renamed or
+rewrapped, keeps its row with the line corrected; a row pointed at another
+literal is an added row and refused; and an edit to a listed literal's pinned
+text is refused too — there is no override and no replacement path. Columns
+that must evolve do not belong in a string literal: take them out (cells in a
+slice joined at run time, or a fixture file read through a listed door).
+`scripts/ci/check-embedded-spaces-tests.ps1` holds each rule on scratch
+repositories, and `gates-can-fail` plants a literal in the real tree. When red,
+repair the literal as a continuation; a fixture's columns (screen captures,
+tables, code samples after an escaped line break) are the only rows, and they
+were the baseline — a new fixture builds its columns another way (`format!`
+padding, cells joined at run time, or a `concat!` whose spaces stand in a
+literal of their own, where they start the literal and are no run).
 
 ## Third-party notices
 

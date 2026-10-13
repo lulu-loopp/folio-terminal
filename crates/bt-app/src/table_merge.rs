@@ -25,7 +25,7 @@
 //!    conflict over, nothing for a clean hand edit.
 
 use crate::document_request::ReplacedInFile;
-use crate::settings_merge::{Account, PassOutcome};
+use crate::settings_merge::{Account, PassOutcome, Said, conflicts_of};
 
 /// **Which of the two tables a pass merges.**
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,31 +40,38 @@ pub(crate) enum Table {
 pub(crate) struct MergePass {
     file: &'static str,
     account: Account,
+    /// **What a cancelled quit's documents phase merged**, put in force by this
+    /// pass: named on the card, and not counted in this pass's line — the quit
+    /// said it when it merged.
+    at_quit: Account,
 }
 
 impl MergePass {
-    pub(crate) fn new(file: &'static str, account: Account) -> Self {
-        Self { file, account }
+    pub(crate) fn new(file: &'static str, account: Account, at_quit: Account) -> Self {
+        Self {
+            file,
+            account,
+            at_quit,
+        }
     }
 
     /// **The pass's one line for `diagnostics.log`** (§3.6): the settings
     /// merge's counts — units taken from the file without a conflict, units
     /// that kept Folio's value, conflicts.
     pub(crate) fn diagnostics(&self) -> String {
-        format!(
-            "BT_PERSIST {} merged: took {} from the file, kept {} from Folio, conflicts {}",
-            self.file, self.account.took, self.account.kept, self.account.conflicted
-        )
+        self.account.said(self.file, Said::InThePass)
     }
 
     /// **What the pass replaced, for its card** (§3.6): nothing for a clean
-    /// hand edit; otherwise the file and each value it won over Folio's, named
-    /// once — a profile by its title and field, a pin by its target, a key of
+    /// hand edit; otherwise the file and each value it won over Folio's — in
+    /// this pass, or in the cancelled quit this pass puts in force — named
+    /// once: a profile by its title and field, a pin by its target, a key of
     /// the file's own by its name.
     pub(crate) fn replaced(&self) -> Option<ReplacedInFile> {
-        (!self.account.conflicts.is_empty()).then(|| ReplacedInFile {
+        let values = conflicts_of(&self.at_quit, &self.account);
+        (!values.is_empty()).then(|| ReplacedInFile {
             file: self.file,
-            values: self.account.conflicts.clone(),
+            values,
             not_applied: Vec::new(),
         })
     }

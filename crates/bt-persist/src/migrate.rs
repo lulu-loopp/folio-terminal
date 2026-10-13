@@ -2344,7 +2344,8 @@ mod tests {
         assert_eq!(
             migrated["update_check"],
             json!(false),
-            "the sibling added one version ago is the one a copy-paste of the              step above would most plausibly reset"
+            "the sibling added one version ago is the one a copy-paste of the \
+             step above would most plausibly reset"
         );
         assert_eq!(migrated["copy_on_select"], json!(false));
         assert_eq!(migrated["theme_mode"], json!("Light"));
@@ -2383,7 +2384,8 @@ mod tests {
         assert_eq!(
             migrated["quake_height"],
             json!(65),
-            "the key added one version ago is the one a copy-paste of the step above would most              plausibly reset"
+            "the key added one version ago is the one a copy-paste of the step above would most \
+             plausibly reset"
         );
         assert_eq!(migrated["quake_dismiss_on_blur"], json!(false));
         assert_eq!(migrated["update_check"], json!(false));
@@ -2428,7 +2430,8 @@ mod tests {
         assert_eq!(migrated["schema_version"], json!(12));
         assert!(
             migrated["windows"][0].get("quake").is_none(),
-            "the step invents no key — a window that was ordinary stays ordinary by              saying nothing at all"
+            "the step invents no key — a window that was ordinary stays ordinary by \
+             saying nothing at all"
         );
         let session: crate::SessionV1 =
             serde_json::from_value(migrated).expect("a migrated document is this build's own");
@@ -2438,12 +2441,14 @@ mod tests {
         );
         assert!(
             !session.windows[0].quake,
-            "and the absent key reads as the ordinary window every v11 document              held"
+            "and the absent key reads as the ordinary window every v11 document \
+             held"
         );
         let written = serde_json::to_string(&session).expect("and it serializes");
         assert!(
             !written.contains("quake"),
-            "a document with no summoned window in it writes the bytes it always              wrote: {written}"
+            "a document with no summoned window in it writes the bytes it always \
+             wrote: {written}"
         );
     }
 

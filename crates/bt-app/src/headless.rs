@@ -1318,6 +1318,7 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
         pins_file_broken: false,
         settings_file_broken: false,
         keybindings_file_broken: false,
+        merge_notice: document_request::MergeNotice::default(),
         settings_fault: None,
         session_fault: None,
         recent: seed::SeedVault::default(),

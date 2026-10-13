@@ -4563,7 +4563,8 @@ mod tests {
             }
             .to_string(),
             "is 200 MB and a background picture may be up to 64 MB",
-            "the sentence names both numbers, because \"too large\" alone              leaves a 70 MB file and a 700 MB one indistinguishable"
+            "the sentence names both numbers, because \"too large\" alone \
+             leaves a 70 MB file and a 700 MB one indistinguishable"
         );
     }
 }

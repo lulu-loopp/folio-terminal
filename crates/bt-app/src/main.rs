@@ -176,6 +176,7 @@ mod shortcuts;
 /// the product at all.
 #[cfg(test)]
 mod source_pin;
+mod storage_pass;
 mod storage_watch;
 mod table_block;
 mod table_merge;
@@ -12444,7 +12445,8 @@ fn deliver_held_input(
     birth.deliver(|held| match target {
         PtyTarget::Nowhere => {
             note(&format!(
-                "a pane born with no shell (no program here, or its shell did not start) dropped                  the {} byte(s) typed into it while it waited",
+                "a pane born with no shell (no program here, or its shell did not start) dropped \
+                 the {} byte(s) typed into it while it waited",
                 held.len()
             ));
             Ok(())
@@ -13288,6 +13290,13 @@ struct App<B: Backend = Native> {
     /// not parse, so that it is said once — [`Self::profiles_file_broken`]'s
     /// rule.
     keybindings_file_broken: bool,
+    /// **What the storage passes of one batch of re-reads replaced and could
+    /// not apply, until its one card is raised** (T-STORE-NOTICE; design note
+    /// 2026-10-11 §3.6). The four documents' reads are answered on separate
+    /// wakes, so one `git checkout` can merge over several turns: each turn's
+    /// notice joins this one, and the card is raised once no store is still
+    /// reading. One writer, `MergeNotice::gather`, on the window thread.
+    merge_notice: document_request::MergeNotice,
     /// **What the two documents this window is made of owe the reader** (review
     /// rows R4-3, R4-5, R4-9 and R4-10).
     ///
@@ -17340,15 +17349,19 @@ mod tab_identity_tests {
         let layer = method_body("Runtime", "preview_float_layer");
         assert!(
             layer.contains("let footless = !geometry.wears_a_foot();"),
-            "the chassis is asked whether there is a strip, rather than a second              reader working it out from the rail"
+            "the chassis is asked whether there is a strip, rather than a second \
+             reader working it out from the rail"
         );
         assert!(
             layer.contains("let rail = self.dress_preview_rail(surface, scale);"),
-            "the window's row is dressed somewhere other than the one dressing both              hosts go through, so a pane and the window torn off it can say two              things about one file"
+            "the window's row is dressed somewhere other than the one dressing both \
+             hosts go through, so a pane and the window torn off it can say two \
+             things about one file"
         );
         assert!(
             !layer.contains("seats::push_corner_tag("),
-            "the window flashes its confirmation in a corner of its own as well as in              the pill, which is the same word twice"
+            "the window flashes its confirmation in a corner of its own as well as in \
+             the pill, which is the same word twice"
         );
         assert!(
             layer.contains("seats::dress_foot("),
@@ -19004,6 +19017,27 @@ fn raise_cancelled_quit_card_on(
         motion,
         now,
     )
+}
+
+/// **The storage pass's card** (T-STORE-NOTICE; design note 2026-10-11 §3.6,
+/// (b)11): its kind, its anchor and its statement — one Info card anchored to the
+/// window, its body one line per file naming what the file's values replaced and
+/// what was not applied ([`i18n::merge_notice`]). It is raised through
+/// `Runtime::toast`, which gives it no title and no verb: the file has already
+/// won, and nothing is owed. `None` for an empty notice: a clean hand edit says
+/// nothing. The full list, with every name a card cuts, is each pass's line in
+/// `diagnostics.log` (`settings_merge::Account::said`).
+fn merge_notice_card(
+    notice: &document_request::MergeNotice,
+) -> Option<(toast::ToastKind, toast::ToastAnchor, String)> {
+    if notice.files.is_empty() {
+        return None;
+    }
+    Some((
+        toast::ToastKind::Info,
+        toast::ToastAnchor::Window,
+        i18n::merge_notice(notice),
+    ))
 }
 
 /// **What became of one owed hand-editable document on a stop that cannot ask**
@@ -45697,6 +45731,7 @@ impl Runtime<'_, Native> {
             pins_file_broken: false,
             settings_file_broken: false,
             keybindings_file_broken: false,
+            merge_notice: document_request::MergeNotice::default(),
             recent,
             recent_folders,
             // **The document is assembled from these, and the first window's
@@ -49425,8 +49460,9 @@ impl<B: Backend> Runtime<'_, B> {
     /// Then what the re-reads put in force: a file that will not parse is said
     /// once, `settings.json`'s changes are merged and put in force through
     /// their rows' doors and `keybindings.json`'s through the one shortcut
-    /// table (`Self::merge_documents`), and the profiles and pins news is
-    /// taken.
+    /// table (`Self::merge_documents`), what the files' values replaced is named
+    /// on the batch's one card once no store is still reading, and the profiles
+    /// and pins news is taken.
     pub(crate) fn take_document_answers(&mut self) -> Result<()> {
         let heard = persist::hear_documents(
             &mut self.app.settings_store,
@@ -49443,10 +49479,7 @@ impl<B: Backend> Runtime<'_, B> {
             )?;
         }
         self.take_kept_news(heard.settings, heard.keybindings)?;
-        // The data of the pass's one card, made whatever the presentation after
-        // the merge answers; T-STORE-NOTICE raises it.
-        let (_replaced, presented) = self.merge_documents();
-        presented?;
+        self.merge_documents()?;
         self.take_profiles_news(heard.profiles)?;
         self.take_pins_news(heard.pins)
     }
@@ -54639,10 +54672,11 @@ impl<B: Backend> App<B> {
     }
 
     /// **One turn of the quit's documents phase** over the four stores
-    /// ([`quit::Quit::documents_turn`]); `None` without a quit.
+    /// ([`quit::Quit::documents_turn`]), and what it merged said in
+    /// `diagnostics.log`; `None` without a quit.
     fn quit_documents_turn(&mut self, now: Instant) -> Option<quit::QuitStep> {
         let quit = self.quit.as_mut()?;
-        Some(quit.documents_turn(
+        let step = quit.documents_turn(
             &mut [
                 &mut self.settings_store,
                 &mut self.keybindings_store,
@@ -54650,7 +54684,11 @@ impl<B: Backend> App<B> {
                 &mut self.pins_store,
             ],
             now,
-        ))
+        );
+        for line in quit.take_merged_lines() {
+            diagnostics::note(&line);
+        }
+        Some(step)
     }
 
     /// **One turn of the quit's recovery phase** over the four stores, the copies
@@ -55473,7 +55511,8 @@ mod launch_landing_tests {
         let tear_out = door.find("self.settle_tear_out(errand, id)?");
         assert!(
             matches!((insert, publish, tear_out), (Some(i), Some(p), Some(t)) if i < p && p < t),
-            "a window opened this turn is missing from the directory the doors              after it read:
+            "a window opened this turn is missing from the directory the doors \
+             after it read:
 {door}"
         );
         let first =
@@ -55482,7 +55521,8 @@ mod launch_landing_tests {
         let publish = first.find("self.publish_window_directory();");
         assert!(
             matches!((insert, publish), (Some(i), Some(p)) if i < p),
-            "the first window is missing from the directory until the turn's              head walks it:
+            "the first window is missing from the directory until the turn's \
+             head walks it:
 {first}"
         );
         let tell = method_body("FolioApp", "tell_the_update_job");
@@ -56890,7 +56930,8 @@ mod files_locate_door_tests {
         // other acknowledgement in this window is.
         assert!(
             method_body("Runtime", "turn").contains("self.preview_refusal_deadline(),"),
-            "nothing wakes the window when the reason is due to go, so the pill stands until              something else happens to repaint"
+            "nothing wakes the window when the reason is due to go, so the pill stands until \
+             something else happens to repaint"
         );
         // ④ The way out, first among what the pill can say.
         let say = method_body("Runtime", "preview_pill_say");
@@ -57990,7 +58031,8 @@ mod file_peek_fade_tests {
         );
         assert!(
             !layer.contains(".opacity *=") && !layer.contains(".opacity ="),
-            "and no layer wears it in its own opacity: a layer faded for a reason              of its own keeps that reason as a surface inside this one"
+            "and no layer wears it in its own opacity: a layer faded for a reason \
+             of its own keeps that reason as a surface inside this one"
         );
 
         assert!(
@@ -71535,13 +71577,15 @@ mod floated_page_tests {
         assert_eq!(
             chrome_over(&stack, None, Some(body)),
             vec![over],
-            "a docked page's hole stands under the whole stack, so a layer over              it covers it and a layer beside it does not"
+            "a docked page's hole stands under the whole stack, so a layer over \
+             it covers it and a layer beside it does not"
         );
         let nothing: Vec<[f32; 4]> = Vec::new();
         assert_eq!(
             chrome_over(&stack, Some(0), Some(body)),
             nothing,
-            "a float's page is drawn over its own float's face, so that layer is              not something standing on it"
+            "a float's page is drawn over its own float's face, so that layer is \
+             not something standing on it"
         );
         assert_eq!(
             chrome_over(&[Some(beside)], None, Some(body)),
@@ -76234,6 +76278,8 @@ mod shell_literal_app_tests;
 #[cfg(test)]
 mod shortcuts_app_tests;
 #[cfg(test)]
+mod storage_reread_tests;
+#[cfg(test)]
 mod table_block_app_tests;
 /// **The fixtures the crate root's test files share**, `pub(crate)` where another file
 /// reaches them.
@@ -76327,7 +76373,10 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 26] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 27] = [
+        // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
+        // from a Recent row, beside its every-platform twin on the host's fallback shell.
+        "app_files_tests.rs",
         // Windows-only test fixtures: a share named by a document (`\\server\share`).
         "app_preview_tests.rs",
         // Windows-only test fixtures: UNC shares, WSL distribution shares and device and
@@ -80630,11 +80679,15 @@ mod clipboard_path_tests {
             ),
             (
                 ".paste_paths_into(target, batch.paths, \"write dropped paths to PTY\")",
-                "a dropped batch reaches a shell through one door, and takes the                  whole batch with it — which is what makes the focus and the                  raise behind its answer happen once per drop and not once per                  file",
+                "a dropped batch reaches a shell through one door, and takes the \
+                 whole batch with it — which is what makes the focus and the \
+                 raise behind its answer happen once per drop and not once per \
+                 file",
             ),
             (
                 "self.bring_this_window_forward();",
-                "and a drop brings this window to the front, from the one place                  that spends a whole batch (owner's ruling 2026-09-17)",
+                "and a drop brings this window to the front, from the one place \
+                 that spends a whole batch (owner's ruling 2026-09-17)",
             ),
             (
                 "self.paste_target(seat)",
@@ -80711,12 +80764,14 @@ mod clipboard_path_tests {
             flushing.contains("if written {")
                 && flushing.contains("self.focus_the_pane_a_path_landed_in(target.seat)?;")
                 && flushing.contains("self.bring_this_window_forward();"),
-            "a drop no longer takes the keyboard and the window with it, or does              so without asking whether anything was written:
+            "a drop no longer takes the keyboard and the window with it, or does \
+             so without asking whether anything was written:
 {flushing}"
         );
         assert!(
             flushing.find("paste_paths_into") < flushing.find("focus_the_pane_a_path_landed_in"),
-            "the focus moved before the write, so where the bytes went could              depend on it:
+            "the focus moved before the write, so where the bytes went could \
+             depend on it:
 {flushing}"
         );
         for forbidden in ["platform_pointer_now", "pointer_position"] {
@@ -81005,7 +81060,9 @@ mod clipboard_path_tests {
         assert_eq!(
             kept(GlassHere::Ours, promised),
             promised.map(|offer| offer.target),
-            "the control: a hand that let go on our own glass, where the box was              drawn, over the shell the box named, pastes — and pastes into that              shell by name"
+            "the control: a hand that let go on our own glass, where the box was \
+             drawn, over the shell the box named, pastes — and pastes into that \
+             shell by name"
         );
 
         // ① The hand moved to another pane and no motion was delivered before
@@ -81058,16 +81115,19 @@ mod clipboard_path_tests {
             assert_eq!(
                 kept(covered, promised),
                 None,
-                "{covered:?}: the path was typed into a terminal behind another                  window, with every identity in the offer unchanged"
+                "{covered:?}: the path was typed into a terminal behind another \
+                 window, with every identity in the offer unchanged"
             );
         }
         assert!(
             !glass_allows_a_text_write(GlassHere::Unknown),
-            "a text write on an answer the window manager would not give is a              guess, and this one cannot be seen or undone"
+            "a text write on an answer the window manager would not give is a \
+             guess, and this one cannot be seen or undone"
         );
         assert!(
             glass_allows_a_drop(GlassHere::Unknown),
-            "and the pane-moving drag keeps the opposite default, which is F2's:              with no answer the payload stays in the window holding it"
+            "and the pane-moving drag keeps the opposite default, which is F2's: \
+             with no answer the payload stays in the window holding it"
         );
 
         // ⑥ P1-b: the box was a refusal — the window is below what its own tree

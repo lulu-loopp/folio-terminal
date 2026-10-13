@@ -1036,7 +1036,8 @@ fn the_ledger_refuses_at_the_door_synchronously() {
                 outcome: Box::new(Terminal::WorkerGone),
             },
         ],
-        "the two owed when the worker ended went to their sink when their requesters went: the \n         request, and the one joined to it, carrying its outcome"
+        "the two owed when the worker ended went to their sink when their requesters went: the \
+         request, and the one joined to it, carrying its outcome"
     );
 }
 

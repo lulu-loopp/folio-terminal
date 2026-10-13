@@ -180,7 +180,7 @@ bt-platform	[windows]	crate::video::Readers::quiet_within	std::sync::Condvar::wa
 bt-platform	[windows]	crate::video::engine::Engine::shutdown	std::thread::JoinHandle::join	1
 bt-platform	[windows]	crate::video::engine::Engine::shutdown	std::thread::sleep	1
 bt-platform	[windows]	crate::video::engine::Engine::wait_for_metadata	std::thread::sleep	1
-bt-platform	[windows]	crate::video::engine::Machinery::pump	std::sync::mpsc::Receiver::recv_timeout	1
+bt-platform	[windows]	crate::video::engine::Pump::run	std::sync::mpsc::Receiver::recv_timeout	1
 bt-platform	[windows]	crate::video::engine::can_play_types	std::thread::JoinHandle::join	1
 bt-platform	[windows]	crate::video::within_budget	std::sync::mpsc::Receiver::recv_timeout	1
 bt-platform	[windows]	crate::windows_impl::<DirWatch as Drop>::drop	std::thread::JoinHandle::join	1

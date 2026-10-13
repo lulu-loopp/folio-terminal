@@ -2219,23 +2219,29 @@ impl<B: Backend> Runtime<'_, B> {
         // `EngineError` is sticky — an engine that has errored does not
         // un-error — and it can arrive at any time: a codec that fails on a
         // frame a minute in, a file that was replaced under the decoder, a
-        // container that turned out to be truncated. A seat left standing on one
-        // is a rectangle that will never receive another picture, so it is shut
-        // down and the surface is given the same sentence a refused *open*
-        // gives, out of the same place.
-        let faulted: Vec<(PreviewSurface, bt_platform::video::engine::EngineError)> = self
+        // container that turned out to be truncated, a source that never
+        // finished loading. A seat left standing on one is a rectangle that will
+        // never receive another picture, so it is shut down and the surface is
+        // given the sentence `video_seat::retirement` names for it.
+        let faulted: Vec<(
+            PreviewSurface,
+            bt_platform::video::engine::EngineError,
+            i18n::Text,
+        )> = self
             .window
             .video
             .iter()
-            .filter_map(|(surface, seat)| Some((surface, seat.fault()?)))
+            .filter_map(|(surface, seat)| {
+                let (error, says) = seat.retirement()?;
+                Some((surface, error, says))
+            })
             .collect();
         membership_moved |= !faulted.is_empty();
-        for (surface, error) in faulted {
+        for (surface, error, says) in faulted {
             self.mouse_trace(|| format!("video_seat surface={surface:?} fault={error:?}"));
             self.window.video.close(surface);
-            self.preview_pane_mut(surface).refuse_picture(Some(
-                PictureRefusal::this_window_cannot(i18n::Text::VideoFormatCannotPlay.text()),
-            ));
+            self.preview_pane_mut(surface)
+                .refuse_picture(Some(PictureRefusal::this_window_cannot(says.text())));
         }
         membership_moved
     }
@@ -4875,7 +4881,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// **The bar of one surface, laid out** — `None` when nothing is playing
     /// there or the bar is not up.
     ///
-    /// The same [`video_seat::bar_layout`] the painter used, off the same
+    /// The same [`video_seat::bar_layout_of`] the painter used, off the same
     /// [`Self::video_shape_of`] rectangle: a hit test that derived the boxes a
     /// second way would be a bar that answers a hand somewhere other than where
     /// it was drawn, which is the one defect a control bar cannot have.
@@ -4887,12 +4893,10 @@ impl<B: Backend> Runtime<'_, B> {
             return None;
         }
         let shape = self.video_shape_of(surface, scale, now)?;
-        let state = seat.state();
-        let figures = video_seat::clock_figures(state.position_secs, state.duration_secs);
-        video_seat::bar_layout(
+        video_seat::bar_layout_of(
+            &seat.state(),
             shape.rect(),
             scale,
-            figures,
             self.video_meta_of(surface).width,
         )
     }
