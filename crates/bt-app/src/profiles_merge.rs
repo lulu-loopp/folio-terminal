@@ -280,16 +280,6 @@ pub(crate) fn merge(
         reading_of(theirs, usable),
     );
     let (b_rows, o_rows) = (rows_in_force(base, &b_read), rows_in_force(ours, &o_read));
-    // The file's sequence: each id's row in force, and every row after it
-    // carried as its duplicate. Refused rows are units of their own.
-    let mut t_sequence: Vec<Slot> = Vec::new();
-    for (index, entry) in theirs.profiles.iter().enumerate() {
-        match t_read[index] {
-            Reading::InForce => t_sequence.push(Slot::Row(entry.id.clone())),
-            Reading::Duplicate => t_sequence.push(Slot::Carried(index, entry.id.clone())),
-            Reading::Refused => {}
-        }
-    }
     let t_rows = rows_in_force(theirs, &t_read);
     let (b, o, t) = (by_id(&b_rows), by_id(&o_rows), by_id(&t_rows));
     let title = |id: &str| -> String {
@@ -410,8 +400,6 @@ pub(crate) fn merge(
     let profiles = order(
         &b_rows,
         &o_rows,
-        &t_rows,
-        &t_sequence,
         &result,
         &refused,
         theirs,
@@ -440,14 +428,14 @@ pub(crate) fn merge(
 fn order(
     b_rows: &[&ProfileEntryV1],
     o_rows: &[&ProfileEntryV1],
-    t_rows: &[&ProfileEntryV1],
-    t_sequence: &[Slot],
     result: &HashMap<String, ProfileEntryV1>,
     refused: &[KeptRefused<'_>],
     theirs: &ProfilesV1,
     t_reading: &[Reading],
     account: &mut Account,
 ) -> Vec<Slot> {
+    let in_force_in_the_file = rows_in_force(theirs, t_reading);
+    let t_rows = &in_force_in_the_file[..];
     let holds = |rows: &[&ProfileEntryV1], id: &str| rows.iter().any(|entry| entry.id == id);
     let common = |id: &str| {
         result.contains_key(id) && holds(b_rows, id) && holds(o_rows, id) && holds(t_rows, id)
@@ -469,22 +457,22 @@ fn order(
     // Step 2: every other row, anchored to its nearest predecessor in its own
     // side's sequence that is in the result. Step 3: `T`'s anchored rows before
     // `O`'s, each side's in its own order — the order they are pushed in.
-    // The carried rows are placed last, so a row anchors to rows only.
-    let a_row_in_result = |slot: &Slot| matches!(slot, Slot::Row(id) if result.contains_key(id));
+    // The rows not in force are placed last, so a row anchors to rows only.
     let mut anchored: HashMap<Option<Slot>, Vec<Slot>> = HashMap::new();
-    for (at, slot) in t_sequence.iter().enumerate() {
-        let Slot::Row(id) = slot else {
-            continue;
-        };
+    for (at, entry) in t_rows.iter().enumerate() {
+        let id = entry.id.as_str();
         if !result.contains_key(id) || common(id) {
             continue;
         }
-        let anchor = t_sequence[..at]
+        let anchor = t_rows[..at]
             .iter()
             .rev()
-            .find(|earlier| a_row_in_result(earlier))
-            .cloned();
-        anchored.entry(anchor).or_default().push(slot.clone());
+            .find(|earlier| result.contains_key(&earlier.id))
+            .map(|earlier| Slot::Row(earlier.id.clone()));
+        anchored
+            .entry(anchor)
+            .or_default()
+            .push(Slot::Row(id.to_owned()));
     }
     for (at, entry) in o_rows.iter().enumerate() {
         let id = entry.id.as_str();
