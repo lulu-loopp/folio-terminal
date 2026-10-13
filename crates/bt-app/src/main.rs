@@ -19007,30 +19007,24 @@ fn raise_cancelled_quit_card_on(
     )
 }
 
-/// **The storage pass's card, raised on `toasts`** (T-STORE-NOTICE; design note
-/// 2026-10-11 §3.6, (b)11): one Info card anchored to the window, with no title
-/// and no verb — the file has already won, and nothing is owed — its body one
-/// line per file naming what the file's values replaced and what was not
-/// applied ([`i18n::merge_notice`]). `None`, and nothing raised, for an empty
-/// notice: a clean hand edit says nothing. The full list is each pass's line in
-/// `diagnostics.log`.
-fn raise_merge_notice_on(
-    toasts: &mut toast::ToastHost,
+/// **The storage pass's card** (T-STORE-NOTICE; design note 2026-10-11 §3.6,
+/// (b)11): its kind, its anchor and its statement — one Info card anchored to the
+/// window, its body one line per file naming what the file's values replaced and
+/// what was not applied ([`i18n::merge_notice`]). It is raised through
+/// `Runtime::toast`, which gives it no title and no verb: the file has already
+/// won, and nothing is owed. `None` for an empty notice: a clean hand edit says
+/// nothing. The full list, with every name a card cuts, is each pass's line in
+/// `diagnostics.log` (`settings_merge::Account::said`).
+fn merge_notice_card(
     notice: &document_request::MergeNotice,
-    motion: Motion,
-    now: Instant,
-) -> Option<toast::ToastId> {
+) -> Option<(toast::ToastKind, toast::ToastAnchor, String)> {
     if notice.files.is_empty() {
         return None;
     }
-    Some(toasts.raise(
+    Some((
         toast::ToastKind::Info,
         toast::ToastAnchor::Window,
-        None,
         i18n::merge_notice(notice),
-        None,
-        motion,
-        now,
     ))
 }
 

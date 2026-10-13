@@ -90,6 +90,24 @@ pub(crate) fn take_merges(window: &mut impl StoragePassWindow) -> anyhow::Result
     presented.and(raised)
 }
 
+/// **The batch's notice when its card is due** — every window's
+/// [`StoragePassWindow::merge_notice_due`]: `turn` joins `pending`
+/// ([`MergeNotice::gather`]), and the whole batch is answered once none of the
+/// four stores is still reading.
+pub(crate) fn notice_due(
+    pending: &mut MergeNotice,
+    turn: MergeNotice,
+    settings: &persist::SettingsStore,
+    keybindings: &persist::KeybindingsStore,
+    profiles: &persist::ProfilesStore,
+    pins: &pins::PinsStore,
+) -> Option<MergeNotice> {
+    pending.gather(
+        turn,
+        persist::documents_reading(settings, keybindings, profiles, pins),
+    )
+}
+
 impl MergeNotice {
     /// **Join one turn's notice to the batch's**, and answer the batch's whole
     /// notice — leaving none held — once no store is `reading` and there is

@@ -1697,11 +1697,11 @@ fn a_quit_that_completes_after_a_merge_says_it_in_diagnostics() {
     );
     assert_eq!(
         quit.take_merged_lines(),
-        vec![
+        vec![format!(
             "BT_PERSIST settings.json merged at quit: took 0 from the file, kept 1 from Folio, \
-             conflicts 1"
-                .to_owned()
-        ],
+             conflicts 1 ({})",
+            crate::settings::SettingsRow::TerminalFont.title()
+        )],
         "the merge at quit, said once"
     );
     assert!(quit.take_merged_lines().is_empty(), "and not again");

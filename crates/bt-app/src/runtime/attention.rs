@@ -5,8 +5,8 @@ use crate::{
     AttentionDelivery, NoticeHost, NoticeStrip, OVER_IN_PANE_TOP_FIRST, OverInPane, PointerTarget,
     PreviewSurface, Runtime, TaskbarFlash, UserInputKind, WindowRuntime, answer_attention_in,
     attention, attention_trace, emit_attention_lines, float, i18n, marks, native_window,
-    next_attention_stop, notice, notify, profiles, quit, raise_cancelled_quit_card_on,
-    raise_merge_notice_on, seats, taskbar_lane, toast,
+    merge_notice_card, next_attention_stop, notice, notify, profiles, quit,
+    raise_cancelled_quit_card_on, seats, taskbar_lane, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -217,27 +217,18 @@ impl Runtime<'_> {
     }
 
     /// **Say on this window what a batch of re-reads' merges replaced**
-    /// (T-STORE-NOTICE; design note 2026-10-11 §3.6): one Info card with no verb
-    /// ([`raise_merge_notice_on`]), the overlay re-derived and the chrome
-    /// presented as [`Self::toast`] does; nothing for an empty notice.
+    /// (T-STORE-NOTICE; design note 2026-10-11 §3.6): the card
+    /// ([`merge_notice_card`]) through the one door, [`Self::toast`] — no title,
+    /// no verb, and the hover asked at birth as for every card; nothing for an
+    /// empty notice.
     pub(crate) fn raise_merge_notice(
         &mut self,
         notice: &crate::document_request::MergeNotice,
     ) -> Result<()> {
-        if raise_merge_notice_on(
-            &mut self.window.toasts,
-            notice,
-            self.app.motion,
-            Instant::now(),
-        )
-        .is_none()
-        {
+        let Some((kind, anchor, body)) = merge_notice_card(notice) else {
             return Ok(());
-        }
-        if self.refresh_overlay() {
-            self.present_chrome_change()?;
-        }
-        Ok(())
+        };
+        self.toast(kind, anchor, None, body)
     }
 
     /// **The cancelled quit's one choice** (revision (d)2): *Leave without this change* asks

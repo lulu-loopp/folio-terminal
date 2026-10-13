@@ -556,18 +556,24 @@ pub(crate) fn conflicts_of(at_quit: &Account, pass: &Account) -> Vec<String> {
 }
 
 impl Account {
-    /// **The counts, as `diagnostics.log` says them** (§3.6): `BT_PERSIST
+    /// **The counts, as `diagnostics.log` says them** (§3.6, (b)11): `BT_PERSIST
     /// <file> merged: took <n> from the file, kept <m> from Folio, conflicts
-    /// <k>`, and `merged at quit` for a quit's merge.
+    /// <k> (<names>)` — every value the file won, named as the card names it, so
+    /// the names a card cuts at its bound are here in full — and `merged at
+    /// quit` for a quit's merge, which no card may follow.
     pub(crate) fn said(&self, file: &str, when: Said) -> String {
         let merged = match when {
             Said::InThePass => "merged",
             Said::AtQuit => "merged at quit",
         };
-        format!(
+        let mut line = format!(
             "BT_PERSIST {file} {merged}: took {} from the file, kept {} from Folio, conflicts {}",
             self.took, self.kept, self.conflicted
-        )
+        );
+        if !self.conflicts.is_empty() {
+            line.push_str(&format!(" ({})", self.conflicts.join(", ")));
+        }
+        line
     }
 
     /// Add one merge's account to the pass's.

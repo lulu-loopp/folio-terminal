@@ -824,7 +824,8 @@ mod tests {
             pass.diagnostics(),
             format!(
                 "BT_PERSIST keybindings.json merged: took 1 from the file, kept 0 from Folio, \
-                 conflicts 1; {} gave Ctrl+k to {}",
+                 conflicts 1 ({}); {} gave Ctrl+k to {}",
+                action_title("new-tab"),
                 action_title("new-tab"),
                 action_title("close-pane")
             )

@@ -768,13 +768,14 @@ impl storage_pass::StoragePassWindow for MergeTurn<'_, '_> {
         turn: document_request::MergeNotice,
     ) -> Option<document_request::MergeNotice> {
         let app = &mut *self.runtime.app;
-        let reading = persist::documents_reading(
+        storage_pass::notice_due(
+            &mut app.merge_notice,
+            turn,
             &app.settings_store,
             &app.keybindings_store,
             &app.profiles_store,
             &app.pins_store,
-        );
-        app.merge_notice.gather(turn, reading)
+        )
     }
 
     fn raise_merge_notice(&mut self, notice: &document_request::MergeNotice) -> Result<()> {

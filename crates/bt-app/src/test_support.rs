@@ -3098,7 +3098,8 @@ pub(crate) fn alone_in_a_process(selector: &str, stdin: &[u8]) -> bool {
 /// came (the door that took it), the shortcut table's departures are told to
 /// the keybindings store, and the profile and pin tables are what their stores'
 /// readers read. The batch's notice is held here as the application holds it,
-/// and its card is raised by the product's own [`raise_merge_notice_on`].
+/// and its card is the product's own ([`merge_notice_card`]), raised as
+/// `Runtime::toast` raises it.
 pub(crate) struct StoragePassRig {
     pub(crate) settings: persist::SettingsStore,
     pub(crate) keybindings: persist::KeybindingsStore,
@@ -3330,17 +3331,22 @@ impl storage_pass::StoragePassWindow for StoragePassRig {
         &mut self,
         turn: document_request::MergeNotice,
     ) -> Option<document_request::MergeNotice> {
-        let reading = persist::documents_reading(
+        storage_pass::notice_due(
+            &mut self.pending,
+            turn,
             &self.settings,
             &self.keybindings,
             &self.profiles,
             &self.pins,
-        );
-        self.pending.gather(turn, reading)
+        )
     }
 
     fn raise_merge_notice(&mut self, notice: &document_request::MergeNotice) -> anyhow::Result<()> {
-        if raise_merge_notice_on(&mut self.toasts, notice, Motion::Full, Instant::now()).is_some() {
+        // `Runtime::raise_merge_notice`'s card, raised as `Runtime::toast` raises
+        // one: no title, no verb.
+        if let Some((kind, anchor, body)) = merge_notice_card(notice) {
+            self.toasts
+                .raise(kind, anchor, None, body, None, Motion::Full, Instant::now());
             self.raised.push(notice.clone());
         }
         Ok(())

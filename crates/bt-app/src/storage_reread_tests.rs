@@ -3,7 +3,7 @@
 //! (b)11). The four real stores, on one scripted lane, driven through the pass
 //! the product runs (`storage_pass::take_merges`) on a window of the test's own
 //! ([`crate::test_support::StoragePassRig`]); written in the crate root's scope
-//! (`use super::*`), beside `raise_merge_notice_on`.
+//! (`use super::*`), beside `merge_notice_card`.
 
 use super::*;
 use crate::document_request::{MergeNotice, ReplacedInFile};
@@ -275,13 +275,12 @@ fn a_checkout_of_all_four_files_is_four_merges_and_one_notice() {
 /// The English lines: `settings.json: Theme and Font size came from disk.`,
 /// both clauses on one line, five names cut to three and how many more, and a
 /// clause of names not applied. The card is an Info card anchored to the
-/// window, with no title and no verb; one card holds the four files; an empty
-/// notice raises nothing.
+/// window, one card for the four files, raised through `Runtime::toast`, which
+/// gives a card no title and no verb; an empty notice is no card.
 ///
 /// MUTATIONS: drop the bound (`None` for `Some(NAMES_ON_A_CARD)` in
-/// `i18n::merge_notice_in`) — the five names are all listed; give the card a
-/// verb (an action in `raise_merge_notice_on`) — the card offers something to
-/// press.
+/// `i18n::merge_notice_in`) — the five names are all listed; raise a card for an
+/// empty notice (drop `merge_notice_card`'s empty check) — a card about nothing.
 #[test]
 fn the_merge_notice_names_each_file_bounded_with_no_choice() {
     use i18n::Lang;
@@ -335,24 +334,61 @@ fn the_merge_notice_names_each_file_bounded_with_no_choice() {
          disk.\npins.json: C:\\项目 folio came from disk.",
         "one line per file, in the notice's order"
     );
-    let now = Instant::now();
-    let mut toasts = toast::ToastHost::default();
-    let card = raise_merge_notice_on(&mut toasts, &notice, Motion::Full, now);
-    let [raised] = toasts.toasts() else {
-        panic!("one card for four files: {:?}", toasts.toasts());
-    };
-    assert_eq!(Some(raised.id()), card);
-    assert_eq!(raised.kind(), toast::ToastKind::Info);
-    assert_eq!(raised.anchor(), toast::ToastAnchor::Window);
-    assert_eq!(raised.body(), i18n::merge_notice(&notice));
-    assert_eq!(raised.action(), None, "nothing to choose: the file has won");
-
-    let mut toasts = toast::ToastHost::default();
     assert_eq!(
-        raise_merge_notice_on(&mut toasts, &MergeNotice::default(), Motion::Full, now),
-        None
+        merge_notice_card(&notice),
+        Some((
+            toast::ToastKind::Info,
+            toast::ToastAnchor::Window,
+            i18n::merge_notice(&notice),
+        )),
+        "one Info card on the window for the four files"
     );
-    assert!(toasts.toasts().is_empty(), "an empty notice raises nothing");
+    assert_eq!(
+        merge_notice_card(&MergeNotice::default()),
+        None,
+        "an empty notice is no card"
+    );
+}
+
+/// RED (T-STORE-NOTICE round 2; (b)11: "§3.6's merge line gains the names") —
+/// **every name a card cuts is in the merge's line.** Five profiles the file won
+/// over Folio's: the card names three and how many more, and the pass's line —
+/// and a quit's — names all five, as the card does.
+///
+/// MUTATION: the counts alone (in `settings_merge::Account::said`, leave out the
+/// names) — the two names past the card's bound are said nowhere.
+#[test]
+fn the_names_a_card_cuts_are_in_the_merge_line() {
+    use settings_merge::{Account, Said};
+    let names = ["甲 A: Name", "乙 B: Name", "丙 C: Name", "丁 D: Name", "戊 E: Name"];
+    let mut account = Account::default();
+    for name in names {
+        account.count(settings_merge::Unit::Conflict, || name.to_owned());
+    }
+    let card = i18n::merge_notice_in(
+        i18n::Lang::English,
+        &MergeNotice {
+            files: vec![ReplacedInFile {
+                file: persist::PROFILES_FILE_NAME,
+                values: account.conflicts.clone(),
+                not_applied: Vec::new(),
+            }],
+        },
+    );
+    assert_eq!(
+        card,
+        "profiles.json: 甲 A: Name, 乙 B: Name, 丙 C: Name and 2 more came from disk."
+    );
+    assert_eq!(
+        account.said(persist::PROFILES_FILE_NAME, Said::InThePass),
+        "BT_PERSIST profiles.json merged: took 0 from the file, kept 0 from Folio, conflicts \
+         5 (甲 A: Name, 乙 B: Name, 丙 C: Name, 丁 D: Name, 戊 E: Name)"
+    );
+    assert_eq!(
+        account.said(persist::PROFILES_FILE_NAME, Said::AtQuit),
+        "BT_PERSIST profiles.json merged at quit: took 0 from the file, kept 0 from Folio, \
+         conflicts 5 (甲 A: Name, 乙 B: Name, 丙 C: Name, 丁 D: Name, 戊 E: Name)"
+    );
 }
 
 /// RED (carry-forward 2; ticket 6's rule) — **a failed presentation still
@@ -481,11 +517,11 @@ fn what_a_cancelled_quit_merged_is_named_on_the_next_passs_card() {
     assert!(quit.take_cancelled().is_some(), "the quit is cancelled");
     assert_eq!(
         lines,
-        vec![
+        vec![format!(
             "BT_PERSIST settings.json merged at quit: took 0 from the file, kept 1 from Folio, \
-             conflicts 1"
-                .to_owned()
-        ],
+             conflicts 1 ({})",
+            settings::SettingsRow::Theme.title()
+        )],
         "the quit's merge, said once"
     );
 
