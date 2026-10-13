@@ -41012,9 +41012,13 @@ fn create_leaf_session(
         // **The whole row and not its index** (§7.1.6c-6c): the profile's own
         // environment is one of the things the spawn now lays down, and a
         // function that asked this module five separate questions about one
-        // index is a function no test can put a profile in front of.
+        // index is a function no test can put a profile in front of. **And the kind of program
+        // the walk found**, because the door follows it: a launcher into WSL that is not
+        // `wsl.exe` is served by no door (`profiles::door_of`).
+        let program_kind = programs.shell(spawn_profile);
         let mut command = shell_integration::shell_command(
             row,
+            &program_kind,
             &place.arguments,
             shell_integration::Scripts::installed(),
             &bt_pty::SystemShellEnvironment,
@@ -41025,6 +41029,7 @@ fn create_leaf_session(
             folder: gone.folder.clone(),
             arguments: shell_integration::shell_command(
                 row,
+                &program_kind,
                 &gone.place.arguments,
                 shell_integration::Scripts::installed(),
                 &bt_pty::SystemShellEnvironment,
@@ -41056,7 +41061,7 @@ fn create_leaf_session(
             .map(|(name, value)| (std::ffi::OsString::from(name), value)),
         );
         resolved_program = Some(PathBuf::from(&program));
-        resolved_shell = programs.shell(spawn_profile);
+        resolved_shell = program_kind;
         // **The shell is asked for, never waited for** (T-BIRTH-OFF-WINDOW). Its pseudoconsole and
         // process are made on a `bt-pty-birth` worker of its own (`pty_door::request_shell`); this
         // pane is made in birth around the request, holds what is typed into it, and lands when the
@@ -41210,7 +41215,9 @@ fn bare_leaf(
             &bt_pty::SystemShellEnvironment,
         ),
         integration: profiles::row_of(&decision.spawn_profile)
-            .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
+            .map_or(profiles::Integration::None, |row| {
+                profiles::door_of(&row, &decision.program_kind)
+            }),
         profile: decision.spawn_profile.clone(),
         program: decision.program.clone(),
         program_kind: decision.program_kind.clone(),
@@ -41426,8 +41433,9 @@ fn finish_leaf_birth(
     // The door of the profile this pane actually came up as, read once,
     // here, where that profile is finally known — after both fallbacks. See
     // the field for why it is not read again later.
-    leaf.integration = profiles::row_of(&profile)
-        .map_or(profiles::Integration::None, |row| profiles::served_by(&row));
+    leaf.integration = profiles::row_of(&profile).map_or(profiles::Integration::None, |row| {
+        profiles::door_of(&row, &leaf.program_kind)
+    });
     leaf.profile = profile;
     leaf.program = resolved_program;
     leaf.pty = pty;
@@ -46568,6 +46576,7 @@ impl Runtime<'_> {
                     .map(|(row, before_folio)| {
                         shell_integration::declared_environment(
                             &row,
+                            &self.app.profile_programs.shell(&row.id),
                             shell_integration::Scripts::installed(),
                             &before_folio,
                             attention_wire::endpoint_name(),

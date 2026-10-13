@@ -841,12 +841,41 @@ pub fn derive_integration(program: &ProgramSource) -> Integration {
     shell_family(program).map_or(Integration::None, |family| family.integration)
 }
 
-/// One row's door, resolved — the answer every caller outside the editor wants.
+/// One row's door, resolved from the row alone — what the row asks for, before the kind of
+/// program a walk found on this machine is known ([`door_of`] is the door it is served through).
 #[must_use]
 pub fn served_by(profile: &Profile) -> Integration {
     match profile.integration {
         IntegrationChoice::Auto => derive_integration(&profile.program),
         IntegrationChoice::Named(named) => named,
+    }
+}
+
+/// **The door a row is served through**, once the walk has said what kind of program it starts
+/// ([`ShellProgram`], carried by `ProfilePrograms::shell` and a leaf's `program_kind`):
+/// [`served_by`] for every program but a WSL launcher that is not `wsl.exe`, which is served by no
+/// door.
+///
+/// The door follows the program kind; a bash inside WSL is given WSL-spelled paths or no door.
+/// `wsl.exe` is given WSL-spelled paths: its `-e` executes the program it names argv for argv, so
+/// the script crosses as one argument in the distribution's spelling
+/// (`shell_integration::WSL_LOGIN_SHELL`). Every other launcher — `System32\bash.exe`, WSL's
+/// Store `bash.exe` alias, a distribution's own launcher — has no such flag: what follows its name
+/// is joined into one command line and re-parsed by a shell inside the distribution (measured
+/// 2026-10-12: `bash.exe -c '…"$0"…' zero` printed `/bin/bash`, the outer shell's `$0`), whose
+/// grammar this side does not know, and a distribution's launcher reads its own verbs (`run`,
+/// `config`) and refuses anything else. So no path can be handed to one whole, and such a row gets
+/// what `wsl.exe` gets when its script cannot be named in WSL: no init file, the plain shell.
+#[must_use]
+pub fn door_of(profile: &Profile, program: &ShellProgram) -> Integration {
+    door_on(served_by(profile), program)
+}
+
+/// `door`, as a program of kind `program` can be handed it — [`door_of`]'s rule.
+fn door_on(door: Integration, program: &ShellProgram) -> Integration {
+    match program {
+        ShellProgram::WslLauncher { .. } => Integration::None,
+        ShellProgram::WslExe | ShellProgram::Cygwin | ShellProgram::Native => door,
     }
 }
 
@@ -920,6 +949,11 @@ pub(crate) struct ShellFamily {
 /// **`wsl` is a launcher and not a shell**: it has no login flag of its own,
 /// and which shell it logs the reader into is asked inside the distribution —
 /// by `shell_integration::WSL_LOGIN_SHELL`.
+///
+/// **A row's door is this table's answer for its stem, and then the program kind's**
+/// ([`door_of`]): the door follows the program kind; a bash inside WSL is given WSL-spelled paths
+/// or no door. `System32\bash.exe` has the stem `bash` and is a launcher into WSL, not a bash this
+/// side can hand an init file to.
 pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
     ShellFamily {
         stems: &["pwsh", "powershell"],
@@ -2756,6 +2790,28 @@ pub enum ShellProgram {
     /// Every other program, and a row with no program on this machine.
     #[default]
     Native,
+}
+
+impl ShellProgram {
+    /// Whether this program starts its shell inside a WSL distribution: a Win32 process whose
+    /// environment reaches that shell only as far as `WSLENV` lists it.
+    #[must_use]
+    pub fn enters_wsl(&self) -> bool {
+        matches!(self, Self::WslExe | Self::WslLauncher { .. })
+    }
+}
+
+/// The kind of program a shipped row starts on a machine where no program is a Store alias,
+/// `System32\bash.exe` or a Cygwin program, as on every test fixture machine: whether the row
+/// starts `wsl.exe`, by the rule [`shell_program_of`] reads, read off the row alone so that every
+/// host can ask it.
+#[cfg(test)]
+pub(crate) fn shipped_kind(row: &Profile) -> ShellProgram {
+    if shell_family(&row.program).is_some_and(|family| family.wsl_launcher) {
+        ShellProgram::WslExe
+    } else {
+        ShellProgram::Native
+    }
 }
 
 /// The Store package Windows Subsystem for Linux itself is installed as. Its `bash.exe` alias is
@@ -16228,18 +16284,6 @@ mod tests {
         }
     }
 
-    /// The kind of program a shipped row starts on a machine where no program is a Store alias,
-    /// `System32\bash.exe` or a Cygwin program, as on every fixture machine here: whether the row
-    /// starts `wsl.exe`, by the rule [`shell_program_of`] reads, read off the row alone so that
-    /// every host can ask it.
-    pub(super) fn shipped_kind(row: &Profile) -> ShellProgram {
-        if shell_family(&row.program).is_some_and(|family| family.wsl_launcher) {
-            ShellProgram::WslExe
-        } else {
-            ShellProgram::Native
-        }
-    }
-
     /// The kind of program a walk over `machine` finds for `row`: resolved and classified as
     /// `crate::programs_lane` does, on a machine with no WSL distribution installed.
     #[cfg(windows)]
@@ -28550,7 +28594,7 @@ mod paste_tests {
                 // The namespace the table gives this row on its own platform.
                 let actual = match printed_path_namespace_on(
                     platform,
-                    &super::tests::shipped_kind(row),
+                    &super::shipped_kind(row),
                     served_by(row),
                     &row.args,
                     &EmptyMachine,
@@ -28795,7 +28839,7 @@ mod paste_tests {
             assert_eq!(
                 printed_path_namespace_on(
                     SeedPlatform::Windows,
-                    &super::tests::shipped_kind(row),
+                    &super::shipped_kind(row),
                     served_by(row),
                     &row.args,
                     &EmptyMachine

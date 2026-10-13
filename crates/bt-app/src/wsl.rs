@@ -581,6 +581,7 @@ mod tests {
             let _ = crate::profiles::title(0);
             let command = crate::shell_integration::shell_command(
                 &crate::profiles::row_of("wsl").expect("the shipped WSL row"),
+                &crate::profiles::ShellProgram::WslExe,
                 &[std::ffi::OsString::from("--cd"), "~".into()],
                 crate::shell_integration::Scripts {
                     bash: Some(std::path::Path::new(r"C:\Folio\folio.bash")),

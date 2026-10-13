@@ -590,19 +590,26 @@ impl Default for EnvironmentDerivation {
 /// `environment` is read, not written: Command Prompt's integration is a
 /// variable this process already has one of, and prefixing rather than replacing
 /// it means the composition has to see what is there.
+///
+/// `program_kind` is what the program walk found the row's program to be
+/// ([`profiles::ProfilePrograms::shell`]): the door is the one the row is served through as that
+/// kind of program ([`profiles::door_of`]), and a program that enters WSL lists the profile's own
+/// variables in `WSLENV`, whatever its door.
 #[must_use]
 pub fn shell_command(
     profile: &Profile,
+    program_kind: &profiles::ShellProgram,
     place_arguments: &[OsString],
     scripts: Scripts<'_>,
     environment: &dyn ShellEnvironment,
 ) -> ShellCommand {
+    let door = profiles::door_of(profile, program_kind);
     // The row's login flag and then its own words (0.4.6 ticket 74): what the row
     // asks the program for, before any door below trades a word for its script.
     let words = profiles::launch_args(profile);
     let own = || {
         let words = words.iter().map(OsString::from);
-        if profiles::served_by(profile) == Integration::PowerShellOptIn {
+        if door == Integration::PowerShellOptIn {
             // PowerShell keeps parsing non-terminal switches only until a terminal such as
             // -Command. A starting-place launcher flag therefore has to precede the row's own
             // words; after -Command it would become user command text instead of a host flag.
@@ -617,21 +624,19 @@ pub fn shell_command(
                 .collect::<Vec<_>>()
         }
     };
-    let mut command = shell_command_for(profile, scripts, environment, &own);
+    let mut command = shell_command_for(profile, door, scripts, environment, &own);
     command.environment_derivation = EnvironmentDerivation {
-        integration: profiles::served_by(profile),
-        crosses_wsl: profile.paths == profiles::PathNamespace::Wsl,
+        integration: door,
+        crosses_wsl: program_kind.enters_wsl(),
         forwards_terminal_into_wsl: command
             .environment
             .iter()
             .any(|(name, _)| environment_name_eq(name, OsStr::new("WSLENV"))),
     };
     let mine = &profile.env;
-    command.environment.extend(hyperlink_declaration(
-        profiles::served_by(profile),
-        environment,
-        mine,
-    ));
+    command
+        .environment
+        .extend(hyperlink_declaration(door, environment, mine));
     command.environment.extend(locale_declaration(
         crate::locale_declaration::held().as_ref(),
         environment,
@@ -642,7 +647,7 @@ pub fn shell_command(
     // one of the names it could set — a reader who writes their own `WSLENV` row
     // is answering the question outright, and the layering below is what lets
     // them.
-    if profile.paths == profiles::PathNamespace::Wsl {
+    if program_kind.enters_wsl() {
         forward_into_wsl(&mut command.environment, mine);
     }
     layer_profile_environment(&mut command.profile_environment, mine);
@@ -1714,11 +1719,12 @@ fn forward_into_wsl(environment: &mut Vec<(OsString, OsString)>, mine: &[(String
 
 fn shell_command_for(
     profile: &Profile,
+    door: Integration,
     scripts: Scripts<'_>,
     environment: &dyn ShellEnvironment,
     own: &dyn Fn() -> Vec<OsString>,
 ) -> ShellCommand {
-    match profiles::served_by(profile) {
+    match door {
         Integration::BashInitFile if scripts.bash.is_some() => match profile.paths {
             // Git Bash: bash *is* the program, and takes the flag directly.
             //
@@ -2087,14 +2093,22 @@ pub enum DeclaredValue {
 /// from — the account's current logon environment where the platform has one,
 /// this process's own where it has not or the read failed (2026-10-05 ruling;
 /// [`page_environment`] holds the one the Profiles page read when it opened).
+/// `program_kind` is the kind of program the walk found for the row, as the spawn is handed it.
 #[must_use]
 pub fn declared_environment(
     profile: &Profile,
+    program_kind: &profiles::ShellProgram,
     scripts: Scripts<'_>,
     before_folio: &[(OsString, OsString)],
     endpoint: Option<&'static str>,
 ) -> Vec<(String, DeclaredValue)> {
-    let mut command = shell_command(profile, &[], scripts, &ComposedEnvironment(before_folio));
+    let mut command = shell_command(
+        profile,
+        program_kind,
+        &[],
+        scripts,
+        &ComposedEnvironment(before_folio),
+    );
     // The wire's three go into the terminal's layer where the spawn puts them;
     // the two a pane has its own of travel as empty values and are named per
     // pane below.
@@ -5572,6 +5586,24 @@ mod tests {
             .expect("a Windows seed id")
     }
 
+    /// [`shell_command`] for a row whose program is the kind a shipped row's program is on a
+    /// machine with no Store alias, legacy launcher or Cygwin program
+    /// ([`profiles::shipped_kind`]): `wsl.exe` for the WSL row, a native program for the others.
+    fn shipped_command(
+        profile: &Profile,
+        place_arguments: &[OsString],
+        scripts: Scripts<'_>,
+        environment: &dyn ShellEnvironment,
+    ) -> ShellCommand {
+        shell_command(
+            profile,
+            &profiles::shipped_kind(profile),
+            place_arguments,
+            scripts,
+            environment,
+        )
+    }
+
     /// `parts` joined by this platform's own separator: `[r"C:\", "Git", "bash.exe"]` is
     /// `C:\Git\bash.exe` on Windows, and on every platform a path whose leaf the platform's
     /// own parser finds — which is what a program's family is read from.
@@ -8544,7 +8576,7 @@ mod tests {
             .into_iter()
             .find(|profile| profile.id == profiles::fallback_profile_id())
             .expect("the floor is a row this build ships");
-        let command = shell_command(&floor, &[], Scripts::default(), &bare());
+        let command = shipped_command(&floor, &[], Scripts::default(), &bare());
         for (name, _) in &command.environment {
             for declared in DECLARED {
                 assert!(
@@ -8658,7 +8690,7 @@ mod tests {
     #[test]
     fn git_bash_trades_its_login_flag_for_the_init_file() {
         let script = Path::new(r"C:\Users\dev\AppData\Roaming\Folio\shell-integration\folio.bash");
-        let command = shell_command(&row("gitbash"), &[], bash_only(script), &bare());
+        let command = shipped_command(&row("gitbash"), &[], bash_only(script), &bare());
         assert_eq!(
             args(&command),
             [
@@ -8680,7 +8712,7 @@ mod tests {
         );
         // No script on this machine, and Git Bash is the shell it always was.
         assert_eq!(
-            args(&shell_command(
+            args(&shipped_command(
                 &row("gitbash"),
                 &[],
                 Scripts::default(),
@@ -8744,7 +8776,7 @@ mod tests {
             bash: Some(script),
             zdotdir: Some(zdotdir),
         };
-        let first = shell_command(&row("wsl"), &place, doors, &bare());
+        let first = shipped_command(&row("wsl"), &place, doors, &bare());
         assert_eq!(
             args(&first),
             expected,
@@ -8764,7 +8796,7 @@ mod tests {
         );
         // The whole of the defect, said as a sentence: the second pane of a run
         // used to be the first one that worked.
-        let second = shell_command(&row("wsl"), &place, doors, &bare());
+        let second = shipped_command(&row("wsl"), &place, doors, &bare());
         assert_eq!(
             args(&second),
             args(&first),
@@ -8842,7 +8874,7 @@ mod tests {
     fn a_script_wsl_cannot_name_is_not_handed_to_it() {
         let place = [OsString::from("--cd"), OsString::from("/mnt/d/Developer")];
         for unreachable in [r"\\nas\home\Folio\folio.bash", "relative\\folio.bash"] {
-            let command = shell_command(
+            let command = shipped_command(
                 &row("wsl"),
                 &place,
                 Scripts {
@@ -8900,7 +8932,7 @@ mod tests {
             ],
             ..row("gitbash")
         };
-        let command = shell_command(
+        let command = shipped_command(
             &theirs,
             &[OsString::from("--rcfile-is-not-here")],
             bash_only(Path::new(r"C:\Folio\folio.bash")),
@@ -8923,7 +8955,7 @@ mod tests {
             args: vec!["-li".to_owned()],
             ..row("gitbash")
         };
-        let command = shell_command(
+        let command = shipped_command(
             &clustered,
             &[],
             bash_only(Path::new(r"C:\Folio\folio.bash")),
@@ -8939,7 +8971,7 @@ mod tests {
             args: Vec::new(),
             ..row("gitbash")
         };
-        let command = shell_command(
+        let command = shipped_command(
             &bare_row,
             &[],
             bash_only(Path::new(r"C:\Folio\folio.bash")),
@@ -8965,7 +8997,7 @@ mod tests {
     /// documentation puts them — has none of them.
     #[test]
     fn the_startup_chain_a_pane_emulates_is_the_one_its_profile_asked_for() {
-        let login = shell_command(
+        let login = shipped_command(
             &row("gitbash"),
             &[],
             bash_only(Path::new(r"C:\Folio\folio.bash")),
@@ -8983,7 +9015,7 @@ mod tests {
             login: false,
             ..row("gitbash")
         };
-        let plain = shell_command(
+        let plain = shipped_command(
             &plain,
             &[],
             bash_only(Path::new(r"C:\Folio\folio.bash")),
@@ -9029,7 +9061,7 @@ mod tests {
             paths: profiles::PathNamespace::Windows,
             ..row("gitbash")
         };
-        let command = shell_command(
+        let command = shipped_command(
             &theirs,
             &[],
             both(r"C:\Folio\folio.bash", r"C:\Folio\zdotdir"),
@@ -9043,7 +9075,7 @@ mod tests {
         assert_eq!(value_of(&command, "BT_USER_ZDOTDIR"), None);
         // A reader who keeps their own startup files somewhere else has said so
         // in that variable, and the script needs it to put them back.
-        let inherited = shell_command(
+        let inherited = shipped_command(
             &theirs,
             &[],
             both(r"C:\Folio\folio.bash", r"C:\Folio\zdotdir"),
@@ -9086,17 +9118,17 @@ mod tests {
         }
         let rows = profiles::shipped_for(profiles::SeedPlatform::MacOs, &Mac);
         let scripts = both("/F/folio.bash", "/F/zdotdir");
-        let zsh = shell_command(&rows[0], &[], scripts, &bare());
+        let zsh = shipped_command(&rows[0], &[], scripts, &bare());
         assert_eq!(args(&zsh), ["-l"]);
         assert_eq!(value_of(&zsh, "ZDOTDIR").as_deref(), Some("/F/zdotdir"));
-        let bash = shell_command(&rows[1], &[], scripts, &bare());
+        let bash = shipped_command(&rows[1], &[], scripts, &bare());
         assert_eq!(args(&bash), ["--init-file", "/F/folio.bash", "-i"]);
         assert_eq!(
             value_of(&bash, INSTALLED_MARKER).as_deref(),
             Some(MODE_LOGIN),
             "the script replays the login chain bash will not run beside an init file"
         );
-        let sh = shell_command(&rows[2], &[], scripts, &bare());
+        let sh = shipped_command(&rows[2], &[], scripts, &bare());
         assert_eq!(args(&sh), ["-l"]);
     }
 
@@ -9173,7 +9205,7 @@ mod tests {
                 bash: Some(&script),
                 zdotdir: Some(&zdotdir),
             };
-            let mut command = shell_command(row, &[], scripts, &bare());
+            let mut command = shipped_command(row, &[], scripts, &bare());
             command
                 .environment
                 .push((OsString::from("HOME"), home.clone().into_os_string()));
@@ -9255,7 +9287,7 @@ mod tests {
             login: false,
             ..row("gitbash")
         };
-        let command = shell_command(
+        let command = shipped_command(
             &theirs,
             &[],
             both(r"C:\Folio\folio.bash", r"C:\Folio\zdotdir"),
@@ -9286,7 +9318,7 @@ mod tests {
     #[test]
     fn the_question_asked_inside_the_distribution_names_both_doors() {
         let place = [OsString::from("--cd"), OsString::from("/mnt/d/Developer")];
-        let command = shell_command(
+        let command = shipped_command(
             &row("wsl"),
             &place,
             both(r"C:\Folio\folio.bash", r"C:\Folio\zdotdir"),
@@ -9348,7 +9380,7 @@ mod tests {
                 Integration::PowerShellOptIn,
                 "{id}: PowerShell's script is the user's to install"
             );
-            let command = shell_command(
+            let command = shipped_command(
                 &profile,
                 &[],
                 bash_only(Path::new(r"C:\script.bash")),
@@ -9394,7 +9426,7 @@ mod tests {
     ///   [`profiles::Integration::CmdPrompt`].
     #[test]
     fn command_prompt_marks_its_command_boundaries_and_reports_its_directory() {
-        let command = shell_command(
+        let command = shipped_command(
             &row("cmd"),
             &[],
             bash_only(Path::new(r"C:\script.bash")),
@@ -9440,7 +9472,7 @@ mod tests {
     #[test]
     fn every_shell_is_told_this_terminal_renders_hyperlinks_unless_it_was_already_told() {
         let forced = |id: &str, environment: &dyn ShellEnvironment| {
-            shell_command(
+            shipped_command(
                 &row(id),
                 &[],
                 bash_only(Path::new(r"C:\s.bash")),
@@ -9473,7 +9505,7 @@ mod tests {
         );
         // And across the WSL boundary a variable that is not listed does not
         // travel, so the declaration is listed whether or not we set it.
-        let wsl = shell_command(
+        let wsl = shipped_command(
             &row("wsl"),
             &[],
             bash_only(Path::new(r"C:\s.bash")),
@@ -9511,7 +9543,7 @@ mod tests {
         assert!(!rows.is_empty(), "a Mac ships its shells");
         for row in &rows {
             let forced = |environment: &dyn ShellEnvironment| {
-                shell_command(row, &[], both("/F/folio.bash", "/F/zdotdir"), environment)
+                shipped_command(row, &[], both("/F/folio.bash", "/F/zdotdir"), environment)
                     .environment
                     .into_iter()
                     .find(|(key, _)| key == "FORCE_HYPERLINK")
@@ -9539,7 +9571,7 @@ mod tests {
     /// *that* prints it three times.
     #[test]
     fn a_prompt_the_user_already_set_is_kept_and_reported_in_front_of_exactly_once() {
-        let theirs = shell_command(
+        let theirs = shipped_command(
             &row("cmd"),
             &[],
             Scripts::default(),
@@ -9550,7 +9582,7 @@ mod tests {
             r"$e]133;D$e\$e]7;file:///$P$e\$e]133;A$e\$T$S$P$G"
         );
 
-        let again = shell_command(
+        let again = shipped_command(
             &row("cmd"),
             &[],
             Scripts::default(),
@@ -9567,7 +9599,7 @@ mod tests {
 
         // An empty `PROMPT` is not a prompt the user chose to have; it is what
         // `cmd` reads as "use the default", and the default is what it gets.
-        let empty = shell_command(
+        let empty = shipped_command(
             &row("cmd"),
             &[],
             Scripts::default(),
@@ -9614,7 +9646,7 @@ mod tests {
     /// overridden - with no symptom except that the row appears not to work.
     #[test]
     fn a_profiles_own_rows_are_written_over_what_this_terminal_says() {
-        let command = shell_command(
+        let command = shipped_command(
             &row_with(
                 "gitbash",
                 &[("FOO", "bar"), ("TERM_PROGRAM", "xterm"), ("EMPTY", "")],
@@ -9634,7 +9666,7 @@ mod tests {
         assert_eq!(value_of(&command, "EMPTY").as_deref(), Some(""));
         // And it is this row's sentence and no other's: the shipped table is
         // untouched, so a sibling profile still hears what the terminal says.
-        let sibling = shell_command(
+        let sibling = shipped_command(
             &row("gitbash"),
             &[],
             bash_only(Path::new(r"C:\s.bash")),
@@ -9654,7 +9686,7 @@ mod tests {
     /// throwing away what somebody is in the middle of writing.
     #[test]
     fn a_nameless_row_never_reaches_a_child() {
-        let command = shell_command(
+        let command = shipped_command(
             &row_with("cmd", &[("", "orphan"), ("KEPT", "1")]),
             &[],
             Scripts::default(),
@@ -9680,7 +9712,7 @@ mod tests {
     #[test]
     fn the_hyperlink_answer_a_profile_gives_replaces_the_declaration_rather_than_joining_it() {
         for answer in ["0", "1"] {
-            let command = shell_command(
+            let command = shipped_command(
                 &row_with("gitbash", &[(FORCE_HYPERLINK, answer)]),
                 &[],
                 bash_only(Path::new(r"C:\s.bash")),
@@ -9691,7 +9723,7 @@ mod tests {
         }
         // `Auto` - no row of that name - is the behaviour that shipped before
         // the picker existed, unchanged.
-        let auto = shell_command(
+        let auto = shipped_command(
             &row("gitbash"),
             &[],
             bash_only(Path::new(r"C:\s.bash")),
@@ -9700,7 +9732,7 @@ mod tests {
         assert_eq!(value_of(&auto, FORCE_HYPERLINK).as_deref(), Some("1"));
         // And a profile's own `0` beats an inherited `1`, which the declaration
         // would have left alone: this is not a declaration, it is the answer.
-        let over_inherited = shell_command(
+        let over_inherited = shipped_command(
             &row_with("gitbash", &[(FORCE_HYPERLINK, "0")]),
             &[],
             bash_only(Path::new(r"C:\s.bash")),
@@ -9726,7 +9758,7 @@ mod tests {
                 paths: profiles::PathNamespace::Windows,
                 ..row(id)
             };
-            let command = shell_command(&shut, &[], bash_only(Path::new(r"C:\s.bash")), &bare());
+            let command = shipped_command(&shut, &[], bash_only(Path::new(r"C:\s.bash")), &bare());
             assert_eq!(
                 command.arguments,
                 // The row's own words, its login switch spelled among them
@@ -9807,6 +9839,124 @@ mod tests {
         }
     }
 
+    /// PIN — **the door follows the program kind, not the stem** (T-WSL-LEGACY-BASH-DOOR): a
+    /// launcher into WSL that is not `wsl.exe` is handed what `wsl.exe` is handed when its script
+    /// cannot be named in WSL — no init file, the row's own words — and never bash's door with a
+    /// Windows-spelled path; the profile's own variables are listed in `WSLENV` for it as for
+    /// `wsl.exe`. A Git Bash and a Cygwin bash keep `--init-file` with the script as Windows
+    /// spells it.
+    ///
+    /// `System32\bash.exe` has the stem `bash`, so the family table alone hands it
+    /// `--init-file C:\…\folio.bash -i`, for a bash that runs inside WSL and cannot open that
+    /// path — and the launcher's command line is re-parsed by a shell inside the distribution,
+    /// so no path can be handed to it whole (`profiles::door_of`).
+    ///
+    /// MUTATIONS: ① decide by stem (`door_of` answers `served_by(profile)` whatever the kind)
+    /// and `System32\bash.exe` is handed `--init-file`; ② list the profile's variables only for a
+    /// row whose paths are WSL's and the launcher's own `FOLIO_样本` stays on the Win32 side.
+    ///
+    /// Windows only: a drive-letter path is a Windows path grammar, and WSL is a Windows launcher.
+    #[cfg(windows)]
+    #[test]
+    fn a_wsl_launcher_that_is_not_wsl_exe_gets_wsl_exes_door() {
+        use profiles::ShellProgram;
+        let script =
+            Path::new(r"C:\Users\alice\AppData\Roaming\Folio\shell-integration\folio.bash");
+        let mine = [("FOLIO_样本", "混合 text")];
+        let custom = |program: &str, integration: profiles::IntegrationChoice| Profile {
+            id: "mine".into(),
+            program: ProgramSource::Path(PathBuf::from(program)),
+            integration,
+            ..row_with("gitbash", &mine)
+        };
+        let auto = profiles::IntegrationChoice::Auto;
+        let wsl_exe = shell_command(
+            &row_with("wsl", &mine),
+            &ShellProgram::WslExe,
+            &[],
+            bash_only(script),
+            &bare(),
+        );
+        assert_eq!(
+            args(&wsl_exe),
+            [
+                "-e",
+                "sh",
+                "-c",
+                WSL_LOGIN_SHELL,
+                WSL_ARGV0,
+                "/mnt/c/Users/alice/AppData/Roaming/Folio/shell-integration/folio.bash",
+                "",
+            ],
+            "wsl.exe: the script, translated into the distribution's spelling"
+        );
+        let launchers = [
+            (
+                r"C:\Windows\System32\bash.exe",
+                auto,
+                ShellProgram::WslLauncher { distribution: None },
+            ),
+            (
+                r"C:\Users\alice\AppData\Local\Microsoft\WindowsApps\bash.exe",
+                auto,
+                ShellProgram::WslLauncher { distribution: None },
+            ),
+            (
+                r"C:\Users\alice\AppData\Local\Microsoft\WindowsApps\ubuntu2204.exe",
+                profiles::IntegrationChoice::Named(Integration::BashInitFile),
+                ShellProgram::WslLauncher {
+                    distribution: Some("Ubuntu-22.04".into()),
+                },
+            ),
+        ];
+        for (program, integration, kind) in launchers {
+            let row = custom(program, integration);
+            let command = shell_command(&row, &kind, &[], bash_only(script), &bare());
+            // What `wsl.exe` is handed when its script cannot be named in WSL: the row's own words.
+            assert_eq!(
+                args(&command),
+                profiles::launch_args(&row),
+                "{program}: no init file"
+            );
+            assert!(
+                !args(&command)
+                    .iter()
+                    .any(|word| word == "--init-file" || word.contains(r"C:\")),
+                "{program}: no Windows-spelled path is handed to a shell inside WSL: {:?}",
+                args(&command)
+            );
+            assert_eq!(value_of(&command, INSTALLED_MARKER), None, "{program}");
+            assert!(
+                value_of(&command, "WSLENV").is_some_and(|listed| listed.contains("FOLIO_样本/u")),
+                "{program}: the profile's own variable crosses as it does for wsl.exe: {:?}",
+                value_of(&command, "WSLENV")
+            );
+        }
+        // A bash this side starts keeps its own door, with the script as Windows spells it.
+        for (program, kind) in [
+            (r"C:\Program Files\Git\bin\bash.exe", ShellProgram::Native),
+            (r"C:\cygwin64\bin\bash.exe", ShellProgram::Cygwin),
+        ] {
+            let command = shell_command(
+                &custom(program, auto),
+                &kind,
+                &[],
+                bash_only(script),
+                &bare(),
+            );
+            assert_eq!(
+                args(&command),
+                [
+                    "--init-file".to_owned(),
+                    script.display().to_string(),
+                    "-i".to_owned()
+                ],
+                "{program}"
+            );
+            assert_eq!(value_of(&command, "WSLENV"), None, "{program}");
+        }
+    }
+
     /// PIN - **a WSL profile's own variables are listed so that they cross.**
     ///
     /// A variable set on `wsl.exe` is set on a *Win32* process, and the
@@ -9823,7 +9973,7 @@ mod tests {
         let script = Path::new(r"C:\Users\dev\AppData\Roaming\Folio\shell-integration\folio.bash");
         let listed = |profile: &Profile| {
             value_of(
-                &shell_command(profile, &[], bash_only(script), &bare()),
+                &shipped_command(profile, &[], bash_only(script), &bare()),
                 "WSLENV",
             )
         };
@@ -9856,7 +10006,7 @@ mod tests {
         // which is the pane that was never injected into.
         assert_eq!(
             value_of(
-                &shell_command(&row("wsl"), &[], Scripts::default(), &bare()),
+                &shipped_command(&row("wsl"), &[], Scripts::default(), &bare()),
                 "WSLENV"
             ),
             None
@@ -9956,6 +10106,7 @@ mod tests {
         assert_eq!(
             declared_environment(
                 &row("gitbash"),
+                &profiles::ShellProgram::Native,
                 bash_only(script),
                 &[],
                 Some("folio-attention-pipe")
@@ -9971,7 +10122,13 @@ mod tests {
         ];
         expected.extend(locale.iter().cloned());
         assert_eq!(
-            declared_environment(&row("pwsh"), Scripts::default(), &[], None),
+            declared_environment(
+                &row("pwsh"),
+                &profiles::ShellProgram::Native,
+                Scripts::default(),
+                &[],
+                None
+            ),
             expected,
             "folio.ps1 is the half that says FORCE_HYPERLINK, and with no wire open no pane is given its three"
         );
@@ -9997,8 +10154,13 @@ mod tests {
             said(FORCE_HYPERLINK, "1"),
         ];
         expected.extend(locale.iter().cloned());
-        let page =
-            declared_environment(&mine, Scripts::default(), &[], Some("folio-attention-pipe"));
+        let page = declared_environment(
+            &mine,
+            &profiles::ShellProgram::Native,
+            Scripts::default(),
+            &[],
+            Some("folio-attention-pipe"),
+        );
         // `Term_Program` is `TERM_PROGRAM` only where names are case-blind.
         if bt_pty::same_environment_name(OsStr::new("Term_Program"), OsStr::new("TERM_PROGRAM")) {
             assert_eq!(page, expected);
@@ -10030,7 +10192,13 @@ mod tests {
             Some(OsStr::new("新 $P$G")),
             "the fixture's prompt is one this process does not have"
         );
-        let page = declared_environment(&row("cmd"), Scripts::default(), &account, None);
+        let page = declared_environment(
+            &row("cmd"),
+            &profiles::ShellProgram::Native,
+            Scripts::default(),
+            &account,
+            None,
+        );
         let value = |wanted: &str| {
             page.iter()
                 .find(|(name, _)| name == wanted)
@@ -10183,7 +10351,7 @@ mod tests {
             ..row("cmd")
         };
         assert_eq!(profiles::served_by(&theirs), Integration::None);
-        let command = shell_command(&theirs, &[], Scripts::default(), &bare());
+        let command = shipped_command(&theirs, &[], Scripts::default(), &bare());
         assert_eq!(command.arguments, [OsString::from("--verbose")]);
         assert_eq!(
             value_of(&command, "ANTHROPIC_LOG").as_deref(),
