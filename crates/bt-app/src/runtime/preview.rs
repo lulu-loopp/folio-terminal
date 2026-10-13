@@ -11190,6 +11190,15 @@ impl Runtime<'_> {
                     let Some((landed, content)) = landed else {
                         continue;
                     };
+                    // **News that arrived while this read was out** (round 6):
+                    // the buffer owes another read, asked below.
+                    if self.window.tabs[index]
+                        .preview_pool
+                        .get(&response.source)
+                        .is_some_and(preview::PreviewBuffer::is_behind_the_disk)
+                    {
+                        read_again.push(index);
+                    }
                     match landed {
                         // **And out by the one door**, whichever slot it landed
                         // in.

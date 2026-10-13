@@ -395,6 +395,14 @@ impl UndoLog {
         self.open = false;
     }
 
+    /// Whether this history knows the body on its way — at a position, or
+    /// discarded from it: `false` once it was forgotten (a Reload) or when no
+    /// body was sent — see [`Self::sent_landed`].
+    #[must_use]
+    pub fn knows_the_body_sent(&self) -> bool {
+        self.sent != Sent::Not
+    }
+
     /// **The body sent landed**: its position is the saved one now — the place
     /// the file stands in this history, whatever was typed or undone since.
     /// A position the log has since discarded leaves no saved state: the bytes

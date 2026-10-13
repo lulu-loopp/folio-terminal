@@ -966,6 +966,12 @@ text_entries! {
     /// What a quit's or a stop's writer says of a buffer whose save is still
     /// on its way: it does not write over it (S-6a round 3).
     PreviewSaveOnItsWay,
+    /// The clause for a save whose file changed while it was out, over a body
+    /// the person had reloaded meanwhile (S-6a round 6).
+    PreviewSaveReloaded,
+    /// What a quit's or a stop's road says of a body a save sent that did not
+    /// land, no longer the body (S-6a round 6, R1).
+    PreviewSaveUnlanded,
     /// The start's toast for one copy a stop kept in the recovered folder, `{folder}` filled
     /// by [`recovered_edits_kept_in`] (T-RECOVERED-FOLDER).
     RecoveredEditKept,
@@ -3946,6 +3952,16 @@ impl Text {
                 "a save of it was still on its way to the disk",
                 "a save of it was still on its way to the disk", // zh: pending S-6a
             ),
+            Self::PreviewSaveReloaded => pick(
+                lang,
+                "the file changed and you reloaded it",
+                "the file changed and you reloaded it", // zh: pending S-6a
+            ),
+            Self::PreviewSaveUnlanded => pick(
+                lang,
+                "a version you saved did not reach the disk",
+                "a version you saved did not reach the disk", // zh: pending S-6a
+            ),
             Self::RecoveredEditKept => pick(
                 lang,
                 "An unsaved edit was kept at {folder}",
@@ -6518,6 +6534,10 @@ impl Text {
         (Self::PreviewSaveUnread, HostPlatform::MacOs),
         (Self::PreviewSaveOnItsWay, HostPlatform::Windows),
         (Self::PreviewSaveOnItsWay, HostPlatform::MacOs),
+        (Self::PreviewSaveReloaded, HostPlatform::Windows),
+        (Self::PreviewSaveReloaded, HostPlatform::MacOs),
+        (Self::PreviewSaveUnlanded, HostPlatform::Windows),
+        (Self::PreviewSaveUnlanded, HostPlatform::MacOs),
         // zh: pending T-SHELL-BIRTH-DEATH — the face of a shell that ended at birth.
         (Self::ShellBirthDeath, HostPlatform::Windows),
         (Self::ShellBirthDeath, HostPlatform::MacOs),
