@@ -32,7 +32,12 @@
 //! * **Ordering.** One worker per share, first in first out: requests run, and end, in the order
 //!   their identities were minted.
 //! * **Supersession.** Nothing on the formula and path shares is coalesced: one question asked
-//!   twice is two requests, two runs and two terminals. On the scale share a newer request for
+//!   twice is two requests, two runs and two terminals — but for an animation's open: a newer open
+//!   of the same file for the same window **supersedes** the one waiting for it
+//!   ([`crate::MathWorkerRequest::relate`]), because the window asks again only after letting the
+//!   older decode go (the file changed under it), and the window files an answer only under the
+//!   identity its record awaits, so the answer of an older open that was already running is never
+//!   filed either (`AnimationCache::awaits`). On the scale share a newer request for
 //!   the same picture on the same pane and surface ([`crate::ScaleWorkerRequest::same_target`])
 //!   that waits behind one not yet started **supersedes** it when it asks for another size
 //!   (`Superseded { by }`) and **joins** it when it asks for the same size (`Joined { with }`) —
@@ -389,7 +394,9 @@ impl ComputationLane {
 
     /// **Ask for one formula, decode or glance** (C1): admitted and held for its asker — its
     /// identity answered — or refused at the door and handed back. Never waits for the worker.
-    /// Nothing is coalesced: one question asked twice is two requests.
+    /// Nothing is coalesced: one question asked twice is two requests — but a newer open of an
+    /// animated file supersedes the same window's open of it still waiting
+    /// ([`crate::MathWorkerRequest::relate`]).
     pub(crate) fn decorate(
         &self,
         request: MathWorkerRequest,
@@ -413,7 +420,7 @@ impl ComputationLane {
             owner,
             asked,
             &self.sink,
-            |_, _| Relation::Other,
+            MathWorkerRequest::relate,
             |ran| {
                 // **This thread says how much stack it wants**
                 // (`bt_math::MATH_WORKER_STACK_BYTES`). One formula's render descends through a
@@ -1606,10 +1613,10 @@ mod tests {
         assert!(
             matches!(
                 answers.done.as_slice(),
-                [MathWorkerResult {
+                [(answering, MathWorkerResult {
                     completion: DecorationWorkerCompletion::PeekImage { path: answered, result: Err(_) },
                     ..
-                }] if *answered == path
+                })] if *answered == path && *answering == id
             ),
             "the glance hears a failed decode for its file"
         );
@@ -1833,8 +1840,9 @@ mod tests {
         .asked();
         assert!(
             matches!(
-                crate::settle_failure(asked),
-                crate::Settled::AnimationUnanswered { path } if path.ends_with("动图 loading.gif")
+                crate::settle_failure(ComputationId(7), asked),
+                crate::Settled::AnimationUnanswered { path, asked: ComputationId(7) }
+                    if path.ends_with("动图 loading.gif")
             ),
             "the open is unanswered until the file's next open"
         );

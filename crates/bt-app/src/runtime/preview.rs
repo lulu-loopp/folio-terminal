@@ -12,7 +12,7 @@ use crate::{
     LeafId, LeafSeed, MARKDOWN_CHIP_RADIUS_LOGICAL_PX, MarkdownBlockLayout, MarkdownCaretBlock,
     MarkdownCaretPaint, MarkdownCaretSeat, MarkdownLive, MarkdownPage, MarkdownPicture,
     MarkdownPreedit, MarkdownRaster, MarkdownRasterKey, MarkdownRasterRequest, MarkdownSourceBlock,
-    MarkdownSourceBytes, MathWorkerRequest, Motion, NoticeHost, OpenAsked, PAGE_ADDRESS_REFUSAL,
+    MarkdownSourceBytes, MathWorkerRequest, Motion, NoticeHost, PAGE_ADDRESS_REFUSAL,
     PREVIEW_REFUSAL_HOLD, PageArt, PageArtKey, PageHandOff, PagePicture, PasteTarget,
     PeekCacheEntry, PeekThumbnailTarget, PictureErrand, PictureOnGlass, PictureReach,
     PictureRefusal, PopoverTrigger, Popup, PresentIntent, PreviewBlockDrag, PreviewBodyDrag,
@@ -10371,16 +10371,9 @@ impl Runtime<'_> {
         // the file: the new open asks again, and no redraw does.
         let leaf = self.focused_shell_address();
         let worker = &self.app.math_worker;
-        self.window.animations.ask_for_showing(&showing, |path| {
-            match worker.decorate(MathWorkerRequest::PeekAnimation {
-                leaf,
-                path: path.to_owned(),
-            }) {
-                Ok(_) => OpenAsked::Asked,
-                Err((crate::lane::Refused::NotStarted(_), _)) => OpenAsked::Unstarted,
-                Err(_) => OpenAsked::TurnedAway,
-            }
-        });
+        self.window
+            .animations
+            .ask_for_showing(&showing, |path| crate::ask_to_open(worker, leaf, path));
         // **The refills, over the drawn set and each animation once.** Two
         // surfaces showing one `loading.gif` are one animation at one phase
         // (§7.44 ⑤), so they are also one order to the worker.

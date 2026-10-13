@@ -25,6 +25,7 @@ All notable changes to Folio are recorded here. The format follows
 ### Fixed
 
 - A GIF caught while it was being written plays once the write finishes. <!-- zh: pending T-ANIMATION-RECORDS-BOUND -->
+- A GIF that changes while it is being opened shows its new contents, not the old ones. <!-- zh: pending T-ANIMATION-ANSWER-IDENTITY -->
 - An update is no longer undone because the new version's note that it started properly was refused for a moment (another program holding the folder, say); Folio tries again about four times a second, for up to about fifteen minutes, or for as long as it takes when the new version has to confirm the update itself. <!-- zh: pending T-TRIAL-RECEIPT-RETRY -->
 - On the Git page, presses in one repository run one after another and never wait for work in another repository, and a press Folio could not carry out says so and lets its row go instead of leaving it dimmed. <!-- zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER -->
 - A Git page that is docked, popped out or moved to another tab while git is still working on it now gets the answer: its dimmed rows come back and a checkout it started no longer blocks the next one. <!-- zh: pending T-GIT-RECEIPTS-FOLLOW-A-MOVED-HOST -->
