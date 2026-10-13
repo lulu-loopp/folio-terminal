@@ -2298,11 +2298,10 @@ mod tests {
                     // publications, within `LOAD_ANSWER_PATIENCE`: past it the
                     // engine has refused the load itself, so running out is a
                     // defect and never a race with the refusal.
-                    let answered = engine
-                        .state_reaching(
-                            |state| state.error.is_some() || state.ready,
-                            LOAD_ANSWER_PATIENCE,
-                        );
+                    let answered = engine.state_reaching(
+                        |state| state.error.is_some() || state.ready,
+                        LOAD_ANSWER_PATIENCE,
+                    );
                     assert!(
                         answered.error.is_some(),
                         "{} loaded, or was never answered: {answered:?}",

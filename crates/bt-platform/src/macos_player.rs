@@ -194,9 +194,9 @@ use super::engine::{
     EngineError, EngineState, FRAME_POLL_INTERVAL, Frame, FrameCost, IDLE_POLL_INTERVAL,
     LedgerEntry, OPEN_BUDGET, SHUTDOWN_BUDGET, note_engine_shut_down,
 };
-use crate::video_load::{Load, LoadDeadline};
 use super::macos_video::displayed_size;
 use crate::macos_files::file_url;
+use crate::video_load::{Load, LoadDeadline};
 
 /// **The timescale an arbitrary number of seconds is asked for in.**
 ///
