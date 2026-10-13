@@ -1313,10 +1313,11 @@ fn a_failure_for_a_file_no_surface_names_files_no_record() {
 /// The card's teardown used to remove its file's `Failed` whoever else named the file, so a pane
 /// showing the same failed picture found nothing at its next refit and read the file again with no
 /// input of its own. The re-read belongs to the card's opening ([`peek_card_opened`]); its
-/// teardown is a surface leaving ([`peek_card_came_down`]).
+/// teardown is a surface leaving ([`let_go_unnamed_peek_records`] over the window's set with the
+/// card already down).
 ///
-/// MUTATIONS (observed red): ① the old unconditional removal — `peek_card_came_down` without
-/// `!named.contains(&key) &&` — the first assertion goes red; ② `peek_card_opened` removing
+/// MUTATIONS (observed red): ① the old unconditional removal — `let_go_unnamed_peek_records`
+/// without `!named.contains(..)` — the first assertion goes red; ② `peek_card_opened` removing
 /// nothing — the opening assertion goes red.
 #[test]
 fn a_card_coming_down_leaves_the_failure_a_pane_still_shows() {
@@ -1330,11 +1331,7 @@ fn a_card_coming_down_leaves_the_failure_a_pane_still_shows() {
     cache.insert(key.clone(), failure());
 
     // The card was up over the file a pane is showing, and comes down.
-    peek_card_came_down(
-        &mut cache,
-        Path::new(shot),
-        &peek_files_named(&tabs, &card, None, None),
-    );
+    let_go_unnamed_peek_records(&mut cache, &peek_files_named(&tabs, &card, None, None));
     assert!(
         matches!(cache.peek(&key), Some(PeekCacheEntry::Failed(_))),
         "the pane still shows the file, so its failure stays"
@@ -1346,11 +1343,7 @@ fn a_card_coming_down_leaves_the_failure_a_pane_still_shows() {
     );
 
     // With no pane on it, the card was the last surface naming the file.
-    peek_card_came_down(
-        &mut cache,
-        Path::new(shot),
-        &peek_files_named(&[], &card, None, None),
-    );
+    let_go_unnamed_peek_records(&mut cache, &peek_files_named(&[], &card, None, None));
     assert!(
         !cache.contains_key(&key),
         "the last surface naming the file is gone, and the record with it"

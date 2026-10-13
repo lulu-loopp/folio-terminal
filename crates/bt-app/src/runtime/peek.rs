@@ -1005,16 +1005,12 @@ impl Runtime<'_> {
         if !self.window.video_carried_off_the_card {
             self.window.video.close(PreviewSurface::Peek);
         }
-        // **A card that comes down is a surface leaving**: what failed for its file alone goes
-        // with it, and a failure another surface still shows stays ([`crate::peek_card_came_down`],
-        // below, once the card names nothing). The next card over the file asks again on opening
-        // ([`crate::peek_card_opened`]). A page it asked about is asked again too (below).
-        let card_file = self
-            .window
-            .file_peek
-            .as_ref()
-            .and_then(|peek| peek.source.file_path())
-            .map(Path::to_path_buf);
+        // **A card that comes down is a surface leaving**: what failed for its file or its page's
+        // pictures alone goes with it, and a failure another surface still shows stays
+        // ([`Self::let_go_unnamed_peek_records`], below, once the card names nothing) — before a
+        // next card is matured in the same turn, with no walk between. The next card over the
+        // file asks again on opening ([`crate::peek_card_opened`]). A page it asked about is asked
+        // again too (below).
         self.window.peek_card_pending = None;
         self.window.file_peek = None;
         // And the hand that was on its head. A press whose card has gone has
@@ -1027,10 +1023,7 @@ impl Runtime<'_> {
         // markdown layout for a file nobody is looking at.
         self.window.peek_pane = PreviewPane::default();
         self.window.peek_picture = None;
-        if let Some(card_file) = card_file {
-            let named = self.peek_files_named();
-            crate::peek_card_came_down(&mut self.window.peek_cache, &card_file, &named);
-        }
+        self.let_go_unnamed_peek_records();
         // And the facts with it: they are about the file the card was over, and
         // the next card asks for its own.
         self.window.peek_facts = None;

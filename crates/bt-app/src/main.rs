@@ -25086,7 +25086,7 @@ fn peek_reads_the_file(entry: Option<&PeekCacheEntry>, readable: bool, settled: 
 /// neither is ever evicted, because each is the record of a question and an evicted record
 /// reads as *never asked*: the pane's, the page's and the flyout's next resolve would ask the
 /// worker again with no new input. A `Pending` leaves by its answer; a `Failed` leaves with the
-/// last surface that names its file ([`let_go_unnamed_peek_records`], [`peek_card_came_down`]), by
+/// last surface that names its file ([`let_go_unnamed_peek_records`]), by
 /// the file-change road ([`forget_a_picture`]), or by a new peek over its file — a hover that
 /// settles ([`peek_reads_the_file`]) or a glance card that opens ([`peek_card_opened`]).
 impl bt_term::Weighed for PeekCacheEntry {
@@ -25181,22 +25181,10 @@ fn file_peek_failure(
 /// the card's own new input, so a failure filed for its file is let go of and the card's body
 /// asks again — [`peek_reads_the_file`]'s rule for a hover that settles, said for the card. The
 /// moment is the opening and not the teardown: a card coming down is a surface leaving, which
-/// lets a failure go only when no other surface names the file ([`peek_card_came_down`]).
+/// lets a failure go only when no other surface names the file ([`let_go_unnamed_peek_records`]).
 fn peek_card_opened(peek_cache: &mut PeekCache, card_file: &Path) {
     let key = bt_term::normalized_local_image_path_key(card_file);
     if matches!(peek_cache.peek(&key), Some(PeekCacheEntry::Failed(_))) {
-        peek_cache.remove(&key);
-    }
-}
-
-/// **A glance card coming down** (T-PEEK-CACHE-QUESTION-RECORDS round 2) —
-/// [`AnimationCache::forget_surface`]'s rule for the peek cache: the card stops naming its file,
-/// and that file's failure is let go of only when no other surface names it (`named`, the
-/// window's set with the card already down — [`peek_files_named`]). A picture pane showing the
-/// same failed file keeps its record, so its next redraw reads the failure and asks nothing.
-fn peek_card_came_down(peek_cache: &mut PeekCache, card_file: &Path, named: &BTreeSet<String>) {
-    let key = bt_term::normalized_local_image_path_key(card_file);
-    if !named.contains(&key) && matches!(peek_cache.peek(&key), Some(PeekCacheEntry::Failed(_))) {
         peek_cache.remove(&key);
     }
 }
