@@ -15688,8 +15688,7 @@ mod tests {
         for _ in 0..crate::preview_undo::UndoLog::DEPTH + 8 {
             // A line break is an entry of its own: no run takes it in.
             assert!(buffer.edit_content(|content| {
-                content.insert(0, '
-');
+                content.insert(0, '\n');
                 true
             }));
         }
