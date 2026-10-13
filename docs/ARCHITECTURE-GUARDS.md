@@ -135,8 +135,10 @@ flow value), a `steps:` that is no block sequence (`[ … ]`, `*list`), a merge
 key (`<<:`); a line in one of those mappings or in a step where a node
 starts that is no key (`- *step`, `- { run: … }`, `- &a run: …` even with
 the step's other keys after it, `&b run: …`, `!!str run: …`, `? run`,
-`&k build:` under `jobs:` — never skipped with its body unrecorded); a step
-that holds nothing (a bare `-`); and a `run:` that is no step's — only `defaults.run`, a job's
+`&k build:` under `jobs:` — never skipped with its body unrecorded — and a
+line at the steps' own column that is no `- `); a step whose item holds no
+mapping (a bare `-`, `- - …`, `- # comment`); and a `run:` that is no step's
+(a column-0 `---` or `...` is a document marker and skipped) — only `defaults.run`, a job's
 `defaults.run` and anything under a step's `with:` stay silent, so a misread
 path (a byte-order mark before `jobs:`) is a diagnostic too. An anchored or
 aliased job, step or `run:` value is never read through.

@@ -202,8 +202,9 @@
 //!   node starts that is no key — `- *step`, `- { run: … }`, `- &a run: …`
 //!   (even with the step's other keys after it), `&b run: …`,
 //!   `!!str run: …`, `? run`, `&k build:` under `jobs:` — which is never
-//!   skipped with its body unrecorded; a step that holds nothing (a bare
-//!   `-`); and a `run:` that is no step's. The
+//!   skipped with its body unrecorded, and a line at the steps' own column
+//!   that is no `- `; a step whose item holds no mapping (a bare `-`,
+//!   `- - …`, `- # comment`); and a `run:` that is no step's. The
 //!   places a `run:` is known to be no step's stay silent: `defaults.run`, a
 //!   job's `defaults.run`, and anything under a step's `with:`. A `run:` on a
 //!   path the scan misreads (a byte-order mark before `jobs:`) is so a `run:`
@@ -233,9 +234,11 @@
 //! item, a `key:` (plain, or in one pair of quotes) a mapping entry, and a
 //! value is one of the forms above, nested keys, or nothing; the lines more
 //! indented than a value that is not a block (a flow collection, a continued
-//! scalar) are that value's, never keys. Limits, written down: a tab is not
-//! indentation, and several `---` documents in one file are read as one;
-//! neither is a form these files are written in.
+//! scalar) are that value's, never keys. A column-0 `---` or `...` (alone or
+//! before a comment) is a document marker, no node, and is skipped as a
+//! blank line is. Limits, written down: a tab is not indentation, and several
+//! `---` documents in one file are read as one; neither is a form these files
+//! are written in.
 //!
 //! A workflow's reader hits, and the path shapes of its reader units, are
 //! cleared as a script's are, by file. The three workflow diagnostics are
@@ -1643,6 +1646,35 @@ fn step_at(source: Source, path: &[Segment]) -> Option<WorkflowStep<'_>> {
     }
 }
 
+/// Whether `path` is a steps sequence itself — `jobs.<job>.steps` or
+/// `runs.steps` — where a line at the items' own column that is no `- ` is a
+/// line the scan does not read.
+fn lists_the_steps(source: Source, path: &[Segment]) -> bool {
+    match (source, path) {
+        (Source::Workflow, [Segment::Key(jobs), Segment::Key(_), Segment::Key(steps)]) => {
+            jobs == "jobs" && steps == "steps"
+        }
+        (Source::Action, [Segment::Key(runs), Segment::Key(steps)]) => {
+            runs == "runs" && steps == "steps"
+        }
+        _ => false,
+    }
+}
+
+/// Whether a line is a YAML document marker — `---` or `...` at column 0,
+/// alone or before a comment — which starts or ends a document and is no
+/// node: it is skipped as a blank line is, so several documents in one file
+/// are read as one.
+fn document_marker(line: &str) -> bool {
+    ["---", "..."].iter().any(|marker| {
+        line.strip_prefix(marker).is_some_and(|after| {
+            let after = after.trim_end();
+            after.is_empty()
+                || (after.starts_with([' ', '\t']) && after.trim_start().starts_with('#'))
+        })
+    })
+}
+
 /// Whether `path` is a mapping the steps hang from or a step itself: the
 /// top level, `jobs`, a job, `defaults`, `defaults.run` (the workflow's and a
 /// job's), `runs`, or a step.
@@ -1701,7 +1733,7 @@ fn shape_diagnostics(
         }
     }
     for line in unread {
-        if holds_the_steps(source, &line.path) {
+        if holds_the_steps(source, &line.path) || lists_the_steps(source, &line.path) {
             found.push((
                 line.line,
                 format!("a line that is no key: {}", line.written),
@@ -1717,7 +1749,7 @@ fn shape_diagnostics(
         if step_at(source, &item.path).is_some() && !mapped.contains(item.path.as_slice()) {
             found.push((
                 item.line,
-                format!("a step that holds nothing: - {}", item.written)
+                format!("a step whose item holds no mapping: - {}", item.written)
                     .trim_end()
                     .to_owned(),
             ));
@@ -1871,7 +1903,7 @@ fn yaml_keys(text: &str) -> (Vec<YamlKey>, Vec<YamlItem>, Vec<YamlLine>) {
     while at < lines.len() {
         let line = lines[at];
         let next = at + 1;
-        if !holds_content(line) {
+        if !holds_content(line) || document_marker(line) {
             at = next;
             continue;
         }
@@ -3648,14 +3680,19 @@ fn a_yaml_shape_above_the_run_steps_is_a_diagnostic() {
 /// diagnostic and never skipped with its body**: an anchored `run:` entry
 /// that opens a step whose other keys follow, an anchored, tagged or complex
 /// `run:` entry after a step's first key, a merge key inside a step, an
-/// anchored job name under `jobs:`, a step that holds nothing; and `jobs:` or
-/// `defaults:` behind an anchor, which leaves the job's shell undecided.
+/// anchored job name under `jobs:`, a step whose item holds no mapping (a
+/// bare `-`, a nested `- - …`, `- # comment`), a line at the items' own
+/// column that is no `- `; and `jobs:` or `defaults:` behind an anchor, which
+/// leaves the job's shell undecided. A column-0 `---` or `...` is a document
+/// marker, no node, and yields nothing.
 ///
 /// MUTATION: `shape_diagnostics` without its arm for a line that is no key
 /// loses lines 5, 8, 10, 12, 13 and 18; without its merge-key arm, line 15;
-/// without its arm for a step that holds nothing, line 17; without its arm
-/// for a mapping the steps hang from, the anchored `jobs:` and `defaults:`.
-/// Each goes red.
+/// without its arm for a step whose item holds no mapping, line 17 and the
+/// last workflow's lines 6 and 7; without its arm for a mapping the steps
+/// hang from, the anchored `jobs:` and `defaults:`; `lists_the_steps`
+/// answering `false` loses the last workflow's line 9; `document_marker`
+/// answering `false` reports its `---` and `...`. Each goes red.
 #[test]
 fn a_line_that_is_no_key_where_the_steps_hang_is_a_diagnostic() {
     let workflow = yaml(&[
@@ -3701,7 +3738,7 @@ fn a_line_that_is_no_key_where_the_steps_hang_is_a_diagnostic() {
             shape(12, "a line that is no key: ? run"),
             shape(13, "a line that is no key: : cat 'crates/w/src/lib.rs'"),
             shape(15, "a merge key: <<: *step"),
-            shape(17, "a step that holds nothing: -"),
+            shape(17, "a step whose item holds no mapping: -"),
             shape(18, "a line that is no key: &k build:"),
         ]
     );
@@ -3741,6 +3778,33 @@ fn a_line_that_is_no_key_where_the_steps_hang_is_a_diagnostic() {
                 Kind::UndecidedWorkflowShell,
                 "no shell:, runs-on: self-hosted".to_owned()
             ),
+        ]
+    );
+    let items = yaml(&[
+        (0, "---"),
+        (0, "jobs:"),
+        (1, "one:"),
+        (2, "runs-on: ubuntu-latest"),
+        (2, "steps:"),
+        (3, "- - run: cat 'crates/x/src/lib.rs'"),
+        (3, "- # 中文 a comment, no step"),
+        (3, "- run: echo ok"),
+        (3, "not a key"),
+        (0, "..."),
+    ]);
+    assert_eq!(
+        script_findings(PLANTED_WORKFLOW, &items),
+        vec![
+            shape(6, "a `run:` in no step: run: cat 'crates/x/src/lib.rs'",),
+            shape(
+                6,
+                "a step whose item holds no mapping: - - run: cat 'crates/x/src/lib.rs'",
+            ),
+            shape(
+                7,
+                "a step whose item holds no mapping: - # 中文 a comment, no step"
+            ),
+            shape(9, "a line that is no key: not a key"),
         ]
     );
 }
