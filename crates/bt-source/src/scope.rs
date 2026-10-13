@@ -67,11 +67,45 @@ pub enum FileScoped {
     /// cannot disable the guard against the mechanism — which also means it
     /// cannot ask a universe for its files.
     TheTripwireItself,
+    /// `scripts/ci/check-dead-code.ps1`, the dead-code gate, naming the file
+    /// names Rust's module rules give meaning to (`lib.rs`, `main.rs`,
+    /// `mod.rs`, `tests.rs`, `*_tests.rs`, `<name>.rs`).
+    ///
+    /// Which `.rs` file is product code and which is test code is decided by
+    /// those names and by the `mod` declarations that reach a file: the gate
+    /// walks every crate's `src/`, reads each file, and resolves out-of-line
+    /// modules to files the way the compiler does, so files are its subject.
+    /// It is a PowerShell gate and cannot ask this crate's index.
+    TheDeadCodeGate,
+    /// `scripts/ci/check-lint-probe.ps1`, naming the lint probe's generated
+    /// source `crates/bt-lint-probe/src/lib.rs`.
+    ///
+    /// The fact it holds is "the committed file is byte for byte what the
+    /// generator writes from the registry": it hands the path to the generator
+    /// as its output and to `git` to compare and to require it tracked. A
+    /// generated file's equality with its generator is a fact about the file;
+    /// there is no item to ask about.
+    TheLintProbeIsGenerated,
+    /// `scripts/ci/check-embedded-spaces.ps1`, the embedded-spaces gate,
+    /// asking `git ls-files` for `"crates/*.rs"`.
+    ///
+    /// Its subject is the source text of every first-party `.rs` file: it lexes
+    /// each one for string literals that carry a run of spaces, a fact about
+    /// how the literal is written, by file and line, which is the key of its
+    /// list. The pattern stays quoted so that `git` expands it, not the shell.
+    /// It is a PowerShell gate and cannot ask this crate's index.
+    TheEmbeddedSpacesGate,
 }
 
 impl FileScoped {
     /// Every entry. The allowlist is small enough to be an array and only shrinks.
-    pub const ALL: [Self; 2] = [Self::VendoredAddedFiles, Self::TheTripwireItself];
+    pub const ALL: [Self; 5] = [
+        Self::VendoredAddedFiles,
+        Self::TheTripwireItself,
+        Self::TheDeadCodeGate,
+        Self::TheLintProbeIsGenerated,
+        Self::TheEmbeddedSpacesGate,
+    ];
 
     /// Where the reader lives, from the workspace root, with forward slashes.
     #[must_use]
@@ -79,6 +113,9 @@ impl FileScoped {
         match self {
             Self::VendoredAddedFiles => "scripts/check-vendor-notices.ps1",
             Self::TheTripwireItself => "crates/bt-source/tests/tripwire.rs",
+            Self::TheDeadCodeGate => "scripts/ci/check-dead-code.ps1",
+            Self::TheLintProbeIsGenerated => "scripts/ci/check-lint-probe.ps1",
+            Self::TheEmbeddedSpacesGate => "scripts/ci/check-embedded-spaces.ps1",
         }
     }
 
@@ -95,6 +132,18 @@ impl FileScoped {
             Self::TheTripwireItself => {
                 "the scan that catches the other kind; files are its subject, and it is written \
                  without this crate's query layer on purpose"
+            }
+            Self::TheDeadCodeGate => {
+                "which file is product code is decided by Rust's module file names and the \
+                 declarations reaching a file; a PowerShell gate that walks the files themselves"
+            }
+            Self::TheLintProbeIsGenerated => {
+                "the committed probe source must be byte for byte its generator's output, a fact \
+                 about a generated file"
+            }
+            Self::TheEmbeddedSpacesGate => {
+                "how every first-party string literal is written is read from the files \
+                 themselves, by file and line; a PowerShell gate that lexes them"
             }
         }
     }
