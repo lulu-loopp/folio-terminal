@@ -73616,8 +73616,8 @@ fn resolved_theme_change(mode: ThemeModeV1, os_theme: OsTheme) -> Option<Theme> 
 /// nothing would look wrong here without it.
 ///
 /// The other half of the rope is
-/// `bt_platform::macos_window_backend_tests::dark_mode_changes_arrive_on_the_window_thread_through_winit`:
-/// the watch's callback does nothing but nudge this loop.
+/// `bt_platform`'s `macos_impl::tests::the_appearance_callback_only_nudges_the_loop`: the
+/// watch's callback does nothing but nudge this loop.
 #[cfg(test)]
 mod system_preference_wiring_tests {
     use super::run_for_volume_arrival;
