@@ -1305,3 +1305,62 @@ fn a_failure_for_a_file_no_surface_names_files_no_record() {
         "nobody shows the other one: its read is answered, and nothing is filed"
     );
 }
+
+/// RED (T-PEEK-CACHE-QUESTION-RECORDS round 2) — **a glance card coming down leaves the failure a
+/// picture pane still shows, and the pane's next walk asks nothing**; a card opening over the file
+/// is new input and reads it again.
+///
+/// The card's teardown used to remove its file's `Failed` whoever else named the file, so a pane
+/// showing the same failed picture found nothing at its next refit and read the file again with no
+/// input of its own. The re-read belongs to the card's opening ([`peek_card_opened`]); its
+/// teardown is a surface leaving ([`peek_card_came_down`]).
+///
+/// MUTATIONS (observed red): ① the old unconditional removal — `peek_card_came_down` without
+/// `!named.contains(&key) &&` — the first assertion goes red; ② `peek_card_opened` removing
+/// nothing — the opening assertion goes red.
+#[test]
+fn a_card_coming_down_leaves_the_failure_a_pane_still_shows() {
+    let shot = r"D:\截图\坏图 card.png";
+    let key = normalized_local_image_path_key(Path::new(shot));
+    let failure =
+        || PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Io("拒绝访问".to_owned()));
+    let tabs = vec![tab_with_a_picture(1, shot).0];
+    let card = PreviewPane::default();
+    let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+    cache.insert(key.clone(), failure());
+
+    // The card was up over the file a pane is showing, and comes down.
+    peek_card_came_down(
+        &mut cache,
+        Path::new(shot),
+        &peek_files_named(&tabs, &card, None, None),
+    );
+    assert!(
+        matches!(cache.peek(&key), Some(PeekCacheEntry::Failed(_))),
+        "the pane still shows the file, so its failure stays"
+    );
+    let pixels = surface_pixels(&mut cache, None, None, None, &key);
+    assert!(
+        matches!(pixels, SurfacePixels::Failed(_)),
+        "and the pane's next walk reads it and asks nothing: {pixels:?}"
+    );
+
+    // With no pane on it, the card was the last surface naming the file.
+    peek_card_came_down(
+        &mut cache,
+        Path::new(shot),
+        &peek_files_named(&[], &card, None, None),
+    );
+    assert!(
+        !cache.contains_key(&key),
+        "the last surface naming the file is gone, and the record with it"
+    );
+
+    // A new card over a file that failed is the card's own new input.
+    cache.insert(key.clone(), failure());
+    peek_card_opened(&mut cache, Path::new(shot));
+    assert!(
+        !cache.contains_key(&key),
+        "a card opening over the file reads it again"
+    );
+}

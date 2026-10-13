@@ -899,6 +899,10 @@ impl Runtime<'_> {
         if let Some(peek) = self.window.file_peek.as_mut() {
             peek.clock = PeekClock::Shown(now);
         }
+        // **A new card is new input**: what failed for its file is read again by its body.
+        if let Some(path) = source.file_path() {
+            crate::peek_card_opened(&mut self.window.peek_cache, path);
+        }
         // The card's surface is pointed at the file here, once, rather than on
         // every frame that draws it: [`PreviewSurface::Peek`]'s pane is what
         // holds the parsed document, and re-aiming it per frame would be a
@@ -1001,23 +1005,16 @@ impl Runtime<'_> {
         if !self.window.video_carried_off_the_card {
             self.window.video.close(PreviewSurface::Peek);
         }
-        // **A card that comes down lets go of what failed for it**, so the next hover over the
-        // same file — the card's own new input — asks again: its file's failed decode and the
-        // resample it was owed. A page it asked about is asked again too (below).
-        if let Some(path) = self
+        // **A card that comes down is a surface leaving**: what failed for its file alone goes
+        // with it, and a failure another surface still shows stays ([`crate::peek_card_came_down`],
+        // below, once the card names nothing). The next card over the file asks again on opening
+        // ([`crate::peek_card_opened`]). A page it asked about is asked again too (below).
+        let card_file = self
             .window
             .file_peek
             .as_ref()
             .and_then(|peek| peek.source.file_path())
-        {
-            let key = normalized_local_image_path_key(path);
-            if matches!(
-                self.window.peek_cache.get(&key),
-                Some(PeekCacheEntry::Failed(_))
-            ) {
-                self.window.peek_cache.remove(&key);
-            }
-        }
+            .map(Path::to_path_buf);
         self.window.peek_card_pending = None;
         self.window.file_peek = None;
         // And the hand that was on its head. A press whose card has gone has
@@ -1030,6 +1027,10 @@ impl Runtime<'_> {
         // markdown layout for a file nobody is looking at.
         self.window.peek_pane = PreviewPane::default();
         self.window.peek_picture = None;
+        if let Some(card_file) = card_file {
+            let named = self.peek_files_named();
+            crate::peek_card_came_down(&mut self.window.peek_cache, &card_file, &named);
+        }
         // And the facts with it: they are about the file the card was over, and
         // the next card asks for its own.
         self.window.peek_facts = None;
@@ -2705,9 +2706,12 @@ impl Runtime<'_> {
     /// Drop peek hover state and hide the flyout. Idempotent; used by every dismiss gesture
     /// (pointer off the span, pointer left, wheel, click, any key).
     pub(in crate::runtime) fn dismiss_peek(&mut self) -> Result<()> {
-        self.window.peek_hover.clear();
-        // The flyout was a surface naming its file: what failed for it alone goes with it.
-        self.let_go_unnamed_peek_records();
+        // A flyout that was up was a surface naming its file: what failed for it alone goes with
+        // it. A dismiss with no flyout up (a keystroke, a wheel over the terminal) is no surface
+        // leaving.
+        if self.window.peek_hover.clear() {
+            self.let_go_unnamed_peek_records();
+        }
         // The next hover is the flyout's new input: a resample still owed — answered late, or
         // failed on the worker, or never started — is asked again by it rather than waited on.
         self.window.peek_thumbnail_pending = None;
