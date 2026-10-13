@@ -176,7 +176,10 @@ to the running process's update job where the launch lands (`Job::told_by_a_laun
 running process may be another installed copy sharing the data directory: the
 endpoint is keyed by the directory, and each end asks the kernel who the other is and
 takes any process of this user whose image has Folio's file name (0.4.8 D3; on Windows
-the client asks, on Unix both ends). A hand-over that gives up — the wire's OS error,
+the client asks, on Unix both ends). The client asks first, before it writes a byte, in
+one order for both arms (`bt_platform::launch_conversation`); on Unix a server that
+refuses its peer holds the connection until the peer's first move, because Darwin
+names a peer's pid only while the connection stands (T-LAUNCH-WIRE-PEER-READ). A hand-over that gives up — the wire's OS error,
 the running Folio's answer, no endpoint — leaves one line in `diagnostics.log`
 (`launch_wire::gave_up_line`, written by `main` once the resident run has opened the
 log) and the start opens its own window.
