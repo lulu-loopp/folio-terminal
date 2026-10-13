@@ -4042,9 +4042,9 @@ pub fn fault_sentence_in(fault: &GitFault, lang: crate::i18n::Lang) -> String {
         GitFault::NotRun(NotRun::WorkerGone) => crate::i18n::Text::GitNotRunWorkerGone
             .in_lang(lang)
             .to_owned(),
-        GitFault::NotRun(NotRun::Failed) => crate::i18n::Text::GitNotRunFailed
-            .in_lang(lang)
-            .to_owned(),
+        GitFault::NotRun(NotRun::Failed) => {
+            crate::i18n::Text::GitNotRunFailed.in_lang(lang).to_owned()
+        }
     }
 }
 
@@ -4204,7 +4204,10 @@ pub struct GitWorker {
 /// since the program walk keeps it current — then [`answer`]. The one road the
 /// read worker and the mutation lane (`crate::git_mutation_lane`) both take, so
 /// a write is located and run exactly as a read is.
-pub(crate) fn ask_git(ctx: &bt_platform::admission::WorkerCtx, question: &GitQuestion) -> GitAnswer {
+pub(crate) fn ask_git(
+    ctx: &bt_platform::admission::WorkerCtx,
+    question: &GitQuestion,
+) -> GitAnswer {
     match GIT_LOCATION.located(ctx).as_deref() {
         Some(program) => answer(program, question, GIT_COMMAND_TIMEOUT, now_unix()),
         None => faulted(question, GitFault::GitMissing(git_not_found().to_owned())),

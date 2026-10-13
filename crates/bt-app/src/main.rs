@@ -46126,17 +46126,14 @@ impl Runtime<'_> {
         let files_worker = files::FilesWorker::spawn(proxy.clone())?;
         let file_index_worker = palette_index::IndexWorker::spawn(proxy.clone())?;
         let preview_worker = preview::PreviewWorker::spawn(proxy.clone())?;
-        let git_mutations = git_mutation_lane::GitMutationLane::new(
-            git_mutation_lane::RepoTurns::new(),
-            {
+        let git_mutations =
+            git_mutation_lane::GitMutationLane::new(git_mutation_lane::RepoTurns::new(), {
                 let proxy = proxy.clone();
                 move || {
                     let _ = proxy.send_event(AppEvent::GitReady);
                 }
-            },
-        );
-        let git_worker =
-            git::GitWorker::spawn(proxy.clone(), Arc::clone(git_mutations.turns()))?;
+            });
+        let git_worker = git::GitWorker::spawn(proxy.clone(), Arc::clone(git_mutations.turns()))?;
         // **One read per family, and both of the row's facts come out of it**: whether this copy's
         // marks are in that file, and — when the file is one this build will not edit — the reason
         // the row has to say instead of `Off` (closure review R1).

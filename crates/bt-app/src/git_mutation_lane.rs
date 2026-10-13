@@ -272,7 +272,9 @@ impl RepoTurns {
 
     /// `root`'s share is `ledger` from now on.
     fn hold(&self, root: &Path, ledger: Arc<MutationLedger>) {
-        locked(&self.state).shares.push((root.to_path_buf(), ledger));
+        locked(&self.state)
+            .shares
+            .push((root.to_path_buf(), ledger));
         self.changed.notify_all();
     }
 
@@ -549,13 +551,14 @@ impl GitMutationLane {
         ended
     }
 
-    /// How many of `root`'s requests wait in its share's line behind the one its worker runs.
+    /// How many requests wait in line in the share request `id` was minted in, behind the one its
+    /// worker runs.
     #[cfg(test)]
-    fn in_line(&self, root: &Path) -> usize {
+    fn in_line_with(&self, id: MutationId) -> usize {
         locked(&self.shares)
             .live
             .iter()
-            .filter(|share| same_folder(&share.root, root))
+            .filter(|share| share.generation == id.share)
             .map(|share| share.queue.in_line())
             .sum()
     }
@@ -626,7 +629,9 @@ pub(crate) fn went_through(question: &GitQuestion) -> GitAnswer {
             target: target.clone(),
             outcome: Ok(()),
         },
-        other => unreachable!("the git mutation lane is asked only writes and checkouts: {other:?}"),
+        other => {
+            unreachable!("the git mutation lane is asked only writes and checkouts: {other:?}")
+        }
     }
 }
 
@@ -1039,8 +1044,10 @@ mod tests {
             .ask_through(checkout(1, root, "功能/feature"), door())
             .expect("the checkout is admitted");
         lane::wait_until("the checkout waiting in line, or running", || {
-            lane.lane.in_line(Path::new(root)) == 1
-                || locked(&log).iter().any(|line| line.contains("功能/feature"))
+            lane.lane.in_line_with(write) == 1
+                || locked(&log)
+                    .iter()
+                    .any(|line| line.contains("功能/feature"))
         });
         hold.release();
         let (first, asked_first) = lane.terminal(write, nobody);
@@ -1058,11 +1065,17 @@ mod tests {
         );
         assert!(matches!(
             first,
-            Terminal::Done(GitAnswer::Write { outcome: Ok(()), .. })
+            Terminal::Done(GitAnswer::Write {
+                outcome: Ok(()),
+                ..
+            })
         ));
         assert!(matches!(
             second,
-            Terminal::Done(GitAnswer::Checkout { outcome: Ok(()), .. })
+            Terminal::Done(GitAnswer::Checkout {
+                outcome: Ok(()),
+                ..
+            })
         ));
         assert_eq!(subject(&asked_first.question), "说明 notes.md");
         assert_eq!(subject(&asked_second.question), "功能/feature");
@@ -1082,7 +1095,13 @@ mod tests {
         let log = Arc::new(Mutex::new(Vec::new()));
         let hold = Arc::new(Hold::default());
         hold.hold();
-        let door = || logging(Arc::clone(&log), Arc::clone(&hold), PathBuf::from("仓库 alpha"));
+        let door = || {
+            logging(
+                Arc::clone(&log),
+                Arc::clone(&hold),
+                PathBuf::from("仓库 alpha"),
+            )
+        };
         let alpha = lane
             .lane
             .ask_through(stage(1, "仓库 alpha", "甲 a.txt"), door())
@@ -1127,19 +1146,16 @@ mod tests {
             .expect("admitted");
         hold.wait_standing("the checkout running");
         let (done, read) = mpsc::channel();
-        read_on_a_worker(
-            Arc::clone(lane.lane.turns()),
-            root,
-            Arc::clone(&log),
-            done,
-        );
+        read_on_a_worker(Arc::clone(lane.lane.turns()), root, Arc::clone(&log), done);
         lane::wait_until("the read waiting its turn, or run", || {
-            lane.lane.turns().reads_waiting() == 1
-                || locked(&log).iter().any(|line| line == "read")
+            lane.lane.turns().reads_waiting() == 1 || locked(&log).iter().any(|line| line == "read")
         });
         hold.release();
         lane::receive(&read, "the read's turn");
-        assert!(matches!(lane.terminal(checkout, nobody).0, Terminal::Done(_)));
+        assert!(matches!(
+            lane.terminal(checkout, nobody).0,
+            Terminal::Done(_)
+        ));
         assert_eq!(
             *locked(&log),
             ["start 发布/release", "end 发布/release", "read"],
@@ -1178,7 +1194,11 @@ mod tests {
         let gone = |owner| owner == AnswerOwner::Tab(TabId(2));
         for id in [running, open] {
             let (_, asked) = lane.terminal(id, gone);
-            assert_ne!(asked.host, column(2), "a page took the closed tab's receipt");
+            assert_ne!(
+                asked.host,
+                column(2),
+                "a page took the closed tab's receipt"
+            );
         }
         let sunk = lane.sunk();
         assert_eq!(
@@ -1236,7 +1256,11 @@ mod tests {
                 outcome: Err(fault),
                 ..
             } => {
-                assert_eq!(paths, &["多余 extra.txt"], "the refused write's own rows undim");
+                assert_eq!(
+                    paths,
+                    &["多余 extra.txt"],
+                    "the refused write's own rows undim"
+                );
                 assert_eq!(*fault, GitFault::NotRun(NotRun::Full));
                 assert_eq!(
                     git::fault_sentence_in(fault, crate::i18n::Lang::English),
