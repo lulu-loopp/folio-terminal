@@ -11,7 +11,7 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -Er
 $gate = Join-Path $PSScriptRoot "check-embedded-spaces.ps1"
 $root = Join-Path ([IO.Path]::GetTempPath()) ("folio-embedded-spaces-" + [guid]::NewGuid())
 $relative = "docs/plans/embedded-spaces-allowed.txt"
-$source = "crates/bt-a/src/lib.rs"
+$source = 'crates/bt-a/src/lib.rs'
 $header = "# the deliberate runs`n#`n"
 
 # Everything here that is not a run, each for its own reason: a `\` continuation's indentation,
