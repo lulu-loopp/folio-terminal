@@ -1,7 +1,8 @@
 //! `preview` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
-use super::peek::PeekAsk;
+use super::peek::{PeekAsk, unstarted_pixels};
+use crate::computation_lane::Asking;
 use crate::{
     ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD, AnimationEntry, AnimationWork, AppEvent, AttentionDelivery,
     BackgroundDecode, BlockScrollPaint, ClipboardPictureAnswer, ClipboardPictureJob,
@@ -72,22 +73,6 @@ use winit::event::{Ime, KeyEvent, MouseScrollDelta};
 use winit::keyboard::{Key, NamedKey};
 
 impl Runtime<'_> {
-    /// **A preview's or a markdown page's resample that failed**: the page's `Pending` raster and
-    /// every preview picture's pending target come down when they are this one, so the next
-    /// resolve asks again (`computation_lane`'s `Failed`, settled by its window).
-    pub(in crate::runtime) fn forget_failed_preview_scale(&mut self, target: &PeekThumbnailTarget) {
-        self.window
-            .markdown_pictures
-            .forget_pending(&MarkdownRasterKey {
-                content: target.0.clone(),
-                width_px: target.1,
-                height_px: target.2,
-            });
-        for surface in self.preview_picture_hosts() {
-            self.preview_pane_mut(surface).forget_picture_scale(target);
-        }
-    }
-
     /// Prefer the live column's order, including watcher refreshes. A preview
     /// outside the tree uses the very same worker and comparator.
     fn preview_folder_listing(
@@ -8862,10 +8847,16 @@ impl Runtime<'_> {
                     return answer;
                 }
                 let asked = self.request_peek_pixels(path);
-                // The lane was full, or its thread not started: nothing is out, and the page's
-                // next resolve asks again.
+                // The lane was full: nothing is out, and the page's next resolve asks again.
                 if asked == PeekAsk::NotNow {
                     return answer;
+                }
+                // Its thread not started: filed as a failed decode, asked again by new input.
+                if asked == PeekAsk::Unstarted {
+                    self.window.peek_cache.insert(
+                        bt_term::normalized_local_image_path_key(path),
+                        unstarted_pixels(),
+                    );
                 }
                 if asked == PeekAsk::Asked {
                     preview_trace::picture_read(preview_trace::global(), path);
@@ -8919,16 +8910,17 @@ impl Runtime<'_> {
                 request.native[0],
                 request.native[1],
             );
-            if self
+            let asked = self
                 .app
                 .math_worker
-                .scale(ScaleWorkerRequest::MarkdownImage { leaf, task })
-                .is_ok()
-            {
+                .scale(ScaleWorkerRequest::MarkdownImage { leaf, task });
+            if asked.is_ok_or_unstarted() {
+                // Asked — or its thread not started, which leaves the pass owed as asked: the
+                // decode's own pixels stand, and a new size asks again.
+                sent |= asked.is_ok();
                 self.window
                     .markdown_pictures
                     .land(request.key, MarkdownRaster::Pending);
-                sent = true;
             }
         }
         sent
@@ -10386,8 +10378,10 @@ impl Runtime<'_> {
                     leaf,
                     path: path.clone(),
                 })
-                .is_ok()
+                .is_ok_or_unstarted()
             {
+                // Asked — or its thread not started, which is asked and failed: no surface asks
+                // again until one begins showing the file anew.
                 self.window.animations.insert(key, AnimationEntry::Pending);
             }
         }
@@ -10450,12 +10444,16 @@ impl Runtime<'_> {
                     cursor,
                     want,
                 });
-            // **A request the lane refused at its door brings the cursor home.** No
-            // completion is coming for it, and an animation whose decoder went with
-            // the request would stand on its last frame for as long as this window
-            // is open; parked, the next frame that draws it asks again.
-            if let Err((_, MathWorkerRequest::AnimationFill { cursor, .. })) = sent {
-                animation.park_cursor(cursor, Vec::new());
+            // **A request the lane refused at its door.** Full: the cursor comes home, and the
+            // next frame that draws the animation asks again. Its thread not started: the fill is
+            // lost as a failed one is — the reservation released, the animation on its last
+            // frame until a surface begins showing the file again — so no frame retries it.
+            match sent {
+                Err((crate::lane::Refused::NotStarted(_), _)) => animation.fill_lost(),
+                Err((_, MathWorkerRequest::AnimationFill { cursor, .. })) => {
+                    animation.park_cursor(cursor, Vec::new());
+                }
+                _ => {}
             }
         }
         self.window
@@ -10824,6 +10822,14 @@ impl Runtime<'_> {
                         }
                         // Nothing is out, and the pane's next resolve asks again.
                         PeekAsk::NotNow => {}
+                        PeekAsk::Unstarted => {
+                            self.window.peek_cache.insert(cache_key, unstarted_pixels());
+                            self.preview_pane_mut(surface).refuse_picture(Some(
+                                PictureRefusal::this_window_cannot(
+                                    i18n::Text::PreviewFailedImageWorker.text(),
+                                ),
+                            ));
+                        }
                         PeekAsk::Refused => {
                             self.preview_pane_mut(surface).refuse_picture(Some(
                                 PictureRefusal::this_window_cannot(
@@ -11011,10 +11017,16 @@ impl Runtime<'_> {
             // on the glass while it travels; the store's own `Pending` is what
             // keeps it to one. This is [`answer_one_picture`]'s own arm, said for
             // a pane instead of for a page.
-            if self.request_peek_pixels(&path) == PeekAsk::Asked {
-                self.window
-                    .peek_cache
-                    .insert(cache_key, PeekCacheEntry::Pending);
+            match self.request_peek_pixels(&path) {
+                PeekAsk::Asked => {
+                    self.window
+                        .peek_cache
+                        .insert(cache_key, PeekCacheEntry::Pending);
+                }
+                PeekAsk::Unstarted => {
+                    self.window.peek_cache.insert(cache_key, unstarted_pixels());
+                }
+                PeekAsk::NotNow | PeekAsk::Refused => {}
             }
             return produced;
         };
@@ -11040,10 +11052,13 @@ impl Runtime<'_> {
             leaf: self.focused_shell_address(),
             task,
         }) {
-            Ok(_) => self.preview_pane_mut(surface).ask_picture_scale(target),
-            // Full, or its thread not started: nothing is out, and the pane's next
-            // resolve asks again.
-            Err((crate::lane::Refused::Full { .. } | crate::lane::Refused::NotStarted(_), _)) => {}
+            // Asked — or its thread not started, which marks it asked too: a refit to a new size
+            // asks again, a redraw does not.
+            Ok(_) | Err((crate::lane::Refused::NotStarted(_), _)) => {
+                self.preview_pane_mut(surface).ask_picture_scale(target);
+            }
+            // Full: nothing is out, and the pane's next resolve asks again.
+            Err((crate::lane::Refused::Full { .. }, _)) => {}
             Err(_) => {
                 self.preview_pane_mut(surface).refuse_picture(Some(
                     PictureRefusal::this_window_cannot(i18n::Text::PreviewFailedImageWorker.text()),

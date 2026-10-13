@@ -55,10 +55,12 @@
 //!   refuses, a formula the engine refuses, a render panic that `bt_math`'s own boundary turns
 //!   into `MathRenderError::Aborted`) is part of that answer. Any other panic in one request's
 //!   work is that request's `Failed`, caught by its [`crate::lane::task`] and said once per streak
-//!   by the share's ledger, and the worker goes on. The window that asked settles it
-//!   (`Runtime::settle_failed_requests`): nothing on screen changes, its in-flight mark comes
-//!   down, and its question is asked again only by new input — a pane holds the task until its
-//!   next bytes or resize, a window surface asks again at its next hover or resolve.
+//!   by the share's ledger, and the worker goes on. Nothing on screen changes, and its question
+//!   is asked again only by new input to the surface that asked (`crate::settle_failure`): a
+//!   pane holds the task until a resize, a scroll, or output that changed the task's own content
+//!   (`Runtime::settle_failed_requests`); a window surface hears its own error answer — a failed
+//!   decode, a refused animation or formula — or keeps its asked mark, and asks again at its next
+//!   new input: a new hover, the file opened again, a new size, new formula content.
 //!   A worker's end ends every request **of that share** still owed `WorkerGone`, faults that
 //!   share (every later request on it refused at the door) and wakes the loop: the death is
 //!   observed per share, the other two threads still answering inside the lane; the product's
@@ -67,8 +69,8 @@
 //! * **Start.** Each share's worker is started by the first request made of it; a start the
 //!   thread door refuses refuses that request at the door ([`Refused::NotStarted`]), said once per
 //!   streak, and leaves the share unfaulted. The pane whose task it was hands nothing more out
-//!   until its next new input, which tries the start once; a window surface asks again at its
-//!   next hover or resolve.
+//!   until its next new input, which tries the start once; a window surface marks the request
+//!   asked and failed, as for a failure, and asks again at its own next new input.
 //! * **Abandonment.** A request whose asker has gone — a tab closed, a window closed — is let go
 //!   by the drain before it takes anything ([`ComputationLane::ended`]); its terminal, now or
 //!   when it comes, goes to the lane's sink, which ignores it by design (C6): what it would have
@@ -103,6 +105,24 @@ pub(crate) const SCALE_BOUND: usize = bt_term::DECODE_TASKS_HELD;
 /// **How many requests the path share owes at once** — a sizing choice: one pane's whole queue of
 /// printed paths (`bt_term::PATH_TASKS_HELD`).
 pub(crate) const PATH_BOUND: usize = bt_term::PATH_TASKS_HELD;
+
+/// **What a surface reads off its request's admission** — whether to mark it asked: admitted, or
+/// its thread not started (asked, and failed: the surface asks again only on its own new input);
+/// and whether the lane was full (nothing out: the next resolve asks again).
+pub(crate) trait Asking {
+    fn is_ok_or_unstarted(&self) -> bool;
+    fn is_full(&self) -> bool;
+}
+
+impl<Job> Asking for Result<ComputationId, (Refused, Job)> {
+    fn is_ok_or_unstarted(&self) -> bool {
+        matches!(self, Ok(_) | Err((Refused::NotStarted(_), _)))
+    }
+
+    fn is_full(&self) -> bool {
+        matches!(self, Err((Refused::Full { .. }, _)))
+    }
+}
 
 /// **One request's name**, minted by its share's ledger and unique within that share.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
@@ -500,8 +520,9 @@ impl ComputationLane {
 
     /// **The window thread's drain**: first every request whose asker has `gone` is let go — its
     /// terminal, now or when it comes, goes to the sink — then every terminal each share holds
-    /// below its drain mark is taken, share by share, each in mint order. One lock per share at a
-    /// time; never waits for a worker.
+    /// below its drain mark is taken, share by share, each in mint order, and with them every
+    /// `Superseded` terminal past the mark (it carries no answer). One lock per share at a time;
+    /// never waits for a worker.
     pub(crate) fn ended(&self, gone: impl Fn(AnswerOwner) -> bool) -> Vec<Ended> {
         self.decoration.let_go(&gone);
         self.scale.let_go(&gone);
@@ -1417,15 +1438,29 @@ mod tests {
         crate::dispatch_pending_math_tasks(probe_leaf(), session, lane, &mut running, &mut notice)
     }
 
-    /// RED (S-8 round 2; revision (b)5 rule 1) — **A formula whose work failed is asked again by
-    /// the pane's next new input, and answered; never before.**
+    /// The pane tasks a drain's failures hold, as the window would hold them in `session`.
+    fn hold_in(session: &mut bt_term::DualPlaneSession, answers: crate::MathAnswers) -> usize {
+        let mut held = 0;
+        for (_, settled) in answers.failed {
+            let crate::Settled::Hold { task, .. } = settled else {
+                panic!("a pane's failed task is held");
+            };
+            session.hold_decoration_task_until_new_input(task);
+            held += 1;
+        }
+        held
+    }
+
+    /// RED (S-8 rounds 2 and 3; revision (b)5 rule 1) — **A formula whose work failed is asked
+    /// again by new input that could change its answer, and answered; never before.**
     ///
-    /// The formula's work panics once. Its `Failed` terminal is settled into the pane
-    /// (`settle_failed_in_session`), which holds the task: frames drawn again with nothing new
-    /// hand nothing out, and the next bytes from the shell hand it out once more, to an answer.
+    /// The formula's work panics once. Its `Failed` terminal is sorted into a pane task to hold
+    /// (`sort_math_terminals` → `settle_failure` → `Settled::Hold`), and the pane holds it: frames
+    /// drawn again with nothing new hand nothing out, and a resize hands it out once more, to an
+    /// answer.
     ///
-    /// MUTATION: make `settle_failed_in_session` leave a pane's task where it is (an empty `Pane`
-    /// arm) — the mark stands, and new input asks nothing.
+    /// MUTATION: make `settle_failure` answer `Settled::Nothing` for a pane's task — no task is
+    /// held, and the mark stands for ever.
     #[test]
     fn a_failed_formula_is_asked_again_by_new_input_and_answered() {
         let (mut lane, _gate) = gated();
@@ -1444,14 +1479,12 @@ mod tests {
         lane.terminal(Share::Decoration, started, nobody);
         let mut session = a_pane_with_a_formula();
         assert!(!hand_out(&mut session, &lane.lane));
-        let (_, _, failed, asking) = lane.next_ended(Share::Decoration, nobody);
-        assert!(matches!(failed, Terminal::Failed(_)), "{failed:?}");
-        let answers =
-            crate::sort_math_terminals(vec![(Share::Decoration, started, failed, asking)]);
-        assert_eq!(answers.failed.len(), 1);
-        for (_, asked) in answers.failed {
-            crate::settle_failed_in_session(&mut session, asked);
-        }
+        let ended = lane.next_ended(Share::Decoration, nobody);
+        assert!(matches!(ended.2, Terminal::Failed(_)), "{:?}", ended.2);
+        assert_eq!(
+            hold_in(&mut session, crate::sort_math_terminals(vec![ended])),
+            1
+        );
         for _ in 0..3 {
             hand_out(&mut session, &lane.lane);
             assert_eq!(
@@ -1460,7 +1493,12 @@ mod tests {
                 "no new input, no new question"
             );
         }
-        session.feed(b" ").unwrap();
+        session
+            .resize(
+                std::num::NonZeroU32::new(44).unwrap(),
+                std::num::NonZeroU32::new(4).unwrap(),
+            )
+            .unwrap();
         hand_out(&mut session, &lane.lane);
         let (_, _, answered, _) = lane.next_ended(Share::Decoration, nobody);
         let completion = answer(answered)
@@ -1475,10 +1513,10 @@ mod tests {
         );
     }
 
-    /// RED (S-8 round 2; revision (b)5 rule 1) — **A printed path whose check failed is asked again
-    /// by the pane's next new input, and answered; never before.**
+    /// RED (S-8 rounds 2 and 3; revision (b)5 rule 1) — **A printed path whose check failed is
+    /// asked again by a resize, and answered; not by more output that leaves it as it was.**
     ///
-    /// MUTATION: as above — an empty `Pane` arm in `settle_failed_in_session`.
+    /// MUTATION: as above — `Settled::Nothing` for a pane's task.
     #[test]
     fn a_failed_path_is_asked_again_by_new_input_and_answered() {
         let (mut lane, _gate) = gated();
@@ -1497,21 +1535,29 @@ mod tests {
         let path = bt_testpath::temp_path("bt-app-path-failed").join("笔记-notes.md");
         let mut session = a_pane_with_a_printed_path(&path);
         assert!(!hand_out(&mut session, &lane.lane));
-        let (_, id, failed, asking) = lane.next_ended(Share::Path, nobody);
-        assert!(matches!(failed, Terminal::Failed(_)), "{failed:?}");
-        let answers = crate::sort_math_terminals(vec![(Share::Path, id, failed, asking)]);
-        for (_, asked) in answers.failed {
-            crate::settle_failed_in_session(&mut session, asked);
-        }
+        let ended = lane.next_ended(Share::Path, nobody);
+        assert!(matches!(ended.2, Terminal::Failed(_)), "{:?}", ended.2);
+        assert_eq!(
+            hold_in(&mut session, crate::sort_math_terminals(vec![ended])),
+            1
+        );
+        session
+            .feed("\u{65e5}\u{5fd7} more output\r\n".as_bytes())
+            .unwrap();
         for _ in 0..3 {
             hand_out(&mut session, &lane.lane);
             assert_eq!(
                 lane.lane.held(Share::Path),
                 0,
-                "no new input, no new question"
+                "output that leaves the path as it was asks nothing"
             );
         }
-        session.feed(b" ").unwrap();
+        session
+            .resize(
+                std::num::NonZeroU32::new(100).unwrap(),
+                std::num::NonZeroU32::new(6).unwrap(),
+            )
+            .unwrap();
         hand_out(&mut session, &lane.lane);
         let (_, _, answered, _) = lane.next_ended(Share::Path, nobody);
         assert!(
@@ -1523,18 +1569,17 @@ mod tests {
         );
     }
 
-    /// RED (S-8 round 2) — **A glance whose decode failed leaves the window's cache able to ask
-    /// again**: the `Pending` entry the glance wrote is taken down by the failure, so the next
-    /// settled hover finds no entry and asks (an entry the file has answered since is kept).
+    /// RED (S-8 round 3) — **A glance whose decode failed is answered as a failed decode**, down
+    /// the road a decode error already takes (`complete_peek_image` files `PeekCacheEntry::Failed`
+    /// and refuses the picture to waiting preview panes), so every surface agrees and the glance
+    /// asks again only at its next settled hover — never on a redraw.
     ///
-    /// MUTATION: make `settle_failed_pixels` leave the entry — the glance stays `Pending`.
+    /// MUTATION: make `settle_failure` answer `Settled::Nothing` for a file's pixels — the
+    /// glance's `Pending` stands for ever.
     #[test]
-    fn a_failed_glance_leaves_the_cache_able_to_ask_again() {
+    fn a_failed_glance_is_answered_as_a_failed_decode() {
         let (mut lane, _gate) = gated();
         let path = PathBuf::from("不在这里/截图 glance.png");
-        let mut cache = crate::PeekCache::with_budget(1 << 20);
-        let key = bt_term::normalized_local_image_path_key(&path);
-        cache.insert(key.clone(), crate::PeekCacheEntry::Pending);
         let id = lane
             .lane
             .decorate_through(
@@ -1551,28 +1596,95 @@ mod tests {
             )
             .ok()
             .expect("admitted");
-        let failed = lane.terminal(Share::Decoration, id, nobody);
-        assert!(matches!(failed, Terminal::Failed(_)), "{failed:?}");
+        let ended = lane.next_ended(Share::Decoration, nobody);
+        assert_eq!(ended.1, id);
+        let answers = crate::sort_math_terminals(vec![ended]);
+        assert!(
+            answers.failed.is_empty(),
+            "a window surface settles by its answer"
+        );
+        assert!(
+            matches!(
+                answers.done.as_slice(),
+                [MathWorkerResult {
+                    completion: DecorationWorkerCompletion::PeekImage { path: answered, result: Err(_) },
+                    ..
+                }] if *answered == path
+            ),
+            "the glance hears a failed decode for its file"
+        );
+    }
+
+    /// RED (S-8 round 3) — **A failure reaches the pane that asked**, and a request joined to a
+    /// failed one is failed too: `hold_failed_in_tabs` finds the asking seat of the asking tab
+    /// (another tab's pane, or a pane closed since, takes nothing), and `sort_math_terminals` sorts
+    /// a `Joined` carrying a `Failed` with the failures.
+    ///
+    /// MUTATION: make `sort_math_terminals` treat every `Joined` as answered (`false`) — the
+    /// joined failure is lost.
+    #[test]
+    fn a_failure_reaches_the_pane_that_asked_and_a_joined_failure_is_a_failure() {
+        let tab = crate::test_support::cross_tab(1, &["一", "two"]);
+        let seats = tab.seats.terminals();
+        let leaf = |seat: bt_layout::SeatId, tab_id| ShellAddress {
+            window: WindowId::from(1_u64),
+            leaf: LeafId { tab: tab_id, seat },
+        };
+        let task = bt_term::SessionDecorationTask::VerifyPath(PathBuf::from("不在这里/路径.md"));
+        let tab_id = tab.id;
+        let mut tabs = vec![tab];
+        assert!(crate::hold_failed_in_tabs(
+            &mut tabs,
+            leaf(seats[1], tab_id),
+            task.clone()
+        ));
+        // A resize gives every held task back: only the seat that asked hands one out.
+        let handed: Vec<bool> = tabs[0]
+            .leaves_mut()
+            .map(|(_, pane)| {
+                let (columns, rows) = pane.session.terminal().dimensions();
+                pane.session
+                    .resize(columns, rows.saturating_add(1))
+                    .unwrap();
+                pane.session.take_decoration_worker_task().is_some()
+            })
+            .collect();
+        assert_eq!(
+            handed,
+            [false, true],
+            "held by the seat that asked, and no other"
+        );
+        assert!(
+            !crate::hold_failed_in_tabs(&mut tabs, leaf(seats[0], TabId(999)), task.clone()),
+            "a tab no window holds takes nothing"
+        );
+
+        let joined = Terminal::Joined {
+            with: ComputationId(1),
+            outcome: Box::new(Terminal::Failed(lane::TaskFailure::Panicked(
+                "planted".into(),
+            ))),
+        };
         let answers = crate::sort_math_terminals(vec![(
-            Share::Decoration,
-            id,
-            failed,
+            Share::Path,
+            ComputationId(2),
+            joined,
             (
-                crate::AnswerOwner::Window(probe_leaf().window),
-                MathWorkerRequest::PeekImage {
-                    leaf: probe_leaf(),
-                    path: path.clone(),
+                crate::AnswerOwner::Tab(tab_id),
+                PathWorkerRequest {
+                    leaf: leaf(seats[1], tab_id),
+                    path: PathBuf::from("不在这里/路径.md"),
                 }
                 .asked(),
             ),
         )]);
-        for (_, asked) in answers.failed {
-            let crate::Asked::Pixels { path } = asked else {
-                panic!("a glance asks for a file's pixels");
-            };
-            crate::settle_failed_pixels(&mut cache, &path);
-        }
-        assert!(cache.get(&key).is_none(), "the next hover asks again");
+        assert!(
+            matches!(
+                answers.failed.as_slice(),
+                [(_, crate::Settled::Hold { .. })]
+            ),
+            "a request joined to a failure is held as a failure"
+        );
     }
 
     /// RED (S-8 round 2; revision (b)5 rule 1) — **A worker the door could not start is tried
@@ -1642,15 +1754,7 @@ mod tests {
         let mut projection = session.new_projection(session.layout_key());
         session.viewport_frame(&mut projection).unwrap();
         session
-            .feed(
-                format!(
-                    "
-{}
-",
-                    path.to_string_lossy()
-                )
-                .as_bytes(),
-            )
+            .feed(format!("\r\n{}\r\n", path.to_string_lossy()).as_bytes())
             .unwrap();
         session.refresh_projection(&mut projection);
         session.viewport_frame(&mut projection).unwrap();

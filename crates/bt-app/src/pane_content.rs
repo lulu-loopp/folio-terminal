@@ -612,14 +612,6 @@ impl PictureView {
         self.image.failure = None;
     }
 
-    /// A resample at this size was asked for and its work failed: nothing is out any more, so
-    /// the surface's next resolve asks again.
-    pub(crate) fn forget_scale(&mut self, target: &PeekThumbnailTarget) {
-        if self.image.pending.as_ref() == Some(target) {
-            self.image.pending = None;
-        }
-    }
-
     /// A resample has landed; answers whether it was the one asked for.
     pub(crate) fn accept_scaled(&mut self, scaled: bt_term::ScaledInlineImage) -> bool {
         self.image.accept_scaled(scaled)

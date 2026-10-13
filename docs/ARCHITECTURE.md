@@ -1233,7 +1233,7 @@ picture superseding the one waiting and the same size joining it), printed paths
 for that share (one hand-out pass of one pane; two panes or windows asking at once reach it
 sooner), a refused pane task given back to its pane and only the refusing share's work stopped
 for that hand-out, a refused thread start pausing the pane's hand-out until its next new input,
-a `Failed` request's in-flight mark taken down and its question asked again only by new input,
+a `Failed` request settled as its surface's own error or held by its pane, asked again only by new input to that surface (for a pane: a resize, a scroll, or output that changed the task's content),
 every request owed to the tab or window that asked and a gone asker's request let go by the
 drain into the lane's ignoring sink, one thread's death observed per share — its own requests
 `WorkerGone` while the other two keep answering — and then the whole feature turned off once,

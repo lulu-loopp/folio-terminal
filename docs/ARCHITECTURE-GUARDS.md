@@ -289,8 +289,9 @@ the order minted unless a newer one for the same target displaces it while it wa
 first request, a refused request handed back with its job, a supersession announced by
 the wake and its terminal — which carries no answer — taken past the drain mark. A lane of
 several threads keeps one ledger per thread, so one thread's end ends only its own requests,
-and keeps what each request asked, so a `Failed` one is settled (its mark taken down, its
-question asked again only by new input) rather than left in flight. What the proof covers:
+and keeps what each request asked, so a `Failed` one is settled — as its surface's own error,
+or held by its pane — and asked again only by new input to that surface, rather than left in
+flight or retried by a redraw. What the proof covers:
 `lane_contract_tests::the_ledger_ends_every_identity_exactly_once_in_every_interleaving`
 plays every order of three identities' outcomes (the six terminals, a racing
 answer after a cancel, a terminal published for a joined identity itself),

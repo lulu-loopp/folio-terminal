@@ -40,7 +40,7 @@ use bt_viewport::{
     BlockOverflowOwner, FrameProjectionError, FrameViewportOrigin, GridCursor,
     LiveMathOccurrenceId, MathBlockAnchor, MathBlockDisplay, MathBlockPlacement,
     MathFailurePlacement, ProjectedLiveMathArtifact, ProjectedMathArtifact, SelectionSpan,
-    ViewSelection, ViewportFrame, ViewportProjection,
+    ViewSelection, ViewportFrame, ViewportProjection, ViewportScrollState,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -379,6 +379,15 @@ pub enum SessionDecorationTask {
     /// its own repaint to find out would stutter exactly while a full-screen program was printing
     /// the paths worth asking about.
     VerifyPath(PathBuf),
+}
+
+/// **What kind of new input reached a session** ([`DualPlaneSession::hold_decoration_task_until_new_input`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NewInput {
+    /// Bytes from the shell: new output, or an edit's echo.
+    Output,
+    /// A resize or a scroll: what is laid out, or what is seen, moved.
+    Layout,
 }
 
 /// One piece of decoration work a worker holds, named by what its completion carries back.
@@ -1761,6 +1770,8 @@ pub struct DualPlaneSession {
     /// again meanwhile — and the next bytes from the shell or the next resize give it back to
     /// its queue, to be handed out once more.
     held_for_new_input: Vec<SessionDecorationTask>,
+    /// The scroll state of the last frame's projection ([`DualPlaneSession::observe_view`]).
+    last_view: Option<ViewportScrollState>,
     /// **The host could not start its worker**: nothing is handed out until this session's next
     /// new input ([`DualPlaneSession::pause_hand_out_until_new_input`]).
     hand_out_paused: bool,
@@ -2323,6 +2334,7 @@ impl DualPlaneSession {
             path_declined_order: VecDeque::new(),
             decoration_work_out: BTreeSet::new(),
             held_for_new_input: Vec::new(),
+            last_view: None,
             hand_out_paused: false,
             printed_path_links: bt_transcript::paths::PrintedPathLinks::default(),
             reprinted_path_links: bt_transcript::paths::PrintedPathLinks::default(),
@@ -4021,6 +4033,16 @@ impl DualPlaneSession {
     /// Deterministic replay entry point. Production callers normally use `feed`; integration tests
     /// can supply a monotonic timestamp without sleeping through the resize silence window.
     pub fn feed_at(&mut self, bytes: &[u8], observed_at: Instant) -> Result<(), SessionError> {
+        let fed = self.feed_bytes_at(bytes, observed_at);
+        if !bytes.is_empty() {
+            self.new_input(NewInput::Output);
+        }
+        fed
+    }
+
+    /// [`Self::feed_at`]'s parse: the bytes applied to the grid, the transcript and every ledger
+    /// that reads them.
+    fn feed_bytes_at(&mut self, bytes: &[u8], observed_at: Instant) -> Result<(), SessionError> {
         // The screen's damage counter, before anything else — see
         // [`Self::screen_revision`]. Bytes from the child are the only thing that
         // writes the live grid outside a resize, so this is where "something
@@ -4028,7 +4050,6 @@ impl DualPlaneSession {
         // know whether re-reading the grid could give a different answer.
         if !bytes.is_empty() {
             self.screen_revision = self.screen_revision.wrapping_add(1);
-            self.new_input();
         }
         let repaint_controls = self.terminal.repaint_controls(bytes);
         let cursor_memory_reprint_boundary =
@@ -4480,7 +4501,7 @@ impl DualPlaneSession {
         rows: NonZeroU32,
         observed_at: Instant,
     ) -> Result<(), SessionError> {
-        self.new_input();
+        self.new_input(NewInput::Layout);
         self.refresh_semantic_region_witnesses();
         let plan = plan_resize(self.terminal.dimensions(), (columns, rows));
         // Before a single cell moves: what each registered live anchor names. A reflow is about to
@@ -9205,6 +9226,9 @@ impl DualPlaneSession {
     pub fn forget_work_in_flight(&mut self) {
         self.path_verify_in_flight.clear();
         self.decoration_work_out.clear();
+        // A task held for new input is work in flight too: let go of it with the rest, or the
+        // re-ask below and its release would ask one question twice.
+        self.held_for_new_input.clear();
         for record in self.inline_images.values_mut() {
             record.display_pending = None;
         }
@@ -9276,6 +9300,10 @@ impl DualPlaneSession {
     /// back to the head of the queue it was taken from and is no longer counted as handed out, so
     /// the next [`Self::take_decoration_worker_task`] hands it out again: nothing is lost, and
     /// nothing is asked again until the host's next hand-out.
+    ///
+    /// Given back past a queue's cap: a queue's cap bounds what output can queue, and a task given
+    /// back was admitted under it once and taken. The excess is at most the tasks of this session
+    /// out at once — the host's own bound for that work — and is the first the next hand-out takes.
     pub fn give_back_decoration_worker_task(&mut self, task: SessionDecorationTask) {
         if let Some(out) = DecorationWorkOut::of(&task) {
             self.decoration_work_out.remove(&out);
@@ -9300,10 +9328,11 @@ impl DualPlaneSession {
     }
 
     /// **A task whose work failed on the host's worker, held until this session's next new input**
-    /// — the next bytes from the shell (an edit's echo, new output) or a resize. Until then it
-    /// stays handed out, so the same question is not asked again on its own; then it goes back to
-    /// the head of its queue and the next hand-out hands it out once more. The decoration stands
-    /// as it was meanwhile: a formula on its source text, a path not yet a link.
+    /// that could change its answer — a resize or a scroll, or output that changed the task's own
+    /// content ([`Self::new_input`]). Until then it stays handed out, so the same question is not
+    /// asked again on its own; then it goes back to the head of its queue and the next hand-out
+    /// hands it out once more. The decoration stands as it was meanwhile: a formula on its source
+    /// text, a path not yet a link.
     pub fn hold_decoration_task_until_new_input(&mut self, task: SessionDecorationTask) {
         self.held_for_new_input.push(task);
     }
@@ -9315,13 +9344,60 @@ impl DualPlaneSession {
         self.hand_out_paused = true;
     }
 
-    /// **New input reached this session**: hand-outs resume, and every task held for it goes back
-    /// to the head of its queue, in the order it was held.
-    fn new_input(&mut self) {
+    /// **New input reached this session.** Hand-outs resume (a paused hand-out tries its start
+    /// once more). A held task goes back to the head of its queue, in the order it was held, when
+    /// the input could change its answer: a resize or a scroll changes what is laid out and seen,
+    /// so every held task is asked again; output changes only what it wrote, so a held task is
+    /// asked again only if its own content changed ([`Self::held_task_changed`]). A picture whose
+    /// decode failed is therefore not tried again on every batch of a `tail -f`.
+    fn new_input(&mut self, input: NewInput) {
         self.hand_out_paused = false;
         let held = std::mem::take(&mut self.held_for_new_input);
-        for task in held.into_iter().rev() {
+        let (asked, still): (Vec<_>, Vec<_>) = held
+            .into_iter()
+            .partition(|task| input == NewInput::Layout || self.held_task_changed(task));
+        self.held_for_new_input = still;
+        for task in asked.into_iter().rev() {
             self.give_back_decoration_worker_task(task);
+        }
+    }
+
+    /// **Whether a held task's content is no longer what it was asked about**: a frozen formula's
+    /// lines at other versions, a live formula's source rows rewritten, a resample whose picture
+    /// was decoded again, a picture whose occurrence is gone. A printed path's question is its
+    /// text, which output cannot change, and a picture file's bytes are not read here: those wait
+    /// for a resize or a scroll.
+    fn held_task_changed(&self, task: &SessionDecorationTask) -> bool {
+        match task {
+            SessionDecorationTask::Math(task) => match task.as_ref() {
+                SessionMathTask::Frozen(task) => !self.worker_task_is_current(task),
+                SessionMathTask::Live(task) => {
+                    task.screen != self.live_screen
+                        || live_task_is_current(task, &self.live_capture()).is_some()
+                }
+            },
+            SessionDecorationTask::InlineImage(task) => {
+                !self.inline_images.contains_key(&task.occurrence_id)
+            }
+            SessionDecorationTask::ScaleInlineImage(task) => self
+                .inline_images
+                .get(&task.occurrence_id)
+                .and_then(|record| record.artifact.as_ref())
+                .is_none_or(|decoded| decoded.key != task.content_key),
+            SessionDecorationTask::VerifyPath(_) => false,
+        }
+    }
+
+    /// **What this pane's projection shows moved** — the reader scrolled. Called with each frame's
+    /// projection; a scroll is new input to every task held for it ([`Self::new_input`]), as a
+    /// resize is, because what is on screen is what the visible scheduler asks about.
+    pub fn observe_view(&mut self, projection: &ViewportProjection) {
+        let view = projection.scroll_state();
+        if self.last_view.as_ref().is_some_and(|last| last != view) {
+            self.new_input(NewInput::Layout);
+        }
+        if self.last_view.as_ref() != Some(view) {
+            self.last_view = Some(view.clone());
         }
     }
 
@@ -25882,12 +25958,15 @@ mod tests {
         }
     }
 
-    /// RED (S-8 round 2) — **a task whose work failed is held until the session's next new input,
-    /// and then handed out once more**; while held, no hand-out asks it again, and a paused
-    /// hand-out (the host's worker could not start) hands out nothing until new input either.
+    /// RED (S-8 rounds 2 and 3) — **a task whose work failed is held until new input that could
+    /// change its answer, and then handed out once more**: idle frames ask nothing, more output
+    /// that leaves the printed path as it was asks nothing (a `tail -f` does not retry it), and a
+    /// resize hands it out again, once. A paused hand-out (the host's worker could not start)
+    /// hands out nothing until new input either.
     ///
-    /// MUTATION: have `new_input` leave `held_for_new_input` where it is — the next bytes do not
-    /// give the path back, and it is never asked again.
+    /// MUTATION: have `new_input` leave `held_for_new_input` where it is — the resize does not
+    /// give the path back, and it is never asked again. Or release every held task on output (the
+    /// round-2 `new_input`) — more output asks the path again.
     #[test]
     fn a_failed_task_waits_for_new_input_and_a_paused_hand_out_resumes_with_it() {
         let path = bt_testpath::temp_path("bt-term-held").join("\u{622a}\u{56fe}-shot.md");
@@ -25915,10 +25994,15 @@ mod tests {
             );
         }
         assert_eq!(session.outstanding_decoration_work(), 1, "still owed");
-        session.feed(b"x").unwrap();
+        session.feed(b"more output, the same path\r\n").unwrap();
+        assert!(
+            session.take_decoration_worker_task().is_none(),
+            "output that leaves the path as it was asks nothing"
+        );
+        session.resize(nz(100), nz(6)).unwrap();
         let Some(SessionDecorationTask::VerifyPath(again)) = session.take_decoration_worker_task()
         else {
-            panic!("new input hands the held name out again");
+            panic!("a resize hands the held name out again");
         };
         assert_eq!(again, path);
         assert!(session.take_decoration_worker_task().is_none(), "once");
@@ -25936,6 +26020,91 @@ mod tests {
                 Some(SessionDecorationTask::InlineImage(_))
             ),
             "new input resumes the hand-out"
+        );
+    }
+
+    /// RED (S-8 round 3) — **a held live formula is asked again when its own source is rewritten,
+    /// and not by output elsewhere**: a line printed below it leaves it held; the formula's own row
+    /// rewritten gives it back, once.
+    ///
+    /// MUTATION: make `held_task_changed` answer `false` for a live task — the rewrite asks
+    /// nothing.
+    #[test]
+    fn a_held_formula_is_asked_again_when_its_own_source_changes() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(4));
+        session
+            .feed_at("$$x+\u{03b1}$$\x1b[?25l".as_bytes(), start)
+            .unwrap();
+        assert_eq!(
+            session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL),
+            1
+        );
+        let Some(task @ SessionDecorationTask::Math(_)) = session.take_decoration_worker_task()
+        else {
+            panic!("the formula is handed out");
+        };
+        session.hold_decoration_task_until_new_input(task);
+        session
+            .feed("\r\n\u{65e5}\u{5fd7} log line".as_bytes())
+            .unwrap();
+        assert!(
+            session.take_decoration_worker_task().is_none(),
+            "output below the formula asks nothing"
+        );
+        session.feed("\x1b[H$$y+\u{03b2}$$".as_bytes()).unwrap();
+        assert!(
+            matches!(
+                session.take_decoration_worker_task(),
+                Some(SessionDecorationTask::Math(_))
+            ),
+            "the formula's own row rewritten asks again"
+        );
+        assert!(session.take_decoration_worker_task().is_none(), "once");
+    }
+
+    /// RED (S-8 round 3) — **a scroll is new input to a held task**: the reader scrolling the
+    /// pane gives a held path back, as a resize does.
+    ///
+    /// MUTATION: make `observe_view` never call `new_input` — the scroll asks nothing.
+    #[test]
+    fn a_scroll_asks_a_held_task_again() {
+        let path = bt_testpath::temp_path("bt-term-scrolled").join("\u{6eda}\u{52a8}-notes.md");
+        let mut session = DualPlaneSession::new(nz(120), nz(4));
+        enable_path_detection(&mut session);
+        for line in 0..20 {
+            session
+                .feed(format!("\u{884c} {line}\r\n").as_bytes())
+                .unwrap();
+        }
+        session
+            .feed(format!("{}\r\n", path.to_string_lossy()).as_bytes())
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        session.observe_view(&projection);
+        let Some(task @ SessionDecorationTask::VerifyPath(_)) =
+            session.take_decoration_worker_task()
+        else {
+            panic!("the printed name is asked about");
+        };
+        session.hold_decoration_task_until_new_input(task);
+        session.observe_view(&projection);
+        assert!(
+            session.take_decoration_worker_task().is_none(),
+            "the same view asks nothing"
+        );
+        projection.scroll_by_rows(3);
+        session.refresh_projection(&mut projection);
+        session.viewport_frame(&mut projection).unwrap();
+        session.observe_view(&projection);
+        assert!(
+            matches!(
+                session.take_decoration_worker_task(),
+                Some(SessionDecorationTask::VerifyPath(_))
+            ),
+            "a scroll asks the held name again"
         );
     }
 

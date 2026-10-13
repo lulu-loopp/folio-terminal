@@ -1862,49 +1862,125 @@ struct PathWorkerRequest {
 }
 
 /// **What one computation-lane request asked, kept beside it** (`computation_lane`) — so that a
-/// request whose work failed (`Failed`, a panic its task caught) can be settled: the mark that
-/// says "asked, an answer is coming" is taken down, and the question is asked again only by new
-/// input (side-effects contract revision (b)5, rule 1), never on its own.
+/// request whose work failed (`Failed`, a panic its task caught) can be settled: nothing on screen
+/// changes, and the question is asked again only by new input to the surface that asked
+/// (side-effects contract revision (b)5, rule 1), never on its own and never by an unrelated
+/// redraw.
 ///
-/// What a pane asked is kept as the session's own task, cheap to hold (a formula's scan, a path,
-/// a resample's shared pixels), so the pane can hold it for its next new input. A pasted
-/// picture's bytes went with its request and are not kept twice: it is the one pane task that is
-/// settled as a failed decode instead.
+/// A pane's task is kept as the session's own task (a formula's scan, a path, a resample's shared
+/// pixels), so the pane can hold it for its next new input. A window surface's request is
+/// settled down the road its own error already takes: its failure is answered as the error answer
+/// that surface knows ([`settle_failure`]), so the surface keeps its "asked, and failed" mark and
+/// asks again on its own new input — a new hover, a newly opened file, a new size, new formula
+/// content.
 #[derive(Clone, Debug)]
 enum Asked {
-    /// A pane's task: held by its session until the pane's next new input.
+    /// A pane's task: held by its session until new input that could change its answer.
     Pane {
         leaf: ShellAddress,
         task: SessionDecorationTask,
     },
-    /// A pasted picture's decode: recorded as failed, its bytes gone with the request.
+    /// A pasted picture's decode: its bytes went with the request, so it is a failed decode.
     Pasted {
         leaf: ShellAddress,
         occurrence_id: u64,
     },
-    /// A file's pixels for the window's decode cache (the glance, a preview, a page's picture):
-    /// the cache's `Pending` entry is taken down, so the next hover or resolve asks again.
-    Pixels { path: PathBuf },
-    /// An animation opened: its `Pending` entry is taken down, so the next surface that shows it
-    /// opens it again.
-    Animation { path: PathBuf },
-    /// An animation's next frames: its decoder went with the request, so the animation stands on
-    /// its last frame — deliberately — until a surface begins showing the file again and opens a
-    /// new playback.
-    AnimationFill,
-    /// One page of the glance card: no longer counted as asked, so the next frame that draws the
-    /// card asks again.
-    Page {
-        path: PathBuf,
-        page: u32,
-        fit: (u32, u32),
+    /// A file's pixels for the window's decode cache (the glance, a preview, a page's picture).
+    Pixels { leaf: ShellAddress, path: PathBuf },
+    /// An animation opened.
+    Animation { leaf: ShellAddress, path: PathBuf },
+    /// An animation's next frames: its decoder went with the request.
+    AnimationFill { path: PathBuf, serial: u64 },
+    /// One page of the glance card: it stays counted as asked, so the card asks again when it is
+    /// shown again (a new hover).
+    Page,
+    /// A preview's formula.
+    PreviewMath {
+        leaf: ShellAddress,
+        key: Box<PreviewMathKey>,
     },
-    /// A preview's formula: its `Pending` entry is taken down, so the page's next resolve asks
-    /// again.
-    PreviewMath { key: Box<PreviewMathKey> },
-    /// A resample for the glance, a preview or a markdown page: its pending target is taken
-    /// down, so the surface's next resolve asks again.
-    WindowScale { target: PeekThumbnailTarget },
+    /// A resample for the glance, a preview or a markdown page: its pending target stays, so the
+    /// surface asks again for a new size (a refit, a resize) or a new hover.
+    WindowScale,
+}
+
+/// **What a failed request comes to** ([`settle_failure`]).
+enum Settled {
+    /// The error answer the asking surface already knows, delivered as an answer.
+    Answer(MathWorkerResult),
+    /// A pane's task, to be held by its session until new input that could change its answer.
+    Hold {
+        leaf: ShellAddress,
+        task: SessionDecorationTask,
+    },
+    /// An animation's fill: its reservation released, the animation standing on its last frame.
+    FillLost { path: PathBuf, serial: u64 },
+    /// Nothing to do: the surface's mark stays and its own new input asks again.
+    Nothing,
+}
+
+/// What a decode that failed on the worker says, in the decode error's own words.
+const DECODE_FAULT: &str = "the decode stopped on a fault";
+
+/// What a decode whose thread could not be started says, in the decode error's own words.
+const DECODE_UNSTARTED: &str = "the decoder could not be started";
+
+/// **A failed request, settled as its surface's own failure** — pure, so the mapping is the one
+/// the tests read:
+///
+/// - a pane's task is held by its session ([`Settled::Hold`]);
+/// - a pasted picture is a failed decode (`InlineImageDecodeError::Decode`);
+/// - a file's pixels are a failed decode filed in the window's cache (`PeekCacheEntry::Failed`,
+///   the waiting preview panes refusing the picture), which the next settled hover reads again;
+/// - an animation is refused (`AnimationRefusal::Undecodable`) until a surface shows it again;
+/// - an animation's fill releases its reservation, and the animation stands on its last frame;
+/// - a preview formula is refused (`MathRenderError::Aborted`): the page draws its source text,
+///   and new content is a new formula, asked anew;
+/// - a card page and a resample keep their marks.
+fn settle_failure(asked: Asked) -> Settled {
+    match asked {
+        Asked::Pane { leaf, task } => Settled::Hold { leaf, task },
+        Asked::Pasted {
+            leaf,
+            occurrence_id,
+        } => Settled::Answer(MathWorkerResult {
+            leaf,
+            completion: DecorationWorkerCompletion::InlineImage {
+                task: bt_term::InlineImageTask {
+                    occurrence_id,
+                    source: bt_term::InlineImageSource::Osc1337(Vec::new()),
+                },
+                result: Err(bt_term::InlineImageDecodeError::Decode(
+                    DECODE_FAULT.to_owned(),
+                )),
+            },
+        }),
+        Asked::Pixels { leaf, path } => Settled::Answer(MathWorkerResult {
+            leaf,
+            completion: DecorationWorkerCompletion::PeekImage {
+                path,
+                result: Err(bt_term::InlineImageDecodeError::Decode(
+                    DECODE_FAULT.to_owned(),
+                )),
+            },
+        }),
+        Asked::Animation { leaf, path } => Settled::Answer(MathWorkerResult {
+            leaf,
+            completion: DecorationWorkerCompletion::PeekAnimation {
+                path,
+                frames: Err(animation::AnimationRefusal::Undecodable),
+            },
+        }),
+        Asked::AnimationFill { path, serial } => Settled::FillLost { path, serial },
+        Asked::PreviewMath { leaf, key } => Settled::Answer(MathWorkerResult {
+            leaf,
+            completion: DecorationWorkerCompletion::PreviewMath {
+                key,
+                result: Err(MathRenderError::Aborted),
+            },
+        }),
+        Asked::Page | Asked::WindowScale => Settled::Nothing,
+    }
 }
 
 impl PathWorkerRequest {
@@ -1941,19 +2017,23 @@ impl MathWorkerRequest {
                     occurrence_id: task.occurrence_id,
                 },
             },
-            Self::PeekImage { path, .. } | Self::PeekVideoFrame { path, .. } => {
-                Asked::Pixels { path: path.clone() }
-            }
-            Self::PeekAnimation { path, .. } => Asked::Animation { path: path.clone() },
-            Self::AnimationFill { .. } => Asked::AnimationFill,
-            Self::PeekPage {
-                path, page, fit, ..
-            } => Asked::Page {
+            Self::PeekImage { leaf, path } | Self::PeekVideoFrame { leaf, path } => Asked::Pixels {
+                leaf: *leaf,
                 path: path.clone(),
-                page: *page,
-                fit: *fit,
             },
-            Self::PreviewMath { key, .. } => Asked::PreviewMath { key: key.clone() },
+            Self::PeekAnimation { leaf, path } => Asked::Animation {
+                leaf: *leaf,
+                path: path.clone(),
+            },
+            Self::AnimationFill { path, serial, .. } => Asked::AnimationFill {
+                path: path.clone(),
+                serial: *serial,
+            },
+            Self::PeekPage { .. } => Asked::Page,
+            Self::PreviewMath { leaf, key } => Asked::PreviewMath {
+                leaf: *leaf,
+                key: key.clone(),
+            },
         }
     }
 
@@ -2054,15 +2134,9 @@ impl ScaleWorkerRequest {
                 leaf: *leaf,
                 task: SessionDecorationTask::ScaleInlineImage(task.clone()),
             },
-            Self::Peek { task, .. }
-            | Self::Preview { task, .. }
-            | Self::MarkdownImage { task, .. } => Asked::WindowScale {
-                target: (
-                    task.content_key.clone(),
-                    task.display_width_px,
-                    task.display_height_px,
-                ),
-            },
+            Self::Peek { .. } | Self::Preview { .. } | Self::MarkdownImage { .. } => {
+                Asked::WindowScale
+            }
         }
     }
 
@@ -3374,16 +3448,6 @@ impl PreviewMathCache {
             .insert(key, (PreviewMathArtifact::Pending, tick));
     }
 
-    /// The formula's work failed: it is no longer pending, so the page's next resolve asks again.
-    fn forget_pending(&mut self, key: &PreviewMathKey) {
-        if matches!(
-            self.entries.get(key),
-            Some((PreviewMathArtifact::Pending, _))
-        ) {
-            self.entries.remove(key);
-        }
-    }
-
     fn land(&mut self, key: PreviewMathKey, artifact: PreviewMathArtifact) {
         let tick = self.tick;
         if let Some((PreviewMathArtifact::Ready(old), _)) = self.entries.get(&key) {
@@ -4177,13 +4241,6 @@ impl MarkdownPictures {
     fn owe(&mut self, request: MarkdownRasterRequest, now: Instant) {
         self.owed.insert(request.key.content.clone(), request);
         self.settle_deadline = Some(now + WINDOW_RESIZE_QUIET);
-    }
-
-    /// The pass's work failed: it is no longer pending, so the page's next resolve asks again.
-    fn forget_pending(&mut self, key: &MarkdownRasterKey) {
-        if matches!(self.rasters.get(key), Some((MarkdownRaster::Pending, _))) {
-            self.rasters.remove(key);
-        }
     }
 
     fn land(&mut self, key: MarkdownRasterKey, raster: MarkdownRaster) {
@@ -5143,13 +5200,6 @@ impl PreviewPane {
     fn refuse_picture_unless_said(&mut self, why: PictureRefusal) {
         if let Some(picture) = self.content.picture_mut() {
             picture.refuse_unless_said(why);
-        }
-    }
-
-    /// A resample of this surface's picture at this size failed: nothing is out any more.
-    fn forget_picture_scale(&mut self, target: &PeekThumbnailTarget) {
-        if let Some(picture) = self.content.picture_mut() {
-            picture.forget_scale(target);
         }
     }
 
@@ -11850,74 +11900,90 @@ fn session_task_of(request: MathWorkerRequest) -> SessionDecorationTask {
     }
 }
 
-/// **What one drain of the computation lane hands the windows**: the answers, the requests whose
-/// work failed with who asked what (each window settles its own, [`Runtime::settle_failed_requests`]),
-/// and whether a worker has ended.
+/// **What one drain of the computation lane hands the windows**: the answers — a failed window
+/// request's settled as its surface's own error answer among them ([`settle_failure`]) — the
+/// failed pane tasks to hold and the animation fills to release, each with who asked (each window
+/// settles its own, [`Runtime::settle_failed_requests`]), and whether a worker has ended.
 #[derive(Default)]
 struct MathAnswers {
     done: Vec<MathWorkerResult>,
-    failed: Vec<(AnswerOwner, Asked)>,
+    failed: Vec<(AnswerOwner, Settled)>,
     lane_gone: bool,
 }
 
 /// **The terminals one drain took, sorted for the windows**: an answer joins `done`; a failed
-/// request — its own failure, or the one it joined — joins `failed`, to be settled by the window
-/// that holds its asker (the ledger has said it); a superseded request, or one joined to an
-/// answer, leaves the answer to the request that ended it; `WorkerGone` says the lane has lost a
-/// worker.
+/// request — its own failure, or the one it joined — is settled ([`settle_failure`]): an error
+/// answer joins `done`, a pane task or an animation fill joins `failed` for the window that holds
+/// its asker (the ledger has said the failure); a superseded request, or one joined to an answer,
+/// leaves the answer to the request that ended it; `WorkerGone` says the lane has lost a worker.
 fn sort_math_terminals(ended: Vec<computation_lane::Ended>) -> MathAnswers {
     let mut answers = MathAnswers::default();
-    for (_, _, terminal, asking) in ended {
-        match terminal {
-            lane::Terminal::Done(answer) => answers.done.extend(answer.take()),
-            lane::Terminal::Failed(_) => answers.failed.push(asking),
-            lane::Terminal::Joined { outcome, .. }
-                if matches!(*outcome, lane::Terminal::Failed(_)) =>
-            {
-                answers.failed.push(asking);
+    for (_, _, terminal, (owner, asked)) in ended {
+        let failed = match terminal {
+            lane::Terminal::Done(answer) => {
+                answers.done.extend(answer.take());
+                false
             }
-            lane::Terminal::WorkerGone => answers.lane_gone = true,
-            lane::Terminal::Superseded { .. } | lane::Terminal::Joined { .. } => {}
+            lane::Terminal::Failed(_) => true,
+            lane::Terminal::Joined { outcome, .. } => {
+                matches!(*outcome, lane::Terminal::Failed(_))
+            }
+            lane::Terminal::WorkerGone => {
+                answers.lane_gone = true;
+                false
+            }
+            lane::Terminal::Superseded { .. } => false,
             lane::Terminal::Cancelled => unreachable!("the computation lane cancels nothing"),
+        };
+        if failed {
+            match settle_failure(asked) {
+                Settled::Answer(answer) => answers.done.push(answer),
+                Settled::Nothing => {}
+                settled @ (Settled::Hold { .. } | Settled::FillLost { .. }) => {
+                    answers.failed.push((owner, settled));
+                }
+            }
         }
     }
     answers
 }
 
-/// **Settle a pane's request whose work failed** ([`Asked`]): its task is held until the pane's
-/// next new input (`DualPlaneSession::hold_decoration_task_until_new_input`), so the formula,
-/// picture or path is asked again by that input and not before; a pasted picture, whose bytes went
-/// with its request, is recorded as a failed decode.
-fn settle_failed_in_session(session: &mut DualPlaneSession, asked: Asked) {
-    match asked {
-        Asked::Pane { task, .. } => session.hold_decoration_task_until_new_input(task),
-        Asked::Pasted { occurrence_id, .. } => {
-            session.complete_inline_image_result(
-                bt_term::InlineImageTask {
-                    occurrence_id,
-                    source: bt_term::InlineImageSource::Osc1337(Vec::new()),
-                },
-                Err(bt_term::InlineImageDecodeError::Decode(
-                    "the decode stopped on a fault".to_owned(),
-                )),
-            );
-        }
-        Asked::Pixels { .. }
-        | Asked::Animation { .. }
-        | Asked::AnimationFill
-        | Asked::Page { .. }
-        | Asked::PreviewMath { .. }
-        | Asked::WindowScale { .. } => {}
-    }
+/// **Hold a failed pane task in the pane that asked**, if that pane is still there: its session
+/// holds it until new input that could change its answer. Answers whether a pane took it.
+fn hold_failed_in_tabs(
+    tabs: &mut [TabState],
+    leaf: ShellAddress,
+    task: SessionDecorationTask,
+) -> bool {
+    let Some(index) = tabs.iter().position(|tab| tab.id == leaf.leaf.tab) else {
+        return false;
+    };
+    let Some(session) = leaf_session_mut(tabs, index, leaf.leaf.seat) else {
+        return false;
+    };
+    session.hold_decoration_task_until_new_input(task);
+    true
 }
 
-/// **Settle a request for a file's pixels whose work failed**: the decode cache's `Pending` entry
-/// is taken down, so the next hover or resolve that wants the file asks again; an entry the file
-/// has answered since is left as it is.
-fn settle_failed_pixels(peek_cache: &mut PeekCache, path: &Path) {
-    let key = normalized_local_image_path_key(path);
-    if matches!(peek_cache.get(&key), Some(PeekCacheEntry::Pending)) {
-        peek_cache.remove(&key);
+/// **An animation fill that failed**: its reservation is released (the bytes it stood for will
+/// never come), re-weighed by taking the entry out and putting it back; the decoder went with the
+/// request, so the animation stands on its last frame until a surface begins showing the file
+/// again. A fill for a playback the window has moved on from changes nothing.
+fn release_failed_fill(animations: &mut AnimationCache, key: String, serial: u64) {
+    let answers_this_playback = matches!(
+        animations.get(&key),
+        Some(AnimationEntry::Ready { serial: held, .. }) if *held == serial
+    );
+    if !answers_this_playback {
+        return;
+    }
+    if let Some(AnimationEntry::Ready {
+        serial,
+        mut animation,
+    }) = animations.remove(&key)
+    {
+        animation.fill_lost();
+        animations.insert(key, AnimationEntry::Ready { serial, animation });
     }
 }
 
@@ -64424,11 +64490,13 @@ impl FolioApp {
     /// (`computation_lane`). A request whose asker no open window holds — a
     /// closed tab, a closed window — is let go first, and its terminal reaches
     /// the lane's sink, which ignores it. Of the rest, each share's terminals
-    /// below its drain mark are taken: an answer joins the batch the windows
-    /// take theirs from; a superseded or joined request leaves the answer to the
-    /// request that ended it; a failure was said by the lane and leaves the
-    /// decoration as it stands; and a worker that has ended turns the lane off,
-    /// once, with its notice.
+    /// below its drain mark are taken (and a superseded one wherever it stands),
+    /// and sorted ([`sort_math_terminals`]): an answer joins the batch the
+    /// windows take theirs from; a superseded or joined request leaves the
+    /// answer to the request that ended it; a failure — said once by the lane —
+    /// is settled as its surface's own error answer, or as a pane task held for
+    /// new input that could change its answer, or an animation fill released;
+    /// and a worker that has ended turns the lane off, once, with its notice.
     fn drain_math_answers(&mut self) -> MathAnswers {
         let mut windows = BTreeSet::new();
         let mut tabs = BTreeSet::new();

@@ -1383,6 +1383,14 @@ impl Animation {
         self.in_flight_bytes = 0;
     }
 
+    /// **The fill out for this animation failed**: its cursor went with the request and will not
+    /// come home, so the reservation made for the frames it was ordered ends here — the bytes
+    /// will never exist. With no cursor, no fill is asked again: the animation stands on its last
+    /// frame until a surface begins showing the file again and opens a new playback.
+    pub fn fill_lost(&mut self) {
+        self.in_flight_bytes = 0;
+    }
+
     /// **This animation's first frame is on the glass — start its clock here**
     /// (adversarial review 2026-09-11, B8).
     ///
@@ -2173,6 +2181,56 @@ mod tests {
         );
         animation.advance(revealed + Duration::from_millis(200));
         assert_eq!(animation.frame_index(), 2);
+    }
+
+    /// RED (S-8 round 3) — **A fill that failed on the worker releases its reservation**: the
+    /// window's animation cache weighs the playback by what it holds again, the reserved frames
+    /// that will never come out of it, and the animation asks for no fill (its cursor went with
+    /// the request) until a surface opens the file again. A failed fill for a playback the window
+    /// has moved on from changes nothing.
+    ///
+    /// MUTATION: make `Animation::fill_lost` keep `in_flight_bytes` — the cache overcounts the
+    /// playback for as long as it lives.
+    #[test]
+    fn a_failed_fill_releases_its_reservation() {
+        const SIDE: u16 = 64;
+        let mut animation = decode_bytes(a_gif_of(12, SIDE, 5)).expect("a small capture");
+        let parked = animation.bytes_held();
+        let (cursor, want) = animation.take_cursor().expect("a ring with room in it");
+        assert!(want > 0);
+        drop(cursor);
+        let reservation = animation.bytes_held() - parked;
+        let key = "D:/\u{52a8}\u{56fe}/loading.gif".to_owned();
+        let mut cache = crate::AnimationCache::with_budget(u64::MAX);
+        cache.insert(
+            key.clone(),
+            crate::AnimationEntry::Ready {
+                serial: 7,
+                animation: Box::new(animation),
+            },
+        );
+        let reserved = cache.bytes_held();
+        assert!(reservation > 0, "the fill is reserved");
+        crate::release_failed_fill(&mut cache, key.clone(), 8);
+        assert_eq!(
+            cache.bytes_held(),
+            reserved,
+            "another playback's fill changes nothing"
+        );
+        crate::release_failed_fill(&mut cache, key.clone(), 7);
+        assert_eq!(
+            cache.bytes_held(),
+            reserved - reservation,
+            "the reservation is released"
+        );
+        let Some(crate::AnimationEntry::Ready { animation, .. }) = cache.remove(&key) else {
+            panic!("the playback stands");
+        };
+        let mut animation = animation;
+        assert!(
+            animation.take_cursor().is_none(),
+            "no fill is asked: the decoder went with the request"
+        );
     }
 
     /// RED — **an animation is weighed by all three of its allocations**

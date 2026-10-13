@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use super::pointer::CaptureOwner;
+use crate::computation_lane::Asking;
 use crate::lane::Refused;
 use crate::{
     DragLatch, FilePeek, FilePeekPress, FilePeekSubject, FloatDrag, FloatDragKind, FloatGrasp,
@@ -33,44 +34,28 @@ use winit::event::MouseButton;
 pub(in crate::runtime) enum PeekAsk {
     /// The computation lane admitted it; its answer is on its way.
     Asked,
-    /// The lane refused it for now — full, or its thread not started: nothing is out, and the
-    /// surface's next resolve asks again.
+    /// The lane was full: nothing is out, and the surface's next resolve asks again (the answers
+    /// that free the lane are the next hand-out).
     NotNow,
+    /// The lane's thread could not be started: the file is filed as failed
+    /// ([`unstarted_pixels`]), so it is asked again only by new input to the surface — a new
+    /// hover, the file opened again.
+    Unstarted,
     /// It was not asked and will not be: a file this window does not open, or a lane that has
     /// stopped.
     Refused,
 }
 
+/// **What a file's pixels are filed as when the lane's thread could not be started**: a failed
+/// decode, in the decoder error's words, so every surface reading the window's cache agrees and
+/// asks again only on its own new input.
+pub(in crate::runtime) fn unstarted_pixels() -> PeekCacheEntry {
+    PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Decode(
+        crate::DECODE_UNSTARTED.to_owned(),
+    ))
+}
+
 impl Runtime<'_> {
-    /// **A glance card's page whose raster failed**: no longer counted as asked, so the next frame
-    /// that draws the card asks again (`computation_lane`'s `Failed`, settled by its window).
-    pub(in crate::runtime) fn forget_failed_page(
-        &mut self,
-        path: &Path,
-        page: u32,
-        fit: (u32, u32),
-    ) {
-        if let Some(slot) = self
-            .window
-            .peek_page
-            .as_mut()
-            .filter(|slot| slot.path == path && slot.fit == fit)
-        {
-            slot.asked.remove(&page);
-        }
-    }
-
-    /// **A glance's resample that failed**: the card's and the flyout's pending target comes down
-    /// when it is this one, so the next hover asks again.
-    pub(in crate::runtime) fn forget_failed_glance_scale(&mut self, target: &PeekThumbnailTarget) {
-        if self.window.peek_card_pending.as_ref() == Some(target) {
-            self.window.peek_card_pending = None;
-        }
-        if self.window.peek_thumbnail_pending.as_ref() == Some(target) {
-            self.window.peek_thumbnail_pending = None;
-        }
-    }
-
     /// Whether this tab has a layout worth showing, and whether now is a moment
     /// to show it (L131).
     ///
@@ -420,7 +405,8 @@ impl Runtime<'_> {
         };
         match self.app.math_worker.decorate(request) {
             Ok(_) => PeekAsk::Asked,
-            Err((Refused::Full { .. } | Refused::NotStarted(_), _)) => PeekAsk::NotNow,
+            Err((Refused::Full { .. }, _)) => PeekAsk::NotNow,
+            Err((Refused::NotStarted(_), _)) => PeekAsk::Unstarted,
             Err(_) => PeekAsk::Refused,
         }
     }
@@ -1197,8 +1183,14 @@ impl Runtime<'_> {
                 }) => (key.clone(), Arc::clone(rgba), *width_px, *height_px),
                 Some(PeekCacheEntry::Pending | PeekCacheEntry::Failed(_)) => return None,
                 None => {
-                    if self.request_peek_pixels(path) == PeekAsk::Asked {
-                        self.window.peek_cache.insert(key, PeekCacheEntry::Pending);
+                    match self.request_peek_pixels(path) {
+                        PeekAsk::Asked => {
+                            self.window.peek_cache.insert(key, PeekCacheEntry::Pending);
+                        }
+                        PeekAsk::Unstarted => {
+                            self.window.peek_cache.insert(key, unstarted_pixels());
+                        }
+                        PeekAsk::NotNow | PeekAsk::Refused => {}
                     }
                     return None;
                 }
@@ -1229,8 +1221,10 @@ impl Runtime<'_> {
                 leaf: self.focused_shell_address(),
                 task: peek_scale_task(&target, rgba, native_width, native_height),
             })
-            .is_ok()
+            .is_ok_or_unstarted()
         {
+            // Asked — or its thread not started, which marks it asked too: the next hover, a new
+            // size, asks again; a redraw does not.
             self.window.peek_card_pending = Some(target);
         }
         None
@@ -1372,11 +1366,12 @@ impl Runtime<'_> {
                     fit,
                     known,
                 })
-                .is_err()
+                .is_full()
                 && let Some(slot) = self.window.peek_page.as_mut()
             {
-                // Refused at the lane's door, so nothing is out: leave the slot able to ask again
-                // rather than waiting for ever on a request that was never made.
+                // The lane was full, so nothing is out: leave the slot able to ask again on the
+                // next frame. A thread not started leaves the page asked: the card asks again
+                // when it is shown again.
                 slot.asked.remove(&index);
             }
         }
@@ -2769,8 +2764,9 @@ impl Runtime<'_> {
                 },
                 task: peek_scale_task(&target, native_rgba, native_width_px, native_height_px),
             })
-            .is_ok()
+            .is_ok_or_unstarted()
         {
+            // Asked, or its thread not started: either way the flyout's next new input asks.
             self.window.peek_thumbnail_pending = Some(target);
         }
         Ok(())
