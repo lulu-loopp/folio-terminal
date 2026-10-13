@@ -15322,3 +15322,18 @@ Records are never evicted, so they grow with the distinct animated files one win
 **Pinned by**
 - `app_preview_tests::records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them`, which now also holds a `Pending` record through the pressure.
 - `bt_term::bounded_cache::tests::weight_pressure_never_takes_a_value_that_is_not_evictable`.
+
+
+### 2026-10-13 — A window's record of an animation question is kept while a surface names its file; a changed file's refusal is let go (T-ANIMATION-RECORDS-BOUND)
+
+**What is built.** `AnimationCache::let_go_unnamed` lets go of a `Pending`, `Unanswered` or `Refused` record whose file no surface of the window names. It runs when a surface leaves a file by any road: `forget_surface` (the surface stopped existing), the subject replacement inside `ask_for_showing` (the surface was handed another file), and `forget_surfaces_gone`, which each walk (`Runtime::request_animations`) runs over the surfaces no tab holds a view for any more — a tab closed, carried to another window or folded into another tab never named its surfaces on the way out. An answer or failure that comes home for a file no surface names files no record (`opened`, `open_unanswered`); a playback is weight and is filed. `let_go_changed_file` lets go of a playback and a refusal when the preview's file-change news names the file (`Runtime::refresh_preview_file`), and the walk then asks about the bytes there now, so a `.gif` caught half-written is not refused for the window's life. `bt_term::BoundedCache::peek` reads an entry without counting a use, for these decisions. The removers, before and after:
+- `Pending`: its answer → its answer, or `let_go_unnamed`.
+- `Unanswered`: `let_go_on_open` → `let_go_on_open`, or `let_go_unnamed` (a second remover).
+- `Refused`: none → `let_go_unnamed` and `let_go_changed_file`.
+- `Ready`: `let_go_on_open`, `adopt_fill` on a changed file, weight → the same, and `let_go_changed_file`.
+
+**The rule, and the correction to S-8 round 7.** A record of a question is kept exactly as long as some surface of the window names its file. The next showing of a file let go of is an open, so its ask is new input, not an autonomous retry (side-effects contract (b)5); a file's new bytes are likewise new input. Round 7's growth sentence — records "grow with the distinct animated files one window has opened" and the over-budget cycle is "bounded in practice, not in principle" — no longer holds: the records number at most the files the window's surfaces name, so records alone can no longer push the map past its budget. What still can is drawn and held playbacks (`Ready`), which the budget governs by eviction. Two things are kept on purpose: a refusal while its file is shown (a redraw asks nothing), and a decode in flight when its file changes (its answer is filed; a change that lands during the decode is asked about at the next change or the next open).
+
+**Pinned by**
+- `app_preview_tests::{a_refused_files_record_leaves_with_the_last_surface_that_named_it, a_record_is_kept_while_any_surface_still_names_its_file, a_surface_handed_another_file_lets_go_of_the_record_nobody_names, a_closed_tabs_surfaces_take_their_records_with_them, an_answer_for_a_file_no_surface_names_files_no_record, a_refused_file_that_changed_is_asked_again_on_its_next_open}`; `a_failed_open_is_unanswered_and_only_the_files_next_open_asks_again` now keeps a second surface on the file so its open, not the last surface leaving, lets the record go; `the_windows_animations_are_bounded_by_the_frames_they_hold` now shows its refused file on a surface.
+- `bt_term::bounded_cache::tests::a_peek_is_not_a_reading_and_leaves_the_eviction_order_alone`.
