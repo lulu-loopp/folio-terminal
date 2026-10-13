@@ -2,17 +2,16 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    AnimationEntry, AnimationFillOutcome, AnswerOwner, DecorationWorkerCompletion, DocumentMath,
-    Layered, MathHoverExit, MathWorkerRequest, MathWorkerResult, ModalBand, Motion, OverlayStack,
+    AnimationFillOutcome, AnswerOwner, DecorationWorkerCompletion, DocumentMath, Layered,
+    MathHoverExit, MathWorkerRequest, MathWorkerResult, ModalBand, Motion, OverlayStack,
     PasteTarget, Popup, PreviewDocument, PreviewMathArtifact, PreviewMathKey, PreviewMathPicture,
-    PreviewSurface, PreviewTextCommand, Runtime, Settled, TabState, adopt_animation_fill,
-    answer_one_formula, answers_for, dispatch_tab_decoration_tasks, document_formulas,
-    dump_overlay_frame, first_run, float_trigger_tip, foreground_program, formula_tools,
-    ground_overlay_layers, hang_watch, hold_failed_in_tabs, i18n, leaf_session_mut, marks,
-    math_copy_window, math_em_milli, new_tab_tip, nonzero_u32, open_unanswered, preview,
-    preview_select, preview_text_command, preview_trace, profiles, quit, rail_overlay_layer,
-    release_failed_fill, restore, retire_spent_math_copy, search, seats, settings, tooltip,
-    trace_sink, window_layout_key,
+    PreviewSurface, PreviewTextCommand, Runtime, Settled, TabState, answer_one_formula,
+    answers_for, dispatch_tab_decoration_tasks, document_formulas, dump_overlay_frame, first_run,
+    float_trigger_tip, foreground_program, formula_tools, ground_overlay_layers, hang_watch,
+    hold_failed_in_tabs, i18n, leaf_session_mut, marks, math_copy_window, math_em_milli,
+    new_tab_tip, nonzero_u32, preview, preview_select, preview_text_command, preview_trace,
+    profiles, quit, rail_overlay_layer, restore, retire_spent_math_copy, search, seats, settings,
+    tooltip, trace_sink, window_layout_key,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -953,15 +952,9 @@ impl Runtime<'_> {
                 Settled::Hold { leaf, task } => {
                     hold_failed_in_tabs(&mut self.window.tabs, leaf, task);
                 }
-                Settled::FillLost { path, serial } => release_failed_fill(
-                    &mut self.window.animations,
-                    normalized_local_image_path_key(&path),
-                    serial,
-                ),
-                Settled::AnimationUnanswered { path } => open_unanswered(
-                    &mut self.window.animations,
-                    normalized_local_image_path_key(&path),
-                ),
+                settled @ (Settled::FillLost { .. } | Settled::AnimationUnanswered { .. }) => {
+                    self.window.animations.settle(settled);
+                }
                 Settled::Answer(_) | Settled::Nothing => {}
             }
         }
@@ -1096,21 +1089,11 @@ impl Runtime<'_> {
                     // playback and gets a number no other playback in this
                     // process has.
                     let serial = self.app.next_animation_serial();
-                    self.window.animations.insert(
-                        key,
-                        match frames {
-                            Ok(animation) => AnimationEntry::Ready {
-                                serial,
-                                animation: Box::new(animation),
-                            },
-                            // **Said where a reader is standing**, and not only
-                            // to a console nobody has open: the refusal is filed
-                            // with its reason and the foot of the pane prints
-                            // the two that are worth printing — see
-                            // [`AnimationEntry::Refused`].
-                            Err(refusal) => AnimationEntry::Refused(refusal),
-                        },
-                    );
+                    // A refusal is **said where a reader is standing**, and
+                    // not only to a console nobody has open: it is filed with
+                    // its reason and the foot of the pane prints the two that
+                    // are worth printing — see [`AnimationEntry::Refused`].
+                    self.window.animations.opened(key, serial, frames);
                     self.refresh_video_layers();
                     self.present_chrome_change()?;
                     false
@@ -1147,13 +1130,11 @@ impl Runtime<'_> {
                     frames,
                 } => {
                     let key = normalized_local_image_path_key(&path);
-                    if adopt_animation_fill(
-                        &mut self.window.animations,
-                        key,
-                        serial,
-                        cursor,
-                        frames,
-                    ) == AnimationFillOutcome::FileChanged
+                    if self
+                        .window
+                        .animations
+                        .adopt_fill(key, serial, cursor, frames)
+                        == AnimationFillOutcome::FileChanged
                     {
                         // **The file was rewritten under the loop.** The
                         // playback is gone and nothing else would notice: the

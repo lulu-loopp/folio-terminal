@@ -571,7 +571,7 @@ pub struct AnimationCursor {
     /// [`Self::ended`] because the window does a different thing with it: a
     /// playback that ran out of file stands on its last frame, and a playback
     /// whose file changed is let go of so the pane opens the new file down the
-    /// ordinary path. See `adopt_animation_fill`.
+    /// ordinary path. See `AnimationCache::adopt_fill`.
     stale: bool,
 }
 
@@ -962,7 +962,7 @@ impl AnimationCursor {
     }
 
     /// **Whether the file was rewritten under the loop** (user report
-    /// 2026-09-12) — see [`Self::stale`] and `adopt_animation_fill`.
+    /// 2026-09-12) — see [`Self::stale`] and `AnimationCache::adopt_fill`.
     #[must_use]
     pub fn file_changed(&self) -> bool {
         self.stale
@@ -1179,7 +1179,7 @@ impl Animation {
     /// is the thing that noticed, and `false` while the cursor is away.
     ///
     /// A playback that answers `true` is one the window lets go of: see
-    /// `adopt_animation_fill`, which is the only caller and the only moment the
+    /// `AnimationCache::adopt_fill`, which is the only caller and the only moment the
     /// cursor is certainly home.
     #[must_use]
     pub fn file_changed(&self) -> bool {
@@ -2136,7 +2136,7 @@ mod tests {
     /// its first frame", said by the half of the defect that is in this module.
     ///
     /// The same sentence covers the other half. An animation nobody draws does
-    /// not advance (the window's `advance_drawn_animations`), so by the time a
+    /// not advance (the window's `AnimationCache::advance_drawn`), so by the time a
     /// reader comes back to it its due time is a moment in the past; without a
     /// rebase the first tick after a tab switch would fast-forward through
     /// however long the tab was away.
@@ -2198,106 +2198,44 @@ mod tests {
     #[test]
     fn a_failed_fill_releases_its_reservation() {
         const SIDE: u16 = 64;
-        let mut animation = decode_bytes(a_gif_of(12, SIDE, 5)).expect("a small capture");
-        let parked = animation.bytes_held();
-        let canvas = parked - animation.ring_bytes();
-        let (cursor, want) = animation.take_cursor().expect("a ring with room in it");
-        assert!(want > 0);
-        drop(cursor);
-        let reservation = animation.bytes_held() - parked;
+        let animation = decode_bytes(a_gif_of(12, SIDE, 5)).expect("a small capture");
+        let canvas = animation.bytes_held() - animation.ring_bytes();
         let key = "D:/\u{52a8}\u{56fe}/loading.gif".to_owned();
         let mut cache = crate::AnimationCache::with_budget(u64::MAX);
-        cache.insert(
-            key.clone(),
-            crate::AnimationEntry::Ready {
-                serial: 7,
-                animation: Box::new(animation),
-            },
-        );
+        cache.opened(key.clone(), 7, Ok(animation));
+        let parked = cache.bytes_held();
+        cache.send_fill(&key, |serial, cursor, want| {
+            assert_eq!(serial, 7);
+            assert!(want > 0, "a ring with room in it");
+            drop(cursor);
+            crate::FillSent::Sent
+        });
         let reserved = cache.bytes_held();
+        let reservation = reserved - parked;
         assert!(reservation > 0, "the fill is reserved");
-        crate::release_failed_fill(&mut cache, key.clone(), 8);
+        cache.release_failed_fill(&key, 8);
         assert_eq!(
             cache.bytes_held(),
             reserved,
             "another playback's fill changes nothing"
         );
-        crate::release_failed_fill(&mut cache, key.clone(), 7);
+        cache.release_failed_fill(&key, 7);
         assert_eq!(
             cache.bytes_held(),
             reserved - reservation - canvas,
             "the reservation and the canvas are released"
         );
-        let Some(crate::AnimationEntry::Ready { animation, .. }) = cache.remove(&key) else {
+        let Some(crate::AnimationEntry::Ready { animation, .. }) = cache.get(&key) else {
             panic!("the playback stands");
         };
-        let mut animation = animation;
         assert_eq!(
             animation.bytes_held(),
             animation.ring_bytes(),
             "the canvas went with the cursor: only the frames in the ring are held"
         );
-        assert!(
-            animation.take_cursor().is_none(),
-            "no fill is asked: the decoder went with the request"
-        );
-    }
-
-    /// RED (S-8 round 5) — **an open that went unanswered waits for the file's next open**: a
-    /// failed open turns its `Pending` entry into `Unanswered` (what `settle_failed_requests`
-    /// does for it) and leaves an entry the file has answered since as it is; the next open lets
-    /// go of an unanswered or playing entry so it asks again, and keeps a refusal (a fact about
-    /// the file) and a decode in flight (this open's answer).
-    ///
-    /// MUTATION: make `open_unanswered` leave `Pending` as it is — a redraw would wait on a
-    /// decode no one is doing. Or make `let_go_on_open` keep `Unanswered` — the file is never
-    /// asked about again.
-    #[test]
-    fn an_unanswered_open_waits_for_the_files_next_open() {
-        use crate::AnimationEntry;
-        let unanswered = "D:/\u{52a8}\u{56fe}/spinner.gif".to_owned();
-        let refused = "D:/\u{9759}\u{56fe}/still.gif".to_owned();
-        let in_flight = "D:/\u{52a8}\u{56fe}/loading.gif".to_owned();
-        let playing = "D:/\u{52a8}\u{56fe}/playing.gif".to_owned();
-        let mut cache = crate::AnimationCache::with_budget(u64::MAX);
-        cache.insert(unanswered.clone(), AnimationEntry::Pending);
-        cache.insert(
-            refused.clone(),
-            AnimationEntry::Refused(AnimationRefusal::OneFrame),
-        );
-        cache.insert(in_flight.clone(), AnimationEntry::Pending);
-        cache.insert(
-            playing.clone(),
-            AnimationEntry::Ready {
-                serial: 3,
-                animation: Box::new(decode_bytes(a_gif_of(4, 16, 5)).expect("a small capture")),
-            },
-        );
-
-        crate::open_unanswered(&mut cache, unanswered.clone());
-        crate::open_unanswered(&mut cache, refused.clone());
-        assert!(matches!(
-            cache.get(&unanswered),
-            Some(AnimationEntry::Unanswered)
-        ));
-        assert!(
-            matches!(cache.get(&refused), Some(AnimationEntry::Refused(_))),
-            "an answer since is kept"
-        );
-
-        for key in [&unanswered, &refused, &in_flight, &playing] {
-            crate::let_go_on_open(&mut cache, key);
-        }
-        assert!(cache.get(&unanswered).is_none(), "the next open asks again");
-        assert!(cache.get(&playing).is_none(), "and starts on frame zero");
-        assert!(matches!(
-            cache.get(&refused),
-            Some(AnimationEntry::Refused(_))
-        ));
-        assert!(matches!(
-            cache.get(&in_flight),
-            Some(AnimationEntry::Pending)
-        ));
+        cache.send_fill(&key, |_, _, _| {
+            panic!("no fill is asked: the decoder went with the request")
+        });
     }
 
     /// RED — **an animation is weighed by all three of its allocations**
@@ -2607,7 +2545,7 @@ mod tests {
     /// instead of decoded into the middle of a picture: the moment the loop
     /// comes round.
     ///
-    /// The window's half of this is `adopt_animation_fill`, which lets the
+    /// The window's half of this is `AnimationCache::adopt_fill`, which lets the
     /// playback go so the pane opens the file again — see the test of that name
     /// in `main.rs`.
     ///

@@ -15249,3 +15249,28 @@ The macOS Prepare staged the new bundle with `ditto` and the rescue clone with `
 **The rule.** A held task is changed by exactly what would make its answer refused. **Correction to the round-3 entry of 2026-10-12**: `a_held_formula_is_asked_again_when_its_own_source_changes`, which it names among its pins, no longer exists — round 4 replaced it by `bt_term::session::tests::a_held_formula_whose_source_changed_is_let_go_and_the_new_one_asked` (the changed task let go and the new one asked) and `a_stale_failed_task_asks_nothing_on_later_output` (what fails again stays held).
 
 **Pinned by** `bt_term::session::tests::{a_held_frozen_formula_whose_block_lost_a_line_is_let_go, a_held_decode_whose_picture_is_gone_is_let_go, a_held_resample_whose_picture_was_decoded_again_is_let_go, a_stale_failed_task_asks_nothing_on_later_output}` and `animation::tests::an_unanswered_open_waits_for_the_files_next_open`.
+
+### 2026-10-13 — A window's animations have one door per change, and a record of a question is never evicted by weight (S-8 round 6)
+
+**What is built.** The window's animations are a type of their own (`AnimationCache`), replacing the bare `bt_term::BoundedCache` and `WindowRuntime::animation_presence`. Each change an entry goes through is one method, and no caller lends the map out:
+- `ask_for_showing` is one walk of the surfaces. It applies the open rule (`animations_opened` over the record of what each surface shows), lets go of what an open replaces, and asks once for each file shown and not held. It is the one writer of `Pending`.
+- `opened` files the worker's answer.
+- `open_unanswered` is the one writer of `Unanswered`. A failed open reaches it through `settle`, which `Runtime::settle_failed_requests` hands to; an open whose thread could not be started reaches it through the walk.
+- `let_go_on_open` is the one remover of `Unanswered`.
+- `release_failed_fill`, `send_fill`, `adopt_fill`, `advance_drawn`, `present_drawn` and `forget_surface` are the remaining doors.
+
+`bt_term::Weighed::evictable` (default `true`) lets a value refuse weight pressure. An animation answers `true` only for a playback. A request in flight, a refusal and an open that never answered still count their entry's overhead toward the budget, but eviction never chooses them: the walk asks for every file shown that the map holds nothing for, so an evicted record would be asked again on the next redraw with no open to ask it. Such records therefore number at most the animated files the window has opened, and leave only through the doors above.
+
+The source pin on `request_animations` in `an_opened_animation_starts_over_and_a_revealed_one_resumes` is retired; the same test now drives the walk. Its rows were removed by hand from the two dated inventories `docs/plans/bt-app-split-pins-2026-09-21.tsv` and `docs/plans/bt-app-reader-shapes-2026-09-21.tsv`; no script maintains them now.
+
+**The rule.** Nothing re-asks an animation's open except the file's next open, and no weight pressure can make a redraw into one.
+
+**Correction to the round-5 entry**, whose title reads "let go … as its completion would be". A held frozen scan whose block lost its opener settles the closer `Suppressed`. The closer is shown as its text and is not marked failed. A resize or a scroll does not ask it again; only a change to its source or to the detector does. "As its completion would be" is not literally true, because the two roads differ:
+- A held task is unresolved, and its let-go settles the closer through `record.fail` at once.
+- A resolved completion of the same block takes the strand road (`account_stranded_pending`, then `rearm_stranded_pending`) and reaches the same `Suppressed` one scan later.
+
+**Pinned by**
+- `bt_term::bounded_cache::tests::weight_pressure_never_takes_a_value_that_is_not_evictable`
+- `bt_term::session::tests::{a_held_frozen_formula_whose_block_lost_a_line_is_let_go, a_held_resample_whose_picture_was_decoded_again_is_let_go, a_stale_failed_task_asks_nothing_on_later_output}`
+- `app_preview_tests::{an_opened_animation_starts_over_and_a_revealed_one_resumes, a_failed_open_is_unanswered_and_only_the_files_next_open_asks_again, records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them}`
+- `animation::tests::a_failed_fill_releases_its_reservation`

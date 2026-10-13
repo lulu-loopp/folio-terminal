@@ -52,6 +52,16 @@ use std::hash::Hash;
 pub trait Weighed {
     /// The bytes this value keeps alive.
     fn bytes_held(&self) -> u64;
+
+    /// **Whether weight pressure may let go of this value.** Eviction is how the map frees bytes;
+    /// a value that is the record of a question rather than pixels — a request in flight, an
+    /// answer that is a refusal — still counts its entry's overhead toward the budget, but a store
+    /// whose owner would ask the question again the moment the record went answers `false` for
+    /// it, and only [`BoundedCache::remove`] takes it out. Every value is evictable unless it says
+    /// otherwise.
+    fn evictable(&self) -> bool {
+        true
+    }
 }
 
 /// **What an entry costs before its value is counted at all.**
@@ -217,13 +227,14 @@ where
     /// larger than the whole budget would otherwise be evicted by its own
     /// arrival, which is a cache that answers `None` to everything it was just
     /// given. What happens instead is that it stands alone, and the next insert
-    /// takes it.
+    /// takes it. A value that is not [`Weighed::evictable`] is never chosen: when only such
+    /// values are left, the total stands over the budget until one of them is removed.
     fn evict_until_within_budget(&mut self, keep: &K) {
         while self.held > self.budget {
             let Some(oldest) = self
                 .entries
                 .iter()
-                .filter(|(key, _)| *key != keep)
+                .filter(|(key, slot)| *key != keep && slot.value.evictable())
                 .min_by_key(|(_, slot)| slot.used.get())
                 .map(|(key, _)| key.clone())
             else {
@@ -284,6 +295,53 @@ mod tests {
         for index in 7..10 {
             assert!(cache.contains_key(&format!("picture {index}")));
         }
+    }
+
+    /// One store holding both: pixels, and the record of a question.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Held {
+        Pixels(u64),
+        Asked,
+    }
+
+    impl Weighed for Held {
+        fn bytes_held(&self) -> u64 {
+            match self {
+                Self::Pixels(bytes) => *bytes,
+                Self::Asked => 0,
+            }
+        }
+
+        fn evictable(&self) -> bool {
+            match self {
+                Self::Pixels(_) => true,
+                Self::Asked => false,
+            }
+        }
+    }
+
+    /// RED (S-8 round 6) — **weight pressure never lets go of a value that says it is not to be
+    /// evicted**: the oldest entry in the map is a record of a question, and the pixels inserted
+    /// after it are what go, down to the newest; the record stays, and so does its overhead in the
+    /// total.
+    ///
+    /// MUTATION: drop `&& slot.value.evictable()` from `evict_until_within_budget` — the record,
+    /// being the oldest, is the first thing evicted.
+    #[test]
+    fn weight_pressure_never_takes_a_value_that_is_not_evictable() {
+        const MEGABYTE: u64 = 1024 * 1024;
+        let mut cache: BoundedCache<String, Held> = BoundedCache::with_budget(2 * MEGABYTE);
+        cache.insert("\u{52a8}\u{56fe}.gif asked".to_owned(), Held::Asked);
+        for index in 0..4 {
+            cache.insert(format!("picture {index}"), Held::Pixels(MEGABYTE));
+        }
+        assert!(
+            cache.contains_key("\u{52a8}\u{56fe}.gif asked"),
+            "the record of a question is not freed by weight"
+        );
+        assert!(cache.contains_key("picture 3"), "the newest pixels stay");
+        assert!(!cache.contains_key("picture 0"), "the oldest pixels went");
+        assert!(cache.bytes_held() <= cache.budget());
     }
 
     /// PIN — **a reading is a use**: the entry a caller keeps asking for is the

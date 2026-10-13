@@ -7,12 +7,12 @@ use crate::{
     ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD, AnimationEntry, AnimationWork, AppEvent, AttentionDelivery,
     BackgroundDecode, BlockScrollPaint, ClipboardPictureAnswer, ClipboardPictureJob,
     DOCK_PREVIEW_FADE, DiffRow, DocumentMath, DocumentPictures, DragLatch, DrawnAnimation,
-    DropPreview, FOOT_REVEAL_FEEDBACK, FileMenuTarget, FilePick, FootSaying, ForeignPane,
+    DropPreview, FOOT_REVEAL_FEEDBACK, FileMenuTarget, FilePick, FillSent, FootSaying, ForeignPane,
     FormulaSwitches, FrameTraces, HyperlinkActivation, ImageDrag, ImageGrasp, ImageZoom, ImeOwner,
     LeafId, LeafSeed, MARKDOWN_CHIP_RADIUS_LOGICAL_PX, MarkdownBlockLayout, MarkdownCaretBlock,
     MarkdownCaretPaint, MarkdownCaretSeat, MarkdownLive, MarkdownPage, MarkdownPicture,
     MarkdownPreedit, MarkdownRaster, MarkdownRasterKey, MarkdownRasterRequest, MarkdownSourceBlock,
-    MarkdownSourceBytes, MathWorkerRequest, Motion, NoticeHost, PAGE_ADDRESS_REFUSAL,
+    MarkdownSourceBytes, MathWorkerRequest, Motion, NoticeHost, OpenAsked, PAGE_ADDRESS_REFUSAL,
     PREVIEW_REFUSAL_HOLD, PageArt, PageArtKey, PageHandOff, PagePicture, PasteTarget,
     PeekCacheEntry, PeekThumbnailTarget, PictureErrand, PictureOnGlass, PictureReach,
     PictureRefusal, PopoverTrigger, Popup, PresentIntent, PreviewBlockDrag, PreviewBodyDrag,
@@ -22,38 +22,37 @@ use crate::{
     RevealTween, RevealedFoot, RowActivation, Runtime, ScaleWorkerRequest, ScrollThumbState,
     SourceBlocks, Step, SurfacePixels, SurfaceSubject, TabClick, TabId, TabRename, TabState,
     TabTriggerHand, VideoGlance, VideoShape, WINDOW_RESIZE_QUIET, WebHeadVerb, WindowRuntime,
-    advance_drawn_animations, animation, animation_layer_key, animation_refusal_notice,
-    animations_opened, answer_one_picture, answers_for, attention_trace, build_preview_diff_body,
-    build_preview_markdown_body, build_preview_table_body, build_preview_text_body,
-    clipboard_picture, create_leaf_session, crumb_segments, deliver_clipboard_picture, diagnostics,
-    documents_held_in, documents_held_mut_in, documents_pictures, earliest_deadline, file_peek,
-    files, files_a_tab_stands_on, files_row_display_name, float, float_dock_label, folded_levels,
+    animation, animation_layer_key, animation_refusal_notice, answer_one_picture, answers_for,
+    attention_trace, build_preview_diff_body, build_preview_markdown_body,
+    build_preview_table_body, build_preview_text_body, clipboard_picture, create_leaf_session,
+    crumb_segments, deliver_clipboard_picture, diagnostics, documents_held_in,
+    documents_held_mut_in, documents_pictures, earliest_deadline, file_peek, files,
+    files_a_tab_stands_on, files_row_display_name, float, float_dock_label, folded_levels,
     foot_revealed_label, forget_a_picture, forget_standing_answers, git_panel, graph_key_of,
     hang_watch, hex_peek, highlight, i18n, image_clamped_pan, image_destination, image_is_pannable,
     image_meta_sentence, image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_scale,
-    image_zoom_settles, image_zoom_toggled, ime_owner, input, let_go_on_open,
-    markdown_empty_page_offset, markdown_prose_composition, markdown_prose_paragraphs,
-    markdown_runs, markdown_source_cell, markdown_source_offset_at, marks, measure_preview_links,
-    native_window, notice, owe_sharpened_rasters, page_address_hand_off, page_destination,
-    page_foot_flash, page_foot_lead, page_source_file, peek_scale_task, picture_channel_owner,
-    picture_errand, picture_files_of, pictures_awaited_by, pictures_need_handing_over,
-    place_preview_math, preedit_caret_byte, present_diagnostics, present_drawn_animations, preview,
-    preview_block_bar_at, preview_block_wheel, preview_body_bar, preview_caret_prose,
-    preview_caret_row, preview_copies_on_select, preview_document_height, preview_document_key,
-    preview_document_max_scroll, preview_edit, preview_edit_bands, preview_image_placement,
-    preview_link_activation, preview_link_answers_a_press, preview_live,
-    preview_open_externally_label, preview_open_lane, preview_opened_label,
-    preview_page_browser_hand_off, preview_press, preview_press_opens_its_link, preview_provenance,
-    preview_rail_tip_text, preview_select, preview_selection_bands, preview_tab_index_among,
-    preview_text, preview_text_box_at, preview_text_boxes, preview_text_grain, preview_trace,
-    preview_viewport, preview_watch, preview_wide_blocks, preview_wrap, preview_wrap_columns,
-    profiles, resolve_document_pictures, revealable_preview_file, scroll_bar_layer,
-    scrollback_quota, seats, settings, settle_attention, shown_address, source_opens_as_a_page,
-    step_preview_caret_by_row, strip_animation_tick_is_due, surface_pixels, surface_subject_of,
-    surface_takes_image_zoom, switcher_rows, tab_owes_frame, tab_trailing_targets, table_block,
-    text_field, tick_owes_a_present, toast, tooltip, trace_sink, video_frame_texture_key,
-    video_seat, video_still_destination, viewport_of_rect, visible_range, webhost, webnav,
-    wheel_points_sideways, window_taskbar_progress, write_terminal_clipboard_text,
+    image_zoom_settles, image_zoom_toggled, ime_owner, input, markdown_empty_page_offset,
+    markdown_prose_composition, markdown_prose_paragraphs, markdown_runs, markdown_source_cell,
+    markdown_source_offset_at, marks, measure_preview_links, native_window, notice,
+    owe_sharpened_rasters, page_address_hand_off, page_destination, page_foot_flash,
+    page_foot_lead, page_source_file, peek_scale_task, picture_channel_owner, picture_errand,
+    picture_files_of, pictures_awaited_by, pictures_need_handing_over, place_preview_math,
+    preedit_caret_byte, present_diagnostics, preview, preview_block_bar_at, preview_block_wheel,
+    preview_body_bar, preview_caret_prose, preview_caret_row, preview_copies_on_select,
+    preview_document_height, preview_document_key, preview_document_max_scroll, preview_edit,
+    preview_edit_bands, preview_image_placement, preview_link_activation,
+    preview_link_answers_a_press, preview_live, preview_open_externally_label, preview_open_lane,
+    preview_opened_label, preview_page_browser_hand_off, preview_press,
+    preview_press_opens_its_link, preview_provenance, preview_rail_tip_text, preview_select,
+    preview_selection_bands, preview_tab_index_among, preview_text, preview_text_box_at,
+    preview_text_boxes, preview_text_grain, preview_trace, preview_viewport, preview_watch,
+    preview_wide_blocks, preview_wrap, preview_wrap_columns, profiles, resolve_document_pictures,
+    revealable_preview_file, scroll_bar_layer, scrollback_quota, seats, settings, settle_attention,
+    shown_address, source_opens_as_a_page, step_preview_caret_by_row, strip_animation_tick_is_due,
+    surface_pixels, surface_subject_of, surface_takes_image_zoom, switcher_rows, tab_owes_frame,
+    tab_trailing_targets, table_block, text_field, tick_owes_a_present, toast, tooltip, trace_sink,
+    video_frame_texture_key, video_seat, video_still_destination, viewport_of_rect, visible_range,
+    webhost, webnav, wheel_points_sideways, window_taskbar_progress, write_terminal_clipboard_text,
 };
 use crate::{LeafView, TextScale};
 use anyhow::Context;
@@ -2296,10 +2295,10 @@ impl Runtime<'_> {
             // **And what that surface was showing an animation of.** The record
             // is deliberately not cleared when a surface stops being *drawn* —
             // that is the whole of how a tab switch resumes rather than restarts
-            // (see [`WindowRuntime::animation_presence`]) — so the one moment it
+            // (see [`AnimationCache::forget_surface`]) — so the one moment it
             // may be dropped is the moment the surface stops existing, which is
             // here.
-            self.window.animation_presence.remove(&surface);
+            self.window.animations.forget_surface(surface);
         }
         // And this tab's head measurements beside them. A seat id is re-minted
         // from a counter, so a width left behind for a pane that has gone comes
@@ -10332,8 +10331,8 @@ impl Runtime<'_> {
     /// worker opens the file again; the answer is a new
     /// [`AnimationEntry::Ready`] with a new serial, standing on frame zero. A
     /// surface that was merely not on the glass has not *begun* anything, so its
-    /// entry is untouched and it resumes. `animation_presence` is the record
-    /// that tells those two apart; see it for why drawn-ness cannot.
+    /// entry is untouched and it resumes. What each surface shows is the record
+    /// that tells those two apart; see [`AnimationCache`] for why drawn-ness cannot.
     fn request_animations(&mut self, drawn: &[DrawnAnimation]) {
         if !self.app.math_worker_running {
             return;
@@ -10343,55 +10342,25 @@ impl Runtime<'_> {
             .into_iter()
             .map(|surface| (surface, self.animation_path_of(surface)))
             .collect();
-        let named: Vec<(PreviewSurface, Option<String>)> = showing
-            .iter()
-            .map(|(surface, path)| {
-                (
-                    *surface,
-                    path.as_deref().map(normalized_local_image_path_key),
-                )
-            })
-            .collect();
-        for key in animations_opened(&mut self.window.animation_presence, &named) {
-            // **Let go of the playback, keep the refusal.** Whether a file can
-            // be animated at all is a property of the file and does not change
-            // by being opened again, so asking a second time would be a walk of
-            // a container this window has already declined. A decode already in
-            // flight is likewise the answer to this open: it will land standing
-            // on frame zero.
-            // An unanswered open — its work failed, or its thread could not be started — is no
-            // fact about the file: the new open asks again.
-            let_go_on_open(&mut self.window.animations, &key);
-        }
-        for (_, path) in &showing {
-            let Some(path) = path else {
-                continue;
-            };
-            let key = normalized_local_image_path_key(path);
-            if self.window.animations.contains_key(&key) {
-                continue;
+        // **Let go of the playback, keep the refusal** — and ask, once, for what is shown and not
+        // held: [`AnimationCache::ask_for_showing`]. Whether a file can be animated at all is a
+        // property of the file and does not change by being opened again, so asking a second
+        // time would be a walk of a container this window has already declined. A decode already
+        // in flight is likewise the answer to this open: it will land standing on frame zero. An
+        // unanswered open — its work failed, or its thread could not be started — is no fact about
+        // the file: the new open asks again, and no redraw does.
+        let leaf = self.focused_shell_address();
+        let worker = &self.app.math_worker;
+        self.window.animations.ask_for_showing(&showing, |path| {
+            match worker.decorate(MathWorkerRequest::PeekAnimation {
+                leaf,
+                path: path.to_owned(),
+            }) {
+                Ok(_) => OpenAsked::Asked,
+                Err((crate::lane::Refused::NotStarted(_), _)) => OpenAsked::Unstarted,
+                Err(_) => OpenAsked::TurnedAway,
             }
-            let leaf = self.focused_shell_address();
-            match self
-                .app
-                .math_worker
-                .decorate(MathWorkerRequest::PeekAnimation {
-                    leaf,
-                    path: path.clone(),
-                }) {
-                Ok(_) => {
-                    self.window.animations.insert(key, AnimationEntry::Pending);
-                }
-                // Its thread not started: asked and unanswered — no redraw asks again, the file's
-                // next open does.
-                Err((crate::lane::Refused::NotStarted(_), _)) => {
-                    self.window
-                        .animations
-                        .insert(key, AnimationEntry::Unanswered);
-                }
-                Err(_) => {}
-            }
-        }
+        });
         // **The refills, over the drawn set and each animation once.** Two
         // surfaces showing one `loading.gif` are one animation at one phase
         // (§7.44 ⑤), so they are also one order to the worker.
@@ -10425,47 +10394,28 @@ impl Runtime<'_> {
     /// supersession, so a lane that could double-post would queue frames of one
     /// file in front of every other question on it).
     fn request_animation_fill(&mut self, key: &str, path: &std::path::Path) {
-        let wants = matches!(
-            self.window.animations.get(key),
-            Some(AnimationEntry::Ready { animation, .. }) if animation.frames_wanted() > 0
-        );
-        if !wants {
-            return;
-        }
-        let Some(AnimationEntry::Ready {
-            serial,
-            mut animation,
-        }) = self.window.animations.remove(key)
-        else {
-            return;
-        };
-        if let Some((cursor, want)) = animation.take_cursor() {
-            let leaf = self.focused_shell_address();
-            let sent = self
-                .app
-                .math_worker
-                .decorate(MathWorkerRequest::AnimationFill {
+        let leaf = self.focused_shell_address();
+        let worker = &self.app.math_worker;
+        self.window
+            .animations
+            .send_fill(key, |serial, cursor, want| {
+                // **A request the lane refused at its door.** Full: the cursor comes home, and
+                // the next frame that draws the animation asks again. Its thread not started: the
+                // fill is lost as a failed one is, so no frame retries it.
+                match worker.decorate(MathWorkerRequest::AnimationFill {
                     leaf,
                     path: path.to_owned(),
                     serial,
                     cursor,
                     want,
-                });
-            // **A request the lane refused at its door.** Full: the cursor comes home, and the
-            // next frame that draws the animation asks again. Its thread not started: the fill is
-            // lost as a failed one is — the reservation released, the animation on its last
-            // frame until a surface begins showing the file again — so no frame retries it.
-            match sent {
-                Err((crate::lane::Refused::NotStarted(_), _)) => animation.fill_lost(),
-                Err((_, MathWorkerRequest::AnimationFill { cursor, .. })) => {
-                    animation.park_cursor(cursor, Vec::new());
+                }) {
+                    Err((crate::lane::Refused::NotStarted(_), _)) => FillSent::Lost,
+                    Err((_, MathWorkerRequest::AnimationFill { cursor, .. })) => {
+                        FillSent::TurnedAway(cursor)
+                    }
+                    _ => FillSent::Sent,
                 }
-                _ => {}
-            }
-        }
-        self.window
-            .animations
-            .insert(key.to_owned(), AnimationEntry::Ready { serial, animation });
+            });
     }
 
     /// **Where one surface's video is drawn, and in which stack** — the geometry
@@ -10593,12 +10543,9 @@ impl Runtime<'_> {
             .iter()
             .map(|animation| (animation.key.clone(), animation.serial))
             .collect();
-        present_drawn_animations(
-            &mut self.window.animations,
-            &self.window.animations_drawn,
-            &presented,
-            now,
-        );
+        self.window
+            .animations
+            .present_drawn(&self.window.animations_drawn, &presented, now);
         self.window.animations_drawn = presented;
     }
 
@@ -10621,11 +10568,9 @@ impl Runtime<'_> {
     /// holding still, which costs nothing and is the right thing to be showing
     /// the moment it is looked at again.
     fn advance_animations(&mut self, now: Instant) -> bool {
-        advance_drawn_animations(
-            &mut self.window.animations,
-            &self.window.animations_drawn,
-            now,
-        )
+        self.window
+            .animations
+            .advance_drawn(&self.window.animations_drawn, now)
     }
 
     /// Whether anything on the glass is an animation this window is running —
@@ -12484,7 +12429,7 @@ impl Runtime<'_> {
     ///
     /// It costs nothing when nothing is live. A window with no recording sweeps
     /// an empty list and pumps an empty map; one drawing no animation has no
-    /// clock to run ([`advance_drawn_animations`] walks what is *drawn*), and the
+    /// clock to run ([`AnimationCache::advance_drawn`] walks what is *drawn*), and the
     /// layers are rebuilt only when something is there to rebuild them from.
     ///
     /// The debt it leaves is the one thing that has to outlive it. A frame that

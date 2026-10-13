@@ -11966,50 +11966,6 @@ fn hold_failed_in_tabs(
     true
 }
 
-/// **An animation open that failed on the worker**: its `Pending` entry becomes
-/// [`AnimationEntry::Unanswered`] — no redraw asks again, and the file's next open lets go of it
-/// ([`let_go_on_open`]). An entry the file has answered since is left as it is.
-fn open_unanswered(animations: &mut AnimationCache, key: String) {
-    if matches!(animations.get(&key), Some(AnimationEntry::Pending)) {
-        animations.insert(key, AnimationEntry::Unanswered);
-    }
-}
-
-/// **A file a surface has just begun showing**: its playback is let go of, so the open starts
-/// again on frame zero, and so is an open that never answered, so the open asks again. A refusal
-/// is kept — whether a file can be animated is a fact about the file — and so is a decode already
-/// in flight, which is this open's answer.
-fn let_go_on_open(animations: &mut AnimationCache, key: &str) {
-    if matches!(
-        animations.get(key),
-        Some(AnimationEntry::Ready { .. } | AnimationEntry::Unanswered)
-    ) {
-        animations.remove(key);
-    }
-}
-
-/// **An animation fill that failed**: its reservation is released (the bytes it stood for will
-/// never come), re-weighed by taking the entry out and putting it back; the decoder went with the
-/// request, so the animation stands on its last frame until a surface begins showing the file
-/// again. A fill for a playback the window has moved on from changes nothing.
-fn release_failed_fill(animations: &mut AnimationCache, key: String, serial: u64) {
-    let answers_this_playback = matches!(
-        animations.get(&key),
-        Some(AnimationEntry::Ready { serial: held, .. }) if *held == serial
-    );
-    if !answers_this_playback {
-        return;
-    }
-    if let Some(AnimationEntry::Ready {
-        serial,
-        mut animation,
-    }) = animations.remove(&key)
-    {
-        animation.fill_lost();
-        animations.insert(key, AnimationEntry::Ready { serial, animation });
-    }
-}
-
 /// **Which of the computation lane's shares a pane's task goes to.**
 fn share_of(task: &SessionDecorationTask) -> computation_lane::Share {
     match task {
@@ -14511,22 +14467,6 @@ struct WindowRuntime {
     /// tween that has landed cannot become live again, and an idle window still
     /// hands over nothing.
     picture_boxes_were_moving: bool,
-    /// **What each surface is showing, so that opening a file can be told from
-    /// revealing one** (adversarial review 2026-09-11, B8).
-    ///
-    /// The ruling is two sentences and the difference between them is this map:
-    /// a file **opened** — picked in the files column, or a pane handed another
-    /// document — starts at its first frame, and a pane merely **obscured and
-    /// revealed** resumes where it was. Drawn-ness cannot tell those apart: a
-    /// pane in a background tab is not drawn and neither is one whose file just
-    /// changed.
-    ///
-    /// So the entry is about the *subject*, not about the glass. It is written
-    /// and cleared only for surfaces this window can currently see the subject
-    /// of, which is why a background tab's pane keeps its entry and resumes: no
-    /// walk touched it. A surface that stops existing loses its entry in
-    /// [`Runtime::sweep_preview_panes`], beside the view it is retired with.
-    animation_presence: BTreeMap<PreviewSurface, String>,
     /// **The files this window's preview seats are showing, watched** (W2 slice
     /// 5, `preview_watch`).
     ///
@@ -32148,6 +32088,12 @@ impl bt_term::Weighed for AnimationEntry {
             Self::Ready { animation, .. } => animation.bytes_held(),
         }
     }
+
+    /// Only a playback is let go of by weight: the other three are the records of questions —
+    /// see [`AnimationCache`] for why one evicted would be asked again with no open to ask it.
+    fn evictable(&self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
 }
 
 /// **The sentence one refused animation earns in the foot of the pane**, or
@@ -32180,8 +32126,402 @@ fn animation_refusal_notice(refusal: animation::AnimationRefusal) -> Option<&'st
     })
 }
 
-/// **What this window's animations live in** — see [`MAX_ANIMATION_CACHE_BYTES`].
-type AnimationCache = bt_term::BoundedCache<String, AnimationEntry>;
+/// **What this window's animations live in** — see [`MAX_ANIMATION_CACHE_BYTES`] — **and every
+/// door to them** (S-8 round 6).
+///
+/// A type of its own rather than the bare map, so that each change an entry can go through is one
+/// method here and no caller lends the map out or writes an entry by hand: an open is asked only by
+/// [`Self::ask_for_showing`], the one writer of `Pending`; its answer is filed only by
+/// [`Self::opened`]; an open that never answered is written only by [`Self::open_unanswered`] and
+/// let go of only by [`Self::let_go_on_open`], on the file's next open; and a playback is reached
+/// into only by the fill, advance and present doors, each of which takes the entry out and puts it
+/// back, so the map re-weighs it.
+///
+/// **An entry that holds no pixels is never let go of by weight.** A request in flight, a refusal
+/// and an open that never answered are the records of questions: each still counts its entry's
+/// overhead toward the budget, but none is ever chosen by eviction
+/// ([`bt_term::Weighed::evictable`]), because a walk asks the worker for every file shown that
+/// this map holds nothing for — an evicted record would be asked again on the next redraw, with no
+/// open to ask it. So such records number at most the animated files this window has opened, and
+/// leave only by the doors above.
+struct AnimationCache {
+    playbacks: bt_term::BoundedCache<String, AnimationEntry>,
+    /// **What each surface is showing, so that opening a file can be told from
+    /// revealing one** (adversarial review 2026-09-11, B8).
+    ///
+    /// The ruling is two sentences and the difference between them is this map:
+    /// a file **opened** — picked in the files column, or a pane handed another
+    /// document — starts at its first frame, and a pane merely **obscured and
+    /// revealed** resumes where it was. Drawn-ness cannot tell those apart: a
+    /// pane in a background tab is not drawn and neither is one whose file just
+    /// changed.
+    ///
+    /// So the entry is about the *subject*, not about the glass. It is written
+    /// and cleared only for surfaces this window can currently see the subject
+    /// of, which is why a background tab's pane keeps its entry and resumes: no
+    /// walk touched it. A surface that stops existing loses its entry
+    /// ([`Self::forget_surface`]), beside the view it is retired with.
+    presence: BTreeMap<PreviewSurface, String>,
+}
+
+/// **What asking the worker to open one file came to** — see [`AnimationCache::ask_for_showing`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpenAsked {
+    /// In the lane: the file is `Pending` until its answer.
+    Asked,
+    /// Its thread could not be started: asked, and unanswered until the file's next open.
+    Unstarted,
+    /// Turned away at the door (the lane is full): nothing is filed, so the next walk asks again.
+    TurnedAway,
+}
+
+/// **What sending one fill came to** — see [`AnimationCache::send_fill`].
+enum FillSent {
+    /// In the lane: the cursor is away until the fill comes home.
+    Sent,
+    /// Turned away at the door (the lane is full): the cursor comes home with no frames, and the
+    /// next frame that draws the animation asks again.
+    TurnedAway(Box<animation::AnimationCursor>),
+    /// Its thread could not be started: the fill is lost as a failed one is — the reservation
+    /// released, the animation on its last frame until a surface begins showing the file again.
+    Lost,
+}
+
+impl AnimationCache {
+    fn with_budget(budget: u64) -> Self {
+        Self {
+            playbacks: bt_term::BoundedCache::with_budget(budget),
+            presence: BTreeMap::new(),
+        }
+    }
+
+    /// One file's entry. A reading is a use — see [`bt_term::BoundedCache::get`].
+    fn get(&self, key: &str) -> Option<&AnimationEntry> {
+        self.playbacks.get(key)
+    }
+
+    /// Whether this window holds anything for the file, **without** counting a use.
+    #[cfg(test)]
+    fn contains_key(&self, key: &str) -> bool {
+        self.playbacks.contains_key(key)
+    }
+
+    /// Whether this window holds nothing for any file.
+    fn is_empty(&self) -> bool {
+        self.playbacks.is_empty()
+    }
+
+    /// What the map is holding, counted as it was inserted.
+    #[cfg(test)]
+    fn bytes_held(&self) -> u64 {
+        self.playbacks.bytes_held()
+    }
+
+    /// The ceiling the map was built with.
+    #[cfg(test)]
+    fn budget(&self) -> u64 {
+        self.playbacks.budget()
+    }
+
+    /// **One walk of the surfaces this window can see the subject of**, and the opens it asks for
+    /// (adversarial review 2026-09-11, B8; S-8 rounds 4 and 6).
+    ///
+    /// What each surface is showing is brought up to date ([`animations_opened`]). A file a surface
+    /// has just begun showing is let go of ([`Self::let_go_on_open`]) — its playback, so the open
+    /// starts again on frame zero, and an open that never answered, so the open asks again. Then
+    /// each file shown that this window holds nothing for is asked of the worker through `ask`,
+    /// once however many surfaces show it. A file this window holds anything for — a playback, a
+    /// decode in flight, a refusal, an open that never answered — is not asked again by a walk: a
+    /// redraw is no new input.
+    fn ask_for_showing(
+        &mut self,
+        showing: &[(PreviewSurface, Option<PathBuf>)],
+        mut ask: impl FnMut(&Path) -> OpenAsked,
+    ) {
+        let named: Vec<(PreviewSurface, Option<String>)> = showing
+            .iter()
+            .map(|(surface, path)| {
+                (
+                    *surface,
+                    path.as_deref().map(normalized_local_image_path_key),
+                )
+            })
+            .collect();
+        for key in animations_opened(&mut self.presence, &named) {
+            self.let_go_on_open(&key);
+        }
+        for (_, path) in showing {
+            let Some(path) = path else {
+                continue;
+            };
+            let key = normalized_local_image_path_key(path);
+            if self.playbacks.contains_key(&key) {
+                continue;
+            }
+            match ask(path) {
+                OpenAsked::Asked => self.playbacks.insert(key, AnimationEntry::Pending),
+                OpenAsked::Unstarted => self.open_unanswered(key),
+                OpenAsked::TurnedAway => {}
+            }
+        }
+    }
+
+    /// **A surface that has stopped existing**: what it was showing is forgotten. The record is
+    /// deliberately kept while a surface is merely not drawn — that is how a tab switch resumes
+    /// rather than restarts — so the one moment it may be dropped is the moment the surface goes.
+    fn forget_surface(&mut self, surface: PreviewSurface) {
+        self.presence.remove(&surface);
+    }
+
+    /// **A file a surface has just begun showing**: its playback is let go of, so the open starts
+    /// again on frame zero, and so is an open that never answered, so the open asks again — the one
+    /// remover of [`AnimationEntry::Unanswered`]. A refusal is kept, because whether a file can be
+    /// animated is a fact about the file, and so is a decode already in flight, which is this
+    /// open's answer.
+    fn let_go_on_open(&mut self, key: &str) {
+        if matches!(
+            self.playbacks.get(key),
+            Some(AnimationEntry::Ready { .. } | AnimationEntry::Unanswered)
+        ) {
+            self.playbacks.remove(key);
+        }
+    }
+
+    /// **An open that was asked and not answered** — its work failed on the worker, or its thread
+    /// could not be started: the file's entry becomes [`AnimationEntry::Unanswered`], which no walk
+    /// asks again and the file's next open lets go of. The one writer of `Unanswered`. An entry the
+    /// file has answered since — a playback, a refusal — is left as it is.
+    fn open_unanswered(&mut self, key: String) {
+        if matches!(
+            self.playbacks.get(&key),
+            None | Some(AnimationEntry::Pending)
+        ) {
+            self.playbacks.insert(key, AnimationEntry::Unanswered);
+        }
+    }
+
+    /// **The worker's answer to an open**, filed whether or not it decoded: a playback under the
+    /// serial minted for it ([`AnimationEntry::Ready`]), or the refusal with its reason
+    /// ([`AnimationEntry::Refused`]) — a refusal is an answer.
+    fn opened(
+        &mut self,
+        key: String,
+        serial: u64,
+        frames: Result<animation::Animation, animation::AnimationRefusal>,
+    ) {
+        self.playbacks.insert(
+            key,
+            match frames {
+                Ok(animation) => AnimationEntry::Ready {
+                    serial,
+                    animation: Box::new(animation),
+                },
+                Err(refusal) => AnimationEntry::Refused(refusal),
+            },
+        );
+    }
+
+    /// **A failed request of this window's animations, settled** ([`settle_failure`]): an open is
+    /// unanswered ([`Self::open_unanswered`]), a fill is lost ([`Self::release_failed_fill`]). The
+    /// other settlements are not this map's.
+    fn settle(&mut self, settled: Settled) {
+        match settled {
+            Settled::AnimationUnanswered { path } => {
+                self.open_unanswered(normalized_local_image_path_key(&path));
+            }
+            Settled::FillLost { path, serial } => {
+                self.release_failed_fill(&normalized_local_image_path_key(&path), serial);
+            }
+            Settled::Hold { .. } | Settled::Answer(_) | Settled::Nothing => {}
+        }
+    }
+
+    /// **An animation fill that failed**: its reservation is released (the bytes it stood for will
+    /// never come), re-weighed by taking the entry out and putting it back; the decoder went with
+    /// the request, so the animation stands on its last frame until a surface begins showing the
+    /// file again. A fill for a playback the window has moved on from changes nothing.
+    fn release_failed_fill(&mut self, key: &str, serial: u64) {
+        let answers_this_playback = matches!(
+            self.playbacks.get(key),
+            Some(AnimationEntry::Ready { serial: held, .. }) if *held == serial
+        );
+        if !answers_this_playback {
+            return;
+        }
+        if let Some(AnimationEntry::Ready {
+            serial,
+            mut animation,
+        }) = self.playbacks.remove(key)
+        {
+            animation.fill_lost();
+            self.playbacks
+                .insert(key.to_owned(), AnimationEntry::Ready { serial, animation });
+        }
+    }
+
+    /// **Send one playing animation's decoder for as many frames as its ring has room for** —
+    /// through `send`, which answers what became of it; see `Runtime::request_animation_fill` for
+    /// when.
+    ///
+    /// Nothing happens for an animation that wants nothing, and that needs no flag: the cursor *is*
+    /// the record that a fill is in flight, so an animation whose cursor is away wants no frames.
+    /// The entry is taken out and put back once, after `send` has answered, so the map weighs the
+    /// reservation `take_cursor` made — or, for a fill turned away or lost, the cursor home again
+    /// or the reservation released.
+    fn send_fill(
+        &mut self,
+        key: &str,
+        send: impl FnOnce(u64, Box<animation::AnimationCursor>, usize) -> FillSent,
+    ) {
+        let wants = matches!(
+            self.playbacks.get(key),
+            Some(AnimationEntry::Ready { animation, .. }) if animation.frames_wanted() > 0
+        );
+        if !wants {
+            return;
+        }
+        let Some(AnimationEntry::Ready {
+            serial,
+            mut animation,
+        }) = self.playbacks.remove(key)
+        else {
+            return;
+        };
+        if let Some((cursor, want)) = animation.take_cursor() {
+            match send(serial, cursor, want) {
+                FillSent::Sent => {}
+                FillSent::TurnedAway(cursor) => animation.park_cursor(cursor, Vec::new()),
+                FillSent::Lost => animation.fill_lost(),
+            }
+        }
+        self.playbacks
+            .insert(key.to_owned(), AnimationEntry::Ready { serial, animation });
+    }
+
+    /// **Move the animations that are on the glass to the frame that is due**, and
+    /// say whether any of them changed (adversarial review 2026-09-11, B8).
+    ///
+    /// `drawn` is what was actually presented last frame, by key and playback. An
+    /// animation outside it is one no surface is drawing: it does not advance,
+    /// because the refills that keep a ring full are asked only for what is drawn,
+    /// and a clock running where no decoder follows it is how a `.gif` in a
+    /// background tab drained its ring and resumed mid-file.
+    ///
+    /// The entry goes out of the map and back rather than being reached into, for
+    /// `bt_term::BoundedCache`'s own reason: `advance` **pops** frames, so an
+    /// animation advanced under the map leaves the ceiling counting pixels that have
+    /// been let go of.
+    fn advance_drawn(&mut self, drawn: &BTreeMap<String, u64>, now: Instant) -> bool {
+        let mut moved = false;
+        for key in drawn.keys() {
+            // **Asked before it is taken.** A key in last frame's drawn set may hold
+            // `Pending` by now — a surface that opened the file again let go of the
+            // playback and asked the worker for it — and a `remove` that ran anyway
+            // would throw that ledger entry away, which is this window asking for the
+            // same decode on every frame until one of them lands.
+            if !matches!(self.playbacks.get(key), Some(AnimationEntry::Ready { .. })) {
+                continue;
+            }
+            let Some(AnimationEntry::Ready {
+                serial,
+                mut animation,
+            }) = self.playbacks.remove(key)
+            else {
+                continue;
+            };
+            moved |= animation.advance(now);
+            self.playbacks
+                .insert(key.clone(), AnimationEntry::Ready { serial, animation });
+        }
+        moved
+    }
+
+    /// **Start the clock of every animation that has just come onto the glass**
+    /// (adversarial review 2026-09-11, B8) — see [`animation::Animation::present`]
+    /// for the two defects that one sentence closes.
+    ///
+    /// A playback already in `was_drawn` under the same serial has been on the glass
+    /// since last frame and keeps the clock its own delays built; anything else is
+    /// arriving, and its next frame is due a delay from now.
+    fn present_drawn(
+        &mut self,
+        was_drawn: &BTreeMap<String, u64>,
+        drawn: &BTreeMap<String, u64>,
+        now: Instant,
+    ) {
+        for (key, serial) in drawn {
+            if was_drawn.get(key) == Some(serial) {
+                continue;
+            }
+            // Asked before it is taken, for [`AnimationCache::advance_drawn`]'s reason: a
+            // `Pending` lifted out of the map and dropped is a request this window
+            // has forgotten it made.
+            if !matches!(self.playbacks.get(key), Some(AnimationEntry::Ready { .. })) {
+                continue;
+            }
+            let Some(AnimationEntry::Ready {
+                serial,
+                mut animation,
+            }) = self.playbacks.remove(key)
+            else {
+                continue;
+            };
+            animation.present(now);
+            self.playbacks
+                .insert(key.clone(), AnimationEntry::Ready { serial, animation });
+        }
+    }
+
+    /// **Take one fill home, or drop it** — `true` when the frames were adopted
+    /// (adversarial review 2026-09-11, B10).
+    ///
+    /// Two ways a fill can arrive for nobody, and both end the same way. The key may
+    /// be gone, which is an animation the map has evicted: re-inserting it would be
+    /// an eviction undone by its own answer. Or the key may hold a **different
+    /// playback** — since B8 a surface that begins showing a file opens it again, so
+    /// the entry under that name can be a second playback standing on frame zero,
+    /// and parking the old cursor into it would hand a fresh animation a decoder
+    /// halfway through the file and a ring of frames from the middle of it. The
+    /// serial is what makes those two answers distinguishable at all; the key names
+    /// the file, and the file is not the playback.
+    ///
+    /// **And a third way, which is not "for nobody" but "of nothing"** (user report
+    /// 2026-09-12): the file was rewritten under the loop. The cursor noticed it at
+    /// the moment the loop came round, which is the only moment a change can be
+    /// acted on rather than decoded into the middle of a picture; this window's part
+    /// is to let the playback go, key and all, so that the next pass over the drawn
+    /// animations opens the file again down the ordinary path and shows whatever is
+    /// there now.
+    fn adopt_fill(
+        &mut self,
+        key: String,
+        serial: u64,
+        cursor: Box<animation::AnimationCursor>,
+        frames: Vec<animation::AnimationFrame>,
+    ) -> AnimationFillOutcome {
+        let answers_this_playback = matches!(
+            self.playbacks.get(&key),
+            Some(AnimationEntry::Ready { serial: held, .. }) if *held == serial
+        );
+        if !answers_this_playback {
+            return AnimationFillOutcome::ForNobody;
+        }
+        let Some(AnimationEntry::Ready {
+            serial,
+            mut animation,
+        }) = self.playbacks.remove(&key)
+        else {
+            return AnimationFillOutcome::ForNobody;
+        };
+        animation.park_cursor(cursor, frames);
+        if animation.file_changed() {
+            return AnimationFillOutcome::FileChanged;
+        }
+        self.playbacks
+            .insert(key, AnimationEntry::Ready { serial, animation });
+        AnimationFillOutcome::Parked
+    }
+}
 
 /// **What the renderer is to call one animation's picture** (adversarial review
 /// 2026-09-11, B3).
@@ -32200,82 +32540,6 @@ type AnimationCache = bt_term::BoundedCache<String, AnimationEntry>;
 /// spell it differently there.
 fn animation_layer_key(surface: PreviewSurface, serial: u64) -> String {
     format!("gif:{surface:?}:{serial}")
-}
-
-/// **Move the animations that are on the glass to the frame that is due**, and
-/// say whether any of them changed (adversarial review 2026-09-11, B8).
-///
-/// `drawn` is what was actually presented last frame, by key and playback. An
-/// animation outside it is one no surface is drawing: it does not advance,
-/// because the refills that keep a ring full are asked only for what is drawn,
-/// and a clock running where no decoder follows it is how a `.gif` in a
-/// background tab drained its ring and resumed mid-file.
-///
-/// The entry goes out of the map and back rather than being reached into, for
-/// `bt_term::BoundedCache`'s own reason: `advance` **pops** frames, so an
-/// animation advanced under the map leaves the ceiling counting pixels that have
-/// been let go of.
-fn advance_drawn_animations(
-    animations: &mut AnimationCache,
-    drawn: &BTreeMap<String, u64>,
-    now: Instant,
-) -> bool {
-    let mut moved = false;
-    for key in drawn.keys() {
-        // **Asked before it is taken.** A key in last frame's drawn set may hold
-        // `Pending` by now — a surface that opened the file again let go of the
-        // playback and asked the worker for it — and a `remove` that ran anyway
-        // would throw that ledger entry away, which is this window asking for the
-        // same decode on every frame until one of them lands.
-        if !matches!(animations.get(key), Some(AnimationEntry::Ready { .. })) {
-            continue;
-        }
-        let Some(AnimationEntry::Ready {
-            serial,
-            mut animation,
-        }) = animations.remove(key)
-        else {
-            continue;
-        };
-        moved |= animation.advance(now);
-        animations.insert(key.clone(), AnimationEntry::Ready { serial, animation });
-    }
-    moved
-}
-
-/// **Start the clock of every animation that has just come onto the glass**
-/// (adversarial review 2026-09-11, B8) — see [`animation::Animation::present`]
-/// for the two defects that one sentence closes.
-///
-/// A playback already in `was_drawn` under the same serial has been on the glass
-/// since last frame and keeps the clock its own delays built; anything else is
-/// arriving, and its next frame is due a delay from now.
-fn present_drawn_animations(
-    animations: &mut AnimationCache,
-    was_drawn: &BTreeMap<String, u64>,
-    drawn: &BTreeMap<String, u64>,
-    now: Instant,
-) {
-    for (key, serial) in drawn {
-        if was_drawn.get(key) == Some(serial) {
-            continue;
-        }
-        // Asked before it is taken, for [`advance_drawn_animations`]'s reason: a
-        // `Pending` lifted out of the map and dropped is a request this window
-        // has forgotten it made.
-        if !matches!(animations.get(key), Some(AnimationEntry::Ready { .. })) {
-            continue;
-        }
-        let Some(AnimationEntry::Ready {
-            serial,
-            mut animation,
-        }) = animations.remove(key)
-        else {
-            continue;
-        };
-        animation.present(now);
-        animations.insert(key.clone(), AnimationEntry::Ready { serial, animation });
-    }
 }
 
 /// **Which animated files this walk of the surfaces has just opened**, and the
@@ -32313,56 +32577,7 @@ fn animations_opened(
     opened
 }
 
-/// **Take one fill home, or drop it** — `true` when the frames were adopted
-/// (adversarial review 2026-09-11, B10).
-///
-/// Two ways a fill can arrive for nobody, and both end the same way. The key may
-/// be gone, which is an animation the map has evicted: re-inserting it would be
-/// an eviction undone by its own answer. Or the key may hold a **different
-/// playback** — since B8 a surface that begins showing a file opens it again, so
-/// the entry under that name can be a second playback standing on frame zero,
-/// and parking the old cursor into it would hand a fresh animation a decoder
-/// halfway through the file and a ring of frames from the middle of it. The
-/// serial is what makes those two answers distinguishable at all; the key names
-/// the file, and the file is not the playback.
-///
-/// **And a third way, which is not "for nobody" but "of nothing"** (user report
-/// 2026-09-12): the file was rewritten under the loop. The cursor noticed it at
-/// the moment the loop came round, which is the only moment a change can be
-/// acted on rather than decoded into the middle of a picture; this window's part
-/// is to let the playback go, key and all, so that the next pass over the drawn
-/// animations opens the file again down the ordinary path and shows whatever is
-/// there now.
-fn adopt_animation_fill(
-    animations: &mut AnimationCache,
-    key: String,
-    serial: u64,
-    cursor: Box<animation::AnimationCursor>,
-    frames: Vec<animation::AnimationFrame>,
-) -> AnimationFillOutcome {
-    let answers_this_playback = matches!(
-        animations.get(&key),
-        Some(AnimationEntry::Ready { serial: held, .. }) if *held == serial
-    );
-    if !answers_this_playback {
-        return AnimationFillOutcome::ForNobody;
-    }
-    let Some(AnimationEntry::Ready {
-        serial,
-        mut animation,
-    }) = animations.remove(&key)
-    else {
-        return AnimationFillOutcome::ForNobody;
-    };
-    animation.park_cursor(cursor, frames);
-    if animation.file_changed() {
-        return AnimationFillOutcome::FileChanged;
-    }
-    animations.insert(key, AnimationEntry::Ready { serial, animation });
-    AnimationFillOutcome::Parked
-}
-
-/// **What became of one fill coming home** — see [`adopt_animation_fill`].
+/// **What became of one fill coming home** — see [`AnimationCache::adopt_fill`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AnimationFillOutcome {
     /// The frames went into the ring they were decoded for.
@@ -44366,7 +44581,6 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         animations_drawn: BTreeMap::new(),
         pictures_owe_a_frame: false,
         picture_boxes_were_moving: false,
-        animation_presence: BTreeMap::new(),
         preview_watch: preview_watch::PreviewWatch::default(),
         files_watch: files_watch::FilesWatch::default(),
         web_cursor: None,

@@ -26177,14 +26177,21 @@ mod tests {
                 session.take_decoration_worker_task().is_none(),
                 "output elsewhere asks nothing"
             );
+            assert_eq!(
+                session.held_for_new_input.len(),
+                1,
+                "and the task is still held, not let go"
+            );
         }
     }
 
-    /// RED (S-8 round 5) — **a held frozen formula whose block lost another of its lines is let
-    /// go**: the candidate line itself is unchanged, but output evicts the block's opener through
-    /// the scrollback quota (a `tail -f`), so the scan is about lines that are no longer there.
-    /// The output lets it go as its completion would be — the closer no longer waits on it —
-    /// instead of holding it until a resize or a scroll.
+    /// RED (S-8 rounds 5 and 6) — **a held frozen formula whose block lost another of its lines is
+    /// let go**: the candidate line itself is unchanged, but output evicts the block's opener
+    /// through the scrollback quota (a `tail -f`), so the scan is about lines that are no longer
+    /// there. The output lets it go instead of holding it until a resize or a scroll: the scan is
+    /// no longer out, and the closer — a lone `\end` with no opener left in history — settles
+    /// `Suppressed`, shown as its text, not marked failed, and asked again only by a change to its
+    /// source or the detector.
     ///
     /// MUTATION: compare only the candidate's versions in `held_task_changed` (drop the
     /// `frozen_block_is_current` clause) — the scan stays held. Or make the frozen arm of
@@ -26207,14 +26214,22 @@ mod tests {
         };
         let opener = line(&session, "\\begin{");
         let closer = line(&session, "\\end{");
-        let task = std::iter::from_fn(|| session.take_worker_task())
+        let task = std::iter::from_fn(|| session.take_decoration_worker_task())
             .find(|task| {
-                task.candidate_id == closer && task.inputs.iter().any(|input| input.id == opener)
+                matches!(task, SessionDecorationTask::Math(math) if matches!(
+                    math.as_ref(),
+                    SessionMathTask::Frozen(task) if task.candidate_id == closer
+                        && task.inputs.iter().any(|input| input.id == opener)
+                ))
             })
             .expect("the closer's scan spans the block");
-        session.hold_decoration_task_until_new_input(SessionDecorationTask::Math(Box::new(
-            SessionMathTask::Frozen(task),
-        )));
+        assert!(
+            session
+                .decoration_work_out
+                .contains(&DecorationWorkOut::FrozenMath(closer)),
+            "the scan is out"
+        );
+        session.hold_decoration_task_until_new_input(task);
         let mut fed = 0;
         while session.document().entries().contains_key(&opener) {
             assert_eq!(
@@ -26236,10 +26251,10 @@ mod tests {
             session.held_for_new_input.is_empty(),
             "the output that evicted the opener lets the scan go"
         );
-        assert_ne!(
+        assert_eq!(
             session.decoration(closer).map(|record| record.decoration),
-            Some(DecorationLifecycle::Pending),
-            "let go as its completion would be: the closer is no longer waiting on the scan"
+            Some(DecorationLifecycle::Suppressed),
+            "the closer settles as its text: no opener is left to make it a block"
         );
         assert!(
             !session
@@ -26279,11 +26294,13 @@ mod tests {
         );
     }
 
-    /// RED (S-8 round 5) — **a held resample whose picture was decoded again is let go**: the size
-    /// it asked for is no longer owed, so the display asks the size it wants of the new decode.
+    /// RED (S-8 rounds 5 and 6) — **a held resample whose picture was decoded again is let go**:
+    /// the size it asked for is no longer owed, so the next hand-out asks the size the display
+    /// wants of the new decode.
     ///
     /// MUTATION: make the resample arm of `let_go_stale_task` drop the task — `display_pending`
-    /// still names the old size and its work stays out.
+    /// still names the old size and its work stays out. Or have it file the old size as declined —
+    /// the new decode is never asked about.
     #[test]
     fn a_held_resample_whose_picture_was_decoded_again_is_let_go() {
         let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
@@ -26328,6 +26345,13 @@ mod tests {
                 .contains(&DecorationWorkOut::Scale(occurrence)),
             "nor out"
         );
+        let Some(SessionDecorationTask::ScaleInlineImage(asked)) =
+            session.take_decoration_worker_task()
+        else {
+            panic!("the display asks the size it wants of the new decode");
+        };
+        assert_eq!(asked.occurrence_id, occurrence);
+        assert_eq!(asked.content_key, "image:decoded-again");
     }
 
     /// RED (S-8 round 3) — **a scroll is new input to a held task**: the reader scrolling the

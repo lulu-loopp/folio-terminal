@@ -943,12 +943,10 @@ fn the_windows_animations_are_bounded_by_the_frames_they_hold() {
     };
     let mut cache = AnimationCache::with_budget(2 * 2 * FRAME_BYTES as u64);
     for index in 0..4_u8 {
-        cache.insert(
+        cache.opened(
             format!(r"d:\spinners\{index}.gif"),
-            AnimationEntry::Ready {
-                serial: u64::from(index) + 1,
-                animation: Box::new(animation::Animation::of(frames(), 512, 512, Instant::now())),
-            },
+            u64::from(index) + 1,
+            Ok(animation::Animation::of(frames(), 512, 512, Instant::now())),
         );
     }
     assert!(
@@ -963,26 +961,157 @@ fn the_windows_animations_are_bounded_by_the_frames_they_hold() {
     assert!(!cache.contains_key(r"d:\spinners\0.gif"));
     // A refusal weighs nothing but is still remembered, which is what stops a
     // `.gif` this window will not animate being asked about on every frame.
-    cache.insert(
+    cache.opened(
         r"d:\spinners\still.gif".to_owned(),
-        AnimationEntry::Refused(animation::AnimationRefusal::OneFrame),
+        0,
+        Err(animation::AnimationRefusal::OneFrame),
     );
     assert!(cache.contains_key(r"d:\spinners\still.gif"));
 }
 
+/// **One walk of the surfaces, with a worker answering every open with
+/// `answer`** — the files it was asked to open, in order.
+fn walk_asking(
+    window: &mut AnimationCache,
+    showing: &[(PreviewSurface, Option<PathBuf>)],
+    answer: OpenAsked,
+) -> Vec<PathBuf> {
+    let mut asked = Vec::new();
+    window.ask_for_showing(showing, |path| {
+        asked.push(path.to_owned());
+        answer
+    });
+    asked
+}
+
+/// RED (S-8 round 6) — **an open whose work failed is unanswered, no redraw
+/// asks it again, and the file's next open does**: the failed request is
+/// settled down the road the window's settlement takes it
+/// (`settle_failure` → `AnimationCache::settle`, which is what
+/// `Runtime::settle_failed_requests` hands it to), and walks over the same
+/// surfaces leave it alone; a surface that goes to another file and back is
+/// an open, and asks.
+///
+/// MUTATION: have `AnimationCache::settle` leave an unanswered open as it is
+/// — the entry stays `Pending`. Or have `ask_for_showing` ask whatever it is
+/// shown (drop its `contains_key` gate) — every redraw asks again. Or have
+/// `let_go_on_open` keep `Unanswered` — the next open asks nothing.
+#[test]
+fn a_failed_open_is_unanswered_and_only_the_files_next_open_asks_again() {
+    let pane = seat_of(TAB_ONE, SeatId(1));
+    let spinner = PathBuf::from("D:/\u{52a8}\u{56fe}/\u{8f6c}\u{5708} spinner.gif");
+    let still = PathBuf::from("D:/\u{52a8}\u{56fe}/still.png");
+    let key = normalized_local_image_path_key(&spinner);
+    let on = |path: &PathBuf| vec![(pane, Some(path.clone()))];
+    let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+    assert_eq!(
+        walk_asking(&mut window, &on(&spinner), OpenAsked::Asked),
+        vec![spinner.clone()]
+    );
+    window.settle(crate::settle_failure(crate::Asked::Animation {
+        path: spinner.clone(),
+    }));
+    assert!(
+        matches!(window.get(&key), Some(AnimationEntry::Unanswered)),
+        "the failed open is unanswered"
+    );
+    for _ in 0..3 {
+        assert!(
+            walk_asking(&mut window, &on(&spinner), OpenAsked::Asked).is_empty(),
+            "a redraw is no new input"
+        );
+    }
+    assert!(walk_asking(&mut window, &[(pane, None)], OpenAsked::Asked).is_empty());
+    assert!(walk_asking(&mut window, &on(&still), OpenAsked::Asked).len() == 1);
+    assert_eq!(
+        walk_asking(&mut window, &on(&spinner), OpenAsked::Asked),
+        vec![spinner.clone()],
+        "the file's next open asks again"
+    );
+}
+
+/// RED (S-8 round 6) — **an open that never answered, and a refusal, are
+/// kept under weight pressure, so no redraw asks them again**: a window whose
+/// playbacks fill its budget lets go of the oldest playbacks, never of the
+/// record of a question. The unanswered open here is one whose thread could not
+/// be started — the second way into `Unanswered`, through the same door.
+///
+/// MUTATION: make `AnimationEntry::evictable` answer `true` for every entry —
+/// the two records are the oldest entries and go first, and the next walk asks
+/// both files again. Or have `ask_for_showing` file nothing for
+/// `OpenAsked::Unstarted` — the next walk asks it again.
+#[test]
+fn records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them() {
+    const FRAME_BYTES: usize = 1024 * 1024;
+    let frames = || {
+        vec![
+            animation::AnimationFrame {
+                bgra: Arc::from(vec![0x20; FRAME_BYTES]),
+                delay: Duration::from_millis(100),
+            },
+            animation::AnimationFrame {
+                bgra: Arc::from(vec![0x40; FRAME_BYTES]),
+                delay: Duration::from_millis(100),
+            },
+        ]
+    };
+    let pane = seat_of(TAB_ONE, SeatId(1));
+    let float = seat_of(TAB_ONE, SeatId(2));
+    let unstarted = PathBuf::from("D:/\u{52a8}\u{56fe}/\u{672a}\u{542f}\u{52a8}.gif");
+    let refused = PathBuf::from("D:/\u{52a8}\u{56fe}/one-frame.gif");
+    let showing = vec![
+        (pane, Some(unstarted.clone())),
+        (float, Some(refused.clone())),
+    ];
+    let mut window = AnimationCache::with_budget(2 * 2 * FRAME_BYTES as u64);
+    assert_eq!(
+        walk_asking(&mut window, &showing[..1], OpenAsked::Unstarted),
+        vec![unstarted.clone()]
+    );
+    assert_eq!(
+        walk_asking(&mut window, &showing, OpenAsked::Asked),
+        vec![refused.clone()]
+    );
+    window.opened(
+        normalized_local_image_path_key(&refused),
+        1,
+        Err(animation::AnimationRefusal::OneFrame),
+    );
+    for index in 0..6_u8 {
+        window.opened(
+            format!(r"d:\spinners\{index}.gif"),
+            u64::from(index) + 2,
+            Ok(animation::Animation::of(frames(), 512, 512, Instant::now())),
+        );
+    }
+    assert!(
+        !window.contains_key(r"d:\spinners\0.gif"),
+        "weight pressure let go of the oldest playback"
+    );
+    assert!(matches!(
+        window.get(&normalized_local_image_path_key(&unstarted)),
+        Some(AnimationEntry::Unanswered)
+    ));
+    assert!(matches!(
+        window.get(&normalized_local_image_path_key(&refused)),
+        Some(AnimationEntry::Refused(_))
+    ));
+    assert!(
+        walk_asking(&mut window, &showing, OpenAsked::Asked).is_empty(),
+        "no redraw asks a question this window holds the record of"
+    );
+}
+
 /// **One animated file, held the way the window holds it** — a ring of
 /// `frames` frames each standing a tenth of a second, under one playback.
-fn a_playback_of(serial: u64, frames: usize, started: Instant) -> AnimationEntry {
+fn a_playback_of(frames: usize, started: Instant) -> animation::Animation {
     let ring = (0..frames)
         .map(|index| animation::AnimationFrame {
             bgra: Arc::from(vec![index as u8; 4]),
             delay: Duration::from_millis(100),
         })
         .collect();
-    AnimationEntry::Ready {
-        serial,
-        animation: Box::new(animation::Animation::of(ring, 1, 1, started)),
-    }
+    animation::Animation::of(ring, 1, 1, started)
 }
 
 /// Which frame of one cached animation is standing.
@@ -1118,12 +1247,12 @@ fn a_second_playback_on_one_surface_is_a_second_name_for_the_renderer() {
 fn the_clock_runs_only_where_an_animation_is_drawn() {
     let start = Instant::now();
     let mut cache = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
-    cache.insert("on the glass".to_owned(), a_playback_of(1, 6, start));
-    cache.insert("in another tab".to_owned(), a_playback_of(2, 6, start));
+    cache.opened("on the glass".to_owned(), 1, Ok(a_playback_of(6, start)));
+    cache.opened("in another tab".to_owned(), 2, Ok(a_playback_of(6, start)));
     let drawn: BTreeMap<String, u64> = [("on the glass".to_owned(), 1)].into();
-    present_drawn_animations(&mut cache, &BTreeMap::new(), &drawn, start);
+    cache.present_drawn(&BTreeMap::new(), &drawn, start);
     for tick in 1..=10 {
-        advance_drawn_animations(&mut cache, &drawn, start + Duration::from_millis(50 * tick));
+        cache.advance_drawn(&drawn, start + Duration::from_millis(50 * tick));
     }
     assert_eq!(
         standing_frame_of(&cache, "on the glass"),
@@ -1172,6 +1301,8 @@ fn the_clock_runs_only_where_an_animation_is_drawn() {
 ///
 /// MUTATION: clear the record for a surface that is merely absent from the
 /// walk and (3) becomes an open, so every tab switch restarts the animation.
+/// Or (S-8 round 6) take the let-go out of `AnimationCache::ask_for_showing`
+/// — the file opened again keeps the playback it had, and is not asked again.
 #[test]
 fn an_opened_animation_starts_over_and_a_revealed_one_resumes() {
     let pane = seat_of(TAB_ONE, SeatId(1));
@@ -1215,43 +1346,71 @@ fn an_opened_animation_starts_over_and_a_revealed_one_resumes() {
     );
 
     // And the window lets go of the playback an open replaces, which is what
-    // sends the worker to open the file again at frame zero.
-    let asking = squeezed_body("Runtime", "request_animations");
+    // sends the worker to open the file again at frame zero: the same walk,
+    // through the window's one door for it, with the worker's answer filed.
+    let a = PathBuf::from("D:/\u{52a8}\u{56fe}/a.gif");
+    let b = PathBuf::from("D:/\u{52a8}\u{56fe}/b.gif");
+    let a_key = normalized_local_image_path_key(&a);
+    let on = |path: Option<&PathBuf>| vec![(pane, path.cloned())];
+    let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+    assert_eq!(
+        walk_asking(&mut window, &on(Some(&a)), OpenAsked::Asked),
+        vec![a.clone()]
+    );
+    window.opened(a_key.clone(), 1, Ok(a_playback_of(6, Instant::now())));
+    let playing = |window: &AnimationCache| match window.get(&a_key) {
+        Some(AnimationEntry::Ready { serial, .. }) => Some(*serial),
+        _ => None,
+    };
     assert!(
-        asking.contains("forkeyinanimations_opened(&mutself.window.animation_presence,&named){"),
-        "the open is decided by the one rule:\n{asking}"
+        walk_asking(&mut window, &on(Some(&a)), OpenAsked::Asked).is_empty(),
+        "a picture that is still there is not asked again",
+    );
+    assert!(walk_asking(&mut window, &[], OpenAsked::Asked).is_empty());
+    assert!(
+        walk_asking(&mut window, &on(Some(&a)), OpenAsked::Asked).is_empty(),
+        "a pane obscured and revealed asks nothing",
+    );
+    assert_eq!(playing(&window), Some(1), "and resumes the playback it had");
+    assert_eq!(
+        walk_asking(&mut window, &on(Some(&b)), OpenAsked::Asked),
+        vec![b.clone()]
+    );
+    assert_eq!(
+        walk_asking(&mut window, &on(Some(&a)), OpenAsked::Asked),
+        vec![a.clone()],
+        "the file opened again is asked again",
     );
     assert!(
-        asking.contains("let_go_on_open(&mutself.window.animations,&key);"),
-        "and an opened file lets go of the playback it had (what `let_go_on_open` lets go of is \
-         pinned by `animation::tests::an_unanswered_open_waits_for_the_files_next_open`):\n{asking}"
+        matches!(window.get(&a_key), Some(AnimationEntry::Pending)),
+        "and its playback was let go of: the answer lands on frame zero",
     );
 
     // (6) the resume itself, in frames. Hidden on frame two, revealed ten
     // seconds later: it stands on frame two, and stands it out from *now*.
     let start = Instant::now();
     let mut cache = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
-    cache.insert("a.gif".to_owned(), a_playback_of(1, 6, start));
+    cache.opened("a.gif".to_owned(), 1, Ok(a_playback_of(6, start)));
     let drawn: BTreeMap<String, u64> = [("a.gif".to_owned(), 1)].into();
     let hidden = BTreeMap::new();
-    present_drawn_animations(&mut cache, &hidden, &drawn, start);
-    advance_drawn_animations(&mut cache, &drawn, start + Duration::from_millis(250));
+    cache.present_drawn(&hidden, &drawn, start);
+    cache.advance_drawn(&drawn, start + Duration::from_millis(250));
     assert_eq!(standing_frame_of(&cache, "a.gif"), 2);
     let away = start + Duration::from_secs(10);
-    advance_drawn_animations(&mut cache, &hidden, away);
+    cache.advance_drawn(&hidden, away);
     assert_eq!(
         standing_frame_of(&cache, "a.gif"),
         2,
         "it did not play while nobody was drawing it",
     );
-    present_drawn_animations(&mut cache, &hidden, &drawn, away);
-    advance_drawn_animations(&mut cache, &drawn, away + Duration::from_millis(99));
+    cache.present_drawn(&hidden, &drawn, away);
+    cache.advance_drawn(&drawn, away + Duration::from_millis(99));
     assert_eq!(
         standing_frame_of(&cache, "a.gif"),
         2,
         "and it does not fast-forward through the ten seconds it was away",
     );
-    advance_drawn_animations(&mut cache, &drawn, away + Duration::from_millis(100));
+    cache.advance_drawn(&drawn, away + Duration::from_millis(100));
     assert_eq!(standing_frame_of(&cache, "a.gif"), 3);
 }
 
@@ -1289,19 +1448,13 @@ fn a_fill_that_answers_a_playback_this_window_has_left_is_dropped() {
     // with its cursor away on a worker and frames on the way home. That is
     // the state every refill is posted from.
     let (playing, away, frames) = a_playback_with_a_fill_in_the_air();
-    cache.insert(
-        "the.gif".to_owned(),
-        AnimationEntry::Ready {
-            serial: 7,
-            animation: Box::new(playing),
-        },
-    );
+    cache.opened("the.gif".to_owned(), 7, Ok(playing));
     let ring_before = ring_bytes_of(&cache, "the.gif");
     let frame_before = generation_of(&cache, "the.gif");
 
     // (1) it comes home to a playback this window has moved on from.
     assert_eq!(
-        adopt_animation_fill(&mut cache, "the.gif".to_owned(), 6, away, frames),
+        cache.adopt_fill("the.gif".to_owned(), 6, away, frames),
         AnimationFillOutcome::ForNobody,
         "a fill for a playback that is gone was taken",
     );
@@ -1314,7 +1467,7 @@ fn a_fill_that_answers_a_playback_this_window_has_left_is_dropped() {
     // (2) and to a key the map has let go of.
     let (_, cursor, frames) = a_playback_with_a_fill_in_the_air();
     assert_eq!(
-        adopt_animation_fill(&mut cache, "gone.gif".to_owned(), 7, cursor, frames),
+        cache.adopt_fill("gone.gif".to_owned(), 7, cursor, frames),
         AnimationFillOutcome::ForNobody,
         "an eviction was undone by its own answer",
     );
@@ -1323,7 +1476,7 @@ fn a_fill_that_answers_a_playback_this_window_has_left_is_dropped() {
     let (_, cursor, frames) = a_playback_with_a_fill_in_the_air();
     assert!(!frames.is_empty());
     assert_eq!(
-        adopt_animation_fill(&mut cache, "the.gif".to_owned(), 7, cursor, frames),
+        cache.adopt_fill("the.gif".to_owned(), 7, cursor, frames),
         AnimationFillOutcome::Parked,
     );
     assert!(
@@ -1335,11 +1488,7 @@ fn a_fill_that_answers_a_playback_this_window_has_left_is_dropped() {
     // frame on the glass, however full it leaves the ring.
     let nothing_drawn = BTreeMap::new();
     assert!(
-        !advance_drawn_animations(
-            &mut cache,
-            &nothing_drawn,
-            Instant::now() + Duration::from_secs(10)
-        ),
+        !cache.advance_drawn(&nothing_drawn, Instant::now() + Duration::from_secs(10)),
         "an undrawn animation moved",
     );
     assert_eq!(
@@ -1491,13 +1640,7 @@ fn a_file_rewritten_under_the_loop_ends_the_playback_and_is_reopened() {
     playing.present(start);
     playing.advance(start + Duration::from_secs(5));
     let (mut cursor, want) = playing.take_cursor().expect("a played-out ring has room");
-    cache.insert(
-        "capture.gif".to_owned(),
-        AnimationEntry::Ready {
-            serial: 11,
-            animation: Box::new(playing),
-        },
-    );
+    cache.opened("capture.gif".to_owned(), 11, Ok(playing));
 
     // The file is rewritten while the cursor is out — a longer one, which is
     // what an export written again is.
@@ -1507,7 +1650,7 @@ fn a_file_rewritten_under_the_loop_ends_the_playback_and_is_reopened() {
     let frames = cursor.next_frames(want.max(16));
 
     assert_eq!(
-        adopt_animation_fill(&mut cache, "capture.gif".to_owned(), 11, cursor, frames),
+        cache.adopt_fill("capture.gif".to_owned(), 11, cursor, frames),
         AnimationFillOutcome::FileChanged,
         "a cursor that came round onto another file was parked as if nothing had happened",
     );
