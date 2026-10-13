@@ -326,9 +326,10 @@ impl World for Fake {
                     &mut crate::update_trial::watchdog_asleep(),
                 );
             }));
-            while !self.home.unkept(txn).exists() {
-                std::thread::yield_now();
-            }
+            let mark = self.home.unkept(txn);
+            crate::lane::wait_until(&format!("the trial's mark {}", mark.display()), || {
+                mark.exists()
+            });
         }
         let receipt = Receipt {
             txn,
@@ -2607,13 +2608,18 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
                 }
                 if tag == "trial-answered" {
                     install.receipt(nonce, nonce, trial.pid);
-                    watch_receipt_decision(install.home.clone(), install.txn, nonce);
                 }
                 install.write(Phase::Trial {
                     nonce,
                     process: trial,
                     began_ms: now_ms(),
                 });
+                // The trial's watch starts on a journal that already says `Trial`: a watch
+                // reading `journal.json` while this fixture renames over it holds the file the
+                // rename replaces, and Windows refuses that rename (`PermissionDenied`).
+                if tag == "trial-answered" {
+                    watch_receipt_decision(install.home.clone(), install.txn, nonce);
+                }
             }
             "committed" => flipped_at(&install, Phase::Committed),
             "intent" => flipped_at(

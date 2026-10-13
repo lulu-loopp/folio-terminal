@@ -8100,6 +8100,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// GUARD — **every terminal birth uses the one PowerShell composition.** Its subject is how
+    /// the source is written: the census of `create_leaf_session`'s callers, the switch read once
+    /// in the constructor, and the composer called only on the birth worker (CONVENTIONS, "A test
+    /// pins behaviour by running it"). The composition itself is driven by the
+    /// `compose_powershell_birth` tests.
     #[test]
     fn every_terminal_birth_uses_the_one_powershell_composition() {
         let index = Index::of_package("bt-app");

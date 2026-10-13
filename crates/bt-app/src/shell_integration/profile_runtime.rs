@@ -1678,12 +1678,11 @@ mod tests {
             let enabler = scope.spawn(|| enable_record(&root));
             // Both writers are standing in the queue behind the holder (or
             // one has already left it, which the assertions below will name).
-            while queue_watch::waiting(&root).len() < 2
-                && !installer.is_finished()
-                && !enabler.is_finished()
-            {
-                std::thread::yield_now();
-            }
+            crate::lane::wait_until("both writers in the queue, or one of them gone", || {
+                queue_watch::waiting(&root).len() >= 2
+                    || installer.is_finished()
+                    || enabler.is_finished()
+            });
             drop(held);
             (installer.join().unwrap(), enabler.join().unwrap())
         });
@@ -1746,18 +1745,12 @@ mod tests {
             let waiter = scope.spawn(|| enable_record(&root));
             // Until the waiter has been in the queue for ten of its patiences,
             // or has left it.
-            loop {
-                if waiter.is_finished() {
-                    break;
-                }
-                if queue_watch::waiting(&root)
-                    .first()
-                    .is_some_and(|joined| joined.elapsed() > patience * 10)
-                {
-                    break;
-                }
-                std::thread::yield_now();
-            }
+            crate::lane::wait_until("the waiter ten patiences in the queue, or gone", || {
+                waiter.is_finished()
+                    || queue_watch::waiting(&root)
+                        .first()
+                        .is_some_and(|joined| joined.elapsed() > patience * 10)
+            });
             assert!(
                 !waiter.is_finished(),
                 "the writer left the queue while ours was still ahead of it"
@@ -1786,9 +1779,9 @@ mod tests {
         let held = lock(&root, Asker::InApp).unwrap();
         let door = std::thread::scope(|scope| {
             let door = scope.spawn(|| lock(&root, Asker::Door).map(drop));
-            while !door.is_finished() && queue_watch::waiting(&root).is_empty() {
-                std::thread::yield_now();
-            }
+            crate::lane::wait_until("the door's answer, or the door in our queue", || {
+                door.is_finished() || !queue_watch::waiting(&root).is_empty()
+            });
             let queued = !queue_watch::waiting(&root).is_empty();
             drop(held);
             let door = door.join().unwrap();

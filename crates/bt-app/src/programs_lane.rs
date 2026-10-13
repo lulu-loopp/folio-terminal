@@ -847,9 +847,9 @@ pub fn take() -> Answers {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::lane::{Executor, Gate, wait_for_a_wake, wake_channel};
+    use crate::lane::{Executor, Gate, Hold, wait_for_a_wake, wake_channel};
     use crate::profiles::{ProgramCandidate, ProgramSource};
-    use std::sync::{Arc, Condvar, mpsc};
+    use std::sync::{Arc, mpsc};
 
     /// **A machine a test writes**: a `PATH`, the files on it, WSL's distributions — all of it
     /// changeable while the lane runs, which is the whole point (a program installed after
@@ -858,7 +858,7 @@ pub(crate) mod tests {
     #[derive(Clone, Default)]
     pub(crate) struct FakeMachine {
         state: Arc<Mutex<FakeState>>,
-        gate: Arc<(Mutex<bool>, Condvar)>,
+        gate: Arc<Hold>,
     }
 
     #[derive(Default)]
@@ -909,7 +909,12 @@ pub(crate) mod tests {
 
         /// From now on every walk stops at its first file question until [`Self::release`].
         pub(crate) fn hold(&self) {
-            *self.gate.0.lock().unwrap() = true;
+            self.gate.hold();
+        }
+
+        /// Waits until a walk stands at its first file question, held there: the walk is out.
+        pub(crate) fn wait_held(&self, what: &str) {
+            self.gate.wait_standing(what);
         }
 
         /// Every file question the walks asked, in order.
@@ -918,8 +923,7 @@ pub(crate) mod tests {
         }
 
         pub(crate) fn release(&self) {
-            *self.gate.0.lock().unwrap() = false;
-            self.gate.1.notify_all();
+            self.gate.release();
         }
 
         fn lock(&self) -> MutexGuard<'_, FakeState> {
@@ -931,7 +935,7 @@ pub(crate) mod tests {
         path: OsString,
         variables: Vec<(String, OsString)>,
         files: Vec<PathBuf>,
-        gate: Arc<(Mutex<bool>, Condvar)>,
+        gate: Arc<Hold>,
         asked: Arc<Mutex<Vec<PathBuf>>>,
     }
 
@@ -947,11 +951,7 @@ pub(crate) mod tests {
         }
 
         fn is_file(&self, path: &Path) -> bool {
-            let (held, released) = &*self.gate;
-            let mut held = held.lock().unwrap();
-            while *held {
-                held = released.wait(held).unwrap();
-            }
+            self.gate.pass();
             self.asked.lock().unwrap().push(path.to_path_buf());
             self.files.iter().any(|file| file == path)
         }
@@ -1249,9 +1249,7 @@ pub(crate) mod tests {
             .request(request(&rows, Trigger::Launch))
             .expect("admitted");
         // Wait until the worker has taken it, so the next three find it out.
-        while lane.lock().out.is_none() {
-            std::thread::yield_now();
-        }
+        machine.wait_held("the held walk");
         machine.install(&bin("rg.exe"));
         lane.request(request(&rows, Trigger::ProgramMenu))
             .expect("admitted");
@@ -1380,9 +1378,7 @@ pub(crate) mod tests {
         machine.hold();
         lane.request(request(&rows, Trigger::ProfilesPage))
             .expect("admitted");
-        while lane.lock().out.is_none() {
-            std::thread::yield_now();
-        }
+        machine.wait_held("walk 3, held");
         lane.request(request(&rows, Trigger::Launch))
             .expect("admitted");
         let replacing = lane
@@ -1415,9 +1411,7 @@ pub(crate) mod tests {
         let held = lane
             .request(request(&two, Trigger::ProgramMenu))
             .expect("admitted");
-        while lane.lock().out.is_none() {
-            std::thread::yield_now();
-        }
+        machine.wait_held("walk 9, held in its first question");
         let in_birth = lane.pane_waits();
         machine.release();
         answers_through(lane, &wakes, held);
