@@ -5519,8 +5519,18 @@ mod tests {
         );
     }
 
+    /// PIN (kept, T-HEADLESS-RUNTIME-SEAM) — **the startup doors stand before the window, and the
+    /// probe takes the quiet door with its own patience.** What is left of the startup pin after
+    /// its halves that run were converted: the order of the process entry (`main`) and of the
+    /// native window's construction (`Runtime::create`), which no test can run — the one builds
+    /// the process, the other the native window the headless backend stands in for — the startup's
+    /// call of the observation, and the probe's quiet door and patience, which a child's command
+    /// does not show. The observation's worker is held by the window-waits registry (its thread's
+    /// name by `every_worker_door_body_is_reached_from_a_completions_door`, a join of it by
+    /// `every_bare_site_is_a_row_and_every_row_a_site`), and the probe's arguments and input by
+    /// `a_probe_asks_without_a_profile_and_feeds_its_input_on_stdin`.
     #[test]
-    fn shell_integration_startup_and_removal_doors_are_above_window_work() {
+    fn shell_integration_startup_doors_stand_before_the_window() {
         let main = crate::test_support::item_body(
             &bt_source::ItemQuery::function("main").in_module("crate"),
         );
@@ -5555,15 +5565,6 @@ mod tests {
                 .in_module("crate::shell_integration::profile_runtime"),
         );
         assert!(begin.contains("spawn_profile_observation("));
-        let worker = crate::test_support::item_body(
-            &bt_source::ItemQuery::function("spawn_profile_observation")
-                .in_module("crate::shell_integration::profile_runtime"),
-        );
-        assert!(worker.contains("\"powershell-profile-observation\""));
-        assert!(
-            !worker.contains(".join()"),
-            "the window thread waits for no startup worker"
-        );
         // The script is prepared before the window; the parser questions about the PowerShell
         // rows follow the program walk's answers (T-PROGRAMS-REFRESH), read before the panes.
         let warmed = create
@@ -5579,11 +5580,8 @@ mod tests {
                     .find("let (tab, conpty_source) = create_tab_state(")
                     .unwrap()
         );
-        let probe = source_for_profile_probe();
         let command = source_for_probe_command();
-        assert!(command.contains("environment.program(program)"));
         assert!(command.contains("bt_platform::quiet_command(resolved)"));
-        assert!(probe.contains("-NoProfile"));
         assert!(
             !crate::test_support::found_in(
                 bt_source::Needle::new(
@@ -5599,9 +5597,55 @@ mod tests {
         let parse_probe =
             crate::test_support::item_body(&bt_source::ItemQuery::function("run_parse_probe"));
         assert!(parse_probe.contains("POWERSHELL_PROBE_PATIENCE"));
-        assert!(probe.contains("ProbeStdio::FED"));
-        assert!(probe.contains("input.as_bytes()"));
-        assert!(!probe.contains(".arg(input)"));
+    }
+
+    /// RED (T-HEADLESS-RUNTIME-SEAM, from the startup pin) — **a probe asks its PowerShell without
+    /// a profile and without a prompt, and hands it the text to read on standard input**, never
+    /// on the command line: the stand-in prints the arguments it was started with, one a line, and
+    /// then what it read.
+    ///
+    /// MUTATIONS: drop `-NoProfile` from `run_powershell_probe`'s arguments — the stand-in does not
+    /// print it; hand the input over as `.arg(input)` — it arrives among the arguments and the
+    /// standard input is empty.
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_asks_without_a_profile_and_feeds_its_input_on_stdin() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = temp_dir("probe-arguments 参数");
+        let program = directory.join("pwsh");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nfor argument in \"$@\"; do printf '%s\\n' \"$argument\"; done\nprintf 'stdin:'\ncat\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = run_powershell_probe(
+            &program,
+            "Write-Output $input",
+            Some("输入 the text"),
+            POWERSHELL_PROBE_PATIENCE,
+            &ProbeEnvironment::Inherited,
+        )
+        .expect("the stand-in answers");
+        let _ = std::fs::remove_dir_all(&directory);
+        let said = String::from_utf8(output.stdout).expect("the stand-in prints UTF-8");
+        let (arguments, read) = said
+            .split_once("stdin:")
+            .expect("the stand-in read its input");
+        assert_eq!(
+            arguments.lines().collect::<Vec<_>>(),
+            [
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Write-Output $input"
+            ],
+            "the probe is asked without a profile and without a prompt"
+        );
+        assert_eq!(
+            read, "输入 the text",
+            "the text is read from standard input"
+        );
     }
 
     /// PIN — **the window hears a removal only through the report's own answer,
@@ -5665,10 +5709,6 @@ mod tests {
             console.contains("ShellProfileNothing"),
             "a person who typed the command is owed an answer"
         );
-    }
-
-    fn source_for_profile_probe() -> &'static str {
-        crate::test_support::item_body(&bt_source::ItemQuery::function("run_powershell_probe"))
     }
 
     fn source_for_probe_command() -> &'static str {
