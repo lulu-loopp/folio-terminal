@@ -77,7 +77,9 @@
 //!   is not the closer of one of the two spellings — whatever else it is, a
 //!   `.rs` in a here-string is given this label;
 //! * a double-quoted value ending in `.rs`, its opener on its line, that is
-//!   interpolated: a `$` not escaped by an odd run of backticks
+//!   interpolated: a `$` not escaped by an odd run of backticks and followed
+//!   by a name or an expression (a letter, a digit, `_`, `{`, `(`, `$`, `?`,
+//!   `^`)
 //!   (`"$dir/lib.rs"`, `"${x}.rs"`, `"$(…)/a.rs"`, ```"``$x/lib.rs"```);
 //! * any other quoted value ending in `.rs`, its opener on its line, that is
 //!   not path-shaped (`'crates/a b/lib.rs'`, `'~/x.rs'`, ``"`$x/lib.rs"``, and
@@ -675,11 +677,18 @@ fn diagnostic_source_shapes(text: &str, closers: &BTreeSet<usize>) -> Vec<(usize
 
 /// Whether a double-quoted PowerShell value expands a variable or a
 /// sub-expression: a `$` after an even run of backticks (none, or escaped
-/// backticks), since each backtick escapes the character after it.
+/// backticks), since each backtick escapes the character after it, and before
+/// a character that starts a name or an expression — a letter, a digit, `_`,
+/// `{`, `(`, `$`, `?` or `^`. A `$` before a space, other punctuation or the
+/// end of the value is a literal `$`.
 fn interpolates(value: &str) -> bool {
     value.match_indices('$').any(|(at, _)| {
         let ticks = value[..at].len() - value[..at].trim_end_matches('`').len();
-        ticks.is_multiple_of(2)
+        let starts_a_name = value[at + 1..].starts_with(|character: char| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, '_' | '{' | '(' | '$' | '?' | '^')
+        });
+        ticks.is_multiple_of(2) && starts_a_name
     })
 }
 
@@ -1233,7 +1242,8 @@ fn an_unreadable_source_path_in_a_shell_reader_is_a_diagnostic_not_a_pass() {
                   $c = Get-Content \"``$x/lib.rs\"\n\
                   $d = Get-Content 'crates/a b/lib.rs'\n\
                   $e = Get-Content '~/x.rs'  # 中文\n\
-                  # lib.rs's own prose\n";
+                  # lib.rs's own prose\n\
+                  $f = Get-Content \"a$ b.rs\"\n";
     assert_eq!(
         shell_findings(script),
         vec![
@@ -1242,6 +1252,7 @@ fn an_unreadable_source_path_in_a_shell_reader_is_a_diagnostic_not_a_pass() {
             (3, Kind::InterpolatedShellPath, "``$x/lib.rs".to_owned()),
             (4, Kind::UnreadableShellPath, "crates/a b/lib.rs".to_owned()),
             (5, Kind::UnreadableShellPath, "~/x.rs".to_owned()),
+            (7, Kind::UnreadableShellPath, "a$ b.rs".to_owned()),
         ]
     );
     let said = shell_refusal(script);

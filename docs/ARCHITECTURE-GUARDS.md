@@ -83,7 +83,7 @@ Three other spellings are diagnostics that fail naming `file:line`, the shape
 and what to do: a `.rs` extension inside a here-string (`@"…"@`, `@'…'@`) that
 is not one of the two spellings; an interpolated double-quoted value
 (`"$dir/lib.rs"`, `"${x}.rs"`, `"$(…)/a.rs"`, a `$` after an even run of
-backticks); and any other quoted `.rs` value with its opener on its line that
+backticks and before a name or an expression); and any other quoted `.rs` value with its opener on its line that
 is not path-shaped (`'crates/a b/lib.rs'`, an escaped `` `$ ``, a
 sub-expression holding a quote of its own). The author rewrites the literal
 into one of the two spellings or lists the file. Out of scope, as limits: a
@@ -95,9 +95,9 @@ a silent pass. A shell reader is cleared like a Rust one, by file: a gate whose
 subject really is source files is a `FileScoped` variant (the vendor-notice,
 dead-code and lint-probe gates). A suite that writes a scratch `.rs` file into
 a temporary tree is no reader of a committed source and gets no row: it spells
-the scratch name so that the script holds no `.rs` literal (or gives
-the scratch file another extension), and a single-quoted scratch path the scan
-reports is a false positive the author rewrites;
+the scratch name so that the script holds no `.rs` literal (or gives the scratch
+file another extension), and a single-quoted scratch path the scan reports is a
+false positive the author rewrites;
 `every_reader_of_a_committed_document_is_on_a_list` holds the document readers
 (by item, through `bt-source`'s index — no script reads Rust for it), and its
 message names the item, the file and both lists;
