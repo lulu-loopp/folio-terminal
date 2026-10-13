@@ -31,13 +31,13 @@ use crate::{
     foot_revealed_label, forget_a_picture, forget_standing_answers, git_panel, graph_key_of,
     hang_watch, hex_peek, highlight, i18n, image_clamped_pan, image_destination, image_is_pannable,
     image_meta_sentence, image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_scale,
-    image_zoom_settles, image_zoom_toggled, ime_owner, input, markdown_empty_page_offset,
-    markdown_prose_composition, markdown_prose_paragraphs, markdown_runs, markdown_source_cell,
-    markdown_source_offset_at, marks, measure_preview_links, native_window, notice,
-    owe_sharpened_rasters, page_address_hand_off, page_destination, page_foot_flash,
-    page_foot_lead, page_source_file, peek_scale_task, picture_channel_owner, picture_errand,
-    picture_files_of, pictures_awaited_by, pictures_need_handing_over, place_preview_math,
-    preedit_caret_byte, present_diagnostics, present_drawn_animations, preview,
+    image_zoom_settles, image_zoom_toggled, ime_owner, input, let_go_on_open,
+    markdown_empty_page_offset, markdown_prose_composition, markdown_prose_paragraphs,
+    markdown_runs, markdown_source_cell, markdown_source_offset_at, marks, measure_preview_links,
+    native_window, notice, owe_sharpened_rasters, page_address_hand_off, page_destination,
+    page_foot_flash, page_foot_lead, page_source_file, peek_scale_task, picture_channel_owner,
+    picture_errand, picture_files_of, pictures_awaited_by, pictures_need_handing_over,
+    place_preview_math, preedit_caret_byte, present_diagnostics, present_drawn_animations, preview,
     preview_block_bar_at, preview_block_wheel, preview_body_bar, preview_caret_prose,
     preview_caret_row, preview_copies_on_select, preview_document_height, preview_document_key,
     preview_document_max_scroll, preview_edit, preview_edit_bands, preview_image_placement,
@@ -10357,12 +10357,7 @@ impl Runtime<'_> {
             // on frame zero.
             // An unanswered open — its work failed, or its thread could not be started — is no
             // fact about the file: the new open asks again.
-            if matches!(
-                self.window.animations.get(&key),
-                Some(AnimationEntry::Ready { .. } | AnimationEntry::Unanswered)
-            ) {
-                self.window.animations.remove(&key);
-            }
+            let_go_on_open(&mut self.window.animations, &key);
         }
         for (_, path) in &showing {
             let Some(path) = path else {

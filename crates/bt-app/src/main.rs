@@ -11966,6 +11966,28 @@ fn hold_failed_in_tabs(
     true
 }
 
+/// **An animation open that failed on the worker**: its `Pending` entry becomes
+/// [`AnimationEntry::Unanswered`] — no redraw asks again, and the file's next open lets go of it
+/// ([`let_go_on_open`]). An entry the file has answered since is left as it is.
+fn open_unanswered(animations: &mut AnimationCache, key: String) {
+    if matches!(animations.get(&key), Some(AnimationEntry::Pending)) {
+        animations.insert(key, AnimationEntry::Unanswered);
+    }
+}
+
+/// **A file a surface has just begun showing**: its playback is let go of, so the open starts
+/// again on frame zero, and so is an open that never answered, so the open asks again. A refusal
+/// is kept — whether a file can be animated is a fact about the file — and so is a decode already
+/// in flight, which is this open's answer.
+fn let_go_on_open(animations: &mut AnimationCache, key: &str) {
+    if matches!(
+        animations.get(key),
+        Some(AnimationEntry::Ready { .. } | AnimationEntry::Unanswered)
+    ) {
+        animations.remove(key);
+    }
+}
+
 /// **An animation fill that failed**: its reservation is released (the bytes it stood for will
 /// never come), re-weighed by taking the entry out and putting it back; the decoder went with the
 /// request, so the animation stands on its last frame until a surface begins showing the file

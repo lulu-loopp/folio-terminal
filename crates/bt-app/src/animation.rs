@@ -1385,8 +1385,9 @@ impl Animation {
 
     /// **The fill out for this animation failed**: its cursor — and the composition canvas it
     /// owns — went with the request and will not come home, so the canvas and the reservation made
-    /// for the frames it was ordered both end here: those bytes will never be this process's. With no cursor, no fill is asked again: the animation stands on its last
-    /// frame until a surface begins showing the file again and opens a new playback.
+    /// for the frames it was ordered both end here: those bytes will never be this process's.
+    /// With no cursor, no fill is asked again: the animation stands on its last frame until a
+    /// surface begins showing the file again and opens a new playback.
     pub fn fill_lost(&mut self) {
         self.in_flight_bytes = 0;
         // The canvas is the cursor's, and the cursor is gone with the request.
@@ -2240,6 +2241,63 @@ mod tests {
             animation.take_cursor().is_none(),
             "no fill is asked: the decoder went with the request"
         );
+    }
+
+    /// RED (S-8 round 5) — **an open that went unanswered waits for the file's next open**: a
+    /// failed open turns its `Pending` entry into `Unanswered` (what `settle_failed_requests`
+    /// does for it) and leaves an entry the file has answered since as it is; the next open lets
+    /// go of an unanswered or playing entry so it asks again, and keeps a refusal (a fact about
+    /// the file) and a decode in flight (this open's answer).
+    ///
+    /// MUTATION: make `open_unanswered` leave `Pending` as it is — a redraw would wait on a
+    /// decode no one is doing. Or make `let_go_on_open` keep `Unanswered` — the file is never
+    /// asked about again.
+    #[test]
+    fn an_unanswered_open_waits_for_the_files_next_open() {
+        use crate::AnimationEntry;
+        let unanswered = "D:/\u{52a8}\u{56fe}/spinner.gif".to_owned();
+        let refused = "D:/\u{9759}\u{56fe}/still.gif".to_owned();
+        let in_flight = "D:/\u{52a8}\u{56fe}/loading.gif".to_owned();
+        let playing = "D:/\u{52a8}\u{56fe}/playing.gif".to_owned();
+        let mut cache = crate::AnimationCache::with_budget(u64::MAX);
+        cache.insert(unanswered.clone(), AnimationEntry::Pending);
+        cache.insert(
+            refused.clone(),
+            AnimationEntry::Refused(AnimationRefusal::OneFrame),
+        );
+        cache.insert(in_flight.clone(), AnimationEntry::Pending);
+        cache.insert(
+            playing.clone(),
+            AnimationEntry::Ready {
+                serial: 3,
+                animation: Box::new(decode_bytes(a_gif_of(4, 16, 5)).expect("a small capture")),
+            },
+        );
+
+        crate::open_unanswered(&mut cache, unanswered.clone());
+        crate::open_unanswered(&mut cache, refused.clone());
+        assert!(matches!(
+            cache.get(&unanswered),
+            Some(AnimationEntry::Unanswered)
+        ));
+        assert!(
+            matches!(cache.get(&refused), Some(AnimationEntry::Refused(_))),
+            "an answer since is kept"
+        );
+
+        for key in [&unanswered, &refused, &in_flight, &playing] {
+            crate::let_go_on_open(&mut cache, key);
+        }
+        assert!(cache.get(&unanswered).is_none(), "the next open asks again");
+        assert!(cache.get(&playing).is_none(), "and starts on frame zero");
+        assert!(matches!(
+            cache.get(&refused),
+            Some(AnimationEntry::Refused(_))
+        ));
+        assert!(matches!(
+            cache.get(&in_flight),
+            Some(AnimationEntry::Pending)
+        ));
     }
 
     /// RED — **an animation is weighed by all three of its allocations**

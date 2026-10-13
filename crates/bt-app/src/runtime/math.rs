@@ -9,10 +9,10 @@ use crate::{
     answer_one_formula, answers_for, dispatch_tab_decoration_tasks, document_formulas,
     dump_overlay_frame, first_run, float_trigger_tip, foreground_program, formula_tools,
     ground_overlay_layers, hang_watch, hold_failed_in_tabs, i18n, leaf_session_mut, marks,
-    math_copy_window, math_em_milli, new_tab_tip, nonzero_u32, preview, preview_select,
-    preview_text_command, preview_trace, profiles, quit, rail_overlay_layer, release_failed_fill,
-    restore, retire_spent_math_copy, search, seats, settings, tooltip, trace_sink,
-    window_layout_key,
+    math_copy_window, math_em_milli, new_tab_tip, nonzero_u32, open_unanswered, preview,
+    preview_select, preview_text_command, preview_trace, profiles, quit, rail_overlay_layer,
+    release_failed_fill, restore, retire_spent_math_copy, search, seats, settings, tooltip,
+    trace_sink, window_layout_key,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -958,17 +958,10 @@ impl Runtime<'_> {
                     normalized_local_image_path_key(&path),
                     serial,
                 ),
-                Settled::AnimationUnanswered { path } => {
-                    let key = normalized_local_image_path_key(&path);
-                    if matches!(
-                        self.window.animations.get(&key),
-                        Some(AnimationEntry::Pending)
-                    ) {
-                        self.window
-                            .animations
-                            .insert(key, AnimationEntry::Unanswered);
-                    }
-                }
+                Settled::AnimationUnanswered { path } => open_unanswered(
+                    &mut self.window.animations,
+                    normalized_local_image_path_key(&path),
+                ),
                 Settled::Answer(_) | Settled::Nothing => {}
             }
         }

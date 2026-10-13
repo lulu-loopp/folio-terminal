@@ -9413,14 +9413,16 @@ impl DualPlaneSession {
     }
 
     /// **Whether a held task's content is no longer what it was asked about**: a frozen formula's
-    /// lines at other versions, a live formula's source rows rewritten, a resample whose picture
-    /// was decoded again, a picture whose occurrence is gone. A printed path's question is its
-    /// text, which output cannot change, and a picture file's bytes are not read here: those wait
-    /// for a resize or a scroll.
+    /// candidate at other versions, or another line of its block rewritten or evicted; a live
+    /// formula's source rows rewritten; a resample whose picture was decoded again; a picture
+    /// whose occurrence is gone. A printed path's question is its text, which output cannot
+    /// change, and a picture file's bytes are not read here: those wait for a resize or a scroll.
     fn held_task_changed(&self, task: &SessionDecorationTask) -> bool {
         match task {
             SessionDecorationTask::Math(task) => match task.as_ref() {
-                SessionMathTask::Frozen(task) => !self.worker_task_is_current(task),
+                SessionMathTask::Frozen(task) => {
+                    !self.worker_task_is_current(task) || !self.frozen_block_is_current(task)
+                }
                 SessionMathTask::Live(task) => {
                     task.screen != self.live_screen
                         || live_task_is_current(task, &self.live_capture()).is_some()
@@ -9959,13 +9961,7 @@ impl DualPlaneSession {
             }
             return true;
         }
-        let block_is_current = task.inputs.iter().all(|input| {
-            self.document
-                .entries()
-                .get(&input.id)
-                .is_some_and(|entry| entry.line.text == input.text)
-        });
-        if !block_is_current {
+        if !self.frozen_block_is_current(&task) {
             return false;
         }
         if task.candidate_id != task.transcript_id
@@ -10063,6 +10059,19 @@ impl DualPlaneSession {
                 record.suppress();
             }
         }
+    }
+
+    /// **Whether every line a frozen scan read is still in history with the text it read** — the
+    /// block's own currency, beside the candidate's ([`Self::worker_task_is_current`]): another
+    /// line of a multi-line block rewritten, or evicted by the scrollback quota, makes the scan's
+    /// answer one about lines that are no longer there.
+    fn frozen_block_is_current(&self, task: &DetectionTask) -> bool {
+        task.inputs.iter().all(|input| {
+            self.document
+                .entries()
+                .get(&input.id)
+                .is_some_and(|entry| entry.line.text == input.text)
+        })
     }
 
     fn worker_task_is_current(&self, task: &DetectionTask) -> bool {
@@ -26138,20 +26147,28 @@ mod tests {
         assert!(!source.contains('x'), "not the old one: {source}");
     }
 
-    /// RED (S-8 round 4) — **a failed task about content that has gone is never asked again**:
-    /// once the formula's row is rewritten, whatever is handed out and fails again stays held,
-    /// and output that does not touch it asks nothing — no `tail -f` loop.
+    /// RED (S-8 rounds 4 and 5) — **a failed task about content that has gone is never asked
+    /// again**: once the formula's row is rewritten, the old scan is let go and nothing is handed
+    /// out; the scan the settled row then asks is handed out, fails again and stays held, and
+    /// output that does not touch it asks nothing — no `tail -f` loop.
     ///
-    /// MUTATION: the round-3 `new_input` (a changed task given back, every output) — the stale
-    /// scan is handed out again on every batch.
+    /// MUTATION: the round-3 `new_input` (a held task given back on every output) — the scan
+    /// that failed again is handed out on the next batch.
     #[test]
     fn a_stale_failed_task_asks_nothing_on_later_output() {
         let mut session = a_pane_holding_a_failed_formula();
         session.feed("\x1b[H$$y+\u{03b2}$$".as_bytes()).unwrap();
-        if let Some(task) = session.take_decoration_worker_task() {
-            // Handed out, and failed again.
-            session.hold_decoration_task_until_new_input(task);
-        }
+        assert!(
+            session.take_decoration_worker_task().is_none(),
+            "the old scan is let go, not handed out"
+        );
+        session.advance_live_stability(Instant::now() + LIVE_MATH_STABLE_INTERVAL);
+        let task = session
+            .take_decoration_worker_task()
+            .expect("the settled row is asked about");
+        // Handed out, and failed again.
+        session.hold_decoration_task_until_new_input(task);
+        assert_eq!(session.held_for_new_input.len(), 1, "held");
         for line in 0..3 {
             session
                 .feed(format!("\x1b[4;1H\u{884c} {line}").as_bytes())
@@ -26161,6 +26178,156 @@ mod tests {
                 "output elsewhere asks nothing"
             );
         }
+    }
+
+    /// RED (S-8 round 5) — **a held frozen formula whose block lost another of its lines is let
+    /// go**: the candidate line itself is unchanged, but output evicts the block's opener through
+    /// the scrollback quota (a `tail -f`), so the scan is about lines that are no longer there.
+    /// The output lets it go as its completion would be — the closer no longer waits on it —
+    /// instead of holding it until a resize or a scroll.
+    ///
+    /// MUTATION: compare only the candidate's versions in `held_task_changed` (drop the
+    /// `frozen_block_is_current` clause) — the scan stays held. Or make the frozen arm of
+    /// `let_go_stale_task` drop the task — the closer waits on it for as long as the pane lives.
+    #[test]
+    fn a_held_frozen_formula_whose_block_lost_a_line_is_let_go() {
+        let mut session =
+            DualPlaneSession::with_frozen_quota(nz(40), nz(2), NonZeroUsize::new(8).unwrap());
+        session
+            .feed(b"\\begin{align}\r\nx &= y\r\n\\end{align}\r\nafter\r\nmore\r\n")
+            .unwrap();
+        let line = |session: &DualPlaneSession, marker: &str| {
+            *session
+                .document()
+                .entries()
+                .iter()
+                .find(|(_, entry)| entry.line.text.contains(marker))
+                .map(|(id, _)| id)
+                .expect("the block's line")
+        };
+        let opener = line(&session, "\\begin{");
+        let closer = line(&session, "\\end{");
+        let task = std::iter::from_fn(|| session.take_worker_task())
+            .find(|task| {
+                task.candidate_id == closer && task.inputs.iter().any(|input| input.id == opener)
+            })
+            .expect("the closer's scan spans the block");
+        session.hold_decoration_task_until_new_input(SessionDecorationTask::Math(Box::new(
+            SessionMathTask::Frozen(task),
+        )));
+        let mut fed = 0;
+        while session.document().entries().contains_key(&opener) {
+            assert_eq!(
+                session.held_for_new_input.len(),
+                1,
+                "output that leaves the block whole leaves the scan held"
+            );
+            session
+                .feed("\u{65e5}\u{5fd7} filler\r\n".as_bytes())
+                .unwrap();
+            fed += 1;
+            assert!(fed < 256, "the opener is never evicted");
+            assert!(
+                session.document().entries().contains_key(&closer),
+                "the closer evicted before the opener; tighten the corpus"
+            );
+        }
+        assert!(
+            session.held_for_new_input.is_empty(),
+            "the output that evicted the opener lets the scan go"
+        );
+        assert_ne!(
+            session.decoration(closer).map(|record| record.decoration),
+            Some(DecorationLifecycle::Pending),
+            "let go as its completion would be: the closer is no longer waiting on the scan"
+        );
+        assert!(
+            !session
+                .decoration_work_out
+                .contains(&DecorationWorkOut::FrozenMath(closer)),
+            "nor is the scan out"
+        );
+    }
+
+    /// RED (S-8 round 5) — **a held decode whose picture is no longer printed is let go**: the
+    /// next output answers it into nothing, so the session owes nothing for it and hands nothing
+    /// out.
+    ///
+    /// MUTATION: make the decode arm of `let_go_stale_task` drop the task — the decode stays owed
+    /// for as long as the pane lives.
+    #[test]
+    fn a_held_decode_whose_picture_is_gone_is_let_go() {
+        let mut session = DualPlaneSession::new(nz(20), nz(6));
+        session
+            .feed("\u{56fe} \x1b]1337;File=inline=1:AAAA\x07".as_bytes())
+            .unwrap();
+        let Some(SessionDecorationTask::InlineImage(task)) = session.take_decoration_worker_task()
+        else {
+            panic!("OSC 1337 files a decode");
+        };
+        let occurrence = task.occurrence_id;
+        session.hold_decoration_task_until_new_input(SessionDecorationTask::InlineImage(task));
+        assert_eq!(session.outstanding_decoration_work(), 1, "held, still owed");
+        // The occurrence goes, as when its line leaves history.
+        session.inline_images.remove(&occurrence);
+        session.feed("\r\n\u{65e5}\u{5fd7}".as_bytes()).unwrap();
+        assert!(session.held_for_new_input.is_empty(), "let go");
+        assert_eq!(session.outstanding_decoration_work(), 0, "owed nothing");
+        assert!(
+            session.take_decoration_worker_task().is_none(),
+            "asked nothing"
+        );
+    }
+
+    /// RED (S-8 round 5) — **a held resample whose picture was decoded again is let go**: the size
+    /// it asked for is no longer owed, so the display asks the size it wants of the new decode.
+    ///
+    /// MUTATION: make the resample arm of `let_go_stale_task` drop the task — `display_pending`
+    /// still names the old size and its work stays out.
+    #[test]
+    fn a_held_resample_whose_picture_was_decoded_again_is_let_go() {
+        let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
+        let mut session = DualPlaneSession::with_cell_height(nz(20), nz(12), cell);
+        session.set_cell_width_subpixels(cell);
+        session.restore_retired_image_bands();
+        session
+            .feed("\u{56fe} \x1b]1337;File=inline=1:AAAA\x07".as_bytes())
+            .unwrap();
+        let Some(SessionDecorationTask::InlineImage(task)) = session.take_decoration_worker_task()
+        else {
+            panic!("OSC 1337 files a decode");
+        };
+        let occurrence = task.occurrence_id;
+        assert!(session.complete_inline_image_result(
+            task.clone(),
+            Ok(decoded_test_image(occurrence, 200, 300, false)),
+        ));
+        let Some(task @ SessionDecorationTask::ScaleInlineImage(_)) =
+            session.take_decoration_worker_task()
+        else {
+            panic!("a decoded picture is resampled to its display box");
+        };
+        session.hold_decoration_task_until_new_input(task);
+        assert!(session.inline_images[&occurrence].display_pending.is_some());
+        // Decoded again: the picture the resample was for is not the one shown now.
+        session
+            .inline_images
+            .get_mut(&occurrence)
+            .and_then(|record| record.artifact.as_mut())
+            .expect("decoded")
+            .key = "image:decoded-again".to_owned();
+        session.feed("\r\n\u{65e5}\u{5fd7}".as_bytes()).unwrap();
+        assert!(session.held_for_new_input.is_empty(), "let go");
+        assert_eq!(
+            session.inline_images[&occurrence].display_pending, None,
+            "the old size is no longer owed"
+        );
+        assert!(
+            !session
+                .decoration_work_out
+                .contains(&DecorationWorkOut::Scale(occurrence)),
+            "nor out"
+        );
     }
 
     /// RED (S-8 round 3) — **a scroll is new input to a held task**: the reader scrolling the
