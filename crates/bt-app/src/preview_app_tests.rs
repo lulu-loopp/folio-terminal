@@ -2165,7 +2165,8 @@ fn a_resize_reflows_the_markdown_without_re_measuring_it() {
         .collect();
     assert!(
         intrinsic_calls.get() > 100,
-        "the fixture's tables and fences really are a measurable share              ({} shaping calls), or this proves nothing",
+        "the fixture's tables and fences really are a measurable share \
+         ({} shaping calls), or this proves nothing",
         intrinsic_calls.get()
     );
 

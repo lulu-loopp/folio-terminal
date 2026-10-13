@@ -658,7 +658,8 @@ fn a_card_torn_off_carries_its_engine_with_it() {
     let loaded = card.state_answering_its_load();
     assert!(
         loaded.ready || loaded.error.is_some(),
-        "the engine gave no answer about its load, which past its own budget is a defect:          {loaded:?}"
+        "the engine gave no answer about its load, which past its own budget is a defect: \
+         {loaded:?}"
     );
     assert_eq!(loaded.error, None, "the fixture loads");
     card.seek_to(0.2, now);

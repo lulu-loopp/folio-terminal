@@ -267,7 +267,8 @@ fn a_wheel_notch_belongs_to_the_pane_it_is_over_on_either_screen() {
                 assert_eq!(
                     answer(held | shift_held),
                     Some(wheel_route(shift, modes, scrolled)),
-                    "{platform:?} {held:?} keeps the original route, shift={shift}                      modes={modes:?} scrolled={scrolled}"
+                    "{platform:?} {held:?} keeps the original route, shift={shift} \
+                     modes={modes:?} scrolled={scrolled}"
                 );
             }
         }
@@ -1554,7 +1555,7 @@ fn a_right_press_on_a_tab_raises_its_menu_and_leaves_the_active_tab_alone() {
     assert!(
         opener < router_call,
         "the tab menu's opener stands above the chrome router, where an open \
-             rail lies over the panes (Q179) and the tab list is what
+             rail lies over the panes (Q179) and the tab list is what \
              `chrome_target_at` answers first"
     );
 }

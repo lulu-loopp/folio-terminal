@@ -5900,7 +5900,8 @@ mod tests {
                 longest_ms: 480,
                 over: 3,
             },
-            "the composition 480 ms, the key 25 ms beside it, the timer 25 ms;              the move cost the pump 10 ms and its handler's 300 ms are the handler's"
+            "the composition 480 ms, the key 25 ms beside it, the timer 25 ms; \
+             the move cost the pump 10 ms and its handler's 300 ms are the handler's"
         );
         let line = hold.line();
         assert!(

@@ -1201,7 +1201,8 @@ function click(id) { document.getElementById(id).click(); }
             ),
         );
         report.say(&format!(
-            "   FINDING a javascript: URL is evaluated by the engine and never reaches the gate              — the page reports {}",
+            "   FINDING a javascript: URL is evaluated by the engine and never reaches the gate \
+             — the page reports {}",
             if after.contains("javascript=ran") {
                 "that it ran"
             } else {
@@ -1287,7 +1288,8 @@ function click(id) { document.getElementById(id).click(); }
             if by_the_gate {
                 "this host's navigation gate"
             } else {
-                "the engine itself, before any callback — the read-access scope                  loadFileURL: was given, which is X-2's row 9 arriving one door earlier"
+                "the engine itself, before any callback — the read-access scope \
+                 loadFileURL: was given, which is X-2's row 9 arriving one door earlier"
             }
         ));
 

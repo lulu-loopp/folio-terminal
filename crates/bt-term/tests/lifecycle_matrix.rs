@@ -1069,15 +1069,18 @@ fn settling_a_gesture_over_a_long_history_stays_within_its_budget() {
     );
     assert!(
         prose_allocations <= PROSE_HEAP_ALLOCATIONS,
-        "settling over a prose history made {prose_allocations} allocations, budget          {PROSE_HEAP_ALLOCATIONS}"
+        "settling over a prose history made {prose_allocations} allocations, budget \
+         {PROSE_HEAP_ALLOCATIONS}"
     );
     assert!(
         formula_bytes <= FORMULA_HEAP_BYTES,
-        "settling over a formula history asked for {formula_bytes} B, budget          {FORMULA_HEAP_BYTES} B"
+        "settling over a formula history asked for {formula_bytes} B, budget \
+         {FORMULA_HEAP_BYTES} B"
     );
     assert!(
         formula_allocations <= FORMULA_HEAP_ALLOCATIONS,
-        "settling over a formula history made {formula_allocations} allocations, budget          {FORMULA_HEAP_ALLOCATIONS}"
+        "settling over a formula history made {formula_allocations} allocations, budget \
+         {FORMULA_HEAP_ALLOCATIONS}"
     );
     assert!(
         prose_elapsed <= SETTLE_CEILING,

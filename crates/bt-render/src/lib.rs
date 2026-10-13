@@ -20967,7 +20967,8 @@ mod tests {
                     * LINE_HEIGHT_TO_FONT_SIZE_RATIO
                     * scale_factor as f32)
                     .ceil(),
-                "the row height is a ratio of the face size now, and at the                  default size it must still be the 22 logical pixels it always was"
+                "the row height is a ratio of the face size now, and at the \
+                 default size it must still be the 22 logical pixels it always was"
             );
             assert_eq!(
                 DEFAULT_TERMINAL_FONT_SIZE_LOGICAL_PX * LINE_HEIGHT_TO_FONT_SIZE_RATIO,
@@ -26796,7 +26797,8 @@ mod tests {
                 "Folio glyph atlas was repacked after a textless frame (refit #2)".to_owned(),
                 "Folio glyph atlas was repacked after a textless frame (refit #3)".to_owned(),
             ],
-            "a re-pack that leaves no line, or leaves one without its number, is a re-pack              nobody on the machine it happened on can count"
+            "a re-pack that leaves no line, or leaves one without its number, is a re-pack \
+             nobody on the machine it happened on can count"
         );
         // The family the refusal line already belongs to, so that one `grep` over
         // `diagnostics.log` finds both halves of the story.
@@ -27357,7 +27359,8 @@ mod tests {
                     .count();
                 assert!(
                     inked > (seat.width * seat.height / 200) as usize,
-                    "window {which}, seat at x={}: {inked} inked pixels — its text did not come                      back",
+                    "window {which}, seat at x={}: {inked} inked pixels — its text did not come \
+                     back",
                     seat.x
                 );
             }
@@ -28071,7 +28074,8 @@ mod tests {
         // moved with it. Equality here would mean the request was dropped.
         assert!(
             semibold.iter().sum::<f32>() > regular.iter().sum::<f32>(),
-            "semibold {semibold:?} must outrun regular {regular:?} —              an unmoved axis is a badge still drawn at 400"
+            "semibold {semibold:?} must outrun regular {regular:?} — \
+             an unmoved axis is a badge still drawn at 400"
         );
         // `Regular` is what a label that says nothing gets, so every call site
         // that predates this field is untouched by it.
@@ -28145,7 +28149,9 @@ mod tests {
             let proportional = figure_advance_spread(&mut font_system, weight, false);
             assert!(
                 proportional > 1.0,
-                "{weight:?}: figures spread {proportional}px without `tnum` —                  if this face ever ships tabular defaults, this pin is the                  place that says the feature request became redundant"
+                "{weight:?}: figures spread {proportional}px without `tnum` — \
+                 if this face ever ships tabular defaults, this pin is the \
+                 place that says the feature request became redundant"
             );
             let tabular = figure_advance_spread(&mut font_system, weight, true);
             // A quarter pixel at the badge's 10px. Segoe UI Variable's tabular
@@ -28574,14 +28580,16 @@ mod tests {
             .collect();
         assert!(
             broken.is_empty(),
-            "these faces have no scalable em, and every advance they report is \n             `inf`: {broken:#?}"
+            "these faces have no scalable em, and every advance they report is \
+             `inf`: {broken:#?}"
         );
         assert!(
             db.faces().any(|face| face
                 .families
                 .iter()
                 .any(|(name, _)| name == COLOR_EMOJI_FONT_FAMILY)),
-            "the embedded emoji face draws bitmaps and must survive a rule that is \n             about the em rather than about outlines"
+            "the embedded emoji face draws bitmaps and must survive a rule that is \
+             about the em rather than about outlines"
         );
     }
 
@@ -28707,7 +28715,8 @@ mod tests {
             let cap_centre = cap_band_centre(&mut font_system, cap_height_ratio, &label);
             assert!(
                 (cap_centre - rect_centre).abs() <= 0.5,
-                "tab title cap band off the tab's axis at {dpi_milli} milli-DPI:                  cap centre {cap_centre}, tab centre {rect_centre}"
+                "tab title cap band off the tab's axis at {dpi_milli} milli-DPI: \
+                 cap centre {cap_centre}, tab centre {rect_centre}"
             );
         }
     }
@@ -28745,7 +28754,8 @@ mod tests {
             let cap_centre = cap_band_centre(&mut font_system, cap_height_ratio, &label);
             assert!(
                 (cap_centre - rect_centre).abs() <= 0.5,
-                "pane head title cap band off the head's axis at {dpi_milli} milli-DPI:                  cap centre {cap_centre}, head centre {rect_centre}"
+                "pane head title cap band off the head's axis at {dpi_milli} milli-DPI: \
+                 cap centre {cap_centre}, head centre {rect_centre}"
             );
         }
     }
@@ -32179,7 +32189,8 @@ mod tests {
 
             assert!(
                 after.cell_height_px > before.cell_height_px,
-                "24 logical pixels of face wants a taller row than 16 did                  ({} vs {})",
+                "24 logical pixels of face wants a taller row than 16 did \
+                 ({} vs {})",
                 after.cell_height_px,
                 before.cell_height_px
             );
@@ -32350,7 +32361,8 @@ mod tests {
             }
             assert!(
                 !inked.is_empty(),
-                "the label drew nothing at all — a gate that cannot see the ink                  cannot see it in the wrong place either"
+                "the label drew nothing at all — a gate that cannot see the ink \
+                 cannot see it in the wrong place either"
             );
             let left = inked.iter().map(|(x, _)| *x).min().expect("ink");
             let right = inked.iter().map(|(x, _)| *x).max().expect("ink");

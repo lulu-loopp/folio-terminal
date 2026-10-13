@@ -26464,7 +26464,8 @@ mod tests {
         assert_eq!(
             typing.len(),
             2,
-            "a field and a caret — the two marks that are true of every open              editor, selection or no selection"
+            "a field and a caret — the two marks that are true of every open \
+             editor, selection or no selection"
         );
         let (field, caret) = (typing[0], typing[1]);
         assert!(
@@ -26498,7 +26499,8 @@ mod tests {
         assert_ne!(
             (field.color, field.opacity),
             (band.color, band.opacity),
-            "and a selection you cannot tell from its own ground is not a              selection"
+            "and a selection you cannot tell from its own ground is not a \
+             selection"
         );
         assert_eq!(
             (band.color, band.opacity),
@@ -26554,7 +26556,8 @@ mod tests {
         let (field, band, caret) = (editing_head[0], editing_head[1], editing_head[2]);
         assert_eq!(
             caret.rect[2], field.rect[2],
-            "a caret at the end of the name stands on the field's last hairline              rather than being refused for reaching it"
+            "a caret at the end of the name stands on the field's last hairline \
+             rather than being refused for reaching it"
         );
         assert!(
             band.rect[2] <= field.rect[2] && field.rect[0] <= band.rect[0],
@@ -28856,7 +28859,8 @@ mod tests {
                         hit_window_chrome(width, scale, mac, RailState::default(), summoned, x, y);
                     assert!(
                         !answer.is_some_and(|target| forbidden.contains(&target)),
-                        "x={x} answers {answer:?} on a window whose platform draws its own                          (summoned={summoned})"
+                        "x={x} answers {answer:?} on a window whose platform draws its own \
+                         (summoned={summoned})"
                     );
                 }
             }
@@ -29370,7 +29374,8 @@ mod tests {
             assert_eq!(
                 first(lit),
                 (lit.strip_left_px as f32) + WINDOW_TAB_FLOAT_LEAD_IN_LOGICAL_PX * scale,
-                "and with the lights on the window it is still the run plus twelve                  ({scale}x)"
+                "and with the lights on the window it is still the run plus twelve \
+                 ({scale}x)"
             );
             assert!(
                 tab_strip_geometry(width, scale, dark, &trailers, 0, 0.0).floating,
@@ -32387,7 +32392,8 @@ mod tests {
             let midway = chevron_of(turn, true);
             assert_eq!(
                 midway.rect, resting.rect,
-                "the `.chevbtn` box is the same 9x6 at {turn} of the turn —                  a transform does not touch layout"
+                "the `.chevbtn` box is the same 9x6 at {turn} of the turn — \
+                 a transform does not touch layout"
             );
             let ChromeMark::Chevron { turned_degrees } = midway.mark else {
                 panic!("the strip draws a chevron");
@@ -32396,7 +32402,8 @@ mod tests {
         }
         assert!(
             seen.len() >= 12,
-            "twenty samples of the turn produced {} angles — the strip is not drawing              the transition, only its two ends",
+            "twenty samples of the turn produced {} angles — the strip is not drawing \
+             the transition, only its two ends",
             seen.len()
         );
 
@@ -33462,7 +33469,8 @@ mod tests {
         assert_eq!(
             fills(&sprites).len(),
             1,
-            "a collapsed caret has no band behind it — only the field's own              ground, which is there for as long as the editor is"
+            "a collapsed caret has no band behind it — only the field's own \
+             ground, which is there for as long as the editor is"
         );
     }
 

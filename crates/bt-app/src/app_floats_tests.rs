@@ -768,7 +768,8 @@ fn opening_any_popup_closes_every_other_one() {
         );
         assert!(
             !closed.contains(&keep),
-            "{keep:?} must not close the popup it is raising — that is what                  makes a toggle possible through the same door as an open"
+            "{keep:?} must not close the popup it is raising — that is what \
+             makes a toggle possible through the same door as an open"
         );
         for other in Popup::ALL {
             assert_eq!(

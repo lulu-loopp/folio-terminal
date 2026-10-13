@@ -192,7 +192,8 @@ fn a_remembered_line_comes_only_from_a_mark_the_reader_was_at() {
     let clause = &leaf[at..];
     assert!(
         clause.contains("!mark.command_text.is_empty() && mark.typed_by_user"),
-        "the line written into session.json comes from a mark whose command              the reader's own keyboard was present for: {clause}"
+        "the line written into session.json comes from a mark whose command \
+         the reader's own keyboard was present for: {clause}"
     );
 }
 
