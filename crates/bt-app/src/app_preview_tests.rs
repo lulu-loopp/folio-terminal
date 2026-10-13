@@ -5,13 +5,14 @@
 
 use super::*;
 use crate::test_support::{
-    PtyPresentationHarness, TAB_ONE, a_held_raster, a_page_that_wants_a_sharper_picture,
-    assert_close, buffer_saying, calls_of, card_text, cell_ink, cross_metrics, cross_move,
-    cross_solve, document_key, engines_settling_to, found_in, free_calls_of, free_fn_body,
-    host_path, in_product, inside, item_body, leaf_saying, ledger_gate, markdown_body, method_body,
-    mono_caret_block, no_directories, one_picture, pictures_drawn, prose, prose_caret_block,
-    reader_names, rested_bars, scale_task, seat_of, shown_and_opened, source, source_block,
-    squeezed_body, tab_with_a_picture, tab_with_a_preview, text_buffer,
+    PtyPresentationHarness, TAB_ONE, a_held_raster, a_page_that_wants_a_sharper_picture, admitted,
+    answer_awaited, assert_close, buffer_saying, calls_of, card_text, cell_ink, cross_metrics,
+    cross_move, cross_solve, document_key, engines_settling_to, fail_awaited, found_in,
+    free_calls_of, free_fn_body, host_path, in_product, inside, item_body, leaf_saying,
+    ledger_gate, markdown_body, method_body, mono_caret_block, no_directories, one_picture,
+    pictures_drawn, probe_leaf, prose, prose_caret_block, reader_names, rested_bars, scale_task,
+    seat_of, shown_and_opened, source, source_block, squeezed_body, tab_with_a_picture,
+    tab_with_a_preview, text_buffer,
 };
 use bt_render::LIGHT_CHROME;
 use bt_source::{ItemQuery, Pattern, Scope, View, needle};
@@ -969,10 +970,11 @@ fn the_windows_animations_are_bounded_by_the_frames_they_hold() {
     walk_asking(
         &mut cache,
         &[(seat_of(TAB_ONE, SeatId(1)), Some(still))],
-        OpenAsked::Asked,
+        admitted,
     );
-    cache.opened(
-        still_key.clone(),
+    answer_awaited(
+        &mut cache,
+        &still_key,
         0,
         Err(animation::AnimationRefusal::OneFrame),
     );
@@ -982,17 +984,17 @@ fn the_windows_animations_are_bounded_by_the_frames_they_hold() {
     ));
 }
 
-/// **One walk of the surfaces, with a worker answering every open with
-/// `answer`** — the files it was asked to open, in order.
+/// **One walk of the surfaces, with a worker answering each open with what
+/// `answer` makes** — the files it was asked to open, in order.
 fn walk_asking(
     window: &mut AnimationCache,
     showing: &[(PreviewSurface, Option<PathBuf>)],
-    answer: OpenAsked,
+    mut answer: impl FnMut() -> OpenAsked,
 ) -> Vec<PathBuf> {
     let mut asked = Vec::new();
     window.ask_for_showing(showing, |path| {
         asked.push(path.to_owned());
-        answer
+        answer()
     });
     asked
 }
@@ -1021,26 +1023,24 @@ fn a_failed_open_is_unanswered_and_only_the_files_next_open_asks_again() {
     let on = |path: &PathBuf| vec![(pane, Some(path.clone())), (other, Some(spinner.clone()))];
     let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
     assert_eq!(
-        walk_asking(&mut window, &on(&spinner), OpenAsked::Asked),
+        walk_asking(&mut window, &on(&spinner), admitted),
         vec![spinner.clone()]
     );
-    window.settle(crate::settle_failure(crate::Asked::Animation {
-        path: spinner.clone(),
-    }));
+    fail_awaited(&mut window, &spinner);
     assert!(
         matches!(window.get(&key), Some(AnimationEntry::Unanswered)),
         "the failed open is unanswered"
     );
     for _ in 0..3 {
         assert!(
-            walk_asking(&mut window, &on(&spinner), OpenAsked::Asked).is_empty(),
+            walk_asking(&mut window, &on(&spinner), admitted).is_empty(),
             "a redraw is no new input"
         );
     }
-    assert!(walk_asking(&mut window, &[(pane, None)], OpenAsked::Asked).is_empty());
-    assert!(walk_asking(&mut window, &on(&still), OpenAsked::Asked).len() == 1);
+    assert!(walk_asking(&mut window, &[(pane, None)], admitted).is_empty());
+    assert!(walk_asking(&mut window, &on(&still), admitted).len() == 1);
     assert_eq!(
-        walk_asking(&mut window, &on(&spinner), OpenAsked::Asked),
+        walk_asking(&mut window, &on(&spinner), admitted),
         vec![spinner.clone()],
         "the file's next open asks again"
     );
@@ -1085,15 +1085,16 @@ fn records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them() {
     ];
     let mut window = AnimationCache::with_budget(2 * 2 * FRAME_BYTES as u64);
     assert_eq!(
-        walk_asking(&mut window, &showing[..1], OpenAsked::Unstarted),
+        walk_asking(&mut window, &showing[..1], || OpenAsked::Unstarted),
         vec![unstarted.clone()]
     );
     assert_eq!(
-        walk_asking(&mut window, &showing, OpenAsked::Asked),
+        walk_asking(&mut window, &showing, admitted),
         vec![refused.clone(), in_flight.clone()]
     );
-    window.opened(
-        normalized_local_image_path_key(&refused),
+    answer_awaited(
+        &mut window,
+        &normalized_local_image_path_key(&refused),
         1,
         Err(animation::AnimationRefusal::OneFrame),
     );
@@ -1121,12 +1122,12 @@ fn records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them() {
     assert!(
         matches!(
             window.get(&normalized_local_image_path_key(&in_flight)),
-            Some(AnimationEntry::Pending)
+            Some(AnimationEntry::Pending { .. })
         ),
         "a decode in flight is still awaited"
     );
     assert!(
-        walk_asking(&mut window, &showing, OpenAsked::Asked).is_empty(),
+        walk_asking(&mut window, &showing, admitted).is_empty(),
         "no redraw asks a question this window holds the record of"
     );
 }
@@ -1143,13 +1144,14 @@ fn a_refusal_shown_on(
         .map(|surface| (*surface, Some(path.to_path_buf())))
         .collect();
     assert_eq!(
-        walk_asking(window, &showing, OpenAsked::Asked),
+        walk_asking(window, &showing, admitted),
         vec![path.to_path_buf()],
         "the first showing asks, once however many surfaces show it"
     );
     let key = normalized_local_image_path_key(path);
-    window.opened(
-        key.clone(),
+    answer_awaited(
+        window,
+        &key,
         1,
         Err(animation::AnimationRefusal::Undecodable),
     );
@@ -1182,11 +1184,7 @@ fn a_refused_files_record_leaves_with_the_last_surface_that_named_it() {
         "the last surface naming the file is gone, and the record with it"
     );
     assert_eq!(
-        walk_asking(
-            &mut window,
-            &[(pane, Some(broken.clone()))],
-            OpenAsked::Asked
-        ),
+        walk_asking(&mut window, &[(pane, Some(broken.clone()))], admitted),
         vec![broken],
         "the file's next showing is an open, and asks"
     );
@@ -1208,12 +1206,7 @@ fn a_record_is_kept_while_any_surface_still_names_its_file() {
     window.forget_surface(other);
     for _ in 0..3 {
         assert!(
-            walk_asking(
-                &mut window,
-                &[(pane, Some(broken.clone()))],
-                OpenAsked::Asked
-            )
-            .is_empty(),
+            walk_asking(&mut window, &[(pane, Some(broken.clone()))], admitted).is_empty(),
             "a redraw of the surface still showing the file is no new input"
         );
     }
@@ -1243,7 +1236,7 @@ fn a_surface_handed_another_file_lets_go_of_the_record_nobody_names() {
         walk_asking(
             &mut window,
             &[(pane, Some(shared.clone())), (other, Some(shared.clone()))],
-            OpenAsked::Asked
+            admitted
         )
         .is_empty(),
         "a file whose refusal is held is not asked by the surface that just began showing it"
@@ -1256,7 +1249,7 @@ fn a_surface_handed_another_file_lets_go_of_the_record_nobody_names() {
         walk_asking(
             &mut window,
             &[(pane, Some(next.clone())), (other, Some(shared.clone()))],
-            OpenAsked::Asked
+            admitted
         ),
         vec![next],
     );
@@ -1265,11 +1258,7 @@ fn a_surface_handed_another_file_lets_go_of_the_record_nobody_names() {
         "the other surface still names the shared file"
     );
     assert_eq!(
-        walk_asking(
-            &mut window,
-            &[(pane, Some(broken.clone()))],
-            OpenAsked::Asked
-        ),
+        walk_asking(&mut window, &[(pane, Some(broken.clone()))], admitted),
         vec![broken],
         "and the file let go of is asked by its next open"
     );
@@ -1293,11 +1282,7 @@ fn a_closed_tabs_surfaces_take_their_records_with_them() {
     window.forget_surfaces_gone(|surface| surface != closed);
     assert!(!window.contains_key(&key));
     assert_eq!(
-        walk_asking(
-            &mut window,
-            &[(kept, Some(broken.clone()))],
-            OpenAsked::Asked
-        ),
+        walk_asking(&mut window, &[(kept, Some(broken.clone()))], admitted),
         vec![broken],
         "the file shown again elsewhere is an open"
     );
@@ -1320,7 +1305,7 @@ fn an_answer_for_a_file_no_surface_names_files_no_record() {
     let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
     for path in [&refused, &failed, &played] {
         assert_eq!(
-            walk_asking(&mut window, &[(pane, Some(path.clone()))], OpenAsked::Asked),
+            walk_asking(&mut window, &[(pane, Some(path.clone()))], admitted),
             vec![path.clone()]
         );
     }
@@ -1329,21 +1314,21 @@ fn an_answer_for_a_file_no_surface_names_files_no_record() {
         assert!(
             matches!(
                 window.get(&normalized_local_image_path_key(path)),
-                Some(AnimationEntry::Pending)
+                Some(AnimationEntry::Pending { .. })
             ),
             "a decode in flight is kept until its answer"
         );
     }
-    window.opened(
-        normalized_local_image_path_key(&refused),
+    answer_awaited(
+        &mut window,
+        &normalized_local_image_path_key(&refused),
         1,
         Err(animation::AnimationRefusal::Undecodable),
     );
-    window.settle(crate::settle_failure(crate::Asked::Animation {
-        path: failed.clone(),
-    }));
-    window.opened(
-        normalized_local_image_path_key(&played),
+    fail_awaited(&mut window, &failed);
+    answer_awaited(
+        &mut window,
+        &normalized_local_image_path_key(&played),
         2,
         Ok(a_playback_of(6, Instant::now())),
     );
@@ -1370,25 +1355,21 @@ fn browsing_away_and_back_during_one_decode_asks_for_it_once() {
     let b = PathBuf::from("D:/\u{6765}\u{56de}/b.gif");
     let on = |path: &PathBuf| vec![(pane, Some(path.clone()))];
     let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
-    assert_eq!(
-        walk_asking(&mut window, &on(&a), OpenAsked::Asked),
-        vec![a.clone()]
-    );
-    assert_eq!(
-        walk_asking(&mut window, &on(&b), OpenAsked::Asked),
-        vec![b.clone()]
-    );
+    assert_eq!(walk_asking(&mut window, &on(&a), admitted), vec![a.clone()]);
+    assert_eq!(walk_asking(&mut window, &on(&b), admitted), vec![b.clone()]);
     assert!(
-        walk_asking(&mut window, &on(&a), OpenAsked::Asked).is_empty(),
+        walk_asking(&mut window, &on(&a), admitted).is_empty(),
         "the decode in flight is this open's answer: one decode, not two"
     );
-    window.opened(
-        normalized_local_image_path_key(&a),
+    answer_awaited(
+        &mut window,
+        &normalized_local_image_path_key(&a),
         1,
         Ok(a_playback_of(6, Instant::now())),
     );
-    window.opened(
-        normalized_local_image_path_key(&b),
+    answer_awaited(
+        &mut window,
+        &normalized_local_image_path_key(&b),
         2,
         Ok(a_playback_of(6, Instant::now())),
     );
@@ -1423,17 +1404,18 @@ fn a_playback_no_surface_names_is_let_go_of() {
             (pane, Some(played.clone())),
             (background, Some(resumes.clone())),
         ],
-        OpenAsked::Asked,
+        admitted,
     );
     for (serial, path) in [(1, &played), (2, &resumes)] {
-        window.opened(
-            normalized_local_image_path_key(path),
+        answer_awaited(
+            &mut window,
+            &normalized_local_image_path_key(path),
             serial,
             Ok(a_playback_of(6, Instant::now())),
         );
     }
     // The background tab is not walked: its surface still names its file.
-    walk_asking(&mut window, &[(pane, Some(next))], OpenAsked::Asked);
+    walk_asking(&mut window, &[(pane, Some(next))], admitted);
     assert!(!window.contains_key(&normalized_local_image_path_key(&played)));
     assert!(
         matches!(
@@ -1503,10 +1485,10 @@ fn a_refused_file_that_changed_is_asked_again_on_its_next_showing() {
         (float, Some(unstarted.clone())),
     ];
     assert_eq!(
-        walk_asking(&mut window, &showing, OpenAsked::Unstarted),
+        walk_asking(&mut window, &showing, || OpenAsked::Unstarted),
         vec![unstarted.clone()]
     );
-    assert!(walk_asking(&mut window, &showing, OpenAsked::Asked).is_empty());
+    assert!(walk_asking(&mut window, &showing, admitted).is_empty());
 
     assert!(window.let_go_changed_file(&key), "the refusal is let go of");
     assert!(
@@ -1514,10 +1496,333 @@ fn a_refused_file_that_changed_is_asked_again_on_its_next_showing() {
         "an open that never answered is no fact about the bytes"
     );
     assert_eq!(
-        walk_asking(&mut window, &showing, OpenAsked::Asked),
+        walk_asking(&mut window, &showing, admitted),
         vec![half_written],
         "the file's new bytes are asked about, and nothing else"
     );
+}
+
+/// RED (T-ANIMATION-ANSWER-IDENTITY) — **an answer for an older ask is superseded, not filed**:
+/// the file changed under its decode, the window let that decode go and asked again, and the two
+/// answers come home in either order. Identity decides, not arrival: whichever comes first, only
+/// the answer to the open the record awaits is filed, and the older open's answer — a playback, a
+/// refusal or a failure — changes nothing, before the newer answer or after it.
+///
+/// MUTATION: have `AnimationCache::opened` file by arrival (drop its `!self.awaits(&key, asked)`
+/// gate) — the older answer is filed over the newer question. Or drop the same gate from
+/// `open_unanswered` — the older open's failure overwrites the newer playback.
+#[test]
+fn an_answer_for_an_older_ask_is_superseded_not_filed() {
+    let pane = seat_of(TAB_ONE, SeatId(1));
+    let path = PathBuf::from("D:/\u{6539}\u{5199}/\u{8f6c}\u{5708} spinner.gif");
+    let key = normalized_local_image_path_key(&path);
+    let showing = [(pane, Some(path.clone()))];
+    let older = crate::computation_lane::ComputationId::from(41);
+    let newer = crate::computation_lane::ComputationId::from(42);
+    for newer_first in [true, false] {
+        let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+        window.ask_for_showing(&showing, |_| OpenAsked::Asked(older));
+        assert!(
+            window.let_go_changed_file(&key),
+            "the file-change news lets go of the decode in flight"
+        );
+        window.ask_for_showing(&showing, |_| OpenAsked::Asked(newer));
+        if newer_first {
+            assert!(window.opened(key.clone(), newer, 2, Ok(a_playback_of(6, Instant::now()))));
+            assert!(
+                !window.opened(
+                    key.clone(),
+                    older,
+                    1,
+                    Err(animation::AnimationRefusal::OneFrame)
+                ),
+                "the older answer, arriving second, is superseded"
+            );
+        } else {
+            assert!(
+                !window.opened(key.clone(), older, 1, Ok(a_playback_of(3, Instant::now()))),
+                "the older answer, arriving first, is superseded"
+            );
+            assert_eq!(
+                window.awaited(&key),
+                Some(newer),
+                "and the newer open is still awaited"
+            );
+            assert!(window.opened(key.clone(), newer, 2, Ok(a_playback_of(6, Instant::now()))));
+        }
+        window.settle(crate::settle_failure(
+            older,
+            crate::Asked::Animation { path: path.clone() },
+        ));
+        assert!(
+            matches!(
+                window.get(&key),
+                Some(AnimationEntry::Ready { serial: 2, .. })
+            ),
+            "the newer open's playback stands (newer first: {newer_first})"
+        );
+    }
+}
+
+/// The animation fixture's bytes, a file `animation::decode` plays.
+fn animated_bytes() -> Vec<u8> {
+    std::fs::read(an_animated_file()).expect("the animation fixture")
+}
+
+/// A scratch `.gif` of this test's own under the build directory, named by `bt_testpath`.
+fn scratch_gif_named(tag: &str) -> PathBuf {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/animation-tests");
+    std::fs::create_dir_all(&directory).expect("a scratch directory under the build directory");
+    directory.join(format!("{}.gif", bt_testpath::unique_name(tag)))
+}
+
+/// **What one drain hands the window, filed as `Runtime::apply_math_results` files it**: each
+/// animation open's answer through [`AnimationCache::opened`] under the identity of the request it
+/// answers, each failed open through [`AnimationCache::settle`]. The identities whose answer was
+/// filed, in the order they came.
+fn file_the_drain(
+    window: &mut AnimationCache,
+    answers: crate::MathAnswers,
+) -> Vec<crate::computation_lane::ComputationId> {
+    let mut filed = Vec::new();
+    for (asked, result) in answers.done {
+        if let DecorationWorkerCompletion::PeekAnimation { path, frames } = result.completion
+            && window.opened(normalized_local_image_path_key(&path), asked, 1, frames)
+        {
+            filed.push(asked);
+        }
+    }
+    for (_, settled) in answers.failed {
+        window.settle(settled);
+    }
+    filed
+}
+
+/// RED (T-ANIMATION-ANSWER-IDENTITY) — **a decode in flight when its file changes is superseded,
+/// and the new bytes are decoded**: on the real computation lane with the product's door, a
+/// `.gif` caught half-written is opened and its decode reads those bytes (refused); the file-change
+/// news arrives before the window has taken that answer, the walk asks about the bytes there now,
+/// and of the two answers only the second — the new bytes, playing — is filed.
+///
+/// MUTATION: have `AnimationCache::let_go_changed_file` keep a `Pending` (its pre-ticket match)
+/// — the news lets go of nothing, the walk asks nothing, and the old bytes' answer would stand.
+#[test]
+fn a_decode_in_flight_when_its_file_changes_is_superseded_and_the_new_bytes_are_decoded() {
+    crate::test_support::install_host_answers();
+    let mut lane = crate::computation_lane::fixtures::watched(crate::lane::Executor::scripted(
+        Arc::new(crate::lane::Gate::default()),
+    ));
+    let gif = scratch_gif_named("\u{5199}\u{5165}\u{4e2d} half-written");
+    std::fs::write(
+        &gif,
+        b"GIF89a \xe5\x86\x99\xe5\x88\xb0\xe4\xb8\x80\xe5\x8d\x8a",
+    )
+    .expect("a scratch file this test owns");
+    let key = normalized_local_image_path_key(&gif);
+    let showing = [(seat_of(TAB_ONE, SeatId(1)), Some(gif.clone()))];
+    let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+    let ask = |window: &mut AnimationCache, lane: &crate::computation_lane::ComputationLane| {
+        window.ask_for_showing(&showing, |path| {
+            crate::ask_to_open(lane, probe_leaf(), path)
+        });
+    };
+
+    ask(&mut window, &lane.lane);
+    let older = window.awaited(&key).expect("the open is in flight");
+    // The decode reads the half-written bytes and answers; the window has not taken it yet.
+    let first = lane.next_ended(
+        crate::computation_lane::Share::Decoration,
+        crate::computation_lane::fixtures::nobody,
+    );
+    std::fs::write(&gif, animated_bytes()).expect("the writer finishes");
+    assert!(
+        window.let_go_changed_file(&key),
+        "the file-change news lets go of the decode in flight"
+    );
+    ask(&mut window, &lane.lane);
+    let newer = window
+        .awaited(&key)
+        .expect("the walk asks about the bytes there now");
+    assert_ne!(older, newer, "a new question, under a new identity");
+    let second = lane.next_ended(
+        crate::computation_lane::Share::Decoration,
+        crate::computation_lane::fixtures::nobody,
+    );
+    let answers = crate::sort_math_terminals(vec![first, second]);
+    assert!(
+        matches!(
+            answers.done.as_slice(),
+            [
+                (a, MathWorkerResult { completion: DecorationWorkerCompletion::PeekAnimation { frames: Err(_), .. }, .. }),
+                (b, MathWorkerResult { completion: DecorationWorkerCompletion::PeekAnimation { frames: Ok(_), .. }, .. }),
+            ] if *a == older && *b == newer
+        ),
+        "the first decode read the half-written bytes, the second the finished file"
+    );
+    assert_eq!(
+        file_the_drain(&mut window, answers),
+        [newer],
+        "only the answer to the question the window asks now is filed"
+    );
+    assert!(
+        matches!(window.get(&key), Some(AnimationEntry::Ready { .. })),
+        "the changed file plays"
+    );
+    std::fs::remove_file(&gif).expect("the scratch file this test wrote");
+}
+
+/// RED (T-ANIMATION-ANSWER-IDENTITY; side-effects contract (b)4, owner ruling Q4) — **a
+/// superseded answer is recorded as a terminal and never shown**: while the worker is busy, a
+/// window's open of a file waits in line; the file changes and the walk asks again, and the
+/// waiting open ends `Superseded { by }` the newer one in the lane's ledger — taken by the drain
+/// at once, carrying no answer, so the window files nothing for it and the person sees no frame of
+/// it — and the newer open is the one the file is filed under.
+///
+/// MUTATION: have `MathWorkerRequest::relate` answer `Relation::Other` for every pair — the
+/// waiting open is run, and ends `Done` rather than `Superseded`.
+#[test]
+fn a_superseded_answer_is_recorded_as_a_terminal_and_never_shown() {
+    use crate::computation_lane::{Share, fixtures::nobody};
+    crate::test_support::install_host_answers();
+    let gate = Arc::new(crate::lane::Gate::default());
+    let mut lane = crate::computation_lane::fixtures::watched(crate::lane::Executor::scripted(
+        Arc::clone(&gate),
+    ));
+    let busy = PathBuf::from("\u{4e0d}\u{5728}\u{8fd9}\u{91cc}/\u{5fd9} busy.gif");
+    let gif = scratch_gif_named("\u{88ab}\u{53d6}\u{4ee3} superseded");
+    std::fs::write(&gif, animated_bytes()).expect("a scratch file this test owns");
+    let key = normalized_local_image_path_key(&gif);
+    let pane = seat_of(TAB_ONE, SeatId(1));
+    let other = seat_of(TAB_ONE, SeatId(2));
+    let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+    let ask = |window: &mut AnimationCache, lane: &crate::computation_lane::ComputationLane| {
+        window.ask_for_showing(
+            &[(pane, Some(busy.clone())), (other, Some(gif.clone()))],
+            |path| crate::ask_to_open(lane, probe_leaf(), path),
+        );
+    };
+
+    gate.hold();
+    ask(&mut window, &lane.lane);
+    assert!(gate.wait_entered(1), "the first open reaches the worker");
+    let older = window.awaited(&key).expect("the second open waits in line");
+    assert!(window.let_go_changed_file(&key));
+    ask(&mut window, &lane.lane);
+    let newer = window.awaited(&key).expect("the walk asks again");
+    crate::lane::wait_for_a_wake(&lane.wakes, "the supersession's wake");
+    let ended = lane.lane.ended(nobody);
+    assert!(
+        ended
+            .iter()
+            .any(|(share, id, terminal, _)| *share == Share::Decoration
+                && *id == older
+                && matches!(terminal, crate::lane::Terminal::Superseded { by } if *by == newer)),
+        "the waiting open ends Superseded by the newer one, in the ledger"
+    );
+    let answers = crate::sort_math_terminals(ended);
+    assert!(
+        answers.done.is_empty() && answers.failed.is_empty(),
+        "a superseded terminal carries nothing to the window"
+    );
+    assert!(file_the_drain(&mut window, answers).is_empty());
+    assert_eq!(
+        window.awaited(&key),
+        Some(newer),
+        "the person sees nothing of it: the file still awaits the newer open"
+    );
+
+    gate.release();
+    let mut filed = Vec::new();
+    for _ in 0..2 {
+        let ended = lane.next_ended(Share::Decoration, nobody);
+        filed.extend(file_the_drain(
+            &mut window,
+            crate::sort_math_terminals(vec![ended]),
+        ));
+    }
+    assert!(filed.contains(&newer) && !filed.contains(&older));
+    assert!(
+        matches!(window.get(&key), Some(AnimationEntry::Ready { .. })),
+        "the newer open's answer plays"
+    );
+    std::fs::remove_file(&gif).expect("the scratch file this test wrote");
+}
+
+/// RED (T-ANIMATION-ANSWER-IDENTITY round 2) — **another window's open of the same file is its
+/// own question**: two windows each open one `.gif` while both opens wait behind a busy worker,
+/// and both run and end `Done` — neither displaces the other — and each window files the answer
+/// to its own open. Only a newer open by the same window supersedes (`MathWorkerRequest::relate`).
+///
+/// MUTATION: drop the `waiting_leaf.window == leaf.window` clause from `MathWorkerRequest::relate`
+/// — the second window's open supersedes the first's, whose window never gets an answer.
+#[test]
+fn another_windows_open_of_the_same_file_is_never_superseded() {
+    use crate::computation_lane::{Share, fixtures::nobody};
+    crate::test_support::install_host_answers();
+    let gate = Arc::new(crate::lane::Gate::default());
+    let mut lane = crate::computation_lane::fixtures::watched(crate::lane::Executor::scripted(
+        Arc::clone(&gate),
+    ));
+    let busy = PathBuf::from("\u{4e0d}\u{5728}\u{8fd9}\u{91cc}/\u{5fd9} busy.gif");
+    let gif = scratch_gif_named("\u{4e24}\u{6247}\u{7a97} two windows");
+    std::fs::write(&gif, animated_bytes()).expect("a scratch file this test owns");
+    let key = normalized_local_image_path_key(&gif);
+    let pane = seat_of(TAB_ONE, SeatId(1));
+    let in_window = |window: u64| ShellAddress {
+        window: WindowId::from(window),
+        ..probe_leaf()
+    };
+    let mut first = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+    let mut second = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+
+    gate.hold();
+    assert!(matches!(
+        crate::ask_to_open(&lane.lane, in_window(1), &busy),
+        OpenAsked::Asked(_)
+    ));
+    assert!(gate.wait_entered(1), "the busy open reaches the worker");
+    for (window, cache) in [(1, &mut first), (2, &mut second)] {
+        cache.ask_for_showing(&[(pane, Some(gif.clone()))], |path| {
+            crate::ask_to_open(&lane.lane, in_window(window), path)
+        });
+    }
+    let asked = [
+        first.awaited(&key).expect("the first window's open waits"),
+        second
+            .awaited(&key)
+            .expect("the second window's open waits"),
+    ];
+    gate.release();
+    let mut ended = Vec::new();
+    for _ in 0..3 {
+        ended.push(lane.next_ended(Share::Decoration, nobody));
+    }
+    for id in asked {
+        assert!(
+            ended
+                .iter()
+                .any(|(_, ended_id, terminal, _)| *ended_id == id
+                    && matches!(terminal, crate::lane::Terminal::Done(_))),
+            "each window's open runs and ends Done: {id:?}"
+        );
+    }
+    let answers = crate::sort_math_terminals(ended);
+    let mut filed = Vec::new();
+    for (asked, result) in answers.done {
+        if let DecorationWorkerCompletion::PeekAnimation { path, frames } = result.completion {
+            let path_key = normalized_local_image_path_key(&path);
+            let cache = if first.awaited(&path_key) == Some(asked) {
+                &mut first
+            } else {
+                &mut second
+            };
+            if cache.opened(path_key, asked, 1, frames) {
+                filed.push(asked);
+            }
+        }
+    }
+    assert_eq!(filed, asked, "each window files the answer to its own open");
+    std::fs::remove_file(&gif).expect("the scratch file this test wrote");
 }
 
 /// **One animated file, held the way the window holds it** — a ring of
@@ -1784,35 +2089,35 @@ fn an_opened_animation_starts_over_and_a_revealed_one_resumes() {
     let on = |path: Option<&PathBuf>| vec![(pane, path.cloned())];
     let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
     assert_eq!(
-        walk_asking(&mut window, &on(Some(&a)), OpenAsked::Asked),
+        walk_asking(&mut window, &on(Some(&a)), admitted),
         vec![a.clone()]
     );
-    window.opened(a_key.clone(), 1, Ok(a_playback_of(6, Instant::now())));
+    answer_awaited(&mut window, &a_key, 1, Ok(a_playback_of(6, Instant::now())));
     let playing = |window: &AnimationCache| match window.get(&a_key) {
         Some(AnimationEntry::Ready { serial, .. }) => Some(*serial),
         _ => None,
     };
     assert!(
-        walk_asking(&mut window, &on(Some(&a)), OpenAsked::Asked).is_empty(),
+        walk_asking(&mut window, &on(Some(&a)), admitted).is_empty(),
         "a picture that is still there is not asked again",
     );
-    assert!(walk_asking(&mut window, &[], OpenAsked::Asked).is_empty());
+    assert!(walk_asking(&mut window, &[], admitted).is_empty());
     assert!(
-        walk_asking(&mut window, &on(Some(&a)), OpenAsked::Asked).is_empty(),
+        walk_asking(&mut window, &on(Some(&a)), admitted).is_empty(),
         "a pane obscured and revealed asks nothing",
     );
     assert_eq!(playing(&window), Some(1), "and resumes the playback it had");
     assert_eq!(
-        walk_asking(&mut window, &on(Some(&b)), OpenAsked::Asked),
+        walk_asking(&mut window, &on(Some(&b)), admitted),
         vec![b.clone()]
     );
     assert_eq!(
-        walk_asking(&mut window, &on(Some(&a)), OpenAsked::Asked),
+        walk_asking(&mut window, &on(Some(&a)), admitted),
         vec![a.clone()],
         "the file opened again is asked again",
     );
     assert!(
-        matches!(window.get(&a_key), Some(AnimationEntry::Pending)),
+        matches!(window.get(&a_key), Some(AnimationEntry::Pending { .. })),
         "and its playback was let go of: the answer lands on frame zero",
     );
 
