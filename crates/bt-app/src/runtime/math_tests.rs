@@ -114,7 +114,6 @@ fn a_typeset_formula(tag: &str) -> (HeadlessFolio, PasteTarget, MathBlockAnchor)
         .anchor
         .clone();
     let target = runtime.paste_target(seat).expect("the shell");
-    drop(runtime);
     (folio, target, anchor)
 }
 
@@ -198,7 +197,6 @@ fn a_frame_composed_for_any_reason_carries_the_formula_flight_it_is_built_from()
         .math_toggle_presentation()
         .expect("the compose carried the flight into the session")
         .height_subpixels;
-    drop(runtime);
     assert!(
         carried != rendered && carried != source,
         "the flight is half way over: {rendered} → {carried} → {source}"

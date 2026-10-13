@@ -651,8 +651,10 @@ fn the_button_on_a_page_this_window_cannot_show_hands_its_file_to_the_system() {
     folio.draw();
     let button = first_point(&mut folio, |runtime, at| {
         matches!(
-            runtime.docked_chrome_target_at(at),
-            Some(crate::seats::ChromeTarget::PreviewOpenButton(_))
+            runtime.pointer_target_at(at),
+            Some(crate::PointerTarget::Chrome(
+                crate::seats::ChromeTarget::PreviewOpenButton(_)
+            ))
         )
     })
     .expect("the unknown page's card offers its button");
@@ -682,8 +684,11 @@ fn the_button_on_a_page_this_window_cannot_show_hands_its_file_to_the_system() {
     folio.draw();
     let button = first_point(&mut folio, |runtime, at| {
         matches!(
-            runtime.float_hit_at(at),
-            Some((_, crate::float::FloatPart::CardButton))
+            runtime.pointer_target_at(at),
+            Some(crate::PointerTarget::Float(
+                _,
+                crate::float::FloatPart::CardButton
+            ))
         )
     })
     .expect("the torn-off window's card offers its button");

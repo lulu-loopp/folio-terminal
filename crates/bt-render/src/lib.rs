@@ -22085,7 +22085,7 @@ mod tests {
     /// wrong in every split window.
     #[test]
     fn the_band_accessors_are_given_a_seat_and_never_take_one() {
-        // The last of the six is the one that does the arithmetic: it takes the
+        // The last of the five is the one that does the arithmetic: it takes the
         // seat too, so nothing below the other five can quietly reach for the
         // field again.
         for name in [
@@ -22093,7 +22093,6 @@ mod tests {
             "math_band_face",
             "math_band_trace",
             "math_hit_test",
-            "math_failure_geometry",
             "math_block_geometry",
         ] {
             // The item, not a slice of a file (P8), and a refusal rather than
@@ -22124,6 +22123,18 @@ mod tests {
                 reaches.report(source())
             );
         }
+        // The failure marker's geometry is a free function since the window seam
+        // (T-HEADLESS-RUNTIME-SEAM), so it has no field to reach for: it is handed
+        // the seat or it has none.
+        let failure = found_in(
+            needle!(Pattern::text("seat: SeatViewport")),
+            View::CodeKeepingLiterals,
+            Scope::Item(ItemQuery::function("math_failure_geometry_px")),
+        );
+        assert!(
+            !failure.is_empty(),
+            "math_failure_geometry_px does not take the band's own pane"
+        );
     }
 
     /// PIN (owner's report 2026-09-14, re-ruled 2026-09-20 by

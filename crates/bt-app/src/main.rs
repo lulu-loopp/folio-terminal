@@ -45863,7 +45863,10 @@ impl Runtime<'_, Native> {
         };
         runtime.dress_new_window(native)?;
         if trace_startup {
-            let renderer_phases = runtime.window.renderer.init_timings(&runtime.app.gpu);
+            // Named as what it is: this block is the native backend's, and the timings are the
+            // native renderer's own.
+            let renderer: &bt_render::WindowRenderer = &runtime.window.renderer;
+            let renderer_phases = renderer.init_timings(&runtime.app.gpu);
             let line = StartupLine {
                 window: window_time,
                 adapter: renderer_phases.adapter,
@@ -63458,7 +63461,7 @@ fn rebuild_every_native_surface(
 ) -> std::result::Result<(), RenderError> {
     let rebuilt: Vec<RebuiltWindow<'_>> = windows
         .into_iter()
-        .map(|window| {
+        .map(|window: &mut WindowRuntime| {
             // **Built before the renderer is borrowed**, out of a
             // `Compositor` and a `Window` this entry goes on owning, and
             // never stored — see [`window_surface_target`], which is the
@@ -67567,7 +67570,7 @@ impl<B: Backend> FolioApp<B> {
                     return;
                 }
             }
-            let Some(mut runtime) =
+            let Some(mut runtime): Option<Runtime<'_, B>> =
                 hang_watch::during(hang_watch::Station::EventLookup, || self.runtime(window_id))
             else {
                 return;
