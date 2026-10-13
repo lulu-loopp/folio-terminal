@@ -3386,5 +3386,5 @@ asked again within `JOURNAL_WRITE_WITHIN`) is written through the same `DurableW
 
 Pinned by `bt_platform::install_txn::tests::{a_write_asked_again_after_a_refused_rename_flushes_its_file_once,
 a_write_over_a_held_target_lands_when_let_go_and_a_dropped_one_leaves_nothing}` and
-`update_apply::held_write_tests::{a_held_journal_write_flushes_one_temporary_and_lands_when_the_hold_lifts,
+`update_apply_windows::tests::{a_held_journal_write_flushes_one_temporary_and_lands_when_the_hold_lifts,
 the_window_marks_writer_asked_again_over_a_held_mark_renames_one_temporary}`.
