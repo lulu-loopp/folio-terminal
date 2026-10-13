@@ -10154,6 +10154,10 @@ impl Runtime<'_> {
             }
         }
         self.window.renderer.set_preview_images(pictures);
+        // **And the failed peeks no surface names any more** (T-PEEK-CACHE-QUESTION-RECORDS):
+        // after the pages and the panes above have said what they show this walk, so a tab
+        // closed, a pane handed another file or a page scrolled past a picture lets its record go.
+        self.let_go_unnamed_peek_records();
     }
 
     /// **Every playing recording, as this frame's video layers** (user ruling
@@ -13412,9 +13416,15 @@ impl Runtime<'_> {
                 // **Filed with its reason** (owner's ruling 2026-09-12), so that
                 // a surface which opens this file later says the same sentence
                 // rather than the one generic line — see [`PeekCacheEntry::Failed`].
-                self.window
-                    .peek_cache
-                    .insert(cache_key.clone(), PeekCacheEntry::Failed(error));
+                // Filed only while some surface names the file
+                // ([`crate::file_peek_failure`]).
+                let named = self.peek_files_named();
+                crate::file_peek_failure(
+                    &mut self.window.peek_cache,
+                    &named,
+                    cache_key.clone(),
+                    error,
+                );
             }
         }
         // **And every markdown page that was waiting to see this file**
@@ -13483,30 +13493,41 @@ impl Runtime<'_> {
         self.window
             .video_facts
             .insert(cache_key.clone(), glance.facts);
-        let entry = match glance.frame {
-            Some(frame) => PeekCacheEntry::Ready {
-                key: video_frame_texture_key(&path, glance.mtime, frame.width, frame.height),
-                rgba: Arc::from(frame.rgba.into_boxed_slice()),
-                width_px: frame.width,
-                height_px: frame.height,
-                // A frame is already fitted into [`VIDEO_FRAME_FIT_PX`] and the
-                // recording's own size is filed beside it in `video_facts`,
-                // which is where every surface reads it from — see
-                // [`PreviewImageState::stated_size`].
-                native_size: None,
-            },
+        match glance.frame {
+            Some(frame) => self.window.peek_cache.insert(
+                cache_key.clone(),
+                PeekCacheEntry::Ready {
+                    key: video_frame_texture_key(&path, glance.mtime, frame.width, frame.height),
+                    rgba: Arc::from(frame.rgba.into_boxed_slice()),
+                    width_px: frame.width,
+                    height_px: frame.height,
+                    // A frame is already fitted into [`VIDEO_FRAME_FIT_PX`] and the
+                    // recording's own size is filed beside it in `video_facts`,
+                    // which is where every surface reads it from — see
+                    // [`PreviewImageState::stated_size`].
+                    native_size: None,
+                },
+            ),
             // **A container this machine has no codec for, said in the
             // decoder's own words.** The picture lane's variants are about a
             // picture file's size and none of them is this; `Decode` is the
             // seam that carries a reason nobody here can translate, which is
             // what the pane has always printed for a video that would not
             // decode — and it prints nothing at all for one, by the paragraph
-            // above.
-            None => PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Decode(
-                "no decoder for this container".to_owned(),
-            )),
-        };
-        self.window.peek_cache.insert(cache_key.clone(), entry);
+            // above. Filed only while some surface names the file
+            // ([`crate::file_peek_failure`]).
+            None => {
+                let named = self.peek_files_named();
+                crate::file_peek_failure(
+                    &mut self.window.peek_cache,
+                    &named,
+                    cache_key.clone(),
+                    bt_term::InlineImageDecodeError::Decode(
+                        "no decoder for this container".to_owned(),
+                    ),
+                );
+            }
+        }
         // Every surface standing on this file, for `complete_peek_image`'s reason: a decode is
         // addressed by path and the answer is the same pixels for a pane, for a window torn off
         // it, or for both at once.

@@ -411,6 +411,43 @@ impl Runtime<'_> {
         }
     }
 
+    /// **Every file a surface of this window names to the peek cache** — [`crate::peek_files_named`]
+    /// over this window's tabs, its card and its flyout.
+    pub(in crate::runtime) fn peek_files_named(&self) -> BTreeSet<String> {
+        crate::peek_files_named(
+            &self.window.tabs,
+            &self.window.peek_pane,
+            self.window
+                .file_peek
+                .as_ref()
+                .and_then(|peek| peek.source.file_path()),
+            self.window
+                .peek_hover
+                .active
+                .as_ref()
+                .map(|active| active.subject.key.as_str()),
+        )
+    }
+
+    /// **The failed peeks no surface names any more, let go of**
+    /// ([`crate::let_go_unnamed_peek_records`]; T-PEEK-CACHE-QUESTION-RECORDS). Run by the walk of
+    /// the surfaces ([`Self::refresh_preview_for_layout`]), by the flyout's new peek before it files
+    /// anything, and when the flyout comes down — the surfaces that leave by a road that names no
+    /// file (a tab closed, a pane handed another subject, a page scrolled on) are caught by the
+    /// next of these.
+    pub(in crate::runtime) fn let_go_unnamed_peek_records(&mut self) {
+        if !self
+            .window
+            .peek_cache
+            .iter()
+            .any(|(_, entry)| matches!(entry, PeekCacheEntry::Failed(_)))
+        {
+            return;
+        }
+        let named = self.peek_files_named();
+        crate::let_go_unnamed_peek_records(&mut self.window.peek_cache, &named);
+    }
+
     /// The pointer is resting on this row — arm the 350ms, or leave a running
     /// intent alone (P146).
     ///
@@ -2669,6 +2706,8 @@ impl Runtime<'_> {
     /// (pointer off the span, pointer left, wheel, click, any key).
     pub(in crate::runtime) fn dismiss_peek(&mut self) -> Result<()> {
         self.window.peek_hover.clear();
+        // The flyout was a surface naming its file: what failed for it alone goes with it.
+        self.let_go_unnamed_peek_records();
         // The next hover is the flyout's new input: a resample still owed — answered late, or
         // failed on the worker, or never started — is asked again by it rather than waited on.
         self.window.peek_thumbnail_pending = None;
@@ -2707,6 +2746,11 @@ impl Runtime<'_> {
         candidate: &PeekCandidate,
         settled: bool,
     ) -> Result<()> {
+        // A new peek: the flyout it replaced named its file until now, and a failure filed for
+        // that one alone goes before this one files anything.
+        if settled {
+            self.let_go_unnamed_peek_records();
+        }
         let cache_key = candidate.subject.key.clone();
         let (content_key, native_rgba, native_width_px, native_height_px) =
             match self.window.peek_cache.get(&cache_key) {
