@@ -3426,3 +3426,27 @@ impl storage_pass::StoragePassWindow for StoragePassRig {
         Ok(())
     }
 }
+
+/// **One file shown on a surface of its own and its open answered**, the way the window files an
+/// answer: a walk names the file on seat `seat` of [`TAB_ONE`] and asks for it, and the worker's
+/// answer comes home ([`AnimationCache::opened`] files nothing for a file no surface names). `key`
+/// is already in the form the window keys files by (lower case, back slashes), so the walk names
+/// exactly it. For the tests whose subject is a playback rather than the open.
+pub(crate) fn shown_and_opened(
+    cache: &mut AnimationCache,
+    seat: u64,
+    key: &str,
+    serial: u64,
+    frames: Result<animation::Animation, animation::AnimationRefusal>,
+) {
+    let path = PathBuf::from(key);
+    assert_eq!(
+        normalized_local_image_path_key(&path),
+        key,
+        "a key the walk names as it is"
+    );
+    cache.ask_for_showing(&[(seat_of(TAB_ONE, SeatId(seat)), Some(path))], |_| {
+        OpenAsked::Asked
+    });
+    cache.opened(key.to_owned(), serial, frames);
+}

@@ -2243,7 +2243,7 @@ mod tests {
                     &journal.with_file_name("health-test"),
                 ),
                 txn(),
-                std::time::Duration::from_millis(5),
+                crate::update_trial::Cadence::every(std::time::Duration::from_millis(5)),
                 &|| woke.set(true),
                 None,
                 &mut crate::update_trial::watchdog_asleep(),
