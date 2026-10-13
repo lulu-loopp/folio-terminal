@@ -17,7 +17,11 @@
 //! of `keybindings.json` is merged by action, then by chord
 //! (`keybindings_merge::run_pass`), and the table is rebuilt from this build's
 //! defaults and the merged departures by the reader an import's shortcuts part
-//! uses (T-STORE-MERGE-KEYBINDINGS).
+//! uses (T-STORE-MERGE-KEYBINDINGS). Hand edits of `profiles.json` and `pins.json`
+//! are merged by row and by pin (`table_merge::run_pass`): the profile table
+//! is installed by the import's own installer, and the PINNED sections are
+//! derived from the pin store whenever a menu is built
+//! (T-STORE-MERGE-PROFILES-PINS).
 
 use std::path::Path;
 
@@ -29,7 +33,7 @@ use crate::{
     FilePick, Runtime, document_request, hang_watch, i18n, persist, profiles, schemes, settings,
     shortcuts, toast,
 };
-use crate::{keybindings_merge, settings_merge};
+use crate::{keybindings_merge, settings_merge, table_merge};
 
 fn keybindings_for_export(
     table: &shortcuts::Shortcuts,
@@ -360,9 +364,10 @@ impl Runtime<'_> {
     /// §3.3, §3.4, §3.6): `settings.json`'s, through `settings_merge::run_pass`
     /// with this window as its doors, then `keybindings.json`'s, through
     /// `keybindings_merge::run_pass` with this window's one shortcut table as its
-    /// door — each pass whole. Each pass's presentation is owed to the turn
-    /// ([`MergeTurn`]), and the window presents once after both: one
-    /// presentation, one answer. Answers what the files' merges replaced and
+    /// door, then `profiles.json`'s and `pins.json`'s, through
+    /// `table_merge::run_pass` — each pass whole, all four on one notice. Each
+    /// pass's presentation is owed to the turn ([`MergeTurn`]), and the window
+    /// presents once after all four: one presentation, one answer. Answers what the files' merges replaced and
     /// could not apply, for the pass's one card (T-STORE-NOTICE raises it) —
     /// nothing for a clean hand edit — and, beside it, whether the presentation
     /// after the merges went through: the data is made first and a failed
@@ -371,21 +376,32 @@ impl Runtime<'_> {
         let mut turn = MergeTurn {
             runtime: self,
             present_owed: false,
+            frame_owed: false,
         };
         let settings = settings_merge::run_pass(&mut turn);
         let keybindings = keybindings_merge::run_pass(&mut turn);
-        let present_owed = turn.present_owed;
+        let profiles = table_merge::run_pass(&mut turn, table_merge::Table::Profiles);
+        let pins = table_merge::run_pass(&mut turn, table_merge::Table::Pins);
+        let (present_owed, frame_owed) = (turn.present_owed, turn.frame_owed);
         let mut notice = document_request::MergeNotice::default();
-        notice.files.extend(settings.replaced);
-        notice.files.extend(keybindings.replaced);
+        for replaced in [
+            settings.replaced,
+            keybindings.replaced,
+            profiles.replaced,
+            pins.replaced,
+        ] {
+            notice.files.extend(replaced);
+        }
         // The passes answer what the turn answered them — it notes the
-        // presentation it owes — and the one presentation answers for both.
+        // presentation it owes — and the one presentation answers for all.
         let presented = settings
             .presented
             .and(keybindings.presented)
+            .and(profiles.presented)
+            .and(pins.presented)
             .and_then(|()| {
                 if present_owed {
-                    self.present_merged()
+                    self.present_merged(frame_owed)
                 } else {
                     Ok(())
                 }
@@ -394,14 +410,23 @@ impl Runtime<'_> {
     }
 
     /// **What a merge put in force, shown**: an open Settings dialog re-derived —
-    /// the row a merge moved, and the Shortcuts page's table — and the chrome
-    /// presented.
-    fn present_merged(&mut self) -> Result<()> {
+    /// the row a merge moved, the Shortcuts page's table, the Profiles page's
+    /// rows — and the chrome presented; and, when the profile table moved
+    /// (`frame`), the window's frame, which draws every name a profile gives.
+    fn present_merged(&mut self, frame: bool) -> Result<()> {
         let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
         let content =
             self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
         self.window.settings.keep_focus_reachable(content);
-        if self.refresh_chrome() {
+        // One present per turn: a whole frame when the profile table moved,
+        // which draws the chrome too, else the chrome alone when it changed.
+        let chrome = self.refresh_chrome();
+        if frame {
+            self.publish_frame(bt_render::FrameTrigger {
+                occurred_at: std::time::Instant::now(),
+                source: bt_render::FrameSource::Expose,
+            })?;
+        } else if chrome {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -636,6 +661,8 @@ impl Runtime<'_> {
 struct MergeTurn<'r, 'a> {
     runtime: &'r mut Runtime<'a>,
     present_owed: bool,
+    /// The profile table in force moved: the presentation is a whole frame.
+    frame_owed: bool,
 }
 
 /// **This window is the settings merge's** (`settings_merge::run_pass`): the
@@ -711,6 +738,43 @@ impl keybindings_merge::KeybindingsWindow for MergeTurn<'_, '_> {
     fn keybindings_present(&mut self) -> Result<()> {
         self.present_owed = true;
         Ok(())
+    }
+}
+
+/// **The two tables' merges, with this window as their door**
+/// (`table_merge::run_pass`, T-STORE-MERGE-PROFILES-PINS): each store's merge
+/// steps, and each table's door — the profile installer, which follows the
+/// editor by its id, re-points no pane and raises its refusals' cards; the pin
+/// store, which the PINNED sections are derived from whenever a menu is built.
+/// What each owes the screen is noted on the turn.
+impl table_merge::TableMergeWindow for MergeTurn<'_, '_> {
+    fn table_merge_begin(&mut self, table: table_merge::Table) -> Option<table_merge::MergePass> {
+        match table {
+            table_merge::Table::Profiles => self.runtime.app.profiles_store.begin_merge(),
+            table_merge::Table::Pins => self.runtime.app.pins_store.begin_merge(),
+        }
+    }
+
+    fn table_door(&mut self, table: table_merge::Table) -> Result<()> {
+        self.present_owed = true;
+        match table {
+            table_merge::Table::Profiles => {
+                self.frame_owed |= self.runtime.install_merged_profile_table()?;
+                Ok(())
+            }
+            table_merge::Table::Pins => Ok(()),
+        }
+    }
+
+    fn table_merge_end(&mut self, table: table_merge::Table) {
+        match table {
+            table_merge::Table::Profiles => self.runtime.app.profiles_store.end_merge(),
+            table_merge::Table::Pins => self.runtime.app.pins_store.end_merge(),
+        }
+    }
+
+    fn table_merge_say(&mut self, line: &str) {
+        eprintln!("{line}");
     }
 }
 

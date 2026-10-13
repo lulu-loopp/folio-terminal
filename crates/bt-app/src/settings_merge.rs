@@ -106,20 +106,12 @@ impl Merging {
         let base = at(&mut self.base).clone();
         let ours = at(&mut self.ours).clone();
         let (value, row) = unit(base, ours, theirs);
-        match row {
-            Unit::Base => {}
-            Unit::Ours => self.account.kept += 1,
-            Unit::Theirs => {
-                self.account.took += 1;
-                let name = self.name(key, &at, &value);
-                push_once(&mut self.account.taken, name);
-            }
-            Unit::Conflict => {
-                self.account.conflicted += 1;
-                let name = self.name(key, &at, &value);
-                push_once(&mut self.account.conflicts, name);
-            }
-        }
+        // Named before the count: the name reads the merge's base while the
+        // count borrows its account, and only a row the file gave is named.
+        let name = matches!(row, Unit::Theirs | Unit::Conflict)
+            .then(|| self.name(key, &at, &value))
+            .unwrap_or_default();
+        self.account.count(row, || name);
         value
     }
 
@@ -551,6 +543,23 @@ impl Account {
         }
         for name in other.conflicts {
             push_once(&mut self.conflicts, name);
+        }
+    }
+
+    /// **Count one unit by the table row that chose it**, named by `name`
+    /// when the file gave it — what each document's merge says about a unit.
+    pub(crate) fn count(&mut self, row: Unit, name: impl FnOnce() -> String) {
+        match row {
+            Unit::Base => {}
+            Unit::Ours => self.kept += 1,
+            Unit::Theirs => {
+                self.took += 1;
+                push_once(&mut self.taken, name());
+            }
+            Unit::Conflict => {
+                self.conflicted += 1;
+                push_once(&mut self.conflicts, name());
+            }
         }
     }
 }
