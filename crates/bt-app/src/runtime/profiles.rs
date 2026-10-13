@@ -728,8 +728,14 @@ impl Runtime<'_> {
     /// a storage pass's merge (`table_merge`), whose presentation — the dialog
     /// re-derived, the frame — is owed to the merge turn and made once after
     /// every pass.
-    pub(crate) fn install_merged_profile_table(&mut self) -> Result<()> {
-        for fault in self.install_profile_table(TablePresentation::OwedToTheTurn)? {
+    ///
+    /// Answers whether the table in force moved (`profiles::profile_revision`
+    /// advances only then): only a table that moved owes the turn a frame.
+    pub(crate) fn install_merged_profile_table(&mut self) -> Result<bool> {
+        let revision = profiles::profile_revision();
+        let faults = self.install_profile_table(TablePresentation::OwedToTheTurn)?;
+        let moved = profiles::profile_revision() != revision;
+        for fault in faults {
             let sentence = i18n::profile_entry_fault(&fault);
             eprintln!("BT_PERSIST {}: {sentence}", persist::PROFILES_FILE_NAME);
             self.toast(
@@ -739,7 +745,7 @@ impl Runtime<'_> {
                 sentence,
             )?;
         }
-        Ok(())
+        Ok(moved)
     }
 
     /// **Put the table the store now holds in force**, and answer the entries it

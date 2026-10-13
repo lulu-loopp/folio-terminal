@@ -418,14 +418,16 @@ impl Runtime<'_> {
         let content =
             self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
         self.window.settings.keep_focus_reachable(content);
-        if self.refresh_chrome() {
-            self.present_chrome_change()?;
-        }
+        // One present per turn: a whole frame when the profile table moved,
+        // which draws the chrome too, else the chrome alone when it changed.
+        let chrome = self.refresh_chrome();
         if frame {
             self.publish_frame(bt_render::FrameTrigger {
                 occurred_at: std::time::Instant::now(),
                 source: bt_render::FrameSource::Expose,
             })?;
+        } else if chrome {
+            self.present_chrome_change()?;
         }
         Ok(())
     }
@@ -659,7 +661,7 @@ impl Runtime<'_> {
 struct MergeTurn<'r, 'a> {
     runtime: &'r mut Runtime<'a>,
     present_owed: bool,
-    /// The profile table moved: the presentation re-draws the frame too.
+    /// The profile table in force moved: the presentation is a whole frame.
     frame_owed: bool,
 }
 
@@ -757,8 +759,8 @@ impl table_merge::TableMergeWindow for MergeTurn<'_, '_> {
         self.present_owed = true;
         match table {
             table_merge::Table::Profiles => {
-                self.frame_owed = true;
-                self.runtime.install_merged_profile_table()
+                self.frame_owed |= self.runtime.install_merged_profile_table()?;
+                Ok(())
             }
             table_merge::Table::Pins => Ok(()),
         }
