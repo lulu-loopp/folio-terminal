@@ -1030,15 +1030,16 @@ fn a_failed_open_is_unanswered_and_only_the_files_next_open_asks_again() {
     );
 }
 
-/// RED (S-8 round 6) — **an open that never answered, and a refusal, are
-/// kept under weight pressure, so no redraw asks them again**: a window whose
+/// RED (S-8 rounds 6 and 7) — **an open that never answered, a refusal and a
+/// decode in flight are kept under weight pressure, so no redraw asks them
+/// again**: a window whose
 /// playbacks fill its budget lets go of the oldest playbacks, never of the
 /// record of a question. The unanswered open here is one whose thread could not
 /// be started — the second way into `Unanswered`, through the same door.
 ///
 /// MUTATION: make `AnimationEntry::evictable` answer `true` for every entry —
-/// the two records are the oldest entries and go first, and the next walk asks
-/// both files again. Or have `ask_for_showing` file nothing for
+/// the three records are the oldest entries and go first, and the next walk
+/// asks the files again. Or have `ask_for_showing` file nothing for
 /// `OpenAsked::Unstarted` — the next walk asks it again.
 #[test]
 fn records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them() {
@@ -1057,11 +1058,14 @@ fn records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them() {
     };
     let pane = seat_of(TAB_ONE, SeatId(1));
     let float = seat_of(TAB_ONE, SeatId(2));
+    let card = seat_of(TAB_ONE, SeatId(3));
     let unstarted = PathBuf::from("D:/\u{52a8}\u{56fe}/\u{672a}\u{542f}\u{52a8}.gif");
     let refused = PathBuf::from("D:/\u{52a8}\u{56fe}/one-frame.gif");
+    let in_flight = PathBuf::from("D:/\u{52a8}\u{56fe}/\u{89e3}\u{7801}\u{4e2d}.gif");
     let showing = vec![
         (pane, Some(unstarted.clone())),
         (float, Some(refused.clone())),
+        (card, Some(in_flight.clone())),
     ];
     let mut window = AnimationCache::with_budget(2 * 2 * FRAME_BYTES as u64);
     assert_eq!(
@@ -1070,7 +1074,7 @@ fn records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them() {
     );
     assert_eq!(
         walk_asking(&mut window, &showing, OpenAsked::Asked),
-        vec![refused.clone()]
+        vec![refused.clone(), in_flight.clone()]
     );
     window.opened(
         normalized_local_image_path_key(&refused),
@@ -1096,6 +1100,13 @@ fn records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them() {
         window.get(&normalized_local_image_path_key(&refused)),
         Some(AnimationEntry::Refused(_))
     ));
+    assert!(
+        matches!(
+            window.get(&normalized_local_image_path_key(&in_flight)),
+            Some(AnimationEntry::Pending)
+        ),
+        "a decode in flight is still awaited"
+    );
     assert!(
         walk_asking(&mut window, &showing, OpenAsked::Asked).is_empty(),
         "no redraw asks a question this window holds the record of"

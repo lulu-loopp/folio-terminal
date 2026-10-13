@@ -34,10 +34,13 @@
 //! # The cost of an eviction
 //!
 //! Choosing a victim is a walk of the map. It happens only on an insert that
-//! goes over budget, and the number of entries is itself bounded by the budget,
-//! so the walk is bounded — but it is a walk, and a cache tuned to hold hundreds
-//! of thousands of tiny entries would want a linked order instead of this. None
-//! of the three is: they hold pictures.
+//! goes over budget, and it is bounded by the number of entries. The budget
+//! bounds that number only for evictable values: a value that says it is not
+//! evictable ([`Weighed::evictable`]) is counted toward the total but never
+//! chosen, so a store holding such values has as many entries as its owner put
+//! in and took out, and past the budget every over-budget insert walks them all.
+//! A cache tuned to hold hundreds of thousands of tiny entries would want a
+//! linked order instead of this. None of the three is: they hold pictures.
 
 use std::borrow::Borrow;
 use std::cell::Cell;
@@ -68,9 +71,13 @@ pub trait Weighed {
 ///
 /// A refusal and a request in flight hold no pixels, and a store that counted
 /// only pixels would let a million of them accumulate under a budget it never
-/// reached — which is the same defect one size down. This is the map's own share
-/// per entry: the hash slot, the boxed key and the enum around the value, rounded
-/// to something that is honest at this scale rather than exact.
+/// reached — which is the same defect one size down. So every entry counts this
+/// toward the total, and an evictable one is let go of by it. A value that is not
+/// [`Weighed::evictable`] still counts it but is never chosen: such entries are
+/// bounded by their owner's doors, not by the budget, and past the budget they
+/// make every evictable entry the next insert's victim. This is the map's own
+/// share per entry: the hash slot, the boxed key and the enum around the value,
+/// rounded to something that is honest at this scale rather than exact.
 const ENTRY_OVERHEAD_BYTES: u64 = 128;
 
 /// One value, and when it was last read.

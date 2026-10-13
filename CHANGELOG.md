@@ -15,16 +15,16 @@ All notable changes to Folio are recorded here. The format follows
 - After a graphics failure, Folio tells you at its next start where it kept your unsaved edit, with a button that opens the folder. <!-- zh: pending T-RECOVERED-FOLDER -->
 
 ### Changed
-- The first formula or picture after Folio starts takes a moment longer (about two seconds on a Mac), because the formula engine now loads when it is first needed rather than at startup. <!-- zh: pending S-8 -->
 
+- The first formula or picture after Folio starts takes a moment longer (about two seconds on a Mac), because the formula engine now loads when it is first needed rather than at startup. <!-- zh: pending S-8 -->
 - Changes to settings.json, keybindings.json, profiles.json and pins.json saved in another editor while Folio runs take effect without a restart, and a change made in Folio at the same time is kept beside them; when both change the same value, or give one key to two shortcuts, the file wins, and one card names what came from disk. <!-- zh: pending T-STORE-MERGE-KEYBINDINGS --> <!-- zh: pending T-STORE-MERGE-PROFILES-PINS --> <!-- zh: pending T-STORE-NOTICE -->
 - A keybindings.json that says it was written on Windows or Linux no longer reads `Cmd+` there, and one written on macOS no longer reads `Win+`; such a line now reads as the other system's key on that system, and a file with no recorded system still reads both. <!-- zh: pending T-STORE-MERGE-KEYBINDINGS -->
 - Quitting first saves any change to settings, shortcuts, profiles or pins that is not on disk yet. If one cannot be saved or kept in the recovered folder, Folio stays open and a card names the file, with a button to leave without that change; quitting again tries again. <!-- zh: pending T-QUIT-DOCUMENTS -->
 - If Folio stops after a failure with such a change unsaved, the change is kept in the recovered folder; if it cannot be kept anywhere, the system's own message says so. <!-- zh: pending T-QUIT-DOCUMENTS -->
 
 ### Fixed
-- A panic in one picture or formula no longer ends Folio; that picture or formula stays as it was and is tried again after the next change in its pane. <!-- zh: pending S-8 -->
 
+- A panic in one picture or formula no longer ends Folio; that picture or formula stays as it was and is tried again after the next change in its pane. <!-- zh: pending S-8 -->
 - A video that never finishes loading now says so after ten seconds instead of showing a player that never starts, and a video that declares no length shows "No length" on its bar instead of a clock stuck at 0:00. <!-- zh: pending T-VIDEO-ENGINE-NO-DURATION -->
 - File paths printed by Cygwin's bash (`/cygdrive/c/…`), by a WSL profile without shell integration, and by a WSL distribution's own launcher are now links, as in Git Bash and WSL panes. <!-- zh: pending T-WINDOWS-SHELL-NAMESPACES -->
 - A path pasted into a Cygwin bash pane is now written as `/cygdrive/c/…`, which Cygwin can open. <!-- zh: pending T-WINDOWS-SHELL-NAMESPACES -->

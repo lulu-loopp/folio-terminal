@@ -15282,3 +15282,23 @@ The source pin on `request_animations` in `an_opened_animation_starts_over_and_a
 - `bt_term::session::tests::{a_held_frozen_formula_whose_block_lost_a_line_is_let_go, a_held_resample_whose_picture_was_decoded_again_is_let_go, a_stale_failed_task_asks_nothing_on_later_output}`
 - `app_preview_tests::{an_opened_animation_starts_over_and_a_revealed_one_resumes, a_failed_open_is_unanswered_and_only_the_files_next_open_asks_again, records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them}`
 - `animation::tests::a_failed_fill_releases_its_reservation`
+
+
+### 2026-10-13 — What weight pressure spares is a record of a question, not every re-ask; such records grow with the files opened (S-8 round 7)
+
+**Correction to the round-6 entry.**
+
+*The inventories.* The round-6 entry said its retired pin's rows were removed from the dated inventories because "no script maintains them now". That removal was wrong and is reverted. `docs/plans/bt-app-split-pins-2026-09-21.tsv` and `docs/plans/bt-app-reader-shapes-2026-09-21.tsv` are generated, dated records, not enforcement inputs (ARCHITECTURE-GUARDS), and a dated record is never edited. The pin's retirement is visible where it is live: in the code of `an_opened_animation_starts_over_and_a_revealed_one_resumes`, and in `docs/plans/MIGRATION-DEBT.tsv`, which has no row for it.
+
+*The rule.* The round-6 rule overclaims. A drawn or revealed playback (`Ready`) that weight pressure evicts is asked again by the next walk, with no open to ask it; so is a playback let go because its file changed under the loop. What is true: no record of a question — `Pending`, `Unanswered` or `Refused` — is ever evicted by weight, so no redraw re-asks a question.
+
+**The cost, in practice and in principle.** Each record costs `ENTRY_OVERHEAD_BYTES` (128 B) plus its key against the window's 240 MiB animation budget. Two of the three kinds have a way out:
+- `Pending` is replaced by its answer.
+- `Unanswered` is let go of by the file's next open.
+- `Refused` has no remover, so it is permanent for the window's life.
+
+Records are never evicted, so they grow with the distinct animated files one window has opened. Past the budget — about 1.9 million such files in one window — every insert would evict every other playback, and two drawn `.gif`s would restart each other. The growth is bounded in practice, not in principle; T-ANIMATION-RECORDS-BOUND is the follow-up ticket.
+
+**Pinned by**
+- `app_preview_tests::records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them`, which now also holds a `Pending` record through the pressure.
+- `bt_term::bounded_cache::tests::weight_pressure_never_takes_a_value_that_is_not_evictable`.
