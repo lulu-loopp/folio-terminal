@@ -946,6 +946,32 @@ text_entries! {
     PreviewConflict,
     /// The clause that gets filled into [`not_saved`].
     PreviewNothingToSave,
+    /// The clause [`not_saved`] is filled with when a save could not reach the
+    /// disk at all (S-6a): nothing in this process would write it.
+    PreviewSaveNotStarted,
+    /// The clause for a body too large to save, `{limit}` filled by
+    /// [`preview_save_too_large`] (S-6a).
+    PreviewSaveTooLarge,
+    /// The clause for a file that is a link or has a second name (S-6a round 2).
+    PreviewSaveLink,
+    /// The clause for a file on a drive that cannot replace it in one step —
+    /// FAT and exFAT removable media (S-6a round 2).
+    PreviewSaveNoExchange,
+    /// The clause for a name beside the file, needed for its replacement, that
+    /// is taken (S-6a round 2).
+    PreviewSaveNameTaken,
+    /// The clause for a file whose bytes could not be read to check them
+    /// against what was read (S-6a round 2).
+    PreviewSaveUnread,
+    /// What a quit's or a stop's writer says of a buffer whose save is still
+    /// on its way: it does not write over it (S-6a round 3).
+    PreviewSaveOnItsWay,
+    /// The clause for a save whose file changed while it was out, over a body
+    /// the person had reloaded meanwhile (S-6a round 6).
+    PreviewSaveReloaded,
+    /// What a quit's or a stop's road says of a body a save sent that did not
+    /// land, no longer the body (S-6a round 6, R1).
+    PreviewSaveUnlanded,
     /// The start's toast for one copy a stop kept in the recovered folder, `{folder}` filled
     /// by [`recovered_edits_kept_in`] (T-RECOVERED-FOLDER).
     RecoveredEditKept,
@@ -3907,6 +3933,51 @@ impl Text {
             Self::PreviewNothingToSave => {
                 pick(lang, "there is nothing to save", "没有要保存的内容")
             }
+            Self::PreviewSaveNotStarted => pick(
+                lang,
+                "the file could not be written",
+                "the file could not be written", // zh: pending S-6a
+            ),
+            Self::PreviewSaveTooLarge => pick(
+                lang,
+                "it is larger than {limit}",
+                "it is larger than {limit}", // zh: pending S-6a
+            ),
+            Self::PreviewSaveLink => pick(
+                lang,
+                "the file is a link or has a second name",
+                "the file is a link or has a second name", // zh: pending S-6a
+            ),
+            Self::PreviewSaveNoExchange => pick(
+                lang,
+                "this drive cannot replace the file safely",
+                "this drive cannot replace the file safely", // zh: pending S-6a
+            ),
+            Self::PreviewSaveNameTaken => pick(
+                lang,
+                "a file beside it is in the way",
+                "a file beside it is in the way", // zh: pending S-6a
+            ),
+            Self::PreviewSaveUnread => pick(
+                lang,
+                "the file could not be read to check it",
+                "the file could not be read to check it", // zh: pending S-6a
+            ),
+            Self::PreviewSaveOnItsWay => pick(
+                lang,
+                "a save of it was still on its way to the disk",
+                "a save of it was still on its way to the disk", // zh: pending S-6a
+            ),
+            Self::PreviewSaveReloaded => pick(
+                lang,
+                "the file changed and you reloaded it",
+                "the file changed and you reloaded it", // zh: pending S-6a
+            ),
+            Self::PreviewSaveUnlanded => pick(
+                lang,
+                "a version you saved was not written to the disk",
+                "a version you saved was not written to the disk", // zh: pending S-6a
+            ),
             Self::RecoveredEditKept => pick(
                 lang,
                 "An unsaved edit was kept at {folder}",
@@ -6487,6 +6558,27 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // zh: pending S-6a — the two clauses a preview save that never reached the disk is
+        // "not saved" for.
+        (Self::PreviewSaveNotStarted, HostPlatform::Windows),
+        (Self::PreviewSaveNotStarted, HostPlatform::MacOs),
+        (Self::PreviewSaveTooLarge, HostPlatform::Windows),
+        (Self::PreviewSaveTooLarge, HostPlatform::MacOs),
+        // zh: pending S-6a — the reasons a preview save's refusal names on the pane.
+        (Self::PreviewSaveLink, HostPlatform::Windows),
+        (Self::PreviewSaveLink, HostPlatform::MacOs),
+        (Self::PreviewSaveNoExchange, HostPlatform::Windows),
+        (Self::PreviewSaveNoExchange, HostPlatform::MacOs),
+        (Self::PreviewSaveNameTaken, HostPlatform::Windows),
+        (Self::PreviewSaveNameTaken, HostPlatform::MacOs),
+        (Self::PreviewSaveUnread, HostPlatform::Windows),
+        (Self::PreviewSaveUnread, HostPlatform::MacOs),
+        (Self::PreviewSaveOnItsWay, HostPlatform::Windows),
+        (Self::PreviewSaveOnItsWay, HostPlatform::MacOs),
+        (Self::PreviewSaveReloaded, HostPlatform::Windows),
+        (Self::PreviewSaveReloaded, HostPlatform::MacOs),
+        (Self::PreviewSaveUnlanded, HostPlatform::Windows),
+        (Self::PreviewSaveUnlanded, HostPlatform::MacOs),
         // zh: pending T-SHELL-BIRTH-DEATH — the face of a shell that ended at birth.
         (Self::ShellBirthDeath, HostPlatform::Windows),
         (Self::ShellBirthDeath, HostPlatform::MacOs),
@@ -7744,8 +7836,19 @@ pub fn not_renamed(reason: &str) -> String {
     }
 }
 
-/// A save that did not happen, and why. The `{reason}` is either
-/// [`Text::PreviewNothingToSave`] or an `io::Error`, and the second of those is
+/// The clause for a preview body larger than a save may write (S-6a), `limit`
+/// already in words.
+#[must_use]
+pub fn preview_save_too_large(limit: &str) -> String {
+    Text::PreviewSaveTooLarge.text().replace("{limit}", limit)
+}
+
+/// A save that did not happen, and why. The `{reason}` is a clause of this
+/// table — [`Text::PreviewNothingToSave`], and for a preview save on the storage
+/// worker [`Text::PreviewSaveNotStarted`], [`Text::PreviewSaveTooLarge`],
+/// [`Text::PreviewSaveLink`], [`Text::PreviewSaveNoExchange`],
+/// [`Text::PreviewSaveNameTaken`] or [`Text::PreviewSaveUnread`] — or an
+/// `io::Error`, and the second of those is
 /// the OS's own sentence in the OS's own language — a known seam, recorded in the
 /// inventory's §E and not papered over here.
 #[must_use]

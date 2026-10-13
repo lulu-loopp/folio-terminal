@@ -921,12 +921,12 @@ fn a_summoned_terminal_with_nothing_unsaved_lets_the_run_end_without_a_card() {
 /// RED (D-4, 0.4.8 G7; ledger #28) — **a dirty preview buffer and a controlled failure: the file
 /// carries the edit.** The failure road keeps each window's unsaved edits through
 /// `keep_unsaved_edits_over` before it closes the window, and a file that can still be written
-/// takes the edit through the quit's own judged write — `PreviewBuffer::save`, the conflict check
-/// and the atomic write — so it is no longer dirty, and the diagnostics line names the file.
+/// takes the edit through the quit's own judged write — `PreviewBuffer::write_now_for_quit`, the
+/// byte precondition and the atomic write — so it is no longer dirty, and the diagnostics line names the file.
 /// A second tab's buffer is kept as well: every tab, not the active one.
 ///
 /// MUTATION: in `PreviewPool::keep_dirty`, skip the write (`let outcome =
-/// SaveOutcome::Failed(String::new());` in place of `buffer.save()`) — the file still says
+/// SaveOutcome::Failed(String::new());` in place of `buffer.write_now_for_quit()`) — the file still says
 /// `one`.
 #[test]
 fn a_controlled_failure_writes_a_dirty_preview_back_to_its_file() {

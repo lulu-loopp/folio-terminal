@@ -107,6 +107,7 @@ fn buffer(text: String) -> preview::PreviewBuffer {
         text,
         truncated: false,
         mtime: None,
+        bytes: None,
         content_says_text: true,
         encoding: preview::HeadEncoding::Utf8,
         lossy: false,
