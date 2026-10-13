@@ -1,6 +1,7 @@
 //! **The window's frame and the references printed in it, driven** (T-HEADLESS-RUNTIME-SEAM):
 //! a press on a printed reference, the compose of a frame and the present, on a headless window.
 
+use crate::computation_lane::{self, fixtures::Watched};
 use crate::headless::{HeadlessFolio, WindowEffect};
 use crate::test_support::{hyperlink_hit, leaf_saying, tab_holding};
 use std::path::{Path, PathBuf};
@@ -49,23 +50,29 @@ fn the_open_door_is_handed_the_printed_name_and_the_reveal_the_resolved_one() {
     let file = root.join("src").join("..").join("src").join("notes.txt");
     let folder = root.join("src").join("..").join("src").join("docs");
 
-    // The lane's answer, from the worker the window's questions go to.
-    let (requests, task_rx) = std::sync::mpsc::channel();
-    let (result_tx, results) = std::sync::mpsc::channel();
-    let worker =
-        std::thread::spawn(move || crate::run_path_verify_worker(task_rx, result_tx, || {}));
+    // The lane's answer, from the share the window's questions go to.
+    let mut watched = computation_lane::fixtures::watched(crate::lane::Executor::scripted(
+        std::sync::Arc::new(crate::lane::Gate::default()),
+    ));
     let mut verdicts = Vec::new();
     for printed in [&file, &folder] {
-        requests
-            .send(crate::PathWorkerRequest {
+        let asked = watched
+            .lane
+            .verify(crate::PathWorkerRequest {
                 leaf: crate::test_support::probe_leaf(),
                 path: printed.clone(),
             })
-            .expect("the worker takes the question");
-        let answer = crate::lane::receive(&results, "the path worker's answer");
+            .ok()
+            .expect("the lane takes the question");
+        let terminal = watched.terminal(
+            computation_lane::Share::Path,
+            asked,
+            computation_lane::fixtures::nobody,
+        );
+        let answer = computation_lane::fixtures::answer(terminal).expect("the path share answers");
         let crate::DecorationWorkerCompletion::VerifiedPath { path, verdict } = answer.completion
         else {
-            panic!("the path worker answers a path question");
+            panic!("the path share answers a path question");
         };
         assert_eq!(&path, printed, "the answer is about the name asked");
         assert_eq!(
@@ -75,8 +82,6 @@ fn the_open_door_is_handed_the_printed_name_and_the_reveal_the_resolved_one() {
         );
         verdicts.push(verdict);
     }
-    drop(requests);
-    worker.join().expect("the worker ends with its queue");
 
     for (printed, verdict) in [&file, &folder].into_iter().zip(verdicts) {
         let leaf = leaf_saying("参考 reference");
@@ -109,39 +114,37 @@ fn the_open_door_is_handed_the_printed_name_and_the_reveal_the_resolved_one() {
 }
 
 /// A window of two shells side by side, the keyboard in the first, whose decoration requests go
-/// to a channel the test reads rather than to the worker.
-fn two_shells(
-    tag: &str,
-) -> (
-    HeadlessFolio,
-    bt_layout::SeatId,
-    std::sync::mpsc::Receiver<crate::MathWorkerRequest>,
-) {
+/// to a computation lane the test watches.
+fn two_shells(tag: &str) -> (HeadlessFolio, bt_layout::SeatId, Watched) {
     let tab = crate::test_support::cross_tab(1, &["键盘 focused", "旁边 beside"]);
     let beside = tab.seats.terminals()[1];
     let mut folio = HeadlessFolio::with_tabs(tag, vec![tab], 0);
-    let (tasks, requests) = std::sync::mpsc::channel();
-    let (scale_tasks, _) = std::sync::mpsc::channel();
-    let (path_tasks, _) = std::sync::mpsc::channel();
-    let (_, results) = std::sync::mpsc::channel();
-    folio.app.math_worker = crate::MathWorker {
-        tasks,
-        scale_tasks,
-        path_tasks,
-        results,
-    };
-    (folio, beside, requests)
+    let watched = computation_lane::fixtures::watched(crate::lane::Executor::scripted(
+        std::sync::Arc::new(crate::lane::Gate::default()),
+    ));
+    folio.app.math_worker = std::sync::Arc::clone(&watched.lane);
+    (folio, beside, watched)
 }
 
-/// The seats of the formulas handed to the typesetting worker since this was last asked.
-fn typeset_for(
-    requests: &std::sync::mpsc::Receiver<crate::MathWorkerRequest>,
-) -> Vec<bt_layout::SeatId> {
-    requests
-        .try_iter()
-        .filter_map(|request| match request {
-            crate::MathWorkerRequest::Math { leaf, .. } => Some(leaf.leaf.seat),
-            _ => None,
+/// How many formulas and pictures the window has handed the lane: every request it admitted,
+/// answered or not (nothing here drains them).
+fn asked(watched: &Watched) -> usize {
+    watched.lane.held(computation_lane::Share::Decoration)
+}
+
+/// The panes the next `count` answers of the lane were asked for, as the lane answers them.
+fn answered_for(watched: &mut Watched, count: usize) -> Vec<bt_layout::SeatId> {
+    (0..count)
+        .map(|_| {
+            let (_, _, terminal, _) = watched.next_ended(
+                computation_lane::Share::Decoration,
+                computation_lane::fixtures::nobody,
+            );
+            computation_lane::fixtures::answer(terminal)
+                .expect("the lane answers a formula")
+                .leaf
+                .leaf
+                .seat
         })
         .collect()
 }
@@ -159,7 +162,7 @@ fn typeset_for(
 /// `Runtime::advance_live_math_if_due` — the live formula is never typeset.
 #[test]
 fn every_visible_pane_settles_its_rows_and_schedules_its_own_artifacts() {
-    let (mut folio, beside, requests) = two_shells("headless-every-pane");
+    let (mut folio, beside, mut watched) = two_shells("headless-every-pane");
     // The panes' first size, told and quiet: the window's own turns, a generous interval apart,
     // until the pane beside has closed the resize its layout opened.
     let mut now = std::time::Instant::now();
@@ -184,7 +187,7 @@ fn every_visible_pane_settles_its_rows_and_schedules_its_own_artifacts() {
             .resize_transaction_open(),
         "the fixture's own precondition: the pane beside has settled its first size"
     );
-    let _ = typeset_for(&requests);
+    let before = asked(&watched);
 
     // A formula on the live rows, typeset once the row it stands on has settled.
     folio
@@ -204,10 +207,9 @@ fn every_visible_pane_settles_its_rows_and_schedules_its_own_artifacts() {
         .turn(deadline, true)
         .expect("the turn is answered");
     folio.draw();
-    let typeset = typeset_for(&requests);
     assert!(
-        typeset.contains(&beside),
-        "the live formula in the pane beside is handed to the typesetting worker: {typeset:?}"
+        asked(&watched) > before,
+        "the live formula in the pane beside is handed to the typesetting lane"
     );
 
     // A formula in the transcript whose typesetting was lost (the worker gone with the request,
@@ -225,11 +227,11 @@ fn every_visible_pane_settles_its_rows_and_schedules_its_own_artifacts() {
             .expect("the pane projects");
         pane.projection.scroll_to_top();
     }
+    let before = asked(&watched);
     folio.draw();
-    let asked = typeset_for(&requests);
     assert!(
-        asked.contains(&beside),
-        "the fixture's own precondition: the transcript's formula was asked for: {asked:?}"
+        asked(&watched) > before,
+        "the fixture's own precondition: the transcript's formula was asked for"
     );
     folio
         .runtime()
@@ -238,12 +240,17 @@ fn every_visible_pane_settles_its_rows_and_schedules_its_own_artifacts() {
         .expect("the pane beside")
         .session
         .forget_work_in_flight();
+    let before = asked(&watched);
     folio.draw();
-    let typeset = typeset_for(&requests);
     assert!(
-        typeset.contains(&beside),
-        "the frame that shows the pane beside again asks for the formula whose work was lost: \
-         {typeset:?}"
+        asked(&watched) > before,
+        "the frame that shows the pane beside again asks for the formula whose work was lost"
+    );
+    let all = asked(&watched);
+    let seats = answered_for(&mut watched, all);
+    assert!(
+        seats.iter().all(|seat| *seat == beside),
+        "every formula the window asked for was the pane beside's: {seats:?}"
     );
 }
 

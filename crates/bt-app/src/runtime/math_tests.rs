@@ -2,6 +2,7 @@
 //! (T-HEADLESS-RUNTIME-SEAM) on a headless window: a typeset display block in a shell's
 //! transcript, its `‹›` flight, and the frames composed around it.
 
+use crate::computation_lane;
 use crate::formula_tools::FormulaToggleMotion;
 use crate::headless::HeadlessFolio;
 use crate::test_support::{leaf_saying, tab_holding};
@@ -10,42 +11,20 @@ use bt_render::{FrameSource, FrameTrigger};
 use bt_viewport::MathBlockAnchor;
 use std::time::{Duration, Instant};
 
-/// The picture the test's typesetter answers every display formula with: a band of `24 × 35`
-/// pixels, the engine's shape for a display block.
-fn typeset_picture() -> bt_math::MathRaster {
-    bt_math::MathRaster {
-        rgba: vec![255; 24 * 35 * 4],
-        width_px: 24,
-        height_px: 35,
-        content_height_px: 19,
-        ascent_px: 12.0,
-        descent_px: 4.0,
-        baseline_px: 12.0,
-        render_time: Duration::from_millis(3),
-        inline_runs: Vec::new(),
-    }
-}
-
 /// **A window of one shell whose transcript holds one typeset display formula, scrolled into
 /// view**: the window, the pane the block stands in, and the block.
 ///
-/// The decoration requests go to a channel the test holds, and the formula's is answered with
-/// [`typeset_picture`] the way the window answers a completion — through the session's own
-/// `complete_worker_result`.
+/// The decoration requests go to a computation lane the test watches; the formula's answer — the
+/// product's own typesetting — is handed to the session the way the window hands a completion,
+/// through its `complete_worker_result`.
 fn a_typeset_formula(tag: &str) -> (HeadlessFolio, PasteTarget, MathBlockAnchor) {
     let tab = crate::test_support::cross_tab(1, &["公式 formula", "旁边 beside"]);
     let seat = tab.seats.terminals()[0];
     let mut folio = HeadlessFolio::with_tabs(tag, vec![tab], 0);
-    let (tasks, requests) = std::sync::mpsc::channel();
-    let (scale_tasks, _) = std::sync::mpsc::channel();
-    let (path_tasks, _) = std::sync::mpsc::channel();
-    let (_, results) = std::sync::mpsc::channel();
-    folio.app.math_worker = crate::MathWorker {
-        tasks,
-        scale_tasks,
-        path_tasks,
-        results,
-    };
+    let mut watched = computation_lane::fixtures::watched(crate::lane::Executor::scripted(
+        std::sync::Arc::new(crate::lane::Gate::default()),
+    ));
+    folio.app.math_worker = std::sync::Arc::clone(&watched.lane);
     folio.app.motion = Motion::Full;
     // The pane's first size, told and quiet.
     let mut now = Instant::now();
@@ -77,29 +56,27 @@ fn a_typeset_formula(tag: &str) -> (HeadlessFolio, PasteTarget, MathBlockAnchor)
         pane.projection.scroll_to_top();
     }
     folio.draw();
-    let mut answered = false;
-    for request in requests.try_iter() {
-        let crate::MathWorkerRequest::Math { task, .. } = request else {
-            continue;
-        };
-        let bt_term::SessionMathTask::Frozen(mut task) = *task else {
-            continue;
-        };
-        assert!(
-            bt_detect::resolve_detection_task(&mut task),
-            "the block is proved"
-        );
-        answered |= folio
+    let (_, _, terminal, _) = watched.next_ended(
+        computation_lane::Share::Decoration,
+        computation_lane::fixtures::nobody,
+    );
+    let answer =
+        computation_lane::fixtures::answer(terminal).expect("the lane typesets the formula");
+    let crate::DecorationWorkerCompletion::Math { task, result } = answer.completion else {
+        panic!("the lane's answer is a formula's");
+    };
+    let bt_term::SessionMathTask::Frozen(task) = *task else {
+        panic!("the formula stands in the transcript");
+    };
+    assert!(
+        folio
             .runtime()
             .sessions
             .get_mut(&seat)
             .expect("the shell")
             .session
-            .complete_worker_result(task, Ok(typeset_picture()));
-    }
-    assert!(
-        answered,
-        "the fixture's own precondition: the formula was asked for and answered"
+            .complete_worker_result(task, result),
+        "the fixture's own precondition: the session takes the formula's picture"
     );
     folio.draw();
     let runtime = folio.runtime();

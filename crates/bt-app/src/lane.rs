@@ -58,8 +58,10 @@
 //! different kind, on a lane or claim that was not run, and on a claim that exercised no request.
 //! The OS hand-off lane (`handoff_lane`, S-5) is built on the seam, and so are the font, taskbar
 //! and program-walk lanes (`settings::FontLane`, `taskbar_lane`, `programs_lane`; S-4), each a
-//! latest-value lane on [`Coalescing`]; each adapter hands its real lane a scripted [`Executor`].
-//! S-6a (the storage worker) and S-7 (the clipboard) each move one more onto it, the same way.
+//! latest-value lane on [`Coalescing`], and the computation lane (`computation_lane`, S-8), three
+//! first-in-first-out shares on [`Queue`], each with its own ledger; each adapter hands its real
+//! lane a scripted [`Executor`], and every lane keeps every claim. S-6a (the storage worker) and
+//! S-7 (the clipboard) each move one more onto it, the same way.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -533,12 +535,18 @@ where
         }
     }
 
-    /// The requester takes `id`'s terminal, if it has ended.
-    fn take(&self, id: Id) -> Option<TerminalOf<Id, O>> {
+    /// The requester takes `id`'s terminal, if it has ended and `wanted` says so of it.
+    fn take(
+        &self,
+        id: Id,
+        wanted: impl FnOnce(&TerminalOf<Id, O>) -> bool,
+    ) -> Option<TerminalOf<Id, O>> {
         let mut out = Out::new();
         let terminal = {
             let mut book = lock(&self.book);
-            book.entries.get(&id)?.terminal.as_ref()?;
+            if !wanted(book.entries.get(&id)?.terminal.as_ref()?) {
+                return None;
+            }
             let terminal = book.entries.remove(&id)?.terminal?;
             self.delivered(&mut book, id, &terminal, &mut out);
             terminal
@@ -602,10 +610,19 @@ where
 
     /// The terminal, once the request has ended; `None` before, and after it was taken.
     pub(crate) fn take(&mut self) -> Option<TerminalOf<Id, O>> {
+        self.take_if(|_| true)
+    }
+
+    /// The terminal, once the request has ended, if `wanted` says so of it; left for a later take
+    /// otherwise.
+    pub(crate) fn take_if(
+        &mut self,
+        wanted: impl FnOnce(&TerminalOf<Id, O>) -> bool,
+    ) -> Option<TerminalOf<Id, O>> {
         if self.settled {
             return None;
         }
-        let terminal = self.ledger.take(self.id);
+        let terminal = self.ledger.take(self.id, wanted);
         self.settled = terminal.is_some();
         terminal
     }
@@ -629,6 +646,8 @@ where
 /// gate, which can hold each task, end the worker, or make a task panic.
 pub(crate) struct Executor {
     band: ThreadPriority,
+    /// The stack its workers are given, in bytes; `None`, the thread door's default.
+    stack: Option<usize>,
     #[cfg(test)]
     script: Option<Arc<Gate>>,
 }
@@ -638,8 +657,20 @@ impl Executor {
     pub(crate) fn thread_door(band: ThreadPriority) -> Self {
         Self {
             band,
+            stack: None,
             #[cfg(test)]
             script: None,
+        }
+    }
+
+    /// **This executor, its workers given a stack of `bytes`** — for a worker whose work says how
+    /// deep it may go (the formula renderer's `bt_math::MATH_WORKER_STACK_BYTES`).
+    pub(crate) fn with_stack(&self, bytes: usize) -> Self {
+        Self {
+            band: self.band,
+            stack: Some(bytes),
+            #[cfg(test)]
+            script: self.script.clone(),
         }
     }
 
@@ -668,19 +699,20 @@ impl Executor {
             return Err(cause);
         }
         let ended = Arc::clone(&ends);
-        let started = bt_platform::spawn_at_priority(name, self.band, move |ctx| {
-            #[cfg(test)]
-            SCRIPT.with(|held| *held.borrow_mut() = script);
-            // Contained (`contained_panic::contain`): the resident panic hook lets a panic
-            // outside a task unwind to here, where it is the worker's end, not the process's.
-            let cause = match crate::contained_panic::contain(|| body(ctx)) {
-                Ok(()) => WorkerEnd::Returned,
-                Err(panic) => {
-                    WorkerEnd::Panicked(crate::pty_door::panic_message(panic.as_ref()).to_owned())
-                }
-            };
-            ended.worker_ended(cause);
-        });
+        let started =
+            bt_platform::spawn_at_priority_with_stack(name, self.band, self.stack, move |ctx| {
+                #[cfg(test)]
+                SCRIPT.with(|held| *held.borrow_mut() = script);
+                // Contained (`contained_panic::contain`): the resident panic hook lets a panic
+                // outside a task unwind to here, where it is the worker's end, not the process's.
+                let cause = match crate::contained_panic::contain(|| body(ctx)) {
+                    Ok(()) => WorkerEnd::Returned,
+                    Err(panic) => WorkerEnd::Panicked(
+                        crate::pty_door::panic_message(panic.as_ref()).to_owned(),
+                    ),
+                };
+                ended.worker_ended(cause);
+            });
         match started {
             Ok(_) => Ok(()),
             Err(error) => {
@@ -999,6 +1031,199 @@ where
     }
 }
 
+/// **How a request asked of a [`Queue`] relates to one waiting there** — the lane's per-target
+/// policy, stated for each pair (revision (b)4).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Relation {
+    /// Unrelated: the newer request waits behind the older one.
+    Other,
+    /// The same operation: the newer request joins the waiting one (`Joined { with }`) and is not
+    /// run itself.
+    Same,
+    /// A newer, different operation on the same target: the waiting one ends
+    /// `Superseded { by }` the newer, which takes the back of the line.
+    Displaces,
+}
+
+/// **A first-in, first-out lane on the seam** (the side-effects contract's C1, C2 and C4): every
+/// request admitted is run, one at a time, in the order its identity was minted — unless a newer
+/// request for the same target displaces it while it waits ([`Relation::Displaces`]) or is the
+/// same operation and joins it ([`Relation::Same`]). Each request ends exactly once, through the
+/// ledger.
+///
+/// The worker is started by the first request that finds it not started, as [`Coalescing`]'s is,
+/// and a start the thread door refuses refuses that request alone, at the door, with no identity
+/// minted ([`Refused::NotStarted`], said once per streak where the lane declares streaks); the
+/// lane is not in fault, and the next request starts it again (revision (b)5, rule 1).
+///
+/// A request a newer one displaces ends `Superseded { by }` at once, and the lane's wake announces
+/// it, so its consumer can take that terminal — which carries no answer — without waiting for the
+/// run before it.
+///
+/// The requester holds what [`Self::ask`] admitted. The identities end in the order they were
+/// minted — one worker, first in first out, a displaced or joined request ending no later than
+/// the one that ends it, the worker's end ending the rest — so a consumer may take the terminals
+/// below [`Ledger::earliest_owed`] as a prefix.
+pub(crate) struct Queue<Id, O, Job>
+where
+    Id: Copy + Ord + fmt::Debug + From<u64> + Send + 'static,
+    O: Owed<Id>,
+{
+    ledger: Arc<Ledger<Id, O>>,
+    line: Mutex<Line<Id, Job>>,
+    asked: std::sync::Condvar,
+}
+
+struct Line<Id, Job> {
+    /// The requests admitted and not yet taken by the worker, in the order they were minted.
+    waiting: std::collections::VecDeque<(Id, Job)>,
+    /// Whether the worker has been started — by the first request whose start the thread door did
+    /// not refuse.
+    started: bool,
+    /// Whether the lane's owner has let it go: the worker runs what is in line, then returns.
+    closed: bool,
+}
+
+impl<Id, O, Job> Queue<Id, O, Job>
+where
+    Id: Copy + Ord + fmt::Debug + From<u64> + Send + 'static,
+    O: Owed<Id>,
+{
+    pub(crate) fn new(ledger: Arc<Ledger<Id, O>>) -> Self {
+        Self {
+            ledger,
+            line: Mutex::new(Line {
+                waiting: std::collections::VecDeque::new(),
+                started: false,
+                closed: false,
+            }),
+            asked: std::sync::Condvar::new(),
+        }
+    }
+
+    /// The lane's ledger: what its worker publishes through and the executor reports the
+    /// worker's end to.
+    pub(crate) fn ledger(&self) -> &Arc<Ledger<Id, O>> {
+        &self.ledger
+    }
+
+    /// **Admit one request (C1): start the worker if it is not started, mint the request's
+    /// identity — joined to the waiting request it is the same operation as, or displacing the one
+    /// it supersedes — and put its job in line**; or refuse it at once, minting nothing, and hand
+    /// the job back with the refusal (revision (b)3). Never waits for the worker.
+    ///
+    /// `relate(waiting, asked)` says how the asked job relates to each one waiting, oldest first;
+    /// the first that is not [`Relation::Other`] decides. `start` is the lane's own
+    /// `Executor::start_worker` call, handed the ledger as a started worker reports to it
+    /// ([`Ran`]).
+    pub(crate) fn ask(
+        &self,
+        job: Job,
+        owed: O,
+        relate: impl Fn(&Job, &Job) -> Relation,
+        start: impl FnOnce(Arc<Ran<Id, O>>) -> Result<(), WorkerEnd>,
+    ) -> Result<Request<Id, O>, (Refused, Job)> {
+        let mut line = lock(&self.line);
+        if !line.started {
+            if let Err(end) = start(Arc::new(Ran(Arc::clone(&self.ledger)))) {
+                // Said after the lane's lock is let go.
+                drop(line);
+                self.ledger.say_not_started(&end);
+                return Err((Refused::NotStarted(end.to_string()), job));
+            }
+            line.started = true;
+        }
+        // Whether this request displaced one: its terminal is announced by the wake, after the
+        // line's lock is let go, so the consumer can take it at once and free its place.
+        let mut superseded = false;
+        let related = line
+            .waiting
+            .iter()
+            .enumerate()
+            .find_map(|(at, (_, waiting))| match relate(waiting, &job) {
+                Relation::Other => None,
+                relation => Some((at, relation)),
+            });
+        let request = match related {
+            Some((at, Relation::Same)) => {
+                let with = line.waiting[at].0;
+                return self
+                    .ledger
+                    .admit_joined(with, owed)
+                    .map_err(|refused| (refused, job));
+            }
+            Some((at, Relation::Displaces)) => {
+                let request = match self.ledger.admit(owed) {
+                    Ok(request) => request,
+                    Err(refused) => return Err((refused, job)),
+                };
+                if let Some((displaced, _)) = line.waiting.remove(at) {
+                    self.ledger
+                        .publish(displaced, Terminal::Superseded { by: request.id() });
+                    superseded = true;
+                }
+                request
+            }
+            _ => match self.ledger.admit(owed) {
+                Ok(request) => request,
+                Err(refused) => return Err((refused, job)),
+            },
+        };
+        line.waiting.push_back((request.id(), job));
+        drop(line);
+        self.asked.notify_one();
+        if superseded {
+            (self.ledger.wake)();
+        }
+        Ok(request)
+    }
+
+    /// **The worker's: the next job**, waiting on the lane's condition variable until one is in
+    /// line; `None` once the lane is let go ([`Self::close`]) and nothing waits. Called only on
+    /// the lane's worker (`ctx`, the capability the thread door lent its body).
+    pub(crate) fn next(&self, ctx: &WorkerCtx) -> Option<(Id, Job)> {
+        let _ = ctx;
+        let mut line = lock(&self.line);
+        loop {
+            if let Some(next) = line.waiting.pop_front() {
+                return Some(next);
+            }
+            if line.closed {
+                return None;
+            }
+            line = self
+                .asked
+                .wait(line)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// **The worker's body**: each job in line run by `run` inside its own [`task`], its terminal
+    /// published, then the wake — until the lane is let go.
+    pub(crate) fn serve(
+        &self,
+        ctx: &WorkerCtx,
+        mut run: impl FnMut(&WorkerCtx, Job) -> Result<O::Answer, O::Error>,
+        wake: &dyn Fn(),
+    ) {
+        while let Some((id, job)) = self.next(ctx) {
+            let terminal = match task(ctx, |ctx| run(ctx, job)) {
+                Ok(answer) => Terminal::Done(answer),
+                Err(failure) => Terminal::Failed(failure),
+            };
+            self.ledger.publish(id, terminal);
+            wake();
+        }
+    }
+
+    /// **The lane's owner lets it go**: the worker runs what is in line and then returns, owing
+    /// nothing.
+    pub(crate) fn close(&self) {
+        lock(&self.line).closed = true;
+        self.asked.notify_all();
+    }
+}
+
 /// The answer a terminal carries, its own or — for a request that joined another — its twin's.
 pub(crate) fn answer_of<Id, T, E>(terminal: Terminal<Id, T, E>) -> Option<T> {
     match terminal {
@@ -1033,6 +1258,7 @@ impl Executor {
     pub(crate) fn scripted(gate: Arc<Gate>) -> Self {
         Self {
             band: ThreadPriority::Normal,
+            stack: None,
             script: Some(gate),
         }
     }
@@ -1051,19 +1277,25 @@ pub(crate) enum LaneName {
     Font,
     /// `taskbar_lane`: whether the taskbar hides itself.
     Taskbar,
-    /// `MathWorker`'s formula and decode thread (`run_decoration_worker`).
+    /// `computation_lane`'s formula, decode and glance share (`bt-math-worker`).
     Computation,
+    /// `computation_lane`'s resample share (`bt-image-scale-worker`).
+    ComputationScale,
+    /// `computation_lane`'s path-verification share (`bt-path-verify-worker`).
+    ComputationPath,
     /// `programs_lane`: what this machine can start (T-PROGRAMS-REFRESH).
     Programs,
 }
 
 #[cfg(test)]
 impl LaneName {
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Handoff,
         Self::Font,
         Self::Taskbar,
         Self::Computation,
+        Self::ComputationScale,
+        Self::ComputationPath,
         Self::Programs,
     ];
 }
@@ -1077,8 +1309,6 @@ pub(crate) enum Replacement {
     /// A newer request supersedes one not yet started; "latest" is the newest **requested**, and
     /// an answer older than the one **adopted** is dropped.
     LatestValue,
-    /// One question, one answer, keyed by the question.
-    PerQuestion,
 }
 
 /// The order requests are executed in.
@@ -1217,23 +1447,71 @@ pub(crate) const TASKBAR: Contract = Contract {
     saying: Saying::PerStreak,
 };
 
-/// `MathWorker`'s decoration thread (`bt-math-worker`): one question, one answer, keyed by the
-/// question; an unbounded `mpsc::channel` each way; the answer's tab is its target
-/// (`MathWorkerResult::owner`, `claimed_by`), and a closed tab's answer is dropped. The answer
-/// sender is shared with the scaling and path-verification threads.
+/// `computation_lane`'s decoration share, on the seam (S-8): one `bt-math-worker` thread; ids
+/// minted by the share's `Ledger`; every request run and answered in the order it was minted, none
+/// coalesced; the asking tab (or window) is the target incarnation, and a closed tab's request ends
+/// in the lane's sink, which ignores it; the ledger owes 196 at once — a sizing choice, what one
+/// pane's session holds queued for this worker (`bt_term::DECORATION_TASKS_HELD`), one running and
+/// the rest waiting, an answer not yet taken holding its place — and refuses the rest at the door;
+/// a failure (a panic in one request's work) is said once per streak.
 #[cfg(test)]
 pub(crate) const COMPUTATION: Contract = Contract {
     lane: Some(LaneName::Computation),
-    replacement: Replacement::PerQuestion,
+    replacement: Replacement::Fifo,
     execution: Order::Submission,
     delivery: Delivery::Submission,
     bounds: Bounds {
-        waiting: Bound::Unbounded,
+        // `computation_lane::DECORATION_BOUND`, written out rather than read, so that a change to
+        // either the declaration or the lane is a disagreement the suite reports.
+        waiting: Bound::At(195),
         executing: 1,
-        answers_held: Bound::Unbounded,
+        answers_held: Bound::At(196),
     },
     cancellation: Cancellation::Abandon,
-    saying: Saying::PerRequest,
+    saying: Saying::PerStreak,
+};
+
+/// `computation_lane`'s resample share, on the seam (S-8): one `bt-image-scale-worker` thread;
+/// ids minted by the share's own `Ledger`; run and ended in the order minted, a newer request for
+/// the same picture, pane and surface superseding the one waiting or joining it at the same size;
+/// the asking tab (or window) is the target incarnation, a closed tab's request ending in the
+/// lane's ignoring sink; the ledger owes 68 at once (`bt_term::DECODE_TASKS_HELD`, one hand-out
+/// pass's resamples) and refuses the rest at the door; a failure is said once per streak.
+#[cfg(test)]
+pub(crate) const COMPUTATION_SCALE: Contract = Contract {
+    lane: Some(LaneName::ComputationScale),
+    replacement: Replacement::Fifo,
+    execution: Order::Submission,
+    delivery: Delivery::Submission,
+    bounds: Bounds {
+        // `computation_lane::SCALE_BOUND`, written out rather than read.
+        waiting: Bound::At(67),
+        executing: 1,
+        answers_held: Bound::At(68),
+    },
+    cancellation: Cancellation::Abandon,
+    saying: Saying::PerStreak,
+};
+
+/// `computation_lane`'s path-verification share, on the seam (S-8): one `bt-path-verify-worker`
+/// thread; ids minted by the share's own `Ledger`; run and ended in the order minted, none
+/// coalesced; the asking tab is the target incarnation, a closed tab's request ending in the
+/// lane's ignoring sink; the ledger owes 512 at once (`bt_term::PATH_TASKS_HELD`, one hand-out
+/// pass's printed paths) and refuses the rest at the door; a failure is said once per streak.
+#[cfg(test)]
+pub(crate) const COMPUTATION_PATH: Contract = Contract {
+    lane: Some(LaneName::ComputationPath),
+    replacement: Replacement::Fifo,
+    execution: Order::Submission,
+    delivery: Delivery::Submission,
+    bounds: Bounds {
+        // `computation_lane::PATH_BOUND`, written out rather than read.
+        waiting: Bound::At(511),
+        executing: 1,
+        answers_held: Bound::At(512),
+    },
+    cancellation: Cancellation::Abandon,
+    saying: Saying::PerStreak,
 };
 
 /// `programs_lane`, on the seam (S-4): one `program-walk` worker; ids minted by the lane's
@@ -1498,59 +1776,10 @@ pub(crate) struct ExpectedFailure {
 
 /// **The lanes' declared failures** — data, not `#[ignore]`. Removing a row while its failure
 /// stands is red (an undeclared failure); repairing a lane without removing its row is red too (an
-/// unexpected pass).
+/// unexpected pass). Empty since S-8: every lane keeps every claim, and only a claim new to the
+/// suite may bring rows (`scripts/ci/check-expected-failures.ps1`).
 #[cfg(test)]
-pub(crate) const EXPECTED_FAILURES: &[ExpectedFailure] = &[
-    ExpectedFailure {
-        lane: LaneName::Computation,
-        claim: Claim::FullLaneAnswersWithoutWaiting,
-        failure: FailureKind::AdmissionUnbounded,
-        repair: "D-74",
-        why: "MathWorker::spawn's request channel is an unbounded mpsc::channel",
-    },
-    ExpectedFailure {
-        lane: LaneName::Computation,
-        claim: Claim::AnswersHeldAreBounded,
-        failure: FailureKind::AnswersUnbounded,
-        repair: "D-74",
-        why: "the answer channel the three threads share is an unbounded mpsc::channel",
-    },
-    ExpectedFailure {
-        lane: LaneName::Computation,
-        claim: Claim::EveryRequestHasItsOwnIdentity,
-        failure: FailureKind::IdentityAmbiguous,
-        repair: "D-75",
-        why: "the lane mints no request id; an answer carries only its question",
-    },
-    ExpectedFailure {
-        lane: LaneName::Computation,
-        claim: Claim::ADeadWorkerIsObservable,
-        failure: FailureKind::DeathUnobservable,
-        repair: "D-76",
-        why: "the scaling and path-verification threads hold clones of the answer sender, so the \
-              drain never sees the decoration thread's death as a disconnection",
-    },
-    // S-3 (2026-10-11): the four claims of the side-effects contract, run on lanes not yet built
-    // on the seam. Each lane's repair ticket moves it onto the seam and removes its rows (S-5 the
-    // hand-off lane's, S-4 the font, taskbar and program-walk lanes').
-    ExpectedFailure {
-        lane: LaneName::Computation,
-        claim: Claim::AFailureIsSaidOnce,
-        failure: FailureKind::NoFailedTerminal,
-        repair: "D-76",
-        why: "the decoration thread runs no task inside a panic catch, and its executor cannot be \
-              stood in for: the suite's gate stands in the wake, after the answer, so a planted \
-              failure never reaches a request, and a decode error is read as an answer",
-    },
-    ExpectedFailure {
-        lane: LaneName::Computation,
-        claim: Claim::AnOrphanedAnswerReachesItsSink,
-        failure: FailureKind::OrphanNotSunk,
-        repair: "D-75",
-        why: "a closed tab's answer is dropped by claimed_by: the lane mints no identity a sink \
-              could be owed by",
-    },
-];
+pub(crate) const EXPECTED_FAILURES: &[ExpectedFailure] = &[];
 
 /// **One claim, run on one lane**: what it found and how many requests it put on the lane.
 #[cfg(test)]
@@ -1568,8 +1797,9 @@ pub(crate) struct Verdict {
 #[cfg(test)]
 pub(crate) trait LaneUnderTest {
     fn contract(&self) -> &'static Contract;
-    /// The executor's gate. The adapter calls [`Gate::pass`] where the lane's worker executes a
-    /// request (or, for a lane whose executor cannot be stood in for, in the worker's wake).
+    /// The executor's gate: the lane's scripted [`Executor`] passes it where each task begins
+    /// ([`Gate::arrive`]), and the adapter's task tells it which question it executes
+    /// ([`Gate::execute`]).
     fn gate(&self) -> &Gate;
     /// The wake's probe. The adapter's wake calls [`WakeProbe::woke`] where the lane wakes the
     /// event loop.
@@ -1839,22 +2069,27 @@ pub(crate) const REFUSED_START: &str = "the lane contract suite refuses this thr
 
 #[cfg(test)]
 impl Gate {
-    /// **Called by the worker, where it executes a request** (`question` when the executor can
-    /// see which). Waits while the gate is held, up to [`HOLD_LIMIT`]; then, if the suite asked for
-    /// the worker's death, panics — which ends the lane's thread as a fault inside its executor
-    /// would; then, if the suite planted a panic in `question` ([`Self::plant_panic`]), panics with
-    /// [`PLANTED_PANIC`] — a fault inside the request's own work.
-    pub(crate) fn pass(&self, question: Option<u64>) {
-        self.arrive_with(question);
-        if let Some(question) = question {
-            self.fire(question);
-        }
-    }
-
     /// **Called by the seam's scripted worker where a task begins**, outside the task's panic
     /// catch ([`task`]): counted, held, and the worker ended here when the suite asks.
     pub(crate) fn arrive(&self) {
-        self.arrive_with(None);
+        let mut state = lock(&self.state);
+        state.entered += 1;
+        self.changed.notify_all();
+        let since = Instant::now();
+        while state.held && since.elapsed() < HOLD_LIMIT {
+            state = self
+                .changed
+                .wait_timeout(state, HOLD_LIMIT)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        if state.kill {
+            state.kill = false;
+            state.killed = true;
+            self.changed.notify_all();
+            drop(state);
+            panic!("the lane contract suite terminates this worker on purpose");
+        }
     }
 
     /// **Called by a scripted task as it executes `question`**, inside its panic catch: recorded,
@@ -1889,27 +2124,6 @@ impl Gate {
         }
     }
 
-    fn arrive_with(&self, question: Option<u64>) {
-        let mut state = lock(&self.state);
-        state.entered += 1;
-        state.executed.extend(question);
-        self.changed.notify_all();
-        let since = Instant::now();
-        while state.held && since.elapsed() < HOLD_LIMIT {
-            state = self
-                .changed
-                .wait_timeout(state, HOLD_LIMIT)
-                .unwrap_or_else(PoisonError::into_inner)
-                .0;
-        }
-        if state.kill {
-            state.killed = true;
-            self.changed.notify_all();
-            drop(state);
-            panic!("the lane contract suite terminates this worker on purpose");
-        }
-    }
-
     pub(crate) fn hold(&self) {
         lock(&self.state).held = true;
     }
@@ -1919,7 +2133,8 @@ impl Gate {
         self.changed.notify_all();
     }
 
-    /// The next request to pass (or the one held now) ends the worker.
+    /// The next request to pass (or the one held now) ends the worker it passes on — that one
+    /// worker, once: a lane of several workers keeps the others.
     pub(crate) fn kill(&self) {
         lock(&self.state).kill = true;
     }
@@ -2186,7 +2401,7 @@ fn full_lane_answers_without_waiting(run: &mut Run<'_>) -> Result<(), Failure> {
     }
     let mut found = while_held;
     match contract.replacement {
-        Replacement::Fifo | Replacement::PerQuestion => {
+        Replacement::Fifo => {
             let refused = admissions
                 .iter()
                 .filter(|admission| admission.refused.is_some())
@@ -2246,9 +2461,7 @@ fn every_request_has_its_own_identity(run: &mut Run<'_>) -> Result<(), Failure> 
             let newest = second.key();
             run.settle(&mut found, |found| has_key(found, newest))
         }
-        Replacement::Fifo | Replacement::PerQuestion => {
-            run.settle(&mut found, |found| found.len() >= 2)
-        }
+        Replacement::Fifo => run.settle(&mut found, |found| found.len() >= 2),
     };
     if !settled {
         return Err(Failure::NoAnswer);
@@ -2289,7 +2502,7 @@ fn order_is_as_declared(run: &mut Run<'_>) -> Result<(), Failure> {
         // that takes one target's answers and then the other's is out of the declared order.
         let target = match contract.replacement {
             Replacement::LatestValue => 0,
-            Replacement::Fifo | Replacement::PerQuestion => (question % 2) as u32,
+            Replacement::Fifo => (question % 2) as u32,
         };
         admissions.push(run.submit(target, question).0);
     }
@@ -2326,7 +2539,7 @@ fn order_is_as_declared(run: &mut Run<'_>) -> Result<(), Failure> {
             }
             Ok(())
         }
-        Replacement::Fifo | Replacement::PerQuestion => {
+        Replacement::Fifo => {
             // A request refused at the door has its terminal already; the rest are found.
             let owed = admissions
                 .iter()
@@ -2445,7 +2658,7 @@ fn every_request_ends_exactly_once(run: &mut Run<'_>) -> Result<(), Failure> {
     let newest = admissions.last().map_or(0, Admission::key);
     let settled = match run.contract().replacement {
         Replacement::LatestValue => run.settle(&mut found, |found| has_key(found, newest)),
-        Replacement::Fifo | Replacement::PerQuestion => run.settle(&mut found, |found| {
+        Replacement::Fifo => run.settle(&mut found, |found| {
             every_admission_ended(&admissions, found)
         }),
     };

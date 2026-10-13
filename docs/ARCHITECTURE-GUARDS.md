@@ -75,7 +75,30 @@ under `target/` and bytes the shipped program embeds are not subjects.
 
 Where and what to do: `crates/bt-source/tests/tripwire.rs`.
 `no_source_reader_names_a_file_outside_the_two_lists` holds the Rust-source
-readers (four lexical shapes, by file);
+readers (four lexical shapes, by file). In a PowerShell reader (a `.ps1`
+holding `Get-Content`, `Select-String` or `ReadAll{Text,Lines,Bytes}`) a `.rs`
+path literal is a hit in exactly two spellings, `"…lib.rs"` and `'…lib.rs'`,
+each path-shaped, its opener the nearest quote of its kind on the same line.
+Three other spellings are diagnostics that fail naming `file:line`, the shape
+and what to do: a `.rs` extension inside a here-string (`@"…"@`, `@'…'@`) that
+is not one of the two spellings; an interpolated double-quoted value
+(`"$dir/lib.rs"`, `"${x}.rs"`, `"$(…)/a.rs"`, a `$` after an even run of
+backticks and before a name or an expression); and any other quoted `.rs` value with its opener on its line that
+is not path-shaped (`'crates/a b/lib.rs'`, an escaped `` `$ ``, a
+sub-expression holding a quote of its own). The author rewrites the literal
+into one of the two spellings or lists the file. Out of scope, as limits: a
+`.rs` with no quote on its line outside a here-string (a comment,
+`-Filter *.rs`), a closer with no opener on its line (a string spanning lines),
+and `.RS` in upper case; a line that only looks like a here-string opener
+(`$m = 'a@'`) opens a phantom one whose `.rs` names are reported — noise, never
+a silent pass. A shell reader is cleared like a Rust one, by file: a gate whose
+subject really is source files is a `FileScoped` variant (the vendor-notice,
+dead-code, lint-probe and embedded-spaces gates). A suite that writes a scratch
+`.rs` file into a temporary tree is no reader of a committed source and gets no
+row: it spells the scratch name so that the script holds no `.rs` literal (as
+`[IO.Path]::ChangeExtension('crates/x/src/lib', 'rs')` does, or by giving the
+scratch file another extension), and a single-quoted scratch path the scan
+reports is a false positive the author rewrites;
 `every_reader_of_a_committed_document_is_on_a_list` holds the document readers
 (by item, through `bt-source`'s index — no script reads Rust for it), and its
 message names the item, the file and both lists;
@@ -282,7 +305,16 @@ each on `lane::Coalescing` — the latest-value shape: one run out and at most o
 waiting, a request asked while one waits joined to it when it is the same
 operation and superseding it when it is not, the worker started by the first
 request, every terminal held for the application and taken in mint order
-below the earliest request still owed. What the proof covers:
+below the earliest request still owed; and the computation lane (S-8,
+`computation_lane`) on `lane::Queue` — the first-in-first-out shape: every request run in
+the order minted unless a newer one for the same target displaces it while it waits
+(`Superseded { by }`) or is the same operation and joins it, the worker started by the
+first request, a refused request handed back with its job, a supersession announced by
+the wake and its terminal — which carries no answer — taken past the drain mark. A lane of
+several threads keeps one ledger per thread, so one thread's end ends only its own requests,
+and keeps what each request asked, so a `Failed` one is settled — as its surface's own error,
+or held by its pane — and asked again only by new input to that surface, rather than left in
+flight or retried by a redraw. What the proof covers:
 `lane_contract_tests::the_ledger_ends_every_identity_exactly_once_in_every_interleaving`
 plays every order of three identities' outcomes (the six terminals, a racing
 answer after a cancel, a terminal published for a joined identity itself),
@@ -300,8 +332,10 @@ list — kept as data in `crates/bt-app/src/lane_expected_failures.tsv`, equal t
 the code by `lane_contract_tests::the_expected_failures_are_this_list` — to the
 merge base: no lane gains a row for a claim the merge base already
 had; a claim new to the suite brings the rows of the lanes that do not keep it
-yet. When red, repair the lane (a repair removes its row in the same change),
-or restore the behaviour the claim caught; do not add a row to quiet it.
+yet. Since S-8 every lane keeps every claim and the list's `# rows` holds only
+its header — the shrink's end, which the script accepts. When red, repair the
+lane (a repair removes its row in the same change), or restore the behaviour the
+claim caught; do not add a row to quiet it.
 
 ## Contained panics
 

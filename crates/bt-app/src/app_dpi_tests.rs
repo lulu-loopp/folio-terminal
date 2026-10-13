@@ -4,7 +4,7 @@
 //! from [`crate::test_support`].
 
 use super::*;
-use crate::test_support::{ResizeGateHarness, grid_of, method_body, probe_leaf, scale_task};
+use crate::test_support::{ResizeGateHarness, grid_of, method_body};
 use std::time::Duration;
 
 /// Sovereignty taken by a divider drag is not handed back by a rectangle
@@ -272,39 +272,6 @@ fn the_scale_change_arm_restates_the_cards_columns_scroll() {
     assert!(
         read < remeasured && remeasured < restated,
         "the old scale is read before it is overwritten, and spent after"
-    );
-}
-
-/// RED: a divider storm used to put every intermediate Lanczos3 request on the one FIFO.
-/// The worker must execute only the newest size for one content/purpose, while preserving a
-/// different purpose as an independent question.
-#[test]
-fn scale_worker_drag_storm_discards_superseded_work_and_completes_the_latest() {
-    let (sender, receiver) = mpsc::channel();
-    for width in 1..=128 {
-        sender
-            .send(ScaleWorkerRequest::Preview {
-                leaf: probe_leaf(),
-                task: scale_task("same-path", width),
-            })
-            .unwrap();
-    }
-    sender
-        .send(ScaleWorkerRequest::Peek {
-            leaf: probe_leaf(),
-            task: scale_task("same-path", 17),
-        })
-        .unwrap();
-    drop(sender);
-
-    let mut executed = Vec::new();
-    run_scale_worker(receiver, |request| {
-        executed.push((request.purpose(), request.task().display_width_px));
-    });
-
-    assert_eq!(
-        executed,
-        vec![(ScalePurpose::Preview, 128), (ScalePurpose::Peek, 17)]
     );
 }
 

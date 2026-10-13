@@ -1254,8 +1254,9 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
             .expect("the handoff lane starts"),
         layout_tables: layout_tables::LayoutTables::spawn(proxy.clone(), Vec::new())
             .expect("the layout tables start"),
-        math_worker: MathWorker::spawn(wake(|| AppEvent::MathReady))
-            .expect("the math worker starts"),
+        math_worker: Arc::new(computation_lane::ComputationLane::new(wake(|| {
+            AppEvent::MathReady
+        }))),
         foreground_program_worker: foreground_program::Worker::spawn(wake(|| AppEvent::MathReady))
             .expect("the foreground worker starts"),
         math_worker_running: true,

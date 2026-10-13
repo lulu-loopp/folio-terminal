@@ -5,7 +5,8 @@
 ## `lane_contract_tests::the_expected_failures_are_this_list` holds both equal to the code, and
 ## `scripts/ci/check-expected-failures.ps1` holds `# rows` to the merge base: no lane gains a row
 ## for a claim the merge base's `# claims` already has. A claim new to the suite brings the rows of
-## the lanes that do not keep it yet. Repairing a lane removes its row here and in the code.
+## the lanes that do not keep it yet. Repairing a lane removes its row here and in the code. Since
+## S-8 (2026-10-12) every lane keeps every claim, and `# rows` holds its header and nothing else.
 
 # claims
 claim
@@ -24,9 +25,3 @@ AnOrphanedAnswerReachesItsSink
 
 # rows
 lane	claim	failure	repair
-Computation	FullLaneAnswersWithoutWaiting	AdmissionUnbounded	D-74
-Computation	AnswersHeldAreBounded	AnswersUnbounded	D-74
-Computation	EveryRequestHasItsOwnIdentity	IdentityAmbiguous	D-75
-Computation	ADeadWorkerIsObservable	DeathUnobservable	D-76
-Computation	AFailureIsSaidOnce	NoFailedTerminal	D-76
-Computation	AnOrphanedAnswerReachesItsSink	OrphanNotSunk	D-75

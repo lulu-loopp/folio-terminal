@@ -1182,8 +1182,8 @@ fn canonical_path(path: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(path).ok()
 }
 
-/// Newest-per-target queue, the shape `PendingScaleRequests` already gives the
-/// resampling lane.
+/// Newest-per-target queue, the shape the resampling share keeps at its door
+/// (`computation_lane`).
 ///
 /// Reading a directory twice because it was folded and unfolded while a slow
 /// share was still answering is work nobody is waiting for, and worse, the older
@@ -1226,7 +1226,7 @@ impl PendingDirRequests {
 /// Serve directory reads, newest question per target first.
 ///
 /// Split from [`FilesWorker::spawn`] so the coalescing can be tested without a
-/// filesystem or an event loop, exactly as `run_scale_worker` is.
+/// filesystem or an event loop.
 fn run_dir_worker(receiver: mpsc::Receiver<DirRequest>, mut execute: impl FnMut(DirRequest)) {
     let mut pending = PendingDirRequests::default();
     while let Ok(request) = receiver.recv() {
