@@ -10,9 +10,9 @@ use crate::{
     PeekThumbnail, PeekThumbnailTarget, PreviewPane, PreviewSurface, ReferenceCard, RowHost,
     Runtime, ScaleWorkerRequest, ScrollThumbState, ShellAddress, facts_of_a_file_the_user_chose,
     file_peek, file_peek_promotion, files, float, git, git_document_question, git_panel,
-    hang_watch, i18n, input, mark_opacity, marks, peek_body_kind, peek_cache_key_for_decode,
-    peek_foot_press, peek_page_texture_key, peek_reads_the_file, peek_scale_task, peek_strip,
-    preview, preview_body_bar, profiles, ring_arc, risen_frame, scroll_bar_layer, seats,
+    hang_watch, i18n, input, mark_opacity, marks, peek_body_kind, peek_foot_press,
+    peek_page_texture_key, peek_reads_the_file, peek_scale_task, peek_strip, preview,
+    preview_body_bar, profiles, ring_arc, risen_frame, scroll_bar_layer, seats,
     session_is_breathing, tooltip, wait_pulse,
 };
 use anyhow::Context;
@@ -2788,17 +2788,7 @@ impl Runtime<'_> {
         let Some(decoded) = decoded else {
             return;
         };
-        let cache_key = peek_cache_key_for_decode(&task.source, decoded);
-        self.window.peek_cache.insert(
-            cache_key,
-            PeekCacheEntry::Ready {
-                key: decoded.key.clone(),
-                rgba: Arc::clone(&decoded.rgba),
-                width_px: decoded.width_px,
-                height_px: decoded.height_px,
-                native_size: decoded.native_size,
-            },
-        );
+        crate::remember_decode(&mut self.window.peek_cache, &task.source, decoded);
     }
 
     /// **Take delivery of a glance card's first page** (user ruling 2026-08-25).

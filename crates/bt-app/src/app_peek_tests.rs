@@ -5,8 +5,8 @@
 
 use super::*;
 use crate::test_support::{
-    a_decode, a_held_raster, a_read_out, chevron_button, free_fn_body, glance_fixture, method_body,
-    peek_open, probe_leaf, tab_with_a_picture, the_three_chevrons,
+    a_decode, a_held_raster, a_read_out, chevron_button, glance_fixture, method_body, peek_open,
+    probe_leaf, tab_with_a_picture, the_three_chevrons,
 };
 use std::time::Duration;
 
@@ -667,16 +667,77 @@ fn a_picture_opened_again_after_a_rename_is_read_off_the_disk() {
 
 /// RED — **the frame under a hover card and the frame in the preview pane
 /// come out of one decoder, asked through one door** (user ruling
-/// 2026-08-27; §7.23).
+/// 2026-08-27; §7.23; behaviour since T-PEEK-ANSWER-IDENTITY round 2).
 ///
 /// The whole of §7.10 ⑥ said about a *lane* rather than about a name: a
 /// glance card and a pane over the same file must show the same picture, and
 /// the only way that is true by construction is that both ask
 /// [`WindowRuntime::request_peek_pixels`] — whose body is [`ask_for_peek_pixels`] — and neither
-/// reads the file's name for itself. The two surfaces are hundreds of lines apart and each has its
-/// own cache guard, so a second `MathWorkerRequest::PeekVideoFrame` built at
-/// one of them would compile, would work, and would be the place the two
-/// drift the day the fork grows a third arm.
+/// reads the file's name for itself. The door's half is asserted on the real lane: a `.mp4` is
+/// answered by the video decoder and a `.png` by the picture decoder, each read filed under the
+/// identity its answer comes home with, and a share on another machine is refused at the door
+/// with nothing asked and nothing filed.
+///
+/// MUTATION: have `ask_for_peek_pixels` build `PeekImage` whatever the name — the `.mp4` comes
+/// home from the picture decoder. Or drop its `is_readable_unasked` refusal — the share is asked.
+#[test]
+fn the_door_reads_a_video_with_the_video_decoder_and_refuses_a_share() {
+    crate::test_support::install_host_answers();
+    let mut lane = crate::computation_lane::fixtures::watched(crate::lane::Executor::scripted(
+        Arc::new(crate::lane::Gate::default()),
+    ));
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/peek-tests");
+    for (name, extension, video) in [
+        ("\u{5f55}\u{5c4f} capture", "mp4", true),
+        ("\u{622a}\u{56fe} shot", "png", false),
+    ] {
+        let path = directory.join(format!("{}.{extension}", bt_testpath::unique_name(name)));
+        let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+        let PeekAsk::Asked(asked) =
+            ask_for_peek_pixels(&mut cache, &lane.lane, probe_leaf(), &path)
+        else {
+            panic!("a local file is asked about: {name}");
+        };
+        assert!(
+            peek_awaits(&cache, &normalized_local_image_path_key(&path), asked),
+            "the read is filed under the identity the lane minted: {name}"
+        );
+        let terminal = lane.terminal(
+            crate::computation_lane::Share::Decoration,
+            asked,
+            crate::computation_lane::fixtures::nobody,
+        );
+        let answer = crate::computation_lane::fixtures::answer(terminal)
+            .unwrap_or_else(|| panic!("the read of {name} is answered"));
+        assert_eq!(
+            matches!(
+                answer.completion,
+                DecorationWorkerCompletion::PeekVideoFrame { .. }
+            ),
+            video,
+            "{name} is answered by the {} decoder",
+            if video { "video" } else { "picture" }
+        );
+    }
+    let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+    assert_eq!(
+        ask_for_peek_pixels(
+            &mut cache,
+            &lane.lane,
+            probe_leaf(),
+            Path::new(r"\\server\share\a.png"),
+        ),
+        PeekAsk::Refused,
+        "a share on another machine is not read unasked"
+    );
+    assert_eq!(cache.iter().count(), 0, "and nothing is filed for it");
+}
+
+/// RED — **the surfaces that show pixels name no decoder; each asks through the one door**
+/// ([`WindowRuntime::request_peek_pixels`]). The two surfaces are hundreds of lines apart and each
+/// has its own cache guard, so a second `MathWorkerRequest::PeekVideoFrame` built at one of them
+/// would compile, would work, and would be the place the two drift the day the fork grows a third
+/// arm.
 ///
 /// Asserted as text for [`files_locate_door_tests`]' reason exactly: what is
 /// being pinned is *which function builds which request*, and no value any
@@ -690,16 +751,6 @@ fn one_door_decides_which_decoder_a_hover_and_a_pane_ask() {
     // Built at run time so that this test's own text is not one of the
     // sites it is counting.
     let lane = |variant: &str| format!("MathWorkerRequest::{variant} {{");
-    let door = free_fn_body("ask_for_peek_pixels");
-    for variant in ["PeekImage", "PeekVideoFrame"] {
-        assert!(
-            door.contains(&lane(variant)),
-            "the door does not build {variant}:\n{door}"
-        );
-    }
-    // And the two surfaces that show pixels name neither: what they ask for
-    // is "this file's pixels", and a second reading of the name at either of
-    // them is where the card and the pane come to disagree.
     for surface in ["refit_preview_picture", "file_peek_fitted_pixels"] {
         let text = method_body("Runtime", surface);
         for variant in ["PeekImage", "PeekVideoFrame"] {
@@ -713,12 +764,6 @@ fn one_door_decides_which_decoder_a_hover_and_a_pane_ask() {
             "`{surface}` must ask through the one door"
         );
     }
-    // The door reads the class through the same predicate the open lane
-    // forks on, so a file that *opened* as a video is decoded as one.
-    assert!(
-        door.contains("preview::path_names_a_video("),
-        "the door must ask the class's own predicate:\n{door}"
-    );
 }
 
 /// RED — **the card keeps the last few pages of the document it is over, and
@@ -1663,4 +1708,63 @@ fn a_set_aside_peek_answer_is_recorded_and_never_shown() {
         "the newer read's pixels stand"
     );
     std::fs::remove_file(&png).expect("the scratch file this test wrote");
+}
+
+/// RED (T-PEEK-ANSWER-IDENTITY round 2) — **a decode the session's worker made never lands over a
+/// read in flight**: a surface's read of a file is out under its identity when the terminal's own
+/// verification decodes the same file and offers it to the peek ([`remember_decode`]). The read's
+/// record survives, so its answer is the awaited one — filed, and the surfaces waiting on it told
+/// (`file_peek_answer` answers `true`, which is what `complete_peek_image` notifies on). With no
+/// read out, the decode warms the peek as before.
+///
+/// MUTATION: drop `remember_decode`'s `Pending` guard — the decode lands over the record, the
+/// read's answer is awaited by nothing and set aside, and nobody waiting hears of it.
+#[test]
+fn a_decode_offered_to_the_peek_never_lands_over_a_read_in_flight() {
+    let path = PathBuf::from("D:/\u{9a8c}\u{8bc1}/\u{622a}\u{56fe} verified.png");
+    let key = normalized_local_image_path_key(&path);
+    let named = BTreeSet::from([key.clone()]);
+    let decoded = bt_term::DecodedInlineImage {
+        occurrence_id: 3,
+        key: "image:\u{9a8c}\u{8bc1} verified".to_owned(),
+        rgba: Arc::from(vec![0x40_u8; 4 * 2 * 4]),
+        width_px: 4,
+        height_px: 2,
+        native_size: None,
+        animated: false,
+    };
+    let source = bt_term::InlineImageSource::LocalPath(path.clone());
+    let asked = crate::computation_lane::ComputationId::from(7);
+    let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+    cache.insert(key.clone(), PeekCacheEntry::Pending { asked });
+
+    remember_decode(&mut cache, &source, &decoded);
+    assert!(
+        peek_awaits(&cache, &key, asked),
+        "the surface's read is still the one awaited"
+    );
+    assert!(
+        file_peek_answer(
+            &mut cache,
+            &named,
+            key.clone(),
+            asked,
+            Ok(a_decode("image:\u{9a8c}\u{8bc1} verified", (4, 2), 32)),
+        ),
+        "its answer is filed, and the surfaces waiting on it are told"
+    );
+    assert!(matches!(
+        cache.peek(&key),
+        Some(PeekCacheEntry::Ready { .. })
+    ));
+
+    let mut warm = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+    remember_decode(&mut warm, &source, &decoded);
+    assert!(
+        matches!(
+            warm.peek(&key),
+            Some(PeekCacheEntry::Ready { width_px: 4, .. })
+        ),
+        "with no read out, verification warms the peek"
+    );
 }

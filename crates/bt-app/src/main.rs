@@ -25284,6 +25284,36 @@ fn file_peek_answer(
     true
 }
 
+/// **A decode the session's own worker made, remembered for the peek** — a pasted picture under
+/// its content key, a printed path's picture under its normalized path
+/// ([`peek_cache_key_for_decode`]; `Runtime::remember_decode_for_peek` says why).
+///
+/// **Never over a read in flight** (T-PEEK-ANSWER-IDENTITY round 2): a `Pending` is the record of
+/// a surface's question, and its answer is the one road that tells the surfaces waiting on it — the
+/// flyout's re-entry, a page's sharpening and re-flow, the panes' and card's redraw. Pixels filed
+/// over it would leave that answer awaited by no record and set aside ([`peek_awaits`]), and the
+/// surfaces waiting would hear nothing. The read's own answer files the same file's pixels.
+fn remember_decode(
+    peek_cache: &mut PeekCache,
+    source: &bt_term::InlineImageSource,
+    decoded: &bt_term::DecodedInlineImage,
+) {
+    let key = peek_cache_key_for_decode(source, decoded);
+    if matches!(peek_cache.peek(&key), Some(PeekCacheEntry::Pending { .. })) {
+        return;
+    }
+    peek_cache.insert(
+        key,
+        PeekCacheEntry::Ready {
+            key: decoded.key.clone(),
+            rgba: Arc::clone(&decoded.rgba),
+            width_px: decoded.width_px,
+            height_px: decoded.height_px,
+            native_size: decoded.native_size,
+        },
+    );
+}
+
 /// **What became of a request for a file's pixels** ([`ask_for_peek_pixels`]).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PeekAsk {
