@@ -13758,7 +13758,7 @@ mod tests {
             assert_eq!(
                 buffer.view(true),
                 PreviewView::Web,
-                "and the source flip is a question about text, which this window
+                "and the source flip is a question about text, which this window \
                  holds none of for a page"
             );
             assert_eq!(

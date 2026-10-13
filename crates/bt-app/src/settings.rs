@@ -29383,8 +29383,7 @@ mod tests {
              three block rows together as the whole of the Rendered blocks page, \
              and the Terminal rows last with the PSReadLine one above them and \
              the pane's two axes adjacent, which is the mock-up's own order for \
-             that page.
-
+             that page.\n\n\
              **Sidebar touches `Tab layout` again** (user ruling 2026-08-18, \
              reversing §7.1.6c-5's filing of it under `Advanced`): the condition \
              on its own is not legible — a row that appears only under a \

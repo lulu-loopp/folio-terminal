@@ -147,8 +147,8 @@ fn shell_fixture(directory: &Path, home: &str, name: &str) -> String {
         name,
         &format!(
             "echo 'shell={name}'\necho \"argv=$*\"\n\
-             echo \"BT_SHELL_INTEGRATION=${{BT_SHELL_INTEGRATION-<unset>}}\"
-             echo \"ZDOTDIR=${{ZDOTDIR-<unset>}}\"
+             echo \"BT_SHELL_INTEGRATION=${{BT_SHELL_INTEGRATION-<unset>}}\"\n\
+             echo \"ZDOTDIR=${{ZDOTDIR-<unset>}}\"\n\
              echo \"BT_USER_ZDOTDIR=${{BT_USER_ZDOTDIR-<unset>}}\""
         ),
     );
