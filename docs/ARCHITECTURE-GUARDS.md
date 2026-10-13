@@ -93,11 +93,12 @@ and `.RS` in upper case; a line that only looks like a here-string opener
 (`$m = 'a@'`) opens a phantom one whose `.rs` names are reported — noise, never
 a silent pass. A shell reader is cleared like a Rust one, by file: a gate whose
 subject really is source files is a `FileScoped` variant (the vendor-notice,
-dead-code and lint-probe gates). A suite that writes a scratch `.rs` file into
-a temporary tree is no reader of a committed source and gets no row: it spells
-the scratch name so that the script holds no `.rs` literal (or gives the scratch
-file another extension), and a single-quoted scratch path the scan reports is a
-false positive the author rewrites;
+dead-code, lint-probe and embedded-spaces gates). A suite that writes a scratch
+`.rs` file into a temporary tree is no reader of a committed source and gets no
+row: it spells the scratch name so that the script holds no `.rs` literal (as
+`[IO.Path]::ChangeExtension('crates/x/src/lib', 'rs')` does, or by giving the
+scratch file another extension), and a single-quoted scratch path the scan
+reports is a false positive the author rewrites;
 `every_reader_of_a_committed_document_is_on_a_list` holds the document readers
 (by item, through `bt-source`'s index — no script reads Rust for it), and its
 message names the item, the file and both lists;

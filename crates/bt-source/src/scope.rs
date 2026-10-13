@@ -86,15 +86,25 @@ pub enum FileScoped {
     /// generated file's equality with its generator is a fact about the file;
     /// there is no item to ask about.
     TheLintProbeIsGenerated,
+    /// `scripts/ci/check-embedded-spaces.ps1`, the embedded-spaces gate,
+    /// asking `git ls-files` for `"crates/*.rs"`.
+    ///
+    /// Its subject is the source text of every first-party `.rs` file: it lexes
+    /// each one for string literals that carry a run of spaces, a fact about
+    /// how the literal is written, by file and line, which is the key of its
+    /// list. The pattern stays quoted so that `git` expands it, not the shell.
+    /// It is a PowerShell gate and cannot ask this crate's index.
+    TheEmbeddedSpacesGate,
 }
 
 impl FileScoped {
     /// Every entry. The allowlist is small enough to be an array and only shrinks.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::VendoredAddedFiles,
         Self::TheTripwireItself,
         Self::TheDeadCodeGate,
         Self::TheLintProbeIsGenerated,
+        Self::TheEmbeddedSpacesGate,
     ];
 
     /// Where the reader lives, from the workspace root, with forward slashes.
@@ -105,6 +115,7 @@ impl FileScoped {
             Self::TheTripwireItself => "crates/bt-source/tests/tripwire.rs",
             Self::TheDeadCodeGate => "scripts/ci/check-dead-code.ps1",
             Self::TheLintProbeIsGenerated => "scripts/ci/check-lint-probe.ps1",
+            Self::TheEmbeddedSpacesGate => "scripts/ci/check-embedded-spaces.ps1",
         }
     }
 
@@ -129,6 +140,10 @@ impl FileScoped {
             Self::TheLintProbeIsGenerated => {
                 "the committed probe source must be byte for byte its generator's output, a fact \
                  about a generated file"
+            }
+            Self::TheEmbeddedSpacesGate => {
+                "how every first-party string literal is written is read from the files \
+                 themselves, by file and line; a PowerShell gate that lexes them"
             }
         }
     }
