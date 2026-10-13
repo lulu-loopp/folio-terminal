@@ -451,7 +451,8 @@ pub(crate) fn adopt_claim(directory: &Path, claim: bt_platform::instance::DataDi
     };
     if let Some(was_writer) = earlier {
         eprintln!(
-            "BT_PERSIST a claim was adopted for {name} after this process had already answered              whether it writes there (writer={was_writer}); the earlier answer stands"
+            "BT_PERSIST a claim was adopted for {name} after this process had already answered \
+             whether it writes there (writer={was_writer}); the earlier answer stands"
         );
     }
     debug_assert!(

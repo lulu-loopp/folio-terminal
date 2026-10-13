@@ -296,7 +296,8 @@ fn the_canvas_is_in_force_before_the_window_is_made() {
     );
     assert!(
         themed < made,
-        "the canvas is settled before the window exists, or the first frame is              painted in the canvas the process was born with"
+        "the canvas is settled before the window exists, or the first frame is \
+         painted in the canvas the process was born with"
     );
     assert!(
         !body[..made].contains("window.theme()"),

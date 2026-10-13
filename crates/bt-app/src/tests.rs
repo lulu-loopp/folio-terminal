@@ -83,18 +83,15 @@ fn hostile_math_is_refused_and_the_real_decoration_worker_survives() {
     install_panic_log_hook_at(log.clone(), move |_| {
         calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     });
-    let (tasks, requests) = mpsc::channel();
-    let (results, completions) = mpsc::channel();
-    let worker = bt_platform::spawn_at_priority(
-        "bt-test-decoration",
+    // The real lane, its workers started through the thread door, its real doors.
+    let mut lane = computation_lane::fixtures::watched(lane::Executor::thread_door(
         bt_platform::ThreadPriority::Normal,
-        move |ctx| run_decoration_worker(ctx, requests, results, || {}),
-    )
-    .expect("start decoration worker");
+    ));
     let leaf = probe_leaf();
-    let render = |source: &str, budget| {
-        tasks
-            .send(MathWorkerRequest::PreviewMath {
+    let mut render = |source: &str| {
+        let id = lane
+            .lane
+            .decorate(MathWorkerRequest::PreviewMath {
                 leaf,
                 key: Box::new(PreviewMathKey {
                     source: source.to_owned(),
@@ -103,17 +100,21 @@ fn hostile_math_is_refused_and_the_real_decoration_worker_survives() {
                     foreground_rgb: [220, 220, 220],
                 }),
             })
-            .unwrap();
-        let completion = completions
-            .recv_timeout(budget)
-            .expect("worker must answer within budget");
+            .ok()
+            .expect("the formula is admitted");
+        let completion = computation_lane::fixtures::answer(lane.terminal(
+            computation_lane::Share::Decoration,
+            id,
+            computation_lane::fixtures::nobody,
+        ))
+        .expect("the worker answers the formula");
         let DecorationWorkerCompletion::PreviewMath { result, .. } = completion.completion else {
             panic!("expected formula completion");
         };
         result
     };
-    // Warm up fonts/Typst independently of the refusal-time measurement.
-    assert!(render("x+1", Duration::from_secs(30)).is_ok());
+    // Warm up fonts/Typst independently of the refusals.
+    assert!(render("x+1").is_ok());
     let mut exponential = String::new();
     for (name, next) in ('a'..='y').zip('b'..='z') {
         exponential.push_str(&format!(r"\newcommand{{\{name}}}{{\{next}\{next}}}"));
@@ -137,51 +138,35 @@ fn hostile_math_is_refused_and_the_real_decoration_worker_survives() {
         let preview::MarkdownBlock::Math { source } = &blocks[0] else {
             panic!("display formula must be detected");
         };
-        let seconds = if expected == MathRenderError::ConversionPanic {
-            5
-        } else {
-            1
-        };
-        assert_eq!(
-            render(source, Duration::from_secs(seconds)).unwrap_err(),
-            expected
-        );
-        assert!(render("x+1", Duration::from_secs(10)).is_ok());
+        assert_eq!(render(source).unwrap_err(), expected);
+        assert!(render("x+1").is_ok());
     }
-    assert!(
-        render(
-            r"\newcommand{\a}{\b}\newcommand{\b}{\c}\newcommand{\c}{x+1}\a",
-            Duration::from_secs(10)
-        )
-        .is_ok()
-    );
-    // **The path lane, which is a thread of its own since audit 3 C-2** — a stat that blocks for
-    // the redirector's timeout must not stand in front of a formula. Driven here by hand, exactly
-    // as the decoration queue above it is.
-    let (path_tasks, path_requests) = mpsc::channel();
-    let (path_results, path_completions) = mpsc::channel();
-    let path_worker =
-        std::thread::spawn(move || run_path_verify_worker(path_requests, path_results, || {}));
-    path_tasks
-        .send(PathWorkerRequest {
+    assert!(render(r"\newcommand{\a}{\b}\newcommand{\b}{\c}\newcommand{\c}{x+1}\a").is_ok());
+    // **The path share, which is a thread of its own since audit 3 C-2** — a stat that blocks for
+    // the redirector's timeout must not stand in front of a formula.
+    let verified = lane
+        .lane
+        .verify(PathWorkerRequest {
             leaf,
             path: log.clone(),
         })
-        .unwrap();
+        .ok()
+        .expect("the path is admitted");
     assert!(matches!(
-        path_completions
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap()
-            .completion,
+        computation_lane::fixtures::answer(lane.terminal(
+            computation_lane::Share::Path,
+            verified,
+            computation_lane::fixtures::nobody,
+        ))
+        .expect("the worker answers the path")
+        .completion,
         DecorationWorkerCompletion::VerifiedPath { verdict, .. } if verdict.exists
     ));
-    drop(path_tasks);
-    path_worker.join().unwrap();
     assert!(std::fs::read_to_string(log).unwrap().contains("unwrap"));
     assert_eq!(fatal_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert!(!bt_math::render_panic_is_contained());
-    drop(tasks);
-    worker.join().unwrap();
+    assert_eq!(lane.said(), Vec::<String>::new(), "no request failed");
+    drop(lane);
     assert!(panic::catch_unwind(|| panic!("ordinary panic hook regression probe")).is_err());
     assert_eq!(fatal_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
@@ -673,7 +658,8 @@ fn a_card_torn_off_carries_its_engine_with_it() {
     let loaded = card.state_answering_its_load();
     assert!(
         loaded.ready || loaded.error.is_some(),
-        "the engine gave no answer about its load, which past its own budget is a defect:          {loaded:?}"
+        "the engine gave no answer about its load, which past its own budget is a defect: \
+         {loaded:?}"
     );
     assert_eq!(loaded.error, None, "the fixture loads");
     card.seek_to(0.2, now);

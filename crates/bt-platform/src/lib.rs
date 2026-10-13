@@ -3295,7 +3295,8 @@ pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Comm
         not(windows),
         expect(
             unused_mut,
-            reason = "the one thing this door does to the child it builds is a Windows flag, and                       the door itself is the rule rather than the flag"
+            reason = "the one thing this door does to the child it builds is a Windows flag, and \
+                      the door itself is the rule rather than the flag"
         )
     )]
     let mut command = std::process::Command::new(program);
@@ -16542,13 +16543,16 @@ mod windows_impl {
             );
             assert!(
                 !pictures.begin_request((ShellPickKind::Program, Vec::new())),
-                "a second ask for the same gesture is coalesced, not stacked —                  including one for the other row this bridge answers, which is                  what keeps a program from arriving on the wallpaper's row"
+                "a second ask for the same gesture is coalesced, not stacked — \
+                 including one for the other row this bridge answers, which is \
+                 what keeps a program from arriving on the wallpaper's row"
             );
 
             assert_eq!(
                 pictures.begin_showing(),
                 Some((ShellPickKind::Image, start)),
-                "the kind travels with the request, so the dialog that opens is                  the one that was asked for"
+                "the kind travels with the request, so the dialog that opens is \
+                 the one that was asked for"
             );
             assert_eq!(pictures.begin_showing(), None);
             pictures.complete(Ok(Some(PathBuf::from(r"C:\Users\me\Pictures\ridge.jpg"))));
@@ -20973,7 +20977,8 @@ mod macos_dialog_backend_tests {
         assert_eq!(
             dressing.matches("setAllowedContentTypes(").count(),
             2,
-            "two of the four rows are filtered — the picture one, and the settings file one              (0.4.4 ticket 05), which offers the one type an export is written as"
+            "two of the four rows are filtered — the picture one, and the settings file one \
+             (0.4.4 ticket 05), which offers the one type an export is written as"
         );
         assert!(
             dressing.contains("setTreatsFilePackagesAsDirectories(false)"),
@@ -23781,7 +23786,9 @@ mod monospace_family_tests {
         assert_eq!(
             names(&ordered),
             vec![DEFAULT_MONOSPACE_FAMILY, "Zilla Mono"],
-            "which of the two spellings survives matters less than that the same              one survives every time — the tie is broken by exact bytes, so the              answer cannot depend on the order the machine reported them in"
+            "which of the two spellings survives matters less than that the same \
+             one survives every time — the tie is broken by exact bytes, so the \
+             answer cannot depend on the order the machine reported them in"
         );
     }
 }

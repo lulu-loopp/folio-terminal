@@ -8821,7 +8821,8 @@ mod tests {
                 OsString::from("BT_SHELL_INTEGRATION"),
                 OsString::from(MODE_LOGIN)
             )),
-            "the marker is what makes the script run the chain it displaced, and this row's own              arguments say which chain that is"
+            "the marker is what makes the script run the chain it displaced, and this row's own \
+             arguments say which chain that is"
         );
         // No script on this machine, and Git Bash is the shell it always was.
         assert_eq!(
