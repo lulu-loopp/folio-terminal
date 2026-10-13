@@ -97,6 +97,7 @@ mod install_channel;
 #[cfg(test)]
 #[path = "journeys_tests.rs"]
 mod journeys_tests;
+mod keybindings_merge;
 mod keyhint;
 /// **The lane contract** (D-33, `docs/ARCHITECTURE.md` §5.1; the side-effects contract, S-3): the
 /// seam a lane is built on — its `Executor`, its request `Ledger` and their hooks — and, with the
@@ -44955,17 +44956,15 @@ impl Runtime<'_> {
         // own words and a build that silently rewrote one it could not read
         // would destroy the copy they could have fixed by hand.
         let mut keybindings_store = persist::KeybindingsStore::open(session_store.lane());
-        let mut shortcuts = shortcuts::Shortcuts::defaults();
-        let overrides: Vec<shortcuts::Override> = keybindings_store
-            .loaded()
-            .iter()
-            .map(|entry| shortcuts::Override {
-                id: entry.action.clone(),
-                chord: entry.chord.clone(),
-            })
-            .collect();
         let mut keybindings_fault = keybindings_store.take_fault();
-        for fault in shortcuts.apply_overrides(&overrides) {
+        // Read in the file's own dialect and carried to this one, the rule an import and a
+        // merge read with; a line naming an action this build has no row for is carried in the
+        // file, never written out of it by a press on another row.
+        let (shortcuts, refused) = settings_bundle::shortcuts_at_start(
+            &mut keybindings_store,
+            bt_platform::host_platform(),
+        );
+        for fault in refused {
             eprintln!(
                 "BT_PERSIST {} refused {}: {}",
                 persist::KEYBINDINGS_FILE_NAME,
@@ -44981,18 +44980,6 @@ impl Runtime<'_> {
                 )
             });
         }
-        // The same for the shortcut table: a line naming an action this build has no row for is
-        // carried in the file, never written out of it by a press on another row.
-        keybindings_store.project(
-            shortcuts
-                .overrides()
-                .into_iter()
-                .map(|entry| bt_persist::BindingOverrideV1 {
-                    action: entry.id,
-                    chord: entry.chord,
-                })
-                .collect(),
-        );
         let theme_mode = startup_theme_mode(settings_store.loaded(), session_store.loaded());
         shell_integration::set_powershell_integration(settings_store.loaded().shell_integration);
         // **The carry-forward's own write, and the only one it ever makes.**
@@ -49331,8 +49318,9 @@ impl Runtime<'_> {
     /// that cannot exchange at once, a disk's refusal at the fifth in a row.
     /// Then what the re-reads put in force: a file that will not parse is said
     /// once, `settings.json`'s changes are merged and put in force through
-    /// their rows' doors (`Self::merge_documents`), and the profiles and pins
-    /// news is taken.
+    /// their rows' doors and `keybindings.json`'s through the one shortcut
+    /// table (`Self::merge_documents`), and the profiles and pins news is
+    /// taken.
     pub(crate) fn take_document_answers(&mut self) -> Result<()> {
         let heard = persist::hear_documents(
             &mut self.app.settings_store,
