@@ -2613,3 +2613,7 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "math_tests.rs"]
+mod tests;

@@ -399,6 +399,8 @@ pub(crate) struct HeadlessGlass {
     pub(crate) chrome: (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeIcon>),
     pub(crate) overlay: (Vec<OverlayLayer>, Vec<OverlayGroup>),
     pub(crate) peek_overlay: Option<PeekImageOverlay>,
+    /// How many times the overlay has been handed over — one build of it each.
+    pub(crate) overlay_builds: usize,
     pub(crate) web_holes: Vec<WebHole>,
     pub(crate) table_blocks: HashMap<TableBlockKey, TableBlockPaint>,
 }
@@ -430,6 +432,7 @@ impl HeadlessGlass {
             chrome: (Vec::new(), Vec::new(), Vec::new()),
             overlay: (Vec::new(), Vec::new()),
             peek_overlay: None,
+            overlay_builds: 0,
             web_holes: Vec::new(),
             table_blocks: HashMap::new(),
         }
@@ -546,6 +549,7 @@ impl Glass for HeadlessGlass {
     }
     fn set_modal_overlay(&mut self, layers: Vec<OverlayLayer>, groups: Vec<OverlayGroup>) -> bool {
         self.overlay = (layers, groups);
+        self.overlay_builds += 1;
         self.changed()
     }
     fn set_window_focused(&mut self, focused: bool) -> bool {
