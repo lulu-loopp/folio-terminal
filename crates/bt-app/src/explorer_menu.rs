@@ -2972,7 +2972,7 @@ mod tests {
                 &path.with_file_name("health-test"),
             ),
             txn,
-            Duration::from_millis(5),
+            crate::update_trial::Cadence::every(Duration::from_millis(5)),
             &|| {},
             None,
             &mut crate::update_trial::watchdog_asleep(),
