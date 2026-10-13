@@ -1173,7 +1173,6 @@ impl HeadlessFolio {
 pub(crate) struct HeadlessApplication {
     pub(crate) folio: crate::FolioApp<Headless>,
     pub(crate) id: WindowId,
-    pub(crate) ledger: Ledger,
     /// The loop the application's turns run in, recording to the window's ledger.
     pub(crate) event_loop: HeadlessLoop,
     _scratch: Scratch,
@@ -1199,10 +1198,7 @@ impl HeadlessApplication {
         Self {
             folio: application,
             id,
-            event_loop: HeadlessLoop {
-                ledger: ledger.clone(),
-            },
-            ledger,
+            event_loop: HeadlessLoop { ledger },
             _scratch: scratch,
         }
     }
