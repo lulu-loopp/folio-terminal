@@ -2321,10 +2321,13 @@ impl Runtime<'_> {
             .get(&seat)
             .cloned()
             .unwrap_or_default();
+        // **Taken, not copied**: the cache is who the column's repository
+        // questions are owed to (`git::GitCacheId`), and a question still out
+        // with git when the column pops out is answered into the window it
+        // becomes — so one cache, standing in one place.
         let git = self.window.tabs[active]
             .git_trees
-            .get(&seat)
-            .cloned()
+            .remove(&seat)
             .unwrap_or_default();
         let git_scroll = self.window.tabs[active]
             .git_scroll

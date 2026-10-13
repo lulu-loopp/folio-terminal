@@ -228,50 +228,26 @@ impl Runtime<'_> {
         let mut body = false;
         for response in answers_for(batch, |response| self.owns(response.owner())) {
             let host = response.host;
-            // **The asker has to still be there.** A column that closed,
-            // a graph that was shut and a window that was dismissed are
-            // one cancellation arriving as a dropped answer — and each
-            // says so in its own register, because each is addressed in
-            // its own way.
+            // **The asker is still there, and this is where it stands.**
+            // The drain found the cache that asked by its identity
+            // (`git_mutation_lane::OpenPages::address`) and addressed a
+            // page's answer to where that cache stands in this turn — a
+            // Files view docked or popped out while git ran is reached in
+            // its new place — and let go of the answers whose cache no open
+            // surface holds: a column or a graph that closed and a window
+            // that was dismissed are one cancellation, arriving as an
+            // answer that never reaches a window.
             //
-            // **The float is asked first, and without a tab.** That is
-            // the whole of why its host carries an epoch (user ruling,
-            // 2026-08-19): a pinned window floats *across* tabs by
-            // ruling, so "is that tab still open" is not the question
-            // here, and dropping a page's answer because the tab the
-            // window was born in has since closed would strand it
-            // mid-read with no second asking owed.
+            // **The float is filed without a tab.** That is the whole of
+            // why its host carries an epoch (user ruling, 2026-08-19): a
+            // pinned window floats *across* tabs by ruling, so the tab the
+            // window was born in having since closed does not strand a
+            // page mid-read with no second asking owed.
             let floating = match &host {
-                git::GitHost::Float { id, .. } => {
-                    if self
-                        .window
-                        .float
-                        .live(*id)
-                        .and_then(float::FloatWin::files)
-                        .is_none()
-                    {
-                        continue;
-                    }
-                    Some(*id)
-                }
+                git::GitHost::Float { id, .. } => Some(*id),
                 git::GitHost::Column(_) | git::GitHost::Graph { .. } => None,
             };
             let tab_index = self.window.tabs.iter().position(|tab| tab.id == host.tab());
-            if floating.is_none() {
-                let Some(index) = tab_index else {
-                    continue;
-                };
-                let tab = &self.window.tabs[index];
-                match &host {
-                    git::GitHost::Column(leaf) if !tab.files.contains_key(&leaf.seat) => {
-                        continue;
-                    }
-                    git::GitHost::Graph { root, .. } if !tab.git_graphs.contains_key(root) => {
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
             // **The two answers that are documents go to the pool**
             // (G-3), which is a tab's and not a column's: a diff opened
             // from one column is the same buffer whichever pane shows
@@ -537,6 +513,7 @@ impl Runtime<'_> {
         let tab_id = self.window.tabs[active].id;
         let cache = self.window.tabs[active].git_trees.entry(seat).or_default();
         cache.retarget(std::path::Path::new(root));
+        let asker = cache.id();
         let questions = cache.pending_questions();
         // Marked before any send, so a second call on the same frame sees
         // questions already asked rather than asking them twice.
@@ -547,6 +524,7 @@ impl Runtime<'_> {
             if !self.app.git_worker.request(git::GitRequest {
                 window: self.window_id(),
                 host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
+                asker,
                 question,
             }) {
                 self.disable_git_worker();
@@ -723,6 +701,19 @@ impl Runtime<'_> {
         name: String,
         renamed_from: Option<String>,
     ) -> Result<()> {
+        let active = self.window.active_tab;
+        let tab_id = self.window.tabs[active].id;
+        // The page the row was pressed on is the asker: its rows are drawn from
+        // this cache, so a column with no cache has no row to have pressed.
+        // Read before the document is opened, so no buffer waits on a question
+        // that is never asked.
+        let Some(asker) = self.window.tabs[active]
+            .git_trees
+            .get(&seat)
+            .map(git::GitCache::id)
+        else {
+            return Ok(());
+        };
         let Some(surface) = self.preview_landing_surface() else {
             return Ok(());
         };
@@ -737,11 +728,10 @@ impl Runtime<'_> {
         let Some(question) = git_document_question(&source, renamed_from) else {
             return Ok(());
         };
-        let active = self.window.active_tab;
-        let tab_id = self.window.tabs[active].id;
         if !self.app.git_worker.request(git::GitRequest {
             window: self.window_id(),
             host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
+            asker,
             question,
         }) {
             self.disable_git_worker();
@@ -1021,6 +1011,7 @@ impl Runtime<'_> {
                 let Some(state) = self.window.tabs[index].git_graphs.get_mut(&root) else {
                     continue;
                 };
+                let asker = state.cache.id();
                 let questions = state.cache.pending_questions();
                 for question in &questions {
                     state.cache.mark_pending(question);
@@ -1032,6 +1023,7 @@ impl Runtime<'_> {
                             tab: tab_id,
                             root: root.clone(),
                         },
+                        asker,
                         question,
                     }) {
                         self.disable_git_worker();
@@ -1051,6 +1043,7 @@ impl Runtime<'_> {
         let Some(state) = self.window.tabs[index].git_graphs.get(root) else {
             return;
         };
+        let asker = state.cache.id();
         let Some(question) = state.cache.more_commits() else {
             return;
         };
@@ -1066,6 +1059,7 @@ impl Runtime<'_> {
                 tab: tab_id,
                 root: root.to_owned(),
             },
+            asker,
             question,
         }) {
             self.disable_git_worker();
@@ -1082,6 +1076,7 @@ impl Runtime<'_> {
         let Some(state) = self.window.tabs[index].git_graphs.get_mut(root) else {
             return;
         };
+        let asker = state.cache.id();
         let Some(question) = state.cache.begin_compare_files(a, b) else {
             return;
         };
@@ -1091,6 +1086,7 @@ impl Runtime<'_> {
                 tab: tab_id,
                 root: root.to_owned(),
             },
+            asker,
             question,
         }) {
             self.disable_git_worker();
@@ -1649,13 +1645,17 @@ impl Runtime<'_> {
         if let Some(hash) = opened
             && hash != git_graph::GRAPH_UNCOMMITTED_HASH
             && let Some(state) = self.window.tabs[tab].git_graphs.get_mut(root)
-            && let Some(question) = state.cache.begin_commit_files(&hash)
+            && let Some((asker, question)) = state
+                .cache
+                .begin_commit_files(&hash)
+                .map(|question| (state.cache.id(), question))
             && !self.app.git_worker.request(git::GitRequest {
                 window: self.window_id(),
                 host: git::GitHost::Graph {
                     tab: tab_id,
                     root: root.to_owned(),
                 },
+                asker,
                 question,
             })
         {
@@ -1822,6 +1822,19 @@ impl Runtime<'_> {
         name: String,
         renamed_from: Option<String>,
     ) -> Result<()> {
+        let index = self.preview_tab_index(from);
+        let tab_id = self.window.tabs[index].id;
+        // The graph the row was pressed on is the asker: its rows are drawn from
+        // this cache, so a tab with no graph on `root` has no row to have pressed.
+        // Read before the document is opened, so no buffer waits on a question
+        // that is never asked.
+        let Some(asker) = self.window.tabs[index]
+            .git_graphs
+            .get(root)
+            .map(|state| state.cache.id())
+        else {
+            return Ok(());
+        };
         let Some(landing) = self.preview_landing_surface() else {
             return Ok(());
         };
@@ -1836,13 +1849,13 @@ impl Runtime<'_> {
         let Some(question) = git_document_question(&source, renamed_from) else {
             return Ok(());
         };
-        let tab_id = self.window.tabs[self.preview_tab_index(from)].id;
         if !self.app.git_worker.request(git::GitRequest {
             window: self.window_id(),
             host: git::GitHost::Graph {
                 tab: tab_id,
                 root: root.to_owned(),
             },
+            asker,
             question,
         }) {
             self.disable_git_worker();
@@ -1857,10 +1870,15 @@ impl Runtime<'_> {
         let Some(cache) = self.window.tabs[active].git_trees.get_mut(&seat) else {
             return Ok(());
         };
+        let asker = cache.id();
         let Some(question) = cache.begin_checkout(target, detach) else {
             return Ok(());
         };
-        self.ask_git_mutation(git::GitHost::Column(LeafId { tab: tab_id, seat }), question)?;
+        self.ask_git_mutation(
+            git::GitHost::Column(LeafId { tab: tab_id, seat }),
+            asker,
+            question,
+        )?;
         // The rows dim now, so the frame that shows them dimmed is this one.
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
@@ -1879,16 +1897,16 @@ impl Runtime<'_> {
         detach: bool,
     ) -> Result<()> {
         let tab = self.window.tabs[self.window.active_tab].id;
-        let Some(question) = self
+        let Some((asker, question)) = self
             .window
             .float
             .live_mut(id)
             .and_then(float::FloatWin::files_mut)
-            .and_then(|files| files.git.begin_checkout(target, detach))
+            .and_then(|files| Some((files.git.id(), files.git.begin_checkout(target, detach)?)))
         else {
             return Ok(());
         };
-        self.ask_git_mutation(git::GitHost::Float { id, tab }, question)?;
+        self.ask_git_mutation(git::GitHost::Float { id, tab }, asker, question)?;
         // The rows dim now, so the frame that shows them dimmed is this one.
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
@@ -1911,6 +1929,7 @@ impl Runtime<'_> {
         let Some(state) = self.window.tabs[active].git_graphs.get_mut(root) else {
             return Ok(());
         };
+        let asker = state.cache.id();
         let Some(question) = state.cache.begin_checkout(target, detach) else {
             return Ok(());
         };
@@ -1919,6 +1938,7 @@ impl Runtime<'_> {
                 tab: tab_id,
                 root: root.to_owned(),
             },
+            asker,
             question,
         )?;
         self.publish_frame(FrameTrigger {
@@ -1936,11 +1956,13 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn ask_git_mutation(
         &mut self,
         host: git::GitHost,
+        asker: git::GitCacheId,
         question: git::GitQuestion,
     ) -> Result<()> {
         let request = git::GitRequest {
             window: self.window_id(),
             host,
+            asker,
             question,
         };
         if let Err((refused, request)) = self.app.git_mutations.ask(request) {
@@ -2929,26 +2951,25 @@ impl Runtime<'_> {
     ) -> Result<()> {
         let active = self.window.active_tab;
         let host = self.git_host_at(origin);
-        let question = match origin {
-            GitOrigin::Column(seat) => self.window.tabs[active]
-                .git_trees
-                .get_mut(seat)
-                .and_then(|cache| cache.begin_write(verb, paths)),
+        let cache = match origin {
+            GitOrigin::Column(seat) => self.window.tabs[active].git_trees.get_mut(seat),
             GitOrigin::Graph(root) => self.window.tabs[active]
                 .git_graphs
                 .get_mut(root)
-                .and_then(|state| state.cache.begin_write(verb, paths)),
+                .map(|state| &mut state.cache),
             GitOrigin::Float(id) => self
                 .window
                 .float
                 .live_mut(*id)
                 .and_then(float::FloatWin::files_mut)
-                .and_then(|files| files.git.begin_write(verb, paths)),
+                .map(|files| &mut files.git),
         };
-        let Some(question) = question else {
+        let Some((asker, question)) =
+            cache.and_then(|cache| Some((cache.id(), cache.begin_write(verb, paths)?)))
+        else {
             return Ok(());
         };
-        self.ask_git_mutation(host, question)?;
+        self.ask_git_mutation(host, asker, question)?;
         // The rows dim now, so the frame that shows them dimmed is this one.
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
@@ -3470,12 +3491,14 @@ impl Runtime<'_> {
         let Some(state) = self.window.tabs[tab].git_graphs.get_mut(&root) else {
             return Ok(());
         };
+        let asker = state.cache.id();
         let Some(question) = state.cache.begin_search(&query) else {
             return Ok(());
         };
         if !self.app.git_worker.request(git::GitRequest {
             window: self.window_id(),
             host: git::GitHost::Graph { tab: tab_id, root },
+            asker,
             question,
         }) {
             self.disable_git_worker();
@@ -3710,24 +3733,21 @@ impl Runtime<'_> {
     fn reread_git_origin(&mut self, origin: &GitOrigin, ask: Ask) -> bool {
         let host = self.git_host_at(origin);
         let active = self.window.active_tab;
-        let questions = match origin {
-            GitOrigin::Column(seat) => match self.window.tabs[active].git_trees.get_mut(seat) {
-                Some(cache) => ask.begin(cache),
-                None => Vec::new(),
-            },
-            GitOrigin::Graph(root) => match self.window.tabs[active].git_graphs.get_mut(root) {
-                Some(state) => ask.begin(&mut state.cache),
-                None => Vec::new(),
-            },
-            GitOrigin::Float(id) => match self
+        let cache = match origin {
+            GitOrigin::Column(seat) => self.window.tabs[active].git_trees.get_mut(seat),
+            GitOrigin::Graph(root) => self.window.tabs[active]
+                .git_graphs
+                .get_mut(root)
+                .map(|state| &mut state.cache),
+            GitOrigin::Float(id) => self
                 .window
                 .float
                 .live_mut(*id)
                 .and_then(float::FloatWin::files_mut)
-            {
-                Some(files) => ask.begin(&mut files.git),
-                None => Vec::new(),
-            },
+                .map(|files| &mut files.git),
+        };
+        let Some((asker, questions)) = cache.map(|cache| (cache.id(), ask.begin(cache))) else {
+            return false;
         };
         if questions.is_empty() {
             return false;
@@ -3736,6 +3756,7 @@ impl Runtime<'_> {
             if !self.app.git_worker.request(git::GitRequest {
                 window: self.window_id(),
                 host: host.clone(),
+                asker,
                 question,
             }) {
                 self.disable_git_worker();
@@ -3947,6 +3968,7 @@ impl Runtime<'_> {
                 continue;
             }
             files.git.retarget(std::path::Path::new(&root));
+            let asker = files.git.id();
             let questions = files.git.pending_questions();
             // Marked before any send, so a second turn of the loop on the same
             // frame sees questions already asked rather than asking them twice.
@@ -3956,6 +3978,7 @@ impl Runtime<'_> {
             asks.extend(questions.into_iter().map(|question| git::GitRequest {
                 window,
                 host: git::GitHost::Float { id, tab },
+                asker,
                 question,
             }));
         }
@@ -4093,6 +4116,20 @@ impl Runtime<'_> {
         name: String,
         renamed_from: Option<String>,
     ) -> Result<()> {
+        let tab = self.window.tabs[self.window.active_tab].id;
+        // The window's page is the asker: the row was pressed on its cache, and
+        // a window that is not live with a Files view has no row to have pressed.
+        // Read before the document is opened, so no buffer waits on a question
+        // that is never asked.
+        let Some(asker) = self
+            .window
+            .float
+            .live(id)
+            .and_then(float::FloatWin::files)
+            .map(|files| files.git.id())
+        else {
+            return Ok(());
+        };
         let Some(surface) = self.preview_landing_surface() else {
             return Ok(());
         };
@@ -4107,10 +4144,10 @@ impl Runtime<'_> {
         let Some(question) = git_document_question(&source, renamed_from) else {
             return Ok(());
         };
-        let tab = self.window.tabs[self.window.active_tab].id;
         if !self.app.git_worker.request(git::GitRequest {
             window: self.window_id(),
             host: git::GitHost::Float { id, tab },
+            asker,
             question,
         }) {
             self.disable_git_worker();
