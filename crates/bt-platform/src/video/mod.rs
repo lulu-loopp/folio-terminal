@@ -989,7 +989,8 @@ mod tests {
 
     /// How long a test here waits for the decoder to answer something that must
     /// be answered: a quick machine pays nothing, and a decoder that never
-    /// answers is a red.
+    /// answers is a red. The same patience as the engine's tests
+    /// (`engine::tests::PATIENCE`), whose module is private to `engine`.
     const DECODER_PATIENCE: Duration = Duration::from_secs(10);
 
     /// PIN — **a frame is measured before it is copied, on both locks** (review
@@ -1405,8 +1406,12 @@ mod tests {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/assets/folio-video-test.mov");
         // The decoder itself, on a thread of its own, within the suite's patience
-        // rather than `FIRST_FRAME_BUDGET`: whether this decoder reads a QuickTime
-        // file is the subject, and how fast a loaded machine opens one is not.
+        // rather than `first_frame`'s outer `FIRST_FRAME_BUDGET`: whether this
+        // decoder reads a QuickTime file is the subject, and how fast a loaded
+        // machine opens and seeks one is not. Only the open and the seek leave the
+        // product's clock here; `read_first_frame` still bounds its `ReadSample`
+        // loop by `FIRST_FRAME_BUDGET`, which is the product's answer to a reader
+        // that never ends.
         let url = HSTRING::from(fixture.as_os_str());
         let frame = within_budget(DECODER_PATIENCE, move || decode_from_url(&url, 280, 160).0)
             .expect("a real mov gives up a frame");
