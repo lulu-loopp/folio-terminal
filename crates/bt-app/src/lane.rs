@@ -1475,11 +1475,13 @@ pub(crate) const TASKBAR: Contract = Contract {
 
 /// `computation_lane`'s decoration share, on the seam (S-8): one `bt-math-worker` thread; ids
 /// minted by the share's `Ledger`; every request run and answered in the order it was minted, none
-/// coalesced; the asking tab (or window) is the target incarnation, and a closed tab's request ends
-/// in the lane's sink, which ignores it; the ledger owes 196 at once — a sizing choice, what one
-/// pane's session holds queued for this worker (`bt_term::DECORATION_TASKS_HELD`), one running and
-/// the rest waiting, an answer not yet taken holding its place — and refuses the rest at the door;
-/// a failure (a panic in one request's work) is said once per streak.
+/// coalesced but a window's animation open, which a newer open of the same file by the same window
+/// supersedes while it waits (T-ANIMATION-ANSWER-IDENTITY); the asking tab (or window) is the
+/// target incarnation, and a closed tab's request ends in the lane's sink, which ignores it; the
+/// ledger owes 196 at once — a sizing choice, what one pane's session holds queued for this worker
+/// (`bt_term::DECORATION_TASKS_HELD`), one running and the rest waiting, an answer not yet taken
+/// holding its place — and refuses the rest at the door; a failure (a panic in one request's work)
+/// is said once per streak.
 #[cfg(test)]
 pub(crate) const COMPUTATION: Contract = Contract {
     lane: Some(LaneName::Computation),
