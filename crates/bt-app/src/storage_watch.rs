@@ -339,6 +339,18 @@ impl StorageWatch {
     pub fn is_armed(&self) -> bool {
         self.heard == Some(true)
     }
+
+    /// **The listener this watch's ear is opened with**, its clock handed in —
+    /// for a test outside this module that names documents on the watcher
+    /// thread's side of the mailbox and drives the folder's one clock without a
+    /// steward.
+    #[cfg(test)]
+    pub(crate) fn listener_on(
+        &self,
+        now: impl Fn() -> Instant + Send + Sync + 'static,
+    ) -> Listener {
+        listener_at(&self.news, || {}, now)
+    }
 }
 
 fn listener(news: &Arc<Mutex<Mailbox>>, wake: impl Fn() + Send + Sync + 'static) -> Listener {

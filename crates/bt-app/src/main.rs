@@ -173,6 +173,7 @@ mod shortcuts;
 /// the product at all.
 #[cfg(test)]
 mod source_pin;
+mod storage_pass;
 mod storage_watch;
 mod table_block;
 mod table_merge;
@@ -13516,6 +13517,13 @@ struct App {
     /// not parse, so that it is said once — [`Self::profiles_file_broken`]'s
     /// rule.
     keybindings_file_broken: bool,
+    /// **What the storage passes of one batch of re-reads replaced and could
+    /// not apply, until its one card is raised** (T-STORE-NOTICE; design note
+    /// 2026-10-11 §3.6). The four documents' reads are answered on separate
+    /// wakes, so one `git checkout` can merge over several turns: each turn's
+    /// notice joins this one, and the card is raised once no store is still
+    /// reading. One writer, `MergeNotice::gather`, on the window thread.
+    merge_notice: document_request::MergeNotice,
     /// **What the two documents this window is made of owe the reader** (review
     /// rows R4-3, R4-5, R4-9 and R4-10).
     ///
@@ -19213,6 +19221,27 @@ fn raise_cancelled_quit_card_on(
         motion,
         now,
     )
+}
+
+/// **The storage pass's card** (T-STORE-NOTICE; design note 2026-10-11 §3.6,
+/// (b)11): its kind, its anchor and its statement — one Info card anchored to the
+/// window, its body one line per file naming what the file's values replaced and
+/// what was not applied ([`i18n::merge_notice`]). It is raised through
+/// `Runtime::toast`, which gives it no title and no verb: the file has already
+/// won, and nothing is owed. `None` for an empty notice: a clean hand edit says
+/// nothing. The full list, with every name a card cuts, is each pass's line in
+/// `diagnostics.log` (`settings_merge::Account::said`).
+fn merge_notice_card(
+    notice: &document_request::MergeNotice,
+) -> Option<(toast::ToastKind, toast::ToastAnchor, String)> {
+    if notice.files.is_empty() {
+        return None;
+    }
+    Some((
+        toast::ToastKind::Info,
+        toast::ToastAnchor::Window,
+        i18n::merge_notice(notice),
+    ))
 }
 
 /// **What became of one owed hand-editable document on a stop that cannot ask**
@@ -46179,6 +46208,7 @@ impl Runtime<'_> {
             pins_file_broken: false,
             settings_file_broken: false,
             keybindings_file_broken: false,
+            merge_notice: document_request::MergeNotice::default(),
             recent,
             recent_folders,
             // **The document is assembled from these, and the first window's
@@ -49905,8 +49935,9 @@ impl Runtime<'_> {
     /// Then what the re-reads put in force: a file that will not parse is said
     /// once, `settings.json`'s changes are merged and put in force through
     /// their rows' doors and `keybindings.json`'s through the one shortcut
-    /// table (`Self::merge_documents`), and the profiles and pins news is
-    /// taken.
+    /// table (`Self::merge_documents`), what the files' values replaced is named
+    /// on the batch's one card once no store is still reading, and the profiles
+    /// and pins news is taken.
     pub(crate) fn take_document_answers(&mut self) -> Result<()> {
         let heard = persist::hear_documents(
             &mut self.app.settings_store,
@@ -49923,10 +49954,7 @@ impl Runtime<'_> {
             )?;
         }
         self.take_kept_news(heard.settings, heard.keybindings)?;
-        // The data of the pass's one card, made whatever the presentation after
-        // the merge answers; T-STORE-NOTICE raises it.
-        let (_replaced, presented) = self.merge_documents();
-        presented?;
+        self.merge_documents()?;
         self.take_profiles_news(heard.profiles)?;
         self.take_pins_news(heard.pins)
     }
@@ -55117,10 +55145,11 @@ impl App {
     }
 
     /// **One turn of the quit's documents phase** over the four stores
-    /// ([`quit::Quit::documents_turn`]); `None` without a quit.
+    /// ([`quit::Quit::documents_turn`]), and what it merged said in
+    /// `diagnostics.log`; `None` without a quit.
     fn quit_documents_turn(&mut self, now: Instant) -> Option<quit::QuitStep> {
         let quit = self.quit.as_mut()?;
-        Some(quit.documents_turn(
+        let step = quit.documents_turn(
             &mut [
                 &mut self.settings_store,
                 &mut self.keybindings_store,
@@ -55128,7 +55157,11 @@ impl App {
                 &mut self.pins_store,
             ],
             now,
-        ))
+        );
+        for line in quit.take_merged_lines() {
+            diagnostics::note(&line);
+        }
+        Some(step)
     }
 
     /// **One turn of the quit's recovery phase** over the four stores, the copies
@@ -76920,6 +76953,8 @@ mod shell_integration_app_tests;
 mod shell_literal_app_tests;
 #[cfg(test)]
 mod shortcuts_app_tests;
+#[cfg(test)]
+mod storage_reread_tests;
 #[cfg(test)]
 mod table_block_app_tests;
 /// **The fixtures the crate root's test files share**, `pub(crate)` where another file

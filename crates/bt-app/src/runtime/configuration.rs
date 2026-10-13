@@ -21,7 +21,8 @@
 //! are merged by row and by pin (`table_merge::run_pass`): the profile table
 //! is installed by the import's own installer, and the PINNED sections are
 //! derived from the pin store whenever a menu is built
-//! (T-STORE-MERGE-PROFILES-PINS).
+//! (T-STORE-MERGE-PROFILES-PINS). What the files' values replaced is named on
+//! one card per batch of re-reads (`storage_pass`, T-STORE-NOTICE).
 
 use std::path::Path;
 
@@ -33,7 +34,7 @@ use crate::{
     FilePick, Runtime, document_request, hang_watch, i18n, persist, profiles, schemes, settings,
     shortcuts, toast,
 };
-use crate::{keybindings_merge, settings_merge, table_merge};
+use crate::{keybindings_merge, settings_merge, storage_pass, table_merge};
 
 fn keybindings_for_export(
     table: &shortcuts::Shortcuts,
@@ -360,53 +361,24 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// **The storage pass's merges, put in force** (design note 2026-10-11
-    /// §3.3, §3.4, §3.6): `settings.json`'s, through `settings_merge::run_pass`
-    /// with this window as its doors, then `keybindings.json`'s, through
-    /// `keybindings_merge::run_pass` with this window's one shortcut table as its
-    /// door, then `profiles.json`'s and `pins.json`'s, through
-    /// `table_merge::run_pass` — each pass whole, all four on one notice. Each
-    /// pass's presentation is owed to the turn ([`MergeTurn`]), and the window
-    /// presents once after all four: one presentation, one answer. Answers what the files' merges replaced and
-    /// could not apply, for the pass's one card (T-STORE-NOTICE raises it) —
-    /// nothing for a clean hand edit — and, beside it, whether the presentation
-    /// after the merges went through: the data is made first and a failed
-    /// presentation never takes it away.
-    pub(crate) fn merge_documents(&mut self) -> (document_request::MergeNotice, Result<()>) {
-        let mut turn = MergeTurn {
+    /// **The storage pass's merges, put in force, and the batch's one card**
+    /// (design note 2026-10-11 §3.3, §3.4, §3.6): `settings.json`'s, through
+    /// `settings_merge::run_pass` with this window as its doors, then
+    /// `keybindings.json`'s, through `keybindings_merge::run_pass` with this
+    /// window's one shortcut table as its door, then `profiles.json`'s and
+    /// `pins.json`'s, through `table_merge::run_pass` — each pass whole, all four
+    /// on one notice ([`storage_pass::merge_documents_on`]). Each pass's
+    /// presentation is owed to the turn ([`MergeTurn`]), and the window presents
+    /// once after all four. Then what the files' merges replaced and could not
+    /// apply joins the batch's notice, and the batch's one card is raised on this
+    /// window once no store is still reading — nothing for a clean hand edit,
+    /// and whatever the presentation answered (T-STORE-NOTICE).
+    pub(crate) fn merge_documents(&mut self) -> Result<()> {
+        storage_pass::take_merges(&mut MergeTurn {
             runtime: self,
             present_owed: false,
             frame_owed: false,
-        };
-        let settings = settings_merge::run_pass(&mut turn);
-        let keybindings = keybindings_merge::run_pass(&mut turn);
-        let profiles = table_merge::run_pass(&mut turn, table_merge::Table::Profiles);
-        let pins = table_merge::run_pass(&mut turn, table_merge::Table::Pins);
-        let (present_owed, frame_owed) = (turn.present_owed, turn.frame_owed);
-        let mut notice = document_request::MergeNotice::default();
-        for replaced in [
-            settings.replaced,
-            keybindings.replaced,
-            profiles.replaced,
-            pins.replaced,
-        ] {
-            notice.files.extend(replaced);
-        }
-        // The passes answer what the turn answered them — it notes the
-        // presentation it owes — and the one presentation answers for all.
-        let presented = settings
-            .presented
-            .and(keybindings.presented)
-            .and(profiles.presented)
-            .and(pins.presented)
-            .and_then(|()| {
-                if present_owed {
-                    self.present_merged(frame_owed)
-                } else {
-                    Ok(())
-                }
-            });
-        (notice, presented)
+        })
     }
 
     /// **What a merge put in force, shown**: an open Settings dialog re-derived —
@@ -657,7 +629,7 @@ impl Runtime<'_> {
 
 /// **One storage pass's merges on this window** ([`Runtime::merge_documents`]):
 /// each pass runs through this window's doors, and what each owes the screen is
-/// noted here — the window presents once, after both passes.
+/// noted here — the window presents once, after the four passes.
 struct MergeTurn<'r, 'a> {
     runtime: &'r mut Runtime<'a>,
     present_owed: bool,
@@ -775,6 +747,39 @@ impl table_merge::TableMergeWindow for MergeTurn<'_, '_> {
 
     fn table_merge_say(&mut self, line: &str) {
         eprintln!("{line}");
+    }
+}
+
+/// **The storage pass on this window** ([`storage_pass::take_merges`]): the one
+/// presentation the passes owe, the batch's notice held by the application —
+/// its card is due once none of the four stores is still reading — and the card
+/// raised here.
+impl storage_pass::StoragePassWindow for MergeTurn<'_, '_> {
+    fn present_merges(&mut self) -> Result<()> {
+        if self.present_owed {
+            self.runtime.present_merged(self.frame_owed)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn merge_notice_due(
+        &mut self,
+        turn: document_request::MergeNotice,
+    ) -> Option<document_request::MergeNotice> {
+        let app = &mut *self.runtime.app;
+        storage_pass::notice_due(
+            &mut app.merge_notice,
+            turn,
+            &app.settings_store,
+            &app.keybindings_store,
+            &app.profiles_store,
+            &app.pins_store,
+        )
+    }
+
+    fn raise_merge_notice(&mut self, notice: &document_request::MergeNotice) -> Result<()> {
+        self.runtime.raise_merge_notice(notice)
     }
 }
 

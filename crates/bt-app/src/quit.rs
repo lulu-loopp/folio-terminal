@@ -567,6 +567,11 @@ pub struct Quit {
     unsaved: Vec<Unsaved>,
     /// The cancellation this quit ended in, until the driver takes it.
     cancelled: Option<Cancelled>,
+    /// **The `diagnostics.log` lines of what the documents phase merged**, one per
+    /// merge, until the driver writes them ([`Self::take_merged_lines`];
+    /// T-STORE-NOTICE): the file's values won at quit are said whether the quit
+    /// completes or is cancelled.
+    merged_lines: Vec<String>,
     /// **An update trial's write release that arrived while this quit held the storage
     /// worker** (round 3): held, not performed, until the quit's outcome settles it
     /// ([`Self::settle_held_release`]).
@@ -648,6 +653,7 @@ impl Quit {
             documents_from: None,
             unsaved: Vec::new(),
             cancelled: None,
+            merged_lines: Vec::new(),
             held_release: Vec::new(),
             update,
             names,
@@ -872,13 +878,19 @@ impl Quit {
             }
         }
         for document in documents.iter_mut() {
-            document.quit_turn();
+            self.merged_lines.extend(document.quit_turn());
         }
         let standings: Vec<(&'static str, Standing)> = documents
             .iter()
             .map(|document| (document.file(), document.standing()))
             .collect();
         self.documents(&standings, now)
+    }
+
+    /// **The lines of what the documents phase merged since they were last
+    /// taken**, for `diagnostics.log`: each merge said once.
+    pub(crate) fn take_merged_lines(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.merged_lines)
     }
 
     /// **The documents phase, decided from each store's standing at `now`.**
