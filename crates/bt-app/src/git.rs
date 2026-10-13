@@ -4239,12 +4239,13 @@ pub(crate) fn ask_git(
 
 impl GitWorker {
     /// Start the thread. **Where git is, is read at every question**
-    /// ([`ask_git`]). A question waits its turn behind the mutations of the
-    /// folder it is run in (`turns`, `crate::git_mutation_lane::RepoTurns`):
-    /// it runs, and its answer is sent, only while no mutation of the repository
-    /// is owed — so a read asked after a press is never a reading taken in the
-    /// middle of it, and its answer is in the channel before a later mutation of
-    /// the repository can start.
+    /// ([`ask_git`]). A question takes its turn with the mutations of the
+    /// folder it is run in (`turns`, `crate::git_mutation_lane::RepoTurns`): it
+    /// waits for the mutations the folder's share had minted when it was asked —
+    /// a press after it does not lengthen the wait — and for a mutation running
+    /// there, then runs and sends its answer with the folder marked as being read,
+    /// so a read asked after a press is never a reading taken in the middle of it,
+    /// and its answer is in the channel before a later mutation there can start.
     pub fn spawn(
         proxy: EventLoopProxy<AppEvent>,
         turns: std::sync::Arc<crate::git_mutation_lane::RepoTurns>,

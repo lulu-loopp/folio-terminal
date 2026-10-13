@@ -64930,15 +64930,11 @@ impl FolioApp {
     /// first, and ends in the lane's sink.
     fn drain_git_answers(&mut self) -> (Vec<git::GitResponse>, bool) {
         let mut batch = Vec::new();
-        let mut tabs = BTreeSet::new();
-        // A floating Git page, by its window and the epoch that minted it, while it still shows a
-        // Files view: what `apply_git_results` files a float's receipt into, and so what makes
-        // its page gone when it is not.
-        let mut floats = BTreeSet::new();
+        let mut open = git_mutation_lane::OpenPages::default();
         for window in self.windows.values() {
             if window.leaving.is_none() {
-                tabs.extend(window.tabs.iter().map(|tab| tab.id));
-                floats.extend(
+                open.tabs.extend(window.tabs.iter().map(|tab| tab.id));
+                open.floats.extend(
                     window
                         .float
                         .live_windows()
@@ -64952,11 +64948,7 @@ impl FolioApp {
         };
         let receipts: Vec<git::GitResponse> = app
             .git_mutations
-            .ended(|request| match &request.host {
-                git::GitHost::Column(leaf) => !tabs.contains(&leaf.tab),
-                git::GitHost::Graph { tab, .. } => !tabs.contains(tab),
-                git::GitHost::Float { id, .. } => !floats.contains(&(request.window, *id)),
-            })
+            .ended(|request| open.gone(request))
             .into_iter()
             .map(|(_, terminal, request)| git_mutation_lane::receipt(terminal, request))
             .collect();

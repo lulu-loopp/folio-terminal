@@ -372,11 +372,12 @@ impl RepoTurns {
         self.changed.notify_all();
     }
 
-    /// `root` has no share any more.
-    fn forget(&self, root: &Path) {
+    /// The share whose ledger is `ledger` is gone — named by its ledger, not its root, so a
+    /// newer share of the same repository is never forgotten in its place.
+    fn forget(&self, ledger: &Arc<MutationLedger>) {
         locked(&self.state)
             .shares
-            .retain(|(held, _)| !same_folder(held, root));
+            .retain(|(_, held)| !Arc::ptr_eq(held, ledger));
         self.changed.notify_all();
     }
 
@@ -637,10 +638,16 @@ impl GitMutationLane {
         shares.live = live;
         drop(shares);
         for share in idle {
-            self.turns.forget(&share.root);
+            self.turns.forget(share.queue.ledger());
             share.queue.close();
         }
         ended
+    }
+
+    /// How many shares the lane holds now.
+    #[cfg(test)]
+    fn live_shares(&self) -> usize {
+        locked(&self.shares).live.len()
     }
 
     /// How many requests wait in line in the share request `id` was minted in, behind the one its
@@ -661,6 +668,29 @@ impl Drop for GitMutationLane {
     fn drop(&mut self) {
         for share in &locked(&self.shares).live {
             share.queue.close();
+        }
+    }
+}
+
+/// **The Git pages the open windows still hold**, gathered by the window thread before its drain
+/// ([`GitMutationLane::ended`]): the tabs standing in a window that is not leaving, and each
+/// floating page by the window it stands in and the epoch that minted it, while it still shows a
+/// Files view — what `apply_git_results` files a float's receipt into.
+#[derive(Default)]
+pub(crate) struct OpenPages {
+    pub(crate) tabs: std::collections::BTreeSet<crate::TabId>,
+    pub(crate) floats: std::collections::BTreeSet<(winit::window::WindowId, crate::float::FloatId)>,
+}
+
+impl OpenPages {
+    /// Whether the page that asked `request` has gone: a column's or a graph's tab no open window
+    /// holds, or a floating page no longer live with a Files view in its window — its receipt is
+    /// then the lane's sink's.
+    pub(crate) fn gone(&self, request: &GitRequest) -> bool {
+        match &request.host {
+            git::GitHost::Column(leaf) => !self.tabs.contains(&leaf.tab),
+            git::GitHost::Graph { tab, .. } => !self.tabs.contains(tab),
+            git::GitHost::Float { id, .. } => !self.floats.contains(&(request.window, *id)),
         }
     }
 }
@@ -1522,6 +1552,100 @@ mod tests {
             lane.sunk().iter().map(|(id, _)| *id).collect::<Vec<_>>(),
             [closed],
             "the closed page's receipt reaches the sink, once"
+        );
+        assert_eq!(
+            lane.lane.live_shares(),
+            0,
+            "once nothing of it is held or owed, the drain lets the repository's share go"
+        );
+    }
+
+    /// RED (T-GIT-MUTATIONS round 3, N2) — **A verb whose work panicked is filed as unfinished,
+    /// not as never run.**
+    ///
+    /// A stage of `半途 halfway.md` whose door panics — after git's child may have exited — ends
+    /// `Failed`; its receipt is the stage's own question with `GitFault::Unfinished`, so the page
+    /// undims its row and reads the repository again.
+    ///
+    /// MUTATION: map `Terminal::Failed` to `GitFault::NotRun(NotRun::WorkerGone)` in `receipt` —
+    /// the panicked stage reads as never run.
+    #[test]
+    fn a_panicked_verb_is_filed_as_unfinished() {
+        let mut lane = watched(Executor::scripted(Arc::new(Gate::default())));
+        let id = lane
+            .lane
+            .ask_through(stage(1, "仓库 repo", "半途 halfway.md"), |_| {
+                Box::new(|_: &WorkerCtx, _: &GitQuestion| -> GitAnswer {
+                    panic!("the door fails after git's child exited, on purpose")
+                })
+            })
+            .expect("admitted");
+        let (terminal, asked) = lane.terminal(id, nobody);
+        assert!(matches!(terminal, Terminal::Failed(_)), "{terminal:?}");
+        let receipt = receipt(terminal, asked);
+        assert!(
+            matches!(
+                &receipt.answer,
+                GitAnswer::Write {
+                    paths,
+                    outcome: Err(GitFault::Unfinished),
+                    ..
+                } if paths == &["半途 halfway.md"]
+            ),
+            "the page files it as unfinished: {receipt:?}"
+        );
+    }
+
+    /// RED (T-GIT-MUTATIONS round 3, N3) — **A dismissed floating page's receipt reaches the sink;
+    /// a live one's reaches its page.**
+    ///
+    /// Two floating Git pages in one window stage a file each — `浮窗 float-7.md` from epoch 7,
+    /// `浮窗 float-8.md` from epoch 8. Epoch 7 is dismissed before the drain: [`OpenPages`] holds
+    /// only epoch 8, so 7's receipt is let go to the sink, once, and 8's is taken for its page.
+    ///
+    /// MUTATION: have `OpenPages::gone` answer `false` for every floating page — the dismissed
+    /// float's receipt is taken for a page that is not there, and the sink records nothing.
+    #[test]
+    fn a_dismissed_floats_receipt_reaches_the_sink() {
+        let mut lane = watched(Executor::scripted(Arc::new(Gate::default())));
+        let window = WindowId::from(1_u64);
+        let from_float = |epoch: u64| GitRequest {
+            window,
+            host: GitHost::Float {
+                id: epoch,
+                tab: TabId(1),
+            },
+            question: GitQuestion::Write {
+                root: PathBuf::from("仓库 repo"),
+                verb: GitWriteVerb::Stage,
+                paths: vec![format!("浮窗 float-{epoch}.md")],
+            },
+        };
+        let dismissed = lane
+            .lane
+            .ask_through(from_float(7), through)
+            .expect("admitted");
+        let live = lane
+            .lane
+            .ask_through(from_float(8), through)
+            .expect("admitted");
+        let mut open = OpenPages::default();
+        open.tabs.insert(TabId(1));
+        open.floats.insert((window, 8));
+        let (_, asked) = lane.terminal(live, |request| open.gone(request));
+        assert_eq!(
+            asked.host,
+            from_float(8).host,
+            "the live float takes its own"
+        );
+        lane::wait_until("the dismissed float's receipt in the sink", || {
+            lane.lane.ended(|request| open.gone(request));
+            !lane.sunk().is_empty()
+        });
+        assert_eq!(
+            lane.sunk().iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            [dismissed],
+            "the dismissed float's receipt reaches the sink, once"
         );
     }
 
