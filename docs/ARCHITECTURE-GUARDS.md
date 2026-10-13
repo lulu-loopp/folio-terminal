@@ -391,6 +391,18 @@ Where and what to do: `docs/plans/TIMING-BOUND-TESTS.tsv`,
 sleep/deadline with a deterministic signal; if time itself is the subject, add
 the narrow test and its reason to the inventory in the same change.
 
+A product budget that a test reaches but does not test is a per-instance seam,
+never a global or an environment variable. The session writer's save budget
+(`persist::SESSION_SAVE_BUDGET`, three seconds) is each store's own value from
+its opening; `SessionStore::set_save_budget` (`#[cfg(test)]`) gives one store
+the suite's patience (`lane::PATIENCE`). A test that writes real files and asks
+whether they landed sets it, so a loaded machine answers later rather than with
+a timeout. A test whose subject is the budget keeps the product's:
+`persist::tests::a_quit_leaves_a_writer_that_never_answers_behind` and the
+stalled writer of
+`persist::tests::a_write_that_misses_the_budget_still_answers_true_and_keeps_the_last_layout`.
+Every product store keeps the product's budget.
+
 ## Raw-effect and thread-door exceptions
 
 The rule: `bt-app` and `bt-platform` create workers through the admitted thread
