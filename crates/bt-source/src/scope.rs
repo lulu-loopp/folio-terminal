@@ -124,11 +124,33 @@ pub enum FileScoped {
     /// between are its subject, and a move of text has no item to ask about.
     /// It is a Python tool and cannot ask this crate's index.
     TheTopicMover,
+    /// `.github/workflows/ci.yml`, the gate canaries, naming
+    /// `crates/bt-doc/src/lib.rs`, `crates/bt-layout/src/lib.rs`,
+    /// `crates/bt-viewport/src/lib.rs`, `crates/bt-compose/src/lib.rs`,
+    /// `crates/bt-platform/src/http.rs` and `crates/bt-lint-probe/src/lib.rs`.
+    ///
+    /// Each canary proves a gate can fail on the defect it exists for: it
+    /// plants that defect into a committed source file, requires the gate to
+    /// refuse it (by that file, where the gate names files), and writes the
+    /// file's original text back. The steps are `gates-can-fail`'s "the
+    /// portable-core gate can actually fail", "the lint gate can actually
+    /// fail", "the wasm-floor gate can actually fail", "the clock guard can
+    /// actually fail, and its scope is the stated one" (whose fifth plant,
+    /// `http.rs`, must *not* be refused: the scope is the stated set) and "the
+    /// embedded-spaces gate can actually fail"; `logic`'s "the ignored-test
+    /// gate can actually fail"; and `core-macos`'s "the macOS lint gate can
+    /// actually fail", which keeps the original in a scratch `.rs` under
+    /// `$RUNNER_TEMP`. A scratch copy would not do: the gates read the
+    /// committed tree (the source set, the workspace's crates, `git ls-files`),
+    /// and what is proved is that a defect in a committed file is refused, so
+    /// the committed file is the subject. It is YAML run by GitHub and cannot
+    /// ask this crate's index.
+    TheGateCanaries,
 }
 
 impl FileScoped {
     /// Every entry. The allowlist is small enough to be an array and only shrinks.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::VendoredAddedFiles,
         Self::TheTripwireItself,
         Self::TheDeadCodeGate,
@@ -137,6 +159,7 @@ impl FileScoped {
         Self::TheModuleGraphGenerator,
         Self::TheReaderShapesMeasurement,
         Self::TheTopicMover,
+        Self::TheGateCanaries,
     ];
 
     /// Where the reader lives, from the workspace root, with forward slashes.
@@ -151,6 +174,7 @@ impl FileScoped {
             Self::TheModuleGraphGenerator => "scripts/dev/bt-app-graph.py",
             Self::TheReaderShapesMeasurement => "scripts/dev/bt-app-reader-shapes.py",
             Self::TheTopicMover => "scripts/dev/bt-app-move-topic.py",
+            Self::TheGateCanaries => ".github/workflows/ci.yml",
         }
     }
 
@@ -191,6 +215,11 @@ impl FileScoped {
             Self::TheTopicMover => {
                 "the retained `--check` proof of step 2a's moves, a record: a topic's methods moved \
                  as text between files, proved against the text in Git; a Python tool"
+            }
+            Self::TheGateCanaries => {
+                "each canary plants a gate's defect into a committed source file, requires the \
+                 refusal and writes the file back: a defect in a committed file is the proof's \
+                 subject; CI's YAML"
             }
         }
     }

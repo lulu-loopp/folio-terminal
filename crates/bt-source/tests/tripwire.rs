@@ -43,9 +43,11 @@
 //!
 //! # What it catches, and what it does not
 //!
-//! Four lexical shapes in `.rs` files, and the script shapes below in `.ps1`,
-//! `.psm1`, `.py` and `.sh` files, everywhere under the workspace root except
-//! `target/`, `.git/`, `vendor/` and `node_modules/`:
+//! Four lexical shapes in `.rs` files, the script shapes below in `.ps1`,
+//! `.psm1`, `.py`, `.sh`, `.bash` and `.zsh` files, and the same shapes in the
+//! `run:` steps of the GitHub workflows and composite actions (see *Workflow
+//! files*), everywhere under the workspace root except `target/`, `.git/`,
+//! `vendor/` and `node_modules/`:
 //!
 //! 1. an `include_str!` or `include_bytes!` whose argument names a `.rs` file;
 //! 2. a path-shaped `.rs` literal handed to a path or read call, in a function
@@ -58,7 +60,8 @@
 //! # Script readers: the verbs, the literal shapes, and what is a diagnostic
 //!
 //! A script is read in one of three languages — PowerShell (`.ps1`, `.psm1`),
-//! Python (`.py`), the shell (`.sh`) — and is a **reader** when its text holds
+//! Python (`.py`), the shell (`.sh`, `.bash`, `.zsh`) — and is a **reader**
+//! when its text holds
 //! one of that language's read verbs; a reader is judged whole, by file. The
 //! verbs are a closed list, matched as written (so `GC` or `Get-content` is not
 //! seen); a verb marked *word* counts only with no name character (an ASCII
@@ -162,11 +165,55 @@
 //! whose only read of a source is inside an embedded `python3 - <<'PY'`
 //! heredoc is judged by the shell's verbs alone, the Python in it unread.
 //!
-//! The scan reads files by extension, so a reader in a file of another kind
-//! is not seen: the inline `pwsh` steps of `.github/workflows/ci.yml` (which
-//! name `crates/bt-doc/src/lib.rs` and read it with `ReadAllText`), and the
-//! tracked `.bash` and `.zsh` scripts (`scripts/shell-integration/folio.bash`,
-//! `betterterminal.bash`, `folio.zsh`).
+//! # Workflow files: containers of scripts
+//!
+//! A GitHub workflow (a `.yml` or `.yaml` under `.github/workflows/`, and no
+//! other YAML file of the tree) and a composite action (an `action.yml` or
+//! `action.yaml` under `.github/actions/`) are not scripts but containers of
+//! them: each `run:` value of a step — an item of `jobs.<job>.steps`, or of a
+//! composite action's `runs.steps` — is one **unit**, judged exactly as a
+//! script of its step's language is, by the verbs, hits, walks and
+//! diagnostics above, and a reader on its own text. A finding is on the
+//! workflow's own line, the unit's line plus the line its value starts after,
+//! so `ci.yml:303` is the line a person reads. Nothing outside a step's
+//! `run:` value is read: a `name:`, an `env:` value, a `with:` input, a
+//! `uses:`, `defaults.run` (a step that runs a script by path has that script
+//! scanned as a file of its own).
+//!
+//! * **The value** is a block scalar (`run: |`, `run: >`, with or without its
+//!   chomping and indentation indicators), its lines with their indentation
+//!   taken off, or a one-line plain value, its YAML comment aside. A folded
+//!   `>` value is read line by line as written, not folded. Any other form —
+//!   a quoted or flow value, an alias (`*name`), an anchor, a tag, a plain
+//!   value continued on further lines, keys nested under `run:` — is the
+//!   diagnostic `UnreadableWorkflowRun` on the `run:` line: write it as a
+//!   block or a one-line plain value, or list the file. A `run:` built from a
+//!   YAML anchor is so never read through: its alias is the diagnostic.
+//! * **The language** is the step's `shell:`, else its job's
+//!   `defaults.run.shell`, else the workflow's `defaults.run.shell` — `pwsh`
+//!   and `powershell` are PowerShell, `bash` and `sh` the shell — and with
+//!   none, GitHub's default on the job's `runs-on`: pwsh on a `windows-`
+//!   runner, bash on an `ubuntu-` or `macos-` one, and on a runner the matrix
+//!   picks (`runs-on: ${{ matrix.<name> }}`) both: the step is judged in each,
+//!   and a finding in either counts, once. Any other shell (`cmd`, `python`,
+//!   a command template, an expression), any other runner (`self-hosted`, a
+//!   list, another expression), a job with neither, and a composite action's
+//!   step without its own `shell:` is the diagnostic `UndecidedWorkflowShell`
+//!   on the `run:` line, whether or not the step reads: give the step a
+//!   `shell:` of pwsh, powershell, bash or sh, or list the file.
+//! * **A `${{ … }}` expression** in a quoted `.rs` value of a reader unit is
+//!   interpolation (`InterpolatedShellPath`) in either quote: GitHub
+//!   substitutes it before the shell sees the text, so `'${{ matrix.x }}.rs'`
+//!   names no file the scan can read. Anywhere else it is ignored.
+//!
+//! The YAML is read by indentation, line by line: a `- ` opens a sequence
+//! item, a `key:` (plain, or in one pair of quotes) a mapping entry, and a
+//! value is one of the forms above, nested keys, or nothing; the lines more
+//! indented than a value that is not a block (a flow collection, a continued
+//! scalar) are that value's, never keys. Limits, written down: a tab is not
+//! indentation, and several `---` documents in one file are read as one;
+//! neither is a form these files are written in. A workflow is cleared as a
+//! script is, by file.
 //!
 //! **It matches by file, not by reader**, because that is the granularity both
 //! lists have: the allowlist is the *file-scoped* one, and a debt row's owning
@@ -507,6 +554,10 @@ const RUST_EXTENSION: &str = "\"rs\"";
 /// A scope that names a file, built.
 const FILE_SCOPE: &str = "Scope::File(";
 
+/// What opens a GitHub expression, which GitHub substitutes into a `run:`
+/// value before the shell sees it.
+const GITHUB_EXPRESSION: &str = "${{";
+
 /// What the scan found a reader doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
@@ -526,6 +577,12 @@ enum Kind {
     /// A script reader's `.rs` extension inside a PowerShell here-string or a
     /// shell heredoc, not a literal of either spelling.
     ShellPathInAHereString,
+    /// A workflow's or composite action's `run:` step whose shell the scan
+    /// cannot decide, so it cannot tell which language to read the step in.
+    UndecidedWorkflowShell,
+    /// A workflow's or composite action's `run:` value in a YAML form the scan
+    /// does not read as one script.
+    UnreadableWorkflowRun,
 }
 
 impl Kind {
@@ -547,6 +604,15 @@ impl Kind {
             Self::ShellPathInAHereString => {
                 "names a `.rs` file inside a here-string or heredoc, which the scan cannot read: \
                  spell it as one '…' or \"…\" literal, or list the file"
+            }
+            Self::UndecidedWorkflowShell => {
+                "runs a `run:` step in a shell the scan cannot decide, so it cannot read the step: \
+                 give the step a `shell:` of pwsh, powershell, bash or sh, or list the file"
+            }
+            Self::UnreadableWorkflowRun => {
+                "has a `run:` value the scan cannot read as one script (an alias, an anchor, a \
+                 tag, a quoted or flow value, or a value continued on further lines): write it \
+                 as a `run: |` block or a one-line plain value, or list the file"
             }
         }
     }
@@ -583,7 +649,8 @@ fn scan(root: &Path) -> Vec<Hit> {
     files.sort();
     let mut hits = Vec::new();
     for file in &files {
-        let language = Language::of(file).expect("the walk keeps only the scanned extensions");
+        let named = from_root(file, root);
+        let source = Source::of(&named).expect("the walk keeps only the scanned files");
         let text = std::fs::read_to_string(file).unwrap_or_else(|error| {
             panic!(
                 "{} is in the tree and this scan could not read it: {error}. A file the guard \
@@ -591,12 +658,17 @@ fn scan(root: &Path) -> Vec<Hit> {
                 file.display()
             )
         });
-        hits.extend(hits_in(&from_root(file, root), &text, language));
+        hits.extend(findings(&named, &text, source));
     }
     hits
 }
 
-fn gather(directory: &Path, found: &mut Vec<PathBuf>) {
+/// Every file under `root` the scan reads ([`Source::of`]).
+fn gather(root: &Path, found: &mut Vec<PathBuf>) {
+    gather_under(root, root, found);
+}
+
+fn gather_under(root: &Path, directory: &Path, found: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
@@ -608,9 +680,9 @@ fn gather(directory: &Path, found: &mut Vec<PathBuf>) {
                 .to_str()
                 .is_some_and(|name| NOT_SCANNED.contains(&name));
             if !skipped {
-                gather(&path, found);
+                gather_under(root, &path, found);
             }
-        } else if Language::of(&path).is_some() {
+        } else if Source::of(&from_root(&path, root)).is_some() {
             found.push(path);
         }
     }
@@ -623,7 +695,41 @@ fn from_root(path: &Path, root: &Path) -> String {
         .replace('\\', "/")
 }
 
-/// The language a scanned file is written in, by its extension.
+/// What a scanned file is: a script, read whole in its language, or a file of
+/// GitHub steps, whose `run:` values are the scripts ([`run_units`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Source {
+    Script(Language),
+    /// A workflow: a `.yml` or `.yaml` under `.github/workflows/`. Its steps
+    /// are its jobs' (`jobs.<job>.steps`).
+    Workflow,
+    /// A composite action: an `action.yml` or `action.yaml` under
+    /// `.github/actions/`. Its steps are `runs.steps`.
+    Action,
+}
+
+impl Source {
+    /// What the file at `path` (from the workspace root, forward slashes) is,
+    /// or `None` for a file the scan does not read: a YAML file anywhere else
+    /// is not read.
+    fn of(path: &str) -> Option<Self> {
+        let file = Path::new(path);
+        let extension = file.extension()?.to_str()?;
+        let yaml = matches!(extension, "yml" | "yaml");
+        if yaml && path.starts_with(".github/workflows/") {
+            Some(Self::Workflow)
+        } else if yaml
+            && path.starts_with(".github/actions/")
+            && file.file_stem().is_some_and(|stem| stem == "action")
+        {
+            Some(Self::Action)
+        } else {
+            Language::of(extension).map(Self::Script)
+        }
+    }
+}
+
+/// The language a script is written in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Language {
     /// `.rs`: the four shapes.
@@ -632,19 +738,19 @@ enum Language {
     PowerShell,
     /// `.py`.
     Python,
-    /// `.sh`.
+    /// `.sh`, `.bash` and `.zsh`.
     Shell,
 }
 
 impl Language {
-    /// The language of a file the scan reads; any other extension is not
-    /// scanned.
-    fn of(path: &Path) -> Option<Self> {
-        match path.extension()?.to_str()? {
+    /// The language of a script file by its extension; any other extension is
+    /// not a script the scan reads.
+    fn of(extension: &str) -> Option<Self> {
+        match extension {
             "rs" => Some(Self::Rust),
             "ps1" | "psm1" => Some(Self::PowerShell),
             "py" => Some(Self::Python),
-            "sh" => Some(Self::Shell),
+            "sh" | "bash" | "zsh" => Some(Self::Shell),
             _ => None,
         }
     }
@@ -724,9 +830,50 @@ struct SourceWalk {
     subject: String,
 }
 
-/// The shapes, in one file's text: the four of Rust, and a script's literals,
-/// walks and diagnostics.
-fn hits_in(file: &str, text: &str, language: Language) -> Vec<Hit> {
+/// One script the scan judges: a script file whole, or one `run:` value of a
+/// workflow's or composite action's step.
+struct Unit<'f> {
+    /// The file it is written in, from the workspace root.
+    file: &'f str,
+    language: Language,
+    /// The file's line just before the unit's first: the unit's line `n` is
+    /// the file's line `offset + n`.
+    offset: usize,
+    text: String,
+    /// Whether GitHub substitutes `${{ … }}` expressions into the text before
+    /// the shell sees it, which it does in a `run:` value.
+    substituted: bool,
+}
+
+/// Every hit and diagnostic in one file: a script's, or each `run:` value's
+/// of a workflow or composite action and the diagnostics of the values that
+/// are no unit — on the file's lines, a finding two units share once.
+fn findings(file: &str, text: &str, source: Source) -> Vec<Hit> {
+    match source {
+        Source::Script(language) => hits_in(&Unit {
+            file,
+            language,
+            offset: 0,
+            text: text.to_owned(),
+            substituted: false,
+        }),
+        Source::Workflow | Source::Action => {
+            let (units, mut found) = run_units(file, text, source);
+            for unit in &units {
+                found.extend(hits_in(unit));
+            }
+            found.sort();
+            found.dedup();
+            found
+        }
+    }
+}
+
+/// The shapes, in one unit's text: the four of Rust, and a script's literals,
+/// walks and diagnostics, each on its file's line.
+fn hits_in(unit: &Unit<'_>) -> Vec<Hit> {
+    let (file, text, language) = (unit.file, unit.text.as_str(), unit.language);
+    let file_line = |at: usize| unit.offset + line_of(text, at);
     let rust = language == Language::Rust;
     let mut found = Vec::new();
     let items = if rust { function_starts(text) } else { vec![0] };
@@ -751,7 +898,7 @@ fn hits_in(file: &str, text: &str, language: Language) -> Vec<Hit> {
         };
         found.push(Hit {
             file: file.to_owned(),
-            line: line_of(text, open),
+            line: file_line(open),
             kind,
             subject: named.to_owned(),
         });
@@ -760,7 +907,7 @@ fn hits_in(file: &str, text: &str, language: Language) -> Vec<Hit> {
     if rust && let Some(at) = text.find(FILE_SCOPE) {
         found.push(Hit {
             file: file.to_owned(),
-            line: line_of(text, at),
+            line: file_line(at),
             kind: Kind::FileScope,
             subject: FILE_SCOPE.to_owned(),
         });
@@ -773,7 +920,7 @@ fn hits_in(file: &str, text: &str, language: Language) -> Vec<Hit> {
     {
         found.push(Hit {
             file: file.to_owned(),
-            line: line_of(text, at),
+            line: file_line(at),
             kind: Kind::ManifestDirectoryWalk,
             subject: format!("{DIRECTORY_READ} under {MANIFEST_DIRECTORY}"),
         });
@@ -782,7 +929,7 @@ fn hits_in(file: &str, text: &str, language: Language) -> Vec<Hit> {
     for walk in walks {
         found.push(Hit {
             file: file.to_owned(),
-            line: line_of(text, walk.at),
+            line: file_line(walk.at),
             kind: Kind::ScriptSourceWalk,
             subject: walk.subject,
         });
@@ -791,10 +938,12 @@ fn hits_in(file: &str, text: &str, language: Language) -> Vec<Hit> {
     if !rust && language.reads(text) {
         let mut closers: BTreeSet<usize> = literals.iter().map(|&(_, close)| close).collect();
         closers.extend(patterns);
-        for (at, kind, subject) in diagnostic_source_shapes(text, &closers, language) {
+        for (at, kind, subject) in
+            diagnostic_source_shapes(text, &closers, language, unit.substituted)
+        {
             found.push(Hit {
                 file: file.to_owned(),
-                line: line_of(text, at),
+                line: file_line(at),
                 kind,
                 subject,
             });
@@ -849,12 +998,14 @@ fn opener_on_the_line(text: &str, at: usize, quote: char) -> Option<usize> {
 /// PowerShell here-string or a shell heredoc that is not the closer of a
 /// literal in `closers` (the closing quotes of the two spellings and of the
 /// walks' patterns); outside every one, a quoted `.rs` value that is
-/// interpolated as `language` interpolates; and any other quoted `.rs` value,
-/// its opener on its line, that is not path-shaped.
+/// interpolated as `language` interpolates, or, in a `substituted` text (a
+/// `run:` value), holds a `${{ … }}` expression; and any other quoted `.rs`
+/// value, its opener on its line, that is not path-shaped.
 fn diagnostic_source_shapes(
     text: &str,
     closers: &BTreeSet<usize>,
     language: Language,
+    substituted: bool,
 ) -> Vec<(usize, Kind, String)> {
     let mut found = Vec::new();
     let bodies = language.here_strings(text);
@@ -869,7 +1020,9 @@ fn diagnostic_source_shapes(
                 continue;
             };
             let value = &text[open + 1..close];
-            let kind = if language.interpolated(text, open, close, quote) {
+            let kind = if language.interpolated(text, open, close, quote)
+                || (substituted && value.contains(GITHUB_EXPRESSION))
+            {
                 Kind::InterpolatedShellPath
             } else {
                 Kind::UnreadableShellPath
@@ -1272,6 +1425,382 @@ fn line_of(text: &str, at: usize) -> usize {
     text[..at].matches('\n').count() + 1
 }
 
+// ────────────────────────────────────────────────────── the workflow files ──
+
+/// What a `run:` value starts with when it is no one-line plain value: a
+/// quote, an alias, an anchor, a tag, a flow collection or another YAML
+/// indicator.
+const NOT_PLAIN: [char; 15] = [
+    '\'', '"', '*', '&', '!', '[', ']', '{', '}', '|', '>', '%', '@', '`', ',',
+];
+
+/// The `run:` values of a workflow's or composite action's steps, each a
+/// [`Unit`] in the language its step runs in — under a runner the matrix
+/// picks, one unit in each — and the diagnostics of the `run:` values that are
+/// no unit: a shell that cannot be decided, a value in a form not read.
+///
+/// A step is an item of `jobs.<job>.steps` (a workflow) or of `runs.steps`
+/// (a composite action); a `run:` anywhere else (a `with:` input, `defaults`)
+/// is no step's, and nothing but `run:` values is read. A step's shell is its
+/// own `shell:`, else its job's `defaults.run.shell`, else the workflow's
+/// `defaults.run.shell` ([`shell_language`]), else GitHub's default for its
+/// job's `runs-on` ([`runner_languages`]); a composite action's step has
+/// only its own.
+fn run_units<'f>(file: &'f str, text: &str, source: Source) -> (Vec<Unit<'f>>, Vec<Hit>) {
+    let keys = yaml_keys(text);
+    let at =
+        |path: &[Segment], name: &str| keys.iter().find(|key| key.path == path && key.name == name);
+    let key = |name: &str| Segment::Key(name.to_owned());
+    let mut units = Vec::new();
+    let mut diagnostics = Vec::new();
+    for run in keys.iter().filter(|key| key.name == "run") {
+        let job = match (source, run.path.as_slice()) {
+            (
+                Source::Workflow,
+                [
+                    Segment::Key(jobs),
+                    Segment::Key(job),
+                    Segment::Key(steps),
+                    Segment::Item(_),
+                ],
+            ) if jobs == "jobs" && steps == "steps" => Some(job.as_str()),
+            (Source::Action, [Segment::Key(runs), Segment::Key(steps), Segment::Item(_)])
+                if runs == "runs" && steps == "steps" =>
+            {
+                None
+            }
+            _ => continue,
+        };
+        let diagnose = |kind: Kind, subject: String| Hit {
+            file: file.to_owned(),
+            line: run.line,
+            kind,
+            subject,
+        };
+        let script = match &run.value {
+            YamlValue::Empty => continue,
+            YamlValue::Block { first_line, text } => Some((first_line - 1, text.clone())),
+            YamlValue::Line(text) if !text.starts_with(NOT_PLAIN) => {
+                Some((run.line - 1, text.clone()))
+            }
+            YamlValue::Line(first) | YamlValue::Continued(first) => {
+                diagnostics.push(diagnose(Kind::UnreadableWorkflowRun, first.clone()));
+                None
+            }
+            YamlValue::Nested => {
+                diagnostics.push(diagnose(
+                    Kind::UnreadableWorkflowRun,
+                    "keys nested under `run:`".to_owned(),
+                ));
+                None
+            }
+        };
+        let mut places = vec![run.path.clone()];
+        if let Some(job) = job {
+            places.push(vec![key("jobs"), key(job), key("defaults"), key("run")]);
+            places.push(vec![key("defaults"), key("run")]);
+        }
+        let languages = match (places.iter().find_map(|path| at(path, "shell")), job) {
+            (Some(shell), _) => one_line(&shell.value)
+                .and_then(shell_language)
+                .map(|language| vec![language])
+                .ok_or_else(|| format!("shell: {}", shell.written)),
+            (None, Some(job)) => match at(&[key("jobs"), key(job)], "runs-on") {
+                Some(runner) => one_line(&runner.value)
+                    .and_then(runner_languages)
+                    .ok_or_else(|| format!("no shell:, runs-on: {}", runner.written)),
+                None => Err("no shell:, no runs-on:".to_owned()),
+            },
+            (None, None) => Err("no shell:".to_owned()),
+        };
+        match languages {
+            Err(found) => diagnostics.push(diagnose(Kind::UndecidedWorkflowShell, found)),
+            Ok(languages) => {
+                if let Some((offset, text)) = script {
+                    for language in languages {
+                        units.push(Unit {
+                            file,
+                            language,
+                            offset,
+                            text: text.clone(),
+                            substituted: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    (units, diagnostics)
+}
+
+/// The language of a step's `shell:`: `pwsh` and `powershell` are
+/// PowerShell, `bash` and `sh` the shell; any other (`cmd`, `python`, a
+/// command template, an expression) is not decided.
+fn shell_language(shell: &str) -> Option<Language> {
+    match shell {
+        "pwsh" | "powershell" => Some(Language::PowerShell),
+        "bash" | "sh" => Some(Language::Shell),
+        _ => None,
+    }
+}
+
+/// The languages of GitHub's default shell on a job's `runs-on`: pwsh on a
+/// `windows-` runner, bash on an `ubuntu-` or `macos-` one, and both on a
+/// runner the matrix picks (`${{ matrix.<name> }}`); any other label, a list
+/// or another expression is not decided.
+fn runner_languages(label: &str) -> Option<Vec<Language>> {
+    let picked_by_the_matrix = label
+        .strip_prefix(GITHUB_EXPRESSION)
+        .and_then(|rest| rest.strip_suffix("}}"))
+        .and_then(|expression| expression.trim().strip_prefix("matrix."))
+        .is_some_and(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || "_-.".contains(character))
+        });
+    if label.starts_with("windows-") {
+        Some(vec![Language::PowerShell])
+    } else if label.starts_with("ubuntu-") || label.starts_with("macos-") {
+        Some(vec![Language::Shell])
+    } else if picked_by_the_matrix {
+        Some(vec![Language::PowerShell, Language::Shell])
+    } else {
+        None
+    }
+}
+
+/// A one-line value, out of the one pair of quotes it may be in.
+fn one_line(value: &YamlValue) -> Option<&str> {
+    let YamlValue::Line(written) = value else {
+        return None;
+    };
+    Some(
+        ['"', '\'']
+            .into_iter()
+            .find_map(|quote| {
+                written
+                    .strip_prefix(quote)
+                    .and_then(|rest| rest.strip_suffix(quote))
+            })
+            .unwrap_or(written),
+    )
+}
+
+/// A key's place in a YAML file: a key it is nested under, or a sequence
+/// item it is in, named by the file's line its `-` is on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Segment {
+    Key(String),
+    Item(usize),
+}
+
+/// One `key:` of a YAML file's block mappings.
+struct YamlKey {
+    /// The keys and items it is nested in, outermost first.
+    path: Vec<Segment>,
+    name: String,
+    /// The file's line it is on.
+    line: usize,
+    /// What is written after it on its line, its comment aside.
+    written: String,
+    value: YamlValue,
+}
+
+/// What a key holds.
+enum YamlValue {
+    /// Nothing, on its line or nested below it.
+    Empty,
+    /// Keys or sequence items nested below it.
+    Nested,
+    /// A value on the key's line alone, as written there.
+    Line(String),
+    /// A block scalar (`|` or `>`, with or without its indicators): its
+    /// content lines with their indentation taken off, the first on the
+    /// file's line `first_line`.
+    Block { first_line: usize, text: String },
+    /// A value that goes on past the key's line other than as a block scalar
+    /// (a plain, quoted or flow value continued on more-indented lines, or
+    /// one that starts on the line below the key): its first line.
+    Continued(String),
+}
+
+/// Every key of a YAML file's block mappings, in file order, read line by
+/// line by indentation. A `- ` opens a sequence item, closing the items and
+/// keys at its indentation and deeper; a `key:` (plain, or in one pair of
+/// quotes, [`mapping_entry`]) closes the keys at its indentation and deeper
+/// and holds one of [`YamlValue`]'s forms. A block scalar's lines are its
+/// content, not keys; a line that is neither an item nor a key (a scalar
+/// item, a document marker) holds no key, and the lines more indented than
+/// it are its own. Blank lines and comment lines are skipped.
+fn yaml_keys(text: &str) -> Vec<YamlKey> {
+    let lines: Vec<&str> = text.lines().collect();
+    let indent = |line: &str| line.len() - line.trim_start_matches(' ').len();
+    let blank = |line: &str| line.trim().is_empty();
+    let holds_content = |line: &str| !blank(line) && !line.trim_start().starts_with('#');
+    let item = |text: &str| text == "-" || text.starts_with("- ");
+    // The first line from `from` on that is not blank and is indented no
+    // deeper than `column`: where a node at `column` ends.
+    let end_of = |from: usize, column: usize| {
+        (from..lines.len())
+            .find(|&at| !blank(lines[at]) && indent(lines[at]) <= column)
+            .unwrap_or(lines.len())
+    };
+    let mut keys = Vec::new();
+    let mut stack: Vec<(usize, Segment)> = Vec::new();
+    let mut at = 0usize;
+    while at < lines.len() {
+        let line = lines[at];
+        let next = at + 1;
+        if !holds_content(line) {
+            at = next;
+            continue;
+        }
+        let mut column = indent(line);
+        let mut rest = &line[column..];
+        while item(rest) {
+            while stack.last().is_some_and(|(open, segment)| {
+                *open > column || (*open == column && matches!(segment, Segment::Item(_)))
+            }) {
+                stack.pop();
+            }
+            stack.push((column, Segment::Item(next)));
+            let after = &rest[1..];
+            let gap = after.len() - after.trim_start_matches(' ').len();
+            column += 1 + gap;
+            rest = &after[gap..];
+        }
+        if rest.is_empty() || rest.starts_with('#') {
+            at = next;
+            continue;
+        }
+        let Some((name, written)) = mapping_entry(rest) else {
+            at = end_of(next, column);
+            continue;
+        };
+        while stack.last().is_some_and(|(open, _)| *open >= column) {
+            stack.pop();
+        }
+        let path = stack.iter().map(|(_, segment)| segment.clone()).collect();
+        let written = without_comment(written).trim_end();
+        let end = end_of(next, column);
+        let value = if let Some(indicated) = block_header(written) {
+            let body = &lines[next..end];
+            let inner = indicated.map_or_else(
+                || {
+                    body.iter()
+                        .find(|line| !blank(line))
+                        .map_or(0, |line| indent(line))
+                },
+                |more| column + more,
+            );
+            let text: Vec<&str> = body
+                .iter()
+                .map(|line| &line[indent(line).min(inner)..])
+                .collect();
+            at = end;
+            YamlValue::Block {
+                first_line: next + 1,
+                text: text.join("\n"),
+            }
+        } else if written.is_empty() {
+            let below = (next..lines.len())
+                .find(|&line| holds_content(lines[line]))
+                .map(|line| (indent(lines[line]), lines[line].trim_start()));
+            match below {
+                Some((depth, text))
+                    if (depth > column && (item(text) || mapping_entry(text).is_some()))
+                        || (depth == column && item(text)) =>
+                {
+                    stack.push((column, Segment::Key(name.clone())));
+                    at = next;
+                    YamlValue::Nested
+                }
+                Some((depth, text)) if depth > column => {
+                    at = end;
+                    YamlValue::Continued(text.to_owned())
+                }
+                _ => {
+                    at = next;
+                    YamlValue::Empty
+                }
+            }
+        } else if lines[next..end].iter().any(|line| holds_content(line)) {
+            at = end;
+            YamlValue::Continued(written.to_owned())
+        } else {
+            at = next;
+            YamlValue::Line(written.to_owned())
+        };
+        keys.push(YamlKey {
+            path,
+            name,
+            line: next,
+            written: written.to_owned(),
+            value,
+        });
+    }
+    keys
+}
+
+/// The mapping entry a line's text starts, if it starts one: its key —
+/// plain, or in one pair of quotes — and what follows the `:`, blanks taken
+/// off its front. A plain key ends at the first `:` that a blank or the end
+/// of the line follows, before any comment, and does not start with a YAML
+/// indicator.
+fn mapping_entry(rest: &str) -> Option<(String, &str)> {
+    let (key, after) = match rest.chars().next()? {
+        quote @ ('"' | '\'') => {
+            let close = rest[1..].find(quote)? + 1;
+            (&rest[1..close], rest[close + 1..].trim_start_matches(' '))
+        }
+        first if NOT_PLAIN.contains(&first) || matches!(first, '#' | '?') => return None,
+        _ => {
+            let code = without_comment(rest);
+            let colon = code
+                .match_indices(':')
+                .map(|(at, _)| at)
+                .find(|&at| code[at + 1..].is_empty() || code[at + 1..].starts_with([' ', '\t']))?;
+            (&rest[..colon], &rest[colon..])
+        }
+    };
+    let value = after.strip_prefix(':')?;
+    (value.is_empty() || value.starts_with([' ', '\t'])).then(|| {
+        (
+            key.trim_end().to_owned(),
+            value.trim_start_matches([' ', '\t']),
+        )
+    })
+}
+
+/// A value with its YAML comment taken off: from the first `#` that begins
+/// it or follows a blank.
+fn without_comment(value: &str) -> &str {
+    let cut = value
+        .match_indices('#')
+        .map(|(at, _)| at)
+        .find(|&at| at == 0 || value[..at].ends_with([' ', '\t']))
+        .unwrap_or(value.len());
+    &value[..cut]
+}
+
+/// Whether a value is a block scalar's header — `|` or `>`, then at most one
+/// chomping indicator (`+`, `-`) and one indentation indicator (a digit 1–9),
+/// in either order — and, if so, its indentation indicator.
+fn block_header(written: &str) -> Option<Option<usize>> {
+    let indicators = written.strip_prefix(['|', '>'])?;
+    let chomping = indicators.matches(['+', '-']).count();
+    let digits: Vec<usize> = indicators
+        .chars()
+        .filter_map(|character| character.to_digit(10))
+        .map(|digit| digit as usize)
+        .collect();
+    let only_indicators = indicators
+        .chars()
+        .all(|character| matches!(character, '+' | '-' | '1'..='9'));
+    (only_indicators && chomping <= 1 && digits.len() <= 1).then(|| digits.first().copied())
+}
+
 // ─────────────────────────────────────────────────────────────── the lists ──
 
 /// Two directories above this crate.
@@ -1461,8 +1990,8 @@ fn no_source_reader_names_a_file_outside_the_two_lists() {
     // of files, not hundreds, and the list comparison below cannot tell — a
     // lone listed reader is no stray. The floor is on the files the walk read
     // and not on the readers it found, because the readers are what every
-    // migration ticket removes: 813 `.rs`, `.ps1`, `.psm1`, `.py` and `.sh`
-    // files on 2026-10-13.
+    // migration ticket removes: 821 `.rs`, `.ps1`, `.psm1`, `.py`, `.sh`,
+    // `.bash` and `.zsh` files, workflows and composite actions on 2026-10-13.
     let mut walked = Vec::new();
     gather(&root, &mut walked);
     assert!(
@@ -1569,11 +2098,11 @@ const PLANTED_PYTHON: &str = "scripts/planted.py";
 /// Where the planted shell reader below says it lives.
 const PLANTED_SHELL: &str = "scripts/planted.sh";
 
-/// A planted script's hits and diagnostics, as `(line, kind, subject)`, in
-/// the language its extension names.
+/// A planted file's hits and diagnostics, as `(line, kind, subject)`, read
+/// as the scan reads a file at its path ([`Source::of`]).
 fn script_findings(file: &str, script: &str) -> Vec<(usize, Kind, String)> {
-    let language = Language::of(Path::new(file)).expect("a planted script is a scanned language");
-    hits_in(file, script, language)
+    let source = Source::of(file).expect("a planted file is one the scan reads");
+    findings(file, script, source)
         .into_iter()
         .map(|hit| (hit.line, hit.kind, hit.subject))
         .collect::<BTreeSet<_>>()
@@ -1592,10 +2121,10 @@ const LITERAL_OR_LIST: &str = "spell it as one '…' or \"…\" literal, or list
 /// What a hit on neither list tells its author to do.
 const LIST_OR_ASK: &str = "if the subject really is a file, add a FileScoped variant";
 
-/// The refusal a planted script earns on no list.
+/// The refusal a planted file earns on no list.
 fn script_refusal(file: &str, script: &str) -> String {
-    let language = Language::of(Path::new(file)).expect("a planted script is a scanned language");
-    let hits = hits_in(file, script, language);
+    let source = Source::of(file).expect("a planted file is one the scan reads");
+    let hits = findings(file, script, source);
     let strays = unlisted(&hits, &BTreeSet::new(), &BTreeSet::new(), &BTreeMap::new());
     complaint(
         &strays,
@@ -1676,7 +2205,7 @@ fn an_interpolated_source_path_in_a_shell_reader_is_a_diagnostic_not_a_pass() {
         "the failure names the line, the shape and what to do: {said}"
     );
     // On a list, the file's diagnostics are cleared as its hits are.
-    let hits = hits_in(PLANTED_SCRIPT, script, Language::PowerShell);
+    let hits = findings(PLANTED_SCRIPT, script, Source::Script(Language::PowerShell));
     let listed = BTreeSet::from([PLANTED_SCRIPT.to_owned()]);
     assert!(unlisted(&hits, &listed, &BTreeSet::new(), &BTreeMap::new()).is_empty());
 }
@@ -2235,6 +2764,460 @@ fn each_read_verb_alone_makes_its_file_a_reader() {
             "{file}: `{line}` is refused naming the line and what to do: {said}"
         );
     }
+}
+
+/// Where the planted workflows below say they live.
+const PLANTED_WORKFLOW: &str = ".github/workflows/planted.yml";
+
+/// Where the planted composite action below says it lives.
+const PLANTED_ACTION: &str = ".github/actions/planted/action.yml";
+
+/// What an undecided shell tells its author to do.
+const SHELL_OR_LIST: &str = "give the step a `shell:` of pwsh, powershell, bash or sh, or list \
+                             the file";
+
+/// What a `run:` value the scan cannot read tells its author to do.
+const BLOCK_OR_LIST: &str = "write it as a `run: |` block or a one-line plain value, or list the \
+                             file";
+
+/// A YAML text from its lines, each indented by two spaces a level: written
+/// so, a planted workflow's indentation is the sample's own and its line
+/// numbers are its lines' places in the list.
+fn yaml(lines: &[(usize, &str)]) -> String {
+    lines
+        .iter()
+        .map(|(level, line)| format!("{}{line}\n", "  ".repeat(*level)))
+        .collect()
+}
+
+/// RED — **a workflow step that runs pwsh and reads a named source is a hit
+/// on the workflow's own line**, the block scalar's offset added, and the
+/// check refuses it naming `file:line` and what to do; the step's `shell:`
+/// wins over its runner's default.
+///
+/// MUTATION: `hits_in` without the unit's offset (`file_line` answering
+/// `line_of(text, at)`) puts the hits on lines 1 and 4, and this goes red.
+#[test]
+fn a_workflow_pwsh_step_reading_a_source_is_a_hit_at_the_yml_line() {
+    let workflow = yaml(&[
+        (0, "name: 种植 — planted"),
+        (0, "on: [push]"),
+        (0, "jobs:"),
+        (1, "canary:"),
+        (2, "runs-on: ubuntu-latest"),
+        (2, "steps:"),
+        (3, "- uses: actions/checkout@v4"),
+        (3, "# 读一个源文件 — reads one"),
+        (3, "- name: the gate can actually fail"),
+        (4, "shell: pwsh"),
+        (4, "run: |"),
+        (
+            5,
+            "$original = [IO.File]::ReadAllText(\"crates/x/src/lib.rs\")",
+        ),
+        (5, "Write-Host '中文 mixed'"),
+        (0, ""),
+        (5, "$other = Get-Content 'crates/y/src/main.rs'"),
+    ]);
+    assert_eq!(
+        script_findings(PLANTED_WORKFLOW, &workflow),
+        vec![
+            (
+                12,
+                Kind::ReadOfANamedSource,
+                "crates/x/src/lib.rs".to_owned()
+            ),
+            (
+                15,
+                Kind::ReadOfANamedSource,
+                "crates/y/src/main.rs".to_owned()
+            ),
+        ]
+    );
+    let said = script_refusal(PLANTED_WORKFLOW, &workflow);
+    assert!(
+        said.contains(".github/workflows/planted.yml:12 reads a named source file")
+            && said.contains(LIST_OR_ASK),
+        "the refusal names the workflow's line and what to do: {said}"
+    );
+}
+
+/// RED — **a workflow step that runs bash or sh and reads a named source is
+/// a hit**: by GitHub's default on an `ubuntu-` runner, by its job's
+/// `defaults.run.shell`, and by its own `shell: sh`.
+///
+/// MUTATION: `shell_language` without its `"bash" | "sh"` arm leaves the
+/// second job's two steps undecided, and this goes red.
+#[test]
+fn a_workflow_bash_step_reading_a_source_is_a_hit() {
+    let workflow = yaml(&[
+        (0, "jobs:"),
+        (1, "linux:"),
+        (2, "runs-on: ubuntu-latest"),
+        (2, "steps:"),
+        (3, "- name: 默认 bash — the runner's default"),
+        (4, "run: |"),
+        (5, "grep -n 'fn main' 'crates/x/src/main.rs'"),
+        (1, "mac:"),
+        (2, "runs-on: macos-14"),
+        (2, "defaults:"),
+        (3, "run:"),
+        (4, "shell: bash"),
+        (2, "steps:"),
+        (3, "- run: |"),
+        (5, "wc -l \"crates/y/src/lib.rs\"  # 中文"),
+        (3, "- shell: sh"),
+        (4, "run: |"),
+        (5, "cat 'crates/z/src/mod.rs'"),
+    ]);
+    assert_eq!(
+        script_findings(PLANTED_WORKFLOW, &workflow),
+        vec![
+            (
+                7,
+                Kind::ReadOfANamedSource,
+                "crates/x/src/main.rs".to_owned()
+            ),
+            (
+                15,
+                Kind::ReadOfANamedSource,
+                "crates/y/src/lib.rs".to_owned()
+            ),
+            (
+                18,
+                Kind::ReadOfANamedSource,
+                "crates/z/src/mod.rs".to_owned()
+            ),
+        ]
+    );
+    let said = script_refusal(PLANTED_WORKFLOW, &workflow);
+    assert!(
+        said.contains(".github/workflows/planted.yml:15 reads a named source file")
+            && said.contains(LIST_OR_ASK),
+        "the refusal names the workflow's line and what to do: {said}"
+    );
+}
+
+/// RED — **a `run:` step whose shell cannot be decided is a diagnostic**, on
+/// its `run:` line, whether or not it reads: a `runs-on` the scan knows no
+/// default for, a `shell:` that is neither PowerShell nor the shell, and a
+/// composite action's step with no `shell:`.
+///
+/// MUTATION: `run_units` pushing nothing for an undecided shell (its
+/// `Err(found)` arm empty) finds none of the three, and this goes red.
+#[test]
+fn a_workflow_step_with_an_undecidable_shell_is_a_diagnostic() {
+    let workflow = yaml(&[
+        (0, "jobs:"),
+        (1, "own:"),
+        (2, "runs-on: self-hosted"),
+        (2, "steps:"),
+        (3, "- name: 自托管 — no default the scan knows"),
+        (4, "run: echo hi"),
+        (3, "- shell: cmd"),
+        (4, "run: type crates\\x\\src\\lib.rs"),
+        (3, "- shell: pwsh"),
+        (4, "run: Write-Host 中文"),
+    ]);
+    assert_eq!(
+        script_findings(PLANTED_WORKFLOW, &workflow),
+        vec![
+            (
+                6,
+                Kind::UndecidedWorkflowShell,
+                "no shell:, runs-on: self-hosted".to_owned()
+            ),
+            (8, Kind::UndecidedWorkflowShell, "shell: cmd".to_owned()),
+        ]
+    );
+    let said = script_refusal(PLANTED_WORKFLOW, &workflow);
+    assert!(
+        said.contains(
+            ".github/workflows/planted.yml:6 runs a `run:` step in a shell the scan cannot decide"
+        ) && said.contains(SHELL_OR_LIST),
+        "the failure names the workflow's line and what to do: {said}"
+    );
+    let action = yaml(&[
+        (0, "name: 动作 — a planted action"),
+        (0, "runs:"),
+        (1, "using: composite"),
+        (1, "steps:"),
+        (2, "- run: echo hi"),
+        (2, "- shell: bash"),
+        (3, "run: echo ok"),
+    ]);
+    assert_eq!(
+        script_findings(PLANTED_ACTION, &action),
+        vec![(5, Kind::UndecidedWorkflowShell, "no shell:".to_owned())]
+    );
+    let said = script_refusal(PLANTED_ACTION, &action);
+    assert!(
+        said.contains(".github/actions/planted/action.yml:5 runs a `run:` step")
+            && said.contains(SHELL_OR_LIST),
+        "the failure names the action's line and what to do: {said}"
+    );
+}
+
+/// RED — **a step on a runner the matrix picks is judged under both
+/// shells**, and a finding under either counts: the heredoc is the shell's,
+/// the here-string PowerShell's.
+///
+/// MUTATION: `runner_languages` answering PowerShell alone for a matrix
+/// runner loses the heredoc's line, and this goes red.
+#[test]
+fn a_matrix_step_is_judged_under_both_shells() {
+    let workflow = yaml(&[
+        (0, "jobs:"),
+        (1, "each:"),
+        (2, "strategy:"),
+        (3, "matrix:"),
+        (4, "os: [windows-2025, ubuntu-latest]"),
+        (2, "runs-on: ${{ matrix.os }}"),
+        (2, "steps:"),
+        (3, "- name: 两种壳 — both shells"),
+        (4, "run: |"),
+        (5, "cat <<EOF"),
+        (5, "crates/x/src/lib.rs"),
+        (5, "EOF"),
+        (5, "$body = @\""),
+        (5, "crates/y/src/main.rs"),
+        (5, "\"@"),
+    ]);
+    assert_eq!(
+        script_findings(PLANTED_WORKFLOW, &workflow),
+        vec![
+            (
+                11,
+                Kind::ShellPathInAHereString,
+                "crates/x/src/lib.rs".to_owned()
+            ),
+            (
+                14,
+                Kind::ShellPathInAHereString,
+                "crates/y/src/main.rs".to_owned()
+            ),
+        ]
+    );
+    let said = script_refusal(PLANTED_WORKFLOW, &workflow);
+    assert!(
+        said.contains(".github/workflows/planted.yml:11 names a `.rs` file inside a here-string")
+            && said.contains(".github/workflows/planted.yml:14 names a `.rs` file")
+            && said.contains(LITERAL_OR_LIST),
+        "the failure names both lines and what to do: {said}"
+    );
+}
+
+/// RED — **a `${{ … }}` expression in a `run:` value's `.rs` path is an
+/// interpolation diagnostic**, in either quote, since GitHub substitutes it
+/// before the shell sees the text; one in no `.rs` path is nothing, and the
+/// same single-quoted value in a script file is no interpolation.
+///
+/// MUTATION: `diagnostic_source_shapes` without its `substituted` term labels
+/// line 8 unreadable instead, and this goes red.
+#[test]
+fn a_github_expression_in_a_source_path_is_a_diagnostic() {
+    let workflow = yaml(&[
+        (0, "jobs:"),
+        (1, "each:"),
+        (2, "runs-on: windows-2025"),
+        (2, "steps:"),
+        (3, "- shell: pwsh"),
+        (4, "run: |"),
+        (5, "# 表达式 — an expression"),
+        (5, "$text = Get-Content '${{ matrix.crate }}/src/lib.rs'"),
+        (5, "$sha = '${{ github.sha }}'"),
+        (5, "$same = Get-Content \"crates/${{ matrix.crate }}.rs\""),
+    ]);
+    assert_eq!(
+        script_findings(PLANTED_WORKFLOW, &workflow),
+        vec![
+            (
+                8,
+                Kind::InterpolatedShellPath,
+                "${{ matrix.crate }}/src/lib.rs".to_owned()
+            ),
+            (
+                10,
+                Kind::InterpolatedShellPath,
+                "crates/${{ matrix.crate }}.rs".to_owned()
+            ),
+        ]
+    );
+    let said = script_refusal(PLANTED_WORKFLOW, &workflow);
+    assert!(
+        said.contains(".github/workflows/planted.yml:8 names a `.rs` path by interpolation")
+            && said.contains(LITERAL_OR_LIST),
+        "the failure names the workflow's line and what to do: {said}"
+    );
+    let script = "# 中文\nGet-Content '${{ matrix.crate }}/src/lib.rs'\n";
+    assert_eq!(
+        shell_findings(script),
+        vec![(
+            2,
+            Kind::UnreadableShellPath,
+            "${{ matrix.crate }}/src/lib.rs".to_owned()
+        )]
+    );
+}
+
+/// RED — **a `.zsh` or `.bash` reader naming a source is a hit**, read as
+/// the shell, as a `.sh` is.
+///
+/// MUTATION: `Language::of` without `"zsh"` reads no planted `.zsh` (the
+/// helper finds no scanned file there), and this goes red.
+#[test]
+fn a_zsh_reader_naming_a_source_is_a_hit() {
+    let zsh = "# 读取一个源文件 — zsh\ngrep -n 'fn main' 'crates/x/src/main.rs'\n";
+    assert_eq!(
+        script_findings("scripts/planted.zsh", zsh),
+        vec![(
+            2,
+            Kind::ReadOfANamedSource,
+            "crates/x/src/main.rs".to_owned()
+        )]
+    );
+    let said = script_refusal("scripts/planted.zsh", zsh);
+    assert!(
+        said.contains("scripts/planted.zsh:2 reads a named source file")
+            && said.contains(LIST_OR_ASK),
+        "the refusal names the line and what to do: {said}"
+    );
+    let bash = "# 中文 mixed — bash\nwc -l \"crates/y/src/lib.rs\"\n";
+    assert_eq!(
+        script_findings("scripts/planted.bash", bash),
+        vec![(
+            2,
+            Kind::ReadOfANamedSource,
+            "crates/y/src/lib.rs".to_owned()
+        )]
+    );
+}
+
+/// RED — **a `run:` value on the key's own line is a unit too**, judged as
+/// a block's is, its YAML comment aside, on the key's line.
+///
+/// MUTATION: `run_units` taking no unit from a one-line value (its
+/// `YamlValue::Line` arm answering `None`) finds nothing, and this goes red.
+#[test]
+fn a_run_value_on_one_line_is_scanned_too() {
+    let workflow = yaml(&[
+        (0, "jobs:"),
+        (1, "one:"),
+        (2, "runs-on: windows-2025"),
+        (2, "steps:"),
+        (3, "- name: 一行 — one line"),
+        (
+            4,
+            "run: Get-Content 'crates/x/src/lib.rs' # 读取 'crates/z/src/a.rs'",
+        ),
+        (3, "- run: Get-Content 'crates/y/src/main.rs'"),
+    ]);
+    assert_eq!(
+        script_findings(PLANTED_WORKFLOW, &workflow),
+        vec![
+            (
+                6,
+                Kind::ReadOfANamedSource,
+                "crates/x/src/lib.rs".to_owned()
+            ),
+            (
+                7,
+                Kind::ReadOfANamedSource,
+                "crates/y/src/main.rs".to_owned()
+            ),
+        ]
+    );
+    let said = script_refusal(PLANTED_WORKFLOW, &workflow);
+    assert!(
+        said.contains(".github/workflows/planted.yml:7 reads a named source file")
+            && said.contains(LIST_OR_ASK),
+        "the refusal names the workflow's line and what to do: {said}"
+    );
+}
+
+/// RED — **a `run:` value in a YAML form the scan does not read as one
+/// script is a diagnostic**, not a pass: a quoted value, an alias, a plain
+/// value continued on the next line.
+///
+/// MUTATION: `run_units` pushing nothing for such a value (its
+/// `YamlValue::Line(first) | YamlValue::Continued(first)` arm answering
+/// `None` alone) finds none of the three, and this goes red.
+#[test]
+fn a_run_value_the_scan_cannot_read_is_a_diagnostic() {
+    let workflow = yaml(&[
+        (0, "jobs:"),
+        (1, "odd:"),
+        (2, "runs-on: windows-2025"),
+        (2, "steps:"),
+        (3, "- run: \"Get-Content 'crates/x/src/lib.rs'\""),
+        (3, "- run: *shared"),
+        (3, "- run: Get-Content"),
+        (5, "'crates/y/src/main.rs'"),
+        (3, "- run: |"),
+        (5, "Write-Host '中文 fine'"),
+    ]);
+    assert_eq!(
+        script_findings(PLANTED_WORKFLOW, &workflow),
+        vec![
+            (
+                5,
+                Kind::UnreadableWorkflowRun,
+                "\"Get-Content 'crates/x/src/lib.rs'\"".to_owned()
+            ),
+            (6, Kind::UnreadableWorkflowRun, "*shared".to_owned()),
+            (7, Kind::UnreadableWorkflowRun, "Get-Content".to_owned()),
+        ]
+    );
+    let said = script_refusal(PLANTED_WORKFLOW, &workflow);
+    assert!(
+        said.contains(".github/workflows/planted.yml:6 has a `run:` value the scan cannot read")
+            && said.contains(BLOCK_OR_LIST),
+        "the failure names the workflow's line and what to do: {said}"
+    );
+}
+
+/// PIN — **outside a step's `run:` value nothing in a workflow is read**: a
+/// `name:`, an `env:` value, a `with:` input (even one called `run`) and
+/// `defaults.run` naming a `.rs` file are nothing, as is a step that runs a
+/// script by path without reading; and a YAML file is read only under
+/// `.github/workflows/` or as a composite action.
+///
+/// MUTATION: `run_units` taking every `run:` key for a step's (its `_ =>
+/// continue` arm answering `None`) reads the `with:` input and `defaults.run`,
+/// and this goes red.
+#[test]
+fn a_name_or_with_value_naming_rs_is_nothing() {
+    let workflow = yaml(&[
+        (0, "name: reads 'crates/x/src/lib.rs' — 名字"),
+        (0, "jobs:"),
+        (1, "quiet:"),
+        (2, "runs-on: windows-2025"),
+        (2, "env:"),
+        (3, "SOURCE: 'crates/x/src/lib.rs'"),
+        (2, "steps:"),
+        (3, "- name: Get-Content 'crates/x/src/lib.rs'"),
+        (4, "uses: ./.github/actions/toolchain"),
+        (4, "with:"),
+        (5, "path: 'crates/x/src/lib.rs'"),
+        (5, "run: Get-Content 'crates/x/src/lib.rs'"),
+        (3, "- name: 读取"),
+        (4, "shell: pwsh"),
+        (4, "run: ./scripts/x.ps1 -Path 'crates/x/src/lib.rs'"),
+        (0, "defaults:"),
+        (1, "run:"),
+        (2, "shell: pwsh"),
+    ]);
+    assert_eq!(script_findings(PLANTED_WORKFLOW, &workflow), vec![]);
+    assert_eq!(
+        Source::of(".github/workflows/ci.yml"),
+        Some(Source::Workflow)
+    );
+    assert_eq!(
+        Source::of(".github/actions/toolchain/action.yml"),
+        Some(Source::Action)
+    );
+    assert_eq!(Source::of(".github/ISSUE_TEMPLATE/config.yml"), None);
+    assert_eq!(Source::of("tests/assets/preview-samples/sample.yaml"), None);
 }
 
 /// PIN — **every allowlist entry names one file, one reason, and a file the scan
