@@ -2175,8 +2175,8 @@ pub(crate) struct ScriptedJobs {
 pub(crate) enum ScriptedJob {
     Document(crate::document_request::DocumentJob),
     Recovered(crate::document_request::RecoveredJob),
-    /// A document's stable read.
-    Read,
+    /// A document's stable read, which the test answers.
+    Read(crate::document_request::ReadJob),
     /// A session document.
     Session,
     /// The launch's session backup.
@@ -2205,7 +2205,7 @@ impl ScriptedJobs {
         Some(match job {
             StorageJob::Document(job) => ScriptedJob::Document(job),
             StorageJob::Recovered(job) => ScriptedJob::Recovered(job),
-            StorageJob::Read(_) => ScriptedJob::Read,
+            StorageJob::Read(job) => ScriptedJob::Read(job),
             StorageJob::Session(_) => ScriptedJob::Session,
             StorageJob::Receipt { .. } => ScriptedJob::Receipt,
             StorageJob::SessionBackup(_) => ScriptedJob::Backup,
@@ -2449,6 +2449,11 @@ impl SettingsStore {
     /// force stays.
     pub(crate) fn ask_reread(&mut self) {
         self.document.ask_read();
+    }
+
+    /// Whether a re-read of `settings.json` is still to be answered.
+    pub(crate) fn reading(&self) -> bool {
+        self.document.reading()
     }
 
     /// **A storage pass's merge, its first three steps** (design note
@@ -2806,6 +2811,11 @@ impl KeybindingsStore {
         self.document.ask_read();
     }
 
+    /// Whether a re-read of `keybindings.json` is still to be answered.
+    pub(crate) fn reading(&self) -> bool {
+        self.document.reading()
+    }
+
     /// **A storage pass's merge, purely** (design note 2026-10-11 §3.4, (b)8,
     /// (c)1): every file stored for the merge is merged by action, then by
     /// chord, against its base ([`keybindings_merge::merge`]) and folded into
@@ -3090,6 +3100,11 @@ impl ProfilesStore {
         self.document.ask_read();
     }
 
+    /// Whether a re-read of `profiles.json` is still to be answered.
+    pub(crate) fn reading(&self) -> bool {
+        self.document.reading()
+    }
+
     /// Record the table as it stands now and hand it to the storage worker.
     ///
     /// Returns whether anything changed, so a caller can skip the write when a
@@ -3246,6 +3261,18 @@ pub(crate) fn hear_documents(
         pins: pins_news,
         faults,
     }
+}
+
+/// **Whether any of the four stores has a re-read still to be answered** — the
+/// batch of re-reads a storage pass asked is not complete, and its one card
+/// waits (`MergeNotice::gather`; T-STORE-NOTICE, design note 2026-10-11 §3.6).
+pub(crate) fn documents_reading(
+    settings: &SettingsStore,
+    keybindings: &KeybindingsStore,
+    profiles: &ProfilesStore,
+    pins: &crate::pins::PinsStore,
+) -> bool {
+    settings.reading() || keybindings.reading() || profiles.reading() || pins.reading()
 }
 
 /// **`profiles.json`'s merge, as the store's seam takes it**: a built-in row no

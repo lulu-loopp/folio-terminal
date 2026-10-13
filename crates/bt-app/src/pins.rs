@@ -290,6 +290,11 @@ impl PinsStore {
         self.document.ask_read();
     }
 
+    /// Whether a re-read of `pins.json` is still to be answered.
+    pub(crate) fn reading(&self) -> bool {
+        self.document.reading()
+    }
+
     /// Record the table as it stands now and hand it to the storage worker.
     ///
     /// Returns whether anything changed, so a press that moved nothing costs no

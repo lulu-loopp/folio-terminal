@@ -1884,6 +1884,18 @@ impl<T: StoredDocument> DocumentState<T> {
         !self.merges.is_empty()
     }
 
+    /// **Whether a re-read of this file is still to be answered** — one on the
+    /// worker, or one asked while it was and owed after it ([`Self::ask_read`]).
+    /// The storage pass's card waits while any store is reading
+    /// (`MergeNotice::gather`, T-STORE-NOTICE).
+    pub(crate) fn reading(&self) -> bool {
+        self.read_again
+            || self
+                .outstanding
+                .iter()
+                .any(|request| matches!(request, Outstanding::Read { .. }))
+    }
+
     /// **The merge's seam: every file stored for the merge, merged and
     /// folded**, in the order the store kept them ((c)1's table).
     ///

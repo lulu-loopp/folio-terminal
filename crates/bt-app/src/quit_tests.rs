@@ -93,7 +93,7 @@ impl Disk {
                 ScriptedJob::Session => self.seen.push(Seen::Session),
                 ScriptedJob::Receipt => self.seen.push(Seen::Receipt),
                 ScriptedJob::Backup => self.seen.push(Seen::Backup),
-                ScriptedJob::Read | ScriptedJob::Other => {}
+                ScriptedJob::Read(_) | ScriptedJob::Other => {}
             }
         }
     }

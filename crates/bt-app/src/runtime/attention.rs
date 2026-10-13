@@ -5,8 +5,8 @@ use crate::{
     AttentionDelivery, NoticeHost, NoticeStrip, OVER_IN_PANE_TOP_FIRST, OverInPane, PointerTarget,
     PreviewSurface, Runtime, TaskbarFlash, UserInputKind, WindowRuntime, answer_attention_in,
     attention, attention_trace, emit_attention_lines, float, i18n, marks, native_window,
-    next_attention_stop, notice, notify, profiles, quit, raise_cancelled_quit_card_on, seats,
-    taskbar_lane, toast,
+    next_attention_stop, notice, notify, profiles, quit, raise_cancelled_quit_card_on,
+    raise_merge_notice_on, seats, taskbar_lane, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -37,6 +37,13 @@ impl Runtime<'_> {
             self.app.motion,
             Instant::now(),
         );
+        self.show_raised_card()
+    }
+
+    /// **A card just raised on this window, shown**: the overlay re-derived and
+    /// the chrome presented, and the card's hover asked at once when the
+    /// pointer is already over it.
+    fn show_raised_card(&mut self) -> Result<()> {
         if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -214,6 +221,27 @@ impl Runtime<'_> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// **Say on this window what a batch of re-reads' merges replaced**
+    /// (T-STORE-NOTICE; design note 2026-10-11 §3.6): one Info card with no verb
+    /// ([`raise_merge_notice_on`]), shown as every card [`Self::toast`] raises
+    /// is; nothing for an empty notice.
+    pub(crate) fn raise_merge_notice(
+        &mut self,
+        notice: &crate::document_request::MergeNotice,
+    ) -> Result<()> {
+        if raise_merge_notice_on(
+            &mut self.window.toasts,
+            notice,
+            self.app.motion,
+            Instant::now(),
+        )
+        .is_none()
+        {
+            return Ok(());
+        }
+        self.show_raised_card()
     }
 
     /// **The cancelled quit's one choice** (revision (d)2): *Leave without this change* asks
