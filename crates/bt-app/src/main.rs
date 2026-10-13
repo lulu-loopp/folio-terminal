@@ -12003,6 +12003,9 @@ struct LeafSession {
     /// `None` for a leaf with no process behind it (the probe path), where there
     /// is no program and therefore nothing for a title to be repeating.
     program: Option<PathBuf>,
+    /// What kind of program [`Self::program`] is, beside it for its reason: only the spawn knew
+    /// it (`profiles::ShellProgram::Native` for a leaf with no process behind it).
+    program_kind: profiles::ShellProgram,
     /// **Where this shell was put down**, in its own profile's namespace —
     /// [`profiles::SpawnPlace::directory`], kept because only the spawn knew it.
     ///
@@ -12338,6 +12341,7 @@ impl BirthDeathFallback {
                     at_shell_home: leaf.session.spawn_at_shell_home(),
                     named: leaf.born_named,
                     program: leaf.program.clone(),
+                    program_kind: leaf.program_kind.clone(),
                     unless_gone: None,
                 },
                 born_grid: leaf.conpty_grid,
@@ -12358,6 +12362,9 @@ struct BirthDecision {
     at_shell_home: bool,
     named: bool,
     program: Option<PathBuf>,
+    /// What kind of program `program` is (`profiles::ProfilePrograms::shell`): what the pane's
+    /// shell prints is read off it.
+    program_kind: profiles::ShellProgram,
     /// The folder the birth asks the disk about, and where the pane stands when it is gone
     /// (G-SWEEP-048, #29).
     unless_gone: Option<Box<profiles::GoneFolder>>,
@@ -40015,7 +40022,54 @@ mod shell_birth_tests {
             at_shell_home: false,
             named: false,
             program: Some(PathBuf::from("外壳")),
+            program_kind: profiles::ShellProgram::Native,
             unless_gone: None,
+        }
+    }
+
+    /// PIN (T-WINDOWS-SHELL-NAMESPACES, 2026-10-12) — **a pane reads the spelling of the shell
+    /// that started in it**: the kind of program its decision carries, and the row it fell back
+    /// to rather than the row it was asked for. Both the session's namespace and the paste
+    /// recipient's are the table's answer for that pair.
+    ///
+    /// MUTATION: `place_leaf` reading the namespace off `seed.profile` (the asked `gitbash`) —
+    /// RED on Windows (`Msys` for the PowerShell it fell back to). MUTATION: `place_leaf` handing
+    /// the table `ShellProgram::Native` — RED on Windows (`Windows` for the Cygwin program).
+    #[test]
+    fn a_pane_reads_the_spelling_of_the_shell_that_started_in_it() {
+        let asked = "gitbash";
+        let environment = bt_pty::SystemShellEnvironment;
+        for (started, shell, profile) in [
+            (
+                Started::FellBack(profiles::fallback_profile_id().to_owned()),
+                profiles::ShellProgram::Native,
+                profiles::fallback_profile_id(),
+            ),
+            (Started::AsAsked, profiles::ShellProgram::Cygwin, asked),
+        ] {
+            let decision = BirthDecision {
+                spawn_profile: profile.to_owned(),
+                program_kind: shell.clone(),
+                ..decided(started.clone())
+            };
+            let seed = seed_of(asked);
+            let mut leaf = bare(&decision, &seed);
+            finish_leaf_birth(&mut leaf, None, &decision, &seed, None, false)
+                .expect("a pane with no shell behind it is finished");
+            let expected = profiles::printed_path_namespace(
+                profiles::index_of_id(profile),
+                &shell,
+                &environment,
+            );
+            assert_eq!(
+                leaf.session.printed_path_namespace(),
+                expected,
+                "{started:?}: the pane reads its shell's spelling"
+            );
+            assert_eq!(
+                leaf.paste_recipient.namespace, expected,
+                "{started:?}: and a path pasted into it is written in that spelling"
+            );
         }
     }
 
@@ -40216,6 +40270,7 @@ mod shell_birth_tests {
             at_shell_home: decided.place.at_shell_home,
             named: decided.place.named,
             program: Some(PathBuf::from("外壳")),
+            program_kind: profiles::ShellProgram::Native,
             unless_gone: decided.unless_gone.clone().map(Box::new),
         };
         let seed = LeafSeed {
@@ -40921,6 +40976,7 @@ fn create_leaf_session(
     // leaf — there is no table to prune, because the value lives on the thing it names.
     let capability = attention_wire::mint_capability();
     let mut resolved_program = None;
+    let mut resolved_shell = profiles::ShellProgram::Native;
     // **The two facts the spawn is made of, both read by id and both able to say
     // no** (T-PROFILE-TABLE-MOVE).
     //
@@ -41000,6 +41056,7 @@ fn create_leaf_session(
             .map(|(name, value)| (std::ffi::OsString::from(name), value)),
         );
         resolved_program = Some(PathBuf::from(&program));
+        resolved_shell = programs.shell(spawn_profile);
         // **The shell is asked for, never waited for** (T-BIRTH-OFF-WINDOW). Its pseudoconsole and
         // process are made on a `bt-pty-birth` worker of its own (`pty_door::request_shell`); this
         // pane is made in birth around the request, holds what is typed into it, and lands when the
@@ -41038,6 +41095,7 @@ fn create_leaf_session(
         at_shell_home: place.at_shell_home,
         named: place.named,
         program: resolved_program,
+        program_kind: resolved_shell,
         unless_gone: unless_gone.map(Box::new),
     };
     let mut leaf = bare_leaf(
@@ -41148,12 +41206,14 @@ fn bare_leaf(
         foreground_program_cadence: foreground_program::Cadence::default(),
         paste_recipient: profiles::paste_recipient(
             profiles::index_of_id(&decision.spawn_profile),
+            &decision.program_kind,
             &bt_pty::SystemShellEnvironment,
         ),
         integration: profiles::row_of(&decision.spawn_profile)
             .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
         profile: decision.spawn_profile.clone(),
         program: decision.program.clone(),
+        program_kind: decision.program_kind.clone(),
         born_named: false,
         spawn_place: None,
         // **What this pane is owed at its first prompt** (§7.54e ④). `None` for every pane in the
@@ -41204,7 +41264,7 @@ fn await_shell(
     seed: &LeafSeed,
 ) {
     let spawn_profile = decision.spawn_profile.clone();
-    place_leaf(leaf, &decision, seed, &spawn_profile, false);
+    place_leaf(leaf, &decision, &spawn_profile, false);
     leaf.birth = Some(PaneBirth {
         seed: seed.clone(),
         probe_input: None,
@@ -41248,6 +41308,7 @@ fn finish_leaf_birth(
         ));
     }
     let mut resolved_program = decision.program.clone();
+    let mut resolved_shell = decision.program_kind.clone();
     // **A pane is the shell it is actually running.** When the profile's own
     // program would not start, `bt-pty` falls back once to `powershell.exe` and
     // hands back the notice that says so — so what this leaf *is*, from here on,
@@ -41271,6 +41332,9 @@ fn finish_leaf_birth(
         // one fact that field exists to answer is "what is behind this pane", so
         // it follows the swap the same way the profile does.
         resolved_program = Some(PathBuf::from(fallback.started));
+        // `bt-pty`'s last resort is Windows PowerShell, which is no WSL launcher and no Cygwin
+        // program.
+        resolved_shell = profiles::ShellProgram::Native;
         profiles::fallback_profile_id().to_owned()
     } else {
         // **The profile that was started, not the one that was asked for**
@@ -41282,6 +41346,8 @@ fn finish_leaf_birth(
         // meet the same missing program and say the same thing again, for ever.
         decision.spawn_profile.clone()
     };
+    // Before the place: the namespace `place_leaf` tells the session is read off it.
+    leaf.program_kind = resolved_shell;
     let session = &mut leaf.session;
     // **The other way into the same degradation**, and the half that used to be
     // silent. A saved leaf naming a profile this build does not have resolves to
@@ -41331,7 +41397,7 @@ fn finish_leaf_birth(
             .feed(bytes)
             .context("feed BT_PROBE_INPUT bytes directly into terminal")?;
     }
-    place_leaf(leaf, decision, seed, &profile, in_birth);
+    place_leaf(leaf, decision, &profile, in_birth);
     // Which modes the carrier itself keeps on, for the two roads that reset a dead program's
     // modes without a byte to the child: the person's verb and the session's own return from a
     // stranded alternate screen. The pane's pseudoconsole is fixed here, at its birth.
@@ -41354,6 +41420,7 @@ fn finish_leaf_birth(
     }
     leaf.paste_recipient = profiles::paste_recipient(
         profiles::index_of_id(&profile),
+        &leaf.program_kind,
         &bt_pty::SystemShellEnvironment,
     );
     // The door of the profile this pane actually came up as, read once,
@@ -41423,13 +41490,7 @@ fn apply_owed_shell_resize(
 /// crossed into `profile`'s namespace after a fallback (`birth_place_of_the_started_shell`), told
 /// to the session as the second rung of §7.1.4's ladder, and kept on the leaf. A pane still waiting
 /// on a row was never put down anywhere; its seed says where it will be.
-fn place_leaf(
-    leaf: &mut LeafSession,
-    decision: &BirthDecision,
-    seed: &LeafSeed,
-    profile: &str,
-    in_birth: bool,
-) {
+fn place_leaf(leaf: &mut LeafSession, decision: &BirthDecision, profile: &str, in_birth: bool) {
     // **And the place it was born in is said in the namespace of the shell that started**
     // (T-RESTART-CWD round 2): `spawn_place` was resolved for `spawn_profile`, and after the swap
     // this leaf is `profile`.
@@ -41448,12 +41509,14 @@ fn place_leaf(
     // the pane's first `OSC 7` report (§7.30, 2026-09-07).
     leaf.session.set_spawn_at_shell_home(at_shell_home);
     // T-3, and it arrives beside the rung above for the same reason: which spelling of an absolute
-    // path this pane's shell prints is a fact about the profile, and `seed.profile` is the last
-    // place that holds it. A Git Bash prints `/d/Demo/report.md` and a WSL bash prints
-    // `/mnt/d/Demo/report.md` for files that are really on this disk.
+    // path this pane's shell prints is a fact about the shell that started — the program it ran
+    // (`leaf.program_kind`) and the row it was started for (`profile`, after any fallback). A Git Bash
+    // prints `/d/Demo/report.md` and a WSL bash prints `/mnt/d/Demo/report.md` for files that are
+    // really on this disk.
     leaf.session
         .set_path_namespace(profiles::printed_path_namespace(
-            profiles::index_of_id(&seed.profile),
+            profiles::index_of_id(profile),
+            &leaf.program_kind,
             &bt_pty::SystemShellEnvironment,
         ));
     // Named only while the started shell stands in the named folder: a fallback profile that
