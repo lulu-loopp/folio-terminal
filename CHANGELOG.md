@@ -26,6 +26,7 @@ All notable changes to Folio are recorded here. The format follows
 
 - A GIF caught while it was being written plays once the write finishes. <!-- zh: pending T-ANIMATION-RECORDS-BOUND -->
 - An update is no longer undone because the new version's note that it started properly was refused for a moment (another program holding the folder, say); Folio tries again about four times a second, for up to about fifteen minutes, or for as long as it takes when the new version has to confirm the update itself. <!-- zh: pending T-TRIAL-RECEIPT-RETRY -->
+- After an update, Folio no longer says that changes made while the new version was being tried were not kept when they were, in a rare case where the disk took the note but would not confirm it. <!-- zh: pending T-TRIAL-WATCH-REPEATS-BOUND -->
 - A panic in one picture or formula no longer ends Folio; that picture or formula stays as it was and is tried again after the next change in its pane. <!-- zh: pending S-8 -->
 - A video that never finishes loading now says so after ten seconds instead of showing a player that never starts, and a video that declares no length shows "No length" on its bar instead of a clock stuck at 0:00. <!-- zh: pending T-VIDEO-ENGINE-NO-DURATION -->
 - File paths printed by Cygwin's bash (`/cygdrive/c/…`), by a WSL profile without shell integration, and by a WSL distribution's own launcher are now links, as in Git Bash and WSL panes. <!-- zh: pending T-WINDOWS-SHELL-NAMESPACES -->

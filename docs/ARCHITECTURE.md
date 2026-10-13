@@ -921,11 +921,14 @@ thread reads and writes none of the four documents (§5.3 row 20 narrowed).
 **The trial's watch** (`folio-trial-watch`, `BelowNormal`, only in a trial) reads
 `H\journal.json` every 250 ms through `file_reads` on `Lane::UpdateJournal` and ends
 at the transaction's decision (`update_trial::watch`). What it writes — the journal,
-the receipt and the mark through the `install_txn` doors, on its own worker — and the
-one process it starts:
+the receipt and the mark through the `install_txn` doors, on its own worker, each
+refused repetition said at its first refusal and at its end — and the one process it
+starts:
 - **the journal, for U-35's reserved trial only**: once ready, it asks at each turn
   to commit itself (`update_apply::commit_last_trial`, under one non-blocking take
-  of `H\lock`), which records `LastTrialReady` from its receipt as it is on disk;
+  of `H\lock`), which records `LastTrialReady` from its receipt as it is on disk —
+  asked again at each turn after a refusal until the decision, a held journal's
+  rounds said for the first refused ask of a streak only;
   every other trial never writes the journal, whose writer is the lock holder;
 - **its receipt again**, after the storage worker's write was refused
   (T-TRIAL-RECEIPT-RETRY, 2026-10-13): one create-new ask at each turn, on no clock
@@ -937,8 +940,11 @@ one process it starts:
   refusal is said once, and the streak's end once;
 - **the `unkept` mark** (`H\<txn>\unkept`, 0.4.8 E4) while a person's change is held
   and the transaction undecided, asked again at each turn while its write is
-  refused; a commit read takes it back (its removal asked again within
-  `JOURNAL_HELD_WITHIN`);
+  refused, until it is durable or the decision (T-TRIAL-WATCH-REPEATS-BOUND) — not
+  given up at the watchdog's end, since the decision is what reads it; once a
+  write's rename put its bytes at its name and only the folder's flush was refused,
+  each turn asks that flush alone. A commit read takes a mark at its name back,
+  flushed or not (its removal asked again within `JOURNAL_HELD_WITHIN`);
 - **the receipt's removal** after a commit, the acknowledgement the holder waits for
   before it re-reads the mark and retires the transaction (asked again within the
   same window);
@@ -1614,7 +1620,7 @@ process.
 | update check | `update::spawn_check` | bt-update-check | UpdateChecked | a refusal stamps the attempt; a refused spawn records an answer and sends no `UpdateChecked`; a panic ends the process under the resident hook | one check out; a second ask shares it | process state every window reads | D-86 |
 | update download and staging | `Job::answer_verb` | bt-update-job | UpdateJobProgress | `Stopped` becomes `Failed`; a refused spawn is `Failed`; a panic ends the process under the resident hook | a transaction per offer; a stale report is dropped | the application's job | D-86 |
 | update launch pass | `Job::consider` | bt-update-job | UpdateJobOffer | a refused spawn runs the check and leaves the transaction for the next launch; a panic ends the process under the resident hook | once per process | the application's job | D-86 |
-| trial watch | `update_trial::begin_watch` | folio-trial-watch | TrialWritesReleased | a refused spawn is one line and the held writes are never released; a panic ends the process under the resident hook | one per trial | the process slot | D-86, D-87 |
+| trial watch | `update_trial::begin_watch` | folio-trial-watch | TrialWritesReleased | a refused spawn is one line and the held writes are never released; a panic ends the process under the resident hook; inside the watch, two declared repetitions on its own 250 ms turn, each bounded by the transaction's decision in this process, not by a count or a clock (C5 rule 3, T-TRIAL-WATCH-REPEATS-BOUND): the `unkept` mark, while a person's change is held, asked once a turn until it is durable or the transaction is decided — not given up at the watchdog's end, because the decision is what reads it, and without it the not-kept card is lost — each ask the whole durable write (one failing create when the home takes no new file; a write with its file flush when refused at that flush or at the rename) or, once a write's rename put its bytes at the mark's name and only its folder's open or flush was refused, that folder flush alone; and U-35's reserved trial's own commit (`update_apply::commit_last_trial`), asked once a turn after a refusal until it commits, the journal no longer waits for it, or the decision — its one road to a commit — each ask one non-blocking lock attempt, a journal and a receipt read and a journal write, whose hold is asked again within `JOURNAL_HELD_WITHIN` (10 s) through the wait door, so held asks come at most once per 10 s; each streak's first refusal is said, with what its first ask said on its way, and its end once, with the number of refused asks and the last refusal | one per trial | the process slot | D-86, D-87 |
 | trial claim | `update_trial::take_the_claim_within` | main (row 28) | return | not had: one line and the process leaves | — | — | row 28 |
 | update leave guard | `update_handoff::leave_armed` | main (row 29) | return | a timeout or a dead guard is said here, in a box | one per process | — | owner-thread |
 | update transaction sweep | `<Machine as World>::on_a_worker` | bt-update-sweep | detached | a refused spawn keeps the transaction for the next start; a failed step is one line; a panic ends the process under the resident hook | one per transaction | — | D-86 |

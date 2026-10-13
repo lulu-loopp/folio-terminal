@@ -686,10 +686,14 @@ fn watch_receipt_decision(home: Home, txn: TxnId, nonce: Nonce) {
             Box::leak(Box::new(crate::update_trial::Gate::new()));
         crate::update_trial::watch(
             gate,
-            (&journal, &mark, &receipt),
+            (
+                &journal,
+                crate::update_trial::Mark::on_disk(&mark),
+                &receipt,
+            ),
             txn,
             crate::update_trial::Cadence::every(Duration::from_millis(5)),
-            &|| {},
+            crate::update_trial::Told::to_the_log(&|| {}),
             None,
             &mut crate::update_trial::watchdog_asleep(),
         );
@@ -1078,10 +1082,14 @@ fn a_live_trial_that_takes_its_mark_back_leaves_no_not_kept_card() {
         let handle = std::thread::spawn(move || {
             crate::update_trial::watch(
                 gate,
-                (&journal, &mark, &receipt_path),
+                (
+                    &journal,
+                    crate::update_trial::Mark::on_disk(&mark),
+                    &receipt_path,
+                ),
                 txn,
                 crate::update_trial::Cadence::every(Duration::from_millis(5)),
-                &|| {},
+                crate::update_trial::Told::to_the_log(&|| {}),
                 None,
                 &mut crate::update_trial::watchdog_asleep(),
             );
