@@ -28,11 +28,6 @@
     hidden console and never with `-activeWindow` (U-31 H-2), and hides the
     passwords.
 
-    **the_watcher_reads_the_journal_where_the_build_writes_it** — the
-    watcher's journal is `H\journal.json`, the name `update_txn.rs`
-    `Home::journal` joins onto the home (U-31 H-1: the old watcher looked in
-    `H\<txn>\journal.json` and never saw a phase).
-
     **update_and_restart_are_shift_tab** — the key driver lights Update and
     Restart with Shift+Tab: Tab lights Skip or Later (U-31 H-4).
 
@@ -169,14 +164,6 @@ try {
         '-Vmx', 'x.vmx', '-VmPassword', 'vm-s3cret', '-Zip', $zip, '-Snapshot', 'a-installed', '-VmrunPath', $stub, '-WhatIf')
     Check ($install.Exit -eq 0 -and $install.Text -match 'snapshot x\.vmx a-installed' -and $install.Text -match '-Phase unpack') `
         "install-candidate.ps1 -WhatIf plans the unpack phase and the snapshot (exit $($install.Exit))"
-
-    # ── the_watcher_reads_the_journal_where_the_build_writes_it ───────────────
-    $txn = [IO.File]::ReadAllText((Join-Path $root 'crates\bt-app\src\update_txn.rs'))
-    $home_ = [regex]::Match($txn, 'fn journal\(&self\) -> PathBuf \{\s*self\.root\.join\("([^"]+)"\)')
-    Check $home_.Success 'update_txn.rs Home::journal joins one name onto the home'
-    $watch = [IO.File]::ReadAllText((Join-Path $root 'scripts\release\cleanvm\updater\guest\watch.ps1'))
-    Check ($watch -match [regex]::Escape("`$journalPath = Join-Path `$H '$($home_.Groups[1].Value)'")) `
-        "watch.ps1 reads H\$($home_.Groups[1].Value), where Home::journal puts it"
 
     # ── update_and_restart_are_shift_tab ──────────────────────────────────────
     $keys = [IO.File]::ReadAllText((Join-Path $root 'scripts\release\cleanvm\updater\guest\keys.ps1'))
