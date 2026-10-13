@@ -21107,7 +21107,9 @@ mod tests {
         let other = shipped_order()
             .iter()
             .copied()
-            .find(|id| has_id(id) && *id != shell && mark(index_of_id(id)) != mark(index_of_id(shell)))
+            .find(|id| {
+                has_id(id) && *id != shell && mark(index_of_id(id)) != mark(index_of_id(shell))
+            })
             .expect("a shipped row whose mark is not the fallback's");
         let folder = bt_testpath::temp_path("recent-rows").join("沙盒 sandbox");
         let cwd = folder.display().to_string();
@@ -21124,7 +21126,11 @@ mod tests {
             );
         }
         let rows = vault.entries();
-        assert_eq!(rows.len(), 2, "two profiles in one folder are two rows: {rows:?}");
+        assert_eq!(
+            rows.len(),
+            2,
+            "two profiles in one folder are two rows: {rows:?}"
+        );
         let layout = layout(
             anchor(scale),
             MenuSide::Below,
