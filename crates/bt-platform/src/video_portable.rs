@@ -260,10 +260,10 @@ pub fn shutdown_media_session() {}
 /// decoder at all** (M4-5; `docs/DESIGN.md` §13.35).
 ///
 /// The shape of [`super`] one level down. What is in *this* module is everything
-/// that is not a player — the four timing constants, the error, the state, the
-/// frame, the cost breakdown and the process ledger — because none of that is
-/// AVFoundation and all of it is the same sentence on a Mac and on a machine
-/// with neither backend. What is in `macos_player.rs` is the AVFoundation
+/// that is not a player — the five timing constants, the error, the state and
+/// its length, the frame, the cost breakdown and the process ledger — because
+/// none of that is AVFoundation and all of it is the same sentence on a Mac and
+/// on a machine with neither backend. What is in `macos_player.rs` is the AVFoundation
 /// conversation and nothing else, and [`no_player`] is the third platform's
 /// silence.
 pub mod engine {
@@ -276,6 +276,10 @@ pub mod engine {
     pub const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
     /// How long opening a source may take.
     pub const OPEN_BUDGET: Duration = Duration::from_secs(5);
+    /// How long a source may take, from the open, to say what it is before the
+    /// engine refuses it as [`EngineError::NotLoaded`]: the build and then the
+    /// load, each given [`OPEN_BUDGET`].
+    pub const LOAD_BUDGET: Duration = OPEN_BUDGET.saturating_mul(2);
     /// How long shutting one down may take.
     pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);
 
@@ -293,12 +297,17 @@ pub mod engine {
         Unsupported,
         /// Something else went wrong, and it says what.
         Other(&'static str),
+        /// **The engine's own refusal**: the source said neither what it is
+        /// nor why it could not be opened within [`LOAD_BUDGET`] of the open.
+        NotLoaded,
     }
 
     /// What the engine is doing right now. See the module note.
     #[derive(Clone, Copy, Debug, Default, PartialEq)]
     pub struct EngineState {
-        /// How long the video is, or `None` before the metadata has arrived.
+        /// How long the video is, or `None` before the metadata has arrived and
+        /// for a source that declares no length. The two `None`s are told apart
+        /// by [`Self::ready`], and [`Self::length`] is that reading.
         pub duration_secs: Option<f64>,
         /// Where the playhead is, in seconds from the start.
         pub position_secs: f64,
@@ -321,6 +330,31 @@ pub mod engine {
         /// Whether this source has a picture at all.
         pub has_video: bool,
         pub has_audio: bool,
+    }
+
+    impl EngineState {
+        /// **What this state says about the source's length** — see [`Length`].
+        #[must_use]
+        pub fn length(&self) -> Length {
+            match (self.duration_secs, self.ready) {
+                (Some(secs), _) => Length::Known(secs),
+                (None, true) => Length::Unknown,
+                (None, false) => Length::Unanswered,
+            }
+        }
+    }
+
+    /// **A source's length, as one of the three things a state can say about
+    /// it.** See the module note on why this is written twice.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub enum Length {
+        /// Nothing has been said yet: the metadata has not arrived, or the
+        /// engine refused before it did.
+        Unanswered,
+        /// The source declares this many seconds.
+        Known(f64),
+        /// The source has loaded and declares no length.
+        Unknown,
     }
 
     /// One frame on its way to the renderer. See the module note.

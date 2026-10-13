@@ -861,6 +861,17 @@ text_entries! {
     /// VP9 `.webm` plays where the Store codec is installed and does not where
     /// it is not.
     VideoFormatCannotPlay,
+    /// **What a surface says when a video never finished loading** — the
+    /// platform's own refusal of a source that said neither what it is nor why
+    /// it could not be opened within its load budget
+    /// (T-VIDEO-ENGINE-NO-DURATION). The surface stops showing a player that
+    /// will never start and prints this instead.
+    VideoDidNotLoad,
+    /// **What a video's bar says in place of its scrubber** when the recording
+    /// has loaded and declares no length — a live stream, or a container
+    /// written without a duration (T-VIDEO-ENGINE-NO-DURATION). There is
+    /// nothing to scrub along, and a `0:00` would read as a load not finished.
+    VideoNoLength,
     /// `</>` while the pane is showing the source — press it for the rendering.
     ///
     /// Two entries and not one, on [`Self::PreviewWebReload`]'s precedent: the
@@ -3744,6 +3755,16 @@ impl Text {
             Self::VideoFormatCannotPlay => {
                 pick(lang, "This format cannot be played", "此格式无法播放")
             }
+            Self::VideoDidNotLoad => pick(
+                lang,
+                "This video did not finish loading",
+                "This video did not finish loading", // zh: pending T-VIDEO-ENGINE-NO-DURATION
+            ),
+            Self::VideoNoLength => pick(
+                lang,
+                "No length",
+                "No length", // zh: pending T-VIDEO-ENGINE-NO-DURATION
+            ),
             Self::PreviewFlipToRendered => pick(lang, "View rendered", "查看渲染结果"),
             Self::PreviewFlipToPage => pick(lang, "View page", "查看页面"),
             Self::FileMenuCopyPath => pick(lang, "Copy path", "复制路径"),
@@ -6447,6 +6468,12 @@ impl Text {
         (Self::ListLast, HostPlatform::MacOs),
         (Self::ListMore, HostPlatform::Windows),
         (Self::ListMore, HostPlatform::MacOs),
+        // zh: pending T-VIDEO-ENGINE-NO-DURATION — a video that never finished loading, and the
+        // bar of one that declares no length.
+        (Self::VideoDidNotLoad, HostPlatform::Windows),
+        (Self::VideoDidNotLoad, HostPlatform::MacOs),
+        (Self::VideoNoLength, HostPlatform::Windows),
+        (Self::VideoNoLength, HostPlatform::MacOs),
     ];
 }
 

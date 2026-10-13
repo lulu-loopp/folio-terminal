@@ -52,7 +52,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use bt_platform::video::engine::{Engine, EngineError, EngineState};
+use bt_platform::video::engine::{Engine, EngineError, EngineState, Length};
 use bt_render::{ChromeLabel, ChromeLabelWeight, ChromePalette, OverlayQuad, VideoStage};
 
 use crate::marks::{Band, ChromeMark, ChromeSprite, OverlayLayer};
@@ -772,12 +772,11 @@ impl VideoSeat {
         self.engine.state_reaching(until, crate::lane::PATIENCE)
     }
 
-    /// **The one thing that went wrong**, if one did — which on a machine
-    /// missing a Store codec is [`EngineError::Unsupported`] and is the honest
-    /// source of `Text::VideoFormatCannotPlay` now that no table can know it.
+    /// **Whether this seat has stopped being a player, and what its surface
+    /// says instead** — see [`retirement`].
     #[must_use]
-    pub fn fault(&self) -> Option<EngineError> {
-        self.engine.state().error
+    pub fn retirement(&self) -> Option<(EngineError, crate::i18n::Text)> {
+        retirement(&self.engine.state())
     }
 
     /// **Whether the sound this seat is making should light the tab's speaker**
@@ -1163,6 +1162,28 @@ impl VideoSeat {
     }
 }
 
+/// **Why a seat whose engine stands at `state` is retired, and the sentence its
+/// surface prints in the player's place** — `None` while it is still a player:
+/// loading, playing, ended, or loaded with no length to show.
+///
+/// An engine's error is sticky, so a seat on one is a rectangle that will never
+/// receive another picture (§7.44 ⑥). Two sentences, because they are two
+/// facts: a decoder that would not open the file — which on a machine missing a
+/// Store codec is [`EngineError::Unsupported`], the honest source of
+/// `Text::VideoFormatCannotPlay` now that no table can know it — and a source
+/// that never finished loading ([`EngineError::NotLoaded`], the platform's own
+/// refusal once its load budget has passed), which is not a claim about the
+/// format at all.
+#[must_use]
+pub fn retirement(state: &EngineState) -> Option<(EngineError, crate::i18n::Text)> {
+    let error = state.error?;
+    let says = match error {
+        EngineError::NotLoaded => crate::i18n::Text::VideoDidNotLoad,
+        _ => crate::i18n::Text::VideoFormatCannotPlay,
+    };
+    Some((error, says))
+}
+
 /// [`VideoSeat::bar`] with its three readings of the seat already taken — the
 /// engine's state, the hand on a track, and how present the bar is — so that
 /// what it paints is a function of what it was handed and nothing else.
@@ -1248,8 +1269,30 @@ fn paint_bar(
     if let Some(rect) = layout.at {
         labels.push(clock_label(elapsed, rect, false));
     }
-    if let Some(rect) = layout.duration {
+    // **A recording that declares no length has no length to show** and
+    // nothing to scrub along: its scrubber's place says so in words and its
+    // duration clock stands empty, rather than a `0:00` that reads as a load
+    // that has not finished.
+    let lengthless = state.length() == Length::Unknown;
+    if let Some(rect) = layout.duration
+        && !lengthless
+    {
         labels.push(clock_label(whole, rect, true));
+    }
+    if lengthless {
+        labels.push(ChromeLabel {
+            text: crate::i18n::Text::VideoNoLength.text().to_owned(),
+            rect: layout.seek,
+            clip: Some(layout.seek),
+            font_size_px: font_px,
+            color: palette.files_row_muted,
+            align_right: false,
+            align_center: true,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            mono: false,
+        });
     }
     if let Some(rect) = layout.rate {
         labels.push(clock_label(rate_text(state.rate), rect, true));
@@ -1289,7 +1332,7 @@ fn paint_bar(
         state.volume.clamp(0.0, 1.0)
     };
     for (rail, track, fraction, slot) in [
-        Some((layout.seek_rail, layout.seek, progress, BarSlot::Seek)),
+        (!lengthless).then_some((layout.seek_rail, layout.seek, progress, BarSlot::Seek)),
         layout
             .volume_rail
             .zip(layout.volume)
@@ -2180,6 +2223,145 @@ mod tests {
             )
             .is_empty(),
             "a bar that is not there is no surface"
+        );
+    }
+
+    /// RED — **a recording that declares no length says so where its scrubber
+    /// would be** (T-VIDEO-ENGINE-NO-DURATION).
+    ///
+    /// The platform says a loaded source with no length — a live stream, a
+    /// container written without a duration — as `ready` with no
+    /// `duration_secs`. Drawn as a loading player would be, that is a `0:00`
+    /// clock and an empty scrubber that never fills: a load that looks as
+    /// though it has not finished. The bar says "no length" in the scrubber's
+    /// place instead, strikes no track a hand could think it scrubs, and leaves
+    /// the duration clock empty; the elapsed clock still runs. A recording with
+    /// a length, and one still loading, keep the bar they had.
+    ///
+    /// MUTATION: read `lengthless` as `false` in `paint_bar` — a source with no
+    /// length drawn as one still loading — and the first assertion goes red.
+    #[test]
+    fn a_recording_with_no_length_says_so_where_its_scrubber_would_be() {
+        let body = [0.0, 0.0, 900.0, 500.0];
+        let palette = bt_render::chrome_palette();
+        let state_of = |duration_secs: Option<f64>, ready: bool| EngineState {
+            duration_secs,
+            position_secs: 12.0,
+            playing: true,
+            ready,
+            has_video: true,
+            volume: 1.0,
+            rate: 1.0,
+            ..EngineState::default()
+        };
+        let no_length = crate::i18n::Text::VideoNoLength.text();
+        let painted = |state: &EngineState| {
+            let layout = bar_layout(
+                body,
+                1.0,
+                clock_figures(state.position_secs, state.duration_secs),
+                0.0,
+            )
+            .expect("a pane fits the whole bar");
+            let bar = paint_bar(state, None, 1.0, body, 1.0, &palette, BarMeta::none());
+            (layout, bar.layers[0].clone())
+        };
+
+        let lengthless = state_of(None, true);
+        assert_eq!(lengthless.length(), Length::Unknown);
+        let (layout, layer) = painted(&lengthless);
+        assert!(
+            layer
+                .labels
+                .iter()
+                .any(|label| label.text == no_length && label.rect == layout.seek),
+            "the scrubber's place says there is no length: {:?}",
+            layer.labels
+        );
+        let duration = layout.duration.expect("a wide bar has its duration clock");
+        assert!(
+            layer.labels.iter().all(|label| label.rect != duration),
+            "no duration clock for a recording with no length: {:?}",
+            layer.labels
+        );
+        assert!(
+            layer.quads.iter().all(|quad| quad.rect != layout.seek_rail),
+            "no track is struck for a recording with nothing to scrub along"
+        );
+        assert!(
+            layer.labels.iter().any(|label| label.text == "0:12"),
+            "the elapsed clock still runs: {:?}",
+            layer.labels
+        );
+
+        for (state, what) in [
+            (state_of(Some(95.0), true), "a recording with a length"),
+            (state_of(None, false), "a recording still loading"),
+        ] {
+            let (layout, layer) = painted(&state);
+            assert!(
+                layer.labels.iter().all(|label| label.text != no_length),
+                "{what} is not said to have no length: {:?}",
+                layer.labels
+            );
+            assert!(
+                layer.quads.iter().any(|quad| quad.rect == layout.seek_rail),
+                "{what} keeps its scrubber"
+            );
+        }
+    }
+
+    /// RED — **a video that never finished loading is retired with its own
+    /// sentence, and a player that is still one is not**
+    /// (T-VIDEO-ENGINE-NO-DURATION).
+    ///
+    /// The platform refuses a source that said nothing within its load budget
+    /// as `EngineError::NotLoaded`. Until then a surface showing it was a player
+    /// at `0:00` that never started; the sweep (`Runtime::sweep_video_seats`)
+    /// takes every seat [`retirement`] names off its surface and prints the
+    /// sentence it names in the player's place. A refusal of the *format* and a
+    /// load that never finished are two sentences, because they are two facts;
+    /// a player still loading, and one loaded with no length, are not retired.
+    ///
+    /// MUTATION: answer `None` for `EngineError::NotLoaded` in [`retirement`] —
+    /// the never-starting player kept on the surface — and the first assertion
+    /// goes red.
+    #[test]
+    fn a_video_that_never_loaded_is_retired_with_its_own_sentence() {
+        let refused = EngineState {
+            error: Some(EngineError::NotLoaded),
+            ..EngineState::default()
+        };
+        assert_eq!(
+            retirement(&refused),
+            Some((EngineError::NotLoaded, crate::i18n::Text::VideoDidNotLoad)),
+            "a load that never finished is retired, and says so"
+        );
+        assert_eq!(
+            retirement(&EngineState {
+                error: Some(EngineError::Unsupported),
+                ..EngineState::default()
+            }),
+            Some((
+                EngineError::Unsupported,
+                crate::i18n::Text::VideoFormatCannotPlay
+            )),
+            "a format the decoder refused keeps its own sentence"
+        );
+        assert_eq!(
+            retirement(&EngineState::default()),
+            None,
+            "a player still loading is still a player"
+        );
+        assert_eq!(
+            retirement(&EngineState {
+                ready: true,
+                has_video: true,
+                natural_size: Some((160, 120)),
+                ..EngineState::default()
+            }),
+            None,
+            "a player with no length is still a player"
         );
     }
 }
