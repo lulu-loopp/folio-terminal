@@ -5447,8 +5447,10 @@ impl PreviewBuffer {
     /// file's bytes ([`OnDisk`]), and the watcher's own read only compares
     /// ([`Self::note_disk_moved`]).
     ///
-    /// Every caller of this door wants the disk's body, so a read the watcher
-    /// asked only to compare becomes one that may land a body.
+    /// Every caller of this door wants the disk's body. A comparison the
+    /// watcher asked and has not sent becomes a body read; one already out
+    /// stays a comparison, which never lands a body itself and asks for the
+    /// body when the body is not the file's ([`Self::land_read`]).
     ///
     /// Answers whether anything was owed, so that a caller can tell a file that
     /// moved from a file that moved under something with nothing to re-read -
@@ -5838,9 +5840,10 @@ impl PreviewBuffer {
     /// conflict, never merged and never lost. A link is written the plain way
     /// (`PlainWriter`), as the preview always wrote one, until the owner's
     /// ruling on links (J5 Q5(b): refuse, and say so on the pane) is built for
-    /// the preview; a volume that cannot exchange two files is refused whatever
-    /// the policy. `asker` is the body revision the bytes are, echoed on the
-    /// answer ([`Self::hear_save`]).
+    /// the preview; a volume that cannot exchange two files is refused — the
+    /// preview's one switch for it, [`ON_A_VOLUME_THAT_CANNOT_EXCHANGE`], is
+    /// `Refuse` until the owner rules. `asker` is the body revision the bytes
+    /// are, echoed on the answer ([`Self::hear_save`]).
     ///
     /// **The door returns at once** (C1); the window thread writes nothing.
     /// One write is on the worker per buffer: a press while one is out is the
@@ -6012,7 +6015,7 @@ impl PreviewBuffer {
             return SaveOutcome::Failed(crate::i18n::Text::PreviewNothingToSave.text().to_owned());
         };
         if self.on_disk.is_out() {
-            return SaveOutcome::Failed(A_SAVE_IS_ON_ITS_WAY.to_owned());
+            return SaveOutcome::Failed(crate::i18n::Text::PreviewSaveOnItsWay.text().to_owned());
         }
         // **A conflict the pane said and nobody has answered** (S-6a, the
         // coordinator's ruling): the revision is the other writer's bytes, so
@@ -6298,31 +6301,74 @@ impl PreviewBuffer {
     fn land_comparison(&mut self, outcome: &HeadOutcome, base: PreviewBase) -> ReadLanded {
         self.head_asked = false;
         self.stale = false;
-        if let Some(stamp) = outcome.stamp() {
-            self.watch_stamp = stamp;
-        }
+        // A comparison cut short is a file past the save bound, which no
+        // revision within it can be.
+        let compared = match (self.compare(outcome), outcome) {
+            (
+                Compared::Unknown,
+                HeadOutcome::Read {
+                    truncated: true, ..
+                },
+            ) => Compared::Differs,
+            (compared, _) => compared,
+        };
         if self.dirty || base != self.base() {
-            let news = match self.compare(outcome) {
+            let news = match compared {
                 Compared::Same => DiskNews::Level,
                 Compared::Differs => DiskNews::Changed,
                 Compared::Unknown => return ReadLanded::Kept { said: false },
             };
+            self.heard_the_stamp_of(outcome);
             // A buffer with nothing on the glass has nothing to disagree about.
             let said = self.content.is_some() && self.say(news);
             return ReadLanded::Kept { said };
         }
         if let HeadOutcome::Read {
-            bytes: Some(bytes), ..
+            bytes: Some(bytes),
+            truncated: false,
+            ..
         } = outcome
-            && self.is_the_reading_of(bytes)
         {
-            self.on_disk.was_read(Some(Arc::clone(bytes)));
-            return ReadLanded::Kept {
-                said: self.say(DiskNews::Level),
+            if self.is_the_reading_of(bytes) {
+                self.heard_the_stamp_of(outcome);
+                self.on_disk.was_read(Some(Arc::clone(bytes)));
+                return ReadLanded::Kept {
+                    said: self.say(DiskNews::Level),
+                };
+            }
+            // **Folio's own save, on its way**: the answer settles this body's
+            // place in its history (a body undone back to clean is not the
+            // bytes sent, and is not the disk's to replace).
+            if self.on_disk.sending(bytes) {
+                self.heard_the_stamp_of(outcome);
+                return ReadLanded::Kept { said: false };
+            }
+            // **A clean body the file no longer holds**, read as an opening
+            // reads it: these bytes are the body when an opening would have
+            // taken them whole — within the head for a buffer that reads heads,
+            // within the edit ceiling for one that reads whole — and otherwise
+            // the opening's own read is asked, ceiling and all.
+            let limit = if self.reads_whole {
+                PREVIEW_EDIT_BYTES
+            } else {
+                PREVIEW_HEAD_BYTES
             };
+            if bytes.len() <= limit {
+                self.accept(outcome.clone());
+                return ReadLanded::Took;
+            }
         }
+        // The stamp is not moved: the body read decides against the stamp this
+        // body was read at.
         self.stale = true;
         ReadLanded::ReadAgain
+    }
+
+    /// The watcher's stamp follows a read this buffer kept its body over.
+    fn heard_the_stamp_of(&mut self, outcome: &HeadOutcome) {
+        if let Some(stamp) = outcome.stamp() {
+            self.watch_stamp = stamp;
+        }
     }
 
     /// **What a read says about the file, against [`OnDisk`]'s bytes**: the
@@ -7552,12 +7598,6 @@ const ON_A_VOLUME_THAT_CANNOT_EXCHANGE: crate::document_request::NoExchange =
 /// [`crate::i18n::not_saved`] is filled with.
 const NO_FILE_BEHIND_THIS_VIEW: &str = "there is no file behind this view";
 
-/// What a quit's or a stop's writer says of a buffer whose save is still on the
-/// storage worker ([`PreviewBuffer::write_now_for_quit`]): it does not write
-/// over a request that may be landing. `diagnostics.log` and `stderr` only —
-/// the quit's card names the file.
-const A_SAVE_IS_ON_ITS_WAY: &str = "a save of it was still on its way to the disk";
-
 /// **What a press of Save came to at the door** ([`PreviewBuffer::request_save`]).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SaveAsked {
@@ -7635,8 +7675,10 @@ struct OnDisk {
 
 impl OnDisk {
     /// A reading of the file: its bytes when the read held the whole of it.
+    /// A body taken from the file answers any conflict said about it.
     fn was_read(&mut self, bytes: Option<Arc<[u8]>>) {
         self.bytes = bytes;
+        self.unanswered = false;
     }
 
     /// Bytes the window thread placed in the file itself (a quit's or a
@@ -7720,6 +7762,8 @@ impl OnDisk {
         match answer.outcome {
             Outcome::Landed { bytes, kept } => {
                 self.bytes = Some(bytes);
+                // The file holds Folio's bytes: nobody else's are there to keep.
+                self.unanswered = false;
                 if let Some(error) = &answer.not_durable {
                     eprintln!(
                         "BT_PERSIST {name} was written and is not known to be durable: {error}"
@@ -8224,10 +8268,12 @@ fn read_up_to(path: &Path, limit: usize) -> HeadOutcome {
     // one probe byte beyond the edit ceiling to detect growth while reading.
     let metadata = file.metadata().ok();
     let known_bytes = metadata.as_ref().map_or(0, |meta| meta.len());
-    let budget = if limit == PREVIEW_EDIT_BYTES && known_bytes > limit as u64 {
-        PREVIEW_HEAD_BYTES
-    } else {
-        limit
+    // A comparison of a file the stat already puts past the save bound reads
+    // nothing: such a file differs from every revision within it (S-6a).
+    let budget = match limit {
+        PREVIEW_EDIT_BYTES if known_bytes > limit as u64 => PREVIEW_HEAD_BYTES,
+        COMPARE_BYTES if known_bytes > limit as u64 => 0,
+        _ => limit,
     };
     let mut head = Vec::new();
     if let Err(error) = file.by_ref().take(budget as u64 + 1).read_to_end(&mut head) {
@@ -8310,11 +8356,13 @@ fn read_up_to(path: &Path, limit: usize) -> HeadOutcome {
 /// than the edit ceiling, so a file Folio saved larger than it opened is read
 /// whole. Its body is never installed: only its bytes are asked about.
 pub fn read_to_compare(path: &Path) -> HeadOutcome {
-    read_up_to(
-        path,
-        usize::try_from(bt_persist::MAX_DOCUMENT_BYTES).unwrap_or(usize::MAX),
-    )
+    read_up_to(path, COMPARE_BYTES)
 }
+
+/// How much of a file a comparison reads: the save bound
+/// ([`bt_persist::MAX_DOCUMENT_BYTES`]). A file the stat puts past it is not
+/// read at all, and answers as cut short.
+const COMPARE_BYTES: usize = bt_persist::MAX_DOCUMENT_BYTES as usize;
 
 /// **The file's bytes as a save's precondition reads them on the window
 /// thread** — the quit's and the stop's synchronous writer
@@ -13307,13 +13355,9 @@ mod tests {
         };
         assert_eq!(
             buffer.land_read(read_to_compare(&path), base),
-            ReadLanded::ReadAgain,
-            "a clean body the file no longer holds is owed the file"
+            ReadLanded::Took,
+            "a clean body the file no longer holds takes the file's bytes, read once"
         );
-        let Some(PreviewWant::Whole(base)) = buffer.claim_head_read() else {
-            panic!("a Markdown buffer is read whole");
-        };
-        assert_eq!(buffer.land_read(read_whole(&path), base), ReadLanded::Took);
         assert_eq!(buffer.content.as_deref(), Some("somebody else\n"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -14331,7 +14375,7 @@ mod tests {
             on_its_way.save_dirty(),
             vec![(
                 "途中 underway.md".to_owned(),
-                SaveOutcome::Failed(A_SAVE_IS_ON_ITS_WAY.to_owned())
+                SaveOutcome::Failed(crate::i18n::Text::PreviewSaveOnItsWay.text().to_owned())
             )]
         );
         assert!(matches!(
@@ -14660,6 +14704,185 @@ mod tests {
             );
             assert!(buffer.dirty);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED (S-6a round 3, R2-1) — **a comparison that lands before the save's
+    /// answer keeps a body undone back to clean, and its history.**
+    ///
+    /// The press, an undo back to the file's own body (clean), the worker's
+    /// write, and the watcher's comparison before the answer: the file holds
+    /// the bytes on their way, so nothing is read in over the reader's body.
+    /// The answer then makes the pressed position the saved one — the undone
+    /// body is dirty against the file, and redoing to the pressed body is
+    /// clean.
+    ///
+    /// MUTATION: drop the `self.on_disk.sending(bytes)` arm of
+    /// `land_comparison`'s clean branch — the comparison's bytes are taken as
+    /// the body (`Took`), the history goes, and the landing finds no position.
+    #[test]
+    fn a_comparison_before_the_answer_keeps_a_body_undone_back_to_clean() {
+        let dir = scratch("compare-before-answer");
+        let (lane, jobs) = crate::persist::StorageLane::scripted();
+        let mut saves = PreviewSaves::on(lane);
+        let mut caret = crate::preview_edit::EditCaret::default();
+        let mut buffer = opened(&dir, "笔记 notes.md", "原文 one\n");
+        let path = on_disk(&buffer).to_path_buf();
+        type_into(&mut buffer, &mut caret, 11);
+        assert_eq!(
+            buffer.request_save(&mut saves, crate::test_support::PRESSED_ON),
+            SaveAsked::Sent
+        );
+        assert!(buffer.undo_edit().is_some());
+        assert!(!buffer.dirty, "undone back to the file's own body");
+        crate::test_support::serve_on_a_worker(crate::test_support::next_document(&jobs), None);
+
+        move_the_disk_forward(&path);
+        assert_eq!(
+            buffer.note_disk_moved(true, file_mtime(&path)),
+            DiskVerdict::ReadAgain
+        );
+        let Some(PreviewWant::Compare(base)) = buffer.claim_head_read() else {
+            panic!("the watcher's question is a comparison");
+        };
+        assert_eq!(
+            buffer.land_read(read_to_compare(&path), base),
+            ReadLanded::Kept { said: false },
+            "the file holds the save on its way: nothing is read in"
+        );
+        assert_eq!(buffer.content.as_deref(), Some("原文 one\n"));
+
+        let mut answers = saves.take_answers();
+        assert_eq!(
+            buffer.hear_save_answer(answers.remove(0), &mut saves),
+            Some(SaveOutcome::Saved)
+        );
+        assert!(buffer.dirty, "the file holds the pressed body");
+        assert!(buffer.redo_edit().is_some(), "the history is still here");
+        assert!(!buffer.dirty, "and the pressed body is the saved one");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED (S-6a round 3, R2-2) — **a clean Markdown file rewritten past the
+    /// edit ceiling refreshes its head.**
+    ///
+    /// The comparison finds other bytes, past what an opening would take whole,
+    /// so it asks for the opening's own read without moving the watcher's
+    /// stamp; that read answers over the ceiling, and its head is installed
+    /// because the stamp says the file moved — as before S-6a.
+    ///
+    /// MUTATION: move the stamp before `ReadAgain` (call `heard_the_stamp_of`
+    /// at the top of `land_comparison`) — the old body stays on the glass,
+    /// marked too large.
+    #[test]
+    fn a_clean_document_rewritten_past_the_ceiling_refreshes_its_head() {
+        let dir = scratch("rewritten-past-ceiling");
+        let mut buffer = opened(&dir, "大文 big.md", "# 小 small\n");
+        let path = on_disk(&buffer).to_path_buf();
+        let grown = format!(
+            "# 新 new\n{}",
+            "行 line\n".repeat(PREVIEW_EDIT_BYTES / 9 + 1024)
+        );
+        assert!(grown.len() > PREVIEW_EDIT_BYTES);
+        std::fs::write(&path, &grown).unwrap();
+        move_the_disk_forward(&path);
+
+        assert_eq!(
+            buffer.note_disk_moved(true, file_mtime(&path)),
+            DiskVerdict::ReadAgain
+        );
+        let Some(PreviewWant::Compare(base)) = buffer.claim_head_read() else {
+            panic!("the watcher's question is a comparison");
+        };
+        assert_eq!(
+            buffer.land_read(read_to_compare(&path), base),
+            ReadLanded::ReadAgain,
+            "past the ceiling: the opening's own read is asked"
+        );
+        let Some(PreviewWant::Whole(base)) = buffer.claim_head_read() else {
+            panic!("a Markdown buffer reads whole");
+        };
+        assert_eq!(buffer.land_read(read_whole(&path), base), ReadLanded::Took);
+        assert!(
+            buffer
+                .content
+                .as_deref()
+                .is_some_and(|body| body.starts_with("# 新 new\n")),
+            "the head of the file as it is now"
+        );
+        assert!(buffer.too_large_to_edit && !buffer.is_editable(false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED (S-6a round 3) — **a file past the save bound differs from every
+    /// revision**: a comparison the stat puts past it reads nothing and tells a
+    /// dirty buffer the file changed.
+    ///
+    /// MUTATION: drop the cut-short-comparison-is-different mapping in
+    /// `land_comparison` — the strip never goes up.
+    #[test]
+    fn a_file_past_the_save_bound_is_said_to_have_changed() {
+        let dir = scratch("past-the-bound");
+        let mut caret = crate::preview_edit::EditCaret::default();
+        let mut buffer = opened(&dir, "备忘 memo.md", "短 short\n");
+        let path = on_disk(&buffer).to_path_buf();
+        type_into(&mut buffer, &mut caret, 4);
+        let over = usize::try_from(bt_persist::MAX_DOCUMENT_BYTES).unwrap() + 1;
+        std::fs::write(&path, vec![b'x'; over]).unwrap();
+        move_the_disk_forward(&path);
+        assert_eq!(
+            buffer.note_disk_moved(true, file_mtime(&path)),
+            DiskVerdict::ReadAgain
+        );
+        let Some(PreviewWant::Compare(base)) = buffer.claim_head_read() else {
+            panic!("the watcher's question is a comparison");
+        };
+        let compared = read_to_compare(&path);
+        assert!(
+            matches!(
+                &compared,
+                HeadOutcome::Read { truncated: true, bytes: None, text, .. } if text.is_empty()
+            ),
+            "nothing of it is read: {compared:?}"
+        );
+        assert_eq!(
+            buffer.land_read(compared, base),
+            ReadLanded::Kept { said: true }
+        );
+        assert_eq!(buffer.disk, DiskNews::Changed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED (S-6a round 3) — **a body taken from the file answers the conflict
+    /// said about it**: after a conflict and *Reload*, typing and quitting
+    /// writes, as any edit of the file's own body would.
+    ///
+    /// MUTATION: leave `unanswered` alone in `OnDisk::was_read` — the quit
+    /// reports a conflict that is no longer there.
+    #[test]
+    fn a_reload_after_a_conflict_answers_it() {
+        let dir = scratch("reload-answers");
+        let mut saves = crate::test_support::a_save_desk();
+        let mut buffer = opened(&dir, "协议 terms.md", "一 v1\n");
+        let path = on_disk(&buffer).to_path_buf();
+        assert!(buffer.edit_content(|content| {
+            content.push_str("我的 mine\n");
+            true
+        }));
+        std::fs::write(&path, "二 v2\n").unwrap();
+        assert_eq!(
+            crate::test_support::save_through(&mut buffer, &mut saves),
+            Some(SaveOutcome::Conflict)
+        );
+        assert!(buffer.take_the_disks_copy(), "Reload asks the file");
+        buffer.accept(read_head(&path));
+        assert_eq!(buffer.content.as_deref(), Some("二 v2\n"));
+        assert!(buffer.edit_content(|content| {
+            content.push_str("再 again\n");
+            true
+        }));
+        assert_eq!(buffer.write_now_for_quit(), SaveOutcome::Saved);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "二 v2\n再 again\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

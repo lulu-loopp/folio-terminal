@@ -963,6 +963,9 @@ text_entries! {
     /// The clause for a file whose bytes could not be read to check them
     /// against what was read (S-6a round 2).
     PreviewSaveUnread,
+    /// What a quit's or a stop's writer says of a buffer whose save is still
+    /// on its way: it does not write over it (S-6a round 3).
+    PreviewSaveOnItsWay,
     /// The start's toast for one copy a stop kept in the recovered folder, `{folder}` filled
     /// by [`recovered_edits_kept_in`] (T-RECOVERED-FOLDER).
     RecoveredEditKept,
@@ -3938,6 +3941,11 @@ impl Text {
                 "the file could not be read to check it",
                 "the file could not be read to check it", // zh: pending S-6a
             ),
+            Self::PreviewSaveOnItsWay => pick(
+                lang,
+                "a save of it was still on its way to the disk",
+                "a save of it was still on its way to the disk", // zh: pending S-6a
+            ),
             Self::RecoveredEditKept => pick(
                 lang,
                 "An unsaved edit was kept at {folder}",
@@ -6508,6 +6516,8 @@ impl Text {
         (Self::PreviewSaveNameTaken, HostPlatform::MacOs),
         (Self::PreviewSaveUnread, HostPlatform::Windows),
         (Self::PreviewSaveUnread, HostPlatform::MacOs),
+        (Self::PreviewSaveOnItsWay, HostPlatform::Windows),
+        (Self::PreviewSaveOnItsWay, HostPlatform::MacOs),
         // zh: pending T-SHELL-BIRTH-DEATH — the face of a shell that ended at birth.
         (Self::ShellBirthDeath, HostPlatform::Windows),
         (Self::ShellBirthDeath, HostPlatform::MacOs),
