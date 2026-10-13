@@ -646,7 +646,6 @@ mod tests {
             shell_integration::EnvironmentDerivation {
                 integration: crate::profiles::Integration::CmdPrompt,
                 crosses_wsl: false,
-                forwards_terminal_into_wsl: false,
             },
             environment(&[("PROMPT", "launch-derived")]),
             environment(&[]),
@@ -667,7 +666,6 @@ mod tests {
             shell_integration::EnvironmentDerivation {
                 integration: crate::profiles::Integration::BashInitFile,
                 crosses_wsl: true,
-                forwards_terminal_into_wsl: true,
             },
             environment(&[("WSLENV", "OLD_VALUE/u:TERM_PROGRAM/u")]),
             environment(&[]),
@@ -689,7 +687,6 @@ mod tests {
             shell_integration::EnvironmentDerivation {
                 integration: crate::profiles::Integration::ZshDotDir,
                 crosses_wsl: false,
-                forwards_terminal_into_wsl: false,
             },
             environment(&[
                 ("ZDOTDIR", "/folio/zsh"),
@@ -717,7 +714,6 @@ mod tests {
             shell_integration::EnvironmentDerivation {
                 integration: crate::profiles::Integration::CmdPrompt,
                 crosses_wsl: false,
-                forwards_terminal_into_wsl: false,
             },
             environment(&[("PROMPT", "launch-derived")]),
             environment(&[]),
@@ -738,7 +734,6 @@ mod tests {
             shell_integration::EnvironmentDerivation {
                 integration: crate::profiles::Integration::BashInitFile,
                 crosses_wsl: false,
-                forwards_terminal_into_wsl: false,
             },
             environment(&[("FORCE_HYPERLINK", "1")]),
             environment(&[]),
