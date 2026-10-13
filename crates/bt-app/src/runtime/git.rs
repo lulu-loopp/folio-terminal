@@ -324,9 +324,11 @@ impl Runtime<'_> {
             // subsystem was built to prevent. Noted before the answer is
             // filed, because filing moves it.
             let moved = match &answer {
+                // A checkout Folio could not finish (`GitFault::Unfinished`)
+                // may have moved too, and is the same claim.
                 git::GitAnswer::Checkout {
                     root,
-                    outcome: Ok(()),
+                    outcome: Ok(()) | Err(git::GitFault::Unfinished),
                     ..
                 } => Some(root.clone()),
                 // **A ref write is the same claim** (v2 ④): a branch
@@ -338,7 +340,7 @@ impl Runtime<'_> {
                 git::GitAnswer::Write {
                     root,
                     verb,
-                    outcome: Ok(()),
+                    outcome: Ok(()) | Err(git::GitFault::Unfinished),
                     ..
                 } if verb.moves_refs() => Some(root.clone()),
                 _ => None,
@@ -1858,14 +1860,7 @@ impl Runtime<'_> {
         let Some(question) = cache.begin_checkout(target, detach) else {
             return Ok(());
         };
-        if !self.app.git_worker.request(git::GitRequest {
-            window: self.window_id(),
-            host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
-            question,
-        }) {
-            self.disable_git_worker();
-            return Ok(());
-        }
+        self.ask_git_mutation(git::GitHost::Column(LeafId { tab: tab_id, seat }), question)?;
         // The rows dim now, so the frame that shows them dimmed is this one.
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
@@ -1893,14 +1888,7 @@ impl Runtime<'_> {
         else {
             return Ok(());
         };
-        if !self.app.git_worker.request(git::GitRequest {
-            window: self.window_id(),
-            host: git::GitHost::Float { id, tab },
-            question,
-        }) {
-            self.disable_git_worker();
-            return Ok(());
-        }
+        self.ask_git_mutation(git::GitHost::Float { id, tab }, question)?;
         // The rows dim now, so the frame that shows them dimmed is this one.
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
@@ -1926,21 +1914,39 @@ impl Runtime<'_> {
         let Some(question) = state.cache.begin_checkout(target, detach) else {
             return Ok(());
         };
-        if !self.app.git_worker.request(git::GitRequest {
-            window: self.window_id(),
-            host: git::GitHost::Graph {
+        self.ask_git_mutation(
+            git::GitHost::Graph {
                 tab: tab_id,
                 root: root.to_owned(),
             },
             question,
-        }) {
-            self.disable_git_worker();
-            return Ok(());
-        }
+        )?;
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
         })?;
+        Ok(())
+    }
+
+    /// **Hand one write or checkout to its repository's mutation lane**
+    /// (`git_mutation_lane`), from whichever page built it. A request the lane
+    /// refuses at the door — full, or its worker gone — is filed at once as its
+    /// receipt, through the road every receipt takes (`apply_git_results`): the
+    /// rows it dimmed undim, and the notice says Folio did not run it.
+    pub(in crate::runtime) fn ask_git_mutation(
+        &mut self,
+        host: git::GitHost,
+        question: git::GitQuestion,
+    ) -> Result<()> {
+        let request = git::GitRequest {
+            window: self.window_id(),
+            host,
+            question,
+        };
+        if let Err((refused, request)) = self.app.git_mutations.ask(request) {
+            let mut receipt = vec![crate::git_mutation_lane::refusal(&refused, request)];
+            self.apply_git_results(&mut receipt, false)?;
+        }
         Ok(())
     }
 
@@ -2942,15 +2948,7 @@ impl Runtime<'_> {
         let Some(question) = question else {
             return Ok(());
         };
-        let window = self.window_id();
-        if !self.app.git_worker.request(git::GitRequest {
-            window,
-            host,
-            question,
-        }) {
-            self.disable_git_worker();
-            return Ok(());
-        }
+        self.ask_git_mutation(host, question)?;
         // The rows dim now, so the frame that shows them dimmed is this one.
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
