@@ -32113,11 +32113,15 @@ enum AnimationEntry {
     /// work. The picture is still the same picture; what the reason buys is the
     /// line in the foot of the pane — see [`Runtime::preview_standing_fact`] and
     /// [`animation::AnimationRefusal::is_worth_saying`].
+    ///
+    /// A refusal is a fact about the file's bytes: it is kept while some surface of the window
+    /// names the file, and let go of when the file changes on disk
+    /// ([`AnimationCache::let_go_changed_file`]), so the next showing asks about the new bytes.
     Refused(animation::AnimationRefusal),
     /// **Asked, and no answer came**: the open's work failed on the worker, or its thread could
     /// not be started. Drawn as a refusal is (the picture lane's still, no notice), and — unlike a
     /// refusal, which is a fact about the file — let go of by the file's next open
-    /// ([`animations_opened`]), which asks again.
+    /// ([`animations_opened`]), which asks again, or when no surface names the file any more.
     Unanswered,
 }
 
@@ -32170,20 +32174,34 @@ fn animation_refusal_notice(refusal: animation::AnimationRefusal) -> Option<&'st
 /// door to them** (S-8 round 6).
 ///
 /// A type of its own rather than the bare map, so that each change an entry can go through is one
-/// method here and no caller lends the map out or writes an entry by hand: an open is asked only by
-/// [`Self::ask_for_showing`], the one writer of `Pending`; its answer is filed only by
-/// [`Self::opened`]; an open that never answered is written only by [`Self::open_unanswered`] and
-/// let go of only by [`Self::let_go_on_open`], on the file's next open; and a playback is reached
-/// into only by the fill, advance and present doors, each of which takes the entry out and puts it
-/// back, so the map re-weighs it.
+/// method here and no caller lends the map out or writes an entry by hand. One writer per state,
+/// and every remover named:
+///
+/// | state | its one writer | removed by |
+/// |---|---|---|
+/// | `Pending` | [`Self::ask_for_showing`] | its answer ([`Self::opened`], [`Self::open_unanswered`]), which files nothing for a file no surface names ([`Self::answered_for_nobody`]) |
+/// | `Unanswered` | [`Self::open_unanswered`] | [`Self::let_go_on_open`], the file's next open; [`Self::let_go_unnamed`] |
+/// | `Refused` | [`Self::opened`] | [`Self::let_go_unnamed`]; [`Self::let_go_changed_file`] |
+/// | `Ready` | [`Self::opened`] | [`Self::let_go_on_open`]; [`Self::let_go_unnamed`]; [`Self::let_go_changed_file`]; [`Self::adopt_fill`], when the cursor finds the file changed; weight |
+///
+/// A playback is reached into only by the fill, advance and present doors, each of which takes the
+/// entry out and puts it back, so the map re-weighs it.
 ///
 /// **An entry that holds no pixels is never let go of by weight.** A request in flight, a refusal
 /// and an open that never answered are the records of questions: each still counts its entry's
 /// overhead toward the budget, but none is ever chosen by eviction
 /// ([`bt_term::Weighed::evictable`]), because a walk asks the worker for every file shown that
 /// this map holds nothing for — an evicted record would be asked again on the next redraw, with no
-/// open to ask it. So such records number at most the animated files this window has opened, and
-/// leave only by the doors above.
+/// open to ask it.
+///
+/// **What this window holds for a file is kept exactly as long as some surface names the file**
+/// (`presence`). When the last surface naming the file leaves — it stops existing, or it is
+/// handed another subject — its refusal, its unanswered open and its playback are let go of
+/// ([`Self::let_go_unnamed`]); its decode in flight is kept until the answer, which is then filed
+/// nowhere. The next showing of that file is an open, whose ask is new input and not a re-ask. So
+/// the records number at most one per file `presence` names, plus the decodes in flight (which the
+/// computation lane bounds), and weight pressure past the budget is reached only by playbacks,
+/// which it governs.
 struct AnimationCache {
     playbacks: bt_term::BoundedCache<String, AnimationEntry>,
     /// **What each surface is showing, so that opening a file can be told from
@@ -32268,7 +32286,9 @@ impl AnimationCache {
     ///
     /// What each surface is showing is brought up to date ([`animations_opened`]). A file a surface
     /// has just begun showing is let go of ([`Self::let_go_on_open`]) — its playback, so the open
-    /// starts again on frame zero, and an open that never answered, so the open asks again. Then
+    /// starts again on frame zero, and an open that never answered, so the open asks again. A file
+    /// a surface has stopped showing is let go of if no surface names it any more
+    /// ([`Self::let_go_unnamed`]). Then
     /// each file shown that this window holds nothing for is asked of the worker through `ask`,
     /// once however many surfaces show it. A file this window holds anything for — a playback, a
     /// decode in flight, a refusal, an open that never answered — is not asked again by a walk: a
@@ -32287,8 +32307,22 @@ impl AnimationCache {
                 )
             })
             .collect();
+        // What each surface named before this walk, where the walk hands it another subject: the
+        // file it leaves may now be named by no surface.
+        let replaced: Vec<String> = named
+            .iter()
+            .filter_map(|(surface, key)| {
+                self.presence
+                    .get(surface)
+                    .filter(|standing| key.as_ref() != Some(*standing))
+                    .cloned()
+            })
+            .collect();
         for key in animations_opened(&mut self.presence, &named) {
             self.let_go_on_open(&key);
+        }
+        for key in replaced {
+            self.let_go_unnamed(&key);
         }
         for (_, path) in showing {
             let Some(path) = path else {
@@ -32306,18 +32340,99 @@ impl AnimationCache {
         }
     }
 
-    /// **A surface that has stopped existing**: what it was showing is forgotten. The record is
-    /// deliberately kept while a surface is merely not drawn — that is how a tab switch resumes
-    /// rather than restarts — so the one moment it may be dropped is the moment the surface goes.
+    /// **A surface that has stopped existing**: what it was showing is forgotten, and what this
+    /// window holds for that file with it when no other surface names the file
+    /// ([`Self::let_go_unnamed`]). The entry is deliberately kept while a surface is merely not
+    /// drawn — that is how a tab switch resumes rather than restarts — so the one moment it may be
+    /// dropped is the moment the surface goes.
     fn forget_surface(&mut self, surface: PreviewSurface) {
-        self.presence.remove(&surface);
+        if let Some(key) = self.presence.remove(&surface) {
+            self.let_go_unnamed(&key);
+        }
+    }
+
+    /// **Every surface that has stopped existing by a road that does not name it** — a tab closed,
+    /// carried to another window or folded into another tab takes its surfaces with it, and none
+    /// of those roads passes through [`Self::forget_surface`]. `exists` answers whether the window
+    /// still has the surface; each one it does not is forgotten as [`Self::forget_surface`] forgets.
+    fn forget_surfaces_gone(&mut self, exists: impl Fn(PreviewSurface) -> bool) {
+        let gone: Vec<PreviewSurface> = self
+            .presence
+            .keys()
+            .copied()
+            .filter(|surface| !exists(*surface))
+            .collect();
+        for surface in gone {
+            self.forget_surface(surface);
+        }
+    }
+
+    /// Whether some surface of this window names the file.
+    fn names(&self, key: &str) -> bool {
+        self.presence.values().any(|named| named == key)
+    }
+
+    /// **A file no surface names any more**: whatever this window holds for it is let go of — a
+    /// refusal or an open that never answered, so the file's next showing is an open and asks, and
+    /// a playback, which can never be resumed: a surface that names the file again does so by an
+    /// open ([`animations_opened`]), and an open lets go of the playback anyway
+    /// ([`Self::let_go_on_open`]), so keeping it would only hold frames and push out a playback
+    /// that a background tab can resume. A decode in flight is kept until its answer, which is
+    /// filed only if a surface names the file by then ([`Self::opened`]) — so a surface that goes
+    /// to another file and back during one decode asks for it once.
+    fn let_go_unnamed(&mut self, key: &str) {
+        if self.names(key) {
+            return;
+        }
+        if matches!(
+            self.playbacks.peek(key),
+            Some(
+                AnimationEntry::Ready { .. }
+                    | AnimationEntry::Unanswered
+                    | AnimationEntry::Refused(_)
+            )
+        ) {
+            self.playbacks.remove(key);
+        }
+    }
+
+    /// **An answer that came home for a file no surface names**: its decode in flight is let go
+    /// of and nothing is filed — a record nobody is showing, or frames nobody can resume
+    /// ([`Self::let_go_unnamed`]'s rule, for the decode it keeps). `true` when the file is unnamed
+    /// and the answer is therefore for nobody.
+    fn answered_for_nobody(&mut self, key: &str) -> bool {
+        if self.names(key) {
+            return false;
+        }
+        if matches!(self.playbacks.peek(key), Some(AnimationEntry::Pending)) {
+            self.playbacks.remove(key);
+        }
+        true
+    }
+
+    /// **A file that changed on disk** — the preview's file-change news
+    /// ([`Runtime::refresh_preview_file`]): its playback and its refusal are let go of, so the
+    /// next walk that shows the file asks about the bytes there now. A refusal is a fact about the
+    /// bytes, and new bytes are a new question. `true` when anything was let go of. An open that
+    /// never answered is no fact about the bytes and waits for the file's next open as before. A
+    /// decode in flight is kept and its answer filed, so a change that lands while it reads is not
+    /// seen until the next change news, or until no surface names the file: answers carry no
+    /// identity of the bytes they read (T-ANIMATION-ANSWER-IDENTITY).
+    fn let_go_changed_file(&mut self, key: &str) -> bool {
+        let changed = matches!(
+            self.playbacks.peek(key),
+            Some(AnimationEntry::Ready { .. } | AnimationEntry::Refused(_))
+        );
+        if changed {
+            self.playbacks.remove(key);
+        }
+        changed
     }
 
     /// **A file a surface has just begun showing**: its playback is let go of, so the open starts
-    /// again on frame zero, and so is an open that never answered, so the open asks again — the one
-    /// remover of [`AnimationEntry::Unanswered`]. A refusal is kept, because whether a file can be
-    /// animated is a fact about the file, and so is a decode already in flight, which is this
-    /// open's answer.
+    /// again on frame zero, and so is an open that never answered, so the open asks again. A
+    /// refusal is kept, because whether a file can be animated is a fact about the file, and so is
+    /// a decode already in flight, which is this open's answer.
     fn let_go_on_open(&mut self, key: &str) {
         if matches!(
             self.playbacks.get(key),
@@ -32330,10 +32445,14 @@ impl AnimationCache {
     /// **An open that was asked and not answered** — its work failed on the worker, or its thread
     /// could not be started: the file's entry becomes [`AnimationEntry::Unanswered`], which no walk
     /// asks again and the file's next open lets go of. The one writer of `Unanswered`. An entry the
-    /// file has answered since — a playback, a refusal — is left as it is.
+    /// file has answered since — a playback, a refusal — is left as it is, and a failure for a file
+    /// no surface names files nothing ([`Self::answered_for_nobody`]).
     fn open_unanswered(&mut self, key: String) {
+        if self.answered_for_nobody(&key) {
+            return;
+        }
         if matches!(
-            self.playbacks.get(&key),
+            self.playbacks.peek(&key),
             None | Some(AnimationEntry::Pending)
         ) {
             self.playbacks.insert(key, AnimationEntry::Unanswered);
@@ -32342,13 +32461,17 @@ impl AnimationCache {
 
     /// **The worker's answer to an open**, filed whether or not it decoded: a playback under the
     /// serial minted for it ([`AnimationEntry::Ready`]), or the refusal with its reason
-    /// ([`AnimationEntry::Refused`]) — a refusal is an answer.
+    /// ([`AnimationEntry::Refused`]) — a refusal is an answer. An answer for a file no surface
+    /// names any more is filed nowhere ([`Self::answered_for_nobody`]).
     fn opened(
         &mut self,
         key: String,
         serial: u64,
         frames: Result<animation::Animation, animation::AnimationRefusal>,
     ) {
+        if self.answered_for_nobody(&key) {
+            return;
+        }
         self.playbacks.insert(
             key,
             match frames {
@@ -32615,6 +32738,21 @@ fn animations_opened(
         }
     }
     opened
+}
+
+/// **Whether a surface is still in the window**, for [`AnimationCache::forget_surfaces_gone`].
+///
+/// A surface is in the window while some tab holds its view — a seat of a tab in the background
+/// as much as one on the glass, and a float filed under whichever tab it was torn from — and the
+/// card is the window's own. Asked of every tab and not of the tree on the glass, because a
+/// background tab's panes are exactly the ones that resume, and a surface the walk wrongly
+/// thought gone would make every walk an open. A free function over the tabs for
+/// [`files_a_tab_stands_on`]'s reason: it is the rule, and tabs are what a test can build.
+fn animation_surface_exists(tabs: &[TabState], surface: PreviewSurface) -> bool {
+    surface == PreviewSurface::Peek
+        || tabs
+            .iter()
+            .any(|tab| tab.preview_panes.get(surface).is_some())
 }
 
 /// **What became of one fill coming home** — see [`AnimationCache::adopt_fill`].
