@@ -810,3 +810,7 @@ mod policy_command_tests {
         assert_eq!(refused, None, "a refused copy says nothing was copied");
     }
 }
+
+#[cfg(test)]
+#[path = "clipboard_tests.rs"]
+mod tests;

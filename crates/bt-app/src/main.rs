@@ -78982,52 +78982,6 @@ mod edit_menu_clipboard_tests {
         }
     }
 
-    /// PIN — **the four doors the Edit menu ends at are the keystroke's own**,
-    /// and the verb reaches the clipboard through none of its own.
-    ///
-    /// A second copy path would be a second answer to what a selection is worth
-    /// on the pasteboard; a second paste path would be a second place for the
-    /// sanitising, the bracketing and the multi-line policy to be decided. The
-    /// four doors named here are the four the two key handlers name. That the
-    /// menu reaches them — `menubar::run_clipboard_verb` over `Runtime`'s
-    /// `menubar::ClipboardDoors` — is driven behaviourally only up to the doors
-    /// (`a_copy_over_a_files_column_or_a_read_only_preview_takes_the_terminals_selection`);
-    /// `Runtime`'s own answer to them is unpinned, because no test builds a
-    /// `Runtime` (the D-95 class).
-    ///
-    /// MUTATION: read the pasteboard in `run_an_application_menu_verb` and
-    /// write the bytes itself — the last assertion goes red.
-    #[test]
-    fn the_edit_menus_clipboard_verbs_go_through_the_keystrokes_own_doors() {
-        let verb = method_body("Runtime", "run_an_application_menu_verb");
-        let editor = method_body("Runtime", "preview_key");
-        let ladder = ladder();
-        for (door, other, whose) in [
-            (
-                "self.copy_preview_selection()",
-                editor,
-                "the preview editor",
-            ),
-            ("self.paste_into_preview()", editor, "the preview editor"),
-            ("self.copy_selection()", ladder, "the terminal"),
-            ("self.paste_from_clipboard()", ladder, "the terminal"),
-        ] {
-            assert!(
-                other.contains(door),
-                "`{door}` is no longer what {whose} answers its own chord with"
-            );
-        }
-        for its_own in [
-            "write_terminal_clipboard_text",
-            "bt_platform::clipboard_text",
-        ] {
-            assert!(
-                !verb.contains(its_own),
-                "the Edit menu touches the pasteboard itself through `{its_own}` instead of                  going through the door the keystroke uses"
-            );
-        }
-    }
-
     /// PIN — **a declined clipboard row runs on the window that has the
     /// keyboard**, through the same landing every other menu press lands at.
     ///
@@ -79258,16 +79212,15 @@ mod edit_menu_clipboard_tests {
     /// rung a field with a caret" (`ime_caret_source`), so a field added to the
     /// ladder is asked about without anyone writing it down. The settings
     /// dialog's fields ride the modal rung and are asked with its one extra fact.
-    /// The decision is the one both roads read — `keyboard_input`'s clipboard
-    /// rung and `run_an_application_menu_verb` — which the second half holds
-    /// them to, along with each upper field's own paste rung.
+    /// That the chord and Edit ▸ Paste both read this decision is driven on a
+    /// headless window by
+    /// `runtime::clipboard::tests::paste_goes_to_the_focused_field_and_never_to_the_shell_behind_it_by_either_road`.
     ///
     /// MUTATION: make `menubar::paste_seat` return `clipboard_seat(focus)`
     /// whatever the field — the find bar and the graph search rows answer
-    /// `Terminal` and go red; drop the `input::is_paste_shortcut` arm from
-    /// `git_menu_key` — the source half goes red.
+    /// `Terminal` and go red.
     #[test]
-    fn paste_goes_to_the_focused_field_and_never_to_the_shell_behind_it() {
+    fn every_field_on_the_ladder_takes_the_paste_and_the_shell_takes_only_its_own() {
         use super::{
             ImeCaretSource, ImeOwner, TextFieldSeat, ime_caret_source, text_field_holding,
         };
@@ -79348,83 +79301,6 @@ mod edit_menu_clipboard_tests {
             assert!(
                 fields_reached.contains(&field),
                 "{field:?} is never reached"
-            );
-        }
-
-        // The two roads read that one decision, and nothing else decides.
-        let ladder = ladder();
-        let rung = ladder
-            .find("menubar::paste_seat(self.clipboard_focus())")
-            .expect("the keystroke's paste asks the ladder's seat");
-        let terminal = ladder
-            .find("self.paste_from_clipboard()?;")
-            .expect("and the terminal is one of its answers");
-        assert!(
-            rung < terminal,
-            "the seat is asked before the shell is written to"
-        );
-        assert_eq!(
-            ladder.matches("self.paste_from_clipboard()").count(),
-            1,
-            "a second road to the terminal's paste in the ladder"
-        );
-        assert!(ladder.contains("self.paste_into_field(field)?;"));
-        // Edit ▸ Paste asks `menubar::paste_seat` inside `menubar::run_clipboard_verb`
-        // (the seat is pinned by `a_paste_reaches_the_terminal_only_while_the_shell_holds_the_keyboard`);
-        // `Runtime`'s call into the road is unpinned (the D-95 class).
-        let focus = method_body("Runtime", "clipboard_focus");
-        assert!(
-            focus.contains("ime_owner(self.keyboard_owner())"),
-            "the field is read off the ladder, not listed"
-        );
-        // The fields whose rungs stand above the clipboard rung take the same
-        // two chords themselves, through the same door or predicate.
-        for (handler, answer) in [
-            (
-                "git_menu_key",
-                "self.paste_into_field(TextFieldSeat::GitPrompt)?;",
-            ),
-            (
-                "settings_field_key",
-                "self.paste_into_field(TextFieldSeat::Settings)?;",
-            ),
-            (
-                "palette_key",
-                "input::is_paste_shortcut(&event.logical_key, self.window.modifiers)",
-            ),
-        ] {
-            assert!(
-                method_body("Runtime", handler).contains(answer),
-                "{handler} does not take the window's paste"
-            );
-        }
-        assert!(
-            item_body(&ItemQuery::function("rename_pastes")).contains("input::is_paste_shortcut("),
-            "the name box spells its own paste chord"
-        );
-        let door = method_body("Runtime", "paste_into_field");
-        let read = door
-            .find("self.window.window.clipboard_text()")
-            .expect("the door reads the clipboard");
-        let applied = door
-            .find("self.apply_clipboard_text_to_field(field, &text)")
-            .expect("the door applies its clipboard text");
-        assert!(
-            read < applied,
-            "the field apply step must follow the clipboard read"
-        );
-        let apply = method_body("Runtime", "apply_clipboard_text_to_field");
-        for insert in [
-            "self.search_ime(",
-            "self.graph_search_ime(",
-            "self.git_prompt_ime(",
-            "self.palette_ime(",
-            "self.rename_ime(",
-            "self.paste_into_settings_field(",
-        ] {
-            assert!(
-                apply.contains(insert),
-                "a field's paste skips its own insert: {insert}"
             );
         }
     }
