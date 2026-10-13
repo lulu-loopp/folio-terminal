@@ -20574,6 +20574,42 @@ mod macos_window_backend_tests {
              both left alone:\n{action}"
         );
     }
+
+    /// GUARD (kept, T-HEADLESS-RUNTIME-SEAM round 2) — **one Objective-C class owns the
+    /// system-settings callbacks, and it has one value callback.** What the callback does is
+    /// driven on macOS (`macos_impl::tests::the_appearance_callback_only_nudges_the_loop`); that
+    /// there is no second class answering the same notifications, and no second key-value
+    /// callback beside the one driven, is a count of declarations in the source — so these two
+    /// counts, and only these, are read from it, on every platform.
+    #[test]
+    fn one_class_owns_the_system_settings_callbacks_with_one_value_callback() {
+        let observer_classes: Vec<_> = source_test::index()
+            .macros()
+            .iter()
+            .filter(|invocation| {
+                invocation.name() == "define_class"
+                    && source_test::index()
+                        .text(invocation.tokens())
+                        .contains("struct SystemSettingsObserver")
+            })
+            .collect();
+        assert_eq!(
+            observer_classes.len(),
+            1,
+            "one Objective-C class owns the system-settings callbacks"
+        );
+        let observer_class = observer_classes[0].tokens();
+        let callbacks = source_test::found(
+            Needle::new(Pattern::identifier("observe_value")),
+            View::Identifiers,
+            Scope::Module("crate::macos_impl".to_owned()),
+        )
+        .spans()
+        .into_iter()
+        .filter(|span| span.within(observer_class))
+        .count();
+        assert_eq!(callbacks, 1, "the observer has one value callback");
+    }
 }
 
 /// **The two choosers, the alert and the formula menu have exactly one arm per

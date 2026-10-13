@@ -32,8 +32,12 @@ fn card_over(host: RowHost, file: &std::path::Path) -> FilePeek {
 /// hand-over**: a files row, a floating tree's row and a Git row through the file manager's
 /// asking door, a reference a program printed through the verified one, off its pane's ledger.
 ///
-/// MUTATION: drop the `PeekFootPress::Reveal` arm's `self.reveal_in_explorer(&path)?` from
-/// `Runtime::press_file_peek_foot` — the foot reveals nothing.
+/// Without the chord the same press hands the system nothing: the card's foot locates the file
+/// in this window's files column instead (`peek_foot_press`'s `Here`).
+///
+/// MUTATIONS: drop the `PeekFootPress::Reveal` arm's `self.reveal_in_explorer(&path)?` from
+/// `Runtime::press_file_peek_foot` — the foot reveals nothing; read every press as the chord
+/// (`hand_over = true`) — a plain press hands the file to the system.
 #[test]
 fn a_ctrl_press_on_the_foot_reveals_the_file_through_its_surfaces_door() {
     let (folder, file) = glance_fixture("headless-reveal");
@@ -43,9 +47,28 @@ fn a_ctrl_press_on_the_foot_reveals_the_file_through_its_surfaces_door() {
         .expect("one of the two is the hand-over chord here");
     for (host, terminal) in [
         (RowHost::Column(SeatId(1)), false),
+        (RowHost::Float(7), false),
         (RowHost::Git(SeatId(2)), false),
         (RowHost::Terminal(SeatId(2)), true),
     ] {
+        // Without the chord: nothing is handed to the system.
+        let mut folio =
+            HeadlessFolio::with_tabs("headless-reveal", vec![cross_tab(1, &["一", "二"])], 0);
+        let mut runtime = folio.runtime();
+        runtime.window.file_peek = Some(card_over(host, &file));
+        runtime.window.modifiers_held = ModifiersState::empty();
+        let _ = runtime
+            .press_file_peek_foot()
+            .expect("the plain press is answered");
+        assert!(
+            !folio
+                .ledger
+                .take()
+                .iter()
+                .any(|effect| matches!(effect, WindowEffect::HandedOff(_))),
+            "{host:?}: a press without the chord hands the system nothing"
+        );
+
         let mut folio =
             HeadlessFolio::with_tabs("headless-reveal", vec![cross_tab(1, &["一", "二"])], 0);
         let mut runtime = folio.runtime();

@@ -165,25 +165,204 @@ fn the_edit_menus_clipboard_verbs_land_where_the_keystrokes_do() {
     );
 }
 
-/// RED (B-AUDIT-046 RT-1) — **a paste goes to the text field that holds the keyboard, by the
-/// chord and by Edit ▸ Paste, and never to the shell behind it**: with the find bar open over a
-/// shell, both put the clipboard's one line into the find bar and nothing into the shell.
-///
-/// MUTATION: make `menubar::paste_seat` answer `clipboard_seat(focus)` whatever the field — the
-/// chord and the menu both hand the paste to the terminal and the find bar stays empty.
-#[test]
-fn paste_goes_to_the_focused_field_and_never_to_the_shell_behind_it_by_either_road() {
-    for through_the_menu in [false, true] {
-        let leaf = leaf_saying("SHELL 外壳");
-        let mut folio =
-            HeadlessFolio::with_tabs("headless-field-paste", vec![tab_holding(leaf)], 0);
-        let seat = folio.runtime().seats.identity();
+/// One text field a paste can land in, opened in a fresh window: what the clipboard holds is
+/// pasted by the chord or through Edit ▸ Paste, and the field's text is read back with whether the
+/// shell behind it (when there is one) was handed anything.
+fn paste_into(field: crate::TextFieldSeat, through_the_menu: bool) -> (String, bool) {
+    use crate::TextFieldSeat;
+    const PASTED: &str = "粘贴 pasted\r\nsecond";
+    let preview = field == TextFieldSeat::GraphSearch;
+    // The repository the graph page is about: a name only, which nothing reads.
+    let root = bt_testpath::temp_path("headless-graph-paste 图");
+    let (tab, preview_seat) = if preview {
+        // A commit graph's page: the search field lives in the graph's view, and a view is kept
+        // only on a surface that shows a graph.
+        let graph = crate::preview::PreviewBuffer::new(
+            crate::preview::PreviewSource::GitGraph { root: root.clone() },
+            "图 graph".to_owned(),
+        );
+        let (tab, seat) = tab_with_a_preview(1, vec![graph]);
+        (tab, Some(seat))
+    } else {
+        (tab_holding(leaf_saying("SHELL 外壳")), None)
+    };
+    let mut folio = HeadlessFolio::with_tabs("headless-field-paste", vec![tab], 0);
+    folio.draw();
+    {
+        let mut runtime = folio.runtime();
+        let tab = runtime.window.tabs[0].id;
+        let seat = runtime.seats.identity();
+        match field {
+            TextFieldSeat::FindBar => runtime.open_search(seat).expect("the find bar opens"),
+            TextFieldSeat::Palette => runtime.open_command_palette().expect("the palette opens"),
+            TextFieldSeat::TabName => {
+                runtime.window.rename = Some(crate::TabRename::open(tab, None));
+            }
+            TextFieldSeat::GitPrompt => {
+                runtime.window.git_menu = Some(crate::GitMenuState {
+                    point: [10.0, 10.0],
+                    origin: crate::GitOrigin::Graph(host_spelling(r"C:\w").into()),
+                    root: host_spelling(r"C:\w").into(),
+                    target: crate::profiles::GitMenuTarget::LocalBranch {
+                        name: "主干 main".to_owned(),
+                        current: true,
+                    },
+                    graph_row: None,
+                    hover: None,
+                    prompt: Some(crate::GitPromptState {
+                        kind: crate::profiles::GitPromptKind::CreateBranch,
+                        caption: String::new(),
+                        field: crate::text_field::TextField::default(),
+                        asked_empty: false,
+                    }),
+                });
+            }
+            TextFieldSeat::GraphSearch => {
+                let seat = preview_seat.expect("the graph's seat");
+                runtime.seats.set_focus(seat);
+                runtime.window.tabs[0].git_graph_view.insert(
+                    seat_of(tab, seat),
+                    crate::GraphView {
+                        root: root.clone(),
+                        search_focused: true,
+                        ..crate::GraphView::default()
+                    },
+                );
+                assert_eq!(
+                    crate::ime_owner(runtime.keyboard_owner()),
+                    crate::ImeOwner::GraphSearch,
+                    "the fixture's own precondition: the graph's search holds the keyboard"
+                );
+            }
+            TextFieldSeat::Settings => runtime
+                .open_settings_on_row(crate::settings::SettingsRow::QuakeCommand)
+                .expect("the dialog opens on the field"),
+        }
+    }
+    *folio.window.window.clipboard.borrow_mut() = Some(PASTED.to_owned());
+    if through_the_menu {
         folio
             .runtime()
-            .open_search(seat)
-            .expect("the find bar opens");
-        assert!(folio.runtime().window.search.is_focused());
-        *folio.window.window.clipboard.borrow_mut() = Some("查找 needle\r\nsecond".to_owned());
+            .run_an_application_menu_verb(AppMenuAction::PasteIntoFocus)
+            .expect("the menu's paste is answered");
+    } else {
+        chord(&mut folio, "v", KeyCode::KeyV);
+    }
+    let mut runtime = folio.runtime();
+    let text = match field {
+        TextFieldSeat::FindBar => runtime.window.search.query().to_string(),
+        TextFieldSeat::Palette => runtime
+            .window
+            .palette
+            .as_ref()
+            .map(|palette| palette.query().into_owned())
+            .unwrap_or_default(),
+        TextFieldSeat::TabName => runtime
+            .window
+            .rename
+            .as_ref()
+            .map(|rename| rename.field.text().to_owned())
+            .unwrap_or_default(),
+        TextFieldSeat::GitPrompt => runtime
+            .window
+            .git_menu
+            .as_ref()
+            .and_then(|menu| menu.prompt.as_ref())
+            .map(|prompt| prompt.field.text().to_owned())
+            .unwrap_or_default(),
+        TextFieldSeat::GraphSearch => runtime.window.tabs[0]
+            .git_graph_view
+            .values()
+            .next()
+            .map(|view| view.search.text().to_owned())
+            .unwrap_or_default(),
+        TextFieldSeat::Settings => runtime
+            .window
+            .settings
+            .text_field(crate::settings::SettingsTarget::Field(
+                crate::settings::SettingsRow::QuakeCommand,
+            ))
+            .map(|field| field.text().to_owned())
+            .unwrap_or_default(),
+    };
+    let shell_untouched = runtime
+        .focused_mut()
+        .is_none_or(|shell| shell.pending_paste.is_none() && shell.pending_typing.is_none());
+    (text, shell_untouched)
+}
+
+/// RED (B-AUDIT-046 RT-1) — **a paste goes to the text field that holds the keyboard, by the
+/// chord and by Edit ▸ Paste, and never to the shell behind it** — every field there is: the find
+/// bar, the graph's search, a git menu's prompt, the palette, a tab's name and a settings field.
+/// Each takes the clipboard's line (the settings field drops its breaks, the others take the first
+/// line through `text_field::one_line`), by both roads, and the shell behind it is handed nothing.
+/// The fields whose rungs stand above the clipboard rung (`git_menu_key`, `settings_field_key`,
+/// `palette_key`, the rename's `rename_pastes`) take the chord themselves; Edit ▸ Paste reaches
+/// each through `paste_into_field`, whose per-field inserts are the ones driven here.
+///
+/// MUTATIONS: make `menubar::paste_seat` answer `clipboard_seat(focus)` whatever the field — the
+/// menu hands the paste to the terminal; drop the paste arm of `git_menu_key`, of
+/// `settings_field_key` or of `palette_key`, or `rename_pastes`' arm of the rename key — that
+/// field's chord pastes nothing; send one of `apply_clipboard_text_to_field`'s six fields to
+/// another's insert — that field stays empty by the menu.
+#[test]
+fn paste_goes_to_the_focused_field_and_never_to_the_shell_behind_it_by_either_road() {
+    use crate::TextFieldSeat;
+    for field in [
+        TextFieldSeat::FindBar,
+        TextFieldSeat::GraphSearch,
+        TextFieldSeat::GitPrompt,
+        TextFieldSeat::Palette,
+        TextFieldSeat::TabName,
+        TextFieldSeat::Settings,
+    ] {
+        let expected = if field == TextFieldSeat::Settings {
+            "粘贴 pastedsecond".to_owned()
+        } else {
+            crate::text_field::one_line("粘贴 pasted\r\nsecond")
+        };
+        for through_the_menu in [false, true] {
+            let (text, shell_untouched) = paste_into(field, through_the_menu);
+            assert_eq!(
+                text, expected,
+                "{field:?} takes the paste (through the menu: {through_the_menu})"
+            );
+            assert!(
+                shell_untouched,
+                "{field:?}: nothing reached the shell behind it (through the menu: \
+                 {through_the_menu})"
+            );
+        }
+    }
+}
+
+/// What a paste left on the shell holding the keyboard: a paste held for it, typing held for it,
+/// and the multi-line paste card raised over it.
+fn what_the_shell_was_handed(folio: &mut HeadlessFolio) -> (bool, Option<(String, bool)>, bool) {
+    let mut runtime = folio.runtime();
+    let card = runtime.paste_card_seat().is_some();
+    let shell = runtime.focused_mut().expect("the shell");
+    (
+        shell.pending_paste.is_some(),
+        shell.pending_typing.clone(),
+        card,
+    )
+}
+
+/// RED (M3-1) — **Edit ▸ Paste with the shell holding the keyboard is the chord's paste**: the
+/// clipboard's two lines reach the shell by the same door, and leave it in the same state —
+/// whatever that door does with a multi-line paste (hold it, raise the card over it), it does
+/// once, the same way, by either road.
+///
+/// MUTATION: make the menu's terminal door write the clipboard's text into the shell itself
+/// instead of `self.paste_from_clipboard()` — the menu's paste skips the door's multi-line policy.
+#[test]
+fn the_menus_paste_into_the_shell_is_the_chords() {
+    let handed = |through_the_menu: bool| {
+        let leaf = leaf_saying("SHELL 外壳");
+        let mut folio =
+            HeadlessFolio::with_tabs("headless-shell-paste", vec![tab_holding(leaf)], 0);
+        *folio.window.window.clipboard.borrow_mut() = Some("第一行 one\r\n第二行 two".to_owned());
         if through_the_menu {
             folio
                 .runtime()
@@ -192,16 +371,13 @@ fn paste_goes_to_the_focused_field_and_never_to_the_shell_behind_it_by_either_ro
         } else {
             chord(&mut folio, "v", KeyCode::KeyV);
         }
-        let mut runtime = folio.runtime();
-        assert_eq!(
-            runtime.window.search.query(),
-            crate::text_field::one_line("查找 needle\r\nsecond"),
-            "the find bar takes the paste (through the menu: {through_the_menu})"
-        );
-        let shell = runtime.focused_mut().expect("the shell");
-        assert!(
-            shell.pending_paste.is_none() && shell.pending_typing.is_none(),
-            "and nothing reached the shell behind it (through the menu: {through_the_menu})"
-        );
-    }
+        what_the_shell_was_handed(&mut folio)
+    };
+    let by_key = handed(false);
+    assert_ne!(
+        by_key,
+        (false, None, false),
+        "the chord hands the shell its paste"
+    );
+    assert_eq!(handed(true), by_key, "and the menu hands it the same");
 }

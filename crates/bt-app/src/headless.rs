@@ -1238,18 +1238,10 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
             let _ = proxy.send_event(event());
         }
     };
-    App {
-        ime_first_focus_seen: false,
+    App::assemble(AppParts {
         gpu,
-        device_loss_pilot: DeviceLossPilot::new(),
-        favicons: Rc::new(RefCell::new(favicon::Favicons::default())),
-        favicons_changed: false,
         tab_ids: TabIds::new(),
-        animation_serials: 0,
         event_proxy: proxy.clone(),
-        git_watch: git_watch::GitWatch::default(),
-        programs_ear: programs_ear::ProgramsEar::default(),
-        index_ear: index_ear::IndexEar::default(),
         handoff_lane: handoff_lane::HandoffLane::spawn(wake(|| AppEvent::HandoffAnswered))
             .expect("the handoff lane starts"),
         layout_tables: layout_tables::LayoutTables::spawn(proxy.clone(), Vec::new())
@@ -1259,21 +1251,12 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
         }))),
         foreground_program_worker: foreground_program::Worker::spawn(wake(|| AppEvent::MathReady))
             .expect("the foreground worker starts"),
-        math_worker_running: true,
-        math_worker_notice_pending: false,
         files_worker: files::FilesWorker::spawn(proxy.clone()).expect("the files worker starts"),
-        files_worker_running: true,
-        files_worker_notice_pending: false,
         file_index_worker: palette_index::IndexWorker::spawn(proxy.clone())
             .expect("the index worker starts"),
-        file_indexes: palette_index::FileIndexes::default(),
         preview_worker: preview::PreviewWorker::spawn(proxy.clone())
             .expect("the preview worker starts"),
-        preview_worker_running: true,
-        preview_worker_notice_pending: false,
         git_worker: git::GitWorker::spawn(proxy.clone()).expect("the git worker starts"),
-        git_worker_running: true,
-        git_worker_notice_pending: false,
         acrylic_available: false,
         startup_started: Instant::now(),
         trace_startup: false,
@@ -1281,25 +1264,12 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
         trace_layout_events: false,
         trace_perf: false,
         motion: Motion::Full,
-        scheme_watch: scheme_watch::SchemeWatch::default(),
-        storage_watch: storage_watch::StorageWatch::default(),
-        scheme_fault: None,
-        scheme_source: [None, None],
         profile_programs: profiles::ProfilePrograms::unknown(),
-        program_news: window_news::WindowSeats::default(),
         startup_shells: None,
         psreadline_documents: None,
-        psreadline_installed: None,
-        first_run_attempted: false,
-        first_run_waited_for_channel: false,
-        first_run_waited_for_agent_folders: false,
         context_menu_installed: false,
-        explorer_package_asked_by: None,
-        explorer_package_asked_place: explorer_menu::ExplorerPlace::default(),
-        explorer_package_announce: Announce::Everything,
         claude_hooks_installed: false,
         agent_config_refusals: [None, None, None],
-        agent_takeovers: Default::default(),
         codex_notify_installed: false,
         copilot_hooks_installed: false,
         copilot_readiness: attention_copilot::Readiness::default(),
@@ -1313,44 +1283,15 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
         cli_preview: None,
         profiles_store: persist::ProfilesStore::at_on(root.join("profiles.json"), lane.clone()),
         profiles_fault: None,
-        profiles_file_broken: false,
         pins_store: pins::PinsStore::at_on(root.join("pins.json"), lane),
         pins_fault: None,
-        pins_file_broken: false,
-        settings_file_broken: false,
-        keybindings_file_broken: false,
-        merge_notice: document_request::MergeNotice::default(),
         settings_fault: None,
         session_fault: None,
         recent: seed::SeedVault::default(),
         recent_folders: recent_folders::RecentFolders::default(),
         window_pictures: Vec::new(),
-        restore_question: Vec::new(),
-        web_warmup: web_warmup::WebWarmup::default(),
-        web_spare: web_spare::WebSpare::default(),
-        run_retiring_until: None,
-        web_pages_open: false,
-        pending_restore_windows: Vec::new(),
-        pending_restore_answer: None,
-        pending_application_change: None,
-        pending_new_windows: Vec::new(),
-        drag_broker: None,
-        pointer_capture: None,
-        pointer_capture_overlaps: Vec::new(),
-        pending_handover: None,
-        quit_requested: false,
-        quit: None,
-        leave_without: None,
-        windows_open: Vec::new(),
-        activated: Vec::new(),
-        window_ring: None,
-        window_ring_shown: None,
-        quake: quake::Quake::default(),
         update_job: update_job::Job::default(),
-        update_shown: update_card::Shown::default(),
-        quit_reason: quit::Reason::Asked,
-        handoff_answer: None,
-    }
+    })
 }
 
 /// **A headless window over `parts`**, holding `tabs` with `active` in front, assembled by the
@@ -1471,6 +1412,14 @@ mod tests {
             .set_clipboard_text("剪贴 clip")
             .expect("the headless clipboard takes text");
         assert_eq!(window.clipboard_text().as_deref(), Ok("剪贴 clip"));
+        let lane =
+            crate::handoff_lane::HandoffLane::spawn(|| {}).expect("the hand-off lane starts");
+        assert!(
+            window
+                .hand_off(&lane, bt_platform::Handoff::Reveal(folder.clone()))
+                .is_err(),
+            "a headless window is named to no door, and says so"
+        );
 
         let glass = &mut parts.glass;
         assert_eq!(glass.scale_factor(), 1.5);
@@ -1576,6 +1525,7 @@ mod tests {
                 WindowEffect::ImeArea([10, 20, 3, 18]),
                 WindowEffect::OptionAsAlt(true),
                 WindowEffect::ClipboardWritten("剪贴 clip".to_owned()),
+                WindowEffect::HandedOff(bt_platform::Handoff::Reveal(folder.clone())),
                 WindowEffect::Presented {
                     seats: 0,
                     source: FrameSource::Expose,
@@ -1611,6 +1561,44 @@ mod tests {
         assert!(
             matches!(sent.as_slice(), [AppEvent::PtyOutput]),
             "the loop's one wake: {sent:?}"
+        );
+    }
+
+    /// RED — **the backend's two doors that are not a part's record what they were asked**: every
+    /// window's surfaces rebuilt after a device loss, and a second window asked of the loop — which
+    /// a headless loop refuses, having recorded it.
+    ///
+    /// MUTATION: drop the `record` from `Headless::rebuild_every_surface` or `Headless::open_window`
+    /// and the ledger is that effect short.
+    #[test]
+    fn the_backends_rebuild_and_second_window_are_recorded() {
+        let mut folio = HeadlessFolio::with_tabs(
+            "headless-backend-doors",
+            vec![crate::test_support::tab_holding(
+                crate::test_support::leaf_saying("后端 backend"),
+            )],
+            0,
+        );
+        folio.ledger.take();
+        Headless::rebuild_every_surface(&mut folio.app.gpu, vec![&mut folio.window])
+            .expect("a headless rebuild answers");
+        let like = folio.window.window.id();
+        let event_loop = HeadlessLoop {
+            ledger: folio.ledger.clone(),
+        };
+        assert!(
+            Headless::open_window(
+                &event_loop,
+                &mut folio.app,
+                &crate::NewWindowPlan::fresh(like),
+                None,
+            )
+            .is_err(),
+            "a headless loop opens no second window"
+        );
+        assert_eq!(
+            folio.ledger.take(),
+            vec![WindowEffect::SurfacesRebuilt(1), WindowEffect::WindowOpened]
         );
     }
 }

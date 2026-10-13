@@ -89,6 +89,7 @@ fn a_quit_at_its_write(
     app.session_store =
         persist::SessionStore::at(place.join("session.json"), place.join("session.lock"));
     app.session_store.set_save_budget(crate::lane::PATIENCE);
+    app.pane_retirement_deadline = crate::lane::PATIENCE;
     app.session_store.record(
         crate::test_support::shells_document(&root, 1),
         Instant::now(),

@@ -261,7 +261,9 @@ fn every_visible_pane_settles_its_rows_and_schedules_its_own_artifacts() {
 ///
 /// MUTATIONS: build the replacement's view with `TextScale::ACTUAL` in `Runtime::restart_shell`
 /// — a pane at 125 % comes back at 100 %; take the old leaf out of the seat before the spawn —
-/// the pane is empty while its replacement is born.
+/// the pane is empty while its replacement is born; drop `self.sessions.insert(seat, spawned)`
+/// from `Runtime::replace_restarted_shell` — the old shell stays the pane after its replacement
+/// landed.
 #[test]
 fn restart_shell_keeps_the_rung_and_the_old_leaf_until_its_replacement_exists() {
     let mut folio = HeadlessFolio::with_tabs(
@@ -303,4 +305,21 @@ fn restart_shell_keeps_the_rung_and_the_old_leaf_until_its_replacement_exists() 
         successor.text_scale, rung,
         "and is born at the pane's own rung"
     );
+
+    // Its landing: the replacement takes the seat by the insert that drops the old shell.
+    let born = successor.incarnation;
+    let successor = runtime
+        .sessions
+        .get_mut(&seat)
+        .and_then(|pane| pane.successor.take())
+        .expect("the replacement");
+    runtime
+        .replace_restarted_shell(seat, *successor)
+        .expect("the replacement lands");
+    let pane = runtime.sessions.get(&seat).expect("the seat holds a shell");
+    assert_eq!(
+        pane.incarnation, born,
+        "the replacement is the pane once it has landed, and the old shell is gone"
+    );
+    assert_eq!(pane.text_scale, rung, "at the pane's own rung");
 }

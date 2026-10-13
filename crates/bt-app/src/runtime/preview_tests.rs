@@ -557,7 +557,9 @@ fn on_the_link(folio: &mut HeadlessFolio) -> PhysicalPosition<f64> {
 ///
 /// MUTATIONS: put `.bands(&caret.selection)` back in `Runtime::build_preview_body_in` — the
 /// prose source block is drawn with no band under the hand; gate the `drag.reached` write on
-/// `spends` in `Runtime::drag_preview_text` — a drag begun on a link reaches nothing.
+/// `spends` in `Runtime::drag_preview_text` — a drag begun on a link reaches nothing; drop
+/// `if reach_moved { self.repaint_preview()?; }` from it — a hand moving inside the source block
+/// asks for no frame.
 #[test]
 fn the_source_blocks_band_is_drawn_from_the_drag_that_reaches_into_it() {
     let (mut folio, surface) = drawn_page("headless-band");
@@ -584,6 +586,17 @@ fn the_source_blocks_band_is_drawn_from_the_drag_that_reaches_into_it() {
     assert!(
         banded,
         "the drag reaching into the source block bands it from the bytes it reached"
+    );
+    // A hand moving only inside the source block moves nothing on the rendered page, and still
+    // asks the window for a frame: the band it draws is the bytes it reached.
+    folio.ledger.take();
+    folio.move_to(PhysicalPosition::new(into.x + 24.0, into.y));
+    assert!(
+        folio
+            .ledger
+            .take()
+            .contains(&crate::headless::WindowEffect::Redraw),
+        "a reach that moved inside the source block asks for a frame"
     );
     folio
         .runtime()
@@ -718,4 +731,56 @@ fn the_button_on_a_page_this_window_cannot_show_hands_its_file_to_the_system() {
             ))),
         "a picture's card names the picture's file"
     );
+}
+
+/// How many places of the product write `text`, read as code with its literals kept.
+fn product_sites(text: &str) -> usize {
+    crate::test_support::found(
+        bt_source::Needle::new(bt_source::Pattern::text(text)),
+        bt_source::View::CodeKeepingLiterals,
+    )
+    .in_the_product(crate::test_support::source())
+    .len()
+}
+
+/// GUARD (kept, T-HEADLESS-RUNTIME-SEAM round 2) — **the page has one entrance, one exit and one
+/// place that owes a caret, and both readers of the source span hand it the rendered selection.**
+/// The behaviour of each is driven above (entering, leaving, the owed caret, the held span);
+/// what no driven test can say is that there is no *second* place doing it — a count of call
+/// sites is a fact about the source, so these counts, and only these, are read from it:
+///
+/// * `pane.enter_page()` — one entrance (T5 ①);
+/// * `md_caret = false` — one exit; the file swap takes the whole view with the document;
+/// * `want_caret_at(Some(` — one place owes the caret;
+/// * `pane.md_select()` handed to `preview_live::selection_span` by the fresh parse
+///   (`rebuild_preview_document`) and by the standing span (`standing_source_span`) — the two
+///   producers of the span read the same selection. The fresh parse's arm is read here too: a
+///   mutation that answered no span from it (`parsed_source`) went unnoticed by every driven test
+///   (the standing span draws the same block on the next frame), so it is held as wiring.
+#[test]
+fn the_page_has_one_entrance_one_exit_and_one_owed_caret() {
+    for (text, why) in [
+        (
+            "pane.enter_page()",
+            "one entrance, a second is a ruling and not an edit",
+        ),
+        (
+            "md_caret = false",
+            "one exit; the file swap takes the whole view with the document",
+        ),
+        ("want_caret_at(Some(", "one place owes the caret"),
+    ] {
+        assert_eq!(product_sites(text), 1, "{text}: {why}");
+    }
+    let fresh = crate::test_support::method_body("Runtime", "rebuild_preview_document");
+    let standing = crate::test_support::method_body("Runtime", "standing_source_span");
+    for (name, body) in [
+        ("rebuild_preview_document", fresh),
+        ("standing_source_span", standing),
+    ] {
+        assert!(
+            body.contains("preview_live::selection_span(") && body.contains("md_select()"),
+            "{name} hands the span's producer the page's rendered selection"
+        );
+    }
 }

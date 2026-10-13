@@ -230,8 +230,9 @@ fn a_flight_that_has_arrived_lands_on_a_turn_the_frame_gate_refuses() {
 /// and for whichever comes first of it and the travel's next frame: a flight five milliseconds
 /// from its end asks to be woken at its end, not a frame later.
 ///
-/// MUTATION: answer only the travel's next frame from `Runtime::math_toggle_deadline` (drop
-/// `flight.lands_at()`) — the wake is a frame after the landing.
+/// MUTATIONS: answer only the travel's next frame from `Runtime::math_toggle_deadline` (drop
+/// `flight.lands_at()`) — the wake is a frame after the landing; answer only the landing (drop
+/// `frame.min(landing)`'s frame) — a flight just begun sleeps until it lands.
 #[test]
 fn the_loop_is_woken_for_a_landing_on_its_own_clock() {
     let (mut folio, target, anchor) = a_typeset_formula("headless-landing-wake");
@@ -248,6 +249,19 @@ fn the_loop_is_woken_for_a_landing_on_its_own_clock() {
         runtime.math_toggle_deadline(now),
         Some(lands),
         "the loop is woken at the landing"
+    );
+
+    // And a flight just begun is woken for its next frame, well before it lands.
+    let flight = a_flight(&mut folio, target, &anchor, now);
+    let lands = flight.lands_at();
+    let runtime = folio.runtime();
+    runtime.window.math_toggle = Some(flight);
+    let woken = runtime
+        .math_toggle_deadline(now)
+        .expect("a flight in the air wakes the loop");
+    assert!(
+        woken < lands,
+        "a flight in the air is woken for its next frame, not its landing"
     );
 }
 
@@ -383,4 +397,172 @@ fn one_compose_builds_the_overlay_once() {
             flight = runtime.window.math_toggle.take();
         }
     }
+}
+
+/// A glance card over `file`, raised from a files column, on the clock `clock`.
+fn card_on(clock: crate::PeekClock) -> crate::FilePeek {
+    crate::FilePeek {
+        host: crate::RowHost::Column(bt_layout::SeatId(1)),
+        source: crate::preview::PreviewSource::file("计划 plan.md".to_owned()),
+        key: "计划 plan.md".to_owned(),
+        name: "计划 plan.md".to_owned(),
+        rect: [10.0, 10.0, 200.0, 30.0],
+        clock,
+        frame: None,
+        body: None,
+        head: None,
+        foot: None,
+        foot_lit: false,
+        column: None,
+        closing_at: None,
+        dwell: None,
+    }
+}
+
+/// RED (review 2026-09-18 rounds 2 and 3) — **each journey's own "am I moving" is what says it
+/// runs, and a journey that is only waiting runs nothing.** A tip settling and a glance card
+/// settling each owe the loop a wake-up (their deadlines) and move nothing; and each of the
+/// moving predicates the window reads — a tip fading in, the card hint's nudge, a command rail's
+/// tween, the formula marks arriving, a glance card fading in — puts its own lane in motion, one
+/// at a time, on a window where nothing else moves.
+///
+/// MUTATIONS: read `tooltip_deadline` or `file_peek_deadline` as running in
+/// `Runtime::running_journeys` — a waiting tip or card is a running one; drop any one of
+/// `tooltip.is_fading`, `card_hint.nudge_moving`, `command_rails_are_moving`,
+/// `math_tools_owe_frames` or `file_peek_is_fading` from it — that journey runs and nothing says
+/// so.
+#[test]
+fn each_journeys_own_predicate_says_it_runs_and_a_wait_does_not() {
+    let mut folio = HeadlessFolio::with_tabs(
+        "headless-predicates",
+        vec![tab_holding(leaf_saying("旅程 journeys"))],
+        0,
+    );
+    folio.app.motion = Motion::Full;
+    let now = Instant::now();
+    let none = pace::Lanes::default();
+    let overlay = pace::Lanes {
+        chrome: false,
+        overlay: true,
+    };
+    let chrome = pace::Lanes {
+        chrome: true,
+        overlay: false,
+    };
+    let runtime = folio.runtime();
+    assert_eq!(
+        runtime.running_journeys(now, false, false),
+        none,
+        "the fixture moves nothing"
+    );
+
+    // Waits.
+    let tip = (
+        crate::tooltip::TooltipAnchorId::Tab(0),
+        crate::tooltip::TipFace::Chrome,
+    );
+    runtime.window.tooltip.observe(Some(tip), now);
+    assert!(
+        runtime.tooltip_deadline(now).is_some(),
+        "a settling tip waits for its intent"
+    );
+    assert_eq!(
+        runtime.running_journeys(now, false, false),
+        none,
+        "and a wait is not motion"
+    );
+    runtime.window.tooltip.hide();
+    runtime.window.file_peek = Some(card_on(crate::PeekClock::Settling(
+        now + Duration::from_millis(300),
+    )));
+    assert!(
+        runtime.file_peek_deadline(now).is_some(),
+        "a settling card waits for its intent"
+    );
+    assert_eq!(
+        runtime.running_journeys(now, false, false),
+        none,
+        "and a wait is not motion"
+    );
+    runtime.window.file_peek = None;
+
+    // Each moving predicate, alone.
+    let due = now + tip.1.intent_delay();
+    runtime.window.tooltip.observe(Some(tip), now);
+    assert!(
+        runtime.window.tooltip.activate_if_due(due),
+        "the tip comes up when its intent is due"
+    );
+    assert_eq!(
+        runtime.running_journeys(due, false, false),
+        overlay,
+        "a tip fading in"
+    );
+    runtime.window.tooltip.hide();
+
+    runtime.window.card_hint.observe(true, true, now);
+    assert_eq!(
+        runtime.running_journeys(now, false, false),
+        chrome,
+        "the card hint's nudge"
+    );
+    runtime.window.card_hint.observe(false, false, now);
+
+    let mut rail = crate::cmdrail::RailCache::default();
+    rail.pointer_mut().aim(3, Some(1), true, now, Motion::Full);
+    runtime
+        .window
+        .command_rails
+        .insert(bt_layout::SeatId(1), rail);
+    assert_eq!(
+        runtime.running_journeys(now, false, false),
+        overlay,
+        "a command rail's tween"
+    );
+    runtime.window.command_rails.clear();
+
+    let boxes = bt_render::MathToolBoxes {
+        anchor: MathBlockAnchor::History {
+            run: None,
+            start: bt_transcript::TranscriptId(1),
+            end: bt_transcript::TranscriptId(1),
+        },
+        display: bt_viewport::MathBlockDisplay::Rendered,
+        block: [40.0, 10.0, 300.0, 59.0],
+        source: [230.0, 25.0, 249.0, 44.0],
+        copy: [251.0, 25.0, 270.0, 44.0],
+    };
+    runtime.window.math_tools = Some(crate::formula_tools::FormulaToolFollow::arriving(
+        &boxes, None, now,
+    ));
+    assert_eq!(
+        runtime.running_journeys(now, false, false),
+        overlay,
+        "the formula marks arriving"
+    );
+    runtime.window.math_tools = None;
+
+    runtime.window.file_peek = Some(card_on(crate::PeekClock::Shown(now)));
+    assert_eq!(
+        runtime.running_journeys(now, false, false),
+        overlay,
+        "a glance card fading in"
+    );
+}
+
+/// GUARD (kept, T-HEADLESS-RUNTIME-SEAM round 2) — **the carry hands neither formula lane a
+/// frame.** `Runtime::carry_live_journeys` runs at the head of every compose, before any pane has
+/// been projected, so it has no frame of this compose to place the formula marks or the source
+/// face against; those two lanes are paid at the present door (`refresh_formula_overlay_for_present`),
+/// which `one_compose_builds_the_overlay_once` drives. A call to `sync_math_tools` or
+/// `math_tool_placement` from the carry would place them against the last compose's frame, and
+/// what that changes on the glass is a one-frame lag the headless renderer does not measure — so
+/// this one fact is a count of call sites, read from the source, and only this one.
+#[test]
+fn the_carry_hands_neither_formula_lane_a_frame() {
+    let carry = crate::test_support::method_body("Runtime", "carry_live_journeys");
+    assert!(
+        !carry.contains("self.sync_math_tools(") && !carry.contains("self.math_tool_placement("),
+        "the carry has no frame of this compose to hand to either formula lane:\n{carry}"
+    );
 }

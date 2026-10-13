@@ -18524,6 +18524,13 @@ fn preview_mono_advance(font_system: &mut FontSystem, font_size_px: f32) -> f32 
 /// [`WindowRenderer`] measures chrome labels, preview paragraphs and terminal cells with, the same
 /// functions over the production font environment ([`preview_measure_font_system`]) and the
 /// default CJK chain, for a stand-in window that has no swapchain to measure for.
+///
+/// **Its one caller is `bt-app`'s test-only headless backend** (T-HEADLESS-RUNTIME-SEAM), and it
+/// is compiled into the product all the same, for a reason rather than by accident: the suite that
+/// uses it is another crate's, which a `#[cfg(test)]` here does not reach, and the alternative — a
+/// cargo feature `bt-app`'s dev-dependency turns on — compiles a second `bt-render` for every
+/// test build of the workspace. What it holds is the product's own measuring, so a product build
+/// carries no logic of its own in it: a font system and the shaping functions the renderer calls.
 pub struct DeviceFreeMeasure {
     font_system: FontSystem,
     terminal_cjk_families: TerminalCjkFamilies,
