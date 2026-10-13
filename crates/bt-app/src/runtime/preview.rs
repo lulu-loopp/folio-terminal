@@ -7828,6 +7828,11 @@ impl Runtime<'_> {
                     .say(Some((preview::save_notice(said), now)));
             }
         }
+        // A body a Reload replaced while its save was out is owed the file the
+        // save just wrote (`PreviewBuffer::hear_save`): its read is asked.
+        for index in 0..self.window.tabs.len() {
+            self.request_stale_previews(index);
+        }
         self.repaint_preview()
     }
 

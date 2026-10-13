@@ -5544,9 +5544,9 @@ impl PreviewBuffer {
             return DiskVerdict::Nothing;
         }
         // A clean body has nothing of its own to lose, so the sentence — if one
-        // was standing, from a delete that has been undone — comes down; a dirty
-        // one's sentence waits for the bytes.
-        let said = !self.dirty && self.say(DiskNews::Level);
+        // was standing, from a delete that has been undone — comes down; one the
+        // watcher only tells ([`Self::is_only_told`]) waits for the bytes.
+        let said = !self.is_only_told() && self.say(DiskNews::Level);
         if self.ask_to_confirm() {
             DiskVerdict::ReadAgain
         } else {
@@ -5939,7 +5939,12 @@ impl PreviewBuffer {
             // the position the sent body was taken at, wherever the cursor has
             // gone since (S-6a) — so an undo or a keystroke after the press is
             // still a change from the file. The dirty bit is read off the log.
-            self.undo.sent_landed();
+            if !self.undo.sent_landed() {
+                // The body was replaced by the disk's copy while the save was
+                // out (a Reload): it is a reading older than this landing, so
+                // the file — the bytes just written — is owed to it.
+                self.mark_stale();
+            }
             self.dirty = self.undo.is_dirty();
         } else {
             self.undo.sent_unanswered();
@@ -6320,12 +6325,22 @@ impl PreviewBuffer {
         // conflict nobody has answered, keeps the history that holds the body
         // sent: the save's answer, or the person, settles it — never the
         // watcher. (Folio's own bytes on their way compare as the same.)
-        if self.dirty
-            || base != self.base()
-            || self.on_disk.is_out()
-            || self.on_disk.has_an_unanswered_conflict()
-        {
+        if self.is_only_told() || base != self.base() {
             let news = match compared {
+                // **Under a conflict nobody has answered, the revision is the
+                // other writer's bytes**, so finding them again is not Folio's
+                // own: the strip stays until a press or a reload answers it —
+                // unless this body is exactly what the file holds.
+                Compared::Same
+                    if self.on_disk.has_an_unanswered_conflict()
+                        && !matches!(
+                            &outcome,
+                            HeadOutcome::Read { bytes: Some(bytes), .. }
+                                if self.is_the_reading_of(bytes)
+                        ) =>
+                {
+                    DiskNews::Changed
+                }
                 Compared::Same => DiskNews::Level,
                 Compared::Differs => DiskNews::Changed,
                 Compared::Unknown => return ReadLanded::Kept { said: false },
@@ -6370,6 +6385,15 @@ impl PreviewBuffer {
         // body was read at.
         self.stale = true;
         ReadLanded::ReadAgain
+    }
+
+    /// **A body the watcher only tells, never replaces** (S-6a rounds 4–5): one
+    /// with unsaved edits, one whose save is on its way, and one under a
+    /// conflict nobody has answered — its history may hold the only copy of the
+    /// body sent. Its strip is the comparison's to raise and lower, never the
+    /// stamp's.
+    fn is_only_told(&self) -> bool {
+        self.dirty || self.on_disk.is_out() || self.on_disk.has_an_unanswered_conflict()
     }
 
     /// The watcher's stamp follows a read this buffer kept its body over.
@@ -14950,6 +14974,24 @@ mod tests {
             "the worker found their bytes"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), theirs);
+
+        // A later write that moves the stamp and leaves their bytes: the
+        // conflict is still unanswered, and the strip stays up.
+        move_the_disk_forward(&path);
+        assert_eq!(
+            buffer.note_disk_moved(true, file_mtime(&path)),
+            DiskVerdict::ReadAgain
+        );
+        let Some(PreviewWant::Compare(base)) = buffer.claim_head_read() else {
+            panic!("the watcher's question is a comparison");
+        };
+        assert_eq!(
+            buffer.land_read(read_to_compare(&path), base),
+            ReadLanded::Kept { said: false },
+            "the strip is already up, and stays"
+        );
+        assert_eq!(buffer.disk, DiskNews::Changed);
+
         assert!(buffer.redo_edit().is_some(), "the body sent is a redo away");
         assert_eq!(buffer.content, sent);
         assert_eq!(buffer.request_save(&mut saves, pressed), SaveAsked::Sent);
@@ -15010,16 +15052,71 @@ mod tests {
         let Some(PreviewWant::Compare(base)) = buffer.claim_head_read() else {
             panic!("the watcher's question is a comparison");
         };
-        assert!(
-            matches!(
-                buffer.land_read(read_to_compare(&path), base),
-                ReadLanded::Kept { .. }
-            ),
-            "nothing is taken a second time"
+        assert_eq!(
+            buffer.land_read(read_to_compare(&path), base),
+            ReadLanded::Kept { said: true },
+            "nothing is taken a second time, and the strip goes up"
+        );
+        assert_eq!(
+            buffer.disk,
+            DiskNews::Changed,
+            "their bytes are not this body's: the conflict is unanswered"
         );
         assert_eq!(buffer.content.as_deref(), Some("原 O\n"));
         assert!(buffer.redo_edit().is_some(), "the body sent is a redo away");
         assert_eq!(buffer.content, sent);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED (S-6a round 5) — **a Reload while a save is out, then the save's
+    /// landing: the body is owed the file, and is not dirty for good.**
+    ///
+    /// The Reload replaced the body by the disk's copy and forgot the history
+    /// that held the body sent; the landing finds no position for it, moves
+    /// nothing in the log (the body is clean, as read) and asks the file again,
+    /// which brings the bytes the save wrote.
+    ///
+    /// MUTATION: a landing with no position leaves no saved state
+    /// (`Sent::Not => self.saved = None` in `sent_landed`) — the buffer is dirty
+    /// for good while the pane says "Saved".
+    #[test]
+    fn a_reload_while_a_save_is_out_then_the_landing_is_owed_the_file() {
+        let dir = scratch("reload-then-landing");
+        let (lane, jobs) = crate::persist::StorageLane::scripted();
+        let mut saves = PreviewSaves::on(lane);
+        let mut caret = crate::preview_edit::EditCaret::default();
+        let mut buffer = opened(&dir, "便签 note.md", "原 O\n");
+        let path = on_disk(&buffer).to_path_buf();
+        type_into(&mut buffer, &mut caret, 6);
+        let sent = buffer.content.clone();
+        assert_eq!(
+            buffer.request_save(&mut saves, crate::test_support::PRESSED_ON),
+            SaveAsked::Sent
+        );
+        assert!(buffer.take_the_disks_copy(), "Reload asks the file");
+        let Some(PreviewWant::Whole(base)) = buffer.claim_head_read() else {
+            panic!("a Markdown buffer reads whole");
+        };
+        assert_eq!(buffer.land_read(read_whole(&path), base), ReadLanded::Took);
+        assert_eq!(buffer.content.as_deref(), Some("原 O\n"));
+
+        crate::test_support::serve_on_a_worker(crate::test_support::next_document(&jobs), None);
+        let mut answers = saves.take_answers();
+        assert_eq!(
+            buffer.hear_save_answer(answers.remove(0), &mut saves),
+            Some(SaveOutcome::Saved)
+        );
+        assert!(!buffer.dirty, "not dirty for good");
+        assert!(
+            buffer.is_behind_the_disk(),
+            "the file the save wrote is owed"
+        );
+        let Some(PreviewWant::Whole(base)) = buffer.claim_head_read() else {
+            panic!("a body read is asked");
+        };
+        assert_eq!(buffer.land_read(read_whole(&path), base), ReadLanded::Took);
+        assert_eq!(buffer.content, sent);
+        assert!(!buffer.dirty);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
