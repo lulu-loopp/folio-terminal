@@ -4233,7 +4233,7 @@ impl GitWorker {
             bt_platform::ThreadPriority::BelowNormal,
             move |ctx| {
                 run_git_worker(request_rx, |request| {
-                    turns.read(ctx, request.question.folder(), || {
+                    turns.question_turn(ctx, request.question.folder(), || {
                         let answer = ask_git(ctx, &request.question);
                         if response_tx
                             .send(GitResponse {

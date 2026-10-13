@@ -223,10 +223,15 @@ impl RepoTurns {
     }
 
     /// **The read worker's turn on `folder`** (`worker`, the capability the thread door lent it):
-    /// waits while the folder's share owes a mutation, then runs `read` — the question and the
+    /// waits while the folder's share owes a mutation, then runs `question` — the question and the
     /// sending of its answer — with the folder marked as being read, so no mutation of it starts
-    /// until `read` is over.
-    pub(crate) fn read<T>(&self, worker: &WorkerCtx, folder: &Path, read: impl FnOnce() -> T) -> T {
+    /// until `question` is over.
+    pub(crate) fn question_turn<T>(
+        &self,
+        worker: &WorkerCtx,
+        folder: &Path,
+        question: impl FnOnce() -> T,
+    ) -> T {
         let _ = worker;
         {
             let mut state = locked(&self.state);
@@ -250,13 +255,13 @@ impl RepoTurns {
             turns: self,
             folder,
         };
-        read()
+        question()
     }
 
     /// **A share worker's turn on `folder`**: waits while a read of the folder is running, then
-    /// runs `mutate`. No read of the folder starts meanwhile: the request running is owed until its
+    /// runs `verb`. No read of the folder starts meanwhile: the request running is owed until its
     /// terminal is published.
-    fn mutate<T>(&self, worker: &WorkerCtx, folder: &Path, mutate: impl FnOnce() -> T) -> T {
+    fn verb_turn<T>(&self, worker: &WorkerCtx, folder: &Path, verb: impl FnOnce() -> T) -> T {
         let _ = worker;
         {
             let mut state = locked(&self.state);
@@ -267,7 +272,7 @@ impl RepoTurns {
                     .unwrap_or_else(PoisonError::into_inner);
             }
         }
-        mutate()
+        verb()
     }
 
     /// `root`'s share is `ledger` from now on.
@@ -490,7 +495,10 @@ impl GitMutationLane {
                         queue.serve(
                             ctx,
                             |ctx, question| {
-                                Ok(turns.mutate(ctx, question.folder(), || door(ctx, &question)))
+                                Ok(
+                                    turns
+                                        .verb_turn(ctx, question.folder(), || door(ctx, &question)),
+                                )
                             },
                             &*wake,
                         );
@@ -1009,7 +1017,7 @@ mod tests {
             "git-mutation-lane-test-read",
             bt_platform::ThreadPriority::Normal,
             move |ctx| {
-                turns.read(ctx, &folder, || locked(&log).push("read".to_owned()));
+                turns.question_turn(ctx, &folder, || locked(&log).push("read".to_owned()));
                 let _ = done.send(());
             },
         )
@@ -1128,7 +1136,7 @@ mod tests {
     /// is asked meanwhile. The read is seen waiting, and runs only after the checkout has ended: a
     /// status read in the middle of a checkout would describe neither branch.
     ///
-    /// MUTATION: have `RepoTurns::read` not wait (drop its `while state.owes(folder)` loop) — the
+    /// MUTATION: have `RepoTurns::question_turn` not wait (drop its `while state.owes(folder)` loop) — the
     /// read runs while the checkout stands.
     #[test]
     fn a_read_of_a_repository_waits_behind_its_in_flight_mutation() {

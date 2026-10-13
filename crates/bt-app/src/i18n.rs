@@ -6570,6 +6570,14 @@ impl Text {
         (Self::MergeNotApplied, HostPlatform::MacOs),
         (Self::MergeClauseSeparator, HostPlatform::Windows),
         (Self::MergeClauseSeparator, HostPlatform::MacOs),
+        // zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER — a Git page's write or checkout Folio
+        // did not run: the repository's lane full, its worker gone, or the work failed.
+        (Self::GitNotRunFull, HostPlatform::Windows),
+        (Self::GitNotRunFull, HostPlatform::MacOs),
+        (Self::GitNotRunWorkerGone, HostPlatform::Windows),
+        (Self::GitNotRunWorkerGone, HostPlatform::MacOs),
+        (Self::GitNotRunFailed, HostPlatform::Windows),
+        (Self::GitNotRunFailed, HostPlatform::MacOs),
     ];
 }
 
