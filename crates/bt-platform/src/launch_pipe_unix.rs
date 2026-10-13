@@ -40,18 +40,24 @@
 //! on this platform both ends can ask:
 //!
 //! * **The server** takes the peer's credentials off the connected socket —
-//!   [`crate::peer::credentials`], which is the uid and the pid this kernel
-//!   recorded when that peer connected — and refuses a peer whose uid is not its
-//!   own or whose executable is not a Folio: an image whose file name is not
-//!   this executable's ([`vet_executable`]). A pid out of a frame would be a
-//!   number the peer chose; these come from the kernel. (The two calls that
-//!   answer it are not the same two on the two Unixes this workspace compiles,
-//!   which is what that module is for.)
+//!   [`crate::peer::credentials`], the uid and the pid the kernel names for
+//!   that peer — and refuses a peer whose uid is not its own or whose
+//!   executable is not a Folio: an image whose file name is not this
+//!   executable's ([`vet_executable`]). A pid out of a frame would be a number
+//!   the peer chose; these come from the kernel. (The two calls that answer it
+//!   are not the same two on the two Unixes this workspace compiles, which is
+//!   what that module is for.) **A peer it refuses keeps its connection until
+//!   its own first move**, because the client is asking the same question at
+//!   the same moment and Darwin answers the pid only while the connection
+//!   stands.
 //! * **The client** reads the endpoint's own file before it connects — a
 //!   socket, not a link, owned by this user, mode `0600` — and then asks the
-//!   same two questions of the connected peer, before a byte of the command
-//!   line is written. A folder somebody is standing in is not told to a process
-//!   that is not this program.
+//!   same two questions of the connected peer the moment it has connected,
+//!   before a byte of the command line is written
+//!   (`crate::launch_conversation`, the order both arms speak). A folder
+//!   somebody is standing in is not told to a process that is not this
+//!   program, and a server that refuses this client is heard as a refusal
+//!   rather than as a connection that went away.
 //!
 //! **The stale endpoint is not this module's to clean up.** A socket file
 //! outlives the process that bound it, so the file being there means nothing;
@@ -339,7 +345,7 @@ fn listen<T>(
 /// the decision is dropped un-committed, and the client's own fallback — a
 /// window of its own — is the report.
 fn serve<T>(
-    mut stream: UnixStream,
+    stream: UnixStream,
     decide: &(impl Fn(&str) -> Option<Decision<T>> + ?Sized),
     commit: &(impl Fn(T) + ?Sized),
 ) {
@@ -348,12 +354,31 @@ fn serve<T>(
     {
         return;
     }
+    answer(Served(stream), decide, commit);
+}
+
+/// **The server's half of one conversation, on a connection it has accepted** —
+/// [`serve`]'s body over any [`Accepted`], so that its order is the thing a
+/// test can watch; the connection is closed when this returns, on every path.
+fn answer<T>(
+    mut connection: impl Accepted,
+    decide: &(impl Fn(&str) -> Option<Decision<T>> + ?Sized),
+    commit: &(impl Fn(T) + ?Sized),
+) {
     // **Step 1 from this side.** A peer that is not this user, or not this
-    // program, is not read from and not answered.
-    if vetted_peer(&stream).is_err() {
+    // program, is not listened to and not answered — **and its end is not
+    // closed before its own first move**. The client asks the same question
+    // of this end the moment it has connected, and on Darwin the kernel
+    // answers the process id half of it only while the connection stands
+    // (`crate::peer`), so a refusal that closed at once could reach the client
+    // as `NotConnected` instead of as its own refusal. The client moves —
+    // writes, or hangs up — only after it has its answer, so the close waits
+    // on that and on [`STEP_DEADLINE`], whichever comes first.
+    if connection.vetted_peer().is_err() {
+        connection.outwait_first_move();
         return;
     }
-    let Ok(frame) = read_frame(&mut stream) else {
+    let Ok(frame) = connection.hear() else {
         return;
     };
     let line = String::from_utf8_lossy(&frame).into_owned();
@@ -364,7 +389,7 @@ fn serve<T>(
     let Some(decision) = decide(&line) else {
         return;
     };
-    if write_frame(&mut stream, decision.reply.as_bytes()).is_err() {
+    if connection.say(decision.reply.as_bytes()).is_err() {
         // A write that did not land is a client that has already given up and
         // gone. Returning here drops `decision` — and with it whatever
         // reservation the decision was holding.
@@ -374,7 +399,7 @@ fn serve<T>(
     // a close, a timeout or anything that is not [`CONFIRM`] leaves the launch
     // un-committed, because in every one of those cases the client is about to
     // open a window of its own.
-    let Ok(confirmation) = read_frame(&mut stream) else {
+    let Ok(confirmation) = connection.hear() else {
         return;
     };
     if String::from_utf8_lossy(&confirmation).trim() != CONFIRM {
@@ -385,6 +410,43 @@ fn serve<T>(
         return;
     };
     commit(admitted);
+}
+
+/// **The server's end of one accepted connection**: the three things the client's
+/// end does ([`crate::launch_conversation::Connection`]), and one more.
+trait Accepted: crate::launch_conversation::Connection {
+    /// Wait for the peer's first move — a byte, or its hang-up — and no longer
+    /// than [`STEP_DEADLINE`]. What it wrote is not read as anything.
+    fn outwait_first_move(&mut self);
+}
+
+/// **An accepted socket**, its every step bounded by [`STEP_DEADLINE`] (set by
+/// [`serve`] before this is made).
+struct Served(UnixStream);
+
+impl crate::launch_conversation::Connection for Served {
+    fn vetted_peer(&mut self) -> io::Result<u32> {
+        vetted_peer(&self.0)
+    }
+
+    fn say(&mut self, frame: &[u8]) -> io::Result<()> {
+        write_frame(&self.0, frame)
+    }
+
+    fn hear(&mut self) -> io::Result<Vec<u8>> {
+        read_frame(&self.0)
+    }
+}
+
+impl Accepted for Served {
+    fn outwait_first_move(&mut self) {
+        let mut byte = [0u8; 1];
+        while let Err(error) = (&self.0).read(&mut byte) {
+            if error.kind() != io::ErrorKind::Interrupted {
+                break;
+            }
+        }
+    }
 }
 
 /// **A second launch's whole conversation with the Folio that is already
@@ -428,22 +490,36 @@ pub fn hand_over(
     // there; the checks below are what make "nobody but this user could have
     // put this here" true before that happens.
     vetted_endpoint(path)?;
-    let mut stream = UnixStream::connect(path)?;
-    // **Step 1: who answered?** Before a byte of the command line is written —
-    // the request names a folder somebody is standing in.
-    let server = vetted_peer(&stream)?;
-    let left = remaining(began);
-    stream.set_read_timeout(Some(left))?;
-    stream.set_write_timeout(Some(left))?;
-    write_frame(&mut stream, request.as_bytes()).map_err(ran_out)?;
-    let reply = read_frame(&mut stream).map_err(ran_out)?;
-    on_reply(server, &String::from_utf8_lossy(&reply));
-    // **Step 4's second half, and the server's commit point.** The last
-    // statement of the conversation, written out rather than left implicit so
-    // that the order of these lines is the order of the protocol.
-    write_frame(&mut stream, CONFIRM.as_bytes()).map_err(ran_out)?;
-    drop(stream);
-    Ok(())
+    let stream = UnixStream::connect(path)?;
+    // **The conversation is the one both arms speak**
+    // (`crate::launch_conversation`): who answered is asked the moment the
+    // connection stands and before a byte of the command line is written — the
+    // request names a folder somebody is standing in — and [`CONFIRM`] goes
+    // last.
+    crate::launch_conversation::hand_over_on(Client { stream, began }, request, on_reply)
+}
+
+/// **The client's end of one connected socket**, every step bounded by what is
+/// left of the budget the handover began with.
+struct Client {
+    stream: UnixStream,
+    began: Instant,
+}
+
+impl crate::launch_conversation::Connection for Client {
+    fn vetted_peer(&mut self) -> io::Result<u32> {
+        vetted_peer(&self.stream)
+    }
+
+    fn say(&mut self, frame: &[u8]) -> io::Result<()> {
+        self.stream.set_write_timeout(Some(remaining(self.began)))?;
+        write_frame(&self.stream, frame).map_err(ran_out)
+    }
+
+    fn hear(&mut self) -> io::Result<Vec<u8>> {
+        self.stream.set_read_timeout(Some(remaining(self.began)))?;
+        read_frame(&self.stream).map_err(ran_out)
+    }
 }
 
 /// Whatever is left of the budget, and never zero.
@@ -624,7 +700,7 @@ fn self_pipe() -> io::Result<(RawFd, RawFd)> {
 /// **One frame out**, length first and bounded on the way out as well as on the
 /// way in — `crate::attention_pipe`'s own rule: this end has no reason to trust
 /// that the far end applied the bound, and neither has that one.
-fn write_frame(stream: &mut UnixStream, payload: &[u8]) -> io::Result<()> {
+fn write_frame(mut stream: &UnixStream, payload: &[u8]) -> io::Result<()> {
     if payload.len() > MAX_FRAME_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -648,7 +724,7 @@ fn write_frame(stream: &mut UnixStream, payload: &[u8]) -> io::Result<()> {
 /// prefix, and a parser given a prefix of a JSON object is a parser that
 /// answers the wrong question rather than no question. That is what
 /// `PIPE_READMODE_MESSAGE` was buying on the other platform.
-fn read_frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
+fn read_frame(mut stream: &UnixStream) -> io::Result<Vec<u8>> {
     let mut header = [0u8; 4];
     stream.read_exact(&mut header)?;
     let length = u32::from_be_bytes(header) as usize;
@@ -675,6 +751,135 @@ mod tests {
         let directory = bt_testpath::temp_path(&format!("bt-platform-launch-{line}"));
         std::fs::create_dir_all(&directory).expect("make the data directory");
         directory
+    }
+
+    /// What one recorded server conversation did, in the order it did it.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum Step {
+        AskedWhoConnected,
+        OutwaitedFirstMove,
+        Heard,
+        Said(String),
+        Closed,
+    }
+
+    /// **An accepted connection that writes down what is done to it** — a
+    /// client whose kernel answer is given, whose frames are `frames` in order,
+    /// and whose close is the moment it is dropped.
+    struct Recording {
+        steps: std::rc::Rc<std::cell::RefCell<Vec<Step>>>,
+        folio: bool,
+        frames: std::collections::VecDeque<&'static str>,
+    }
+
+    impl crate::launch_conversation::Connection for Recording {
+        fn vetted_peer(&mut self) -> io::Result<u32> {
+            self.steps.borrow_mut().push(Step::AskedWhoConnected);
+            if self.folio {
+                Ok(4242)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "the launch endpoint is held by 另一个程序, which is not a Folio",
+                ))
+            }
+        }
+
+        fn say(&mut self, frame: &[u8]) -> io::Result<()> {
+            self.steps
+                .borrow_mut()
+                .push(Step::Said(String::from_utf8_lossy(frame).into_owned()));
+            Ok(())
+        }
+
+        fn hear(&mut self) -> io::Result<Vec<u8>> {
+            self.steps.borrow_mut().push(Step::Heard);
+            self.frames
+                .pop_front()
+                .map(|frame| frame.as_bytes().to_vec())
+                .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))
+        }
+    }
+
+    impl Accepted for Recording {
+        fn outwait_first_move(&mut self) {
+            self.steps.borrow_mut().push(Step::OutwaitedFirstMove);
+        }
+    }
+
+    impl Drop for Recording {
+        fn drop(&mut self) {
+            self.steps.borrow_mut().push(Step::Closed);
+        }
+    }
+
+    /// One server conversation with a client that is (`folio`) or is not a
+    /// Folio and says the request and the confirmation: what it did, and what
+    /// it committed.
+    fn answered(folio: bool) -> (Vec<Step>, Vec<String>) {
+        let steps = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let committed = std::cell::RefCell::new(Vec::new());
+        answer(
+            Recording {
+                steps: std::rc::Rc::clone(&steps),
+                folio,
+                frames: ["打开 folder", CONFIRM].into(),
+            },
+            &|line: &str| {
+                Some(Decision {
+                    reply: format!("answer to {line}"),
+                    admitted: Some(line.to_owned()),
+                })
+            },
+            &|admitted: String| committed.borrow_mut().push(admitted),
+        );
+        let steps = steps.borrow().clone();
+        (steps, committed.into_inner())
+    }
+
+    /// **RED (T-LAUNCH-WIRE-PEER-READ) — the server asks who connected before
+    /// it hears a word, and a peer it refuses keeps its connection until its own
+    /// first move.**
+    ///
+    /// The client asks the same question of this end at the same moment
+    /// (`crate::launch_conversation`), and Darwin answers the pid half of it
+    /// only while the connection stands (`crate::peer`); a refusal that closed
+    /// at once could beat that question and reach the client as `NotConnected`
+    /// rather than as its own refusal. Through a recording connection, so the
+    /// order is what is asked on every kernel — Linux keeps the pid after a
+    /// close and would never show the race on a real socket.
+    ///
+    /// MUTATION: return on a refused peer without `outwait_first_move` — the
+    /// first conversation closes straight after the question; or move
+    /// `vetted_peer` after the first `hear` — the first conversation hears the
+    /// request of a peer it refuses, the second asks after a word.
+    #[test]
+    fn the_peer_is_read_before_any_word_is_exchanged() {
+        let (steps, committed) = answered(false);
+        assert_eq!(
+            steps,
+            vec![
+                Step::AskedWhoConnected,
+                Step::OutwaitedFirstMove,
+                Step::Closed
+            ],
+            "a refused peer is asked, not listened to, and its end is closed only after its              first move"
+        );
+        assert!(committed.is_empty(), "and nothing is committed for it");
+
+        let (steps, committed) = answered(true);
+        assert_eq!(
+            steps,
+            vec![
+                Step::AskedWhoConnected,
+                Step::Heard,
+                Step::Said("answer to 打开 folder".to_owned()),
+                Step::Heard,
+                Step::Closed,
+            ],
+            "a Folio's request is heard only after it has been asked who it is"
+        );
+        assert_eq!(committed, vec!["打开 folder".to_owned()]);
     }
 
     /// **RED — one request crosses, and it is answered.**
@@ -848,9 +1053,9 @@ mod tests {
         )
         .expect("open the launch endpoint");
         {
-            let mut stream = UnixStream::connect(endpoint.name()).expect("connect to the endpoint");
-            write_frame(&mut stream, b"one request").expect("write the request");
-            let reply = read_frame(&mut stream).expect("read the reply");
+            let stream = UnixStream::connect(endpoint.name()).expect("connect to the endpoint");
+            write_frame(&stream, b"one request").expect("write the request");
+            let reply = read_frame(&stream).expect("read the reply");
             assert_eq!(reply, b"answer to one request");
             // And now this client goes away without a word, which is every
             // client that lost the reply, crashed, or was killed between the

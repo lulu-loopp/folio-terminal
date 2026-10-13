@@ -710,23 +710,44 @@ pub fn hand_over(
             Err(error) => return Err(error),
         }
     };
-    // **Step 1: who answered?** Before a byte of the command line is written — the request names a
+    // **The conversation is the one both arms speak** (`crate::launch_conversation`): who answered
+    // is asked of the kernel before a byte of the command line is written — the request names a
     // folder somebody is standing in, and a process that is not this program has no business being
-    // told it.
-    let server = vetted_server(handle.0)?;
-    write_bounded(handle.0, request.as_bytes())?;
-    let mut buffer = vec![0u8; MAX_FRAME_BYTES];
-    let left = HANDOVER_BUDGET.saturating_sub(began.elapsed());
-    let read = read_reply(handle.0, &mut buffer, left)?;
-    on_reply(server, &String::from_utf8_lossy(&buffer[..read]));
-    // **Step 4's second half, and the server's commit point.** Written out rather than left
-    // implicit so that the order of the last statements is the order of the protocol: the
-    // foreground has been granted above, and only now is the server told it may act. A failure
-    // here is a handover that did not happen — the server parks nothing — so it is reported, and
+    // told it — and [`CONFIRM`] goes last, after `on_reply` has granted the foreground. A failure
+    // there is a handover that did not happen — the server parks nothing — so it is reported, and
     // the caller opens its own window.
-    write_bounded(handle.0, CONFIRM.as_bytes())?;
-    drop(handle);
-    Ok(())
+    crate::launch_conversation::hand_over_on(
+        Client {
+            pipe: handle,
+            began,
+        },
+        request,
+        on_reply,
+    )
+}
+
+/// **The client's end of one connected pipe**, under the budget the handover began with.
+struct Client {
+    pipe: OwnedHandle,
+    began: Instant,
+}
+
+impl crate::launch_conversation::Connection for Client {
+    fn vetted_peer(&mut self) -> io::Result<u32> {
+        vetted_server(self.pipe.0)
+    }
+
+    fn say(&mut self, frame: &[u8]) -> io::Result<()> {
+        write_bounded(self.pipe.0, frame)
+    }
+
+    fn hear(&mut self) -> io::Result<Vec<u8>> {
+        let mut buffer = vec![0u8; MAX_FRAME_BYTES];
+        let left = HANDOVER_BUDGET.saturating_sub(self.began.elapsed());
+        let read = read_reply(self.pipe.0, &mut buffer, left)?;
+        buffer.truncate(read);
+        Ok(buffer)
+    }
 }
 
 /// **The process at the other end of this pipe, if it is this program.**
@@ -748,16 +769,22 @@ fn vetted_server(pipe: HANDLE) -> io::Result<u32> {
             "the launch endpoint named a process id that is not a process",
         ));
     }
-    let mine = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.file_name().map(std::ffi::OsStr::to_ascii_lowercase));
-    let theirs = crate::process_image_path(pid)
-        .and_then(|exe| exe.file_name().map(std::ffi::OsStr::to_ascii_lowercase));
-    match (mine, theirs) {
+    let Some(theirs) = crate::process_image_path(pid) else {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the other end of the launch endpoint has an image this process cannot read",
+        ));
+    };
+    let named = |exe: &Path| exe.file_name().map(std::ffi::OsStr::to_ascii_lowercase);
+    let mine = std::env::current_exe().ok();
+    match (mine.as_deref().and_then(named), named(&theirs)) {
         (Some(mine), Some(theirs)) if mine == theirs => Ok(pid),
         _ => Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "the launch endpoint is held by a process that is not this program",
+            format!(
+                "the launch endpoint is held by {}, which is not a Folio",
+                theirs.display()
+            ),
         )),
     }
 }
