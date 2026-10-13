@@ -5986,7 +5986,11 @@ impl PreviewBuffer {
     /// what it was: unlike the conflict an interactive save answers, which the
     /// pane says to the person and a second press answers, nobody here has seen
     /// the other writer's bytes, and a stop that cannot ask must not write over
-    /// them on the strength of a quit's attempt. A save already on the worker
+    /// them on the strength of a quit's attempt — so the next press meets them
+    /// and says the conflict once more, and the press after that writes. A
+    /// conflict the pane has said and no press has answered is a conflict here
+    /// too, whatever the precondition would say (the coordinator's ruling: a
+    /// stop never writes over bytes the person has not acted on). A save already on the worker
     /// is not written over: the buffer answers [`SaveOutcome::Failed`], and the
     /// quit that asked stays (S-6a's choice (b); S-6c's `Documents` phase waits
     /// for the answer instead).
@@ -13823,6 +13827,13 @@ mod tests {
     /// body revision as the asker. Served on a thread the thread door started —
     /// a worker — the file lands, and the answer heard by the buffer cleans it.
     ///
+    /// What proves the window thread wrote nothing is the file, unchanged when
+    /// the press returns (the mutation below turns that red), and the worker's
+    /// write itself, which needs a `WorkerCtx` (`conditional_write` takes one,
+    /// and only the thread door lends it). The role asserted after the write is
+    /// the helper's thread's, true by construction: it says where the test ran
+    /// the worker's step, not that the product did.
+    ///
     /// MUTATION: write the file on the calling thread in `request_save`
     /// (`bt_persist::atomic_replace_keeping_metadata(&path, &bytes)` before the
     /// hand-over) — the file is changed before any worker serves the request.
@@ -14828,7 +14839,9 @@ mod tests {
     ///
     /// Red gate: write the quit's save with `bt_persist::atomic_write` in
     /// `write_now_for_quit`, and on Windows the stream is gone after the second
-    /// save.
+    /// save. **The red is Windows-only**: on APFS the name is a sibling file,
+    /// which no writer touches, so this test holds there under the mutation
+    /// too — macOS's carried metadata is pinned by the writers' own suites.
     #[test]
     fn a_save_keeps_what_the_file_carried() {
         let dir = scratch("carried");

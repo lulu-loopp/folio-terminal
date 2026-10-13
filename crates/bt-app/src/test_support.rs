@@ -2102,7 +2102,9 @@ pub(crate) fn save_through(
 /// storage worker's own step (`document_request::serve_document_between`) —
 /// with `crossing` written into the file between the precondition read and the
 /// exchange: a writer that crosses the save. Answers the role of the thread the
-/// write ran on. Waits within the suite's patience.
+/// write ran on — this helper's own thread, a worker by construction, so the
+/// answer says where the test ran the step and proves nothing about the
+/// product's thread. Waits within the suite's patience.
 pub(crate) fn serve_on_a_worker(
     job: document_request::DocumentJob,
     crossing: Option<Vec<u8>>,
