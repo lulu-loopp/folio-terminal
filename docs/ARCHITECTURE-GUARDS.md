@@ -132,8 +132,11 @@ in silence: on the mappings the steps hang from (top level, `jobs`, a job,
 the workflow's and a job's `defaults`/`defaults.run`, `runs`) a value that is
 no block mapping (an anchored or tagged job body `build: &b`, an alias, a
 flow value), a `steps:` that is no block sequence (`[ … ]`, `*list`), a merge
-key (`<<:`); a step that is no block mapping (`- *step`, `- { run: … }`,
-`- &a run: …`); and a `run:` that is no step's — only `defaults.run`, a job's
+key (`<<:`); a line in one of those mappings or in a step where a node
+starts that is no key (`- *step`, `- { run: … }`, `- &a run: …` even with
+the step's other keys after it, `&b run: …`, `!!str run: …`, `? run`,
+`&k build:` under `jobs:` — never skipped with its body unrecorded); a step
+that holds nothing (a bare `-`); and a `run:` that is no step's — only `defaults.run`, a job's
 `defaults.run` and anything under a step's `with:` stay silent, so a misread
 path (a byte-order mark before `jobs:`) is a diagnostic too. An anchored or
 aliased job, step or `run:` value is never read through.
@@ -159,7 +162,7 @@ workflow that has one is refused all the same; a workflow's reader hits and
 the path shapes of its reader units are cleared by file, as a script's are.
 The split is deliberate: a listed file is a declared reader of sources, so an
 interpolated or unreadable `.rs` path in it (`InterpolatedShellPath`,
-`UnreadableShellPath`) is part of what its list vouches for, while an
+`UnreadableShellPath`, `ShellPathInAHereString`) is part of what its list vouches for, while an
 undecided shell, an unreadable `run:` value or an unread workflow shape hides
 what the file reads at all, which no list can vouch for.
 A line that only looks like a here-string or heredoc opener

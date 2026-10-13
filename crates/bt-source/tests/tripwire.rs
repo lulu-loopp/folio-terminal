@@ -198,8 +198,12 @@
 //!   job, `runs`), a value that is no block mapping (an anchor or tag before
 //!   a job's body, `build: &b`; an alias; a flow value), a `steps:` that is no
 //!   block sequence (`steps: [ … ]`, `steps: *list`), and a merge key
-//!   (`<<: *defaults`); a step that is no block mapping (`- *step`,
-//!   `- { run: … }`, `- &a run: …`); and a `run:` that is no step's. The
+//!   (`<<: *defaults`); a line in one of those mappings or in a step where a
+//!   node starts that is no key — `- *step`, `- { run: … }`, `- &a run: …`
+//!   (even with the step's other keys after it), `&b run: …`,
+//!   `!!str run: …`, `? run`, `&k build:` under `jobs:` — which is never
+//!   skipped with its body unrecorded; a step that holds nothing (a bare
+//!   `-`); and a `run:` that is no step's. The
 //!   places a `run:` is known to be no step's stay silent: `defaults.run`, a
 //!   job's `defaults.run`, and anything under a step's `with:`. A `run:` on a
 //!   path the scan misreads (a byte-order mark before `jobs:`) is so a `run:`
@@ -240,7 +244,8 @@
 //! that has one is refused all the same; the shape is rewritten. The split is
 //! deliberate: a listed file is a declared reader of sources, so an
 //! interpolated or unreadable `.rs` path inside it (`InterpolatedShellPath`,
-//! `UnreadableShellPath`, in a script or a workflow's reader step) is part of
+//! `UnreadableShellPath`, `ShellPathInAHereString`, in a script or a
+//! workflow's reader step) is part of
 //! what its list vouches for and is cleared with it, while a workflow shape
 //! the scan cannot read hides what the file reads at all, which no list can
 //! vouch for.
@@ -1505,7 +1510,7 @@ const NOT_PLAIN: [char; 15] = [
 /// job's `runs-on` ([`runner_languages`]); a composite action's step has
 /// only its own.
 fn run_units<'f>(file: &'f str, text: &str, source: Source) -> (Vec<Unit<'f>>, Vec<Hit>) {
-    let (keys, items) = yaml_keys(text);
+    let (keys, items, unread) = yaml_keys(text);
     let at =
         |path: &[Segment], name: &str| keys.iter().find(|key| key.path == path && key.name == name);
     let key = |name: &str| Segment::Key(name.to_owned());
@@ -1516,7 +1521,7 @@ fn run_units<'f>(file: &'f str, text: &str, source: Source) -> (Vec<Unit<'f>>, V
         subject,
     };
     let mut units = Vec::new();
-    let mut diagnostics = shape_diagnostics(source, &keys, &items)
+    let mut diagnostics = shape_diagnostics(source, &keys, &items, &unread)
         .into_iter()
         .map(|(line, subject)| diagnose(line, Kind::UnreadableWorkflowShape, subject))
         .collect::<Vec<_>>();
@@ -1666,9 +1671,16 @@ fn holds_the_steps(source: Source, path: &[Segment]) -> bool {
 /// its line and what it spells: a key of a mapping the steps hang from
 /// ([`holds_the_steps`]) whose value is no block mapping or sequence — an
 /// anchor or tag before its body (`build: &b`), an alias, a flow value — a
-/// merge key (`<<:`) in one of those mappings, and a step that is no block
-/// mapping (`- *step`, `- { run: … }`, `- &a run: …`).
-fn shape_diagnostics(source: Source, keys: &[YamlKey], items: &[YamlItem]) -> Vec<(usize, String)> {
+/// merge key (`<<:`) in one of those mappings, a line in one of them or in
+/// a step that is no key (`- *step`, `- { run: … }`, `- &a run: …`,
+/// `&b run: …`, `!!str run: …`, `? run`, `&k build:` under `jobs:`), and a
+/// step that holds nothing (a bare `-`).
+fn shape_diagnostics(
+    source: Source,
+    keys: &[YamlKey],
+    items: &[YamlItem],
+    unread: &[YamlLine],
+) -> Vec<(usize, String)> {
     let mut found = Vec::new();
     for key in keys {
         let mut path = key.path.clone();
@@ -1688,12 +1700,26 @@ fn shape_diagnostics(source: Source, keys: &[YamlKey], items: &[YamlItem]) -> Ve
             found.push((key.line, format!("steps: {}", key.written)));
         }
     }
-    let mapped: BTreeSet<&[Segment]> = keys.iter().map(|key| key.path.as_slice()).collect();
+    for line in unread {
+        if holds_the_steps(source, &line.path) {
+            found.push((
+                line.line,
+                format!("a line that is no key: {}", line.written),
+            ));
+        }
+    }
+    let mapped: BTreeSet<&[Segment]> = keys
+        .iter()
+        .map(|key| key.path.as_slice())
+        .chain(unread.iter().map(|line| line.path.as_slice()))
+        .collect();
     for item in items {
         if step_at(source, &item.path).is_some() && !mapped.contains(item.path.as_slice()) {
             found.push((
                 item.line,
-                format!("a step that is no mapping: - {}", item.written),
+                format!("a step that holds nothing: - {}", item.written)
+                    .trim_end()
+                    .to_owned(),
             ));
         }
     }
@@ -1785,6 +1811,16 @@ struct YamlItem {
     written: String,
 }
 
+/// A line where a node starts that is neither a key nor a sequence item's
+/// `- ` (`&a run: …`, `!!str run: …`, `? run`, a scalar item's value): its
+/// place, as a key there would have it, and its text. What is indented under
+/// it is its own.
+struct YamlLine {
+    path: Vec<Segment>,
+    line: usize,
+    written: String,
+}
+
 /// What a key holds.
 enum YamlValue {
     /// Nothing, on its line or nested below it.
@@ -1811,8 +1847,10 @@ enum YamlValue {
 /// content, not keys; a line that is neither an item nor a key (a scalar
 /// item, a document marker) holds no key, and the lines more indented than
 /// it are its own. Blank lines and comment lines are skipped. The sequence
-/// items come back beside the keys, each with its place.
-fn yaml_keys(text: &str) -> (Vec<YamlKey>, Vec<YamlItem>) {
+/// items come back beside the keys, each with its place, and so does every
+/// line where a node starts that is neither ([`YamlLine`]): nothing is
+/// skipped without a record.
+fn yaml_keys(text: &str) -> (Vec<YamlKey>, Vec<YamlItem>, Vec<YamlLine>) {
     let lines: Vec<&str> = text.lines().collect();
     let indent = |line: &str| line.len() - line.trim_start_matches(' ').len();
     let blank = |line: &str| line.trim().is_empty();
@@ -1827,6 +1865,7 @@ fn yaml_keys(text: &str) -> (Vec<YamlKey>, Vec<YamlItem>) {
     };
     let mut keys = Vec::new();
     let mut items = Vec::new();
+    let mut unread = Vec::new();
     let mut stack: Vec<(usize, Segment)> = Vec::new();
     let mut at = 0usize;
     while at < lines.len() {
@@ -1859,13 +1898,18 @@ fn yaml_keys(text: &str) -> (Vec<YamlKey>, Vec<YamlItem>) {
             at = next;
             continue;
         }
-        let Some((name, written)) = mapping_entry(rest) else {
-            at = end_of(next, column);
-            continue;
-        };
         while stack.last().is_some_and(|(open, _)| *open >= column) {
             stack.pop();
         }
+        let Some((name, written)) = mapping_entry(rest) else {
+            unread.push(YamlLine {
+                path: stack.iter().map(|(_, segment)| segment.clone()).collect(),
+                line: next,
+                written: line.trim().to_owned(),
+            });
+            at = end_of(next, column);
+            continue;
+        };
         let path = stack.iter().map(|(_, segment)| segment.clone()).collect();
         let written = without_comment(written).trim_end();
         let end = end_of(next, column);
@@ -1925,21 +1969,21 @@ fn yaml_keys(text: &str) -> (Vec<YamlKey>, Vec<YamlItem>) {
             value,
         });
     }
-    (keys, items)
+    (keys, items, unread)
 }
 
 /// The mapping entry a line's text starts, if it starts one: its key —
 /// plain, or in one pair of quotes — and what follows the `:`, blanks taken
 /// off its front. A plain key ends at the first `:` that a blank or the end
 /// of the line follows, before any comment, and does not start with a YAML
-/// indicator.
+/// indicator or with the `:` of a complex key's value (an empty key).
 fn mapping_entry(rest: &str) -> Option<(String, &str)> {
     let (key, after) = match rest.chars().next()? {
         quote @ ('"' | '\'') => {
             let close = rest[1..].find(quote)? + 1;
             (&rest[1..close], rest[close + 1..].trim_start_matches(' '))
         }
-        first if NOT_PLAIN.contains(&first) || matches!(first, '#' | '?') => return None,
+        first if NOT_PLAIN.contains(&first) || matches!(first, '#' | '?' | ':') => return None,
         _ => {
             let code = without_comment(rest);
             let colon = code
@@ -3508,7 +3552,7 @@ fn a_listed_reader_clears_its_path_shapes_and_not_its_workflow_diagnostics() {
 /// mark. No list clears it.
 ///
 /// MUTATION: `shape_diagnostics` without its merge-key arm loses line 4;
-/// without its arm for a step that is no mapping, lines 6–8; without its arm
+/// without its arm for a line that is no key, lines 6–8; without its arm
 /// for a mapping the steps hang from, line 12; without its `steps:` arm,
 /// lines 18 and 20; `run_units` without its no-step arm (`if !silent` made
 /// `if false`) loses line 23 and the byte-order-marked file's line 5. Each
@@ -3549,15 +3593,15 @@ fn a_yaml_shape_above_the_run_steps_is_a_diagnostic() {
         script_findings(PLANTED_WORKFLOW, &workflow),
         vec![
             shape(4, "a merge key: <<: *common"),
-            shape(6, "a step that is no mapping: - *step"),
+            shape(6, "a line that is no key: - *step"),
             shape(
                 7,
-                "a step that is no mapping: - { run: \"Get-Content 'crates/x/src/lib.rs'\", \
+                "a line that is no key: - { run: \"Get-Content 'crates/x/src/lib.rs'\", \
                  shell: pwsh }",
             ),
             shape(
                 8,
-                "a step that is no mapping: - &a run: Get-Content 'crates/x/src/lib.rs'",
+                "a line that is no key: - &a run: Get-Content 'crates/x/src/lib.rs'",
             ),
             shape(12, "anchored: &b"),
             shape(18, "steps: [ { run: x } ]"),
@@ -3597,6 +3641,107 @@ fn a_yaml_shape_above_the_run_steps_is_a_diagnostic() {
             5,
             "a `run:` in no step: run: Get-Content 'crates/x/src/lib.rs'"
         )]
+    );
+}
+
+/// RED — **a line that is no key where the steps hang, or in a step, is a
+/// diagnostic and never skipped with its body**: an anchored `run:` entry
+/// that opens a step whose other keys follow, an anchored, tagged or complex
+/// `run:` entry after a step's first key, a merge key inside a step, an
+/// anchored job name under `jobs:`, a step that holds nothing; and `jobs:` or
+/// `defaults:` behind an anchor, which leaves the job's shell undecided.
+///
+/// MUTATION: `shape_diagnostics` without its arm for a line that is no key
+/// loses lines 5, 8, 10, 12, 13 and 18; without its merge-key arm, line 15;
+/// without its arm for a step that holds nothing, line 17; without its arm
+/// for a mapping the steps hang from, the anchored `jobs:` and `defaults:`.
+/// Each goes red.
+#[test]
+fn a_line_that_is_no_key_where_the_steps_hang_is_a_diagnostic() {
+    let workflow = yaml(&[
+        (0, "jobs:"),
+        (1, "one:"),
+        (2, "runs-on: ubuntu-latest"),
+        (2, "steps:"),
+        (3, "- &a run: cat 'crates/x/src/lib.rs'"),
+        (4, "shell: bash"),
+        (3, "- name: 名字"),
+        (4, "&b run: cat 'crates/y/src/lib.rs'"),
+        (3, "- name: tagged"),
+        (4, "!!str run: cat 'crates/z/src/lib.rs'"),
+        (3, "- name: complex"),
+        (4, "? run"),
+        (4, ": cat 'crates/w/src/lib.rs'"),
+        (3, "- name: merged"),
+        (4, "<<: *step"),
+        (4, "run: echo ok"),
+        (3, "-"),
+        (1, "&k build:"),
+        (2, "runs-on: ubuntu-latest"),
+        (2, "steps:"),
+        (3, "- run: cat 'crates/v/src/lib.rs'"),
+    ]);
+    let shape =
+        |line: usize, subject: &str| (line, Kind::UnreadableWorkflowShape, subject.to_owned());
+    assert_eq!(
+        script_findings(PLANTED_WORKFLOW, &workflow),
+        vec![
+            shape(
+                5,
+                "a line that is no key: - &a run: cat 'crates/x/src/lib.rs'"
+            ),
+            shape(
+                8,
+                "a line that is no key: &b run: cat 'crates/y/src/lib.rs'"
+            ),
+            shape(
+                10,
+                "a line that is no key: !!str run: cat 'crates/z/src/lib.rs'",
+            ),
+            shape(12, "a line that is no key: ? run"),
+            shape(13, "a line that is no key: : cat 'crates/w/src/lib.rs'"),
+            shape(15, "a merge key: <<: *step"),
+            shape(17, "a step that holds nothing: -"),
+            shape(18, "a line that is no key: &k build:"),
+        ]
+    );
+    let said = script_refusal(PLANTED_WORKFLOW, &workflow);
+    assert!(
+        said.contains(".github/workflows/planted.yml:5 has a shape above its `run:` steps")
+            && said.contains(MAPPINGS_TO_WRITE),
+        "the failure names the workflow's line and what to do: {said}"
+    );
+    let anchored_jobs = yaml(&[
+        (0, "jobs: &j"),
+        (1, "one:"),
+        (2, "runs-on: ubuntu-latest"),
+        (2, "steps:"),
+        (3, "- run: cat 'crates/x/src/lib.rs'  # 中文"),
+    ]);
+    assert_eq!(
+        script_findings(PLANTED_WORKFLOW, &anchored_jobs),
+        vec![shape(1, "jobs: &j")]
+    );
+    let anchored_defaults = yaml(&[
+        (0, "defaults: &d"),
+        (1, "run:"),
+        (2, "shell: bash"),
+        (0, "jobs:"),
+        (1, "one:"),
+        (2, "runs-on: self-hosted"),
+        (2, "steps:"),
+        (3, "- run: cat 'crates/x/src/lib.rs'  # 中文"),
+    ]);
+    assert_eq!(
+        script_findings(PLANTED_WORKFLOW, &anchored_defaults),
+        vec![
+            shape(1, "defaults: &d"),
+            (
+                8,
+                Kind::UndecidedWorkflowShell,
+                "no shell:, runs-on: self-hosted".to_owned()
+            ),
+        ]
     );
 }
 
