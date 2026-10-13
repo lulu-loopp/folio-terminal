@@ -3959,8 +3959,8 @@ impl Text {
             ),
             Self::PreviewSaveUnlanded => pick(
                 lang,
-                "a version you saved did not reach the disk",
-                "a version you saved did not reach the disk", // zh: pending S-6a
+                "a version you saved was not written to the disk",
+                "a version you saved was not written to the disk", // zh: pending S-6a
             ),
             Self::RecoveredEditKept => pick(
                 lang,
