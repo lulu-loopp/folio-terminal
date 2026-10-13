@@ -5521,12 +5521,17 @@ mod tests {
 
     /// PIN (kept, T-HEADLESS-RUNTIME-SEAM) — **the startup doors stand before the window, and the
     /// probe takes the quiet door with its own patience.** What is left of the startup pin after
-    /// its halves that run were converted: the order of the process entry (`main`) and of the
-    /// native window's construction (`Runtime::create`), which no test can run — the one builds
-    /// the process, the other the native window the headless backend stands in for — the startup's
-    /// call of the observation, and the probe's quiet door and patience, which a child's command
-    /// does not show. The observation's worker is held by the window-waits registry (its thread's
-    /// name by `every_worker_door_body_is_reached_from_a_completions_door`, a join of it by
+    /// its halves that run were converted. The two orders it reads — the process entry's (`main`)
+    /// and the native window's construction (`Runtime::create`) — are written inline in those two
+    /// functions, and neither runs under a test: the one is the process, the other builds the
+    /// native window the headless backend stands in for. They **could** be driven if the steps
+    /// lived in a shared startup function both backends call; that move is
+    /// T-STARTUP-ORDER-SHARED, and until it lands this reads the order. The probe's quiet door
+    /// (`CREATE_NO_WINDOW`, which a `Command` does not show) and the patience naming are read
+    /// here too. What runs is driven elsewhere: the startup's observation and its refused start
+    /// by `a_refused_startup_observation_is_said_and_asked_again`, the observation thread's name
+    /// and that nobody joins it by the window-waits registry
+    /// (`every_worker_door_body_is_reached_from_a_completions_door`,
     /// `every_bare_site_is_a_row_and_every_row_a_site`), and the probe's arguments and input by
     /// `a_probe_asks_without_a_profile_and_feeds_its_input_on_stdin`.
     #[test]
@@ -5560,11 +5565,6 @@ mod tests {
             .in_the_product(crate::test_support::source())
             .is_empty()
         );
-        let begin = crate::test_support::item_body(
-            &bt_source::ItemQuery::function("begin_startup_migration")
-                .in_module("crate::shell_integration::profile_runtime"),
-        );
-        assert!(begin.contains("spawn_profile_observation("));
         // The script is prepared before the window; the parser questions about the PowerShell
         // rows follow the program walk's answers (T-PROGRAMS-REFRESH), read before the panes.
         let warmed = create
@@ -5599,10 +5599,65 @@ mod tests {
         assert!(parse_probe.contains("POWERSHELL_PROBE_PATIENCE"));
     }
 
+    /// RED (T-HEADLESS-RUNTIME-SEAM round 2) — **a startup observation the thread door refuses is
+    /// said once, and the next asking tries again.** The startup's latch is set by a start, not by
+    /// an attempt: two askings that are both refused are two attempts, each said in the voice the
+    /// startup was handed, and the latch is still open after them. Before, the refusal was thrown
+    /// away (`let _ =`) and the latch taken first, so one refused start meant no startup
+    /// observation until the Profiles page was opened.
+    ///
+    /// MUTATIONS: drop the `latch.store(false, ..)` after a refused start in
+    /// `begin_startup_migration_through` — the second asking returns at the latch and only one
+    /// refusal is said; say nothing in `ObservationEnds::worker_ended` — the refusals are thrown
+    /// away again.
+    #[test]
+    fn a_refused_startup_observation_is_said_and_asked_again() {
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        let executor = crate::lane::Executor::scripted(std::sync::Arc::clone(&gate));
+        let latch = std::sync::atomic::AtomicBool::new(false);
+        let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let data = temp_dir("startup-observation 观察");
+        for _ in 0..2 {
+            gate.refuse_next_start();
+            let lines = std::sync::Arc::clone(&said);
+            profile_runtime::begin_startup_migration_through(
+                &latch,
+                &executor,
+                || data.clone(),
+                move |line| lines.lock().unwrap().push(line.to_owned()),
+            );
+        }
+        let said = said.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(&data);
+        assert_eq!(
+            said.len(),
+            2,
+            "each refused start is said once, and the second asking tries again: {said:?}"
+        );
+        assert!(
+            said.iter()
+                .all(|line| line.contains(crate::lane::REFUSED_START)),
+            "what is said is the door's refusal: {said:?}"
+        );
+        assert!(
+            !latch.load(std::sync::atomic::Ordering::Acquire),
+            "the latch stays open on a refused start"
+        );
+    }
+
     /// RED (T-HEADLESS-RUNTIME-SEAM, from the startup pin) — **a probe asks its PowerShell without
     /// a profile and without a prompt, and hands it the text to read on standard input**, never
     /// on the command line: the stand-in prints the arguments it was started with, one a line, and
     /// then what it read.
+    ///
+    /// **Unix only, and why** (the coordinator asked for a Windows twin): the probe starts its
+    /// program through `bt_platform::spawn_probe`, which on Windows hands the path straight to
+    /// `CreateProcessW` as the application. That runs an executable and nothing else — a batch
+    /// stand-in is refused there (tried: `cmd.exe` is not asked to read it, and the start fails
+    /// with the path not recognised) — and Windows ships no executable that prints its arguments
+    /// and its standard input back, so a Windows twin would need a stand-in program built for the
+    /// suite. The facts read here are the probe's own (`run_powershell_probe` builds the same
+    /// arguments and writes the same input on every platform); the Mac gate runs them.
     ///
     /// MUTATIONS: drop `-NoProfile` from `run_powershell_probe`'s arguments — the stand-in does not
     /// print it; hand the input over as `.arg(input)` — it arrives among the arguments and the
@@ -5643,7 +5698,8 @@ mod tests {
             "the probe is asked without a profile and without a prompt"
         );
         assert_eq!(
-            read, "输入 the text",
+            read.trim_end_matches(['\r', '\n']),
+            "输入 the text",
             "the text is read from standard input"
         );
     }
