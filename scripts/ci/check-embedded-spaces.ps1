@@ -7,50 +7,69 @@
 # inside the string, and the message reads "within the lane" and a dozen spaces
 # and "suite's patience". The compiler accepts it, rustfmt leaves it, and a
 # test's assertion text carries it unseen. This gate refuses the class: every
-# string literal of first-party Rust with a run of three or more spaces inside
-# a source line (defined below) is either repaired or on
+# string literal of first-party Rust with a run of three or more spaces
+# (defined below) is either repaired or on
 # `docs/plans/embedded-spaces-allowed.txt`, the list of literals whose columns
 # are deliberate (fixture tables, aligned samples), and that list only shrinks.
 # The rule is `docs/CONVENTIONS.md` §五's sentence on message literals.
 #
 # WHAT IS READ. Every `.rs` file `git ls-files` names under `crates/` - so no
-# `vendor/` (not under `crates/`) and no `target/` (not tracked). The file is
-# lexed, not parsed: comments (line, block, nested), character literals and
-# lifetimes are skipped as what they are, and every string literal - `"…"`,
-# `b"…"`, `c"…"`, and the raw forms `r"…"`, `r#"…"#`, `br…`, `cr…` - is read as
-# its source text between the quotes.
+# `vendor/` (not under `crates/`) and no `target/` (not tracked) - with its
+# line endings read as `\n`. The file is lexed, not parsed: comments (line,
+# block, nested), character literals and lifetimes are skipped as what they
+# are, and every string literal - `"…"`, `b"…"`, `c"…"`, and the raw forms
+# `r"…"`, `r#"…"#`, `br…`, `cr…` - is read as its source text between the
+# quotes. A shape the lexer cannot finish is refused by its file:line, never
+# passed and never read to the end of the file: a string, raw string or block
+# comment that does not close, and a character literal whose escape or closing
+# quote is missing. The rest of that file is not read until it is fixed.
 #
-# WHAT IS A RUN. Three or more consecutive spaces in a literal's source text
-# with a character other than a space or a tab before them and after them on
-# the same source line: a run between two words, before a `\` continuation,
-# after an escaped `\n` that was meant to be a continuation. What is not: the
-# blanks at the start of a source line of the literal (after a `\`
-# continuation Rust drops them; in a literal that holds a line break they are
-# the text's own indentation; right after the opening quote they are padding),
-# and the blanks that end one (before the closing quote, or before a line
-# break the literal holds) - a lost continuation always has words on both
-# sides.
+# WHAT IS A RUN. Three or more consecutive spaces in a literal's source text,
+# in one of two places:
+#
+#   * inside a source line: a character other than a space before them (a tab
+#     counts as such a character) and, after them and any further blanks, a
+#     character that is not a space or a tab, on the same source line - a run
+#     between two words, before a `\` continuation, after an escaped `\n` that
+#     was meant to be a continuation;
+#   * at the start of a source line of an escaping (non-raw) literal that
+#     follows a real line break - one with no `\` continuation before it - when
+#     a character that is not a blank follows: the shape a `\` lost at the end
+#     of a wrapped line leaves behind.
+#
+# What is not a run: the blanks right after the opening quote (padding), the
+# blanks after a `\` continuation (Rust drops them), the blanks that end a
+# source line (before the closing quote or a line break - a lost continuation
+# always has words on both sides), and the indentation of a raw literal's
+# lines (a raw literal is how a fixture keeps its own line breaks and
+# indentation; its mid-line runs are runs all the same).
 #
 # THE LIST. One row per literal, `path:line reason`: the path from the
-# repository root with `/`, the line the literal opens on (two literals that
-# open on one line share its row), and why its columns are deliberate. `#`
-# lines and blank lines are commentary. In the tree the list is exact both
-# ways: a literal with a run that has no row is refused by its file:line (and
-# the line of the run, when that is a later one), and a row whose line opens
-# no such literal is refused as stale - the literal was repaired or moved, and
-# the row is removed or its line corrected in the same commit.
+# repository root with `/`, the line the literal opens on, and why its columns
+# are deliberate. Two literals with runs that open on one line take two rows
+# with that line. `#` lines and blank lines are commentary. In the tree the
+# list is exact both ways: every line carries as many rows as it opens
+# literals with a run - a literal without its row is refused by its file:line
+# (and the line of the run, when that is a later one), and a row beyond that
+# count is refused as stale.
+#
+# THE IDENTITY of a row is its path, its literal's text - the trimmed source
+# line of the literal's first run - and its reason; its line is where that
+# literal opens today. Rows of one line pair with that line's literals in
+# order. So a literal that moves (an edit above it) keeps its row with the
+# line corrected, and a row pointed at a different literal is a different
+# row: its text is not the one the merge base listed.
 #
 # THE COMPARISON is the dead-code gate's (`check-dead-code.ps1`): against the
-# pull request's merge base with `origin/main`, with multiplicity. A row is
-# identified by its path and its reason; the line is where the literal opens
-# today, so a row whose only change is its line is the same literal moved (an
-# edit above it), not an added row. A row the merge base does not have is
-# refused: a literal is repaired, never listed - except by the commit that
-# introduces the list. It passes, loudly, when the base has no list - that is
-# how the commit that introduces the list passes. It refuses (exit 2) when
-# there is no base at all: no `origin/main` in the clone, or no merge base,
-# means the comparison did not happen. CI runs it in jobs that check out with
-# `fetch-depth: 0`.
+# pull request's merge base with `origin/main`, with multiplicity. The base's
+# identities are read from the base itself: its list, and each listed file as
+# the base holds it (`git show`, decoded as UTF-8), lexed the same way. A row
+# whose identity the merge base does not have is refused: a literal is
+# repaired, never listed - except by the commit that introduces the list. It
+# passes, loudly, when the base has no list - that is how the commit that
+# introduces the list passes. It refuses (exit 2) when there is no base at
+# all: no `origin/main` in the clone, or no merge base, means the comparison
+# did not happen. CI runs it in jobs that check out with `fetch-depth: 0`.
 #
 # The lexer runs in C# compiled at start-up, as the dead-code gate's does: the
 # first-party Rust is some forty-five megabytes, and a character loop in
@@ -93,15 +112,24 @@ namespace FolioEmbeddedSpacesGate
         public string Text;   // that source line, trimmed
     }
 
+    public sealed class Scan
+    {
+        public List<Run> Runs = new List<Run>();
+        public int FaultLine; // 0 when the lexer finished the file
+        public string Fault;
+    }
+
     public static class Scanner
     {
         static bool IdentStart(char c) { return c == '_' || char.IsLetter(c); }
         static bool IdentPart(char c) { return c == '_' || char.IsLetterOrDigit(c); }
+        static bool Blank(char c) { return c == ' ' || c == '\t'; }
 
-        // Every string literal of `s` that holds a run, one entry per literal.
-        public static List<Run> Runs(string s)
+        // Every string literal of `s` that holds a run, one entry per literal, in source order;
+        // or, where the lexer cannot finish a shape, the runs before it and that shape's line.
+        public static Scan Read(string s)
         {
-            var runs = new List<Run>();
+            var scan = new Scan();
             int i = 0, n = s.Length, line = 1;
             while (i < n)
             {
@@ -114,6 +142,7 @@ namespace FolioEmbeddedSpacesGate
                 }
                 if (c == '/' && i + 1 < n && s[i + 1] == '*')
                 {
+                    int opens = line;
                     int depth = 1; i += 2;
                     while (i < n && depth > 0)
                     {
@@ -122,6 +151,7 @@ namespace FolioEmbeddedSpacesGate
                         else if (s[i] == '*' && i + 1 < n && s[i + 1] == '/') { depth--; i += 2; }
                         else i++;
                     }
+                    if (depth > 0) return Fail(scan, opens, "a block comment that does not close");
                     continue;
                 }
                 if (IdentStart(c))
@@ -136,9 +166,9 @@ namespace FolioEmbeddedSpacesGate
                         i++;
                         int from = i;
                         while (i < n && !(s[i] == '"' && Closes(s, i + 1, hashes))) i++;
-                        int to = Math.Min(i, n);
-                        Judge(s, from, to, line, runs);
-                        line += Count(s, from, to);
+                        if (i >= n) return Fail(scan, line, "a raw string that does not close");
+                        Judge(s, from, i, line, true, scan.Runs);
+                        line += Count(s, from, i);
                         i += 1 + hashes;
                         continue;
                     }
@@ -150,25 +180,35 @@ namespace FolioEmbeddedSpacesGate
                     }
                     if ((id == "b" || id == "c") && i < n && s[i] == '"')
                     {
-                        i = Quoted(s, i, ref line, runs);
+                        int opens = line;
+                        i = Quoted(s, i, ref line, scan.Runs);
+                        if (i < 0) return Fail(scan, opens, "a string that does not close");
                         continue;
                     }
                     if (id == "b" && i < n && s[i] == '\'')
                     {
                         i = SkipChar(s, i);
+                        if (i < 0) return Fail(scan, line, "a character literal that does not close");
                         continue;
                     }
                     continue;
                 }
                 if (c == '"')
                 {
-                    i = Quoted(s, i, ref line, runs);
+                    int opens = line;
+                    i = Quoted(s, i, ref line, scan.Runs);
+                    if (i < 0) return Fail(scan, opens, "a string that does not close");
                     continue;
                 }
                 if (c == '\'')
                 {
                     // A character literal, or a lifetime / label: `'a'` against `'a`.
-                    if (i + 1 < n && s[i + 1] == '\\') { i = SkipChar(s, i); continue; }
+                    if (i + 1 < n && s[i + 1] == '\\')
+                    {
+                        i = SkipChar(s, i);
+                        if (i < 0) return Fail(scan, line, "a character literal that does not close");
+                        continue;
+                    }
                     int width = (i + 1 < n && char.IsHighSurrogate(s[i + 1])) ? 2 : 1;
                     if (i + 1 + width < n && s[i + 1 + width] == '\'') { i += 2 + width; continue; }
                     i++;
@@ -182,7 +222,14 @@ namespace FolioEmbeddedSpacesGate
                 }
                 i++;
             }
-            return runs;
+            return scan;
+        }
+
+        static Scan Fail(Scan scan, int line, string what)
+        {
+            scan.FaultLine = line;
+            scan.Fault = what;
+            return scan;
         }
 
         static bool RawAhead(string s, int i)
@@ -205,7 +252,8 @@ namespace FolioEmbeddedSpacesGate
             return lines;
         }
 
-        // An escaping string from its opening quote; returns the index after the closing one.
+        // An escaping string from its opening quote; returns the index after the closing one,
+        // or -1 when the file ends first.
         static int Quoted(string s, int i, ref int line, List<Run> runs)
         {
             int n = s.Length;
@@ -215,56 +263,85 @@ namespace FolioEmbeddedSpacesGate
                 if (s[i] == '\\' && i + 1 < n) { i += 2; continue; }
                 i++;
             }
-            Judge(s, from, i, line, runs);
+            if (i >= n) return -1;
+            Judge(s, from, i, line, false, runs);
             line += Count(s, from, i);
             return i + 1;
         }
 
-        static bool Blank(char c) { return c == ' ' || c == '\t'; }
+        // Whether the source line that ends at `end` (a line break inside an escaping literal)
+        // ends in a `\` continuation: an odd number of backslashes right before the break.
+        static bool Continues(string s, int lineStart, int end)
+        {
+            int k = end, slashes = 0;
+            while (k > lineStart && s[k - 1] == '\\') { slashes++; k--; }
+            return slashes % 2 == 1;
+        }
 
         // The literal's source text is s[from..to), opening on `line`, and each of its source
-        // lines is s[k..end). Its first run, if any, is recorded: three spaces or more with a
-        // character that is not a space or a tab before it and after it on the same source line.
-        static void Judge(string s, int from, int to, int line, List<Run> runs)
+        // lines is s[k..end). Its first run, if any, is recorded (the header says what a run is).
+        static void Judge(string s, int from, int to, int line, bool raw, List<Run> runs)
         {
             int at = line;
             int k = from;
+            bool first = true;
+            bool continued = false;
             while (true)
             {
                 int end = s.IndexOf('\n', k, to - k);
                 if (end < 0) end = to;
                 int p = k;
-                while (p < end && Blank(s[p])) p++;
-                while (p < end)
+                int spaces = 0, widest = 0;
+                while (p < end && Blank(s[p]))
+                {
+                    spaces = s[p] == ' ' ? spaces + 1 : 0;
+                    if (spaces > widest) widest = spaces;
+                    p++;
+                }
+                bool found = !first && !raw && !continued && widest >= 3 && p < end;
+                while (!found && p < end)
                 {
                     if (s[p] != ' ') { p++; continue; }
                     int run = p;
                     while (p < end && s[p] == ' ') p++;
                     int width = p - run;
                     while (p < end && Blank(s[p])) p++;
-                    if (width >= 3 && p < end)
-                    {
-                        int head = s.LastIndexOf('\n', run) + 1;
-                        int tail = s.IndexOf('\n', run);
-                        if (tail < 0) tail = s.Length;
-                        runs.Add(new Run { Opens = line, Line = at, Text = s.Substring(head, tail - head).Trim() });
-                        return;
-                    }
+                    found = width >= 3 && p < end;
+                }
+                if (found)
+                {
+                    int tail = s.IndexOf('\n', k);
+                    if (tail < 0) tail = s.Length;
+                    int head = s.LastIndexOf('\n', k - 1) + 1;
+                    runs.Add(new Run { Opens = line, Line = at, Text = s.Substring(head, tail - head).Trim() });
+                    return;
                 }
                 if (end == to) return;
+                continued = !raw && Continues(s, k, end);
+                first = false;
                 at++;
                 k = end + 1;
             }
         }
 
-        // A character literal from its opening quote (or the `b` before it has been read).
+        // A character literal from its opening quote (or the `b` before it has been read);
+        // returns the index after its closing quote, or -1 when the escape or the quote is missing.
         static int SkipChar(string s, int i)
         {
+            int n = s.Length;
             i++;
+            if (i >= n) return -1;
             if (s[i] == '\\')
             {
                 i++;
-                if (s[i] == 'u') i = s.IndexOf('}', i) + 1;
+                if (i >= n) return -1;
+                if (s[i] == 'u')
+                {
+                    int close = s.IndexOf('}', i);
+                    int stop = s.IndexOf('\n', i);
+                    if (close < 0 || (stop >= 0 && stop < close)) return -1;
+                    i = close + 1;
+                }
                 else if (s[i] == 'x') i += 3;
                 else i++;
             }
@@ -272,14 +349,27 @@ namespace FolioEmbeddedSpacesGate
             {
                 i += char.IsHighSurrogate(s[i]) ? 2 : 1;
             }
+            if (i >= n || s[i] != '\'') return -1;
             return i + 1;
         }
     }
 }
 '@
 
-# The tree: one `path:line` key per literal with a run.
-$found = [ordered]@{}
+# One file's literals with a run, in source order, each with its `path:line` key and its text;
+# a shape the lexer cannot finish is a problem named by its file:line.
+function Read-Literals([string]$File, [string]$Text, [System.Collections.Generic.List[string]]$Problems) {
+    $scan = [FolioEmbeddedSpacesGate.Scanner]::Read($Text.Replace("`r`n", "`n"))
+    if ($scan.FaultLine -gt 0) {
+        $Problems.Add("${File}:$($scan.FaultLine): $($scan.Fault) - the lexer cannot read on, and the rest of the file is not checked")
+    }
+    foreach ($run in $scan.Runs) {
+        [pscustomobject]@{ Key = "${File}:$($run.Opens)"; Line = $run.Line; Text = $run.Text; Path = $File }
+    }
+}
+
+$problems = [System.Collections.Generic.List[string]]::new()
+$found = [System.Collections.Generic.List[object]]::new()
 Push-Location $repo
 try {
     $files = @(& git ls-files -- "crates/*.rs")
@@ -288,21 +378,21 @@ try {
     Pop-Location
 }
 foreach ($file in ($files | Sort-Object)) {
-    $text = [IO.File]::ReadAllText((Join-Path $repo $file)).Replace("`r`n", "`n")
-    foreach ($run in [FolioEmbeddedSpacesGate.Scanner]::Runs($text)) {
-        $found["${file}:$($run.Opens)"] = $run
+    foreach ($literal in (Read-Literals $file ([IO.File]::ReadAllText((Join-Path $repo $file))) $problems)) {
+        $literal | Add-Member -NotePropertyName Ordinal -NotePropertyValue $found.Count
+        $found.Add($literal)
     }
 }
 
 if ($Rows) {
-    foreach ($key in $found.Keys) {
-        $run = $found[$key]
-        Write-Output "$key`trun on line $($run.Line)`t$($run.Text)"
+    foreach ($literal in $found) {
+        Write-Output "$($literal.Key)`trun on line $($literal.Line)`t$($literal.Text)"
     }
+    foreach ($problem in $problems) { Write-Output "PROBLEM`t$problem" }
     exit 0
 }
 
-# A list row: `path:line reason`.
+# A list row: `path:line reason`, in file order.
 function Read-AllowRows([string[]]$lines) {
     $rows = @()
     foreach ($line in $lines) {
@@ -311,35 +401,53 @@ function Read-AllowRows([string[]]$lines) {
             throw "$relative has a row that is not ``path:line reason``: $line"
         }
         $rows += [pscustomobject]@{
-            Key      = "$($Matches.path):$($Matches.line)"
-            Identity = "$($Matches.path) $($Matches.reason)"
+            Key    = "$($Matches.path):$($Matches.line)"
+            Path   = $Matches.path
+            Reason = $Matches.reason
         }
     }
     return , $rows
+}
+
+# The identities of `rows` against `literals`: the rows of one key pair in order with that key's
+# literals in source order, and a row past its key's literals has none (it is stale).
+function Get-Identities($rows, $literals) {
+    $byKey = @{}
+    foreach ($literal in $literals) {
+        if (-not $byKey.ContainsKey($literal.Key)) { $byKey[$literal.Key] = [System.Collections.Generic.List[object]]::new() }
+        $byKey[$literal.Key].Add($literal)
+    }
+    $taken = @{}
+    foreach ($row in $rows) {
+        $index = if ($taken.ContainsKey($row.Key)) { $taken[$row.Key] } else { 0 }
+        $taken[$row.Key] = $index + 1
+        $literal = if ($byKey.ContainsKey($row.Key) -and $index -lt $byKey[$row.Key].Count) { $byKey[$row.Key][$index] } else { $null }
+        [pscustomobject]@{
+            Row      = $row
+            Literal  = $literal
+            Identity = if ($literal) { "$($row.Path)`t$($literal.Text)`t$($row.Reason)" } else { $null }
+        }
+    }
 }
 
 if (-not (Test-Path -LiteralPath $list)) {
     throw "$relative is not in the tree - it is the list of literals whose runs of spaces are deliberate"
 }
 $now = Read-AllowRows ([IO.File]::ReadAllLines($list))
+$paired = @(Get-Identities $now $found)
 
-$problems = @()
 $listed = @{}
-foreach ($row in $now) {
-    if ($listed.ContainsKey($row.Key)) {
-        $problems += "${relative}: $($row.Key) is listed twice"
-        continue
-    }
-    $listed[$row.Key] = $true
-    if (-not $found.Contains($row.Key)) {
-        $problems += "${relative}: $($row.Key) opens no string literal with a run of spaces - the row is stale; remove it, or correct its line"
+foreach ($pair in $paired) {
+    if ($pair.Literal) {
+        $listed[$pair.Literal.Ordinal] = $true
+    } else {
+        $problems.Add("${relative}: $($pair.Row.Key) is stale - no further string literal with a run of spaces opens on that line; remove the row (a literal that moved keeps its row with the line corrected, and the comparison with the merge base holds it to the same literal)")
     }
 }
-foreach ($key in $found.Keys) {
-    if (-not $listed.ContainsKey($key)) {
-        $run = $found[$key]
-        $at = if ($run.Line -ne $run.Opens) { " (the run is on line $($run.Line))" } else { "" }
-        $problems += "${key}: a string literal carries a run of three or more spaces${at}: $($run.Text)"
+foreach ($literal in $found) {
+    if (-not $listed.ContainsKey($literal.Ordinal)) {
+        $at = if ("$($literal.Path):$($literal.Line)" -ne $literal.Key) { " (the run is on line $($literal.Line))" } else { "" }
+        $problems.Add("$($literal.Key): a string literal carries a run of three or more spaces${at}: $($literal.Text)")
     }
 }
 
@@ -354,6 +462,20 @@ if ($problems.Count -gt 0) {
         "is a lost line continuation: end the line with ``\`` (Rust drops the break and the next " +
         "line's indentation). Deliberate columns stay only on the rows the list already has (it only shrinks)."
     )
+}
+
+# `git show` of a blob at the base, decoded as UTF-8 (the reason is in check-dead-code.ps1: the
+# console's code page would turn non-ASCII text into different strings); $null when absent.
+function Show-AtBase([string]$Base, [string]$Path) {
+    $consoleEncoding = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = [Text.Encoding]::UTF8
+        $text = (& git show "${Base}:${Path}" 2>$null) | Out-String
+        if ($LASTEXITCODE -ne 0) { return $null }
+        return $text
+    } finally {
+        [Console]::OutputEncoding = $consoleEncoding
+    }
 }
 
 Push-Location $repo
@@ -375,27 +497,36 @@ try {
         exit 2
     }
 
-    $text = (& git show "${base}:${relative}" 2>$null) | Out-String
-    if ($LASTEXITCODE -ne 0) {
+    $text = Show-AtBase $base $relative
+    if ($null -eq $text) {
         Write-Host "$relative is not in $base - this is the commit that introduces it, and it has $($now.Count) rows."
         exit 0
     }
     $before = Read-AllowRows ($text -split "`r?`n")
+    # The base's literals, read from the base's own copy of each file its list names.
+    $baseProblems = [System.Collections.Generic.List[string]]::new()
+    $baseLiterals = [System.Collections.Generic.List[object]]::new()
+    foreach ($path in ($before | ForEach-Object { $_.Path } | Sort-Object -Unique)) {
+        $blob = Show-AtBase $base $path
+        if ($null -eq $blob) { continue }
+        foreach ($literal in (Read-Literals $path $blob $baseProblems)) { $baseLiterals.Add($literal) }
+    }
 } finally {
     Pop-Location
 }
 
-# Multiplicity, not membership: two rows of one path and reason are two rows.
+# Multiplicity, not membership: two rows of one identity are two rows.
 $allowed = @{}
-foreach ($row in $before) {
-    if ($allowed.ContainsKey($row.Identity)) { $allowed[$row.Identity] += 1 } else { $allowed[$row.Identity] = 1 }
+foreach ($pair in (Get-Identities $before $baseLiterals)) {
+    if (-not $pair.Identity) { continue }
+    if ($allowed.ContainsKey($pair.Identity)) { $allowed[$pair.Identity] += 1 } else { $allowed[$pair.Identity] = 1 }
 }
 $added = @()
-foreach ($row in $now) {
-    if ($allowed.ContainsKey($row.Identity) -and $allowed[$row.Identity] -gt 0) {
-        $allowed[$row.Identity] -= 1
+foreach ($pair in $paired) {
+    if ($allowed.ContainsKey($pair.Identity) -and $allowed[$pair.Identity] -gt 0) {
+        $allowed[$pair.Identity] -= 1
     } else {
-        $added += $row
+        $added += $pair
     }
 }
 
@@ -403,9 +534,12 @@ $removed = $before.Count - ($now.Count - $added.Count)
 Write-Host "$relative against $($base.Substring(0, 12)): $($before.Count) rows -> $($now.Count), $($added.Count) added, $removed removed."
 
 if ($added.Count -gt 0) {
-    foreach ($row in $added) { Write-Host "    added: $($row.Key) ($($row.Identity))" }
+    foreach ($pair in $added) {
+        Write-Host "    added: $($pair.Row.Key) ($($pair.Row.Reason)) for the literal on its line: $($pair.Literal.Text)"
+    }
     throw (
-        "$($added.Count) row(s) were added to $relative, and this list only shrinks (listed above). " +
+        "$($added.Count) row(s) were added to $relative, and this list only shrinks (listed above; a row is its " +
+        "path, its literal's text and its reason, so a row pointed at another literal is an added row). " +
         "Repair the literal instead: a message is one sentence, continued with ``\`` at the end of a line."
     )
 }

@@ -2,15 +2,17 @@
 # three or more spaces is deliberate: a fixture's columns, a code sample's
 # indentation after an escaped line break, a report padded into a column.
 # One row per literal: `path:line reason`, the line being the one the literal
-# opens on.
+# opens on; two such literals opening on one line take two rows.
 #
 # **This list only shrinks.** `scripts/ci/check-embedded-spaces.ps1` refuses a
-# literal with a run that has no row (by its file:line), a row whose line opens
-# no such literal (stale: remove it, or correct its line), and a row the merge
-# base does not have (a row is its path and its reason; its line is where the
-# literal opens today, so a literal that moves keeps its row with the line
-# changed). A message with a run in it is a lost line continuation and is
-# repaired, never listed: end the line with `\` (`docs/CONVENTIONS.md` §五).
+# literal with a run that has no row (by its file:line), a row beyond the
+# literals its line opens (stale: remove it), and a row the merge base does not
+# have. A row is its path, its literal's text (the trimmed source line of the
+# literal's first run) and its reason; its line is where the literal opens
+# today, so a literal that moves keeps its row with the line corrected, and a
+# row pointed at another literal is a new row. A message with a run in it is a
+# lost line continuation and is repaired, never listed: end the line with `\`
+# (`docs/CONVENTIONS.md` §五).
 #
 crates/bt-app/examples/video-probe.rs:387 the probe's caption: its fields spaced apart on purpose
 crates/bt-app/src/app_mouse_tests.rs:1547 code sample: the indentation after an escaped line break is the sample's own
@@ -50,6 +52,7 @@ crates/bt-app/src/main.rs:33005 the chrome dump's tag column: `quad` padded to t
 crates/bt-app/src/main.rs:33119 the chrome dump's tag column: `quad` padded to the width of the other tags
 crates/bt-app/src/main.rs:58774 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/main.rs:61506 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:61986 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/main.rs:61986 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/main.rs:62178 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/main.rs:63161 code sample: the indentation after an escaped line break is the sample's own

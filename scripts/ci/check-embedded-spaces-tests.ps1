@@ -1,7 +1,10 @@
 # Scratch-repository tests for check-embedded-spaces.ps1: a string literal with a run of three or
-# more spaces between two characters of one source line is refused by its file:line unless the
-# allow-list has its row, the list is exact (a stale row is refused), and it only shrinks against
-# the merge base (a row is its path and its reason, so a row whose line moved is the same row).
+# more spaces inside a source line, or at the start of an escaping literal's line after a real line
+# break, is refused by its file:line unless the allow-list has its row; the list is exact (a stale
+# row is refused, a second literal on a listed line needs its own row); it only shrinks against the
+# merge base (a row is its path, its literal's text and its reason, so a row whose line moved is the
+# same row and a row pointed at another literal is not); and a shape the lexer cannot finish is
+# refused by its file:line rather than read to the end of the file.
 
 $ErrorActionPreference = "Stop"
 if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -ErrorAction SilentlyContinue) {
@@ -15,10 +18,12 @@ $source = 'crates/bt-a/src/lib.rs'
 $header = "# the deliberate runs`n#`n"
 
 # Everything here that is not a run, each for its own reason: a `\` continuation's indentation,
-# the indentation inside a literal that holds a line break, a run at the start of the literal and
-# one before its closing quote, a run in a comment, a run in a doc comment, an escaped quote (which
-# must not close its string), a quote in a character literal (which must not open a string), a
-# lifetime, and a raw identifier.
+# the indentation inside a raw literal that holds a line break, a run at the start of the literal
+# and one before its closing quote, a run in a comment, a run in a doc comment, an escaped quote
+# (which must not close its string), an escaped backslash before a closing quote, a quote in a
+# character literal and in a byte character literal (neither opens a string), an inner quote in a
+# `r#"…"#`, a lifetime, and a raw identifier. Each trap comment holds a run after a quote, so a
+# lexer that misreads the shape before it reads that run as a string's.
 $clean = @'
 //! A doc comment with a run:   here.
 /// Another   one.
@@ -34,12 +39,15 @@ pub fn message<'a>(name: &'a str) -> String {
     )
 }
 
-pub const SAMPLE: &str = "fn main() {
+pub const SAMPLE: &str = r"fn main() {
     println!();
 }";
 pub const PADDED: &str = "   indented and trailing   ";
 pub const QUOTED: &str = "an escaped quote \"";
 // a lexer that ended that string at its escaped quote would read this run   as a string's: "
+pub const SLASH: &str = "\\"; // a lexer that read the backslash as escaping the quote:   a " b
+pub const BQUOTE: u8 = b'"'; // a lexer that read the quote as opening a string:   a " b
+pub const INNER: &str = r#"a "quoted" word"#;
 '@
 
 # The fixture whose columns are deliberate: line 3 of this file, as a raw string.
@@ -50,10 +58,12 @@ pub const TABLE: &str = r"name   value";
 '@
 $fixtureRow = "${source}:3 a table fixture`n"
 
-function Write-Tree([string]$Code, [string]$List) {
+function Write-Tree([string]$Code, [string]$List, [switch]$Crlf) {
     $path = Join-Path $root $source
     [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path)) | Out-Null
-    [IO.File]::WriteAllText($path, $Code.Replace("`r`n", "`n"))
+    $text = $Code.Replace("`r`n", "`n")
+    if ($Crlf) { $text = $text.Replace("`n", "`r`n") }
+    [IO.File]::WriteAllText($path, $text)
     $listPath = Join-Path $root $relative
     [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($listPath)) | Out-Null
     [IO.File]::WriteAllText($listPath, $List)
@@ -152,7 +162,7 @@ try {
         # A row whose line opens no literal with a run is stale.
         Write-Tree ($clean + "`n" + $fixture) ($header + $row + "${source}:1 a row for nothing`n")
         $output = Run-Gate 1 "a stale row"
-        if ($output -notmatch [regex]::Escape("${source}:1 opens no string literal with a run of spaces")) {
+        if ($output -notmatch [regex]::Escape("${source}:1 is stale")) {
             throw "the stale row was refused for the wrong reason: $output"
         }
 
@@ -174,6 +184,69 @@ try {
         $output = Run-Gate 0 "shrunk"
         if ($output -notmatch "1 rows -> 0, 0 added, 1 removed") { throw "the removal was not counted: $output" }
 
+        # A second literal with a run on a line that is already listed needs a row of its own, and
+        # a second row for a line that opens one literal is stale.
+        $shared = $clean + "`n" + $fixture.Replace('r"name   value";', '[r"name   value", r"one   two"];').Replace('TABLE: &str', 'TABLE: [&str; 2]')
+        Write-Tree $shared ($header + $row)
+        $output = Run-Gate 1 "a second literal on a listed line"
+        if ($output -notmatch [regex]::Escape("${source}:${fixtureLine}: a string literal carries a run")) {
+            throw "the second literal on a listed line was not refused by its file:line: $output"
+        }
+        Write-Tree ($clean + "`n" + $fixture) ($header + $row + $row)
+        $output = Run-Gate 1 "a second row for a line with one literal"
+        if ($output -notmatch [regex]::Escape("${source}:${fixtureLine} is stale")) {
+            throw "the extra row was refused for the wrong reason: $output"
+        }
+
+        # A row pointed at another literal of the same file, with the same reason, is a new row:
+        # the fixture it listed was repaired, and its row now names a literal the base never listed.
+        $repointed = $clean + "`n" + $fixture.Replace('r"name   value"', 'r"name value"') + "`npub const OTHER: &str = r`"key   word`";`n"
+        Write-Tree $repointed ($header + "${source}:$($fixtureLine + 1) a table fixture`n")
+        $output = Run-Gate 1 "a row repointed at another literal"
+        if ($output -notmatch "only shrinks" -or $output -notmatch [regex]::Escape('r"key   word"')) {
+            throw "the repointed row was not refused as an added row: $output"
+        }
+
+        # A lost `\` at the end of a wrapped line: the next line's indentation follows a real line
+        # break inside an escaping literal; an escaped backslash before the break is no
+        # continuation. And the other string forms: a C string, a raw byte string, and a raw string
+        # whose inner `"#` does not close it (it opened with two hashes).
+        foreach ($case in @(
+                @{ Name = "a lost continuation before a real line break"; Text = "pub const WRAPPED: &str = `"the first half of the sentence`n     and the second half`";" },
+                @{ Name = "an escaped backslash before a real line break"; Text = 'pub const SLASHES: &str = "a path that ends in \\' + "`n" + '     and this line was meant to continue";' },
+                @{ Name = "a run in a C string"; Text = "pub const C: &core::ffi::CStr = c`"one   two`";" },
+                @{ Name = "a run in a raw byte string"; Text = "pub const BR: &[u8] = br`"one   two`";" },
+                @{ Name = "a run in a raw string whose inner quote and hash do not close it"; Text = 'pub const HASHES: &str = r##"a "#   " b"##;' })) {
+            Write-Tree ($clean + "`n" + $fixture + "`n" + $case.Text + "`n") ($header + $row)
+            $output = Run-Gate 1 $case.Name
+            if ($output -notmatch [regex]::Escape("${source}:$($fixtureLine + 1): a string literal carries a run")) {
+                throw "$($case.Name) was not refused by its file:line: $output"
+            }
+        }
+
+        # CRLF line endings read as LF: the clean tree passes, a planted run is named by its line.
+        Write-Tree ($clean + "`n" + $fixture) ($header + $row) -Crlf
+        $output = Run-Gate 0 "the clean tree with CRLF line endings"
+        if ($output -notmatch "1 rows -> 1, 0 added, 0 removed") { throw "the CRLF tree was not read as the LF one: $output" }
+        Write-Tree ($clean + "`n" + $fixture + "`npub const LOST: &str = `"the first half          and the second`";`n") ($header + $row) -Crlf
+        $output = Run-Gate 1 "a planted run with CRLF line endings"
+        if ($output -notmatch [regex]::Escape("${source}:$($fixtureLine + 1): a string literal carries a run")) {
+            throw "the CRLF planted run was not refused by its file:line: $output"
+        }
+
+        # A shape the lexer cannot finish is refused by its file:line, and the run ends.
+        foreach ($case in @(
+                @{ Name = "a string that does not close"; Text = 'pub const OPEN: &str = "never closed;'; Said = "a string that does not close" },
+                @{ Name = "a raw string that does not close"; Text = 'pub const RAW: &str = r#"never closed";'; Said = "a raw string that does not close" },
+                @{ Name = "a block comment that does not close"; Text = "/* never closed"; Said = "a block comment that does not close" },
+                @{ Name = "a character escape that does not close"; Text = "pub const U: char = '\u{41';"; Said = "a character literal that does not close" })) {
+            Write-Tree ($clean + "`n" + $fixture + "`n" + $case.Text + "`n") ($header + $row)
+            $output = Run-Gate 1 $case.Name
+            if ($output -notmatch [regex]::Escape("${source}:$($fixtureLine + 1): $($case.Said)")) {
+                throw "$($case.Name) was not refused by its file:line: $output"
+            }
+        }
+
         # A malformed row is refused rather than read as something else.
         Write-Tree ($clean + "`n" + $fixture) ($header + "${source} a table fixture`n")
         $output = Run-Gate 1 "a malformed row"
@@ -185,5 +258,5 @@ try {
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
 }
 
-Write-Host "check-embedded-spaces: no-base, clean, planted, escaped break, continuation, byte string, removed row, moved row, stale row, added row, reworded row, shrink and malformed-row cases pass"
+Write-Host "check-embedded-spaces: no-base, clean, planted, escaped break, continuation, byte string, removed row, moved row, stale row, added row, reworded row, shrink, shared line, extra row, repointed row, lost continuation at a line break, escaped backslash, C string, raw byte string, hash count, CRLF, four unfinished shapes and malformed-row cases pass"
 exit 0

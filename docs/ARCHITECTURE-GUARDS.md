@@ -434,20 +434,31 @@ compiler and rustfmt both accept.
 Where and what to do: `scripts/ci/check-embedded-spaces.ps1` lexes every
 tracked `.rs` under `crates/` (comments, character literals and lifetimes
 skipped; every string form, raw ones included) and refuses, by file:line, a
-string literal with three or more spaces between two other characters of one
-source line — the blanks that start or end a source line of the literal are
-not a run — unless `docs/plans/embedded-spaces-allowed.txt` has its row
-(`path:line reason`, the line the literal opens on). The list is exact both
-ways (a row whose line opens no such literal is stale) and only shrinks
-against the merge base: a row is its path and its reason, so a literal that
-moves keeps its row with the line changed, and any other row the base does not
-have is refused. `scripts/ci/check-embedded-spaces-tests.ps1` holds each rule
-on scratch repositories, and `gates-can-fail` plants a literal in the real
-tree. When red, repair the literal as a continuation; a fixture's columns
-(screen captures, tables, code samples after an escaped line break) are the
-only rows, and they were the baseline — a new fixture builds its columns
-another way (`format!` padding, or a `concat!` whose spaces stand in a literal
-of their own, where they start the literal and are no run).
+string literal with a run of three or more spaces: inside a source line, with
+a character other than a space before it and a non-blank after it; or, in an
+escaping (non-raw) literal, at the start of a source line that follows a real
+line break (no `\` continuation before it) when a non-blank follows — the
+shape a `\` lost at the end of a wrapped line leaves. Blanks after the opening
+quote, after a continuation, at the end of a source line, and a raw literal's
+indentation are not runs; a fixture that keeps its own line breaks is a raw
+string. A shape the lexer cannot finish (a string, raw string or block comment
+that does not close, a character literal whose escape or quote is missing) is
+refused by its file:line, never passed. A literal with a run passes only on
+its row of `docs/plans/embedded-spaces-allowed.txt` (`path:line reason`, the
+line the literal opens on; two literals on one line take two rows). The list
+is exact both ways (a row beyond the literals its line opens is stale) and only
+shrinks against the merge base. A row's identity is its path, its literal's
+text (the trimmed source line of the literal's first run, read for the base
+from the base's own copy of the file) and its reason — as the dead-code gate's
+item column pins its site — so a literal that moves keeps its row with the
+line corrected, and a row pointed at another literal is an added row and
+refused. `scripts/ci/check-embedded-spaces-tests.ps1` holds each rule on
+scratch repositories, and `gates-can-fail` plants a literal in the real tree.
+When red, repair the literal as a continuation; a fixture's columns (screen
+captures, tables, code samples after an escaped line break) are the only rows,
+and they were the baseline — a new fixture builds its columns another way
+(`format!` padding, or a `concat!` whose spaces stand in a literal of their
+own, where they start the literal and are no run).
 
 ## Third-party notices
 
