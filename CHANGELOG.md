@@ -24,6 +24,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- A picture that could not be loaded is no longer read again and again while the window holds many other pictures. <!-- zh: pending T-PEEK-CACHE-QUESTION-RECORDS -->
 - A GIF caught while it was being written plays once the write finishes. <!-- zh: pending T-ANIMATION-RECORDS-BOUND -->
 - A GIF that changes while it is being opened shows its new contents, not the old ones. <!-- zh: pending T-ANIMATION-ANSWER-IDENTITY -->
 - An update is no longer undone because the new version's note that it started properly was refused for a moment (another program holding the folder, say); Folio tries again about four times a second, for up to about fifteen minutes, or for as long as it takes when the new version has to confirm the update itself. <!-- zh: pending T-TRIAL-RECEIPT-RETRY -->

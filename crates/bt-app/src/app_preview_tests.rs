@@ -8573,3 +8573,44 @@ fn the_preview_head_names_the_picture_installed_on_its_pane() {
         "and the next picture's step renames it"
     );
 }
+
+/// RED (T-PEEK-CACHE-QUESTION-RECORDS round 2) — **a markdown page names the pictures in its
+/// reach, so a failure it asked about stays while the page is held.**
+///
+/// [`peek_files_named`]'s page arm is [`DocumentPictures::files`] — the very set the file watch
+/// follows. A page whose picture failed keeps drawing its own `Failed` answer, and the record
+/// stays beside it; once no page holds the picture, the record goes.
+///
+/// MUTATION (observed red): drop the markdown arm from [`peek_files_named`] — the first assertion
+/// goes red.
+#[test]
+fn a_pages_picture_in_reach_keeps_its_failed_record() {
+    let file = PathBuf::from(r"D:\文档\图\坏 shot.png");
+    let key = normalized_local_image_path_key(&file);
+    let mut pictures = DocumentPictures::default();
+    pictures.files.insert(file.clone());
+    pictures
+        .by_source
+        .insert("图/坏 shot.png".to_owned(), MarkdownPicture::Failed);
+    let page = a_page_holding(pictures);
+    let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+    cache.insert(
+        key.clone(),
+        PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::UnsupportedFormat),
+    );
+
+    let_go_unnamed_peek_records(&mut cache, &peek_files_named(&[], &page, None, None));
+    assert!(
+        matches!(cache.peek(&key), Some(PeekCacheEntry::Failed(_))),
+        "the page holding the picture in its reach names its file"
+    );
+
+    let_go_unnamed_peek_records(
+        &mut cache,
+        &peek_files_named(&[], &PreviewPane::default(), None, None),
+    );
+    assert!(
+        !cache.contains_key(&key),
+        "and with no page holding it, the record goes"
+    );
+}

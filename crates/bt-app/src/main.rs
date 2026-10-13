@@ -25123,12 +25123,116 @@ fn peek_reads_the_file(entry: Option<&PeekCacheEntry>, readable: bool, settled: 
         }
 }
 
+/// **What an entry weighs, and which entries weight pressure may take** (T-PEEK-CACHE-QUESTION-RECORDS).
+///
+/// A `Ready` weighs its native decode's pixels and is the one thing eviction chooses: the cost of
+/// having let it go is one worker read of a file that is still on the disk, and the surfaces
+/// drawing it keep the answer they were given (§7.1.3u). A `Pending` and a `Failed` — the
+/// unstarted record ([`DECODE_UNSTARTED`]) is a `Failed` — hold no pixels: each counts only the
+/// map's flat overhead per entry (`bt_term::BoundedCache`'s `ENTRY_OVERHEAD_BYTES`, 128 B), and
+/// neither is ever evicted, because each is the record of a question and an evicted record
+/// reads as *never asked*: the pane's, the page's and the flyout's next resolve would ask the
+/// worker again with no new input. A `Pending` leaves by its answer; a `Failed` leaves with the
+/// last surface that names its file ([`let_go_unnamed_peek_records`]), by
+/// the file-change road ([`forget_a_picture`]), or by a new peek over its file — a hover that
+/// settles ([`peek_reads_the_file`]) or a glance card that opens ([`peek_card_opened`]).
 impl bt_term::Weighed for PeekCacheEntry {
     fn bytes_held(&self) -> u64 {
         match self {
             Self::Pending | Self::Failed(_) => 0,
             Self::Ready { rgba, .. } => rgba.len() as u64,
         }
+    }
+
+    fn evictable(&self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
+}
+
+/// **Every file a surface of this window names to the peek cache** (T-PEEK-CACHE-QUESTION-RECORDS),
+/// by the key the cache files it under.
+///
+/// The surfaces whose resolve files a record of a question are four, and each names its file in
+/// the state it already keeps: a picture pane — a seat or a float of any tab, in the background as
+/// much as on the glass — by the picture it holds ([`PreviewPane::image`]); a markdown page, on
+/// any of those panes or on the card, by every picture in reach it asked about
+/// ([`DocumentPictures::files`]); the glance card by its file (`card_file`); and the hover flyout
+/// by its subject while it is up (`flyout`). A free function over the tabs for
+/// [`animation_surface_exists`]' reason: the set is derived from what the window holds, rather
+/// than kept beside it as a second record that could disagree, and tabs are what a test can build.
+fn peek_files_named(
+    tabs: &[TabState],
+    peek_pane: &PreviewPane,
+    card_file: Option<&Path>,
+    flyout: Option<&str>,
+) -> BTreeSet<String> {
+    let mut named = BTreeSet::new();
+    for pane in documents_held_in(tabs, peek_pane) {
+        if let Some(picture) = pane.image() {
+            named.insert(bt_term::normalized_local_image_path_key(&picture.path));
+        }
+        if let PreviewDocument::Markdown { pictures, .. } = pane.doc() {
+            named.extend(
+                pictures
+                    .files
+                    .iter()
+                    .map(|file| bt_term::normalized_local_image_path_key(file)),
+            );
+        }
+    }
+    named.extend(card_file.map(bt_term::normalized_local_image_path_key));
+    named.extend(flyout.map(str::to_owned));
+    named
+}
+
+/// **A failed peek no surface names any more is let go of** (T-PEEK-CACHE-QUESTION-RECORDS) —
+/// [`AnimationCache::let_go_unnamed`]'s rule, for the peek cache.
+///
+/// A `Failed` record is kept exactly as long as some surface names its file (`named`, from
+/// [`peek_files_named`]): while one does, its redraws read the failure and ask nothing; when the
+/// last one has gone, the file's next showing is new input and asks. A decode in flight is kept
+/// until its answer, which [`file_peek_failure`] files nowhere if the file is unnamed by then. A
+/// decode is weight, which the budget governs.
+fn let_go_unnamed_peek_records(peek_cache: &mut PeekCache, named: &BTreeSet<String>) {
+    let unnamed: Vec<String> = peek_cache
+        .iter()
+        .filter(|(key, entry)| {
+            matches!(entry, PeekCacheEntry::Failed(_)) && !named.contains(key.as_str())
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in &unnamed {
+        peek_cache.remove(key);
+    }
+}
+
+/// **A failure that came home for one file — its decode's, or a video's with no frame — filed
+/// only for a file some surface names** (T-PEEK-CACHE-QUESTION-RECORDS;
+/// [`AnimationCache::answered_for_nobody`]'s rule, for the peek cache). For a file no surface names
+/// by the time it lands, its decode in flight is let go of and nothing is filed: a record nobody
+/// is showing would be one [`let_go_unnamed_peek_records`] exists to end.
+fn file_peek_failure(
+    peek_cache: &mut PeekCache,
+    named: &BTreeSet<String>,
+    key: String,
+    failure: bt_term::InlineImageDecodeError,
+) {
+    if named.contains(&key) {
+        peek_cache.insert(key, PeekCacheEntry::Failed(failure));
+    } else if matches!(peek_cache.peek(&key), Some(PeekCacheEntry::Pending)) {
+        peek_cache.remove(&key);
+    }
+}
+
+/// **A glance card opening over a file** (T-PEEK-CACHE-QUESTION-RECORDS round 2): a new card is
+/// the card's own new input, so a failure filed for its file is let go of and the card's body
+/// asks again — [`peek_reads_the_file`]'s rule for a hover that settles, said for the card. The
+/// moment is the opening and not the teardown: a card coming down is a surface leaving, which
+/// lets a failure go only when no other surface names the file ([`let_go_unnamed_peek_records`]).
+fn peek_card_opened(peek_cache: &mut PeekCache, card_file: &Path) {
+    let key = bt_term::normalized_local_image_path_key(card_file);
+    if matches!(peek_cache.peek(&key), Some(PeekCacheEntry::Failed(_))) {
+        peek_cache.remove(&key);
     }
 }
 
