@@ -43,8 +43,9 @@
 //!
 //! # What it catches, and what it does not
 //!
-//! Four lexical shapes, in `.rs` and `.ps1` files, everywhere under the
-//! workspace root except `target/`, `.git/`, `vendor/` and `node_modules/`:
+//! Four lexical shapes in `.rs` files, and the script shapes below in `.ps1`,
+//! `.psm1`, `.py` and `.sh` files, everywhere under the workspace root except
+//! `target/`, `.git/`, `vendor/` and `node_modules/`:
 //!
 //! 1. an `include_str!` or `include_bytes!` whose argument names a `.rs` file;
 //! 2. a path-shaped `.rs` literal handed to a path or read call, in a function
@@ -54,12 +55,35 @@
 //! 4. a directory read rooted at the manifest directory that picks files out by
 //!    the `rs` extension.
 //!
-//! # Shell readers: the literal shapes, and what is a diagnostic
+//! # Script readers: the verbs, the literal shapes, and what is a diagnostic
 //!
-//! A `.ps1` file is a reader when its text holds one of the shell read verbs
-//! (`Get-Content`, `Select-String`, `ReadAllText`, `ReadAllLines`,
-//! `ReadAllBytes`), and in a reader a literal naming a `.rs` path is a hit of
-//! shape 2 in exactly two spellings:
+//! A script is read in one of three languages — PowerShell (`.ps1`, `.psm1`),
+//! Python (`.py`), the shell (`.sh`) — and is a **reader** when its text holds
+//! one of that language's read verbs; a reader is judged whole, by file. The
+//! verbs are a closed list, matched as written (so `GC` or `Get-content` is not
+//! seen); a verb marked *word* counts only with no name character (an ASCII
+//! letter, a digit, `_`) just before it and, when it ends in one, just after
+//! it. Only those characters block a match: a sigil, a bracket, a dash or a
+//! comment's `#` does not, so `$type`, `[type]`, `-type`, `$cat` and the word
+//! `type` in a comment all count — noise that makes a file a reader, never a
+//! silent pass:
+//!
+//! * PowerShell: `Get-Content`, `Select-String`, `ReadAllText`,
+//!   `ReadAllLines`, `ReadAllBytes`, `ReadLines`, `OpenText`, `[IO.File]::Open`
+//!   (and its full name `[System.IO.File]::Open`), `OpenRead`, `Import-Csv`,
+//!   `Get-FileHash`; and the aliases `gc`, `cat`, `type`, `sls` as words;
+//! * Python: `.read_text(`, `.read_bytes(`, `.open(`; `fileinput` as a word;
+//!   `open(` as a word with no `.` before it (the built-in; `Popen(` is not
+//!   it, and a method `.open(` is the verb before); and a walk, below.
+//!   `Path(…)` is the subject of such a read, not a read:
+//!   `Path('x.rs').read_text()` is a reader by `.read_text(`;
+//! * the shell: `cat`, `grep`, `rg`, `sed`, `awk`, `head`, `tail`, `wc`,
+//!   `cut`, `sort`, `diff`, `cmp`, `md5sum`, `shasum` as words; a `<` input
+//!   redirection (a `<` with no `<` on either side, before no `(` or `&`); and
+//!   a walk, below. A `while read` loop is fed by one of these.
+//!
+//! In a reader a literal naming a `.rs` path is a hit of shape 2 in exactly
+//! two spellings:
 //!
 //! * `"…lib.rs"` — double-quoted;
 //! * `'…lib.rs'` — single-quoted;
@@ -69,36 +93,80 @@
 //! nearest quote of the same kind on the same line before the closer — the
 //! one-line back-walk, never a pairing from the top of the file.
 //!
+//! A **walk** is a hit too, with the tree it walks as its subject, as
+//! `read_dir` and `"rs"` are for Rust (shape 4), and it makes its file a
+//! reader:
+//!
+//! * Python: a `glob(`, `rglob(` or `iglob(` (as a word) whose arguments — on
+//!   the call's line, inside its parentheses counted as written — hold a quoted
+//!   value ending in `.rs`, the pattern;
+//! * the shell: a `find` (as a word) whose line, after it, holds `-name`,
+//!   blanks and a quoted value ending in `.rs` (`find crates -name '*.rs'`).
+//!
+//! A walk's pattern is neither a literal hit nor a diagnostic.
+//!
 //! Three other spellings in a reader are **diagnostics**: the test fails
 //! naming `file:line`, the shape and what to do — rewrite the literal into one
 //! of the two spellings, or list the file:
 //!
-//! * a `.rs` extension on a line inside a here-string (`@"…"@`, `@'…'@`) that
-//!   is not the closer of one of the two spellings — whatever else it is, a
-//!   `.rs` in a here-string is given this label;
-//! * a double-quoted value ending in `.rs`, its opener on its line, that is
-//!   interpolated: a `$` not escaped by an odd run of backticks and followed
-//!   by a name or an expression (a letter, a digit, `_`, `{`, `(`, `$`, `?`,
-//!   `^`)
-//!   (`"$dir/lib.rs"`, `"${x}.rs"`, `"$(…)/a.rs"`, ```"``$x/lib.rs"```);
+//! * a `.rs` extension on a line inside a PowerShell here-string (`@"…"@`,
+//!   `@'…'@`) or a shell heredoc (`<<EOF` … `EOF`) that is not the closer of
+//!   one of the two spellings — whatever else it is, a `.rs` in one is given
+//!   this label;
+//! * a quoted value ending in `.rs`, its opener on its line, that is
+//!   interpolated:
+//!   - PowerShell, double-quoted: a `$` not escaped by an odd run of backticks
+//!     and followed by a name or an expression (a letter, a digit, `_`, `{`,
+//!     `(`, `$`, `?`, `^`) (`"$dir/lib.rs"`, `"${x}.rs"`, `"$(…)/a.rs"`,
+//!     ```"``$x/lib.rs"```);
+//!   - the shell, double-quoted: a `$` not escaped by an odd run of
+//!     backslashes and followed by a name, a positional or special parameter,
+//!     `{` or `(` (`"$root/x.rs"`, `"${dir}/x.rs"`, `"$(pwd)/a.rs"`);
+//!   - Python, either quote: an f-string (a prefix of string-prefix letters
+//!     holding `f`) with a `{` in it, a value with a `{` followed by
+//!     `.format(`, or a value with a `%` followed by `%`
+//!     (`f"{root}/lib.rs"`, `"{}/main.rs".format(root)`, `'%s/mod.rs' % root`);
 //! * any other quoted value ending in `.rs`, its opener on its line, that is
-//!   not path-shaped (`'crates/a b/lib.rs'`, `'~/x.rs'`, ``"`$x/lib.rs"``, and
-//!   `"$(Join-Path $a "b")/a.rs"`, whose back-walk stops at the inner quote).
+//!   not path-shaped (`'crates/a b/lib.rs'`, `'~/x.rs'`, ``"`$x/lib.rs"``,
+//!   `"\$x/lib.rs"`, `'{x}.rs'`, `"$(Join-Path $a "b")/a.rs"`, whose back-walk
+//!   stops at the inner quote, and `p.endswith('.rs')`, which has nothing
+//!   before the dot).
 //!
 //! A here-string opens at a line whose code ends in `@"` or `@'` (the `@` not
 //! just after a quote or a backtick) and closes at the next line that starts
 //! with that quote and `@`. A line that only looks like an opener —
 //! `$m = 'a@'`, `Write-Host "x@"` — opens a phantom here-string that runs to
 //! the next closer or the end of the file: every `.rs` in it is then reported,
-//! which is noise and never a silent pass.
+//! which is noise and never a silent pass. A heredoc opens at `<<` (not
+//! `<<<`), an optional `-`, optional blanks and a word of name characters, bare
+//! or in `'…'`, `"…"` or after `\`, and closes at the line that is that word
+//! alone (leading tabs aside for `<<-`); several on one line open one after
+//! another, and an arithmetic `<< 3` opens a phantom one the same way.
 //!
 //! Limits, written down rather than discovered later: a `.rs` with no quote at
-//! all on its line outside a here-string (a comment, `-Filter *.rs`, a glob) is
-//! not a literal path and is out of scope; so is a closer with no opener on its
-//! line (a string spanning lines), since a one-line back-walk cannot tell it
-//! from prose such as `# lib.rs's`; and the extension is matched as written,
-//! so `.RS` is not seen. Rust files are read as above; these shapes are the
-//! shell's only.
+//! all on its line outside a here-string or heredoc (a comment, `-Filter *.rs`,
+//! a glob, `cat crates/x/src/lib.rs`) is not a literal path and is out of
+//! scope; so is a `.rs` that ends no quoted value (`'x.rs is…'`), and a closer
+//! with no opener on its line (a string spanning lines, a Python triple-quoted
+//! body), since a one-line back-walk cannot tell it from prose such as
+//! `# lib.rs's`; a script that hands a path to a command it runs by a verb not
+//! on its language's list (`subprocess.run(['cat', …])`) is no reader; and the
+//! extension is matched as written, so `.RS` is not seen. Rust files are read
+//! as above; these shapes are the scripts' only.
+//!
+//! The walks are as narrow as written. In a file with no other read verb each
+//! of these is silent, and in a reader its `'*.rs'` is an unreadable value
+//! instead of a walk: a glob whose pattern is on a continuation line of the
+//! call; `find -iname '*.rs'`, `find -path '*.rs'`, `-name \*.rs`, an unquoted
+//! `-name *.rs`, and a `-name` on a continuation line of the `find`. A `.sh`
+//! whose only read of a source is inside an embedded `python3 - <<'PY'`
+//! heredoc is judged by the shell's verbs alone, the Python in it unread.
+//!
+//! The scan reads files by extension, so a reader in a file of another kind
+//! is not seen: the inline `pwsh` steps of `.github/workflows/ci.yml` (which
+//! name `crates/bt-doc/src/lib.rs` and read it with `ReadAllText`), and the
+//! tracked `.bash` and `.zsh` scripts (`scripts/shell-integration/folio.bash`,
+//! `betterterminal.bash`, `folio.zsh`).
 //!
 //! **It matches by file, not by reader**, because that is the granularity both
 //! lists have: the allowlist is the *file-scoped* one, and a debt row's owning
@@ -107,12 +175,11 @@
 //! fire, and the debt row is what tracks it. It is a tripwire and not a
 //! completeness proof — the list's own header says the same thing about itself.
 //!
-//! Three limits, written down rather than discovered later: comments are not
+//! Two limits, written down rather than discovered later: comments are not
 //! stripped, so prose naming a file counts (deliberate — an over-approximation
-//! is the safe direction for a guard); a reader split across two functions, one
-//! building the path and another reading it, is seen only if both are in the
-//! same file and the reading one names the path; and the scan reads no Python,
-//! so `scripts/dev/*.py` are on the debt list and out of its reach.
+//! is the safe direction for a guard); and a reader split across two
+//! functions, one building the path and another reading it, is seen only if
+//! both are in the same file and the reading one names the path.
 //!
 //! # The document readers
 //!
@@ -269,7 +336,7 @@
 //! its key is an item and only the index knows which module a byte is in.
 //! What it does not see, written down rather than discovered: a path handed in
 //! as a parameter (`bt-app`'s `build.rs` `release_manifest`, and `scan` above,
-//! which reads `.ps1` files); a root reached through a method, a closure or
+//! which reads script files); a root reached through a method, a closure or
 //! another file's function; a path a function hands on from its own
 //! parameter (`bt_persist::read_settings` is the reader of what it is
 //! handed; its caller, which names the fixture, is the row); a read call
@@ -389,12 +456,47 @@ const PATH_HEADS: [&str; 9] = [
 /// which is cargo's target-discovery rule and names no reader's subject, reads
 /// as a source pin.
 const RUST_READS: [&str; 3] = ["read_to_string", "fs::read(", "File::open"];
-const SHELL_READS: [&str; 5] = [
+
+/// PowerShell's read verbs, matched anywhere in the text as written.
+/// `IO.File]::Open` is `[IO.File]::Open` and its full name
+/// `[System.IO.File]::Open` alike.
+const POWERSHELL_READS: [&str; 11] = [
     "Get-Content",
     "Select-String",
     "ReadAllText",
     "ReadAllLines",
     "ReadAllBytes",
+    "ReadLines",
+    "OpenText",
+    "IO.File]::Open",
+    "OpenRead",
+    "Import-Csv",
+    "Get-FileHash",
+];
+
+/// PowerShell's read aliases, matched as whole words ([`whole_words`]).
+const POWERSHELL_READ_ALIASES: [&str; 4] = ["gc", "cat", "type", "sls"];
+
+/// Python's read verbs matched anywhere in the text as written.
+const PYTHON_READS: [&str; 3] = [".read_text(", ".read_bytes(", ".open("];
+
+/// Python's read verbs matched as whole words.
+const PYTHON_READ_WORDS: [&str; 1] = ["fileinput"];
+
+/// The built-in `open(`: a whole word with no `.` before it, so that
+/// `Popen(` is not it and a method `.open(` is [`PYTHON_READS`]'s.
+const PYTHON_OPEN: &str = "open(";
+
+/// Python's directory walks: a call whose pattern ends in `.rs` reads the
+/// tree it walks.
+const PYTHON_GLOBS: [&str; 3] = ["glob(", "rglob(", "iglob("];
+
+/// The shell's read verbs, matched as whole words. `<` input redirection is
+/// one more ([`redirects_input`]), and a `find … -name '*.rs'` walk another
+/// ([`shell_walks`]); a `while read` loop is fed by one of these.
+const SHELL_READ_WORDS: [&str; 14] = [
+    "cat", "grep", "rg", "sed", "awk", "head", "tail", "wc", "cut", "sort", "diff", "cmp",
+    "md5sum", "shasum",
 ];
 
 /// The three tokens that together are a walk of a crate's own sources.
@@ -412,13 +514,17 @@ enum Kind {
     ReadOfANamedSource,
     FileScope,
     ManifestDirectoryWalk,
-    /// A shell reader's double-quoted `.rs` value that is interpolated.
+    /// A Python `glob` or a shell `find -name` whose pattern ends in `.rs`:
+    /// a script's walk of a source tree.
+    ScriptSourceWalk,
+    /// A script reader's (PowerShell, Python, shell) quoted `.rs` value that is
+    /// interpolated.
     InterpolatedShellPath,
-    /// A shell reader's quoted `.rs` value, its opener on its line, that is
+    /// A script reader's quoted `.rs` value, its opener on its line, that is
     /// neither path-shaped nor interpolated.
     UnreadableShellPath,
-    /// A shell reader's `.rs` extension inside a here-string, not a literal of
-    /// either spelling.
+    /// A script reader's `.rs` extension inside a PowerShell here-string or a
+    /// shell heredoc, not a literal of either spelling.
     ShellPathInAHereString,
 }
 
@@ -429,6 +535,7 @@ impl Kind {
             Self::ReadOfANamedSource => "reads a named source file at run time",
             Self::FileScope => "builds a scope that names a file",
             Self::ManifestDirectoryWalk => "walks its own manifest directory for `.rs` files",
+            Self::ScriptSourceWalk => "walks a directory for `.rs` files",
             Self::InterpolatedShellPath => {
                 "names a `.rs` path by interpolation, which the scan cannot read: spell it as one \
                  '…' or \"…\" literal, or list the file"
@@ -438,8 +545,8 @@ impl Kind {
                  read: spell it as one '…' or \"…\" literal, or list the file"
             }
             Self::ShellPathInAHereString => {
-                "names a `.rs` file inside a here-string, which the scan cannot read: spell it as \
-                 one '…' or \"…\" literal, or list the file"
+                "names a `.rs` file inside a here-string or heredoc, which the scan cannot read: \
+                 spell it as one '…' or \"…\" literal, or list the file"
             }
         }
     }
@@ -476,7 +583,7 @@ fn scan(root: &Path) -> Vec<Hit> {
     files.sort();
     let mut hits = Vec::new();
     for file in &files {
-        let rust = file.extension().is_some_and(|kind| kind == "rs");
+        let language = Language::of(file).expect("the walk keeps only the scanned extensions");
         let text = std::fs::read_to_string(file).unwrap_or_else(|error| {
             panic!(
                 "{} is in the tree and this scan could not read it: {error}. A file the guard \
@@ -484,7 +591,7 @@ fn scan(root: &Path) -> Vec<Hit> {
                 file.display()
             )
         });
-        hits.extend(hits_in(&from_root(file, root), &text, rust));
+        hits.extend(hits_in(&from_root(file, root), &text, language));
     }
     hits
 }
@@ -503,10 +610,7 @@ fn gather(directory: &Path, found: &mut Vec<PathBuf>) {
             if !skipped {
                 gather(&path, found);
             }
-        } else if path
-            .extension()
-            .is_some_and(|kind| kind == "rs" || kind == "ps1")
-        {
+        } else if Language::of(&path).is_some() {
             found.push(path);
         }
     }
@@ -519,22 +623,126 @@ fn from_root(path: &Path, root: &Path) -> String {
         .replace('\\', "/")
 }
 
-/// The four shapes, in one file's text.
-fn hits_in(file: &str, text: &str, rust: bool) -> Vec<Hit> {
+/// The language a scanned file is written in, by its extension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Language {
+    /// `.rs`: the four shapes.
+    Rust,
+    /// `.ps1` and `.psm1`.
+    PowerShell,
+    /// `.py`.
+    Python,
+    /// `.sh`.
+    Shell,
+}
+
+impl Language {
+    /// The language of a file the scan reads; any other extension is not
+    /// scanned.
+    fn of(path: &Path) -> Option<Self> {
+        match path.extension()?.to_str()? {
+            "rs" => Some(Self::Rust),
+            "ps1" | "psm1" => Some(Self::PowerShell),
+            "py" => Some(Self::Python),
+            "sh" => Some(Self::Shell),
+            _ => None,
+        }
+    }
+
+    /// Whether `body` holds one of this language's read verbs.
+    fn reads(self, body: &str) -> bool {
+        let anywhere = |verbs: &[&str]| verbs.iter().any(|verb| body.contains(verb));
+        let as_words = |verbs: &[&str]| {
+            verbs
+                .iter()
+                .any(|verb| whole_words(body, verb).next().is_some())
+        };
+        match self {
+            Self::Rust => anywhere(&RUST_READS),
+            Self::PowerShell => anywhere(&POWERSHELL_READS) || as_words(&POWERSHELL_READ_ALIASES),
+            Self::Python => {
+                anywhere(&PYTHON_READS)
+                    || as_words(&PYTHON_READ_WORDS)
+                    || whole_words(body, PYTHON_OPEN).any(|at| !body[..at].ends_with('.'))
+                    || !python_walks(body).is_empty()
+            }
+            Self::Shell => {
+                as_words(&SHELL_READ_WORDS)
+                    || redirects_input(body)
+                    || !shell_walks(body).is_empty()
+            }
+        }
+    }
+
+    /// The quotes a path literal is spelled in: Rust's string literal; both of
+    /// a script's.
+    fn quotes(self) -> &'static [char] {
+        match self {
+            Self::Rust => &['"'],
+            Self::PowerShell | Self::Python | Self::Shell => &['"', '\''],
+        }
+    }
+
+    /// The content lines of every multi-line string the language spells by an
+    /// opening line and a closing one: PowerShell's here-strings, the shell's
+    /// heredocs.
+    fn here_strings(self, text: &str) -> Vec<std::ops::Range<usize>> {
+        match self {
+            Self::PowerShell => here_string_bodies(text),
+            Self::Shell => heredoc_bodies(text),
+            Self::Rust | Self::Python => Vec::new(),
+        }
+    }
+
+    /// Whether the `quote`-delimited value between `open` and `close` is
+    /// interpolated.
+    fn interpolated(self, text: &str, open: usize, close: usize, quote: char) -> bool {
+        let value = &text[open + 1..close];
+        match self {
+            Self::PowerShell => quote == '"' && interpolates(value),
+            Self::Shell => quote == '"' && shell_interpolates(value),
+            Self::Python => python_interpolates(text, open, close),
+            Self::Rust => false,
+        }
+    }
+
+    /// The language's walks of a source tree.
+    fn walks(self, text: &str) -> Vec<SourceWalk> {
+        match self {
+            Self::Python => python_walks(text),
+            Self::Shell => shell_walks(text),
+            Self::Rust | Self::PowerShell => Vec::new(),
+        }
+    }
+}
+
+/// A script's walk of a source tree: where its verb is, the closing quote of
+/// its `.rs` pattern, and what it spells.
+struct SourceWalk {
+    at: usize,
+    close: usize,
+    subject: String,
+}
+
+/// The shapes, in one file's text: the four of Rust, and a script's literals,
+/// walks and diagnostics.
+fn hits_in(file: &str, text: &str, language: Language) -> Vec<Hit> {
+    let rust = language == Language::Rust;
     let mut found = Vec::new();
     let items = if rust { function_starts(text) } else { vec![0] };
-    let literals = if rust {
-        named_source_literals(text)
-    } else {
-        shell_source_literals(text)
-    };
+    let walks = language.walks(text);
+    let patterns: BTreeSet<usize> = walks.iter().map(|walk| walk.close).collect();
+    let literals: Vec<(usize, usize)> = source_literals(text, language)
+        .into_iter()
+        .filter(|(_, close)| !patterns.contains(close))
+        .collect();
 
     for &(open, close) in &literals {
         let named = &text[open + 1..close];
         let before = &text[..open];
         let kind = if ends_with_any(strip_raw_marker(before.trim_end()), &INCLUDING) {
             Kind::IncludedSource
-        } else if reads_a_file(&text[body_of(&items, text.len(), open)], rust)
+        } else if language.reads(&text[body_of(&items, text.len(), open)])
             && (!rust || ends_with_a_path_head(before))
         {
             Kind::ReadOfANamedSource
@@ -571,9 +779,19 @@ fn hits_in(file: &str, text: &str, rust: bool) -> Vec<Hit> {
         });
     }
 
-    if !rust && reads_a_file(text, rust) {
-        let closers: BTreeSet<usize> = literals.iter().map(|&(_, close)| close).collect();
-        for (at, kind, subject) in diagnostic_source_shapes(text, &closers) {
+    for walk in walks {
+        found.push(Hit {
+            file: file.to_owned(),
+            line: line_of(text, walk.at),
+            kind: Kind::ScriptSourceWalk,
+            subject: walk.subject,
+        });
+    }
+
+    if !rust && language.reads(text) {
+        let mut closers: BTreeSet<usize> = literals.iter().map(|&(_, close)| close).collect();
+        closers.extend(patterns);
+        for (at, kind, subject) in diagnostic_source_shapes(text, &closers, language) {
             found.push(Hit {
                 file: file.to_owned(),
                 line: line_of(text, at),
@@ -587,23 +805,20 @@ fn hits_in(file: &str, text: &str, rust: bool) -> Vec<Hit> {
 }
 
 /// Every string literal in `text` whose value is a path ending in `.rs`, as the
-/// byte positions of its two quotes.
+/// byte positions of its two quotes, in text order: double-quoted in Rust, and
+/// double- or single-quoted in a script.
 ///
 /// The search starts from the *closing* quote and walks back to the nearest one
-/// on the same line rather than pairing quotes from the top of the file. A
-/// forward pairing desynchronises on the first `'"'` character literal and then
-/// reads the rest of the file inside out; this cannot, because every candidate
-/// is decided within one line.
-fn named_source_literals(text: &str) -> Vec<(usize, usize)> {
-    quoted_source_literals(text, '"')
-}
-
-/// [`named_source_literals`] for a shell file: the double-quoted spelling and
-/// the single-quoted one, each found by the same one-line back-walk, in text
-/// order.
-fn shell_source_literals(text: &str) -> Vec<(usize, usize)> {
-    let mut found = quoted_source_literals(text, '"');
-    found.extend(quoted_source_literals(text, '\''));
+/// of its kind on the same line rather than pairing quotes from the top of the
+/// file. A forward pairing desynchronises on the first `'"'` character literal
+/// and then reads the rest of the file inside out; this cannot, because every
+/// candidate is decided within one line.
+fn source_literals(text: &str, language: Language) -> Vec<(usize, usize)> {
+    let mut found: Vec<(usize, usize)> = language
+        .quotes()
+        .iter()
+        .flat_map(|&quote| quoted_source_literals(text, quote))
+        .collect();
     found.sort_unstable();
     found
 }
@@ -629,15 +844,20 @@ fn opener_on_the_line(text: &str, at: usize, quote: char) -> Option<usize> {
     text[line_start..at].rfind(quote).map(|at| line_start + at)
 }
 
-/// The three diagnostic shapes of a shell reader, each as the byte position
+/// The three diagnostic shapes of a script reader, each as the byte position
 /// of its `.rs`, its kind and what it spells: a `.rs` extension inside a
-/// here-string that is not the closer of a literal in `closers` (the closing
-/// quotes of the two spellings); outside every here-string, a double-quoted
-/// `.rs` value that is interpolated; and any other quoted `.rs` value, its
-/// opener on its line, that is not path-shaped.
-fn diagnostic_source_shapes(text: &str, closers: &BTreeSet<usize>) -> Vec<(usize, Kind, String)> {
+/// PowerShell here-string or a shell heredoc that is not the closer of a
+/// literal in `closers` (the closing quotes of the two spellings and of the
+/// walks' patterns); outside every one, a quoted `.rs` value that is
+/// interpolated as `language` interpolates; and any other quoted `.rs` value,
+/// its opener on its line, that is not path-shaped.
+fn diagnostic_source_shapes(
+    text: &str,
+    closers: &BTreeSet<usize>,
+    language: Language,
+) -> Vec<(usize, Kind, String)> {
     let mut found = Vec::new();
-    let bodies = here_string_bodies(text);
+    let bodies = language.here_strings(text);
     let in_a_here_string = |at: usize| bodies.iter().any(|body| body.contains(&at));
     for quote in ['"', '\''] {
         for (at, _) in text.match_indices(&format!(".rs{quote}")) {
@@ -649,7 +869,7 @@ fn diagnostic_source_shapes(text: &str, closers: &BTreeSet<usize>) -> Vec<(usize
                 continue;
             };
             let value = &text[open + 1..close];
-            let kind = if quote == '"' && interpolates(value) {
+            let kind = if language.interpolated(text, open, close, quote) {
                 Kind::InterpolatedShellPath
             } else {
                 Kind::UnreadableShellPath
@@ -732,6 +952,224 @@ fn here_string_bodies(text: &str) -> Vec<std::ops::Range<usize>> {
     bodies
 }
 
+/// Whether a double-quoted shell value expands a parameter or a command: a `$`
+/// after an even run of backslashes (each escapes the character after it) and
+/// before a name, a positional or special parameter, `{` or `(` — `$dir`,
+/// `$1`, `$@`, `${dir}`, `$(…)`.
+fn shell_interpolates(value: &str) -> bool {
+    value.match_indices('$').any(|(at, _)| {
+        let slashes = value[..at].len() - value[..at].trim_end_matches('\\').len();
+        let expands = value[at + 1..].starts_with(|character: char| {
+            character.is_ascii_alphanumeric()
+                || matches!(
+                    character,
+                    '_' | '{' | '(' | '@' | '*' | '#' | '?' | '$' | '!' | '-'
+                )
+        });
+        slashes.is_multiple_of(2) && expands
+    })
+}
+
+/// Whether the Python string between `open` and `close` is formatted: an
+/// f-string (a prefix of string-prefix letters holding `f`) or one followed by
+/// `.format(` with a `{` in it, or one followed by `%` with a `%` in it.
+fn python_interpolates(text: &str, open: usize, close: usize) -> bool {
+    let value = &text[open + 1..close];
+    let before = &text[..open];
+    let prefix = &before[before
+        .trim_end_matches(|character: char| character.is_ascii_alphabetic())
+        .len()..];
+    let f_string = prefix.len() <= 2
+        && prefix.contains(['f', 'F'])
+        && prefix
+            .chars()
+            .all(|character| "rRbBfFuU".contains(character));
+    let after = text[close + 1..].trim_start_matches([' ', '\t']);
+    (value.contains('{') && (f_string || after.starts_with(".format(")))
+        || (value.contains('%') && after.starts_with('%'))
+}
+
+/// The content lines of every shell heredoc, as byte ranges over `text`: from
+/// the line after its opener to the start of the line that is its delimiter
+/// word alone (leading tabs aside for `<<-`), or to the end of the text. An
+/// opener is `<<` (not `<<<`), an optional `-`, optional blanks and a word of
+/// name characters, bare or in `'…'`, `"…"` or after `\`; several on one line
+/// open one after another.
+fn heredoc_bodies(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut bodies = Vec::new();
+    let mut waiting: std::collections::VecDeque<(String, bool)> = std::collections::VecDeque::new();
+    let mut open: Option<(String, bool, usize)> = None;
+    let mut at = 0usize;
+    for line in text.split_inclusive('\n') {
+        let next = at + line.len();
+        match open.take() {
+            Some((word, tabs, start)) => {
+                let content = line.trim_end_matches(['\n', '\r']);
+                let content = if tabs {
+                    content.trim_start_matches('\t')
+                } else {
+                    content
+                };
+                if content == word {
+                    bodies.push(start..at);
+                    open = waiting.pop_front().map(|(word, tabs)| (word, tabs, next));
+                } else {
+                    open = Some((word, tabs, start));
+                }
+            }
+            None => {
+                waiting.extend(heredoc_openers(line));
+                open = waiting.pop_front().map(|(word, tabs)| (word, tabs, next));
+            }
+        }
+        at = next;
+    }
+    if let Some((_, _, start)) = open {
+        bodies.push(start..text.len());
+    }
+    bodies
+}
+
+/// The heredocs one line opens, in order: each delimiter word, and whether
+/// its closer may be indented by tabs (`<<-`).
+fn heredoc_openers(line: &str) -> Vec<(String, bool)> {
+    let mut openers = Vec::new();
+    for (at, _) in line.match_indices("<<") {
+        if line[..at].ends_with('<') || line[at + 2..].starts_with('<') {
+            continue;
+        }
+        let rest = &line[at + 2..];
+        let (tabs, rest) = match rest.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, rest),
+        };
+        let rest = rest.trim_start_matches([' ', '\t']);
+        let rest = rest.strip_prefix(['\'', '"', '\\']).unwrap_or(rest);
+        let word: String = rest
+            .chars()
+            .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+            .collect();
+        if !word.is_empty() {
+            openers.push((word, tabs));
+        }
+    }
+    openers
+}
+
+/// Where `word` stands in `text` as a whole word: no name character (an ASCII
+/// letter, a digit, `_`) just before it when it starts with one, and none
+/// just after it when it ends with one.
+fn whole_words<'t>(text: &'t str, word: &'t str) -> impl Iterator<Item = usize> + 't {
+    let name = |character: char| character.is_ascii_alphanumeric() || character == '_';
+    text.match_indices(word).filter_map(move |(at, _)| {
+        let clear_before = !word.starts_with(name) || !text[..at].ends_with(name);
+        let clear_after = !word.ends_with(name) || !text[at + word.len()..].starts_with(name);
+        (clear_before && clear_after).then_some(at)
+    })
+}
+
+/// Whether a shell text redirects a command's input from a file: a `<` with
+/// no `<` on either side (a heredoc's, a here-string's) and before no `(` or
+/// `&` (a process substitution, a descriptor).
+fn redirects_input(text: &str) -> bool {
+    text.match_indices('<')
+        .any(|(at, _)| !text[..at].ends_with('<') && !text[at + 1..].starts_with(['<', '(', '&']))
+}
+
+/// The first quoted value inside `range` on one line whose closer is `.rs'`
+/// or `.rs"` and whose opener, the nearest quote of its kind on the line, is
+/// inside `range` too, as the positions of its two quotes.
+fn first_source_value(text: &str, range: std::ops::Range<usize>) -> Option<(usize, usize)> {
+    ['"', '\'']
+        .into_iter()
+        .flat_map(|quote| {
+            text[range.clone()]
+                .match_indices(&format!(".rs{quote}"))
+                .map(move |(at, _)| (range.start + at, quote))
+                .collect::<Vec<_>>()
+        })
+        .filter_map(|(at, quote)| {
+            let open = opener_on_the_line(text, at, quote)?;
+            (open >= range.start).then_some((open, at + 3))
+        })
+        .min()
+}
+
+/// Python's walks of a source tree: a `glob(`, `rglob(` or `iglob(` call
+/// whose arguments, on the call's line and inside its parentheses (counted as
+/// written), hold a quoted value ending in `.rs` — the call's pattern.
+fn python_walks(text: &str) -> Vec<SourceWalk> {
+    let mut walks = Vec::new();
+    for verb in PYTHON_GLOBS {
+        for at in whole_words(text, verb) {
+            let paren = at + verb.len() - 1;
+            let line_end = text[paren..]
+                .find('\n')
+                .map_or(text.len(), |end| paren + end);
+            let mut depth = 0usize;
+            let mut end = line_end;
+            for (offset, character) in text[paren..line_end].char_indices() {
+                match character {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = paren + offset;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some((open, close)) = first_source_value(text, paren + 1..end) {
+                walks.push(SourceWalk {
+                    at,
+                    close,
+                    subject: format!("{} {}", &verb[..verb.len() - 1], &text[open..=close]),
+                });
+            }
+        }
+    }
+    walks.sort_by_key(|walk| walk.at);
+    walks
+}
+
+/// The shell's walks of a source tree: a `find` whose line, after it, holds
+/// `-name`, blanks and a quoted value ending in `.rs`.
+fn shell_walks(text: &str) -> Vec<SourceWalk> {
+    let mut walks = Vec::new();
+    for at in whole_words(text, "find") {
+        let line_end = text[at..].find('\n').map_or(text.len(), |end| at + end);
+        for (offset, flag) in text[at..line_end].match_indices("-name") {
+            let rest = &text[at + offset + flag.len()..line_end];
+            let value = rest.trim_start_matches([' ', '\t']);
+            if value.len() == rest.len() {
+                continue;
+            }
+            let open = line_end - value.len();
+            let Some(quote) = value
+                .chars()
+                .next()
+                .filter(|quote| matches!(quote, '"' | '\''))
+            else {
+                continue;
+            };
+            let Some(length) = value[1..].find(quote) else {
+                continue;
+            };
+            let close = open + 1 + length;
+            if text[open + 1..close].ends_with(".rs") {
+                walks.push(SourceWalk {
+                    at,
+                    close,
+                    subject: format!("find -name {}", &text[open..=close]),
+                });
+            }
+        }
+    }
+    walks
+}
+
 /// A name a file could have: no spaces, no quotes, and something before the dot.
 fn path_shaped(value: &str) -> bool {
     value.len() > ".rs".len()
@@ -763,11 +1201,6 @@ fn ends_with_a_path_head(before: &str) -> bool {
         .rfind(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
         .map_or(0, |at| at + 1);
     PATH_HEADS.contains(&&before[head_at..])
-}
-
-fn reads_a_file(body: &str, rust: bool) -> bool {
-    let verbs: &[&str] = if rust { &RUST_READS } else { &SHELL_READS };
-    verbs.iter().any(|verb| body.contains(verb))
 }
 
 /// The span of the function `at` is written in, as a range over `text`.
@@ -1028,7 +1461,8 @@ fn no_source_reader_names_a_file_outside_the_two_lists() {
     // of files, not hundreds, and the list comparison below cannot tell — a
     // lone listed reader is no stray. The floor is on the files the walk read
     // and not on the readers it found, because the readers are what every
-    // migration ticket removes: 718 `.rs` and `.ps1` files on 2026-10-09.
+    // migration ticket removes: 813 `.rs`, `.ps1`, `.psm1`, `.py` and `.sh`
+    // files on 2026-10-13.
     let mut walked = Vec::new();
     gather(&root, &mut walked);
     assert!(
@@ -1129,14 +1563,27 @@ fn a_planted_reader_that_is_on_neither_list_makes_the_tripwire_fire() {
 /// Where the planted shell readers below say they live.
 const PLANTED_SCRIPT: &str = "scripts/planted.ps1";
 
-/// The planted script's hits and diagnostics, as `(line, kind, subject)`.
-fn shell_findings(script: &str) -> Vec<(usize, Kind, String)> {
-    hits_in(PLANTED_SCRIPT, script, false)
+/// Where the planted Python reader below says it lives.
+const PLANTED_PYTHON: &str = "scripts/planted.py";
+
+/// Where the planted shell reader below says it lives.
+const PLANTED_SHELL: &str = "scripts/planted.sh";
+
+/// A planted script's hits and diagnostics, as `(line, kind, subject)`, in
+/// the language its extension names.
+fn script_findings(file: &str, script: &str) -> Vec<(usize, Kind, String)> {
+    let language = Language::of(Path::new(file)).expect("a planted script is a scanned language");
+    hits_in(file, script, language)
         .into_iter()
         .map(|hit| (hit.line, hit.kind, hit.subject))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+/// The planted PowerShell script's hits and diagnostics.
+fn shell_findings(script: &str) -> Vec<(usize, Kind, String)> {
+    script_findings(PLANTED_SCRIPT, script)
 }
 
 /// What a shell diagnostic tells its author to do.
@@ -1145,9 +1592,10 @@ const LITERAL_OR_LIST: &str = "spell it as one '…' or \"…\" literal, or list
 /// What a hit on neither list tells its author to do.
 const LIST_OR_ASK: &str = "if the subject really is a file, add a FileScoped variant";
 
-/// The refusal the planted script earns on no list.
-fn shell_refusal(script: &str) -> String {
-    let hits = hits_in(PLANTED_SCRIPT, script, false);
+/// The refusal a planted script earns on no list.
+fn script_refusal(file: &str, script: &str) -> String {
+    let language = Language::of(Path::new(file)).expect("a planted script is a scanned language");
+    let hits = hits_in(file, script, language);
     let strays = unlisted(&hits, &BTreeSet::new(), &BTreeSet::new(), &BTreeMap::new());
     complaint(
         &strays,
@@ -1157,12 +1605,17 @@ fn shell_refusal(script: &str) -> String {
     )
 }
 
+/// The refusal the planted PowerShell script earns on no list.
+fn shell_refusal(script: &str) -> String {
+    script_refusal(PLANTED_SCRIPT, script)
+}
+
 /// RED — **a single-quoted `.rs` path in a shell reader is a hit**, as the
 /// double-quoted one always was, and the check refuses it naming the line and
 /// what to do.
 ///
-/// MUTATION: `shell_source_literals` without its single-quoted half (only
-/// `quoted_source_literals(text, '"')`) finds nothing here, and this goes red.
+/// MUTATION: `Language::quotes` without the single quote for a script (only
+/// `'"'`) finds nothing here, and this goes red.
 #[test]
 fn a_single_quoted_source_path_in_a_shell_reader_is_a_hit() {
     let script = "# 读取一个源文件 — reads one\n\
@@ -1223,7 +1676,7 @@ fn an_interpolated_source_path_in_a_shell_reader_is_a_diagnostic_not_a_pass() {
         "the failure names the line, the shape and what to do: {said}"
     );
     // On a list, the file's diagnostics are cleared as its hits are.
-    let hits = hits_in(PLANTED_SCRIPT, script, false);
+    let hits = hits_in(PLANTED_SCRIPT, script, Language::PowerShell);
     let listed = BTreeSet::from([PLANTED_SCRIPT.to_owned()]);
     assert!(unlisted(&hits, &listed, &BTreeSet::new(), &BTreeMap::new()).is_empty());
 }
@@ -1349,6 +1802,439 @@ fn a_glob_or_comment_naming_rs_is_neither_hit_nor_diagnostic() {
             && said.contains(LIST_OR_ASK),
         "only the literal is refused, with what to do: {said}"
     );
+}
+
+/// RED — **a Python reader naming a `.rs` path in either spelling is a hit**,
+/// and the check refuses it naming the line and what to do; the same literal
+/// in a Python file that reads nothing is no reader's.
+///
+/// MUTATION: `Language::reads` answering `false` for Python finds nothing
+/// here, and this goes red.
+#[test]
+fn a_python_reader_naming_a_source_is_a_hit() {
+    let script = "# 读取一个源文件 — reads one\n\
+                  text = open('crates/x/src/lib.rs', encoding='utf-8').read()\n\
+                  other = Path(\"crates/y/src/main.rs\").read_text()  # 中文 mixed\n";
+    assert_eq!(
+        script_findings(PLANTED_PYTHON, script),
+        vec![
+            (
+                2,
+                Kind::ReadOfANamedSource,
+                "crates/x/src/lib.rs".to_owned()
+            ),
+            (
+                3,
+                Kind::ReadOfANamedSource,
+                "crates/y/src/main.rs".to_owned()
+            ),
+        ]
+    );
+    let said = script_refusal(PLANTED_PYTHON, script);
+    assert!(
+        said.contains("scripts/planted.py:2 reads a named source file")
+            && said.contains(LIST_OR_ASK),
+        "the refusal names the line and what to do: {said}"
+    );
+    let named_only = "name = 'crates/x/src/lib.rs'  # 中文\n";
+    assert_eq!(script_findings(PLANTED_PYTHON, named_only), vec![]);
+}
+
+/// RED — **a formatted `.rs` path in a Python reader is a diagnostic, not a
+/// pass**: an f-string, a `.format(` and a `%` are interpolation; a value with
+/// a space, or braces with no formatting, is a value that is not one path.
+///
+/// MUTATION: `Language::interpolated` answering `false` for Python labels
+/// lines 2–4 unreadable instead, and this goes red.
+#[test]
+fn a_python_f_string_source_path_is_a_diagnostic() {
+    let script = "import os  # 中文 注释\n\
+                  a = open(f\"{root}/crates/x/src/lib.rs\")\n\
+                  b = open(\"{}/main.rs\".format(root))\n\
+                  c = open('%s/mod.rs' % root)\n\
+                  d = open(\"crates/a b/lib.rs\")\n\
+                  e = open('{x}.rs')\n";
+    assert_eq!(
+        script_findings(PLANTED_PYTHON, script),
+        vec![
+            (
+                2,
+                Kind::InterpolatedShellPath,
+                "{root}/crates/x/src/lib.rs".to_owned()
+            ),
+            (3, Kind::InterpolatedShellPath, "{}/main.rs".to_owned()),
+            (4, Kind::InterpolatedShellPath, "%s/mod.rs".to_owned()),
+            (5, Kind::UnreadableShellPath, "crates/a b/lib.rs".to_owned()),
+            (6, Kind::UnreadableShellPath, "{x}.rs".to_owned()),
+        ]
+    );
+    let said = script_refusal(PLANTED_PYTHON, script);
+    assert!(
+        said.contains("scripts/planted.py:2 names a `.rs` path by interpolation")
+            && said.contains(LITERAL_OR_LIST),
+        "the failure names the line, the shape and what to do: {said}"
+    );
+}
+
+/// RED — **a Python `glob`/`rglob` whose pattern ends in `.rs` is a walk of a
+/// source tree, a hit**, its pattern neither a literal hit nor a diagnostic;
+/// a glob over another extension is nothing.
+///
+/// MUTATION: `Language::walks` answering no walk for Python leaves both
+/// patterns as unreadable values, and this goes red.
+#[test]
+fn a_python_glob_over_rs_is_a_walk_hit() {
+    let script = "from pathlib import Path  # 遍历源文件\n\
+                  for p in Path('crates/中文 x').rglob('*.rs'):\n\
+                  print(p)\n\
+                  files = glob.glob(os.path.join(root, \"src\", \"*.rs\"))\n\
+                  names = sorted(Path('docs').glob('*.md'))\n";
+    assert_eq!(
+        script_findings(PLANTED_PYTHON, script),
+        vec![
+            (2, Kind::ScriptSourceWalk, "rglob '*.rs'".to_owned()),
+            (4, Kind::ScriptSourceWalk, "glob \"*.rs\"".to_owned()),
+        ]
+    );
+    let said = script_refusal(PLANTED_PYTHON, script);
+    assert!(
+        said.contains("scripts/planted.py:2 walks a directory for `.rs` files")
+            && said.contains(LIST_OR_ASK),
+        "the refusal names the line and what to do: {said}"
+    );
+}
+
+/// RED — **a shell reader naming a `.rs` path in either spelling is a hit**:
+/// handed to `grep`, to `wc`, and redirected into a `while read` loop.
+///
+/// MUTATION: `Language::reads` answering `false` for the shell finds nothing
+/// here, and this goes red.
+#[test]
+fn a_shell_reader_naming_a_source_is_a_hit() {
+    let script = "#!/usr/bin/env bash\n\
+                  # 读取一个源文件 — reads one\n\
+                  grep -n 'fn main' 'crates/x/src/main.rs'\n\
+                  wc -l \"crates/y/src/lib.rs\"  # 中文 mixed\n\
+                  while read -r line; do echo \"$line\"; done < 'crates/z/src/mod.rs'\n";
+    assert_eq!(
+        script_findings(PLANTED_SHELL, script),
+        vec![
+            (
+                3,
+                Kind::ReadOfANamedSource,
+                "crates/x/src/main.rs".to_owned()
+            ),
+            (
+                4,
+                Kind::ReadOfANamedSource,
+                "crates/y/src/lib.rs".to_owned()
+            ),
+            (
+                5,
+                Kind::ReadOfANamedSource,
+                "crates/z/src/mod.rs".to_owned()
+            ),
+        ]
+    );
+    let said = script_refusal(PLANTED_SHELL, script);
+    assert!(
+        said.contains("scripts/planted.sh:3 reads a named source file")
+            && said.contains(LIST_OR_ASK),
+        "the refusal names the line and what to do: {said}"
+    );
+}
+
+/// RED — **a parameter or a command substitution in a shell reader's `.rs`
+/// path is a diagnostic, not a pass**: `"$root/…"`, `"${dir}/…"`,
+/// `"$(pwd)/…"`; an escaped `\$` and a single-quoted `$` expand nothing and
+/// are values that are not one path.
+///
+/// MUTATION: `shell_interpolates` answering `false` labels lines 2–4
+/// unreadable instead, and this goes red.
+#[test]
+fn a_shell_variable_source_path_is_a_diagnostic() {
+    let script = "root=$(git rev-parse --show-toplevel)  # 根目录\n\
+                  cat \"$root/crates/x/src/lib.rs\"\n\
+                  sed -n 1p \"${dir}/main.rs\"\n\
+                  head \"$(pwd)/a.rs\"\n\
+                  tail \"\\$escaped/lib.rs\"\n\
+                  diff 'crates/$x/lib.rs' other\n";
+    assert_eq!(
+        script_findings(PLANTED_SHELL, script),
+        vec![
+            (
+                2,
+                Kind::InterpolatedShellPath,
+                "$root/crates/x/src/lib.rs".to_owned()
+            ),
+            (3, Kind::InterpolatedShellPath, "${dir}/main.rs".to_owned()),
+            (4, Kind::InterpolatedShellPath, "$(pwd)/a.rs".to_owned()),
+            (5, Kind::UnreadableShellPath, "\\$escaped/lib.rs".to_owned()),
+            (6, Kind::UnreadableShellPath, "crates/$x/lib.rs".to_owned()),
+        ]
+    );
+    let said = script_refusal(PLANTED_SHELL, script);
+    assert!(
+        said.contains("scripts/planted.sh:2 names a `.rs` path by interpolation")
+            && said.contains(LITERAL_OR_LIST),
+        "the failure names the line, the shape and what to do: {said}"
+    );
+}
+
+/// RED — **a `.rs` file named inside a shell heredoc is a diagnostic**,
+/// unless it is one of the two literal spellings, which is a hit; `<<-`
+/// closes at its tab-indented word, and a `<<<` here-string opens no heredoc.
+///
+/// MUTATION: `Language::here_strings` answering no body for the shell finds
+/// no failure on lines 3 and 7, and this goes red.
+#[test]
+fn a_heredoc_naming_a_source_is_a_diagnostic() {
+    let script = "cat <<EOF\n\
+                  first line 中文\n\
+                  crates/x/src/lib.rs\n\
+                  EOF\n\
+                  cat <<-'END'\n\
+                  \tgrep x 'crates/y/src/main.rs'\n\
+                  \tthen mod.rs, and a .rsx that is no extension\n\
+                  \tEND\n\
+                  not inside: a.rs\n\
+                  cat <<< \"$x\"\n\
+                  still outside: b.rs\n";
+    assert_eq!(
+        script_findings(PLANTED_SHELL, script),
+        vec![
+            (
+                3,
+                Kind::ShellPathInAHereString,
+                "crates/x/src/lib.rs".to_owned()
+            ),
+            (
+                6,
+                Kind::ReadOfANamedSource,
+                "crates/y/src/main.rs".to_owned()
+            ),
+            (
+                7,
+                Kind::ShellPathInAHereString,
+                "then mod.rs, and a .rsx that is no extension".to_owned()
+            ),
+        ]
+    );
+    let said = script_refusal(PLANTED_SHELL, script);
+    assert!(
+        said.contains("scripts/planted.sh:3 names a `.rs` file inside a here-string or heredoc")
+            && said.contains(LITERAL_OR_LIST),
+        "the failure names the line, the shape and what to do: {said}"
+    );
+}
+
+/// RED — **a `find … -name '*.rs'` is a walk of a source tree, a hit**, in
+/// either quote, its pattern neither a literal hit nor a diagnostic; a `find`
+/// over another extension is nothing.
+///
+/// MUTATION: `Language::walks` answering no walk for the shell leaves both
+/// patterns as unreadable values, and this goes red.
+#[test]
+fn a_find_over_rs_is_a_walk_hit() {
+    let script = "# 找出所有源文件 — every source\n\
+                  find crates -name '*.rs' -print0 | xargs -0 wc -l\n\
+                  find \"crates/中文 dir\" -name \"*.rs\" | while read -r f; do echo \"$f\"; done\n\
+                  find . -name '*.toml'\n";
+    assert_eq!(
+        script_findings(PLANTED_SHELL, script),
+        vec![
+            (2, Kind::ScriptSourceWalk, "find -name '*.rs'".to_owned()),
+            (3, Kind::ScriptSourceWalk, "find -name \"*.rs\"".to_owned()),
+        ]
+    );
+    let said = script_refusal(PLANTED_SHELL, script);
+    assert!(
+        said.contains("scripts/planted.sh:2 walks a directory for `.rs` files")
+            && said.contains(LIST_OR_ASK),
+        "the refusal names the line and what to do: {said}"
+    );
+}
+
+/// RED — **a PowerShell read alias makes the file a reader**: `gc` reads, so
+/// its `.rs` literal is a hit, as `[IO.File]::OpenRead`'s is; an alias
+/// inside a longer name (`$category`, `$types`) is no alias. Only ASCII
+/// letters, digits and `_` block a match: `$type` or `$cat` alone would count.
+///
+/// MUTATION: `Language::reads` without `POWERSHELL_READ_ALIASES` finds nothing
+/// in the first script, and this goes red.
+#[test]
+fn a_powershell_alias_read_makes_the_file_a_reader() {
+    let aliased = "# 别名 — an alias\n\
+                   $text = gc 'crates/x/src/lib.rs'\n";
+    assert_eq!(
+        shell_findings(aliased),
+        vec![(
+            2,
+            Kind::ReadOfANamedSource,
+            "crates/x/src/lib.rs".to_owned()
+        )]
+    );
+    let said = shell_refusal(aliased);
+    assert!(
+        said.contains("scripts/planted.ps1:2 reads a named source file")
+            && said.contains(LIST_OR_ASK),
+        "the refusal names the line and what to do: {said}"
+    );
+    let opened = "$stream = [IO.File]::OpenRead('crates/y/src/main.rs')  # 中文\n";
+    assert_eq!(
+        shell_findings(opened),
+        vec![(
+            1,
+            Kind::ReadOfANamedSource,
+            "crates/y/src/main.rs".to_owned()
+        )]
+    );
+    let inside_names = "$category = 'crates/x/src/lib.rs'  # 中文\n\
+                        $types = Get-Item x\n";
+    assert_eq!(shell_findings(inside_names), vec![]);
+}
+
+/// PIN — **in a Python or shell reader, a `.rs` with no quote on its line
+/// outside a heredoc — a glob, a comment, a bare argument — is neither a hit
+/// nor a diagnostic**. The one literal beside them is the only finding, and
+/// the refusal says what to do about it alone.
+///
+/// MUTATION: count every `.rs` as a heredoc line (`heredoc_bodies` returning
+/// the whole text) and the shell half goes red; give Python the whole text as
+/// one here-string (`Language::here_strings`' Python arm) and the Python half
+/// goes red.
+#[test]
+fn a_glob_or_comment_naming_rs_in_a_script_is_neither_hit_nor_diagnostic() {
+    let python = "# reads main.rs — 读取 main.rs\n\
+                  paths = sorted(root.glob('*.py'))\n\
+                  text = open(path).read()\n\
+                  one = 'crates/x/src/lib.rs'\n";
+    assert_eq!(
+        script_findings(PLANTED_PYTHON, python),
+        vec![(
+            4,
+            Kind::ReadOfANamedSource,
+            "crates/x/src/lib.rs".to_owned()
+        )]
+    );
+    let shell = "# reads main.rs — 读取 main.rs\n\
+                 ls src/*.rs | wc -l\n\
+                 cat crates/x/src/lib.rs\n\
+                 grep fn 'crates/x/src/lib.rs'\n";
+    assert_eq!(
+        script_findings(PLANTED_SHELL, shell),
+        vec![(
+            4,
+            Kind::ReadOfANamedSource,
+            "crates/x/src/lib.rs".to_owned()
+        )]
+    );
+    let said = script_refusal(PLANTED_SHELL, shell);
+    assert!(
+        said.starts_with("1 source reader(s)")
+            && said.contains("scripts/planted.sh:4 ")
+            && said.contains(LIST_OR_ASK),
+        "only the literal is refused, with what to do: {said}"
+    );
+}
+
+/// One line per read verb, each in a planted file of its own language, each
+/// naming the same source with no other verb beside it.
+const ONE_VERB_EACH: [(&str, &str); 35] = [
+    (PLANTED_SCRIPT, "Get-Content 'crates/x/src/lib.rs'"),
+    (PLANTED_SCRIPT, "Select-String fn 'crates/x/src/lib.rs'"),
+    (
+        PLANTED_SCRIPT,
+        "[IO.File]::ReadAllText('crates/x/src/lib.rs')",
+    ),
+    (
+        PLANTED_SCRIPT,
+        "[IO.File]::ReadAllLines('crates/x/src/lib.rs')",
+    ),
+    (
+        PLANTED_SCRIPT,
+        "[IO.File]::ReadAllBytes('crates/x/src/lib.rs')",
+    ),
+    (
+        PLANTED_SCRIPT,
+        "[IO.File]::ReadLines('crates/x/src/lib.rs')",
+    ),
+    (PLANTED_SCRIPT, "$info.OpenText('crates/x/src/lib.rs')"),
+    (
+        PLANTED_SCRIPT,
+        "[IO.File]::Open('crates/x/src/lib.rs', 'Open')",
+    ),
+    (PLANTED_SCRIPT, "$info.OpenRead('crates/x/src/lib.rs')"),
+    (PLANTED_SCRIPT, "Import-Csv 'crates/x/src/lib.rs'"),
+    (PLANTED_SCRIPT, "Get-FileHash 'crates/x/src/lib.rs'"),
+    (PLANTED_SCRIPT, "gc 'crates/x/src/lib.rs'"),
+    (PLANTED_SCRIPT, "cat 'crates/x/src/lib.rs'"),
+    (PLANTED_SCRIPT, "type 'crates/x/src/lib.rs'"),
+    (PLANTED_SCRIPT, "sls fn 'crates/x/src/lib.rs'"),
+    (PLANTED_PYTHON, "text = open('crates/x/src/lib.rs')"),
+    (
+        PLANTED_PYTHON,
+        "text = Path('crates/x/src/lib.rs').read_text()",
+    ),
+    (
+        PLANTED_PYTHON,
+        "data = Path('crates/x/src/lib.rs').read_bytes()",
+    ),
+    (
+        PLANTED_PYTHON,
+        "handle = Path('crates/x/src/lib.rs').open()",
+    ),
+    (
+        PLANTED_PYTHON,
+        "lines = fileinput.input('crates/x/src/lib.rs')",
+    ),
+    (PLANTED_SHELL, "cat 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "grep fn 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "rg fn 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "sed -n 1p 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "awk 1 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "head 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "tail 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "wc -l 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "cut -c1 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "sort 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "diff a 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "cmp a 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "md5sum 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "shasum 'crates/x/src/lib.rs'"),
+    (
+        PLANTED_SHELL,
+        "while read -r l; do :; done < 'crates/x/src/lib.rs'",
+    ),
+];
+
+/// RED — **each read verb on its own makes its file a reader**: a file
+/// holding that one verb and a `.rs` literal is a hit on the literal's line,
+/// refused naming the line and what to do.
+///
+/// MUTATION: remove any one verb from its list (or make `redirects_input`
+/// answer `false`) and the row holding it finds nothing, and this goes red
+/// naming that row.
+#[test]
+fn each_read_verb_alone_makes_its_file_a_reader() {
+    for (file, line) in ONE_VERB_EACH {
+        let script = format!("# 读取一个源文件 — 中文 mixed\n{line}\n");
+        assert_eq!(
+            script_findings(file, &script),
+            vec![(
+                2,
+                Kind::ReadOfANamedSource,
+                "crates/x/src/lib.rs".to_owned()
+            )],
+            "{file}: `{line}` is a read of the source it names"
+        );
+        let said = script_refusal(file, &script);
+        assert!(
+            said.contains(&format!("{file}:2 reads a named source file"))
+                && said.contains(LIST_OR_ASK),
+            "{file}: `{line}` is refused naming the line and what to do: {said}"
+        );
+    }
 }
 
 /// PIN — **every allowlist entry names one file, one reason, and a file the scan

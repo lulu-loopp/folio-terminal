@@ -75,30 +75,64 @@ under `target/` and bytes the shipped program embeds are not subjects.
 
 Where and what to do: `crates/bt-source/tests/tripwire.rs`.
 `no_source_reader_names_a_file_outside_the_two_lists` holds the Rust-source
-readers (four lexical shapes, by file). In a PowerShell reader (a `.ps1`
-holding `Get-Content`, `Select-String` or `ReadAll{Text,Lines,Bytes}`) a `.rs`
-path literal is a hit in exactly two spellings, `"…lib.rs"` and `'…lib.rs'`,
-each path-shaped, its opener the nearest quote of its kind on the same line.
-Three other spellings are diagnostics that fail naming `file:line`, the shape
-and what to do: a `.rs` extension inside a here-string (`@"…"@`, `@'…'@`) that
-is not one of the two spellings; an interpolated double-quoted value
-(`"$dir/lib.rs"`, `"${x}.rs"`, `"$(…)/a.rs"`, a `$` after an even run of
-backticks and before a name or an expression); and any other quoted `.rs` value with its opener on its line that
-is not path-shaped (`'crates/a b/lib.rs'`, an escaped `` `$ ``, a
-sub-expression holding a quote of its own). The author rewrites the literal
-into one of the two spellings or lists the file. Out of scope, as limits: a
-`.rs` with no quote on its line outside a here-string (a comment,
-`-Filter *.rs`), a closer with no opener on its line (a string spanning lines),
-and `.RS` in upper case; a line that only looks like a here-string opener
-(`$m = 'a@'`) opens a phantom one whose `.rs` names are reported — noise, never
-a silent pass. A shell reader is cleared like a Rust one, by file: a gate whose
-subject really is source files is a `FileScoped` variant (the vendor-notice,
-dead-code, lint-probe and embedded-spaces gates). A suite that writes a scratch
-`.rs` file into a temporary tree is no reader of a committed source and gets no
+readers (four lexical shapes, by file).
+A script is a reader when it holds a read verb of its language, from a
+closed list matched as written, an alias or a short verb only as a whole word
+(only an ASCII letter, a digit or `_` beside it blocks a match, so `$type`,
+`[type]`, `-type`, `$cat` and the word in a comment count — noise, never
+silence):
+PowerShell (`.ps1`, `.psm1`) `Get-Content`, `Select-String`,
+`ReadAll{Text,Lines,Bytes}`, `ReadLines`, `OpenText`, `[IO.File]::Open`,
+`OpenRead`, `Import-Csv`, `Get-FileHash` and the aliases `gc`, `cat`, `type`,
+`sls`; Python (`.py`) the built-in `open(` (no `.` before it), `.read_text(`,
+`.read_bytes(`, `.open(`,
+`fileinput` and a `glob(`/`rglob(`/`iglob(` whose pattern ends in `.rs`; the
+shell (`.sh`) `cat`, `grep`, `rg`, `sed`, `awk`, `head`, `tail`, `wc`, `cut`,
+`sort`, `diff`, `cmp`, `md5sum`, `shasum`, a `<` input redirection and a
+`find … -name '*.rs'`. In a reader a `.rs` path literal is a hit in exactly
+two spellings, `"…lib.rs"` and `'…lib.rs'`, each path-shaped, its opener the
+nearest quote of its kind on the same line; a Python glob or a shell `find`
+over `*.rs` is a hit with the tree it walks as its subject (the scripts'
+`read_dir` + `"rs"`). Three other spellings are diagnostics that fail naming
+`file:line`, the shape and what to do: a `.rs` extension inside a PowerShell
+here-string (`@"…"@`, `@'…'@`) or a shell heredoc (`<<EOF` … `EOF`) that is
+not one of the two spellings; an interpolated value — PowerShell's
+double-quoted `"$dir/lib.rs"`, `"${x}.rs"`, `"$(…)/a.rs"` (a `$` after an even
+run of backticks and before a name or an expression), the shell's
+double-quoted `"$root/x.rs"`, `"${dir}/x.rs"`, `"$(pwd)/a.rs"` (a `$` after an
+even run of backslashes), Python's `f"{root}/x.rs"`, `"{}.rs".format(…)` and
+`"%s.rs" % …`; and any other quoted `.rs` value with its opener on its line
+that is not path-shaped (`'crates/a b/lib.rs'`, an escaped `` `$ `` or `\$`,
+a sub-expression holding a quote of its own, `'.rs'` alone). The author
+rewrites the literal into one of the two spellings or lists the file. Out of
+scope, as limits: a `.rs` with no quote on its line outside a here-string or
+heredoc (a comment, `-Filter *.rs`, a bare `cat crates/x/src/lib.rs`), a `.rs`
+that ends no quoted value, a closer with no opener on its line (a string
+spanning lines, a Python triple-quoted body), a path handed to a command run
+by a verb not on the list (`subprocess.run(['cat', …])`), and `.RS` or a verb
+in another case. The walks are as narrow as written: a glob pattern on a
+continuation line, `find -iname`, `find -path '*.rs'`, `-name \*.rs`, an
+unquoted pattern and a `-name` on a continuation line are silent in a file with
+no other verb (unreadable values in a reader), and a `.sh` whose only source
+read is inside an embedded `python3 - <<'PY'` heredoc is judged by the shell's
+verbs alone. Files of another kind are not scanned: the inline `pwsh` steps of
+`.github/workflows/ci.yml` (which read `crates/bt-doc/src/lib.rs` with
+`ReadAllText`) and the tracked `.bash`/`.zsh` scripts under
+`scripts/shell-integration/`; a line that only looks like a here-string or heredoc opener
+(`$m = 'a@'`, `$(( 1 << 3 ))`) opens a phantom one whose `.rs` names are
+reported — noise, never a silent pass. A script reader is cleared like a Rust
+one, by file: a gate or tool whose subject really is source files is a
+`FileScoped` variant (the vendor-notice, dead-code, lint-probe and
+embedded-spaces gates, and the split plan's module-graph generator,
+reader-shapes measurement and topic mover in `scripts/dev/`); the split
+freshness generator is a MIGRATION-DEBT `exception`. A suite that writes a
+scratch `.rs` file into a temporary tree is no reader of a committed source and gets no
 row: it spells the scratch name so that the script holds no `.rs` literal (as
 `[IO.Path]::ChangeExtension('crates/x/src/lib', 'rs')` does, or by giving the
 scratch file another extension), and a single-quoted scratch path the scan
-reports is a false positive the author rewrites;
+reports is a false positive the author rewrites, as is a `.rs` literal in a
+script that reads only something else (`bt-app-split-table.py` reads a JSON and
+takes a node's name as `Path(…).stem`);
 `every_reader_of_a_committed_document_is_on_a_list` holds the document readers
 (by item, through `bt-source`'s index — no script reads Rust for it), and its
 message names the item, the file and both lists;
@@ -283,7 +317,7 @@ never the thread door itself — the completions reachability guard's
 `worker_roots` reads that call as the thread's start, so the lane's thread name
 and the worker-door bodies its body reaches are seen as a thread door's are);
 it builds its `lane::Ledger` with its own wake, which the ledger calls when the
-worker ends, after every owed identity has its terminal; it admits each request
+worker ends owing any request, after every owed identity has its terminal (a worker that ends owing nothing wakes nobody); it admits each request
 through the ledger (`admit`, or `admit_joined` for the same operation asked
 again), which mints the identity or refuses at the door, and records the sink
 the identity is owed when its requester goes; it runs each request's work
@@ -310,7 +344,10 @@ below the earliest request still owed; and the computation lane (S-8,
 the order minted unless a newer one for the same target displaces it while it waits
 (`Superseded { by }`) or is the same operation and joins it, the worker started by the
 first request, a refused request handed back with its job, a supersession announced by
-the wake and its terminal — which carries no answer — taken past the drain mark. A lane of
+the wake and its terminal — which carries no answer — taken past the drain mark; and the git
+mutation lane (T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER, `git_mutation_lane`) on `lane::Queue` too,
+one share per repository, made by its first request and let go once nothing of it is held or owed, its
+identities the share's generation beside the minted number so a later share never repeats one. A lane of
 several threads keeps one ledger per thread, so one thread's end ends only its own requests,
 and keeps what each request asked, so a `Failed` one is settled — as its surface's own error,
 or held by its pane — and asked again only by new input to that surface, rather than left in

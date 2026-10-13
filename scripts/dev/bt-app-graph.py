@@ -127,6 +127,8 @@ files={p:files[p] for p in sorted(files,key=listed_order)}
 # from.
 unreached=sorted(set(files)-set(contexts))
 for p in unreached: contexts[p]=tuple(p[:-3].split('/'))
+# A node is a top-level entry's name less its extension; bt-app-split-table.py
+# takes the same name as `Path(...).stem`.
 nodes={p.split('/')[0].removesuffix('.rs') for p in files if p!=ROOT}
 def physical(p): return p.split('/')[0].removesuffix('.rs')
 def owner(path): return path[0] if path and path[0] in nodes else '@root'
