@@ -113,7 +113,7 @@ def main() -> int:
 
     stats = {}
     for path, value in graph["stats"].items():
-        node = path.split("/")[0].removesuffix(".rs")
+        node = Path(path.split("/")[0]).stem
         row = stats.setdefault(node, {"lines": 0, "test": 0})
         row["lines"] += value["lines"]
         row["test"] += value["test"]
