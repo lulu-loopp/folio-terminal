@@ -48,11 +48,14 @@
 //!   end ends every request of that share still in line `WorkerGone`, faults the share and wakes
 //!   the loop; those, and a refusal at the door, never ran, and reach the page as
 //!   [`GitFault::NotRun`] ([`receipt`]): the rows undim and the notice says Folio did not run it.
-//! * **Abandonment.** A request whose page has gone — its tab closed, its floating window
-//!   dismissed or its window closed — is let go by the drain before it takes anything; its
-//!   terminal, now or when it comes, goes to the lane's sink, which ignores it (C6): nobody is left
-//!   to undim, and a failure in it was said by the ledger. A column closed inside a tab that stays
-//!   open is the tab's: its receipt reaches the tab, which finds no column to file it in.
+//! * **Abandonment.** A request is owed to the repository cache that asked
+//!   ([`git::GitCacheId`]), not to the place it asked from. One whose cache no open surface holds —
+//!   its column or its tab closed, its floating window dismissed, its window closed, its column
+//!   pointed at another folder — is let go by the drain before it takes anything ([`OpenPages`]);
+//!   its terminal, now or when it comes, goes to the lane's sink, which ignores it (C6): nobody is
+//!   left to undim, and a failure in it was said by the ledger. A view that **moved** while git ran
+//!   — a float docked into a column, a column popped out into a float, a pane carried into another
+//!   tab — still holds its cache, and its receipt reaches it where it stands.
 //! * **Lifetime.** A share is made by the first request for its repository and let go by the drain
 //!   once the window thread holds none of its requests **and its ledger owes none** — a let-go
 //!   request still running or in line keeps its share, its one worker and its place in the
@@ -672,26 +675,91 @@ impl Drop for GitMutationLane {
     }
 }
 
-/// **The Git pages the open windows still hold**, gathered by the window thread before its drain
-/// ([`GitMutationLane::ended`]): the tabs standing in a window that is not leaving, and each
-/// floating page by the window it stands in and the epoch that minted it, while it still shows a
-/// Files view — what `apply_git_results` files a float's receipt into.
+/// **Where one repository cache stands this turn**: a docked Files column (its tab and seat), a
+/// tab's commit graph (its tab and repository), or a floating Files view (the epoch that minted
+/// its window).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Place {
+    Column(crate::LeafId),
+    Graph { tab: crate::TabId, root: PathBuf },
+    Float(crate::float::FloatId),
+}
+
+/// **Every repository cache the open windows hold, by its identity**, gathered by the window
+/// thread before its drain: each column's, each graph's and each floating Files view's, with the
+/// window it stands in, for every window that is not leaving.
+///
+/// An answer is owed to the cache that asked ([`git::GitCacheId`]), never to the place it asked
+/// from, so a Files view docked into a column or popped out into a float while git ran is found
+/// where it stands now ([`Self::resolve`]) — the one resolution both the drain's test for a gone
+/// page ([`Self::gone`]) and the filing ([`Self::address`], whose host `apply_git_results` files
+/// by) read. Only a cache no open surface holds is gone: its view was closed, its window
+/// dismissed or its column pointed at another folder.
 #[derive(Default)]
 pub(crate) struct OpenPages {
-    pub(crate) tabs: std::collections::BTreeSet<crate::TabId>,
-    pub(crate) floats: std::collections::BTreeSet<(winit::window::WindowId, crate::float::FloatId)>,
+    places: std::collections::BTreeMap<git::GitCacheId, (winit::window::WindowId, Place)>,
 }
 
 impl OpenPages {
-    /// Whether the page that asked `request` has gone: a column's or a graph's tab no open window
-    /// holds, or a floating page no longer live with a Files view in its window — its receipt is
-    /// then the lane's sink's.
+    /// The cache `asker` stands at `place`, in `window`, this turn.
+    pub(crate) fn stand(
+        &mut self,
+        asker: git::GitCacheId,
+        window: winit::window::WindowId,
+        place: Place,
+    ) {
+        let earlier = self.places.insert(asker, (window, place));
+        debug_assert!(
+            earlier.is_none(),
+            "one cache stands in one place: {asker:?} was already standing at {earlier:?}"
+        );
+    }
+
+    /// **The window and the host the cache `asker` is reached under now**, or `None` when no open
+    /// surface holds it. `asked` is where the question was asked from: a floating view keeps the
+    /// tab a document it asked for goes to (`GitHost::Float`'s `tab`), which is the tab the
+    /// question was asked in, wherever the view stood then.
+    pub(crate) fn resolve(
+        &self,
+        asker: git::GitCacheId,
+        asked: &git::GitHost,
+    ) -> Option<(winit::window::WindowId, git::GitHost)> {
+        let (window, place) = self.places.get(&asker)?;
+        let host = match place {
+            Place::Column(leaf) => git::GitHost::Column(*leaf),
+            Place::Graph { tab, root } => git::GitHost::Graph {
+                tab: *tab,
+                root: root.clone(),
+            },
+            Place::Float(id) => git::GitHost::Float {
+                id: *id,
+                tab: asked.tab(),
+            },
+        };
+        Some((*window, host))
+    }
+
+    /// Whether the page that asked `request` has gone — no open surface holds its cache; its
+    /// receipt is then the lane's sink's.
     pub(crate) fn gone(&self, request: &GitRequest) -> bool {
-        match &request.host {
-            git::GitHost::Column(leaf) => !self.tabs.contains(&leaf.tab),
-            git::GitHost::Graph { tab, .. } => !self.tabs.contains(tab),
-            git::GitHost::Float { id, .. } => !self.floats.contains(&(request.window, *id)),
+        self.resolve(request.asker, &request.host).is_none()
+    }
+
+    /// **An answer addressed for the window that files it**, or `None` when the cache that asked
+    /// is gone (the cancellation, arriving as a dropped answer). A page's answer is addressed to
+    /// where its cache stands now. A document ([`GitAnswer::is_document`]) keeps the address it
+    /// was asked under: it is filed into the preview pool of the tab it was asked in, which no
+    /// move of the view changes.
+    pub(crate) fn address(&self, response: GitResponse) -> Option<GitResponse> {
+        let (window, host) = self.resolve(response.asker, &response.host)?;
+        if response.answer.is_document() {
+            return Some(response);
         }
+        Some(GitResponse {
+            window,
+            host,
+            ..response
+        })
     }
 }
 
@@ -716,6 +784,7 @@ pub(crate) fn receipt(terminal: MutationTerminal, request: GitRequest) -> GitRes
     GitResponse {
         window: request.window,
         host: request.host,
+        asker: request.asker,
         answer,
     }
 }
@@ -734,6 +803,7 @@ pub(crate) fn refusal(refused: &Refused, request: GitRequest) -> GitResponse {
         answer: git::faulted(&request.question, GitFault::NotRun(why)),
         window: request.window,
         host: request.host,
+        asker: request.asker,
     }
 }
 
@@ -761,9 +831,10 @@ pub(crate) fn went_through(question: &GitQuestion) -> GitAnswer {
 
 /// **The lane contract suite's adapter for the git mutation lane** (`crate::lane`): the real
 /// [`GitMutationLane`], driven with the suite's scripted executor through its own admission
-/// ([`GitMutationLane::ask_through`]) and the product's acceptance — the drain lets go of a closed
-/// tab's requests ([`GitMutationLane::ended`]) and each receipt is claimed by its tab
-/// (`claimed_by`), as `apply_git_results` asks through `Runtime::owns`.
+/// ([`GitMutationLane::ask_through`]) and the product's acceptance — each target is a column
+/// whose repository cache stands in its tab while it is open ([`OpenPages`]), the drain lets go
+/// of a closed target's requests ([`GitMutationLane::ended`]) and each receipt is taken by the
+/// column its cache stands in ([`OpenPages::resolve`]), as the application's drain does.
 ///
 /// Every question is a `Stage` of one file in one repository — the file named by the question,
 /// in Chinese and Latin — and the door is a fake that tells the suite's gate which question it
@@ -771,21 +842,22 @@ pub(crate) fn went_through(question: &GitQuestion) -> GitAnswer {
 /// through: no `git` is started.
 #[cfg(test)]
 pub(crate) mod contract_adapter {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::git::{GitHost, GitWriteVerb};
+    use crate::git::{GitCacheId, GitHost, GitWriteVerb};
     use crate::lane::{
         Admission, Contract, Delivered, GIT_MUTATION, Gate, LaneUnderTest, Outcome, WakeProbe,
     };
-    use crate::{LeafId, SeatId, TabId, WindowId, claimed_by};
+    use crate::{LeafId, SeatId, TabId, WindowId};
 
     struct Adapter {
         lane: GitMutationLane,
         gate: Arc<Gate>,
         probe: Arc<WakeProbe>,
-        opened: BTreeSet<u32>,
+        /// Each target's page, by the identity of its repository cache.
+        opened: BTreeMap<u32, GitCacheId>,
         closed: BTreeSet<u32>,
         sunk: Arc<Mutex<Vec<Delivered>>>,
         said: Arc<AtomicUsize>,
@@ -798,6 +870,14 @@ pub(crate) mod contract_adapter {
 
     fn tab_of(target: u32) -> TabId {
         TabId(u64::from(target) + 1)
+    }
+
+    /// The column a target's page stands in: the first seat of its tab.
+    fn column_of(target: u32) -> GitHost {
+        GitHost::Column(LeafId {
+            tab: tab_of(target),
+            seat: SeatId(1),
+        })
     }
 
     /// The file a question stages: its name carries the question.
@@ -868,7 +948,7 @@ pub(crate) mod contract_adapter {
             lane,
             gate,
             probe,
-            opened: BTreeSet::new(),
+            opened: BTreeMap::new(),
             closed: BTreeSet::new(),
             sunk,
             said,
@@ -889,13 +969,11 @@ pub(crate) mod contract_adapter {
         }
 
         fn submit(&mut self, target: u32, question: u64) -> Admission {
-            self.opened.insert(target);
+            let asker = *self.opened.entry(target).or_insert_with(GitCacheId::mint);
             let request = GitRequest {
                 window: adapter_window(),
-                host: GitHost::Column(LeafId {
-                    tab: tab_of(target),
-                    seat: SeatId(1),
-                }),
+                host: column_of(target),
+                asker,
                 question: GitQuestion::Write {
                     root: PathBuf::from("仓库 repo"),
                     verb: GitWriteVerb::Stage,
@@ -932,22 +1010,27 @@ pub(crate) mod contract_adapter {
         }
 
         fn drain(&mut self) -> Vec<Delivered> {
-            let open: Vec<TabId> = self
-                .opened
-                .difference(&self.closed)
-                .map(|target| tab_of(*target))
-                .collect();
+            let mut open = OpenPages::default();
+            for (target, asker) in &self.opened {
+                if !self.closed.contains(target) {
+                    open.stand(
+                        *asker,
+                        adapter_window(),
+                        Place::Column(LeafId {
+                            tab: tab_of(*target),
+                            seat: SeatId(1),
+                        }),
+                    );
+                }
+            }
             self.lane
-                .ended(|request| {
-                    !claimed_by(request.owner(), adapter_window(), open.iter().copied())
-                })
+                .ended(|request| open.gone(request))
                 .into_iter()
                 .map(|(id, terminal, request)| match &terminal {
                     Terminal::Done(GitAnswer::Write { paths, .. }) => {
-                        let target =
-                            claimed_by(request.owner(), adapter_window(), open.iter().copied())
-                                .then(|| u32::try_from(request.host.tab().0 - 1).ok())
-                                .flatten();
+                        let target = open
+                            .resolve(request.asker, &request.host)
+                            .and_then(|(_, host)| u32::try_from(host.tab().0 - 1).ok());
                         Delivered {
                             target,
                             ticket: Some(id.number()),
@@ -984,7 +1067,7 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
-    use crate::git::{GitHost, GitWriteVerb};
+    use crate::git::{GitCacheId, GitHost, GitWriteVerb};
     use crate::lane::{Gate, Hold};
     use crate::{LeafId, SeatId, TabId, WindowId};
 
@@ -1067,6 +1150,7 @@ mod tests {
         GitRequest {
             window: WindowId::from(1_u64),
             host: column(tab),
+            asker: GitCacheId::mint(),
             question: GitQuestion::Write {
                 root: PathBuf::from(root),
                 verb: GitWriteVerb::Stage,
@@ -1080,6 +1164,7 @@ mod tests {
         GitRequest {
             window: WindowId::from(1_u64),
             host: column(tab),
+            asker: GitCacheId::mint(),
             question: GitQuestion::Checkout {
                 root: PathBuf::from(root),
                 target: target.to_owned(),
@@ -1596,57 +1681,346 @@ mod tests {
         );
     }
 
-    /// RED (T-GIT-MUTATIONS round 3, N3) — **A dismissed floating page's receipt reaches the sink;
-    /// a live one's reaches its page.**
+    /// The one window the moving views stand in.
+    fn moving_window() -> WindowId {
+        WindowId::from(1_u64)
+    }
+
+    /// A floating Files view, by its epoch, in tab 1.
+    fn float_host(epoch: u64) -> GitHost {
+        GitHost::Float {
+            id: epoch,
+            tab: TabId(1),
+        }
+    }
+
+    /// A Files view's repository cache, on `仓库 repo`, whose root is known.
+    fn files_view_cache() -> git::GitCache {
+        git::GitCache::at_root(PathBuf::from("仓库 repo"), git::GitRole::Page)
+    }
+
+    /// `question`, asked by `cache` from `host`.
+    fn asked_by(cache: &git::GitCache, host: GitHost, question: GitQuestion) -> GitRequest {
+        GitRequest {
+            window: moving_window(),
+            host,
+            asker: cache.id(),
+            question,
+        }
+    }
+
+    /// The pages open after a move: only `cache`, standing at `place`.
+    fn standing(cache: &git::GitCache, place: Place) -> OpenPages {
+        let mut open = OpenPages::default();
+        open.stand(cache.id(), moving_window(), place);
+        open
+    }
+
+    /// **The receipt for `id`, taken and addressed as the application's drain does** — let go
+    /// against `open`, made the page's receipt, and addressed to where its cache stands now.
+    fn delivered(lane: &mut Watched, id: MutationId, open: &OpenPages) -> GitResponse {
+        let (terminal, request) = lane.terminal(id, |request| open.gone(request));
+        open.address(receipt(terminal, request))
+            .expect("a receipt the drain took is addressed to the cache that asked")
+    }
+
+    /// RED (T-GIT-RECEIPTS-FOLLOW-A-MOVED-HOST) — **A Files view docked while its verbs ran
+    /// receives their receipts in the column it became: its row undims and its checkout lets go.**
     ///
-    /// Two floating Git pages in one window stage a file each — `浮窗 float-7.md` from epoch 7,
-    /// `浮窗 float-8.md` from epoch 8. Epoch 7 is dismissed before the drain: [`OpenPages`] holds
-    /// only epoch 8, so 7's receipt is let go to the sink, once, and 8's is taken for its page.
+    /// A floating Files view (epoch 7) stages `说明 notes.md` and presses a checkout of
+    /// `功能/feature`; while git is at the first, the float is docked — its cache, with the dimmed
+    /// row and the held checkout, now stands in column seat 3 of tab 1, and no float of epoch 7 is
+    /// open. Both receipts reach the column: addressed to it, filed into its cache, the row no
+    /// longer pending, the checkout no longer held, and nothing in the sink.
     ///
-    /// MUTATION: have `OpenPages::gone` answer `false` for every floating page — the dismissed
-    /// float's receipt is taken for a page that is not there, and the sink records nothing.
+    /// MUTATION: in `OpenPages::resolve`, find the place by the asked host instead of the cache's
+    /// identity — the float is gone, so both receipts are sunk and none comes within the lane
+    /// suite's patience.
     #[test]
-    fn a_dismissed_floats_receipt_reaches_the_sink() {
-        let mut lane = watched(Executor::scripted(Arc::new(Gate::default())));
-        let window = WindowId::from(1_u64);
-        let from_float = |epoch: u64| GitRequest {
-            window,
-            host: GitHost::Float {
-                id: epoch,
-                tab: TabId(1),
-            },
-            question: GitQuestion::Write {
-                root: PathBuf::from("仓库 repo"),
-                verb: GitWriteVerb::Stage,
-                paths: vec![format!("浮窗 float-{epoch}.md")],
-            },
-        };
-        let dismissed = lane
+    fn a_receipt_reaches_a_files_view_docked_while_its_verb_ran() {
+        let gate = Arc::new(Gate::default());
+        let mut lane = watched(Executor::scripted(Arc::clone(&gate)));
+        gate.hold();
+        let mut cache = files_view_cache();
+        let write = cache
+            .begin_write(GitWriteVerb::Stage, vec!["说明 notes.md".to_owned()])
+            .expect("the row's write is built");
+        let checkout = cache
+            .begin_checkout("功能/feature".to_owned(), false)
+            .expect("the checkout is built");
+        let write = lane
             .lane
-            .ask_through(from_float(7), through)
+            .ask_through(asked_by(&cache, float_host(7), write), through)
+            .expect("admitted");
+        assert!(gate.wait_entered(1), "the write reaches the worker");
+        let checkout = lane
+            .lane
+            .ask_through(asked_by(&cache, float_host(7), checkout), through)
+            .expect("admitted");
+        // DOCK: the float is wiped and its cache moves into a column.
+        let column = LeafId {
+            tab: TabId(1),
+            seat: SeatId(3),
+        };
+        let mut docked = cache;
+        let open = standing(&docked, Place::Column(column));
+        gate.release();
+        for id in [write, checkout] {
+            let response = delivered(&mut lane, id, &open);
+            assert_eq!(
+                response.host,
+                GitHost::Column(column),
+                "addressed to the column the float became"
+            );
+            assert!(docked.accept(response.answer), "filed into its cache");
+        }
+        assert!(!docked.write_pending("说明 notes.md"), "the row undims");
+        assert_eq!(docked.checkout_pending(), None, "the checkout lets go");
+        assert!(lane.sunk().is_empty(), "nothing is sunk: the view is open");
+    }
+
+    /// RED (T-GIT-RECEIPTS-FOLLOW-A-MOVED-HOST) — **A Files column popped out into a float while
+    /// its verb ran receives the receipt in the float.**
+    ///
+    /// A column (seat 1 of tab 1) stages `草稿 draft.md`; while git is at it, the column pops out
+    /// into a floating window of epoch 9 carrying its cache, and the column is closed. The receipt
+    /// is addressed to the float — by its epoch, keeping the tab the question was asked in — and
+    /// undims the row.
+    ///
+    /// MUTATION: in `OpenPages::resolve`, find the place by the asked host instead of the cache's
+    /// identity — the column is gone, so the receipt is sunk and none comes within the lane
+    /// suite's patience.
+    #[test]
+    fn a_receipt_reaches_a_files_view_popped_out_while_its_verb_ran() {
+        let gate = Arc::new(Gate::default());
+        let mut lane = watched(Executor::scripted(Arc::clone(&gate)));
+        gate.hold();
+        let mut cache = files_view_cache();
+        let write = cache
+            .begin_write(GitWriteVerb::Stage, vec!["草稿 draft.md".to_owned()])
+            .expect("the row's write is built");
+        let id = lane
+            .lane
+            .ask_through(asked_by(&cache, column(1), write), through)
+            .expect("admitted");
+        assert!(gate.wait_entered(1), "the write reaches the worker");
+        // The pop-out: the column's cache moves into a floating window of epoch 9.
+        let mut floating = cache;
+        let open = standing(&floating, Place::Float(9));
+        gate.release();
+        let response = delivered(&mut lane, id, &open);
+        assert_eq!(
+            response.host,
+            float_host(9),
+            "addressed to the float the column became"
+        );
+        assert!(floating.accept(response.answer), "filed into its cache");
+        assert!(!floating.write_pending("草稿 draft.md"), "the row undims");
+        assert!(lane.sunk().is_empty(), "nothing is sunk: the view is open");
+    }
+
+    /// RED (T-GIT-MUTATIONS round 3, N3; T-GIT-RECEIPTS-FOLLOW-A-MOVED-HOST) — **A closed Files
+    /// view's receipt still reaches the sink, recorded once; an open one's reaches its page.**
+    ///
+    /// Two floating Files views in one window stage a file each — `浮窗 float-7.md` from epoch 7,
+    /// `浮窗 float-8.md` from epoch 8. Epoch 7 is dismissed before the drain, and no surface holds
+    /// its cache: its receipt is let go to the sink, once, with git's own receipt. Epoch 8's view
+    /// still holds its cache, and its receipt is taken for it.
+    ///
+    /// MUTATION: have `OpenPages::gone` answer `false` for every request — the closed view's
+    /// receipt is taken for a page that is not there, and the sink records nothing.
+    #[test]
+    fn a_closed_files_views_receipt_is_still_sunk_and_recorded() {
+        let mut lane = watched(Executor::scripted(Arc::new(Gate::default())));
+        let mut closed_cache = files_view_cache();
+        let mut open_cache = files_view_cache();
+        let stage = |cache: &mut git::GitCache, epoch: u64| {
+            let question = cache
+                .begin_write(GitWriteVerb::Stage, vec![format!("浮窗 float-{epoch}.md")])
+                .expect("the row's write is built");
+            asked_by(cache, float_host(epoch), question)
+        };
+        let closed = lane
+            .lane
+            .ask_through(stage(&mut closed_cache, 7), through)
             .expect("admitted");
         let live = lane
             .lane
-            .ask_through(from_float(8), through)
+            .ask_through(stage(&mut open_cache, 8), through)
             .expect("admitted");
-        let mut open = OpenPages::default();
-        open.tabs.insert(TabId(1));
-        open.floats.insert((window, 8));
-        let (_, asked) = lane.terminal(live, |request| open.gone(request));
-        assert_eq!(
-            asked.host,
-            from_float(8).host,
-            "the live float takes its own"
-        );
-        lane::wait_until("the dismissed float's receipt in the sink", || {
+        // The dismissal: epoch 7's window, and its cache with it, are gone.
+        drop(closed_cache);
+        let open = standing(&open_cache, Place::Float(8));
+        let response = delivered(&mut lane, live, &open);
+        assert_eq!(response.host, float_host(8), "the open view takes its own");
+        assert!(open_cache.accept(response.answer));
+        lane::wait_until("the closed view's receipt in the sink", || {
             lane.lane.ended(|request| open.gone(request));
             !lane.sunk().is_empty()
         });
+        let sunk = lane.sunk();
         assert_eq!(
-            lane.sunk().iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            [dismissed],
-            "the dismissed float's receipt reaches the sink, once"
+            sunk.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            [closed],
+            "the closed view's receipt reaches the sink, once"
         );
+        assert!(
+            matches!(&sunk[0].1, Terminal::Done(GitAnswer::Write { paths, .. }) if paths == &["浮窗 float-7.md"]),
+            "with git's own receipt"
+        );
+    }
+
+    /// RED (T-GIT-RECEIPTS-FOLLOW-A-MOVED-HOST round 2) — **A column closed inside a tab that
+    /// stays open has its receipt sunk; the column beside it in the same tab takes its own.**
+    ///
+    /// Two Files columns stand in tab 1 — seat 1 and seat 2, each with its own cache — and each
+    /// stages a file (`左栏 left.md`, `右栏 right.md`). Seat 1 is closed before the drain while the
+    /// tab stays open: no surface holds its cache, so its receipt reaches the sink, once, with
+    /// git's own receipt, and seat 2's receipt is addressed to seat 2.
+    ///
+    /// MUTATION: in `OpenPages::resolve`, find the place by the asked host's tab instead of the
+    /// cache's identity — seat 1's receipt is taken for the column still standing in its tab, and
+    /// the sink records nothing.
+    #[test]
+    fn a_column_closed_in_a_tab_that_stays_open_has_its_receipt_sunk() {
+        let mut lane = watched(Executor::scripted(Arc::new(Gate::default())));
+        let mut closed_cache = files_view_cache();
+        let mut open_cache = files_view_cache();
+        let seat = |n: u64| LeafId {
+            tab: TabId(1),
+            seat: SeatId(n),
+        };
+        let stage = |cache: &mut git::GitCache, n: u64, path: &str| {
+            let question = cache
+                .begin_write(GitWriteVerb::Stage, vec![path.to_owned()])
+                .expect("the row's write is built");
+            asked_by(cache, GitHost::Column(seat(n)), question)
+        };
+        let closed = lane
+            .lane
+            .ask_through(stage(&mut closed_cache, 1, "左栏 left.md"), through)
+            .expect("admitted");
+        let live = lane
+            .lane
+            .ask_through(stage(&mut open_cache, 2, "右栏 right.md"), through)
+            .expect("admitted");
+        // Seat 1 closes; its cache goes with it, and tab 1 stays open.
+        drop(closed_cache);
+        let open = standing(&open_cache, Place::Column(seat(2)));
+        let response = delivered(&mut lane, live, &open);
+        assert_eq!(
+            response.host,
+            GitHost::Column(seat(2)),
+            "the column still standing takes its own"
+        );
+        assert!(open_cache.accept(response.answer));
+        lane::wait_until("the closed column's receipt in the sink", || {
+            lane.lane.ended(|request| open.gone(request));
+            !lane.sunk().is_empty()
+        });
+        let sunk = lane.sunk();
+        assert_eq!(
+            sunk.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            [closed],
+            "the closed column's receipt reaches the sink, once"
+        );
+        assert!(
+            matches!(&sunk[0].1, Terminal::Done(GitAnswer::Write { paths, .. }) if paths == &["左栏 left.md"]),
+            "with git's own receipt"
+        );
+    }
+
+    /// RED (T-GIT-RECEIPTS-FOLLOW-A-MOVED-HOST, the read side) — **A read answered after its Files
+    /// view docked fills the column the view became; one whose view closed is dropped.**
+    ///
+    /// A floating Files view (epoch 7) asks its status, and is docked into column seat 3 of tab 1
+    /// before the answer comes: the answer is addressed to the column and filed into the cache
+    /// there, so the page stops reading instead of waiting for an answer that was dropped. The same
+    /// answer, once no surface holds the cache, is dropped.
+    ///
+    /// MUTATION: in `OpenPages::resolve`, find the place by the asked host instead of the cache's
+    /// identity — the docked view's answer is dropped and its status stays pending.
+    #[test]
+    fn a_read_answer_reaches_a_files_view_docked_while_it_was_read() {
+        let mut cache = files_view_cache();
+        let status = GitQuestion::Status {
+            root: PathBuf::from("仓库 repo"),
+        };
+        cache.mark_pending(&status);
+        let asked = asked_by(&cache, float_host(7), status);
+        let answer = GitResponse {
+            window: asked.window,
+            host: asked.host,
+            asker: asked.asker,
+            answer: GitAnswer::Status {
+                root: PathBuf::from("仓库 repo"),
+                outcome: Ok(git::GitStatus::default()),
+            },
+        };
+        let column = LeafId {
+            tab: TabId(1),
+            seat: SeatId(3),
+        };
+        let mut docked = cache;
+        let open = standing(&docked, Place::Column(column));
+        let addressed = open
+            .address(answer.clone())
+            .expect("the docked view's answer is not dropped");
+        assert_eq!(addressed.host, GitHost::Column(column));
+        assert!(docked.accept(addressed.answer), "filed into its cache");
+        assert!(docked.status().ready().is_some(), "the page stops reading");
+        assert_eq!(
+            OpenPages::default().address(answer),
+            None,
+            "an answer whose view closed is dropped"
+        );
+    }
+
+    /// RED (T-GIT-RECEIPTS-FOLLOW-A-MOVED-HOST, the read side) — **A document asked from a Files
+    /// view keeps the pool it was asked for when the view moves.**
+    ///
+    /// A floating Files view (epoch 7, asked while tab 4 was in front) opens a diff of
+    /// `说明 notes.md` and is docked into column seat 3 of tab 1 before the diff comes. The diff
+    /// is not the cache's: it keeps the address it was asked under, so it is filed into tab 4's
+    /// pool, where its buffer waits — and it is not dropped, because the view that asked is still
+    /// open.
+    ///
+    /// MUTATION: drop the document's early return in `OpenPages::address` — the diff is addressed
+    /// to the column in tab 1, a pool its buffer is not in.
+    #[test]
+    fn a_document_keeps_the_pool_it_was_asked_for_when_its_view_moves() {
+        let cache = files_view_cache();
+        let asked_from = GitHost::Float {
+            id: 7,
+            tab: TabId(4),
+        };
+        let answer = GitResponse {
+            window: moving_window(),
+            host: asked_from.clone(),
+            asker: cache.id(),
+            answer: GitAnswer::Diff {
+                root: PathBuf::from("仓库 repo"),
+                path: "说明 notes.md".to_owned(),
+                against: crate::preview::GitDiffAgainst::WorkingTree,
+                outcome: Ok(b"diff".to_vec()),
+            },
+        };
+        let docked = cache;
+        let open = standing(
+            &docked,
+            Place::Column(LeafId {
+                tab: TabId(1),
+                seat: SeatId(3),
+            }),
+        );
+        let addressed = open
+            .address(answer)
+            .expect("the view that asked is still open");
+        assert_eq!(
+            addressed.host, asked_from,
+            "the document keeps the address it was asked under"
+        );
+        assert_eq!(addressed.host.tab(), TabId(4), "and with it its pool");
     }
 
     /// RED (T-GIT-MUTATIONS round 2, B2) — **A read waits for the verbs owed when it was asked,
