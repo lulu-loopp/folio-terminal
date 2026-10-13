@@ -505,8 +505,20 @@ fallback path described under **Authority and fallback** rather than on a guess.
 | **`sh` or `dash`** | no | no | no | no | no | — | yes | that shell's own |
 | **Command Prompt** | **yes** | **no** | no | **yes, no code** | **yes** | refused — see below | yes | not promised |
 | **a profile of the reader's own**, no door | no | no | no | no | no | — | yes | not promised |
+| **a WSL launcher other than `wsl.exe`** (`System32\bash.exe`, a Store alias, a distribution's launcher) | no | no | no | no | no | — | no | that shell's own |
 
 Several rows need their reasons stated, because each looks like an omission and is not.
+
+**A WSL launcher that is not `wsl.exe` is served by no door** (T-WSL-LEGACY-BASH-DOOR, 2026-10-12).
+The door follows the program kind; a bash inside WSL is given WSL-spelled paths or no door.
+`wsl.exe -e` executes its program argv for argv, which is what lets the script cross as one
+argument in the distribution's spelling. `System32\bash.exe` and WSL's Store `bash.exe` alias have
+no such flag: what follows their name is joined into one command line and re-parsed by a shell
+inside the distribution (measured: `bash.exe -c '…"$0"…' zero` prints `/bin/bash`, the outer
+shell's `$0`), and a distribution's launcher (`ubuntu2204.exe`) reads only its own verbs. A path
+cannot be handed to any of them whole, so the pane gets the row's own words and the plain shell.
+The profile's own variables are still listed in `WSLENV` for it, as for every program that enters
+WSL; the terminal's declarations are not, as for a `wsl.exe` pane that was handed no script.
 
 **The two PowerShells are two profiles** (user ruling 2026-08-11), which is Windows Terminal's own
 arrangement and what a machine with both installed makes necessary: 7 and 5.1 are different
