@@ -1680,6 +1680,18 @@ impl Runtime<'_> {
             self.refresh_chrome();
             self.present_chrome_change()?;
         }
+        // **And an animation of the file** (T-ANIMATION-RECORDS-BOUND): its playback and its
+        // refusal are answers about bytes that are no longer there, so both are let go of and the
+        // walk asks about the file as it is now — a `.gif` caught half-written is asked again once
+        // the writer has moved its bytes, rather than refused for the window's life.
+        if self
+            .window
+            .animations
+            .let_go_changed_file(&normalized_local_image_path_key(path))
+        {
+            self.refresh_video_layers();
+            self.present_chrome_change()?;
+        }
         // **The pane and not the seat number** (F1b′): this walk is over every
         // tab, and a seat number means nothing outside the tab it was read from.
         let reload: Vec<LeafId> = self
@@ -10334,6 +10346,18 @@ impl Runtime<'_> {
     /// entry is untouched and it resumes. What each surface shows is the record
     /// that tells those two apart; see [`AnimationCache`] for why drawn-ness cannot.
     fn request_animations(&mut self, drawn: &[DrawnAnimation]) {
+        // **The surfaces a tab took with it.** A tab closed, carried to another window or folded
+        // into another tab leaves by roads that never name its surfaces, so each walk forgets what
+        // a surface no longer in the window was showing ([`AnimationCache::forget_surfaces_gone`]).
+        // A surface is in the window while some tab holds its view; the card is the window's own.
+        let window = &mut *self.window;
+        window.animations.forget_surfaces_gone(|surface| {
+            surface == PreviewSurface::Peek
+                || window
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.preview_panes.get(surface).is_some())
+        });
         if !self.app.math_worker_running {
             return;
         }

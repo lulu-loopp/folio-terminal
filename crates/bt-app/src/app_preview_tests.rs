@@ -959,14 +959,22 @@ fn the_windows_animations_are_bounded_by_the_frames_they_hold() {
         "the animation asked for last is the one it kept",
     );
     assert!(!cache.contains_key(r"d:\spinners\0.gif"));
-    // A refusal weighs nothing but is still remembered, which is what stops a
-    // `.gif` this window will not animate being asked about on every frame.
+    // A refusal weighs nothing but is still remembered while a surface shows its
+    // file, which is what stops a `.gif` this window will not animate being
+    // asked about on every frame.
+    let still = PathBuf::from(r"d:\spinners\still.gif");
+    let still_key = normalized_local_image_path_key(&still);
+    walk_asking(
+        &mut cache,
+        &[(seat_of(TAB_ONE, SeatId(1)), Some(still))],
+        OpenAsked::Asked,
+    );
     cache.opened(
-        r"d:\spinners\still.gif".to_owned(),
+        still_key.clone(),
         0,
         Err(animation::AnimationRefusal::OneFrame),
     );
-    assert!(cache.contains_key(r"d:\spinners\still.gif"));
+    assert!(cache.contains_key(&still_key));
 }
 
 /// **One walk of the surfaces, with a worker answering every open with
@@ -990,7 +998,9 @@ fn walk_asking(
 /// (`settle_failure` → `AnimationCache::settle`, which is what
 /// `Runtime::settle_failed_requests` hands it to), and walks over the same
 /// surfaces leave it alone; a surface that goes to another file and back is
-/// an open, and asks.
+/// an open, and asks. A second surface goes on showing the file throughout,
+/// so the record is never let go of for want of a surface naming it
+/// (`let_go_unnamed`) and the open alone is what lets it go.
 ///
 /// MUTATION: have `AnimationCache::settle` leave an unanswered open as it is
 /// — the entry stays `Pending`. Or have `ask_for_showing` ask whatever it is
@@ -999,10 +1009,11 @@ fn walk_asking(
 #[test]
 fn a_failed_open_is_unanswered_and_only_the_files_next_open_asks_again() {
     let pane = seat_of(TAB_ONE, SeatId(1));
+    let other = seat_of(TAB_ONE, SeatId(2));
     let spinner = PathBuf::from("D:/\u{52a8}\u{56fe}/\u{8f6c}\u{5708} spinner.gif");
     let still = PathBuf::from("D:/\u{52a8}\u{56fe}/still.png");
     let key = normalized_local_image_path_key(&spinner);
-    let on = |path: &PathBuf| vec![(pane, Some(path.clone()))];
+    let on = |path: &PathBuf| vec![(pane, Some(path.clone())), (other, Some(spinner.clone()))];
     let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
     assert_eq!(
         walk_asking(&mut window, &on(&spinner), OpenAsked::Asked),
@@ -1110,6 +1121,264 @@ fn records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them() {
     assert!(
         walk_asking(&mut window, &showing, OpenAsked::Asked).is_empty(),
         "no redraw asks a question this window holds the record of"
+    );
+}
+
+/// One file refused by the worker, shown on `surfaces`: the window's record of it after one walk
+/// and the answer — and the file's key.
+fn a_refusal_shown_on(
+    window: &mut AnimationCache,
+    surfaces: &[PreviewSurface],
+    path: &Path,
+) -> String {
+    let showing: Vec<(PreviewSurface, Option<PathBuf>)> = surfaces
+        .iter()
+        .map(|surface| (*surface, Some(path.to_path_buf())))
+        .collect();
+    assert_eq!(
+        walk_asking(window, &showing, OpenAsked::Asked),
+        vec![path.to_path_buf()],
+        "the first showing asks, once however many surfaces show it"
+    );
+    let key = normalized_local_image_path_key(path);
+    window.opened(
+        key.clone(),
+        1,
+        Err(animation::AnimationRefusal::Undecodable),
+    );
+    assert!(matches!(window.get(&key), Some(AnimationEntry::Refused(_))));
+    key
+}
+
+/// RED (T-ANIMATION-RECORDS-BOUND) — **a refusal leaves with the last surface that named its
+/// file**: two surfaces show a refused `.gif`; the first going keeps the record, the second going
+/// lets it go, and the file's next showing is an open, which asks.
+///
+/// MUTATION: have `AnimationCache::let_go_unnamed` return at once (never let go) — the record
+/// outlives both surfaces and the last assertion's walk asks nothing.
+#[test]
+fn a_refused_files_record_leaves_with_the_last_surface_that_named_it() {
+    let pane = seat_of(TAB_ONE, SeatId(1));
+    let float = seat_of(TAB_ONE, SeatId(2));
+    let broken = PathBuf::from("D:/\u{52a8}\u{56fe}/\u{534a}\u{622a} broken.gif");
+    let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+    let key = a_refusal_shown_on(&mut window, &[pane, float], &broken);
+
+    window.forget_surface(pane);
+    assert!(
+        matches!(window.get(&key), Some(AnimationEntry::Refused(_))),
+        "a surface still names the file, so its refusal is kept"
+    );
+    window.forget_surface(float);
+    assert!(
+        !window.contains_key(&key),
+        "the last surface naming the file is gone, and the record with it"
+    );
+    assert_eq!(
+        walk_asking(
+            &mut window,
+            &[(pane, Some(broken.clone()))],
+            OpenAsked::Asked
+        ),
+        vec![broken],
+        "the file's next showing is an open, and asks"
+    );
+}
+
+/// RED (T-ANIMATION-RECORDS-BOUND) — **a record is kept while any surface still names its file**:
+/// one of two surfaces showing a refused file goes, and the redraws of the one left ask nothing.
+///
+/// MUTATION: have `AnimationCache::let_go_unnamed` skip its `self.names(key)` check (let go on
+/// every forget) — the record goes with the first surface and the next redraw asks the file again.
+#[test]
+fn a_record_is_kept_while_any_surface_still_names_its_file() {
+    let pane = seat_of(TAB_ONE, SeatId(1));
+    let other = seat_of(TAB_ONE, SeatId(2));
+    let broken = PathBuf::from("D:/\u{52a8}\u{56fe}/\u{4e00}\u{5e27} one-frame.gif");
+    let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+    let key = a_refusal_shown_on(&mut window, &[pane, other], &broken);
+
+    window.forget_surface(other);
+    for _ in 0..3 {
+        assert!(
+            walk_asking(
+                &mut window,
+                &[(pane, Some(broken.clone()))],
+                OpenAsked::Asked
+            )
+            .is_empty(),
+            "a redraw of the surface still showing the file is no new input"
+        );
+    }
+    assert!(matches!(window.get(&key), Some(AnimationEntry::Refused(_))));
+}
+
+/// RED (T-ANIMATION-RECORDS-BOUND) — **a surface handed another file lets go of a record nobody
+/// names**, and keeps one another surface still names: the open rule's subject replacement is the
+/// second road a surface leaves a file by.
+///
+/// MUTATION: drop the `for key in replaced { self.let_go_unnamed(&key) }` loop from
+/// `AnimationCache::ask_for_showing` — the refused file's record stays after its one surface moved
+/// on, and the walk that shows it again asks nothing.
+#[test]
+fn a_surface_handed_another_file_lets_go_of_the_record_nobody_names() {
+    let pane = seat_of(TAB_ONE, SeatId(1));
+    let other = seat_of(TAB_ONE, SeatId(2));
+    let broken = PathBuf::from("D:/\u{52a8}\u{56fe}/\u{574f} broken.gif");
+    let shared = PathBuf::from("D:/\u{52a8}\u{56fe}/\u{5171}\u{7528} shared.gif");
+    let next = PathBuf::from("D:/\u{52a8}\u{56fe}/next.gif");
+    let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+    let broken_key = a_refusal_shown_on(&mut window, &[pane], &broken);
+    // The other surface shows a second refused file, which the pane then shows too.
+    let shared_key = a_refusal_shown_on(&mut window, &[other], &shared);
+
+    assert!(
+        walk_asking(
+            &mut window,
+            &[(pane, Some(shared.clone())), (other, Some(shared.clone()))],
+            OpenAsked::Asked
+        )
+        .is_empty(),
+        "a file whose refusal is held is not asked by the surface that just began showing it"
+    );
+    assert!(
+        !window.contains_key(&broken_key),
+        "the pane moved on from the only surface naming its file"
+    );
+    assert_eq!(
+        walk_asking(
+            &mut window,
+            &[(pane, Some(next.clone())), (other, Some(shared.clone()))],
+            OpenAsked::Asked
+        ),
+        vec![next],
+    );
+    assert!(
+        matches!(window.get(&shared_key), Some(AnimationEntry::Refused(_))),
+        "the other surface still names the shared file"
+    );
+    assert_eq!(
+        walk_asking(
+            &mut window,
+            &[(pane, Some(broken.clone()))],
+            OpenAsked::Asked
+        ),
+        vec![broken],
+        "and the file let go of is asked by its next open"
+    );
+}
+
+/// RED (T-ANIMATION-RECORDS-BOUND) — **a surface that left with its tab takes its records with
+/// it**: a tab closed, carried away or folded into another leaves by roads that never name its
+/// surfaces, and the walk's `forget_surfaces_gone` forgets each surface the window no longer has.
+///
+/// MUTATION: have `forget_surfaces_gone` keep every surface (`filter(|_| false)`) — the closed
+/// tab's refusal stays, and the refused file shown again in another tab asks nothing.
+#[test]
+fn a_closed_tabs_surfaces_take_their_records_with_them() {
+    const TAB_TWO: TabId = TabId(2);
+    let kept = seat_of(TAB_ONE, SeatId(1));
+    let closed = seat_of(TAB_TWO, SeatId(1));
+    let broken = PathBuf::from("D:/\u{5173}\u{95ed}/\u{6807}\u{7b7e} broken.gif");
+    let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+    let key = a_refusal_shown_on(&mut window, &[closed], &broken);
+
+    window.forget_surfaces_gone(|surface| surface != closed);
+    assert!(!window.contains_key(&key));
+    assert_eq!(
+        walk_asking(
+            &mut window,
+            &[(kept, Some(broken.clone()))],
+            OpenAsked::Asked
+        ),
+        vec![broken],
+        "the file shown again elsewhere is an open"
+    );
+}
+
+/// RED (T-ANIMATION-RECORDS-BOUND) — **an answer that comes home after the last surface left files
+/// no record**: a refusal, and a failed open, for a file no surface names are records nobody is
+/// showing; a playback is weight, and is filed.
+///
+/// MUTATION: drop the `Err(_) if !self.names(&key) => return` arm from `AnimationCache::opened` —
+/// the late refusal is filed and outlives every surface. Or drop `self.names(&key) &&` from
+/// `open_unanswered` — the late failure is filed as `Unanswered`.
+#[test]
+fn an_answer_for_a_file_no_surface_names_files_no_record() {
+    let pane = seat_of(TAB_ONE, SeatId(1));
+    let refused = PathBuf::from("D:/\u{8fdf}\u{5230}/refused.gif");
+    let failed = PathBuf::from("D:/\u{8fdf}\u{5230}/failed.gif");
+    let played = PathBuf::from("D:/\u{8fdf}\u{5230}/played.gif");
+    let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+    for path in [&refused, &failed, &played] {
+        assert_eq!(
+            walk_asking(&mut window, &[(pane, Some(path.clone()))], OpenAsked::Asked),
+            vec![path.clone()]
+        );
+    }
+    window.forget_surface(pane);
+    for path in [&refused, &failed, &played] {
+        assert!(
+            !window.contains_key(&normalized_local_image_path_key(path)),
+            "a decode in flight for a file no surface names is let go of"
+        );
+    }
+    window.opened(
+        normalized_local_image_path_key(&refused),
+        1,
+        Err(animation::AnimationRefusal::Undecodable),
+    );
+    window.settle(crate::settle_failure(crate::Asked::Animation {
+        path: failed.clone(),
+    }));
+    window.opened(
+        normalized_local_image_path_key(&played),
+        2,
+        Ok(a_playback_of(6, Instant::now())),
+    );
+    assert!(!window.contains_key(&normalized_local_image_path_key(&refused)));
+    assert!(!window.contains_key(&normalized_local_image_path_key(&failed)));
+    assert!(matches!(
+        window.get(&normalized_local_image_path_key(&played)),
+        Some(AnimationEntry::Ready { .. })
+    ));
+}
+
+/// RED (T-ANIMATION-RECORDS-BOUND) — **a refused file that changed is asked again on its next
+/// showing**: the preview's file-change news lets go of the refusal (a fact about the old bytes)
+/// as it lets go of a playback, and the walk asks about the bytes there now; an open that never
+/// answered is no fact about the bytes and stays for the file's next open.
+///
+/// MUTATION: have `AnimationCache::let_go_changed_file` match only `AnimationEntry::Ready` (the
+/// file-change road ignores `Refused`) — it answers `false`, the refusal stays and the walk asks
+/// nothing.
+#[test]
+fn a_refused_file_that_changed_is_asked_again_on_its_next_open() {
+    let pane = seat_of(TAB_ONE, SeatId(1));
+    let float = seat_of(TAB_ONE, SeatId(2));
+    let half_written = PathBuf::from("D:/\u{5f55}\u{5c4f}/\u{5199}\u{5165}\u{4e2d} capture.gif");
+    let unstarted = PathBuf::from("D:/\u{5f55}\u{5c4f}/unstarted.gif");
+    let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+    let key = a_refusal_shown_on(&mut window, &[pane], &half_written);
+    let showing = vec![
+        (pane, Some(half_written.clone())),
+        (float, Some(unstarted.clone())),
+    ];
+    assert_eq!(
+        walk_asking(&mut window, &showing, OpenAsked::Unstarted),
+        vec![unstarted.clone()]
+    );
+    assert!(walk_asking(&mut window, &showing, OpenAsked::Asked).is_empty());
+
+    assert!(window.let_go_changed_file(&key), "the refusal is let go of");
+    assert!(
+        !window.let_go_changed_file(&normalized_local_image_path_key(&unstarted)),
+        "an open that never answered is no fact about the bytes"
+    );
+    assert_eq!(
+        walk_asking(&mut window, &showing, OpenAsked::Asked),
+        vec![half_written],
+        "the file's new bytes are asked about, and nothing else"
     );
 }
 
