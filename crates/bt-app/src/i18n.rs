@@ -952,6 +952,17 @@ text_entries! {
     /// The clause for a body too large to save, `{limit}` filled by
     /// [`preview_save_too_large`] (S-6a).
     PreviewSaveTooLarge,
+    /// The clause for a file that is a link or has a second name (S-6a round 2).
+    PreviewSaveLink,
+    /// The clause for a file on a drive that cannot replace it in one step —
+    /// FAT and exFAT removable media (S-6a round 2).
+    PreviewSaveNoExchange,
+    /// The clause for a name beside the file, needed for its replacement, that
+    /// is taken (S-6a round 2).
+    PreviewSaveNameTaken,
+    /// The clause for a file whose bytes could not be read to check them
+    /// against what was read (S-6a round 2).
+    PreviewSaveUnread,
     /// The start's toast for one copy a stop kept in the recovered folder, `{folder}` filled
     /// by [`recovered_edits_kept_in`] (T-RECOVERED-FOLDER).
     RecoveredEditKept,
@@ -3907,6 +3918,26 @@ impl Text {
                 "it is larger than {limit}",
                 "it is larger than {limit}", // zh: pending S-6a
             ),
+            Self::PreviewSaveLink => pick(
+                lang,
+                "the file is a link or has a second name",
+                "the file is a link or has a second name", // zh: pending S-6a
+            ),
+            Self::PreviewSaveNoExchange => pick(
+                lang,
+                "this drive cannot replace the file safely",
+                "this drive cannot replace the file safely", // zh: pending S-6a
+            ),
+            Self::PreviewSaveNameTaken => pick(
+                lang,
+                "a file beside it is in the way",
+                "a file beside it is in the way", // zh: pending S-6a
+            ),
+            Self::PreviewSaveUnread => pick(
+                lang,
+                "the file could not be read to check it",
+                "the file could not be read to check it", // zh: pending S-6a
+            ),
             Self::RecoveredEditKept => pick(
                 lang,
                 "An unsaved edit was kept at {folder}",
@@ -6468,6 +6499,15 @@ impl Text {
         (Self::PreviewSaveNotStarted, HostPlatform::MacOs),
         (Self::PreviewSaveTooLarge, HostPlatform::Windows),
         (Self::PreviewSaveTooLarge, HostPlatform::MacOs),
+        // zh: pending S-6a — the reasons a preview save's refusal names on the pane.
+        (Self::PreviewSaveLink, HostPlatform::Windows),
+        (Self::PreviewSaveLink, HostPlatform::MacOs),
+        (Self::PreviewSaveNoExchange, HostPlatform::Windows),
+        (Self::PreviewSaveNoExchange, HostPlatform::MacOs),
+        (Self::PreviewSaveNameTaken, HostPlatform::Windows),
+        (Self::PreviewSaveNameTaken, HostPlatform::MacOs),
+        (Self::PreviewSaveUnread, HostPlatform::Windows),
+        (Self::PreviewSaveUnread, HostPlatform::MacOs),
         // zh: pending T-SHELL-BIRTH-DEATH — the face of a shell that ended at birth.
         (Self::ShellBirthDeath, HostPlatform::Windows),
         (Self::ShellBirthDeath, HostPlatform::MacOs),
@@ -7718,8 +7758,12 @@ pub fn preview_save_too_large(limit: &str) -> String {
     Text::PreviewSaveTooLarge.text().replace("{limit}", limit)
 }
 
-/// A save that did not happen, and why. The `{reason}` is either
-/// [`Text::PreviewNothingToSave`] or an `io::Error`, and the second of those is
+/// A save that did not happen, and why. The `{reason}` is a clause of this
+/// table — [`Text::PreviewNothingToSave`], and for a preview save on the storage
+/// worker [`Text::PreviewSaveNotStarted`], [`Text::PreviewSaveTooLarge`],
+/// [`Text::PreviewSaveLink`], [`Text::PreviewSaveNoExchange`],
+/// [`Text::PreviewSaveNameTaken`] or [`Text::PreviewSaveUnread`] — or an
+/// `io::Error`, and the second of those is
 /// the OS's own sentence in the OS's own language — a known seam, recorded in the
 /// inventory's §E and not papered over here.
 #[must_use]

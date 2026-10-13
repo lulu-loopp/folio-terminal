@@ -6403,6 +6403,7 @@ mod conditional_write_tests {
                 bytes: Arc::from(bytes),
                 mode,
                 link_policy: LinkPolicy::Refuse,
+                no_exchange: crate::document_request::NoExchange::Refuse,
                 asker: 7,
                 kept,
                 answer,

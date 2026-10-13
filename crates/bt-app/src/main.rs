@@ -65974,11 +65974,13 @@ impl FolioApp {
         if answers.is_empty() {
             return Ok(());
         }
-        self.for_each_window(|runtime| runtime.hear_preview_saves(&mut answers))?;
+        // Every answer taken is ended — heard, or sunk — whatever a window's
+        // repaint answered (C6): the sink comes before the error is passed on.
+        let heard = self.for_each_window(|runtime| runtime.hear_preview_saves(&mut answers));
         if let Some(app) = self.app.as_mut() {
             app.sink_preview_save_answers(answers);
         }
-        Ok(())
+        heard
     }
 
     fn announce_recovered_edits(&mut self) -> Result<()> {

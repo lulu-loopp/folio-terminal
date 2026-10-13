@@ -111,6 +111,22 @@ pub(crate) enum LinkPolicy {
     PlainWriter,
 }
 
+/// **What a request does on a volume that cannot exchange two files in one
+/// step** ((b)1; hand-off item 6). The four stores refuse; the preview's save
+/// refuses until the owner rules on it, and its one switch is
+/// `preview::ON_A_VOLUME_THAT_CANNOT_EXCHANGE` (S-6a round 2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NoExchange {
+    /// Nothing is written; the answer is `Refused(ExchangeUnavailable)`.
+    Refuse,
+    /// Write the file the plain way, as the preview's save did before S-6a.
+    #[expect(
+        dead_code,
+        reason = "T-PREVIEW-NO-EXCHANGE-RULING until 2026-11-30: the owner's pending ruling on a preview save over a volume that cannot exchange"
+    )]
+    PlainWriter,
+}
+
 /// **A file the worker left beside a document, and the version whose landing
 /// retires it** ((d)1).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -141,6 +157,7 @@ pub(crate) struct DocumentJob {
     pub(crate) bytes: Arc<[u8]>,
     pub(crate) mode: Mode,
     pub(crate) link_policy: LinkPolicy,
+    pub(crate) no_exchange: NoExchange,
     /// Opaque to the worker and echoed on the answer: the preview's body
     /// revision, `0` for a store.
     pub(crate) asker: u64,
@@ -458,27 +475,33 @@ fn exchange(
         ),
         Err(ExchangeRefusal::Link) => match job.link_policy {
             LinkPolicy::Refuse => refused(Refusal::Link),
-            LinkPolicy::PlainWriter => {
-                let _ = std::fs::remove_file(temp);
-                Served::plainly(
-                    match bt_persist::atomic_replace_keeping_metadata(&job.which, &job.bytes) {
-                        Ok(()) => Outcome::Landed {
-                            bytes: Arc::clone(&job.bytes),
-                            kept: None,
-                        },
-                        Err(error) => Outcome::Refused {
-                            cause: Refusal::Disk(error.to_string()),
-                        },
-                    },
-                )
-            }
+            LinkPolicy::PlainWriter => plainly(job, temp),
         },
-        Err(ExchangeRefusal::ExchangeUnavailable(error)) => {
-            refused(Refusal::ExchangeUnavailable(error.to_string()))
-        }
+        Err(ExchangeRefusal::ExchangeUnavailable(error)) => match job.no_exchange {
+            NoExchange::Refuse => refused(Refusal::ExchangeUnavailable(error.to_string())),
+            NoExchange::PlainWriter => plainly(job, temp),
+        },
         Err(ExchangeRefusal::BackupNameTaken(path)) => refused(Refusal::BackupNameTaken(path)),
         Err(ExchangeRefusal::Failed(error)) => refused(Refusal::Disk(error.to_string())),
     }
+}
+
+/// **The plain write** a request's policy asks for where the exchange refused:
+/// the staged sibling goes, and the file is replaced keeping what it carried,
+/// with no displaced copy to read back.
+fn plainly(job: &DocumentJob, temp: &Path) -> Served {
+    let _ = std::fs::remove_file(temp);
+    Served::plainly(
+        match bt_persist::atomic_replace_keeping_metadata(&job.which, &job.bytes) {
+            Ok(()) => Outcome::Landed {
+                bytes: Arc::clone(&job.bytes),
+                kept: None,
+            },
+            Err(error) => Outcome::Refused {
+                cause: Refusal::Disk(error.to_string()),
+            },
+        },
+    )
 }
 
 /// **§3.2 step 4: what the exchange displaced, read and judged.** The bytes
@@ -1460,6 +1483,7 @@ impl<T: StoredDocument> DocumentState<T> {
             bytes: Arc::clone(&bytes),
             mode: self.mode,
             link_policy: LinkPolicy::Refuse,
+            no_exchange: NoExchange::Refuse,
             asker: 0,
             kept: self.kept.clone(),
             answer,
@@ -2187,6 +2211,7 @@ mod tests {
             bytes: Arc::from(&b"{\"\xe5\x86\x99\": 1}"[..]),
             mode: Mode::Restore,
             link_policy: LinkPolicy::Refuse,
+            no_exchange: super::NoExchange::Refuse,
             asker: 0,
             kept: Vec::new(),
             answer,

@@ -2769,11 +2769,11 @@ fn a_body_with_unsaved_edits_is_not_overwritten_and_says_so() {
         preview::DiskVerdict::ReadAgain,
         "a read, to compare: the stamp alone decides nothing"
     );
-    let Some(preview::PreviewWant::Whole(base)) = buffer.claim_head_read() else {
-        panic!("a body with unsaved edits is compared whole");
+    let Some(preview::PreviewWant::Compare(base)) = buffer.claim_head_read() else {
+        panic!("a body with unsaved edits is compared, never re-read");
     };
     assert_eq!(
-        buffer.land_read(preview::read_whole(&path), base),
+        buffer.land_read(preview::read_to_compare(&path), base),
         preview::ReadLanded::Kept { said: true },
         "the bytes differ, and the strip goes up"
     );

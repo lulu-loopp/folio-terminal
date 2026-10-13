@@ -7796,7 +7796,8 @@ impl Runtime<'_> {
     /// **The storage worker's answers about preview saves, heard by this
     /// window's buffers** (S-6a): each answer goes to the buffer that asked, if
     /// one of this window's tabs holds it ([`preview::PreviewSaves::deliver`]),
-    /// and its sentence to the surface that pressed, if it still stands. An
+    /// and its sentence to the surface that pressed, if it still shows that
+    /// file. An
     /// answer this window holds no buffer for is left in `answers`, for the next
     /// window or the sink.
     pub(crate) fn hear_preview_saves(
@@ -7814,11 +7815,14 @@ impl Runtime<'_> {
             return Ok(());
         }
         let now = Instant::now();
-        for (surface, said) in heard {
+        for (surface, source, said) in heard {
             let Some(said) = said else {
                 continue;
             };
-            if self.preview_pane(surface).is_some() {
+            let still_shows_it = self
+                .preview_buffer_on(surface)
+                .is_some_and(|buffer| buffer.source() == &source);
+            if still_shows_it {
                 self.preview_pane_mut(surface)
                     .say(Some((preview::save_notice(said), now)));
             }
@@ -11145,6 +11149,7 @@ impl Runtime<'_> {
         // Whether a read landing raised the "this file changed on disk" strip
         // over a document somebody had typed in — see [`preview::ReadLanded`].
         let mut said_disk_news = false;
+        let mut read_again = Vec::new();
         let answers: Vec<preview::PreviewResponse> =
             answers_for(batch, |response| self.owns(response.owner()));
         for response in answers {
@@ -11215,6 +11220,9 @@ impl Runtime<'_> {
                         // somebody's document, so the seats are re-solved and
                         // not merely repainted.
                         preview::ReadLanded::Kept { said } => said_disk_news |= said,
+                        // The watcher's comparison found a clean body the file
+                        // no longer holds: its body is asked for (S-6a).
+                        preview::ReadLanded::ReadAgain => read_again.push(index),
                     }
                 }
                 // A picture's byte count, for the meta line under it.
@@ -11279,6 +11287,9 @@ impl Runtime<'_> {
         // the seats are re-solved when the set of panes wearing one moves.
         if said_disk_news {
             self.settle_preview_disk_notices()?;
+        }
+        for index in read_again {
+            self.request_stale_previews(index);
         }
         Ok(())
     }
