@@ -670,6 +670,10 @@ fn a_card_torn_off_carries_its_engine_with_it() {
         .expect("a seat on the card");
     let loaded =
         card.state_reaching(|state| state.duration_secs.is_some() || state.error.is_some());
+    assert!(
+        loaded.duration_secs.is_some() || loaded.error.is_some(),
+        "the engine gave neither a length nor an error within the suite's patience: {loaded:?}"
+    );
     assert_eq!(loaded.error, None, "the fixture loads");
     card.seek_to(0.2, now);
     let target = 0.2 * loaded.duration_secs.expect("a length");
