@@ -99,7 +99,7 @@ impl MergeNotice {
     /// adds each of its names once to the entry it already has.
     pub(crate) fn gather(&mut self, turn: MergeNotice, reading: bool) -> Option<MergeNotice> {
         for entry in turn.files {
-            self.join(entry);
+            self.add_file(entry);
         }
         if reading || self.files.is_empty() {
             return None;
@@ -107,7 +107,7 @@ impl MergeNotice {
         Some(std::mem::take(self))
     }
 
-    fn join(&mut self, entry: ReplacedInFile) {
+    fn add_file(&mut self, entry: ReplacedInFile) {
         if let Some(held) = self.files.iter_mut().find(|held| held.file == entry.file) {
             for name in entry.values {
                 push_once(&mut held.values, name);
