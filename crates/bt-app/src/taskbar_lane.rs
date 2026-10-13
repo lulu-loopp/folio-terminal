@@ -333,7 +333,7 @@ pub(crate) mod tests {
     use bt_platform::TaskbarReading;
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     /// A lane of the test's own, leaked for the `'static` its worker needs, with a wake that
     /// reports every answer the worker publishes. `pub(crate)` for the flat module's pins.
@@ -379,9 +379,7 @@ pub(crate) mod tests {
         );
 
         release.send(true).unwrap();
-        wakes
-            .recv_timeout(Duration::from_secs(30))
-            .expect("the answer wakes the loop");
+        wait_for_a_wake(&wakes, "the answer wakes the loop");
         let first = lane.reading();
         assert_eq!((first.generation, first.auto_hidden), (1, true));
 
@@ -389,9 +387,7 @@ pub(crate) mod tests {
         lane.request(start + REFRESH_INTERVAL);
         assert_eq!(lane.observe(start + REFRESH_INTERVAL, true), first);
         release.send(false).unwrap();
-        wakes
-            .recv_timeout(Duration::from_secs(30))
-            .expect("a changed answer wakes the loop");
+        wait_for_a_wake(&wakes, "a changed answer wakes the loop");
         let second = lane.reading();
         assert_eq!((second.generation, second.auto_hidden), (2, false));
 

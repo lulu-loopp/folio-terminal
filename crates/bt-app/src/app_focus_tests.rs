@@ -7,7 +7,7 @@ use super::*;
 use crate::test_support::{
     THREE_LINES, a_local_file, a_local_folder, card_restore_first, card_restore_fixture,
     card_restore_resize, card_restore_settle, card_restore_widen, host_file_uri, host_path,
-    paste_leaf, paste_tab, paste_text_into, squeezed_body,
+    paste_leaf, paste_tab, paste_text_into, squeezed_body, tab_with_a_preview,
 };
 use std::time::Duration;
 use winit::keyboard::{Key, NamedKey};
@@ -554,4 +554,55 @@ fn a_key_other_than_enter_tab_or_esc_reaches_nothing_and_leaves_the_card_up() {
             assert!(at < later, "`{road}` is reached before the card's rung");
         }
     }
+}
+
+// ── a card quotes what is in memory and never goes looking (§7.1.6b′) ─────
+
+/// RED (§7.1.6b′) — **a card quotes a body already in memory and asks nothing of a disk.**
+///
+/// A preview whose buffer holds its text is quoted on the card; a preview whose file has not
+/// been read is a face — even when the file on disk holds a body the card could quote — and its
+/// read is still owed afterwards: asking for the card took nothing out of the lane that reads
+/// it. Somebody else puts the body in memory, and the next projection finds it there.
+///
+/// MUTATION (observed red): in `TabState::mini_source`, quote a document whose buffer holds no
+/// body (`buffer.content().is_none()`) — the preview whose body is in memory is a face.
+#[test]
+fn a_card_quotes_a_body_already_in_memory_and_asks_nothing_of_a_disk() {
+    let (read, seat) = tab_with_a_preview(
+        1,
+        vec![crate::test_support::text_buffer(
+            "说明 notes.md",
+            "第一行 the first line\nsecond",
+        )],
+    );
+    let Some(focus_thumb::SeatSource::Document { buffer, .. }) =
+        read.mini_source(seat, SeatKind::Preview, None, None)
+    else {
+        panic!("a body in memory is quoted on the card");
+    };
+    assert_eq!(buffer.text(), Some("第一行 the first line\nsecond"));
+
+    let folder = crate::test_support::disk_scratch("card-unread");
+    let file = folder.join("未读 unread.md");
+    std::fs::write(&file, "磁盘上的正文 the body on disk\n").unwrap();
+    let source = preview::PreviewSource::file(&file);
+    let unread = preview::PreviewBuffer::new(source.clone(), "未读 unread.md".to_owned());
+    assert!(unread.wants_head_read(), "nothing has read it yet");
+    let (unread_tab, seat) = tab_with_a_preview(2, vec![unread]);
+    assert!(
+        matches!(
+            unread_tab.mini_source(seat, SeatKind::Preview, None, None),
+            Some(focus_thumb::SeatSource::Face { .. })
+        ),
+        "a document whose body is not in memory is a face, whatever the disk holds"
+    );
+    assert!(
+        unread_tab
+            .preview_pool
+            .get(&source)
+            .is_some_and(|buffer| buffer.content().is_none() && buffer.wants_head_read()),
+        "the card read nothing and claimed nothing: the read is still owed"
+    );
+    let _ = std::fs::remove_dir_all(&folder);
 }

@@ -1014,14 +1014,7 @@ mod tests {
 
     /// Wait, within the lane suite's patience, until `steward` has no worker.
     fn until_the_worker_is_gone(steward: &Steward) {
-        let since = std::time::Instant::now();
-        while steward.lock().worker {
-            assert!(
-                since.elapsed() < crate::lane::PATIENCE,
-                "the dead steward's end within the lane suite's patience"
-            );
-            std::thread::yield_now();
-        }
+        crate::lane::wait_until("the dead steward's end", || !steward.lock().worker);
     }
 
     /// PIN (B5 design note, revision (c)3) — **a sync returns while a watch start is held**, and

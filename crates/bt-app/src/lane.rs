@@ -1702,6 +1702,98 @@ pub(crate) fn receive<T>(messages: &mpsc::Receiver<T>, what: &str) -> T {
         Err(_) => panic!("nothing within the lane suite's patience while awaiting {what}"),
     }
 }
+
+/// **A state another thread reaches that announces itself to nobody** — a worker gone, a mark
+/// written, a queue that let go — asked again until `done` holds or [`PATIENCE`] has run out;
+/// whether it held. The wait ends on the state, so a loaded machine is waited for and a quick one
+/// pays nothing. Where a signal exists ([`wait_for_a_wake`], [`Hold::wait_standing`]) the test
+/// waits on that instead.
+#[cfg(test)]
+pub(crate) fn within_patience(mut done: impl FnMut() -> bool) -> bool {
+    let since = Instant::now();
+    while !done() {
+        if since.elapsed() >= PATIENCE {
+            return done();
+        }
+        std::thread::yield_now();
+    }
+    true
+}
+
+/// [`within_patience`], failing the test that awaited `what`, by name, when the state never comes
+/// rather than hanging it.
+#[cfg(test)]
+pub(crate) fn wait_until(what: &str, done: impl FnMut() -> bool) {
+    assert!(
+        within_patience(done),
+        "not so within the lane suite's patience while awaiting {what}"
+    );
+}
+
+/// **A hold a fake puts its work behind**: the suite holds it; the fake passes it where its work
+/// begins and stands there while it is held; the suite waits, within [`PATIENCE`], until a worker
+/// is standing in it — the signal that the work has been taken and has not ended.
+///
+/// Its limit: a worker woken by [`Hold::release`] is counted as standing until it has run again,
+/// so a `hold` straight after a `release` can let the next [`Hold::wait_standing`] return on that
+/// worker rather than on the next one. Every test that holds twice awaits the held work's end
+/// (its answer, through the lane's wake) between the two holds, which is when the count is zero.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Hold {
+    state: Mutex<HoldState>,
+    changed: Condvar,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct HoldState {
+    held: bool,
+    /// How many workers stand in the hold now.
+    standing: usize,
+}
+
+#[cfg(test)]
+impl Hold {
+    /// From now on every pass stands until [`Self::release`].
+    pub(crate) fn hold(&self) {
+        lock(&self.state).held = true;
+    }
+
+    pub(crate) fn release(&self) {
+        lock(&self.state).held = false;
+        self.changed.notify_all();
+    }
+
+    /// **Called by the fake where its work begins**: counted as standing, and kept there while the
+    /// hold is held.
+    pub(crate) fn pass(&self) {
+        let mut state = lock(&self.state);
+        state.standing += 1;
+        self.changed.notify_all();
+        while state.held {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        state.standing -= 1;
+    }
+
+    /// Waits until a worker stands in the hold; a worker that never comes fails the test that
+    /// awaited `what`, by name, rather than hanging it.
+    pub(crate) fn wait_standing(&self, what: &str) {
+        let (state, waited) = self
+            .changed
+            .wait_timeout_while(lock(&self.state), PATIENCE, |state| state.standing == 0)
+            .unwrap_or_else(PoisonError::into_inner);
+        drop(state);
+        assert!(
+            !waited.timed_out(),
+            "nothing stood in the hold within the lane suite's patience while awaiting {what}"
+        );
+    }
+}
 /// How long it watches before concluding that something does not happen.
 #[cfg(test)]
 const QUIET: Duration = Duration::from_millis(300);

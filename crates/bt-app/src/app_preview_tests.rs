@@ -7661,3 +7661,36 @@ fn reopening_the_same_source_keeps_the_pending_jump() {
     assert_eq!(left.map(|(source, _)| source), Some(notes));
     assert_eq!(pane.goto_line(), None, "a different file owes nothing");
 }
+
+/// RED (T-PREVIEW-ARROWS round 2) — **the preview's head names the picture installed on its
+/// pane**: a pane showing a document is headed by the document's name; once a picture is shown
+/// on it — the landing an arrow key's step makes — the head is the picture's, and the next
+/// picture's after the next step.
+///
+/// MUTATION (observed red): `TabState::preview_head_name` reading only the buffer (the image arm
+/// never taken) — the head names nothing once the picture lands.
+#[test]
+fn the_preview_head_names_the_picture_installed_on_its_pane() {
+    let (mut tab, seat) = tab_with_a_preview(7, vec![text_buffer("说明 notes.md", "正文")]);
+    assert_eq!(
+        tab.preview_head_name(seat).as_deref(),
+        Some("说明 notes.md")
+    );
+    let surface = seat_of(TabId(7), seat);
+    tab.preview_panes
+        .entry(surface)
+        .show_picture(host_path(r"D:\相册 shots\一 first.png"));
+    assert_eq!(
+        tab.preview_head_name(seat).as_deref(),
+        Some("一 first.png"),
+        "the picture landed on the pane names its head"
+    );
+    tab.preview_panes
+        .entry(surface)
+        .show_picture(host_path(r"D:\相册 shots\二 second.png"));
+    assert_eq!(
+        tab.preview_head_name(seat).as_deref(),
+        Some("二 second.png"),
+        "and the next picture's step renames it"
+    );
+}

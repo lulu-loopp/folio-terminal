@@ -2093,15 +2093,16 @@ mod tests {
                 Ok(mut engine) => {
                     // Loading is asynchronous, so an engine may exist for a file
                     // that cannot be loaded; what may not happen is a picture.
-                    let deadline = Instant::now() + Duration::from_secs(5);
-                    while Instant::now() < deadline && engine.state().error.is_none() {
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
+                    // "No length and no error" is the state before Media
+                    // Foundation has answered, so the wait is for one of its two
+                    // answers — refused or loaded — on the engine's own
+                    // publications, within the suite's patience.
+                    let answered = engine
+                        .state_reaching(|state| state.error.is_some() || state.ready, PATIENCE);
                     assert!(
-                        engine.state().error.is_some(),
-                        "{} loaded: {:?}",
-                        path.display(),
-                        engine.state()
+                        answered.error.is_some(),
+                        "{} loaded, or was never answered: {answered:?}",
+                        path.display()
                     );
                     assert!(
                         engine.frame().is_none(),
