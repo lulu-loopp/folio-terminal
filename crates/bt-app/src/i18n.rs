@@ -1773,6 +1773,18 @@ text_entries! {
     /// none, because this one stands alone on a row.
     GitNoCommits,
     GitFaultTimedOut,
+    /// A write or checkout refused at the press: its repository's mutation
+    /// lane already owes as many as it holds (`git::NotRun::Full`).
+    GitNotRunFull,
+    /// A write or checkout whose repository's worker ended before it ran
+    /// (`git::NotRun::WorkerGone`).
+    GitNotRunWorkerGone,
+    /// A write or checkout whose worker could not be started
+    /// (`git::NotRun::NotStarted`).
+    GitNotRunNotStarted,
+    /// A write or checkout whose work failed inside Folio after git may have
+    /// run it (`git::GitFault::Unfinished`); the page is read again.
+    GitUnfinished,
     /// The fifth of the worker sentences, in the shape the other four wear: a
     /// worker dying is a feature going away, and the line has to say which half
     /// still works.
@@ -4671,6 +4683,26 @@ impl Text {
                 "git did not answer and was stopped",
                 "git 没有回答，已被停止",
             ),
+            Self::GitNotRunFull => pick(
+                lang,
+                "Too many git actions are waiting in this repository; this one was not run",
+                "Too many git actions are waiting in this repository; this one was not run", // zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER
+            ),
+            Self::GitNotRunWorkerGone => pick(
+                lang,
+                "Git actions in this repository stopped; this one was not run",
+                "Git actions in this repository stopped; this one was not run", // zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER
+            ),
+            Self::GitNotRunNotStarted => pick(
+                lang,
+                "Folio could not start this git action",
+                "Folio could not start this git action", // zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER
+            ),
+            Self::GitUnfinished => pick(
+                lang,
+                "Folio could not finish this git action; the page was read again",
+                "Folio could not finish this git action; the page was read again", // zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER
+            ),
             Self::GitWorkerStopped => pick(
                 lang,
                 "Git reading stopped. The terminal is unaffected",
@@ -6638,6 +6670,16 @@ impl Text {
         (Self::MergeNotApplied, HostPlatform::MacOs),
         (Self::MergeClauseSeparator, HostPlatform::Windows),
         (Self::MergeClauseSeparator, HostPlatform::MacOs),
+        // zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER — a Git page's write or checkout Folio
+        // did not run (the repository's lane full, its worker gone or not started) or did not finish.
+        (Self::GitNotRunFull, HostPlatform::Windows),
+        (Self::GitNotRunFull, HostPlatform::MacOs),
+        (Self::GitNotRunWorkerGone, HostPlatform::Windows),
+        (Self::GitNotRunWorkerGone, HostPlatform::MacOs),
+        (Self::GitNotRunNotStarted, HostPlatform::Windows),
+        (Self::GitNotRunNotStarted, HostPlatform::MacOs),
+        (Self::GitUnfinished, HostPlatform::Windows),
+        (Self::GitUnfinished, HostPlatform::MacOs),
     ];
 }
 
