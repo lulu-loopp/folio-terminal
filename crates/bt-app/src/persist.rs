@@ -6570,7 +6570,11 @@ mod conditional_write_tests {
         let news = store
             .document()
             .hear_read(StableRead::Bytes(Arc::from(&hand[..])));
-        assert_eq!(news.unreadable, Some(false), "it read, and nothing is taken");
+        assert_eq!(
+            news.unreadable,
+            Some(false),
+            "it read, and nothing is taken"
+        );
         assert_eq!(store.loaded(), &in_force[..], "the table in force stays");
         assert_eq!(store.document().merges().len(), 1, "stored for the merge");
         assert!(store.store(vec![line("new-tab", "Ctrl+j"), line("quit", "Ctrl+u")]));
@@ -7205,7 +7209,11 @@ mod conditional_write_tests {
         let news = store
             .document()
             .hear_read(StableRead::Bytes(Arc::from(&again[..])));
-        assert_eq!(news.unreadable, Some(false), "a held document takes nothing from a re-read");
+        assert_eq!(
+            news.unreadable,
+            Some(false),
+            "a held document takes nothing from a re-read"
+        );
         assert_eq!(store.revision().bytes.as_deref(), Some(&again[..]));
         let merges = store.document().merges().to_vec();
         assert_eq!(merges.len(), 2, "the conflict's file, then the newest");

@@ -1021,10 +1021,22 @@ fn every_store_sends_merge_and_each_moved_document_is_merged_and_landed_at_quit(
         &mut pins,
     ];
     assert_eq!(
-        drive(&mut quit, &mut documents, &mut session, &mut disk, &folder, now),
+        drive(
+            &mut quit,
+            &mut documents,
+            &mut session,
+            &mut disk,
+            &folder,
+            now
+        ),
         QuitStep::Documents
     );
-    assert_eq!(disk.writes.len(), 4, "one write per document: {:?}", disk.seen);
+    assert_eq!(
+        disk.writes.len(),
+        4,
+        "one write per document: {:?}",
+        disk.seen
+    );
     assert!(
         disk.writes.iter().all(|write| write.mode == Mode::Merge),
         "every product store sends Merge"
@@ -1035,7 +1047,14 @@ fn every_store_sends_merge_and_each_moved_document_is_merged_and_landed_at_quit(
         });
     }
     assert_eq!(
-        drive(&mut quit, &mut documents, &mut session, &mut disk, &folder, now),
+        drive(
+            &mut quit,
+            &mut documents,
+            &mut session,
+            &mut disk,
+            &folder,
+            now
+        ),
         QuitStep::Documents,
         "the merged documents are sent again"
     );
@@ -1055,10 +1074,21 @@ fn every_store_sends_merge_and_each_moved_document_is_merged_and_landed_at_quit(
         disk.answer_write(landed);
     }
     assert_eq!(
-        drive(&mut quit, &mut documents, &mut session, &mut disk, &folder, now),
+        drive(
+            &mut quit,
+            &mut documents,
+            &mut session,
+            &mut disk,
+            &folder,
+            now
+        ),
         QuitStep::Exit
     );
-    assert!(disk.copies.is_empty(), "nothing went to `recovered`: {:?}", disk.seen);
+    assert!(
+        disk.copies.is_empty(),
+        "nothing went to `recovered`: {:?}",
+        disk.seen
+    );
     let session_at = disk
         .seen
         .iter()
