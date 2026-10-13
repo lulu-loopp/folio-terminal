@@ -15686,8 +15686,10 @@ mod tests {
         type_into(&mut buffer, &mut caret, 6);
         assert_eq!(buffer.request_save(&mut saves, pressed), SaveAsked::Sent);
         for _ in 0..crate::preview_undo::UndoLog::DEPTH + 8 {
+            // A line break is an entry of its own: no run takes it in.
             assert!(buffer.edit_content(|content| {
-                content.insert(0, 'x');
+                content.insert(0, '
+');
                 true
             }));
         }
