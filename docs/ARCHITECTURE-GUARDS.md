@@ -77,11 +77,15 @@ Where and what to do: `crates/bt-source/tests/tripwire.rs`.
 `no_source_reader_names_a_file_outside_the_two_lists` holds the Rust-source
 readers (four lexical shapes, by file).
 A script is a reader when it holds a read verb of its language, from a
-closed list matched as written, an alias or a short verb only as a whole word:
+closed list matched as written, an alias or a short verb only as a whole word
+(only an ASCII letter, a digit or `_` beside it blocks a match, so `$type`,
+`[type]`, `-type`, `$cat` and the word in a comment count — noise, never
+silence):
 PowerShell (`.ps1`, `.psm1`) `Get-Content`, `Select-String`,
 `ReadAll{Text,Lines,Bytes}`, `ReadLines`, `OpenText`, `[IO.File]::Open`,
 `OpenRead`, `Import-Csv`, `Get-FileHash` and the aliases `gc`, `cat`, `type`,
-`sls`; Python (`.py`) `open(`, `.read_text(`, `.read_bytes(`, `.open(`,
+`sls`; Python (`.py`) the built-in `open(` (no `.` before it), `.read_text(`,
+`.read_bytes(`, `.open(`,
 `fileinput` and a `glob(`/`rglob(`/`iglob(` whose pattern ends in `.rs`; the
 shell (`.sh`) `cat`, `grep`, `rg`, `sed`, `awk`, `head`, `tail`, `wc`, `cut`,
 `sort`, `diff`, `cmp`, `md5sum`, `shasum`, a `<` input redirection and a
@@ -106,7 +110,15 @@ heredoc (a comment, `-Filter *.rs`, a bare `cat crates/x/src/lib.rs`), a `.rs`
 that ends no quoted value, a closer with no opener on its line (a string
 spanning lines, a Python triple-quoted body), a path handed to a command run
 by a verb not on the list (`subprocess.run(['cat', …])`), and `.RS` or a verb
-in another case; a line that only looks like a here-string or heredoc opener
+in another case. The walks are as narrow as written: a glob pattern on a
+continuation line, `find -iname`, `find -path '*.rs'`, `-name \*.rs`, an
+unquoted pattern and a `-name` on a continuation line are silent in a file with
+no other verb (unreadable values in a reader), and a `.sh` whose only source
+read is inside an embedded `python3 - <<'PY'` heredoc is judged by the shell's
+verbs alone. Files of another kind are not scanned: the inline `pwsh` steps of
+`.github/workflows/ci.yml` (which read `crates/bt-doc/src/lib.rs` with
+`ReadAllText`) and the tracked `.bash`/`.zsh` scripts under
+`scripts/shell-integration/`; a line that only looks like a here-string or heredoc opener
 (`$m = 'a@'`, `$(( 1 << 3 ))`) opens a phantom one whose `.rs` names are
 reported — noise, never a silent pass. A script reader is cleared like a Rust
 one, by file: a gate or tool whose subject really is source files is a

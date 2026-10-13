@@ -117,11 +117,12 @@ pub enum FileScoped {
     /// `scripts/dev/bt-app-move-topic.py`, the tool that moved each 2a topic
     /// out of `main.rs`, naming `main.rs`, `mod.rs` and `<topic>.rs`.
     ///
-    /// It moves a topic's methods as text from one file into another and
-    /// proves a move by comparing the pre-move text from Git with the topic
-    /// file: the files it moves text between are its subject, and a move of
-    /// text has no item to ask about. It is a Python tool and cannot ask this
-    /// crate's index.
+    /// Step 2a is finished (`docs/DESIGN.md`, 2026-09-22); the script is the
+    /// retained `--check` proof of those moves, a record. It moved a topic's
+    /// methods as text from one file into another, and `--check` compares the
+    /// pre-move text from Git with the topic file: the files it moved text
+    /// between are its subject, and a move of text has no item to ask about.
+    /// It is a Python tool and cannot ask this crate's index.
     TheTopicMover,
 }
 
@@ -188,8 +189,8 @@ impl FileScoped {
                  name; a Python measurement whose dated output is a record"
             }
             Self::TheTopicMover => {
-                "a topic's methods move as text from one file into another and the move is proved \
-                 against the file's text in Git; a Python tool with no item to ask about"
+                "the retained `--check` proof of step 2a's moves, a record: a topic's methods moved \
+                 as text between files, proved against the text in Git; a Python tool"
             }
         }
     }

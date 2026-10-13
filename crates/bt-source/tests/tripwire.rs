@@ -63,16 +63,20 @@
 //! verbs are a closed list, matched as written (so `GC` or `Get-content` is not
 //! seen); a verb marked *word* counts only with no name character (an ASCII
 //! letter, a digit, `_`) just before it and, when it ends in one, just after
-//! it:
+//! it. Only those characters block a match: a sigil, a bracket, a dash or a
+//! comment's `#` does not, so `$type`, `[type]`, `-type`, `$cat` and the word
+//! `type` in a comment all count — noise that makes a file a reader, never a
+//! silent pass:
 //!
 //! * PowerShell: `Get-Content`, `Select-String`, `ReadAllText`,
 //!   `ReadAllLines`, `ReadAllBytes`, `ReadLines`, `OpenText`, `[IO.File]::Open`
 //!   (and its full name `[System.IO.File]::Open`), `OpenRead`, `Import-Csv`,
 //!   `Get-FileHash`; and the aliases `gc`, `cat`, `type`, `sls` as words;
-//! * Python: `.read_text(`, `.read_bytes(`, `.open(`; `open(` and `fileinput`
-//!   as words (`Popen(` is not `open(`); and a walk, below. `Path(…)` is the
-//!   subject of such a read, not a read: `Path('x.rs').read_text()` is a
-//!   reader by `.read_text(`;
+//! * Python: `.read_text(`, `.read_bytes(`, `.open(`; `fileinput` as a word;
+//!   `open(` as a word with no `.` before it (the built-in; `Popen(` is not
+//!   it, and a method `.open(` is the verb before); and a walk, below.
+//!   `Path(…)` is the subject of such a read, not a read:
+//!   `Path('x.rs').read_text()` is a reader by `.read_text(`;
 //! * the shell: `cat`, `grep`, `rg`, `sed`, `awk`, `head`, `tail`, `wc`,
 //!   `cut`, `sort`, `diff`, `cmp`, `md5sum`, `shasum` as words; a `<` input
 //!   redirection (a `<` with no `<` on either side, before no `(` or `&`); and
@@ -149,6 +153,20 @@
 //! on its language's list (`subprocess.run(['cat', …])`) is no reader; and the
 //! extension is matched as written, so `.RS` is not seen. Rust files are read
 //! as above; these shapes are the scripts' only.
+//!
+//! The walks are as narrow as written. In a file with no other read verb each
+//! of these is silent, and in a reader its `'*.rs'` is an unreadable value
+//! instead of a walk: a glob whose pattern is on a continuation line of the
+//! call; `find -iname '*.rs'`, `find -path '*.rs'`, `-name \*.rs`, an unquoted
+//! `-name *.rs`, and a `-name` on a continuation line of the `find`. A `.sh`
+//! whose only read of a source is inside an embedded `python3 - <<'PY'`
+//! heredoc is judged by the shell's verbs alone, the Python in it unread.
+//!
+//! The scan reads files by extension, so a reader in a file of another kind
+//! is not seen: the inline `pwsh` steps of `.github/workflows/ci.yml` (which
+//! name `crates/bt-doc/src/lib.rs` and read it with `ReadAllText`), and the
+//! tracked `.bash` and `.zsh` scripts (`scripts/shell-integration/folio.bash`,
+//! `betterterminal.bash`, `folio.zsh`).
 //!
 //! **It matches by file, not by reader**, because that is the granularity both
 //! lists have: the allowlist is the *file-scoped* one, and a debt row's owning
@@ -462,9 +480,12 @@ const POWERSHELL_READ_ALIASES: [&str; 4] = ["gc", "cat", "type", "sls"];
 /// Python's read verbs matched anywhere in the text as written.
 const PYTHON_READS: [&str; 3] = [".read_text(", ".read_bytes(", ".open("];
 
-/// Python's read verbs matched with nothing of a name before them, so that
-/// `Popen(` is not `open(`.
-const PYTHON_READ_WORDS: [&str; 2] = ["open(", "fileinput"];
+/// Python's read verbs matched as whole words.
+const PYTHON_READ_WORDS: [&str; 1] = ["fileinput"];
+
+/// The built-in `open(`: a whole word with no `.` before it, so that
+/// `Popen(` is not it and a method `.open(` is [`PYTHON_READS`]'s.
+const PYTHON_OPEN: &str = "open(";
 
 /// Python's directory walks: a call whose pattern ends in `.rs` reads the
 /// tree it walks.
@@ -642,6 +663,7 @@ impl Language {
             Self::Python => {
                 anywhere(&PYTHON_READS)
                     || as_words(&PYTHON_READ_WORDS)
+                    || whole_words(body, PYTHON_OPEN).any(|at| !body[..at].ends_with('.'))
                     || !python_walks(body).is_empty()
             }
             Self::Shell => {
@@ -1439,7 +1461,8 @@ fn no_source_reader_names_a_file_outside_the_two_lists() {
     // of files, not hundreds, and the list comparison below cannot tell — a
     // lone listed reader is no stray. The floor is on the files the walk read
     // and not on the readers it found, because the readers are what every
-    // migration ticket removes: 718 `.rs` and `.ps1` files on 2026-10-09.
+    // migration ticket removes: 813 `.rs`, `.ps1`, `.psm1`, `.py` and `.sh`
+    // files on 2026-10-13.
     let mut walked = Vec::new();
     gather(&root, &mut walked);
     assert!(
@@ -2033,8 +2056,9 @@ fn a_find_over_rs_is_a_walk_hit() {
 }
 
 /// RED — **a PowerShell read alias makes the file a reader**: `gc` reads, so
-/// its `.rs` literal is a hit, as `[IO.File]::OpenRead`'s is; an alias inside
-/// a name (`$category`, `$types`) is no alias.
+/// its `.rs` literal is a hit, as `[IO.File]::OpenRead`'s is; an alias
+/// inside a longer name (`$category`, `$types`) is no alias. Only ASCII
+/// letters, digits and `_` block a match: `$type` or `$cat` alone would count.
 ///
 /// MUTATION: `Language::reads` without `POWERSHELL_READ_ALIASES` finds nothing
 /// in the first script, and this goes red.
@@ -2076,7 +2100,9 @@ fn a_powershell_alias_read_makes_the_file_a_reader() {
 /// the refusal says what to do about it alone.
 ///
 /// MUTATION: count every `.rs` as a heredoc line (`heredoc_bodies` returning
-/// the whole text) and this goes red.
+/// the whole text) and the shell half goes red; give Python the whole text as
+/// one here-string (`Language::here_strings`' Python arm) and the Python half
+/// goes red.
 #[test]
 fn a_glob_or_comment_naming_rs_in_a_script_is_neither_hit_nor_diagnostic() {
     let python = "# reads main.rs — 读取 main.rs\n\
@@ -2110,6 +2136,105 @@ fn a_glob_or_comment_naming_rs_in_a_script_is_neither_hit_nor_diagnostic() {
             && said.contains(LIST_OR_ASK),
         "only the literal is refused, with what to do: {said}"
     );
+}
+
+/// One line per read verb, each in a planted file of its own language, each
+/// naming the same source with no other verb beside it.
+const ONE_VERB_EACH: [(&str, &str); 35] = [
+    (PLANTED_SCRIPT, "Get-Content 'crates/x/src/lib.rs'"),
+    (PLANTED_SCRIPT, "Select-String fn 'crates/x/src/lib.rs'"),
+    (
+        PLANTED_SCRIPT,
+        "[IO.File]::ReadAllText('crates/x/src/lib.rs')",
+    ),
+    (
+        PLANTED_SCRIPT,
+        "[IO.File]::ReadAllLines('crates/x/src/lib.rs')",
+    ),
+    (
+        PLANTED_SCRIPT,
+        "[IO.File]::ReadAllBytes('crates/x/src/lib.rs')",
+    ),
+    (
+        PLANTED_SCRIPT,
+        "[IO.File]::ReadLines('crates/x/src/lib.rs')",
+    ),
+    (PLANTED_SCRIPT, "$info.OpenText('crates/x/src/lib.rs')"),
+    (
+        PLANTED_SCRIPT,
+        "[IO.File]::Open('crates/x/src/lib.rs', 'Open')",
+    ),
+    (PLANTED_SCRIPT, "$info.OpenRead('crates/x/src/lib.rs')"),
+    (PLANTED_SCRIPT, "Import-Csv 'crates/x/src/lib.rs'"),
+    (PLANTED_SCRIPT, "Get-FileHash 'crates/x/src/lib.rs'"),
+    (PLANTED_SCRIPT, "gc 'crates/x/src/lib.rs'"),
+    (PLANTED_SCRIPT, "cat 'crates/x/src/lib.rs'"),
+    (PLANTED_SCRIPT, "type 'crates/x/src/lib.rs'"),
+    (PLANTED_SCRIPT, "sls fn 'crates/x/src/lib.rs'"),
+    (PLANTED_PYTHON, "text = open('crates/x/src/lib.rs')"),
+    (
+        PLANTED_PYTHON,
+        "text = Path('crates/x/src/lib.rs').read_text()",
+    ),
+    (
+        PLANTED_PYTHON,
+        "data = Path('crates/x/src/lib.rs').read_bytes()",
+    ),
+    (
+        PLANTED_PYTHON,
+        "handle = Path('crates/x/src/lib.rs').open()",
+    ),
+    (
+        PLANTED_PYTHON,
+        "lines = fileinput.input('crates/x/src/lib.rs')",
+    ),
+    (PLANTED_SHELL, "cat 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "grep fn 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "rg fn 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "sed -n 1p 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "awk 1 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "head 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "tail 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "wc -l 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "cut -c1 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "sort 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "diff a 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "cmp a 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "md5sum 'crates/x/src/lib.rs'"),
+    (PLANTED_SHELL, "shasum 'crates/x/src/lib.rs'"),
+    (
+        PLANTED_SHELL,
+        "while read -r l; do :; done < 'crates/x/src/lib.rs'",
+    ),
+];
+
+/// RED — **each read verb on its own makes its file a reader**: a file
+/// holding that one verb and a `.rs` literal is a hit on the literal's line,
+/// refused naming the line and what to do.
+///
+/// MUTATION: remove any one verb from its list (or make `redirects_input`
+/// answer `false`) and the row holding it finds nothing, and this goes red
+/// naming that row.
+#[test]
+fn each_read_verb_alone_makes_its_file_a_reader() {
+    for (file, line) in ONE_VERB_EACH {
+        let script = format!("# 读取一个源文件 — 中文 mixed\n{line}\n");
+        assert_eq!(
+            script_findings(file, &script),
+            vec![(
+                2,
+                Kind::ReadOfANamedSource,
+                "crates/x/src/lib.rs".to_owned()
+            )],
+            "{file}: `{line}` is a read of the source it names"
+        );
+        let said = script_refusal(file, &script);
+        assert!(
+            said.contains(&format!("{file}:2 reads a named source file"))
+                && said.contains(LIST_OR_ASK),
+            "{file}: `{line}` is refused naming the line and what to do: {said}"
+        );
+    }
 }
 
 /// PIN — **every allowlist entry names one file, one reason, and a file the scan
