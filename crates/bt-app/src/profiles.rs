@@ -988,10 +988,14 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
 
 /// The family `program` belongs to, or `None` for a program no row names.
 fn shell_family(program: &ProgramSource) -> Option<&'static ShellFamily> {
-    let stem = program_stem(program)?;
+    family_of_stem(&program_stem(program)?)
+}
+
+/// The family a program stem ([`program_stem`]) belongs to.
+fn family_of_stem(stem: &str) -> Option<&'static ShellFamily> {
     SHELL_FAMILIES
         .iter()
-        .find(|family| family.stems.contains(&stem.as_str()))
+        .find(|family| family.stems.contains(&stem))
 }
 
 fn derive_grammar_on(
@@ -1041,6 +1045,7 @@ fn encoder_for(
 /// The namespace call is deliberately the standing resolver, unchanged by either insertion key.
 pub fn paste_recipient(
     index: usize,
+    program: &ShellProgram,
     environment: &dyn ShellEnvironment,
 ) -> crate::shell_literal::Recipient {
     let grammar = grammar(index);
@@ -1062,7 +1067,7 @@ pub fn paste_recipient(
     });
     crate::shell_literal::Recipient {
         encoder,
-        namespace: printed_path_namespace(index, environment),
+        namespace: printed_path_namespace(index, program, environment),
         spelling,
         wsl_distribution: wsl_distribution(index),
     }
@@ -2716,9 +2721,13 @@ fn compose_on(
 /// door that reaches inside the distribution — bash's init file or zsh's
 /// directory — crosses the namespace, which is why this asks both questions and
 /// not either one.
+///
+/// **What the shell prints is a wider question** ([`printed_path_namespace_on`]): it follows the
+/// program alone, so every launcher into a distribution prints `/mnt/c/…` whatever its door. The
+/// two agree where they overlap, because both read `wsl.exe` off one row of [`SHELL_FAMILIES`]
+/// (its `wsl_launcher`): a row whose directories are WSL's prints WSL's spelling.
 fn derived_paths(profile: &Profile) -> PathNamespace {
-    let launcher = shell_family(&profile.program).is_some_and(|family| family.wsl_launcher);
-    if launcher
+    if shell_family(&profile.program).is_some_and(|family| family.wsl_launcher)
         && matches!(
             served_by(profile),
             Integration::BashInitFile | Integration::ZshDotDir
@@ -2728,6 +2737,128 @@ fn derived_paths(profile: &Profile) -> PathNamespace {
     } else {
         PathNamespace::Windows
     }
+}
+
+/// **What a row's program is, as far as the spelling its shell prints goes** — the program's half
+/// of [`printed_path_namespace_on`]'s table, read off the program a walk resolved by
+/// [`shell_program_of`] (T-WINDOWS-SHELL-NAMESPACES, 2026-10-12).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ShellProgram {
+    /// `wsl.exe`, by any path: the launcher whose own `-d` names its distribution.
+    WslExe,
+    /// Another launcher into a WSL distribution: the `bash.exe` Windows keeps in its system
+    /// directory or WSL's Store package aliases, or a distribution's own launcher
+    /// (`ubuntu2204.exe`). `distribution` is the one a distribution's launcher starts; `None` is a
+    /// `bash.exe`, which starts the machine's default.
+    WslLauncher { distribution: Option<String> },
+    /// A Cygwin program: `cygwin1.dll` stands in its own directory.
+    Cygwin,
+    /// Every other program, and a row with no program on this machine.
+    #[default]
+    Native,
+}
+
+/// The Store package Windows Subsystem for Linux itself is installed as. Its `bash.exe` alias is
+/// the legacy launcher, as `System32\bash.exe` is.
+const WSL_PACKAGE_FAMILY: &str = "MicrosoftCorporationII.WindowsSubsystemForLinux_8wekyb3d8bbwe";
+
+/// The library every Cygwin program loads from its own directory, and that no other layer ships:
+/// Git for Windows and MSYS2 load `msys-2.0.dll`.
+const CYGWIN_LIBRARY: &str = "cygwin1.dll";
+
+/// **Which kind of program `program` is** — a [`ShellProgram`] read off the path a walk resolved.
+///
+/// The rules, first match wins (Windows; on every other platform every program is
+/// [`ShellProgram::Native`], since there is no WSL or Cygwin layer to stand in):
+///
+/// 1. its stem is `wsl` → [`ShellProgram::WslExe`] (the rule [`derived_paths`] reads too);
+/// 2. it is a Store alias — `%LOCALAPPDATA%\Microsoft\WindowsApps\<family>\<name>.exe`, or the
+///    same name directly in `WindowsApps` with that file in a family's directory beside it — of
+///    WSL's own package and named `bash`, → a launcher of the machine's default distribution; of
+///    the package an installed distribution came from (`crate::wsl::WslFacts::package_families`)
+///    → a launcher of that distribution;
+/// 3. it is `bash.exe` in `%SystemRoot%\System32` → a launcher of the machine's default
+///    distribution;
+/// 4. `cygwin1.dll` stands in its own directory → [`ShellProgram::Cygwin`] (wherever Cygwin's
+///    root is: its setup lets the root be anywhere, so the directory's name is no criterion);
+/// 5. anything else → [`ShellProgram::Native`].
+///
+/// A pure function but for its two seams: `environment.is_file` is its only disk question (the
+/// program walk asks it, on its worker — `crate::programs_lane`), and `installation` is asked only
+/// for a program among the Store aliases. The path is read as Windows writes one — either
+/// separator, compared without case — whatever the host, because the platform is an input.
+pub(crate) fn shell_program_of(
+    platform: SeedPlatform,
+    program: &Path,
+    environment: &dyn ShellEnvironment,
+    installation: &dyn Fn() -> crate::wsl::WslFacts,
+) -> ShellProgram {
+    if platform != SeedPlatform::Windows {
+        return ShellProgram::Native;
+    }
+    let text = program.to_string_lossy();
+    let (directory, file) = text.rsplit_once(['\\', '/']).unwrap_or(("", &text));
+    let stem = file
+        .rsplit_once('.')
+        .map_or(file, |(stem, _)| stem)
+        .to_ascii_lowercase();
+    if family_of_stem(&stem).is_some_and(|family| family.wsl_launcher) {
+        return ShellProgram::WslExe;
+    }
+    let aliases = environment
+        .var_os("LOCALAPPDATA")
+        .map(|local| format!(r"{}\Microsoft\WindowsApps", local.to_string_lossy()));
+    if let Some(aliases) = aliases.as_deref() {
+        let package = if same_windows_directory(directory, aliases) {
+            let installation = installation();
+            std::iter::once(WSL_PACKAGE_FAMILY)
+                .chain(installation.package_families())
+                .find(|family| {
+                    environment.is_file(Path::new(&format!(r"{aliases}\{family}\{file}")))
+                })
+                .map(|family| (family.to_owned(), installation.clone()))
+        } else {
+            directory
+                .rsplit_once(['\\', '/'])
+                .filter(|(root, _)| same_windows_directory(root, aliases))
+                .map(|(_, family)| (family.to_owned(), installation()))
+        };
+        if let Some((family, installation)) = package {
+            if family.eq_ignore_ascii_case(WSL_PACKAGE_FAMILY) && stem == "bash" {
+                return ShellProgram::WslLauncher { distribution: None };
+            }
+            if let Some(distribution) = installation.distribution_of_package(&family) {
+                return ShellProgram::WslLauncher {
+                    distribution: Some(distribution.to_owned()),
+                };
+            }
+        }
+    }
+    if stem == "bash"
+        && environment.var_os("SystemRoot").is_some_and(|root| {
+            same_windows_directory(directory, &format!(r"{}\System32", root.to_string_lossy()))
+        })
+    {
+        return ShellProgram::WslLauncher { distribution: None };
+    }
+    if !directory.is_empty()
+        && environment.is_file(Path::new(&format!(r"{directory}\{CYGWIN_LIBRARY}")))
+    {
+        return ShellProgram::Cygwin;
+    }
+    ShellProgram::Native
+}
+
+/// Whether two Windows directories are one: the same names under either separator, compared as
+/// Windows compares a name — without case.
+fn same_windows_directory(left: &str, right: &str) -> bool {
+    let names = |path: &str| {
+        path.split(['\\', '/'])
+            .filter(|name| !name.is_empty())
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>()
+    };
+    names(left) == names(right)
 }
 
 fn program_from_file(program: &ProgramV1) -> ProgramSource {
@@ -3682,32 +3813,45 @@ pub fn integration(index: usize) -> Integration {
 
 /// Which spelling of an absolute path one row's shell **prints**, for the path
 /// detector — T-3 (`docs/plans/shell-matrix-2026-09-07.md`): the row at `index`
-/// in this window's table, on the platform this build is. The rule itself is
-/// [`printed_path_namespace_on`], which takes the platform as an input.
+/// in this window's table, running `program` (the kind of the program its walk
+/// resolved, [`ProfilePrograms::shell`]), on the platform this build is. The rule
+/// itself is [`printed_path_namespace_on`], which takes the platform as an input.
 #[must_use]
 pub fn printed_path_namespace(
     index: usize,
+    program: &ShellProgram,
     environment: &dyn ShellEnvironment,
 ) -> PrintedPathNamespace {
     printed_path_namespace_on(
         SeedPlatform::of_this_build(),
-        paths(index),
+        program,
         integration(index),
         &args(index),
         environment,
     )
 }
 
-/// **The (platform, shell) → printed-path namespace table**, with the platform an
-/// input rather than a `cfg`, so a runner on any platform can be asked what every
-/// other one answers (T-MAC-PRINTED-NAMESPACE, 2026-10-12).
+/// **The (platform, program, door) → printed-path namespace table**, with the
+/// platform an input rather than a `cfg`, so a runner on any platform can be asked
+/// what every other one answers (T-MAC-PRINTED-NAMESPACE and
+/// T-WINDOWS-SHELL-NAMESPACES, 2026-10-12).
 ///
-/// | platform        | row                                              | namespace |
-/// |-----------------|--------------------------------------------------|-----------|
-/// | Windows         | starts `wsl.exe` (`paths` is [`PathNamespace::Wsl`]) | [`PrintedPathNamespace::Wsl`] |
-/// | Windows         | Windows directories behind a bash/zsh init door (Git Bash) | [`PrintedPathNamespace::Msys`] |
-/// | Windows         | every other row (PowerShell, cmd, …)             | [`PrintedPathNamespace::Windows`] |
-/// | macOS, other Unix | every row (zsh, bash, sh, the account's own shell) | [`PrintedPathNamespace::Posix`] |
+/// | platform          | program ([`ShellProgram`], by [`shell_program_of`])        | door              | namespace |
+/// |-------------------|------------------------------------------------------------|-------------------|-----------|
+/// | Windows           | `wsl.exe`                                                  | any               | [`PrintedPathNamespace::Wsl`], distribution from its `-d`, else the machine's default |
+/// | Windows           | another WSL launcher (`System32\bash.exe`, `ubuntu2204.exe`) | any             | [`PrintedPathNamespace::Wsl`], the launcher's distribution, else the machine's default |
+/// | Windows           | a Cygwin program                                           | any               | [`PrintedPathNamespace::Cygwin`] |
+/// | Windows           | any other (Git Bash, MSYS2)                                | bash or zsh init  | [`PrintedPathNamespace::Msys`] |
+/// | Windows           | any other (PowerShell, cmd, …)                             | any other         | [`PrintedPathNamespace::Windows`] |
+/// | macOS, other Unix | every program                                              | any               | [`PrintedPathNamespace::Posix`] |
+///
+/// **The program decides first and the door second.** What a shell prints is a
+/// fact about the layer it runs in, and a door only decides what is integrated: a
+/// `wsl.exe` row whose door is off still prints `/mnt/d/…`, a Cygwin bash behind
+/// bash's init door prints `/cygdrive/d/…`, and the legacy `bash.exe` launcher —
+/// a `bash` by its name — prints its distribution's spelling. Only a program that
+/// is none of these is read by its door: a bash or zsh init door on a Windows
+/// program is a bash standing in a Win32 world, which is what MSYS is.
 ///
 /// Not the same question as [`paths`], and the difference is the Windows half of
 /// this table. [`PathNamespace`] answers *where this pane's working directory is*,
@@ -3715,33 +3859,24 @@ pub fn printed_path_namespace(
 /// standing in `D:\Demo`, one directory under two spellings, and the Win32 one is
 /// the true one because it is what `CreateProcess` was handed. But the shell
 /// still **prints** `/d/Demo/report.md`, and text on the screen is read in the
-/// spelling it was written in.
+/// spelling it was written in. Where the two overlap they agree: a row whose
+/// directories are WSL's starts `wsl.exe` ([`derived_paths`]).
 ///
-/// So on Windows the third namespace the `gitbash` row's own note refuses to
-/// become is a namespace here, and it is read off the pair the row already
-/// carries rather than off its id: a row whose directories are Windows and whose
-/// door is a **bash or zsh init file** is a bash standing in a Win32 world, which
-/// is what MSYS is. A row that starts `wsl.exe` is the distribution's own
-/// filesystem, door or no door — a WSL pane prints `/mnt/d/…` whether or not
-/// anything integrated it. Everything else prints this machine's spelling.
-///
-/// **Off Windows the pair decides nothing.** The macOS and Unix rows carry the
-/// same `(Windows directories, init-file door)` pair Git Bash does — `paths` has
-/// no POSIX variant because a POSIX machine's directories need no translation —
-/// but a zsh on a Mac is not standing in a Win32 world: there is no MSYS layer,
-/// `/d/Demo` is the directory `d` under the root, and every shell prints the one
-/// filesystem this machine reads.
+/// **Off Windows the program and the door decide nothing.** A zsh on a Mac is not
+/// standing in a Win32 world: there is no MSYS layer, `/d/Demo` is the directory
+/// `d` under the root, and every shell prints the one filesystem this machine
+/// reads.
 #[must_use]
 pub fn printed_path_namespace_on(
     platform: SeedPlatform,
-    paths: PathNamespace,
+    program: &ShellProgram,
     door: Integration,
     arguments: &[String],
     environment: &dyn ShellEnvironment,
 ) -> PrintedPathNamespace {
-    match (platform, paths, door) {
+    match (platform, program, door) {
         (SeedPlatform::MacOs | SeedPlatform::OtherUnix, _, _) => PrintedPathNamespace::Posix,
-        (SeedPlatform::Windows, PathNamespace::Wsl, _) => PrintedPathNamespace::Wsl {
+        (SeedPlatform::Windows, ShellProgram::WslExe, _) => PrintedPathNamespace::Wsl {
             distro: wsl_distribution_of(arguments),
             // Not knowable here, and deliberately not guessed: `wsl.exe --cd ~` is what the
             // launcher is *told*, and only the shell that read it can say what it expanded to. The
@@ -3749,9 +3884,18 @@ pub fn printed_path_namespace_on(
             // (`PrintedPathNamespace::with_shell_home`).
             home: None,
         },
+        (SeedPlatform::Windows, ShellProgram::WslLauncher { distribution }, _) => {
+            PrintedPathNamespace::Wsl {
+                // A launcher other than `wsl.exe` takes no `-d`: a distribution's own starts that
+                // distribution, and `bash.exe` the machine's default.
+                distro: distribution.clone().or_else(machine_default_distribution),
+                home: None,
+            }
+        }
+        (SeedPlatform::Windows, ShellProgram::Cygwin, _) => PrintedPathNamespace::Cygwin,
         (
             SeedPlatform::Windows,
-            PathNamespace::Windows,
+            ShellProgram::Native,
             Integration::BashInitFile | Integration::ZshDotDir,
         ) => PrintedPathNamespace::Msys {
             // Git for Windows maps `$HOME` onto the Windows home, read by the platform this
@@ -3760,7 +3904,7 @@ pub fn printed_path_namespace_on(
                 .var_os(home_variable(platform))
                 .map(PathBuf::from),
         },
-        (SeedPlatform::Windows, PathNamespace::Windows, _) => PrintedPathNamespace::Windows,
+        (SeedPlatform::Windows, ShellProgram::Native, _) => PrintedPathNamespace::Windows,
     }
 }
 
@@ -3784,11 +3928,15 @@ fn wsl_distribution(index: usize) -> Option<String> {
 
 /// [`wsl_distribution`] for a row's arguments already in hand.
 fn wsl_distribution_of(arguments: &[String]) -> Option<String> {
-    named_distribution(arguments).or_else(|| {
-        crate::wsl::facts()
-            .default_distribution()
-            .map(str::to_owned)
-    })
+    named_distribution(arguments).or_else(machine_default_distribution)
+}
+
+/// The distribution a launcher told nothing else starts: the machine's default, out of
+/// [`crate::wsl::facts`].
+fn machine_default_distribution() -> Option<String> {
+    crate::wsl::facts()
+        .default_distribution()
+        .map(str::to_owned)
 }
 
 /// The `-d <name>` / `--distribution <name>` a row's arguments carry, if any.
@@ -5593,13 +5741,14 @@ pub struct ProfilePrograms {
     answers: BTreeMap<String, RowAnswer>,
 }
 
-/// One row's completed answer: the source it was asked about, the walk that answered, and where
-/// the program is (`None`: not on this machine).
+/// One row's completed answer: the source it was asked about, the walk that answered, where
+/// the program is (`None`: not on this machine), and what kind of program it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RowAnswer {
     source: ProgramSource,
     generation: u64,
     program: Option<OsString>,
+    shell: ShellProgram,
 }
 
 /// **One row's answer as a walk publishes it** — what [`ProfilePrograms::adopt_against`] takes.
@@ -5612,6 +5761,9 @@ pub struct RowVerdict {
     /// longer has is not an answer about the row.
     pub source: ProgramSource,
     pub program: Option<OsString>,
+    /// What kind of program `program` is ([`shell_program_of`], asked by the walk that found it);
+    /// [`ShellProgram::Native`] when there is none.
+    pub shell: ShellProgram,
 }
 
 impl ProfilePrograms {
@@ -5642,12 +5794,22 @@ impl ProfilePrograms {
             answers: rows
                 .iter()
                 .map(|profile| {
+                    let program = Self::resolve_row(profile, environment);
+                    let shell = program.as_deref().map_or(ShellProgram::Native, |program| {
+                        shell_program_of(
+                            SeedPlatform::of_this_build(),
+                            Path::new(program),
+                            environment,
+                            &crate::wsl::facts,
+                        )
+                    });
                     (
                         profile.id.clone(),
                         RowAnswer {
                             source: profile.program.clone(),
                             generation: 0,
-                            program: Self::resolve_row(profile, environment),
+                            program,
+                            shell,
                         },
                     )
                 })
@@ -5711,10 +5873,13 @@ impl ProfilePrograms {
                 source: verdict.source,
                 generation: verdict.generation,
                 program: verdict.program,
+                shell: verdict.shell,
             };
             let before = self.answers.insert(verdict.id, answer.clone());
             changed |= before.is_none_or(|before| {
-                before.program != answer.program || before.source != answer.source
+                before.program != answer.program
+                    || before.source != answer.source
+                    || before.shell != answer.shell
             });
         }
         changed
@@ -5749,6 +5914,15 @@ impl ProfilePrograms {
     #[must_use]
     pub fn answer(&self, id: &str) -> Option<Option<&OsStr>> {
         self.answers.get(id).map(|answer| answer.program.as_deref())
+    }
+
+    /// What kind of program the profile with this id starts — [`ShellProgram::Native`] when this
+    /// machine has nowhere to start it from or the row is unknown, as for [`Self::program`].
+    #[must_use]
+    pub fn shell(&self, id: &str) -> ShellProgram {
+        self.answers
+            .get(id)
+            .map_or(ShellProgram::Native, |answer| answer.shell.clone())
     }
 
     /// Whether the row with this id has no answer yet.
@@ -5806,6 +5980,7 @@ impl ProfilePrograms {
                                 program: available
                                     .contains(&index)
                                     .then(|| OsString::from(format!("C:\\fake\\{index}.exe"))),
+                                shell: ShellProgram::Native,
                             },
                         )
                     })
@@ -5828,6 +6003,7 @@ impl ProfilePrograms {
                             source: profile.program.clone(),
                             generation: 0,
                             program: None,
+                            shell: ShellProgram::Native,
                         },
                     )
                 })
@@ -16052,6 +16228,32 @@ mod tests {
         }
     }
 
+    /// The kind of program a shipped row starts on a machine where no program is a Store alias,
+    /// `System32\bash.exe` or a Cygwin program, as on every fixture machine here: whether the row
+    /// starts `wsl.exe`, by the rule [`shell_program_of`] reads, read off the row alone so that
+    /// every host can ask it.
+    pub(super) fn shipped_kind(row: &Profile) -> ShellProgram {
+        if shell_family(&row.program).is_some_and(|family| family.wsl_launcher) {
+            ShellProgram::WslExe
+        } else {
+            ShellProgram::Native
+        }
+    }
+
+    /// The kind of program a walk over `machine` finds for `row`: resolved and classified as
+    /// `crate::programs_lane` does, on a machine with no WSL distribution installed.
+    #[cfg(windows)]
+    fn the_shell_a_walk_finds(row: &Profile, machine: &dyn ShellEnvironment) -> ShellProgram {
+        ProfilePrograms::resolve_row(row, machine).map_or(ShellProgram::Native, |program| {
+            shell_program_of(
+                SeedPlatform::Windows,
+                Path::new(&program),
+                machine,
+                &crate::wsl::WslFacts::default,
+            )
+        })
+    }
+
     /// `machine` with the program of every row of **this process's** table that
     /// names one path — the rows a build off Windows ships — and that `keep`
     /// picks, installed at that path.
@@ -18411,15 +18613,22 @@ mod tests {
     #[test]
     fn a_row_says_which_spelling_of_an_absolute_path_its_shell_prints() {
         let machine = FakeMachine::fully_equipped().with_var("USERPROFILE", r"C:\Users\alice");
+        // The row `index_of_id` stands at, for a name that is no id (`powershell`) included.
+        let shell_of = |name: &str| {
+            the_shell_a_walk_finds(
+                &row_of(&id(index_of_id(name))).expect("a row of the table"),
+                &machine,
+            )
+        };
         assert_eq!(
-            printed_path_namespace(index_of_id("gitbash"), &machine),
+            printed_path_namespace(index_of_id("gitbash"), &shell_of("gitbash"), &machine),
             PrintedPathNamespace::Msys {
                 home: Some(PathBuf::from(r"C:\Users\alice"))
             },
             "a bash whose directories are Windows directories is an MSYS bash"
         );
         assert_eq!(
-            printed_path_namespace(index_of_id("wsl"), &machine),
+            printed_path_namespace(index_of_id("wsl"), &shell_of("wsl"), &machine),
             PrintedPathNamespace::Wsl {
                 distro: None,
                 home: None
@@ -18428,13 +18637,21 @@ mod tests {
         );
         for windows_speaking in ["pwsh", "powershell", "cmd"] {
             assert_eq!(
-                printed_path_namespace(index_of_id(windows_speaking), &machine),
+                printed_path_namespace(
+                    index_of_id(windows_speaking),
+                    &shell_of(windows_speaking),
+                    &machine
+                ),
                 PrintedPathNamespace::Windows,
                 "{windows_speaking} spells this machine's own paths"
             );
         }
         assert_eq!(
-            printed_path_namespace(index_of_id("gitbash"), &FakeMachine::default()),
+            printed_path_namespace(
+                index_of_id("gitbash"),
+                &ShellProgram::Native,
+                &FakeMachine::default()
+            ),
             PrintedPathNamespace::Msys { home: None },
             "a machine that cannot name a home has no `~` to expand either"
         );
@@ -18446,7 +18663,7 @@ mod tests {
     /// The macOS and Unix rows carry the same `(Windows directories, init-file door)` pair the
     /// `gitbash` row does, so a rule read off that pair alone classed every Mac shell as MSYS. The
     /// table is driven here with the platform as an input, over every row every platform ships and
-    /// over every `(paths, door)` pair the function accepts, so one runner checks all three.
+    /// over the `(program, door)` pairs no shipped row reaches, so one runner checks all three.
     ///
     /// MUTATION: drop the platform arm (answer from the shell's pair alone) and the macOS `zsh` and
     /// `bash` rows come back `Msys` — RED.
@@ -18464,7 +18681,13 @@ mod tests {
             .with_file("/opt/homebrew/bin/fish");
         let alices_windows_home = || PathBuf::from(r"C:\Users\alice");
         let namespace_of = |platform: SeedPlatform, row: &Profile| {
-            printed_path_namespace_on(platform, row.paths, served_by(row), &row.args, &machine)
+            printed_path_namespace_on(
+                platform,
+                &shipped_kind(row),
+                served_by(row),
+                &row.args,
+                &machine,
+            )
         };
 
         // Every row every platform ships.
@@ -18524,12 +18747,14 @@ mod tests {
             );
         }
 
-        // The pairs no shipped row carries.
+        // What the loop above does not reach: a zsh door on a Windows program, a WSL row's own
+        // `-d` (the shipped `wsl` row carries the same program and door, without it), and a WSL
+        // launcher on a platform that has no WSL.
         let pinned_to_ubuntu = ["-d".to_owned(), "Ubuntu".to_owned()];
         assert_eq!(
             printed_path_namespace_on(
                 SeedPlatform::Windows,
-                PathNamespace::Windows,
+                &ShellProgram::Native,
                 Integration::ZshDotDir,
                 &[],
                 &machine
@@ -18542,7 +18767,7 @@ mod tests {
         assert_eq!(
             printed_path_namespace_on(
                 SeedPlatform::Windows,
-                PathNamespace::Wsl,
+                &ShellProgram::WslExe,
                 Integration::BashInitFile,
                 &pinned_to_ubuntu,
                 &machine
@@ -18557,7 +18782,7 @@ mod tests {
             assert_eq!(
                 printed_path_namespace_on(
                     platform,
-                    PathNamespace::Wsl,
+                    &ShellProgram::WslExe,
                     Integration::BashInitFile,
                     &pinned_to_ubuntu,
                     &machine
@@ -18565,6 +18790,283 @@ mod tests {
                 PrintedPathNamespace::Posix,
                 "{platform:?} has no WSL; every row there prints POSIX"
             );
+        }
+    }
+
+    /// PIN (T-WINDOWS-SHELL-NAMESPACES, 2026-10-12) — **on Windows the namespace follows the
+    /// program first and the door second**: every launcher into a distribution prints WSL's
+    /// spelling whatever its door, a Cygwin program prints Cygwin's, and only a program that is
+    /// none of these is read by its door (a bash or zsh init door is MSYS).
+    ///
+    /// Driven over `(program kind, door)` with the kinds as inputs, so every host checks the
+    /// Windows table; the kinds' recognition from a path is
+    /// `a_programs_kind_is_read_off_its_path_and_what_stands_beside_it`.
+    ///
+    /// MUTATION: the door-only rule (WSL only for `wsl.exe` behind a bash/zsh door, then the door
+    /// alone) — RED on the first two rows: `wsl.exe` with its door off comes back `Windows`, and
+    /// `System32\bash.exe` comes back `Msys`.
+    #[test]
+    fn a_windows_rows_namespace_follows_what_its_shell_prints() {
+        let machine = FakeMachine::default().with_var("USERPROFILE", r"C:\Users\alice");
+        let msys = || PrintedPathNamespace::Msys {
+            home: Some(PathBuf::from(r"C:\Users\alice")),
+        };
+        let wsl = |distro: Option<&str>| PrintedPathNamespace::Wsl {
+            distro: distro.map(str::to_owned),
+            home: None,
+        };
+        let debian = ["-d".to_owned(), "Debian".to_owned()];
+        let rows: [(
+            &str,
+            ShellProgram,
+            Integration,
+            &[String],
+            PrintedPathNamespace,
+        ); 10] = [
+            (
+                r"a row of its own running C:\Windows\System32\wsl.exe, door off",
+                ShellProgram::WslExe,
+                Integration::None,
+                &debian,
+                wsl(Some("Debian")),
+            ),
+            (
+                r"C:\Windows\System32\bash.exe, the legacy launcher",
+                ShellProgram::WslLauncher { distribution: None },
+                Integration::BashInitFile,
+                &[],
+                // No test process has adopted a WSL installation, so there is no default to name.
+                wsl(None),
+            ),
+            (
+                "ubuntu2204.exe, a distribution's own launcher",
+                ShellProgram::WslLauncher {
+                    distribution: Some("Ubuntu-22.04".to_owned()),
+                },
+                Integration::None,
+                &[],
+                wsl(Some("Ubuntu-22.04")),
+            ),
+            (
+                "wsl.exe behind bash's door, the shipped row",
+                ShellProgram::WslExe,
+                Integration::BashInitFile,
+                &[],
+                wsl(None),
+            ),
+            (
+                r"C:\cygwin64\bin\bash.exe behind bash's door",
+                ShellProgram::Cygwin,
+                Integration::BashInitFile,
+                &[],
+                PrintedPathNamespace::Cygwin,
+            ),
+            (
+                r"D:\工具\cyg\bin\fish.exe, door off",
+                ShellProgram::Cygwin,
+                Integration::None,
+                &[],
+                PrintedPathNamespace::Cygwin,
+            ),
+            (
+                "Git Bash",
+                ShellProgram::Native,
+                Integration::BashInitFile,
+                &[],
+                msys(),
+            ),
+            (
+                r"C:\msys64\usr\bin\zsh.exe",
+                ShellProgram::Native,
+                Integration::ZshDotDir,
+                &[],
+                msys(),
+            ),
+            (
+                "pwsh",
+                ShellProgram::Native,
+                Integration::PowerShellOptIn,
+                &[],
+                PrintedPathNamespace::Windows,
+            ),
+            (
+                "cmd",
+                ShellProgram::Native,
+                Integration::CmdPrompt,
+                &[],
+                PrintedPathNamespace::Windows,
+            ),
+        ];
+        for (row, program, door, arguments, expected) in rows {
+            assert_eq!(
+                printed_path_namespace_on(
+                    SeedPlatform::Windows,
+                    &program,
+                    door,
+                    arguments,
+                    &machine
+                ),
+                expected,
+                "{row}"
+            );
+            for platform in [SeedPlatform::MacOs, SeedPlatform::OtherUnix] {
+                assert_eq!(
+                    printed_path_namespace_on(platform, &program, door, arguments, &machine),
+                    PrintedPathNamespace::Posix,
+                    "{platform:?}: {row}"
+                );
+            }
+        }
+        // Where the two namespaces overlap they agree: a row whose directories are WSL's prints
+        // WSL's spelling.
+        for row in shipped_for(SeedPlatform::Windows, &machine) {
+            if row.paths == PathNamespace::Wsl {
+                assert!(
+                    matches!(
+                        printed_path_namespace_on(
+                            SeedPlatform::Windows,
+                            &shipped_kind(&row),
+                            served_by(&row),
+                            &row.args,
+                            &machine
+                        ),
+                        PrintedPathNamespace::Wsl { .. }
+                    ),
+                    "{}",
+                    row.id
+                );
+            }
+        }
+    }
+
+    /// PIN (T-WINDOWS-SHELL-NAMESPACES, 2026-10-12) — **which kind of program a resolved path is**:
+    /// `wsl.exe` by any path; a Store alias of WSL's own `bash` or of the package a distribution
+    /// came from; `bash.exe` in the system directory; a program with `cygwin1.dll` in its own
+    /// directory, wherever Cygwin's root is; and nothing else. The disk is a fixture and WSL's
+    /// installation a value, so the test reads neither of this machine's, and the installation is
+    /// read only for a program among the Store aliases.
+    ///
+    /// MUTATION: drop the `cygwin1.dll` question — RED on the Cygwin bash. MUTATION: drop the
+    /// system-directory rule — RED on `System32\bash.exe`.
+    ///
+    /// Every host runs it: the platform is an input and the path is read as Windows text, and a
+    /// non-Windows platform answers `Native` for every program (asserted below).
+    #[test]
+    fn a_programs_kind_is_read_off_its_path_and_what_stands_beside_it() {
+        const UBUNTU_PACKAGE: &str = "CanonicalGroupLimited.Ubuntu22.04LTS_79rhkp1fndgsc";
+        let aliases = r"C:\Users\alice\AppData\Local\Microsoft\WindowsApps";
+        let machine = FakeMachine::default()
+            .with_var("SystemRoot", r"C:\WINDOWS")
+            .with_var("LOCALAPPDATA", r"C:\Users\alice\AppData\Local")
+            .with_file(r"C:\cygwin64\bin\cygwin1.dll")
+            .with_file(r"D:\工具\cyg\bin\cygwin1.dll")
+            .with_file(&format!(r"{aliases}\{WSL_PACKAGE_FAMILY}\bash.exe"))
+            .with_file(&format!(r"{aliases}\{UBUNTU_PACKAGE}\ubuntu2204.exe"))
+            .with_file(&format!(
+                r"{aliases}\Microsoft.PowerShell_8wekyb3d8bbwe\pwsh.exe"
+            ));
+        let asked = std::cell::Cell::new(0);
+        let installation = || {
+            asked.set(asked.get() + 1);
+            crate::wsl::facts_of(&["Debian", "Ubuntu-22.04"], "Debian")
+                .with_package("Ubuntu-22.04", UBUNTU_PACKAGE)
+        };
+        let ubuntu = || ShellProgram::WslLauncher {
+            distribution: Some("Ubuntu-22.04".to_owned()),
+        };
+        let default_distribution = || ShellProgram::WslLauncher { distribution: None };
+        for (program, expected, reads_the_installation) in [
+            (
+                r"C:\WINDOWS\System32\wsl.exe".to_owned(),
+                ShellProgram::WslExe,
+                false,
+            ),
+            (r"D:\tools\WSL.EXE".to_owned(), ShellProgram::WslExe, false),
+            (format!(r"{aliases}\wsl.exe"), ShellProgram::WslExe, false),
+            (
+                r"C:\Windows\system32\bash.exe".to_owned(),
+                default_distribution(),
+                false,
+            ),
+            (format!(r"{aliases}\bash.exe"), default_distribution(), true),
+            (format!(r"{aliases}\ubuntu2204.exe"), ubuntu(), true),
+            (
+                format!(r"{aliases}\{UBUNTU_PACKAGE}\ubuntu2204.exe"),
+                ubuntu(),
+                true,
+            ),
+            (format!(r"{aliases}\pwsh.exe"), ShellProgram::Native, true),
+            (
+                r"C:\cygwin64\bin\bash.exe".to_owned(),
+                ShellProgram::Cygwin,
+                false,
+            ),
+            (
+                r"D:\工具\cyg\bin\zsh.exe".to_owned(),
+                ShellProgram::Cygwin,
+                false,
+            ),
+            (
+                r"C:\Program Files\Git\bin\bash.exe".to_owned(),
+                ShellProgram::Native,
+                false,
+            ),
+            (
+                r"C:\msys64\usr\bin\zsh.exe".to_owned(),
+                ShellProgram::Native,
+                false,
+            ),
+            (
+                r"C:\WINDOWS\System32\cmd.exe".to_owned(),
+                ShellProgram::Native,
+                false,
+            ),
+        ] {
+            let before = asked.get();
+            assert_eq!(
+                shell_program_of(
+                    SeedPlatform::Windows,
+                    Path::new(&program),
+                    &machine,
+                    &installation
+                ),
+                expected,
+                "{program}"
+            );
+            assert_eq!(
+                asked.get() > before,
+                reads_the_installation,
+                "{program}: WSL's installation is read only for a Store alias"
+            );
+            for platform in [SeedPlatform::MacOs, SeedPlatform::OtherUnix] {
+                assert_eq!(
+                    shell_program_of(platform, Path::new(&program), &machine, &installation),
+                    ShellProgram::Native,
+                    "{platform:?} has no WSL and no Cygwin: {program}"
+                );
+            }
+        }
+    }
+
+    /// PIN (T-WINDOWS-SHELL-NAMESPACES, 2026-10-12) — **the shipped rows' programs, resolved and
+    /// classified as a walk does**, are the kinds `shipped_kind` reads off the rows alone.
+    ///
+    /// **Windows only:** the rows resolve through `Path::join` of Windows variables.
+    #[cfg(windows)]
+    #[test]
+    fn the_shipped_rows_are_the_kinds_a_walk_finds() {
+        let equipped = FakeMachine::fully_equipped();
+        for (id, expected) in [
+            ("wsl", ShellProgram::WslExe),
+            ("gitbash", ShellProgram::Native),
+            ("cmd", ShellProgram::Native),
+        ] {
+            let row = windows_shipped()
+                .into_iter()
+                .find(|row| row.id == id)
+                .expect("a shipped row");
+            assert_eq!(the_shell_a_walk_finds(&row, &equipped), expected, "{id}");
+            assert_eq!(shipped_kind(&row), expected, "{id}");
         }
     }
 
@@ -18584,7 +19086,7 @@ mod tests {
         let doorless_on = |platform: SeedPlatform| {
             printed_path_namespace_on(
                 platform,
-                PathNamespace::Windows,
+                &ShellProgram::Native,
                 Integration::None,
                 &[],
                 &machine,
@@ -27619,6 +28121,44 @@ mod tests {
         }
     }
 
+    /// PIN (T-WINDOWS-SHELL-NAMESPACES, 2026-10-12) — **a walk says what kind of program each row
+    /// found**, asking the disk on its own worker: a bash with `cygwin1.dll` beside it is Cygwin's,
+    /// and becomes so on the walk after the library arrives.
+    ///
+    /// MUTATION: the walk publishing `ShellProgram::Native` for every row — RED on the second walk.
+    ///
+    /// **Windows only:** off Windows every program is `Native`.
+    #[cfg(windows)]
+    #[test]
+    fn a_walk_says_what_kind_of_program_each_row_found() {
+        use crate::programs_lane::{Trigger, WalkRequest, tests as lane_tests};
+        let machine = lane_tests::FakeMachine::with_path(&[lane_tests::bin_dir()]);
+        let (lane, wakes, _) = lane_tests::lane(machine.clone());
+        let rows = vec![lane_tests::row("cygbash", "bash.exe")];
+        let ask = |trigger| {
+            lane.request(WalkRequest {
+                rows: rows.clone(),
+                first: Vec::new(),
+                trigger,
+            })
+            .expect("admitted")
+        };
+        machine.install(&lane_tests::bin("bash.exe"));
+
+        let first = ask(Trigger::Launch);
+        let answers = lane_tests::answers_through(lane, &wakes, first);
+        assert_eq!(answers.verdicts[0].shell, ShellProgram::Native);
+
+        machine.install(&lane_tests::bin("cygwin1.dll"));
+        let second = ask(Trigger::Environment);
+        let answers = lane_tests::answers_through(lane, &wakes, second);
+        assert_eq!(
+            answers.verdicts[0].shell,
+            ShellProgram::Cygwin,
+            "the library beside the program makes it Cygwin's"
+        );
+    }
+
     /// RED — **a program installed while Folio runs shows in the new-tab menu after the
     /// environment broadcast, and after a menu opens with no broadcast at all**.
     ///
@@ -27700,6 +28240,7 @@ mod tests {
             id: tool.id.clone(),
             source: tool.program.clone(),
             program: Some(OsString::from(program)),
+            shell: ShellProgram::Native,
         };
         let mut programs = ProfilePrograms::unknown();
         assert!(programs.adopt_against(&table, [verdict(5, r"C:\新\tool.exe")]));
@@ -27974,8 +28515,10 @@ mod paste_tests {
         }
     }
 
+    /// Every row each platform seeds, in order and none besides: its id, its grammar, and the
+    /// namespace the table gives it on its own platform.
     #[test]
-    fn every_seed_row_has_a_grammar_and_standing_namespace_pair() {
+    fn the_seed_rows_come_in_this_order_with_these_grammars_and_namespaces() {
         for platform in [SeedPlatform::Windows, SeedPlatform::MacOs] {
             let rows = shipped_for(platform, &EmptyMachine);
             let expected = if platform == SeedPlatform::Windows {
@@ -28007,7 +28550,7 @@ mod paste_tests {
                 // The namespace the table gives this row on its own platform.
                 let actual = match printed_path_namespace_on(
                     platform,
-                    row.paths,
+                    &super::tests::shipped_kind(row),
                     served_by(row),
                     &row.args,
                     &EmptyMachine,
@@ -28015,6 +28558,7 @@ mod paste_tests {
                     PrintedPathNamespace::Windows => "windows",
                     PrintedPathNamespace::Posix => "posix",
                     PrintedPathNamespace::Msys { .. } => "msys",
+                    PrintedPathNamespace::Cygwin => "cygwin",
                     PrintedPathNamespace::Wsl { .. } => "wsl",
                 };
                 assert_eq!(actual, namespace, "{id}");
@@ -28225,8 +28769,8 @@ mod paste_tests {
 
     /// PIN (T-MAC-PRINTED-NAMESPACE round 2, 2026-10-12) — **a Git Bash row whose paste keys are
     /// overridden still prints MSYS paths.** The overrides choose how a path is *inserted*; what
-    /// the shell prints is the row's `(paths, door)` pair, read through the profile file's own
-    /// merge exactly as a loaded table reads it.
+    /// the shell prints is the row's program and door, read through the profile file's own merge
+    /// exactly as a loaded table reads it.
     ///
     /// MUTATION: let `paste_paths_as = windows` change `paths` or the door in the merge — RED.
     #[test]
@@ -28251,7 +28795,7 @@ mod paste_tests {
             assert_eq!(
                 printed_path_namespace_on(
                     SeedPlatform::Windows,
-                    row.paths,
+                    &super::tests::shipped_kind(row),
                     served_by(row),
                     &row.args,
                     &EmptyMachine
@@ -28265,8 +28809,8 @@ mod paste_tests {
     #[test]
     fn namespace_resolver_keeps_its_standing_inputs_and_grammar_does_not_use_served_by() {
         // The resolver's standing inputs are its signature now: `printed_path_namespace_on` is
-        // handed the platform, `paths`, the resolved door and the arguments, and no row, so it has
-        // no paste override to read (T-MAC-PRINTED-NAMESPACE, 2026-10-12).
+        // handed the platform, the program's kind, the resolved door and the arguments, and no
+        // row, so it has no paste override to read (T-MAC-PRINTED-NAMESPACE, 2026-10-12).
         let resolver =
             crate::test_support::item_body(&ItemQuery::function("printed_path_namespace"));
         assert!(!resolver.contains("paste_as"));
