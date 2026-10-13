@@ -2548,6 +2548,29 @@ fn merge(shipped: Vec<Profile>, file: &ProfilesV1) -> (Vec<Profile>, Vec<Profile
     merge_on(shipped, file, SeedPlatform::of_this_build())
 }
 
+/// **Whether the installer can put an entry in force** — [`merge_on`]'s own
+/// test, [`compose_on`] over this build's shipped table, read without
+/// installing. An entry it cannot is refused (`ProfileFault::Unusable`); the
+/// first one it can is its id's row in force, and every later row of that id
+/// is a duplicate. The profiles merge and a press's delta read a document by
+/// this (review rounds 4 and 5).
+pub(crate) fn installable() -> impl Fn(&ProfileEntryV1) -> bool {
+    let shipped = shipped();
+    let platform = SeedPlatform::of_this_build();
+    move |entry: &ProfileEntryV1| {
+        let seed = shipped.iter().find(|profile| profile.id == entry.id);
+        compose_on(seed, entry, platform).is_some()
+    }
+}
+
+/// **The table [`install`] would put in force from `file`**, and what it
+/// refused — for a test's window, which has no process-wide table of its own.
+#[cfg(test)]
+pub(crate) fn table_from(file: &ProfilesV1) -> (ProfileTable, Vec<ProfileFault>) {
+    let (profiles, faults) = merge(shipped(), file);
+    (ProfileTable { profiles }, faults)
+}
+
 fn merge_on(
     shipped: Vec<Profile>,
     file: &ProfilesV1,

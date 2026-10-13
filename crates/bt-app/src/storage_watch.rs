@@ -42,7 +42,7 @@
 //! are followed live (R33; owner ruling Q3, 2026-10-11) —
 //! `settings.json` merged through its rows' doors, `keybindings.json` merged
 //! by action and chord into the one shortcut table, `profiles.json` and
-//! `pins.json` taken.
+//! `pins.json` merged by row and by pin, their tables put in force after.
 //!
 //! # Arming, failure and silence
 //!

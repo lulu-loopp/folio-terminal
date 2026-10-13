@@ -1047,10 +1047,10 @@ with the carried overrides over it.
 **One reload discipline**: `settings.json`, `keybindings.json`, `profiles.json` and
 the pins are followed live by the named storage watch, each re-read compared with
 the revision Folio last read or wrote, every write conditional on it, and a file
-that changed merged against it, the file winning a conflict (`settings.json` and
-`keybindings.json` merge now — keybindings by action, then by chord, the file's
-action keeping a chord both sides claim; until their merges, `profiles.json` and the
-pins are taken), with an unparseable mid-run file leaving what is in force untouched.
+that changed merged against it, the file winning a conflict — `settings.json` by
+field, `keybindings.json` by action and then by chord (the file's action keeping a
+chord both sides claim), `profiles.json` by row and field and the pins by pin — with
+an unparseable mid-run file leaving what is in force untouched.
 **From.** The M2 persistence schema document (two files, unknown-field and
 failure policy); §7.2 *the command-line front door* and the `cli.rs` module doc;
 `docs/BT-ENVIRONMENT.md`, held complete in both directions by
