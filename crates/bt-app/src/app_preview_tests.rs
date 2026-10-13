@@ -1222,8 +1222,9 @@ fn an_opened_animation_starts_over_and_a_revealed_one_resumes() {
         "the open is decided by the one rule:\n{asking}"
     );
     assert!(
-        asking.contains("self.window.animations.remove(&key);"),
-        "and an opened file lets go of the playback it had:\n{asking}"
+        asking.contains("let_go_on_open(&mutself.window.animations,&key);"),
+        "and an opened file lets go of the playback it had (what `let_go_on_open` lets go of is \
+         pinned by `animation::tests::an_unanswered_open_waits_for_the_files_next_open`):\n{asking}"
     );
 
     // (6) the resume itself, in frames. Hidden on frame two, revealed ten
