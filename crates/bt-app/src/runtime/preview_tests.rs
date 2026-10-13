@@ -608,3 +608,109 @@ fn the_source_blocks_band_is_drawn_from_the_drag_that_reaches_into_it() {
         .cancel_preview_text_drag()
         .expect("the gesture is let go");
 }
+
+/// The first point of the window, walked every four pixels, where `hit` answers.
+fn first_point(
+    folio: &mut HeadlessFolio,
+    mut hit: impl FnMut(
+        &mut crate::Runtime<'_, crate::headless::Headless>,
+        PhysicalPosition<f64>,
+    ) -> bool,
+) -> Option<PhysicalPosition<f64>> {
+    let mut runtime = folio.runtime();
+    (0..300)
+        .flat_map(|row| (0..200).map(move |column| (column, row)))
+        .map(|(column, row)| PhysicalPosition::new(f64::from(column) * 6.0, f64::from(row) * 2.7))
+        .find(|at| hit(&mut runtime, *at))
+}
+
+/// RED — **the button on a page this window cannot show runs one verb, in a pane and in a
+/// window torn off it**: it hands the surface's own file to the system's handler, whichever lane
+/// — the buffer's or the picture's — the surface came down (owner's ruling 2026-09-12).
+///
+/// MUTATIONS: answer the pane's `ChromeTarget::PreviewOpenButton` in `Runtime::chrome_mouse_input`
+/// with nothing — the pane's button opens nothing; drop the picture's lane from
+/// `Runtime::preview_file_on` — a refused picture's button names no file.
+#[test]
+fn the_button_on_a_page_this_window_cannot_show_hands_its_file_to_the_system() {
+    let path = host_spelling(r"C:\w\数据.bin");
+    let mut buffer = crate::preview::PreviewBuffer::new(
+        crate::preview::PreviewSource::file(path.clone()),
+        "数据.bin".to_owned(),
+    );
+    buffer.accept(crate::preview::HeadOutcome::Read {
+        text: "\u{0}\u{1}二进制".to_owned(),
+        truncated: false,
+        mtime: None,
+        content_says_text: false,
+        encoding: crate::preview::HeadEncoding::Utf8,
+        lossy: false,
+    });
+    let (tab, seat) = tab_with_a_preview(1, vec![buffer]);
+    let mut folio = HeadlessFolio::with_tabs("headless-open-button", vec![tab], 0);
+    folio.draw();
+    let button = first_point(&mut folio, |runtime, at| {
+        matches!(
+            runtime.docked_chrome_target_at(at),
+            Some(crate::seats::ChromeTarget::PreviewOpenButton(_))
+        )
+    })
+    .expect("the unknown page's card offers its button");
+    folio.ledger.take();
+    folio.press(button);
+    folio.release(button);
+    let opened: Vec<_> = folio
+        .ledger
+        .take()
+        .into_iter()
+        .filter_map(|effect| match effect {
+            crate::headless::WindowEffect::HandedOff(handoff) => Some(handoff),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        opened,
+        [bt_platform::Handoff::Open(std::path::PathBuf::from(&path))],
+        "the pane's button hands its file to the system"
+    );
+
+    // The same page torn off into a window of its own: its card's button is the same verb.
+    folio
+        .runtime()
+        .pop_out_preview(seat)
+        .expect("the page is torn off");
+    folio.draw();
+    let button = first_point(&mut folio, |runtime, at| {
+        matches!(
+            runtime.float_hit_at(at),
+            Some((_, crate::float::FloatPart::CardButton))
+        )
+    })
+    .expect("the torn-off window's card offers its button");
+    folio.ledger.take();
+    folio.press(button);
+    folio.release(button);
+    assert!(
+        folio.ledger.take().into_iter().any(|effect| effect
+            == crate::headless::WindowEffect::HandedOff(bt_platform::Handoff::Open(
+                std::path::PathBuf::from(&path)
+            ))),
+        "the window's button hands the same file to the system"
+    );
+
+    // A picture this window refuses comes down the picture lane, and has no buffer at all.
+    let picture = host_spelling(r"C:\w\巨图.png");
+    let (tab, seat) = crate::test_support::tab_with_a_picture(1, &picture);
+    let mut folio = HeadlessFolio::with_tabs("headless-open-picture", vec![tab], 0);
+    folio
+        .runtime()
+        .open_preview_externally_on(seat_of(TabId(1), seat))
+        .expect("the verb is answered");
+    assert!(
+        folio.ledger.take().into_iter().any(|effect| effect
+            == crate::headless::WindowEffect::HandedOff(bt_platform::Handoff::Open(
+                std::path::PathBuf::from(&picture)
+            ))),
+        "a picture's card names the picture's file"
+    );
+}

@@ -2529,3 +2529,7 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(wake_deadline)
     }
 }
+
+#[cfg(test)]
+#[path = "frame_tests.rs"]
+mod tests;

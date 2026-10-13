@@ -2891,3 +2891,7 @@ impl<B: Backend> Runtime<'_, B> {
         file_peek::contains(head, [at.x as f32, at.y as f32]).then_some(FloatGrasp::Head)
     }
 }
+
+#[cfg(test)]
+#[path = "peek_tests.rs"]
+mod tests;

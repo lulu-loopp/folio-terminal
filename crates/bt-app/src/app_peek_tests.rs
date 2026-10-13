@@ -1083,9 +1083,11 @@ fn the_column_stays_where_the_foot_took_it_when_the_card_goes() {
 /// card does not become a way round audit 3 C-2's rule. The file is revealed,
 /// not its folder: Explorer and Finder open the folder with the file selected.
 ///
+/// The press itself — the card comes down and the door is knocked on — is driven on a headless
+/// window by `runtime::peek::tests::a_ctrl_press_on_the_foot_reveals_the_file_through_its_surfaces_door`.
+///
 /// MUTATION: answer `Reveal` for a terminal host (the files door) — the second
-/// assertion goes red; drop the reveal call from `press_file_peek_foot` — the
-/// body pin does.
+/// assertion goes red.
 #[test]
 fn a_ctrl_click_on_the_foot_reveals_the_file() {
     let (folder, file) = glance_fixture("reveal");
@@ -1105,17 +1107,5 @@ fn a_ctrl_click_on_the_foot_reveals_the_file() {
         Some(PeekFootPress::RevealVerified(SeatId(2), file.clone())),
         "a printed reference is handed over off its ledger"
     );
-    let press = method_body("Runtime", "press_file_peek_foot");
-    for door in [
-        "self.reveal_in_explorer(&path)?;",
-        "let facts = self.verified_target(seat, &path);",
-        "self.reveal_verified(&path, facts)?;",
-        "input::pointer_chord_held(self.window.modifiers_held)",
-    ] {
-        assert!(
-            press.contains(door),
-            "the foot's press reaches `{door}` rather than a door of its own"
-        );
-    }
     let _ = std::fs::remove_dir_all(&folder);
 }

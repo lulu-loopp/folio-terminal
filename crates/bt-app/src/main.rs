@@ -80084,57 +80084,6 @@ mod refused_preview_card_tests {
             "the window's card button is hit from a second reading of what is refused"
         );
     }
-
-    /// RED — **pressing it runs the verb the unknown page's button runs.**
-    ///
-    /// One door out of this window and no second launcher: the press names a
-    /// surface, the surface names a file — through the picture lane as well as
-    /// the buffer, because a picture is not a buffer — and the file goes to
-    /// `open_local_path`, which is where `bt_platform`'s own refusals live.
-    ///
-    /// RED GATE: `open_preview_externally` reached for a buffer, and a surface
-    /// showing a picture has none. A button drawn on a refused picture would
-    /// have stood over a verb that did nothing at all.
-    #[test]
-    fn pressing_the_button_on_a_refused_page_runs_the_same_verb_as_the_unknown_page() {
-        // The pane's button and the window's reach the same verb.
-        assert!(
-            method_body("Runtime", "chrome_mouse_input")
-                .contains(concat!("ChromeTarget::", "PreviewOpenButton(_) => {")),
-            "the pane's card button no longer takes a press"
-        );
-        assert!(
-            method_body("Runtime", "open_preview_externally")
-                .contains(concat!("open_preview_externally_on", "(")),
-            "the pane's button has grown a second verb of its own"
-        );
-        assert!(
-            method_body("Runtime", "press_float").contains(concat!(
-                "open_preview_externally_on(",
-                "PreviewSurface::Float(id))"
-            )),
-            "the window's card button no longer reaches the pane's verb"
-        );
-        // And that one verb names the file through both lanes.
-        let verb = method_body("Runtime", "open_preview_externally_on");
-        assert!(
-            verb.contains(concat!("preview_file_on(", "surface)"))
-                && verb.contains(concat!("open_path_in_default_app", "(")),
-            "the verb no longer asks this surface for its file, or no longer hands it over"
-        );
-        let file = method_body("Runtime", "preview_file_on");
-        assert!(
-            file.contains(concat!("preview_buffer_on(", "surface)"))
-                && file.contains(concat!("preview_picture(", "surface)")),
-            "the file question misses one of the two lanes, so one kind of card presses nothing"
-        );
-        // One launcher, and it is the door it has always been.
-        assert!(
-            method_body("Runtime", "open_path_in_default_app")
-                .contains(concat!("open_local_path", "_ask(path)")),
-            "the card's button no longer goes through this window's one door"
-        );
-    }
 }
 
 /// **Every field in this window asks whether a press is typing before it types**
@@ -82728,37 +82677,6 @@ mod printed_path_provenance_tests {
         assert!(resolved.ends_with("docs"), "{}", resolved.display());
 
         let _ = std::fs::remove_dir_all(&directory);
-    }
-
-    /// GUARD (closure review r6, B-2; re-pointed by CC-4) — **the open door is asked about the name
-    /// `main` asked it about, and the resolved name is the doors' own transform.**
-    ///
-    /// `main`'s Windows `open_local_path` reads `names_a_program` off the *printed* spelling —
-    /// there is no `canonicalize` in that door at all. For one round the branch handed it the
-    /// resolved name instead, which is a different question about a symlink and a refusal `main`
-    /// does not make. Its subject is how `Runtime::activate_hyperlink` and
-    /// `run_path_verify_worker` are written (CONVENTIONS, "A test pins behaviour by running it").
-    ///
-    /// MUTATION: hand `bt_term::verify_path` a raw `canonicalize` in `run_path_verify_worker`
-    /// instead of `bt_platform::resolved_for_a_door`, and the last assertion goes red.
-    #[test]
-    fn the_open_door_is_handed_the_printed_name_and_the_reveal_the_resolved_one() {
-        let press = method_body("Runtime", "activate_hyperlink");
-        let open = press
-            .find("self.open_local_path_verified(&path, facts)?;")
-            .expect("the open door is handed the path as printed");
-        let reveal = press
-            .find("self.reveal_verified(&path, facts)?;")
-            .expect("and so is the reveal, which takes the resolved name off the target");
-        assert!(open < reveal, "the file arm stands before the folder arm");
-        // And the resolved name is the doors' own transform, not a second reading of it: the
-        // path-verification lane hands `bt_term::verify_path` the door's own function as its
-        // resolver (CC-4; `bt-term` names no platform function itself).
-        let door = "bt_platform::resolved_for_a_door";
-        assert!(
-            free_fn_body("run_path_verify_worker").contains(door),
-            "the worker produces the door's input with the door's own function"
-        );
     }
 
     /// RED (audit 3 C-2) — **one resolution per subject, however many readers ask.**
