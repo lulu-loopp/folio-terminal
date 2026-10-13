@@ -1673,12 +1673,11 @@ fn environment_name_eq(left: &OsStr, right: &OsStr) -> bool {
 /// translation writes their own `WSLENV` row, and the layering above lets that
 /// row win outright.
 ///
-/// The terminal's own five are **not** added here, and that is deliberate rather
-/// than an omission: they are listed by the install path alone, which is what
-/// `docs/shell-integration.md`'s matrix states about a WSL login that lands in
-/// `zsh` ("set, but not forwarded"). What changes in this slice is that a
-/// profile's own rows cross whatever the login shell turns out to be, because
-/// they are the reader's instruction and not this terminal's guess.
+/// The terminal's own four ([`FORWARDED`]) are not added here: [`shell_command`]
+/// lists them for every pane whose program enters WSL, handed a script or not
+/// (owner ruling 2026-10-12). This lists the profile's own rows, which cross
+/// whatever the login shell turns out to be, because they are the reader's
+/// instruction and not this terminal's guess.
 fn forward_into_wsl(environment: &mut Vec<(OsString, OsString)>, mine: &[(String, String)]) {
     let names: Vec<&str> = mine
         .iter()

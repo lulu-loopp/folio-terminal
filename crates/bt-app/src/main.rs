@@ -46581,15 +46581,18 @@ impl Runtime<'_> {
             // not a duplication.
             //
             // Composed from the environment the next pane would be born from — the account's
-            // current one, asked for as the page opens — and empty while that request is out
-            // (`shell_integration::page_environment`).
+            // current one, asked for as the page opens — for the kind of program the walk found,
+            // and empty while either is still being asked (`shell_integration::page_environment`,
+            // `ProfilePrograms::known_shell`), as the sentence and the `Auto` label say
+            // "checking" until the kind is known.
             ghosts: settings::held_ghosts(
                 &profiles::row_of(&profiles::id(index))
                     .zip(shell_integration::page_environment())
-                    .map(|(row, before_folio)| {
+                    .zip(self.app.profile_programs.known_shell(&profiles::id(index)))
+                    .map(|((row, before_folio), program_kind)| {
                         shell_integration::declared_environment(
                             &row,
-                            &self.app.profile_programs.shell(&row.id),
+                            &program_kind,
                             shell_integration::Scripts::installed(),
                             &before_folio,
                             attention_wire::endpoint_name(),
