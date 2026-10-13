@@ -85,6 +85,19 @@ pub enum PrintedPathNamespace {
     /// `StartingDir::WindowsHome` already acts on: Git for Windows maps `$HOME` onto the Windows
     /// home. `None` is a machine that could not name one, and then `~` names nothing here either.
     Msys { home: Option<PathBuf> },
+    /// Cygwin's layer, where `/cygdrive/d/Demo` is `D:\Demo` (T-WINDOWS-SHELL-NAMESPACES,
+    /// 2026-10-12).
+    ///
+    /// The drive map is Cygwin's own default: every drive appears under the `cygdrive` prefix at
+    /// its lower-cased letter. Read like [`Self::Msys`] with that prefix and nothing else. The
+    /// prefix is a default an `/etc/fstab` line can move, and a Cygwin told to move it prints a
+    /// spelling this window reads as plain text, never as another file.
+    ///
+    /// No home. Cygwin's `$HOME` is `/home/<account>` below the installation's own root unless
+    /// `/etc/nsswitch.conf` says otherwise, and neither the root nor that file has been read here,
+    /// so `~` names nothing in this namespace and stays plain text; a shell's later report does
+    /// not change that ([`Self::with_shell_home`] teaches only a WSL pane).
+    Cygwin,
     /// A WSL distribution, where `/mnt/d/Demo` is `D:\Demo`.
     ///
     /// The mount rule is WSL's own documented one — every fixed drive under `/mnt` at its
@@ -149,10 +162,10 @@ impl PrintedPathNamespace {
                     && bytes[1] == b':'
                     && matches!(bytes[2], b'\\' | b'/')
                 {
-                    let prefix = if matches!(self, Self::Wsl { .. }) {
-                        "/mnt"
-                    } else {
-                        ""
+                    let prefix = match self {
+                        Self::Wsl { .. } => "/mnt",
+                        Self::Cygwin => "/cygdrive",
+                        Self::Windows | Self::Posix | Self::Msys { .. } => "",
                     };
                     return format!(
                         "{prefix}/{}/{}",
@@ -210,6 +223,7 @@ impl PrintedPathNamespace {
                 Some(tail) => Some(join_below(home.as_deref()?, tail.strip_prefix('/')?)),
                 None => drive_mount_to_local_path(printed.strip_prefix('/')?),
             },
+            Self::Cygwin => drive_mount_to_local_path(printed.strip_prefix("/cygdrive/")?),
             Self::Wsl { distro, home } => {
                 if let Some(mounted) = printed
                     .strip_prefix("/mnt/")
@@ -3996,6 +4010,55 @@ mod tests {
             .into_iter()
             .map(|(range, uri)| format!("{} → {uri}", &line[range.byte_start..range.byte_end]))
             .collect()
+    }
+
+    /// PIN (T-WINDOWS-SHELL-NAMESPACES, 2026-10-12): **a Cygwin pane's drives are under
+    /// `/cygdrive`**, and that spelling is read as the file this machine holds and written back
+    /// for the pane, while MSYS's and WSL's spellings, `~`, and the installation's own tree stay
+    /// plain text in it.
+    ///
+    /// MUTATION: the Cygwin arm read and written as MSYS (`/c/…`, no prefix) — RED.
+    #[test]
+    fn a_cygdrive_path_is_read_and_written_in_the_cygwin_namespace() {
+        let cygwin = PrintedPathNamespace::Cygwin;
+        assert!(
+            cygwin.reads_a_foreign_spelling(),
+            "a Cygwin pane prints a spelling the ordinary rooted scan cannot read"
+        );
+        for (printed, local) in [
+            ("/cygdrive/c/Users/alice/x", r"C:\Users\alice\x"),
+            ("/cygdrive/d/项目/报告 v2.md", r"D:\项目\报告 v2.md"),
+            ("/cygdrive/e/", "E:\\"),
+        ] {
+            assert_eq!(
+                cygwin.to_local_path(printed),
+                Some(PathBuf::from(local)),
+                "{printed} is read as this machine's file"
+            );
+            assert_eq!(
+                cygwin.to_pane_spelling(local),
+                printed,
+                "{local} is written in the pane's spelling"
+            );
+        }
+        for not_a_drive in [
+            "/c/Users/alice/x",
+            "/mnt/c/Users/alice/x",
+            "~/x",
+            "/cygdrive/",
+            "/cygdrive/cdrom/x",
+            "/usr/bin/bash",
+        ] {
+            assert_eq!(cygwin.to_local_path(not_a_drive), None, "{not_a_drive}");
+        }
+        assert_eq!(
+            linked_in(
+                &cygwin,
+                &[(r"D:\Demo\report.md", true)],
+                "wrote /cygdrive/d/Demo/report.md",
+            ),
+            ["/cygdrive/d/Demo/report.md → file:///D:/Demo/report.md"]
+        );
     }
 
     /// PIN (T-3, 2026-09-07): the four spellings a Git Bash prints, each read as the file this
