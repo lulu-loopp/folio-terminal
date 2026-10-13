@@ -22,10 +22,10 @@
 //!   every phase this process wrote: a phase is recorded through
 //!   `update_txn::Journal::advance` (the protocol's refusal), only when
 //!   `update_txn::may_record` says the actor may, and written with
-//!   [`write_journal`] — `install_txn::durable_write`, asked again for
-//!   [`Limits::journal_held_within`] while another program holds the journal
-//!   open, each round said (U-34, 0.4.8 E4); an effect is asked of
-//!   `update_txn::may` first;
+//!   [`write_journal`] — `install_txn::durable_write`'s order, its rename
+//!   asked again for [`Limits::journal_held_within`] while another program
+//!   holds the journal open, each round said (U-34, 0.4.8 E4); an effect is
+//!   asked of `update_txn::may` first;
 //! * [`wait_for_the_claim`] — §C.4's authoritative test that the old build is
 //!   gone: the data directory's claim, tried until had and let go at once;
 //! * [`watch_trial`] — a trial waited for (W7, W8, M7, M8), on both platforms:
@@ -278,11 +278,17 @@ pub(crate) struct Unwritten {
     pub(crate) held: Option<String>,
 }
 
-/// **Write the journal's bytes durably** (`install_txn::durable_write`), and
-/// while the rename is refused because another program holds `journal.json`
-/// open (`install_txn::Failure::refused_while_open`: Windows only), ask again
+/// **Write the journal's bytes durably** (`install_txn::DurableWrite`:
+/// `install_txn::durable_write`'s order), and while the rename is refused
+/// because another program holds `journal.json` open
+/// (`install_txn::Failure::refused_while_open`: Windows only), ask again
 /// through the wait door until `within` has passed since the first ask (U-34;
-/// 0.4.8 E4: [`JOURNAL_HELD_WITHIN`] in the product). **Each refused round says
+/// 0.4.8 E4: [`JOURNAL_HELD_WITHIN`] in the product). **A held round asks the
+/// rename alone** (T-JOURNAL-WRITE-UNDER-HOLD): the temporary is written and
+/// flushed once, by the first round, and each later round renames that same
+/// temporary — one `MoveFileExW`, no flush — so a hold costs one durable
+/// write, landed on the round it lifts; a write given up removes its
+/// temporary. **Each refused round says
 /// one line** through `say` — the system's refusal and how long the journal
 /// has been held — so a hold is in the log whether or not it outlasts the
 /// window. The door itself never waits: it has other callers and no wait
@@ -299,9 +305,10 @@ pub(crate) fn write_journal(
     say: &mut dyn FnMut(&str),
 ) -> Result<(), Unwritten> {
     let began = Instant::now();
+    let mut write = install_txn::DurableWrite::new(path, bytes);
     write_held_within(
         within,
-        || install_txn::durable_write(path, bytes),
+        || write.ask(),
         install_txn::Failure::refused_while_open,
         |failure| failure.error.to_string(),
         &mut || began.elapsed(),
@@ -1878,7 +1885,8 @@ pub(crate) fn election_within(until: Instant, now: Instant) -> Duration {
 /// applier road has not been taken; the outgoing build, which holds the
 /// transaction lock while it asks, may claim without either
 /// ([`Contender`]).** A mark read or replacement refused by a scanner is
-/// re-asked within [`JOURNAL_WRITE_WITHIN`], as [`write_journal`] asks. After
+/// re-asked within [`JOURNAL_WRITE_WITHIN`], as [`write_journal`] asks — a held
+/// replacement's later rounds its rename alone ([`mark_writer`]). After
 /// a successful rename the visible mark records the duty. **A mark that does
 /// not land before its rename** (0.4.8 E2) is [`Contender::unrecorded`]'s: an
 /// applier stands aside — it lets the lock go, runs no road and starts
@@ -1930,9 +1938,7 @@ pub(crate) fn take_the_window_within<C: Contender>(
             after_lock: || {},
             read_owner: || read_window_owner(home, txn),
             read_phase: || read_window_phase(home, txn),
-            write: |path: &Path, bytes: &[u8]| {
-                MarkWriteFailure::from_result(install_txn::durable_write(path, bytes))
-            },
+            write: mark_writer(),
             wait: |pause| match worker {
                 Some(worker) => {
                     bt_platform::wait::sleep_within(worker, pause);
@@ -1942,6 +1948,26 @@ pub(crate) fn take_the_window_within<C: Contender>(
             },
         },
     )
+}
+
+/// **The window's mark, written in the product** (`install_txn::DurableWrite`):
+/// a write asked again with the same mark and bytes — the election's rounds
+/// while another program holds the mark open — asks the rename of the
+/// temporary its first ask flushed, never a second temporary or file flush
+/// (T-JOURNAL-WRITE-UNDER-HOLD); another mark or other bytes start a new
+/// write, and the write it replaces removes a temporary it never landed.
+fn mark_writer() -> impl FnMut(&Path, &[u8]) -> Result<(), MarkWriteFailure> {
+    let mut asked: Option<install_txn::DurableWrite> = None;
+    move |path: &Path, bytes: &[u8]| {
+        if asked
+            .as_ref()
+            .is_some_and(|write| !write.is_of(path, bytes))
+        {
+            asked = None;
+        }
+        let write = asked.get_or_insert_with(|| install_txn::DurableWrite::new(path, bytes));
+        MarkWriteFailure::from_result(write.ask())
+    }
 }
 
 pub(crate) struct MarkWriteFailure {
@@ -2227,9 +2253,7 @@ pub(crate) fn take_the_window_within_at(
             after_lock,
             read_owner: || read_window_owner(home, txn),
             read_phase: || read_window_phase(home, txn),
-            write: |path: &Path, bytes: &[u8]| {
-                MarkWriteFailure::from_result(install_txn::durable_write(path, bytes))
-            },
+            write: mark_writer(),
             wait: |_| false,
         },
     )
@@ -3571,6 +3595,184 @@ mod held_journal_tests {
         );
         let refused = answer.expect_err("refused");
         assert_eq!((asks, said.len(), refused.held), (1, 0, None));
+    }
+}
+
+/// **A journal write, and the window's mark, over a file another program holds
+/// open** (T-JOURNAL-WRITE-UNDER-HOLD), on Windows — the one platform where a
+/// hold refuses a replacing rename — with real files and a real hold
+/// (`trust_harness::hold_without_delete_sharing`, a scanner's open). The rounds
+/// are counted by what the write says on each: the hold is let go when a given
+/// round is said, so the round the write lands on is the test's, not a clock's.
+#[cfg(all(test, windows))]
+mod held_write_tests {
+    use super::*;
+    use bt_platform::trust_harness::hold_without_delete_sharing;
+
+    /// A folder of this test's own, empty.
+    fn folder(tag: &str) -> PathBuf {
+        let folder = bt_testpath::temp_path(&format!("bt-journal-hold-{tag}"));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        folder
+    }
+
+    /// The temporaries a durable write left in `folder`, by name.
+    fn temporaries_in(folder: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with('.') && name.ends_with(".tmp"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// `body` on a worker of the thread door, run to its end.
+    fn on_a_worker<T: Send + 'static>(body: impl FnOnce(&WorkerCtx) -> T + Send + 'static) -> T {
+        let worker = bt_platform::spawn_at_priority(
+            "bt-journal-hold-test",
+            bt_platform::ThreadPriority::BelowNormal,
+            body,
+        )
+        .expect("the thread door starts a thread");
+        match worker.join() {
+            Ok(answer) => answer,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// RED (T-JOURNAL-WRITE-UNDER-HOLD) — **a journal write another program
+    /// holds writes and flushes its temporary once: every refused round finds
+    /// the same one temporary beside the journal, the write lands on the round
+    /// after the hold is let go, and nothing is left beside the journal; a hold
+    /// past the window is given up as before, its temporary removed and the
+    /// journal byte for byte.**
+    ///
+    /// MUTATION: in `write_journal`, ask `install_txn::durable_write` each
+    /// round (the old whole write) — no temporary stands between rounds.
+    #[test]
+    fn a_held_journal_write_flushes_one_temporary_and_lands_when_the_hold_lifts() {
+        let folder = folder("journal");
+        let journal = folder.join("journal.json");
+        install_txn::durable_write(&journal, br#"{"phase":"Armed"}"#).unwrap();
+        let next = r#"{"phase":"Moving","note":"移动中 moving"}"#;
+        let (answer, rounds) = on_a_worker({
+            let (folder, journal) = (folder.clone(), journal.clone());
+            move |worker| {
+                let mut held = Some(hold_without_delete_sharing(&journal).unwrap());
+                let mut rounds: Vec<(String, Vec<String>)> = Vec::new();
+                let answer = write_journal(
+                    worker,
+                    &journal,
+                    next.as_bytes(),
+                    JOURNAL_HELD_WITHIN,
+                    &mut |line| {
+                        rounds.push((line.to_owned(), temporaries_in(&folder)));
+                        if rounds.len() == 3 {
+                            held = None;
+                        }
+                    },
+                );
+                drop(held);
+                (answer.map_err(|unwritten| unwritten.said), rounds)
+            }
+        });
+        assert_eq!(answer, Ok(()), "{rounds:?}");
+        assert_eq!(
+            rounds.len(),
+            3,
+            "landed on the round after the third: {rounds:?}"
+        );
+        let first = &rounds[0].1;
+        assert_eq!(first.len(), 1, "one temporary while held: {rounds:?}");
+        for (line, temporaries) in &rounds {
+            assert!(
+                line.starts_with("BT_UPDATE_JOURNAL held by another program for "),
+                "{line}"
+            );
+            assert_eq!(
+                temporaries, first,
+                "the same temporary each round: {rounds:?}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&journal).unwrap(), next);
+        assert_eq!(temporaries_in(&folder), Vec::<String>::new());
+
+        // Held for good, past a short window: given up, as before.
+        let (answer, rounds) = on_a_worker({
+            let (folder, journal) = (folder.clone(), journal.clone());
+            move |worker| {
+                let held = hold_without_delete_sharing(&journal).unwrap();
+                let mut rounds = Vec::new();
+                let answer = write_journal(
+                    worker,
+                    &journal,
+                    b"never landed",
+                    Duration::from_millis(100),
+                    &mut |_| rounds.push(temporaries_in(&folder)),
+                );
+                drop(held);
+                (answer.map_err(|unwritten| unwritten.held), rounds)
+            }
+        });
+        let held = answer.expect_err("a hold past the window is given up");
+        assert!(held.is_some(), "the hold is the refusal kept for the card");
+        assert!(!rounds.is_empty());
+        assert!(
+            rounds.iter().all(|temporaries| temporaries.len() == 1),
+            "{rounds:?}"
+        );
+        assert_eq!(temporaries_in(&folder), Vec::<String>::new(), "removed");
+        assert_eq!(std::fs::read_to_string(&journal).unwrap(), next);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// RED (T-JOURNAL-WRITE-UNDER-HOLD) — **the window's mark, asked again over
+    /// a held mark, renames the one temporary its first ask flushed and lands
+    /// it once the hold is let go; a writer asked for another mark starts a
+    /// new write and removes the temporary it never landed.**
+    ///
+    /// MUTATION: in `mark_writer`, ask `install_txn::durable_write` each time
+    /// (the old whole write) — no temporary stands between the asks.
+    #[test]
+    fn the_window_marks_writer_asked_again_over_a_held_mark_renames_one_temporary() {
+        let folder = folder("mark");
+        let mark = folder.join("owner");
+        install_txn::durable_write(&mark, b"1 1").unwrap();
+        let mine = "4242 7 窗口 owner".as_bytes();
+        let mut write = mark_writer();
+        let held = hold_without_delete_sharing(&mark).unwrap();
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let Err(refused) = write(&mark, mine) else {
+                panic!("a held mark is refused");
+            };
+            assert!(refused.refused_while_open, "{}", refused.why);
+            seen.push(temporaries_in(&folder));
+        }
+        assert_eq!(seen[0].len(), 1, "{seen:?}");
+        assert_eq!(seen[0], seen[1], "the same temporary: {seen:?}");
+        drop(held);
+        assert!(write(&mark, mine).is_ok());
+        assert_eq!(std::fs::read(&mark).unwrap(), mine);
+        assert_eq!(temporaries_in(&folder), Vec::<String>::new());
+
+        let other = folder.join("owner-other");
+        std::fs::write(&other, b"old").unwrap();
+        let held = hold_without_delete_sharing(&mark).unwrap();
+        assert!(write(&mark, b"5 5").is_err());
+        assert_eq!(temporaries_in(&folder).len(), 1);
+        assert!(write(&other, mine).is_ok(), "another mark is its own write");
+        assert_eq!(std::fs::read(&other).unwrap(), mine);
+        assert_eq!(
+            temporaries_in(&folder),
+            Vec::<String>::new(),
+            "the replaced write's temporary is removed"
+        );
+        drop(held);
+        assert_eq!(std::fs::read(&mark).unwrap(), mine, "byte for byte");
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }
 

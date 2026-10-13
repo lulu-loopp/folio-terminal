@@ -15,6 +15,9 @@
 //!   `FILE_FLAG_BACKUP_SEMANTICS`; macOS: `F_FULLFSYNC` on the directory's
 //!   descriptor). It returns only after the directory flush. A reader after a
 //!   power cut finds the old file or the new one, whole, and never a torn one.
+//!   **Asked again** ([`DurableWrite`]): a write whose rename was refused keeps
+//!   its flushed temporary, and its next ask is that rename alone — a target
+//!   another program holds open costs a rename a round, not a file flush.
 //! * **A durable create** ([`durable_create`]): the same steps, with a rename
 //!   that never replaces — the trial's receipt (U-13), written once and never
 //!   over an existing one.
@@ -437,6 +440,47 @@ fn durable_fill_with<S: Surface>(
     replace: Replace,
     fill: impl FnOnce(&mut S, &mut S::Handle, &Path) -> Result<(), Failure>,
 ) -> Result<(), Failure> {
+    let mut staged = None;
+    let written = ask_fill_with(surface, target, replace, &mut staged, fill);
+    if let Some(temporary) = staged {
+        surface.remove(&temporary);
+    }
+    written
+}
+
+/// **One ask of a durable file write, in [`durable_fill_with`]'s order**: with
+/// nothing in `staged`, the temporary is created, filled, flushed and closed
+/// ([`stage_with`]); with a temporary there — flushed by an earlier ask whose
+/// rename was refused — this ask is that temporary's rename alone. Then the
+/// rename and the directory flush. **A refused rename leaves the flushed
+/// temporary in `staged`** for the next ask, and the caller removes it when it
+/// asks no more; every failure before the rename removes it here.
+fn ask_fill_with<S: Surface>(
+    surface: &mut S,
+    target: &Path,
+    replace: Replace,
+    staged: &mut Option<PathBuf>,
+    fill: impl FnOnce(&mut S, &mut S::Handle, &Path) -> Result<(), Failure>,
+) -> Result<(), Failure> {
+    let temporary = match staged.take() {
+        Some(temporary) => temporary,
+        None => stage_with(surface, target, fill)?,
+    };
+    if let Err(error) = surface.rename(&temporary, target, replace) {
+        *staged = Some(temporary);
+        return Err(Failure::at(Stage::Rename, target, error));
+    }
+    flush_directory(surface, directory_of(target))
+}
+
+/// The first half of a durable file write: a temporary beside `target`,
+/// `fill` writing into it, its flush and its close — its path, or the failure
+/// with the temporary removed.
+fn stage_with<S: Surface>(
+    surface: &mut S,
+    target: &Path,
+    fill: impl FnOnce(&mut S, &mut S::Handle, &Path) -> Result<(), Failure>,
+) -> Result<PathBuf, Failure> {
     let temporary =
         temporary_beside(target).map_err(|error| Failure::at(Stage::CreateTemp, target, error))?;
     let mut file = surface
@@ -452,11 +496,83 @@ fn durable_fill_with<S: Surface>(
         surface.remove(&temporary);
         return Err(failure);
     }
-    if let Err(error) = surface.rename(&temporary, target, replace) {
-        surface.remove(&temporary);
-        return Err(Failure::at(Stage::Rename, target, error));
+    Ok(temporary)
+}
+
+/// **A [`durable_write`] that can be asked again, paying for its durable steps
+/// once** (T-JOURNAL-WRITE-UNDER-HOLD): the first [`Self::ask`] is
+/// `durable_write`'s whole order — a temporary beside the target, the bytes, a
+/// flush of the file, the replacing rename, a flush of the directory. **When the
+/// rename is refused, the temporary stays, flushed**, and the next ask is that
+/// rename alone (then the directory flush when it lands) — so a write asked
+/// again while another program holds the target open (Windows:
+/// [`Failure::refused_while_open`]) costs one rename a round, never a second
+/// temporary or file flush, and the bytes it lands are the ones flushed before
+/// the first rename. An ask after any other failure, or after a landed write,
+/// is the whole order again. **Dropping a write whose temporary was never
+/// renamed removes it.** It never waits: the rounds and their pauses are the
+/// caller's.
+#[derive(Debug)]
+pub struct DurableWrite {
+    target: PathBuf,
+    bytes: Vec<u8>,
+    /// The temporary an earlier ask flushed and could not rename.
+    staged: Option<PathBuf>,
+}
+
+impl DurableWrite {
+    /// The write of `bytes` to `target`, not yet asked.
+    #[must_use]
+    pub fn new(target: &Path, bytes: &[u8]) -> Self {
+        Self {
+            target: target.to_path_buf(),
+            bytes: bytes.to_vec(),
+            staged: None,
+        }
     }
-    flush_directory(surface, directory_of(target))
+
+    /// Whether this is the write of `bytes` to `target`.
+    #[must_use]
+    pub fn is_of(&self, target: &Path, bytes: &[u8]) -> bool {
+        self.target == target && self.bytes == bytes
+    }
+
+    /// **Ask the write once**: the whole order, or — after a refused rename —
+    /// the rename of the temporary already flushed, then the directory flush.
+    ///
+    /// # Errors
+    /// As [`durable_write`]: a [`Failure`] naming the stage that failed. One at
+    /// [`Stage::Rename`] keeps the temporary for the next ask.
+    pub fn ask(&mut self) -> Result<(), Failure> {
+        self.ask_on(&mut arm::Os)
+    }
+
+    fn ask_on<S: Surface>(&mut self, surface: &mut S) -> Result<(), Failure> {
+        let bytes = &self.bytes;
+        ask_fill_with(
+            surface,
+            &self.target,
+            Replace::Existing,
+            &mut self.staged,
+            |surface, file, temporary| {
+                surface
+                    .write_all(file, bytes)
+                    .map_err(|error| Failure::at(Stage::Write, temporary, error))
+            },
+        )
+    }
+
+    fn discard_on<S: Surface>(&mut self, surface: &mut S) {
+        if let Some(temporary) = self.staged.take() {
+            surface.remove(&temporary);
+        }
+    }
+}
+
+impl Drop for DurableWrite {
+    fn drop(&mut self) {
+        self.discard_on(&mut arm::Os);
+    }
 }
 
 fn durable_move_with<S: Surface>(surface: &mut S, from: &Path, to: &Path) -> Result<(), Failure> {
@@ -1193,6 +1309,9 @@ pub(crate) mod recording {
     pub(crate) struct Recorder {
         pub(crate) calls: Vec<Call>,
         pub(crate) fail: Option<Fail>,
+        /// How many times `fail` is refused before that call is answered;
+        /// `None`, every time.
+        pub(crate) refusals_left: Option<usize>,
     }
 
     impl Recorder {
@@ -1200,14 +1319,30 @@ pub(crate) mod recording {
             Self {
                 calls: Vec::new(),
                 fail: Some(fail),
+                refusals_left: None,
             }
         }
 
-        fn answer(&self, at: Fail) -> io::Result<()> {
-            if self.fail == Some(at) {
-                Err(io::Error::other(format!("{at:?} refused by the fake")))
-            } else {
-                Ok(())
+        /// Refusing `fail` the first `times` times it is asked, then answering it.
+        pub(crate) fn failing_times(fail: Fail, times: usize) -> Self {
+            Self {
+                calls: Vec::new(),
+                fail: Some(fail),
+                refusals_left: Some(times),
+            }
+        }
+
+        fn answer(&mut self, at: Fail) -> io::Result<()> {
+            if self.fail != Some(at) {
+                return Ok(());
+            }
+            match &mut self.refusals_left {
+                Some(0) => Ok(()),
+                Some(left) => {
+                    *left -= 1;
+                    Err(io::Error::other(format!("{at:?} refused by the fake")))
+                }
+                None => Err(io::Error::other(format!("{at:?} refused by the fake"))),
             }
         }
     }
@@ -1647,6 +1782,144 @@ mod tests {
         }
     }
 
+    /// Journal bytes with a mixed-script note, for the writes asked again.
+    const NOTED: &[u8] = "{\"v\":1,\"note\":\"日志 held by a scanner 扫描中\"}".as_bytes();
+
+    /// RED (T-JOURNAL-WRITE-UNDER-HOLD) — **a write asked again after its
+    /// rename was refused asks the rename alone: one temporary, one file flush
+    /// for the whole hold, and it lands on the round the rename is answered.**
+    ///
+    /// A journal another program holds open is asked again for up to 10 s, in
+    /// some 25 rounds; each round a whole write paid a file flush
+    /// (`F_FULLFSYNC` on macOS, `FlushFileBuffers` on Windows) for a temporary
+    /// it then threw away. And a write given up removes its temporary.
+    ///
+    /// MUTATION: in `ask_fill_with`, on a refused rename remove the temporary
+    /// and leave `staged` empty (the old whole write each round) — four file
+    /// flushes, four temporaries.
+    #[test]
+    fn a_write_asked_again_after_a_refused_rename_flushes_its_file_once() {
+        let target = home().join("journal.json");
+        let held_rounds = 3;
+        let mut fake = Recorder::failing_times(Fail::Rename, held_rounds);
+        let mut write = DurableWrite::new(&target, NOTED);
+        for round in 0..held_rounds {
+            let refused = write.ask_on(&mut fake).unwrap_err();
+            assert_eq!(refused.stage, Stage::Rename, "round {round}: {refused}");
+        }
+        write.ask_on(&mut fake).unwrap();
+        let temporary = temporary_of(&fake.calls);
+        let file_flushes = fake
+            .calls
+            .iter()
+            .filter(|call| {
+                matches!(
+                    call,
+                    Call::Flush {
+                        directory: false,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            file_flushes, 1,
+            "one file flush for the hold: {:?}",
+            fake.calls
+        );
+        let mut landed = vec![
+            Call::Create(temporary.clone()),
+            Call::Write(temporary.clone(), NOTED.to_vec()),
+            Call::Flush {
+                path: temporary.clone(),
+                directory: false,
+            },
+            Call::Close(temporary.clone()),
+        ];
+        landed.extend(std::iter::repeat_n(
+            Call::Rename(temporary.clone(), target.clone(), Replace::Existing),
+            held_rounds + 1,
+        ));
+        landed.extend([
+            Call::OpenDirectory(home()),
+            Call::Flush {
+                path: home(),
+                directory: true,
+            },
+            Call::Close(home()),
+        ]);
+        assert_eq!(fake.calls, landed);
+        write.discard_on(&mut fake);
+        assert_eq!(fake.calls, landed, "a landed write has nothing to remove");
+
+        // Held for good: given up, its one temporary removed, once.
+        let mut fake = Recorder::failing(Fail::Rename);
+        let mut write = DurableWrite::new(&target, NOTED);
+        for _ in 0..2 {
+            assert_eq!(write.ask_on(&mut fake).unwrap_err().stage, Stage::Rename);
+        }
+        write.discard_on(&mut fake);
+        write.discard_on(&mut fake);
+        let temporary = temporary_of(&fake.calls);
+        assert_eq!(fake.calls.last(), Some(&Call::Remove(temporary.clone())));
+        assert_eq!(
+            fake.calls
+                .iter()
+                .filter(|call| matches!(call, Call::Remove(_)))
+                .count(),
+            1,
+            "{:?}",
+            fake.calls
+        );
+    }
+
+    /// RED (T-JOURNAL-WRITE-UNDER-HOLD) — **on the real arm, a write over a
+    /// target another program holds without delete sharing keeps one
+    /// temporary beside it while it is refused, lands its bytes once the hold
+    /// lifts, and a write given up and dropped leaves only the target, byte for
+    /// byte.**
+    ///
+    /// MUTATION: make `DurableWrite`'s `Drop` do nothing — the given-up
+    /// write's temporary stays in the installation home.
+    #[cfg(windows)]
+    #[test]
+    fn a_write_over_a_held_target_lands_when_let_go_and_a_dropped_one_leaves_nothing() {
+        let home = scratch("held");
+        let journal = home.join("journal.json");
+        durable_write(&journal, b"old").unwrap();
+        let held = crate::trust_harness::hold_without_delete_sharing(&journal).unwrap();
+        let mut write = DurableWrite::new(&journal, NOTED);
+        let mut temporaries = Vec::new();
+        for _ in 0..2 {
+            let refused = write.ask().unwrap_err();
+            assert!(refused.refused_while_open(), "{refused}");
+            let names = names_in(&home);
+            assert_eq!(names.len(), 2, "the target and one temporary: {names:?}");
+            temporaries.push(names[0].clone());
+        }
+        assert_eq!(
+            temporaries[0], temporaries[1],
+            "the same temporary each round"
+        );
+        assert!(
+            temporaries[0].starts_with(".journal.json."),
+            "{temporaries:?}"
+        );
+        drop(held);
+        write.ask().unwrap();
+        assert_eq!(std::fs::read(&journal).unwrap(), NOTED);
+        assert_eq!(names_in(&home), vec!["journal.json".to_string()]);
+
+        let held = crate::trust_harness::hold_without_delete_sharing(&journal).unwrap();
+        let mut given_up = DurableWrite::new(&journal, b"never landed");
+        assert!(given_up.ask().unwrap_err().refused_while_open());
+        drop(given_up);
+        drop(held);
+        assert_eq!(names_in(&home), vec!["journal.json".to_string()]);
+        assert_eq!(std::fs::read(&journal).unwrap(), NOTED);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// RED (U-12) — **a durable remove flushes the directory the entry was in,
     /// after the removal, and nothing there already is done, not a failure.**
     ///
@@ -1668,6 +1941,7 @@ mod tests {
             let mut fake = Recorder {
                 calls: Vec::new(),
                 fail,
+                refusals_left: None,
             };
             durable_remove_with(&mut fake, &folder).unwrap();
             assert_eq!(

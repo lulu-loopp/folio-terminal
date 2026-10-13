@@ -3355,3 +3355,36 @@ Pinned by `update_trial::tests::{a_refused_unkept_mark_is_asked_again_each_turn_
 a_refusing_home_costs_one_folder_flush_per_turn_not_a_full_write,
 a_mark_at_its_name_is_taken_back_by_the_commit_though_its_folder_never_flushed,
 a_reserved_trials_self_commit_is_asked_until_the_decision_and_said_once_per_streak}`.
+
+### Amendment to revision (e), 2026-10-13 (T-JOURNAL-WRITE-UNDER-HOLD) — a held journal write pays its flush once
+
+**Who holds, and for how long.** The transaction lock `H\lock` is a byte-range lock on its own file,
+taken by every holder before it writes the journal and kept for its road; two Folio holders therefore
+meet at `H\lock` (`try_hold` answers `Pending`, `hold_within` waits), never at `journal.json`, and
+Folio's own reads of the journal share deletion. The hold that refuses a journal write
+(`install_txn::Failure::refused_while_open`: Windows' `ERROR_ACCESS_DENIED` or
+`ERROR_SHARING_VIOLATION` at the rename) is a foreign program's — a scanner, an indexer, a backup or
+sync tool — and its length is that program's. `JOURNAL_HELD_WITHIN` (10 s, 0.4.8 E4) is derived from
+that program (an on-access scan, Defender's default cloud wait), not from the lock protocol.
+
+**What a held round cost.** Each round was the whole durable write: a new temporary, the bytes, its
+file flush, the refused rename, the temporary removed — about 25 file flushes per 10 s window, and a
+fresh file for a scanner to open each round.
+
+**What it costs now.** `update_apply::write_journal` asks one `install_txn::DurableWrite`: its first
+round is `durable_write`'s order; when the rename is refused the flushed temporary stays, and every
+later round is that temporary's rename alone — one `MoveFileExW`, no flush — followed by the directory
+flush on the round it lands. The window, its rounds, its lines and its answer at the end
+(`Unwritten { held }`) are unchanged; a write given up removes its temporary. Durability is
+unchanged: the bytes are flushed before the first rename and never written after it; the rename that
+lands them is the same write-through rename. A probe of the hold before each round (an open of
+`journal.json` asking delete access) is not built: it costs what the rename costs, is itself an open a
+scanner intercepts, cannot see a hold on the temporary, and still leaves the rename to decide. macOS
+has no held round (`rename(2)` replaces an open file). The window election's mark (`H\<txn>\owner`,
+asked again within `JOURNAL_WRITE_WITHIN`) is written through the same `DurableWrite`
+(`update_apply::mark_writer`).
+
+Pinned by `bt_platform::install_txn::tests::{a_write_asked_again_after_a_refused_rename_flushes_its_file_once,
+a_write_over_a_held_target_lands_when_let_go_and_a_dropped_one_leaves_nothing}` and
+`update_apply::held_write_tests::{a_held_journal_write_flushes_one_temporary_and_lands_when_the_hold_lifts,
+the_window_marks_writer_asked_again_over_a_held_mark_renames_one_temporary}`.
