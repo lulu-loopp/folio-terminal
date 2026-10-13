@@ -67,8 +67,9 @@
 //! that rescue build is 0.4.7 or later. The recovery records this trial if its
 //! receipt names it exactly and commits, ends it if it never became ready, and
 //! otherwise defers. **The trial never ends itself.** An unreadable journal is
-//! never handed back. A receipt the storage worker could not write is written
-//! again by the watch, with a growing pause, until it lands.
+//! never handed back. A receipt the storage worker could not write is asked
+//! again by the watch at each of its turns until it lands — no clock of its
+//! own — and no longer once the watchdog is spent (T-TRIAL-RECEIPT-RETRY).
 //!
 //! # Readiness and the receipt (F-14, (b).2)
 //!
@@ -464,8 +465,9 @@ impl Gate {
     /// **The receipt written again when a write of it was refused** (U-37): a
     /// home that refused it — made read-only, a scanner's handle — may take it
     /// a moment later, and a receipt that never lands is a healthy trial nobody
-    /// can commit. `None` when nothing is owed; written by the one rule for
-    /// what is already at the receipt's name ([`write_receipt`]).
+    /// can commit. One ask: the watch asks at each of its turns ([`watch`]).
+    /// `None` when nothing is owed; written by the one rule for what is
+    /// already at the receipt's name ([`write_receipt`]).
     fn write_owed_receipt(&self) -> Option<Result<(), String>> {
         let job = {
             let state = self.state();
@@ -479,6 +481,12 @@ impl Gate {
             self.state().receipt_owed = false;
         }
         Some(written)
+    }
+
+    /// **The owed receipt is given up** — the watchdog is spent ([`watch`]).
+    /// `true` when one was owed, so the watch says so once.
+    fn give_up_owed_receipt(&self) -> bool {
+        std::mem::take(&mut self.state().receipt_owed)
     }
 
     /// `true` once: the claim is adopted, the transaction undecided, and the
@@ -602,7 +610,7 @@ pub(crate) fn begin_watch(wake: impl Fn() + Send + 'static) {
                 &GATE,
                 (&journal, &home.unkept(txn), &home.receipt_path(txn, &nonce)),
                 txn,
-                WATCH_INTERVAL,
+                Cadence::every(WATCH_INTERVAL),
                 &wake,
                 own_commit,
                 &mut watchdog,
@@ -643,14 +651,6 @@ pub(crate) const WATCHDOG: Duration = Duration::from_millis(crate::update_txn::T
 /// again; the next start or logon decides after that.
 pub(crate) const HAND_BACKS: u32 = 4;
 
-/// **The first pause before a refused receipt is written again**, doubled at
-/// each refusal up to [`RECEIPT_RETRY_CAP`] (H.2).
-pub(crate) const RECEIPT_RETRY_FIRST: Duration = Duration::from_millis(250);
-
-/// **The longest pause between two writes of a refused receipt** (H.2): about
-/// 127 attempts in an hour of a home that stays read-only.
-pub(crate) const RECEIPT_RETRY_CAP: Duration = Duration::from_secs(30);
-
 /// **The trial's watchdog** (U-37, H.2): at each due time of an undecided
 /// transaction, `hand_back` is called with whether this trial became ready
 /// (its receipt fell due) and answers the recovery it started, if any, by pid
@@ -658,6 +658,25 @@ pub(crate) const RECEIPT_RETRY_CAP: Duration = Duration::from_secs(30);
 pub(crate) struct Watchdog<'a> {
     pub(crate) every: Duration,
     pub(crate) hand_back: &'a mut dyn FnMut(bool) -> Option<Running>,
+}
+
+/// **The watch's turn** (H.2 step 4): the pause between two turns, and what
+/// runs at the end of each turn before it — nothing in the product
+/// ([`Cadence::every`]); in a test, the world's moves between two turns, so the
+/// test counts turns rather than time.
+pub(crate) struct Cadence<'a> {
+    pub(crate) interval: Duration,
+    pub(crate) between: Option<&'a mut dyn FnMut()>,
+}
+
+impl Cadence<'_> {
+    /// A turn every `interval`, with nothing between.
+    pub(crate) const fn every(interval: Duration) -> Self {
+        Self {
+            interval,
+            between: None,
+        }
+    }
 }
 
 /// A watchdog that does not fire within any test.
@@ -683,16 +702,20 @@ enum Read {
     Unreadable,
 }
 
-/// **The watch's loop** (design revision (h) H.2), each turn in this order,
-/// until the transaction is decided: (1) the receipt — the storage worker's
-/// answer taken, a refused receipt written again, create-new, after a pause
-/// from [`RECEIPT_RETRY_FIRST`] doubling to [`RECEIPT_RETRY_CAP`]; (2) the
+/// **The watch's loop** (design revision (h) H.2, as revision (m) amends step
+/// 1), each turn in this order, until the transaction is decided: (1) the
+/// receipt — the storage worker's answer taken; a refused receipt asked again,
+/// create-new, once at each turn — the watch's own cadence, no clock of its
+/// own — while the watchdog is not spent, and given up, said once, when it is:
+/// the watchdog's life is the re-ask's declared bound, past which the watch
+/// makes no hand-back a landed receipt would commit and the next start or
+/// logon decides (T-TRIAL-RECEIPT-RETRY); (2) the
 /// journal read — a header decides, `NotFound` is the end, **any other error
 /// is `Unreadable`** and skips neither step 1 nor step 3; (3) the watchdog —
 /// at each of its [`HAND_BACKS`] due times, an `Undecided` transaction is
 /// handed back, single-flight (not while the recovery an earlier hand-back
 /// started still runs, by pid and start instant), and an `Unreadable` one is
-/// not (no holder could read it either); (4) the pause. Read-only on the
+/// not (no holder could read it either); (4) the pause, `cadence`. Read-only on the
 /// journal — its writer is the lock holder — **except for U-35's reserved
 /// trial** (`commit_itself`, U-35 round 2): once this trial is ready (its
 /// receipt fell due), between steps 1 and 2 it asks to commit itself on that
@@ -709,16 +732,23 @@ pub(crate) fn watch(
     gate: &Gate,
     (journal, unkept, receipt): (&Path, &Path, &Path),
     txn: TxnId,
-    interval: Duration,
+    cadence: Cadence<'_>,
     wake: &dyn Fn(),
     mut commit_itself: Option<&mut CommitItself<'_>>,
     watchdog: &mut Watchdog<'_>,
 ) {
+    let Cadence {
+        interval,
+        mut between,
+    } = cadence;
     let begun = Instant::now();
     let mut spent: u32 = 0;
     let mut recovery: Option<Running> = None;
     let mut unreadable_since: Option<Instant> = None;
-    let (mut retry_at, mut pause) = (Instant::now(), RECEIPT_RETRY_FIRST);
+    // The watch's own asks of a refused receipt, and the last refusal: said
+    // once, at the streak's end (C3).
+    let mut receipt_asks: u32 = 0;
+    let mut receipt_refusal = String::new();
     let mut said_commit_refusal = false;
     let mut said_mark_refusal = false;
     let mut taking_back: Option<Instant> = None;
@@ -750,25 +780,32 @@ pub(crate) fn watch(
                     ),
                     Err(error) => {
                         eprintln!(
-                            "BT_UPDATE_TRIAL receipt of {txn} not written by {:?}: {error}; the watch writes it again",
+                            "BT_UPDATE_TRIAL receipt of {txn} not written by {:?}: {error}; the watch asks again at each of its turns until its watchdog is spent",
                             written.by
                         );
+                        receipt_refusal = error;
                         gate.owe_receipt();
-                        retry_at = Instant::now() + pause;
                     }
                 }
             }
-            if Instant::now() >= retry_at {
+            if spent < HAND_BACKS {
                 match gate.write_owed_receipt() {
                     Some(Ok(())) => {
-                        eprintln!("BT_UPDATE_TRIAL receipt of {txn} written by the trial's watch");
+                        receipt_asks += 1;
+                        eprintln!(
+                            "BT_UPDATE_TRIAL receipt of {txn} written by the trial's watch at its ask {receipt_asks}"
+                        );
                     }
-                    Some(Err(_)) => {
-                        pause = pause.saturating_mul(2).min(RECEIPT_RETRY_CAP);
-                        retry_at = Instant::now() + pause;
+                    Some(Err(refusal)) => {
+                        receipt_asks += 1;
+                        receipt_refusal = refusal;
                     }
                     None => {}
                 }
+            } else if gate.give_up_owed_receipt() {
+                eprintln!(
+                    "BT_UPDATE_TRIAL receipt of {txn} still refused after {receipt_asks} asks of the trial's watch: {receipt_refusal}; the watchdog is spent, so it is not asked again, and the next start or logon decides"
+                );
             }
             // The mark that a person's change is held until the commit.
             if gate.owes_unkept_mark() {
@@ -899,6 +936,9 @@ pub(crate) fn watch(
             }
         }
         // (4) The pause.
+        if let Some(between) = between.as_deref_mut() {
+            between();
+        }
         std::thread::sleep(interval);
     }
 }
@@ -1575,7 +1615,7 @@ mod tests {
                     &watched.with_file_name("health-test"),
                 ),
                 TXN,
-                Duration::from_millis(5),
+                Cadence::every(Duration::from_millis(5)),
                 &|| {
                     watch_woken.fetch_add(1, Ordering::SeqCst);
                 },
@@ -1663,7 +1703,7 @@ mod tests {
                 &gate,
                 (&journal, &mark, &journal.with_file_name("health-test")),
                 TXN,
-                Duration::from_millis(5),
+                Cadence::every(Duration::from_millis(5)),
                 &|| {},
                 None,
                 &mut watchdog_asleep(),
@@ -1744,7 +1784,7 @@ mod tests {
                 &journal.with_file_name("health-test"),
             ),
             TXN,
-            Duration::ZERO,
+            Cadence::every(Duration::ZERO),
             &|| woken.set(woken.get() + 1),
             Some(&mut commit),
             &mut Watchdog {
@@ -1798,7 +1838,7 @@ mod tests {
                     &journal.with_file_name("health-test"),
                 ),
                 TXN,
-                Duration::from_millis(5),
+                Cadence::every(Duration::from_millis(5)),
                 &|| {
                     woken.fetch_add(1, Ordering::SeqCst);
                 },
@@ -1849,7 +1889,7 @@ mod tests {
                     &watched.with_file_name("health-test"),
                 ),
                 TXN,
-                Duration::from_millis(5),
+                Cadence::every(Duration::from_millis(5)),
                 &|| {},
                 None,
                 &mut watchdog,
@@ -1933,16 +1973,19 @@ mod tests {
     }
 
     /// RED (U-37, H.2) — **a journal that cannot be read is no answer and no
-    /// excuse: the refused receipt is still written again, and nothing is
+    /// excuse: the refused receipt is still asked again, and nothing is
     /// handed back while it stays unreadable — no holder could read it
     /// either.**
     ///
     /// Codex's review of `caea1099`, finding 2: a read error `continue`d past
-    /// the receipt's retry and the watchdog's deadline.
+    /// the receipt's retry and the watchdog's deadline. Counted in the watch's
+    /// own turns (T-TRIAL-RECEIPT-RETRY): every due time of the watchdog falls
+    /// in its first four turns, the receipt's ask at the first is refused, and
+    /// its ask at the second lands.
     ///
-    /// MUTATIONS: in `watch`, read the journal first and go back to the top of
-    /// the loop on a read error (the round-1 order); or hand back an
-    /// `Unreadable` transaction as an undecided one.
+    /// MUTATIONS: in `watch`, read the journal first and end the turn on a
+    /// read error (the round-1 order); or hand back an `Unreadable`
+    /// transaction as an undecided one.
     #[test]
     fn an_unreadable_journal_still_retries_the_receipt_and_is_never_handed_back() {
         let root = scratch("unreadable");
@@ -1957,30 +2000,296 @@ mod tests {
             journal: granting(&home),
             txn: TXN,
         };
-        let gate: &'static Gate = Box::leak(Box::new(Gate::new()));
+        let gate = Gate::new();
         gate.adopt_claim();
         assert!(gate.hand_receipt());
         gate.keep_receipt(job.clone());
         gate.owe_receipt();
-        let (watcher, handed) = watching(
-            gate,
-            &journal,
-            Duration::from_millis(30),
+        let handed = std::cell::Cell::new(0_usize);
+        let mut hand_back = |_: bool| {
+            handed.set(handed.get() + 1);
+            None
+        };
+        let (mut turns, mut landed_at) = (0_u32, None);
+        let mut between = || {
+            turns += 1;
+            if landed_at.is_none() && job.path.exists() {
+                landed_at = Some(turns);
+            }
+            match turns {
+                // The home takes the receipt from now on.
+                1 => std::fs::create_dir_all(home.transaction(TXN)).unwrap(),
+                // Past every due time of the watchdog: the journal is read
+                // again, and says the commit.
+                n if n == HAND_BACKS + 2 => {
+                    std::fs::remove_dir_all(&journal).unwrap();
+                    std::fs::write(&journal, journal_bytes(TXN, Phase::Committed)).unwrap();
+                }
+                n => assert!(n < 64, "the watch ends at the commit"),
+            }
+        };
+        watch(
+            &gate,
+            (
+                &journal,
+                &journal.with_file_name(crate::update_txn::UNKEPT_FILE),
+                &journal.with_file_name("health-test"),
+            ),
+            TXN,
+            Cadence {
+                interval: Duration::ZERO,
+                between: Some(&mut between),
+            },
+            &|| {},
             None,
-            Instant::now(),
+            &mut Watchdog {
+                every: Duration::ZERO,
+                hand_back: &mut hand_back,
+            },
         );
-        std::thread::sleep(Duration::from_millis(100));
-        std::fs::create_dir_all(home.transaction(TXN)).unwrap();
-        let give_up = Instant::now() + Duration::from_secs(10);
-        while !job.path.exists() {
-            assert!(Instant::now() < give_up, "the receipt is written again");
-            std::thread::sleep(Duration::from_millis(10));
+        assert_eq!(
+            landed_at,
+            Some(2),
+            "refused at the first turn, asked again at the second"
+        );
+        assert_eq!(handed.get(), 0, "never handed back");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A trial's watch over `home`'s journal of [`TXN`], with its receipt
+    /// `job` owed or awaited as the caller left `gate`: the world's moves
+    /// between two turns are `between`'s, given the turn's number and whether
+    /// the receipt is on disk; the watchdog's period is `every`, and each
+    /// hand-back's `ready` word is recorded. The turns taken, and the
+    /// hand-backs.
+    fn watch_by_turns(
+        gate: &Gate,
+        home: &Home,
+        job: &ReceiptJob,
+        every: Duration,
+        wake: &dyn Fn(),
+        between: &mut dyn FnMut(u32, bool),
+    ) -> (u32, Vec<bool>) {
+        let mut handed = Vec::new();
+        let mut hand_back = |ready: bool| {
+            handed.push(ready);
+            None
+        };
+        let mut turns = 0_u32;
+        let mut each_turn = || {
+            turns += 1;
+            assert!(turns < 64, "the watch ends within its turns");
+            between(turns, job.path.exists());
+        };
+        watch(
+            gate,
+            (&home.journal(), &home.unkept(TXN), &job.path),
+            TXN,
+            Cadence {
+                interval: Duration::ZERO,
+                between: Some(&mut each_turn),
+            },
+            wake,
+            None,
+            &mut Watchdog {
+                every,
+                hand_back: &mut hand_back,
+            },
+        );
+        (turns, handed)
+    }
+
+    /// `home`'s receipt of this process for [`TXN`], its journal granting it
+    /// and its transaction folder missing, so the home refuses it.
+    fn refused_receipt(home: &Home) -> ReceiptJob {
+        ReceiptJob {
+            path: home.receipt_path(TXN, &nonce()),
+            bytes: Receipt {
+                txn: TXN,
+                nonce: nonce(),
+                pid: std::process::id(),
+                version: crate::version::VERSION.to_owned(),
+                started: None,
+            }
+            .encode(),
+            journal: granting(home),
+            txn: TXN,
         }
-        std::thread::sleep(Duration::from_millis(400));
-        assert!(handed.lock().unwrap().is_empty(), "never handed back");
-        std::fs::remove_dir_all(&journal).unwrap();
-        std::fs::write(&journal, journal_bytes(TXN, Phase::Committed)).unwrap();
-        watcher.join().unwrap();
+    }
+
+    /// RED (T-TRIAL-RECEIPT-RETRY, design revision (m)) — **a refused receipt
+    /// is asked again at each turn of the watch and on no clock of its own**:
+    /// refused at three turns, it lands at the first turn after the home
+    /// takes it.
+    ///
+    /// The doubling pause asked again 250 ms, 750 ms, 1.75 s … after the
+    /// refusal, whatever the turns: a refusal that cleared at 62 s waited
+    /// until 91.75 s, past a live holder's deadline. Turns here take no time,
+    /// so a clock of the receipt's own never comes due within them.
+    ///
+    /// MUTATION: in `watch`, ask the owed receipt again only once a pause from
+    /// 250 ms doubling to 30 s has passed since the last refusal (the doubling
+    /// clock restored).
+    #[test]
+    fn a_refused_receipt_is_asked_again_only_on_the_watchs_own_turn() {
+        let root = scratch("receipt-turns");
+        let home = Home::at(root.join("home"));
+        let job = refused_receipt(&home);
+        let gate = Gate::new();
+        gate.adopt_claim();
+        assert!(gate.hand_receipt());
+        gate.keep_receipt(job.clone());
+        gate.owe_receipt();
+        let mut landed_at = None;
+        let (turns, handed) = watch_by_turns(
+            &gate,
+            &home,
+            &job,
+            watchdog_asleep().every,
+            &|| {},
+            &mut |turn, on_disk| {
+                if on_disk && landed_at.is_none() {
+                    landed_at = Some(turn);
+                    std::fs::write(home.journal(), journal_bytes(TXN, Phase::Committed)).unwrap();
+                } else if turn == 3 {
+                    std::fs::create_dir_all(home.transaction(TXN)).unwrap();
+                }
+            },
+        );
+        assert_eq!(
+            landed_at,
+            Some(4),
+            "asked at each turn: refused at three, then landed"
+        );
+        assert!(turns > 4 && handed.is_empty(), "{turns} turns, {handed:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-TRIAL-RECEIPT-RETRY) — **a passing refusal of the receipt does
+    /// not roll the trial back**: the real storage worker's write is refused
+    /// (the transaction folder is missing — the macOS D14 shape), the home
+    /// takes writes again a turn later, and the receipt the watch asks again
+    /// lands before the lock holder's deadline; the holder commits, and the
+    /// trial's held writes are released.
+    ///
+    /// The holder is played between the watch's turns, its deadline the
+    /// second turn's end: it commits on a receipt it finds and rolls back at
+    /// the deadline with none — `update_apply::watch_trial`'s rule at
+    /// `update_txn::TRIAL_DEADLINE_MS`. The writes held are not a person's
+    /// change, so no turn writes the mark that one would.
+    ///
+    /// MUTATION: the doubling clock restored, as in
+    /// `a_refused_receipt_is_asked_again_only_on_the_watchs_own_turn`: the
+    /// receipt is not asked before the deadline, the holder rolls back and
+    /// nothing is released.
+    #[test]
+    fn a_transient_receipt_refusal_does_not_roll_the_trial_back() {
+        const DEADLINE: u32 = 2;
+        let root = scratch("receipt-transient");
+        let home = Home::at(root.join("home"));
+        let job = refused_receipt(&home);
+        let mut store = persist::SessionStore::at(
+            root.join("data").join("session.json"),
+            root.join("data").join("session.lock"),
+        );
+        let gate = Gate::new();
+        assert!(gate.defer(true, Writer::Session));
+        gate.adopt_claim();
+        assert!(gate.hand_receipt());
+        gate.keep_receipt(job.clone());
+        let answer = store.write_receipt(job.clone()).expect("a writer");
+        let refused = crate::lane::receive(&answer, "the storage worker's answer for the receipt");
+        assert!(refused.result.is_err(), "the home refuses it: {refused:?}");
+        let (answered, again) = mpsc::channel();
+        answered.send(refused).unwrap();
+        gate.await_receipt(again);
+        let woken = std::cell::Cell::new(0_usize);
+        let mut decided: Option<Phase> = None;
+        watch_by_turns(
+            &gate,
+            &home,
+            &job,
+            watchdog_asleep().every,
+            &|| woken.set(woken.get() + 1),
+            &mut |turn, on_disk| {
+                if decided.is_some() {
+                    return;
+                }
+                if on_disk {
+                    decided = Some(Phase::Committed);
+                } else if turn == DEADLINE {
+                    decided = Some(Phase::Retired {
+                        outcome: Outcome::RolledBack,
+                        untried: false,
+                    });
+                } else if turn == 1 {
+                    std::fs::create_dir_all(home.transaction(TXN)).unwrap();
+                }
+                if let Some(phase) = &decided {
+                    std::fs::write(home.journal(), journal_bytes(TXN, phase.clone())).unwrap();
+                }
+            },
+        );
+        assert_eq!(decided, Some(Phase::Committed), "the holder committed");
+        assert_eq!(woken.get(), 1, "the commit woke the window thread once");
+        assert_eq!(gate.take_released(), vec![Writer::Session]);
+        assert!(!gate.defers(true));
+        store.close();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-TRIAL-RECEIPT-RETRY) — **a receipt the home keeps refusing ends
+    /// in the hand-back**: the watch asks for it at each turn while its
+    /// watchdog runs, hands the transaction back as a ready trial at each due
+    /// time, and once the watchdog is spent asks no more — even when the home
+    /// would take it now (the declared bound: the next start or logon
+    /// decides). That decision, made here three turns after the last
+    /// hand-back, ends the trial: nothing held is written.
+    ///
+    /// MUTATION: in `watch`, ask the owed receipt again whatever the watchdog
+    /// has spent (the bound removed).
+    #[test]
+    fn a_permanent_receipt_refusal_ends_in_the_hand_back() {
+        let root = scratch("receipt-permanent");
+        let home = Home::at(root.join("home"));
+        let job = refused_receipt(&home);
+        let gate = Gate::new();
+        assert!(gate.defer(true, Writer::Settings));
+        gate.adopt_claim();
+        assert!(gate.hand_receipt());
+        gate.keep_receipt(job.clone());
+        gate.owe_receipt();
+        let mut ever_on_disk = false;
+        let (turns, handed) = watch_by_turns(
+            &gate,
+            &home,
+            &job,
+            // Every due time falls in the first four turns.
+            Duration::ZERO,
+            &|| {},
+            &mut |turn, on_disk| {
+                ever_on_disk |= on_disk;
+                if turn == HAND_BACKS {
+                    std::fs::create_dir_all(home.transaction(TXN)).unwrap();
+                } else if turn == HAND_BACKS + 3 {
+                    let ended = Phase::Retired {
+                        outcome: Outcome::RolledBack,
+                        untried: false,
+                    };
+                    std::fs::write(home.journal(), journal_bytes(TXN, ended)).unwrap();
+                }
+            },
+        );
+        assert_eq!(
+            handed,
+            vec![true; HAND_BACKS as usize],
+            "handed back as a ready trial"
+        );
+        assert!(!ever_on_disk, "not asked past the watchdog's end");
+        assert_eq!(turns, HAND_BACKS + 3);
+        assert!(gate.take_released().is_empty());
+        assert!(gate.pending().is_empty(), "dropped");
+        assert!(gate.defers(true), "shut for the rest of the process");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2043,7 +2352,7 @@ mod tests {
                             &home.receipt_path(TXN, &nonce()),
                         ),
                         TXN,
-                        Duration::from_millis(10),
+                        Cadence::every(Duration::from_millis(10)),
                         &|| {},
                         None,
                         &mut watchdog,
@@ -2179,7 +2488,7 @@ mod tests {
                     &acknowledged,
                 ),
                 TXN,
-                Duration::from_millis(5),
+                Cadence::every(Duration::from_millis(5)),
                 &|| {},
                 None,
                 &mut watchdog_asleep(),
@@ -2541,7 +2850,7 @@ mod tests {
                 &journal.with_file_name("health-test"),
             ),
             TXN,
-            Duration::ZERO,
+            Cadence::every(Duration::ZERO),
             &|| {},
             Some(&mut commit),
             &mut Watchdog {
