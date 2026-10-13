@@ -192,8 +192,9 @@ use objc2_foundation::{NSDictionary, NSNotification, NSNotificationCenter, NSNum
 
 use super::engine::{
     EngineError, EngineState, FRAME_POLL_INTERVAL, Frame, FrameCost, IDLE_POLL_INTERVAL,
-    LOAD_BUDGET, LedgerEntry, OPEN_BUDGET, SHUTDOWN_BUDGET, note_engine_shut_down,
+    LedgerEntry, OPEN_BUDGET, SHUTDOWN_BUDGET, note_engine_shut_down,
 };
+use crate::video_load::{Load, LoadDeadline};
 use super::macos_video::displayed_size;
 use crate::macos_files::file_url;
 
@@ -275,7 +276,13 @@ impl Engine {
                 "folio-video-engine",
                 crate::ThreadPriority::Normal,
                 move |_ctx| {
-                    run(&url, asked_at + LOAD_BUDGET, &shared, &commands, &inbox);
+                    run(
+                        &url,
+                        LoadDeadline::from_open(asked_at),
+                        &shared,
+                        &commands,
+                        &inbox,
+                    );
                     // Last of all, and read by `Engine::shutdown` to know
                     // whether joining this thread will return — see there.
                     shared.stopped.store(true, Ordering::Release);
@@ -563,12 +570,12 @@ enum Command {
 /// everything playback made.
 fn run(
     path: &Path,
-    load_due: Instant,
+    deadline: LoadDeadline,
     shared: &Arc<Shared>,
     commands: &mpsc::Sender<Command>,
     inbox: &mpsc::Receiver<Command>,
 ) {
-    autoreleasepool(|_pool| match Machinery::build(path, load_due, commands) {
+    autoreleasepool(|_pool| match Machinery::build(path, deadline, commands) {
         Ok(mut machinery) => {
             // Before the pump and after the player: this is what stops
             // `Engine::state` charging a working engine with having missed
@@ -623,10 +630,10 @@ struct Machinery {
     ended: bool,
     generation: u64,
     error: Option<EngineError>,
-    /// When the load runs out: [`LOAD_BUDGET`] after the open request. Past
-    /// it, a player that is still not ready is refused by this module itself —
-    /// see [`Self::publish_state`].
-    load_due: Instant,
+    /// When the load is over without having said anything: `LOAD_BUDGET`
+    /// after the open request. Past it, a player that is still not ready is
+    /// refused by this module itself — see [`Self::publish_state`].
+    deadline: LoadDeadline,
 }
 
 impl Machinery {
@@ -637,7 +644,7 @@ impl Machinery {
     )]
     fn build(
         path: &Path,
-        load_due: Instant,
+        deadline: LoadDeadline,
         commands: &mpsc::Sender<Command>,
     ) -> Result<Self, EngineError> {
         let url = file_url(path, false).map_err(|_| EngineError::Other("the path has no URL"))?;
@@ -721,7 +728,7 @@ impl Machinery {
                 ended: false,
                 generation: 0,
                 error: None,
-                load_due,
+                deadline,
             })
         }
     }
@@ -894,28 +901,38 @@ impl Machinery {
             // make this flag a statement about the caller's run loop rather than
             // about the file — see §13.35 ⑤.
             let ready = natural_size.is_some() || self.has_audio;
-            // **The load's deadline, the Windows arm's.** A video track whose
-            // size the asset does not say is answered only by the item's
-            // presentation size, which arrives on that same main queue — so a
-            // player can stand not ready for ever here too. Past `LOAD_BUDGET`
-            // it is this module's own refusal, said once and as sticky as any
-            // other error.
-            if !ready && self.error.is_none() && Instant::now() >= self.load_due {
-                self.error = Some(EngineError::NotLoaded);
-            }
+            // **The load's deadline**, decided by `LoadDeadline::judge` for both
+            // arms. A video track whose size the asset does not say is answered
+            // only by the item's presentation size, which arrives on that same
+            // main queue — so a player can stand not ready for ever here too.
+            // A refusal is `NotLoaded`, not ready, with no length or size, and
+            // it is the terminal: what the item says afterwards is not
+            // published.
+            let refused = match self.deadline.judge(
+                Instant::now(),
+                ready,
+                self.error.is_some(),
+                self.error == Some(EngineError::NotLoaded),
+            ) {
+                Load::AsSaid => false,
+                Load::Refused => {
+                    self.error.get_or_insert(EngineError::NotLoaded);
+                    true
+                }
+            };
             EngineState {
-                duration_secs,
+                duration_secs: duration_secs.filter(|_| !refused),
                 position_secs: seconds_or_zero(self.player.currentTime()),
                 // **Not "a frame changed recently".** A video paused on its last
                 // picture is `false` here and still has a picture on the glass.
                 playing: rate != 0.0 && !self.ended,
-                natural_size,
+                natural_size: natural_size.filter(|_| !refused),
                 ended: self.ended,
                 error: self.error,
                 muted: self.player.isMuted(),
                 volume: f64::from(self.player.volume()),
                 rate: self.wanted_rate,
-                ready,
+                ready: ready && !refused,
                 has_video: self.has_video,
                 has_audio: self.has_audio,
             }

@@ -8781,6 +8781,10 @@ pub mod hotkey;
 /// platform — the one owner both `video` arms read and move.
 mod engine_ledger;
 
+/// A playback engine's load — its budget, the length's three readings and the
+/// deadline's decision — with one owner for both `video` arms.
+mod video_load;
+
 /// The first frame of a video, out of Media Foundation — see the module's own
 /// note for the apartment it runs in and for why the set of files it can draw is
 /// not the set that could be played.
@@ -26204,14 +26208,13 @@ mod macos_player_signature_tests {
         }
     }
 
-    /// RED — **both arms poll at the same two intervals, open and load on the
-    /// same budgets and give a shutdown the same two seconds.**
+    /// RED — **both arms poll at the same two intervals, open on the same
+    /// budget and give a shutdown the same two seconds.**
     ///
-    /// Five numbers that are policy rather than platform, and each one is a
+    /// Four numbers that are policy rather than platform, and each one is a
     /// different product if the two machines disagree: a video that is a quarter
     /// of a frame staler on one machine, a pane that gives up at a different
-    /// time, a source refused as not loaded sooner on one machine than on the
-    /// other, and a window that waits twice as long on a wedged decoder.
+    /// time, and a window that waits twice as long on a wedged decoder.
     ///
     /// MUTATION: change any one of them in one file and this names it.
     #[test]
@@ -26220,7 +26223,6 @@ mod macos_player_signature_tests {
             "pub const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(4);",
             "pub const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);",
             "pub const OPEN_BUDGET: Duration = Duration::from_secs(5);",
-            "pub const LOAD_BUDGET: Duration = OPEN_BUDGET.saturating_mul(2);",
             "pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);",
         ] {
             assert_eq!(

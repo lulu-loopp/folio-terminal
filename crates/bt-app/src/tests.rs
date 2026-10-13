@@ -663,16 +663,17 @@ fn a_card_torn_off_carries_its_engine_with_it() {
     // for playback to move it (M-SWEEP-048). A seek lands on every machine; a
     // Mac's `AVPlayer` only advances while the main run loop drains the main
     // queue, which no libtest thread can do, its own run loop pumped or not.
-    // Both waits are on the engine thread's publications, within the lane
-    // suite's patience.
+    // Both waits are on the engine thread's publications: the first for the
+    // load's terminal answer, within a patience derived from the engine's own
+    // load budget (so it cannot end a moment before the engine's refusal), the
+    // second within the lane suite's patience.
     let card = seats
         .get_mut(PreviewSurface::Peek)
         .expect("a seat on the card");
-    let loaded =
-        card.state_reaching(|state| state.duration_secs.is_some() || state.error.is_some());
+    let loaded = card.state_answering_its_load();
     assert!(
-        loaded.duration_secs.is_some() || loaded.error.is_some(),
-        "the engine gave neither a length nor an error within the suite's patience: {loaded:?}"
+        loaded.ready || loaded.error.is_some(),
+        "the engine gave no answer about its load, which past its own budget is a defect:          {loaded:?}"
     );
     assert_eq!(loaded.error, None, "the fixture loads");
     card.seek_to(0.2, now);

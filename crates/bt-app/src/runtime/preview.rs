@@ -4892,12 +4892,10 @@ impl Runtime<'_> {
             return None;
         }
         let shape = self.video_shape_of(surface, scale, now)?;
-        let state = seat.state();
-        let figures = video_seat::clock_figures(state.position_secs, state.duration_secs);
-        video_seat::bar_layout(
+        video_seat::bar_layout_of(
+            &seat.state(),
             shape.rect(),
             scale,
-            figures,
             self.video_meta_of(surface).width,
         )
     }

@@ -220,6 +220,11 @@ pub struct BarLayout {
     /// to give way, because it is the only one that is a fact rather than a
     /// verb.
     pub meta: Option<[f32; 4]>,
+    /// **Whether the scrubber is a control.** `false` for a recording that has
+    /// loaded and declares no length: there is nothing to scrub along, the bar
+    /// says so in the scrubber's place ([`bar_layout_of`]), and a press there
+    /// takes hold of nothing.
+    pub seekable: bool,
 }
 
 impl BarLayout {
@@ -237,7 +242,7 @@ impl BarLayout {
         if hit(self.play) {
             return Some(BarSlot::PlayPause);
         }
-        if hit(self.seek_grab) {
+        if self.seekable && hit(self.seek_grab) {
             return Some(BarSlot::Seek);
         }
         if self.mute.is_some_and(hit) {
@@ -505,6 +510,28 @@ pub fn bar_layout(
         volume,
         rate,
         meta,
+        seekable: true,
+    })
+}
+
+/// **The bar of a recording whose engine stands at `state`**, laid out — the
+/// one door the painter and the hit test both lay the bar out through, so the
+/// boxes a hand is answered by are the boxes that were drawn.
+///
+/// The clocks are reserved for the wider of the two readings
+/// ([`clock_figures`]), and a recording that has loaded and declares no length
+/// ([`Length::Unknown`]) has no scrubber to take hold of.
+#[must_use]
+pub fn bar_layout_of(
+    state: &EngineState,
+    body: [f32; 4],
+    scale: f32,
+    meta_px: f32,
+) -> Option<BarLayout> {
+    let figures = clock_figures(state.position_secs, state.duration_secs);
+    bar_layout(body, scale, figures, meta_px).map(|layout| BarLayout {
+        seekable: state.length() != Length::Unknown,
+        ..layout
     })
 }
 
@@ -770,6 +797,19 @@ impl VideoSeat {
     #[cfg(test)]
     pub fn state_reaching(&self, until: impl Fn(&EngineState) -> bool) -> EngineState {
         self.engine.state_reaching(until, crate::lane::PATIENCE)
+    }
+
+    /// **Wait for the engine's terminal answer about its load** — ready, or
+    /// refused — within `LOAD_ANSWER_PATIENCE`, which is derived from the
+    /// engine's own `LOAD_BUDGET` and poll so that the wait cannot end a moment
+    /// before the engine's own refusal lands. Answers the state the wait ended
+    /// on.
+    #[cfg(test)]
+    pub fn state_answering_its_load(&self) -> EngineState {
+        self.engine.state_reaching(
+            |state| state.ready || state.error.is_some(),
+            bt_platform::video::engine::LOAD_ANSWER_PATIENCE,
+        )
     }
 
     /// **Whether this seat has stopped being a player, and what its surface
@@ -1201,8 +1241,7 @@ fn paint_bar(
     }
     let elapsed = clock_text(state.position_secs);
     let whole = clock_text(state.duration_secs.unwrap_or(0.0));
-    let figures = clock_figures(state.position_secs, state.duration_secs);
-    let Some(layout) = bar_layout(body, scale, figures, meta.width) else {
+    let Some(layout) = bar_layout_of(state, body, scale, meta.width) else {
         return Band::default();
     };
     let font_px = font_logical_px() * scale;
@@ -1273,7 +1312,7 @@ fn paint_bar(
     // nothing to scrub along: its scrubber's place says so in words and its
     // duration clock stands empty, rather than a `0:00` that reads as a load
     // that has not finished.
-    let lengthless = state.length() == Length::Unknown;
+    let lengthless = !layout.seekable;
     if let Some(rect) = layout.duration
         && !lengthless
     {
@@ -1409,9 +1448,10 @@ fn clock_text(seconds: f64) -> String {
 ///
 /// Both boxes get the same width, which is what stops the scrubber changing
 /// length as the elapsed clock crosses a minute. The hit test and the painter
-/// both call this so that the boxes they compute are the same boxes.
+/// both reach it through [`bar_layout_of`], so the boxes they compute are the
+/// same boxes.
 #[must_use]
-pub fn clock_figures(position_secs: f64, duration_secs: Option<f64>) -> usize {
+fn clock_figures(position_secs: f64, duration_secs: Option<f64>) -> usize {
     let elapsed = clock_text(position_secs);
     let whole = clock_text(duration_secs.unwrap_or(0.0));
     elapsed.chars().count().max(whole.chars().count())
@@ -2238,8 +2278,12 @@ mod tests {
     /// the duration clock empty; the elapsed clock still runs. A recording with
     /// a length, and one still loading, keep the bar they had.
     ///
-    /// MUTATION: read `lengthless` as `false` in `paint_bar` — a source with no
-    /// length drawn as one still loading — and the first assertion goes red.
+    /// The press agrees with the picture: where the words stand, a hand takes
+    /// hold of no scrubber.
+    ///
+    /// MUTATION: make `bar_layout_of` answer `seekable: true` for every state —
+    /// a source with no length drawn and pressed as one still loading — and the
+    /// first assertion goes red.
     #[test]
     fn a_recording_with_no_length_says_so_where_its_scrubber_would_be() {
         let body = [0.0, 0.0, 900.0, 500.0];
@@ -2256,13 +2300,7 @@ mod tests {
         };
         let no_length = crate::i18n::Text::VideoNoLength.text();
         let painted = |state: &EngineState| {
-            let layout = bar_layout(
-                body,
-                1.0,
-                clock_figures(state.position_secs, state.duration_secs),
-                0.0,
-            )
-            .expect("a pane fits the whole bar");
+            let layout = bar_layout_of(state, body, 1.0, 0.0).expect("a pane fits the whole bar");
             let bar = paint_bar(state, None, 1.0, body, 1.0, &palette, BarMeta::none());
             (layout, bar.layers[0].clone())
         };
@@ -2288,6 +2326,15 @@ mod tests {
             layer.quads.iter().all(|quad| quad.rect != layout.seek_rail),
             "no track is struck for a recording with nothing to scrub along"
         );
+        let on_the_words = [
+            (layout.seek[0] + layout.seek[2]) / 2.0,
+            (layout.seek[1] + layout.seek[3]) / 2.0,
+        ];
+        assert_eq!(
+            layout.slot_at(on_the_words),
+            None,
+            "a press on the words takes hold of nothing"
+        );
         assert!(
             layer.labels.iter().any(|label| label.text == "0:12"),
             "the elapsed clock still runs: {:?}",
@@ -2307,6 +2354,15 @@ mod tests {
             assert!(
                 layer.quads.iter().any(|quad| quad.rect == layout.seek_rail),
                 "{what} keeps its scrubber"
+            );
+            let on_the_track = [
+                (layout.seek[0] + layout.seek[2]) / 2.0,
+                (layout.seek[1] + layout.seek[3]) / 2.0,
+            ];
+            assert_eq!(
+                layout.slot_at(on_the_track),
+                Some(BarSlot::Seek),
+                "{what}'s scrubber answers a press"
             );
         }
     }

@@ -158,6 +158,7 @@ use windows::core::{BSTR, Interface, implement};
 
 use crate::engine_ledger;
 use crate::engine_ledger::LedgerEntry;
+use crate::video_load::{Load, LoadDeadline};
 
 /// **How often the engine thread asks whether a new picture has arrived, while
 /// one is expected.**
@@ -203,22 +204,11 @@ pub const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// [`Option`] means. [`LOAD_BUDGET`] bounds the load.
 pub const OPEN_BUDGET: Duration = Duration::from_secs(5);
 
-/// **How long a source may take, from the open, to say what it is before not
-/// having said so is the engine's own refusal** ([`EngineError::NotLoaded`]).
-///
-/// Media Foundation answers a load with an event either way — the metadata, or
-/// an error — and nothing in the platform bounds how long it may take to send
-/// one. Without this, "no length, no size, no error" is a state an engine can
-/// stand in for ever, and a surface showing it is a player at `0:00` that never
-/// starts.
-///
-/// Measured from the open request, on the engine thread, so it covers the build
-/// and then the load. Each half is given what [`OPEN_BUDGET`] gives the build —
-/// two orders of magnitude past a local file's measured open, and the number the
-/// window's own watchdog calls a hang — so the whole is twice that. It is checked
-/// by the engine thread's own idle poll ([`IDLE_POLL_INTERVAL`]), so it is said
-/// at most one poll late, and no caller keeps a clock for it.
-pub const LOAD_BUDGET: Duration = OPEN_BUDGET.saturating_mul(2);
+/// The load's budget and the length's readings are one owner's for both arms.
+#[cfg(any(test, feature = "trust-harness"))]
+#[doc(hidden)]
+pub use crate::video_load::LOAD_ANSWER_PATIENCE;
+pub use crate::video_load::{LOAD_BUDGET, Length};
 
 /// **How long [`Engine::shutdown`] waits for the engine thread to say it has
 /// left** (review row R2-19).
@@ -349,31 +339,8 @@ impl EngineState {
     /// **What this state says about the source's length** — see [`Length`].
     #[must_use]
     pub fn length(&self) -> Length {
-        match (self.duration_secs, self.ready) {
-            (Some(secs), _) => Length::Known(secs),
-            (None, true) => Length::Unknown,
-            (None, false) => Length::Unanswered,
-        }
+        Length::of(self.duration_secs, self.ready)
     }
-}
-
-/// **A source's length, as one of the three things a state can say about it.**
-///
-/// [`EngineState::duration_secs`] is `None` for two different reasons, and a
-/// surface draws them differently: a player still waiting for its metadata, and
-/// a source that has loaded and declares no length — a live stream, or a
-/// container written without a duration. The second is an end state and not a
-/// load that has not finished; a player shows it as having no length rather
-/// than as a clock that has not started.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Length {
-    /// Nothing has been said yet: the metadata has not arrived, or the engine
-    /// refused before it did.
-    Unanswered,
-    /// The source declares this many seconds.
-    Known(f64),
-    /// The source has loaded and declares no length.
-    Unknown,
 }
 
 /// **One decoded picture, in the byte order the swapchain wants.**
@@ -514,7 +481,7 @@ impl Engine {
                     run(
                         &BSTR::from_wide(&url),
                         adapter,
-                        asked_at + LOAD_BUDGET,
+                        LoadDeadline::from_open(asked_at),
                         &shared,
                         &commands,
                         &inbox,
@@ -541,10 +508,10 @@ impl Engine {
     /// **An engine whose thread pumps `media` instead of Media Foundation** —
     /// the scripted seam this module's load tests drive, so that "a source that
     /// never answers" and "a source with no length" are states a test can put
-    /// the pump in rather than files it has to find. `load_due` is the instant
-    /// on `media`'s own clock that the load runs out at.
+    /// the pump in rather than files it has to find. `deadline` is read on
+    /// `media`'s own clock.
     #[cfg(test)]
-    fn scripted<M: Media + Send + 'static>(media: M, load_due: Instant) -> Self {
+    fn scripted<M: Media + Send + 'static>(media: M, deadline: LoadDeadline) -> Self {
         let shared = Arc::new(Shared::default());
         let (commands, inbox) = mpsc::channel();
         let thread = {
@@ -554,7 +521,7 @@ impl Engine {
                 crate::ThreadPriority::Normal,
                 move |_ctx| {
                     shared.built.store(true, Ordering::Release);
-                    Pump::new(media, load_due).run(&shared, &inbox);
+                    Pump::new(media, deadline).run(&shared, &inbox);
                     shared.stopped.store(true, Ordering::Release);
                 },
             )
@@ -1018,7 +985,7 @@ pub fn can_play_types(types: &[&str]) -> Vec<CanPlay> {
 fn run(
     url: &BSTR,
     adapter: Adapter,
-    load_due: Instant,
+    deadline: LoadDeadline,
     shared: &Arc<Shared>,
     commands: &mpsc::Sender<Command>,
     inbox: &mpsc::Receiver<Command>,
@@ -1041,7 +1008,7 @@ fn run(
             // `Engine::state` charging a working engine with having missed
             // `OPEN_BUDGET`.
             shared.built.store(true, Ordering::Release);
-            let mut pump = Pump::new(machinery, load_due);
+            let mut pump = Pump::new(machinery, deadline);
             pump.run(shared, inbox);
             pump.media.stop();
             engine_ledger::note_engine_shut_down();
@@ -1136,17 +1103,17 @@ struct Pump<M> {
     /// Sticky, and the first one said is the one kept: a later event is about
     /// an engine that has already stopped being a player.
     error: Option<EngineError>,
-    /// The instant on [`Media::load_clock`] past which a source that has not
-    /// loaded is refused ([`LOAD_BUDGET`] after the open request).
-    load_due: Instant,
+    /// When the load is over without having said anything ([`LOAD_BUDGET`]
+    /// after the open request), read on [`Media::load_clock`].
+    deadline: LoadDeadline,
 }
 
 impl<M: Media> Pump<M> {
-    fn new(media: M, load_due: Instant) -> Self {
+    fn new(media: M, deadline: LoadDeadline) -> Self {
         Self {
             media,
             error: None,
-            load_due,
+            deadline,
         }
     }
 
@@ -1198,20 +1165,31 @@ impl<M: Media> Pump<M> {
     /// run out — and publish the state.
     ///
     /// **The load's deadline is read here**, every turn, which is every
-    /// [`IDLE_POLL_INTERVAL`] at the latest while nothing is playing: a source
-    /// that is neither ready nor refused when [`LOAD_BUDGET`] has passed is
-    /// refused by the engine itself, once, and the refusal is as sticky as any
-    /// error Media Foundation reports. A source that is ready is never refused
-    /// for time, with or without a length.
+    /// [`IDLE_POLL_INTERVAL`] at the latest while nothing is playing. The
+    /// decision is [`LoadDeadline::judge`]'s, the macOS arm's too; this maps it:
+    /// a refusal is [`EngineError::NotLoaded`], not ready, with no length or
+    /// size — and it is the terminal, so what the source says afterwards is not
+    /// published.
     fn publish_state(&mut self, shared: &Arc<Shared>) -> EngineState {
-        let look = self.media.look();
-        if self.error.is_none()
-            && !look.state(None).ready
-            && self.media.load_clock() >= self.load_due
-        {
-            self.error = Some(EngineError::NotLoaded);
-        }
-        let state = look.state(self.error);
+        let said = self.media.look().state(self.error);
+        let state = match self.deadline.judge(
+            self.media.load_clock(),
+            said.ready,
+            said.error.is_some(),
+            said.error == Some(EngineError::NotLoaded),
+        ) {
+            Load::AsSaid => said,
+            Load::Refused => {
+                let error = *self.error.get_or_insert(EngineError::NotLoaded);
+                EngineState {
+                    duration_secs: None,
+                    natural_size: None,
+                    ready: false,
+                    error: Some(error),
+                    ..said
+                }
+            }
+        };
         *shared.state.lock().unwrap_or_else(|held| held.into_inner()) = state;
         shared.published.notify_all();
         state
@@ -1957,7 +1935,7 @@ mod tests {
         let _ledger = ledger_gate();
         let mut engine = Engine::open(&fixture("folio-video-test.mp4")).expect("an engine opens");
         assert!(
-            engine.wait_for_metadata(Duration::from_secs(10)),
+            engine.wait_for_metadata(LOAD_ANSWER_PATIENCE),
             "metadata: {:?}",
             engine.state()
         );
@@ -2004,7 +1982,7 @@ mod tests {
     fn a_frame_arrives_after_play_and_position_advances() {
         let _ledger = ledger_gate();
         let mut engine = Engine::open(&fixture("folio-video-test.mp4")).expect("an engine opens");
-        assert!(engine.wait_for_metadata(Duration::from_secs(10)));
+        assert!(engine.wait_for_metadata(LOAD_ANSWER_PATIENCE));
         engine.set_muted(true);
         engine.play();
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -2078,7 +2056,7 @@ mod tests {
         let _ledger = ledger_gate();
         let mut engine = Engine::open(&fixture("folio-video-test.mov")).expect("an engine opens");
         assert!(
-            engine.wait_for_metadata(Duration::from_secs(10)),
+            engine.wait_for_metadata(LOAD_ANSWER_PATIENCE),
             "metadata: {:?}",
             engine.state()
         );
@@ -2116,7 +2094,7 @@ mod tests {
         let mut engine = Engine::open_on(&fixture("folio-video-test.mp4"), Adapter::Software)
             .expect("a WARP engine opens");
         assert!(
-            engine.wait_for_metadata(Duration::from_secs(10)),
+            engine.wait_for_metadata(LOAD_ANSWER_PATIENCE),
             "metadata: {:?}",
             engine.state()
         );
@@ -2282,7 +2260,7 @@ mod tests {
         let mut engine = Engine::open(&fixture("folio-video-test.mov"))
             .expect("the same platform opens the file the table refused");
         assert!(
-            engine.wait_for_metadata(Duration::from_secs(10)),
+            engine.wait_for_metadata(LOAD_ANSWER_PATIENCE),
             "a type answered `No` still loaded: {:?}",
             engine.state()
         );
@@ -2317,9 +2295,14 @@ mod tests {
                     // "No length and no error" is the state before Media
                     // Foundation has answered, so the wait is for one of its two
                     // answers — refused or loaded — on the engine's own
-                    // publications, within the suite's patience.
+                    // publications, within `LOAD_ANSWER_PATIENCE`: past it the
+                    // engine has refused the load itself, so running out is a
+                    // defect and never a race with the refusal.
                     let answered = engine
-                        .state_reaching(|state| state.error.is_some() || state.ready, PATIENCE);
+                        .state_reaching(
+                            |state| state.error.is_some() || state.ready,
+                            LOAD_ANSWER_PATIENCE,
+                        );
                     assert!(
                         answered.error.is_some(),
                         "{} loaded, or was never answered: {answered:?}",
@@ -2350,7 +2333,7 @@ mod tests {
     fn the_verbs_reach_the_engine() {
         let _ledger = ledger_gate();
         let mut engine = Engine::open(&fixture("folio-video-test.mp4")).expect("an engine opens");
-        assert!(engine.wait_for_metadata(Duration::from_secs(10)));
+        assert!(engine.wait_for_metadata(LOAD_ANSWER_PATIENCE));
         engine.set_muted(true);
         engine.set_volume(0.25);
         engine.set_rate(1.5);
@@ -2470,16 +2453,20 @@ mod tests {
     /// `0:00` that never starts. The source here never answers, on a clock the
     /// test moves: the engine says nothing before [`LOAD_BUDGET`] has passed on
     /// that clock, says [`EngineError::NotLoaded`] once it has, and keeps
-    /// saying it — a source that loads after it was refused is still refused.
+    /// saying it — a source that loads after it was refused is still refused,
+    /// and is not published as ready beside the refusal. The decision itself is
+    /// `video_load`'s (`a_load_is_refused_only_past_its_budget_and_for_good`);
+    /// this is the pump that ships reading it.
     ///
-    /// MUTATION: take the deadline out of `Pump::publish_state` and the wait
-    /// for the refusal runs out of `PATIENCE` on a state with no error.
+    /// MUTATION: map `Load::Refused` as `Load::AsSaid` in `Pump::publish_state`
+    /// and the wait for the refusal runs out of `PATIENCE` on a state with no
+    /// error.
     #[test]
     fn a_load_that_never_answers_ends_as_the_engines_refusal_within_its_budget() {
         let opened = Instant::now();
         let due = opened + LOAD_BUDGET;
         let script = Script::new(still_loading(), opened);
-        let mut engine = Engine::scripted(script.clone(), due);
+        let mut engine = Engine::scripted(script.clone(), LoadDeadline::from_open(opened));
 
         let waiting = script.turns(&engine, 3);
         assert_eq!(waiting.error, None, "refused at the open: {waiting:?}");
@@ -2513,6 +2500,10 @@ mod tests {
         });
         let after = script.turns(&engine, 2);
         assert_eq!(after.error, Some(EngineError::NotLoaded), "{after:?}");
+        assert!(
+            !after.ready && after.duration_secs.is_none() && after.natural_size.is_none(),
+            "the refusal is the terminal; a late answer is not published beside it: {after:?}"
+        );
         engine.shutdown();
     }
 
@@ -2542,9 +2533,9 @@ mod tests {
                 },
                 opened + LOAD_BUDGET,
             );
-            // Due at the open: a source that were not ready would be refused on
-            // the pump's first look.
-            let mut engine = Engine::scripted(script.clone(), opened);
+            // The clock already at the deadline: a source that were not ready
+            // would be refused on the pump's first look.
+            let mut engine = Engine::scripted(script.clone(), LoadDeadline::from_open(opened));
             let loaded = script.turns(&engine, 3);
             assert_eq!(loaded.error, None, "{duration}: {loaded:?}");
             assert!(loaded.ready, "{duration}: {loaded:?}");
@@ -2562,7 +2553,7 @@ mod tests {
             },
             opened,
         );
-        let mut engine = Engine::scripted(script.clone(), opened);
+        let mut engine = Engine::scripted(script.clone(), LoadDeadline::from_open(opened));
         let known = script.turns(&engine, 2);
         assert_eq!(known.length(), Length::Known(5.0), "{known:?}");
         engine.shutdown();
