@@ -708,7 +708,11 @@ impl OpenPages {
         window: winit::window::WindowId,
         place: Place,
     ) {
-        self.places.insert(asker, (window, place));
+        let earlier = self.places.insert(asker, (window, place));
+        debug_assert!(
+            earlier.is_none(),
+            "one cache stands in one place: {asker:?} was already standing at {earlier:?}"
+        );
     }
 
     /// **The window and the host the cache `asker` is reached under now**, or `None` when no open
@@ -1862,6 +1866,66 @@ mod tests {
         );
         assert!(
             matches!(&sunk[0].1, Terminal::Done(GitAnswer::Write { paths, .. }) if paths == &["浮窗 float-7.md"]),
+            "with git's own receipt"
+        );
+    }
+
+    /// RED (T-GIT-RECEIPTS-FOLLOW-A-MOVED-HOST round 2) — **A column closed inside a tab that
+    /// stays open has its receipt sunk; the column beside it in the same tab takes its own.**
+    ///
+    /// Two Files columns stand in tab 1 — seat 1 and seat 2, each with its own cache — and each
+    /// stages a file (`左栏 left.md`, `右栏 right.md`). Seat 1 is closed before the drain while the
+    /// tab stays open: no surface holds its cache, so its receipt reaches the sink, once, with
+    /// git's own receipt, and seat 2's receipt is addressed to seat 2.
+    ///
+    /// MUTATION: in `OpenPages::resolve`, find the place by the asked host's tab instead of the
+    /// cache's identity — seat 1's receipt is taken for the column still standing in its tab, and
+    /// the sink records nothing.
+    #[test]
+    fn a_column_closed_in_a_tab_that_stays_open_has_its_receipt_sunk() {
+        let mut lane = watched(Executor::scripted(Arc::new(Gate::default())));
+        let mut closed_cache = files_view_cache();
+        let mut open_cache = files_view_cache();
+        let seat = |n: u64| LeafId {
+            tab: TabId(1),
+            seat: SeatId(n),
+        };
+        let stage = |cache: &mut git::GitCache, n: u64, path: &str| {
+            let question = cache
+                .begin_write(GitWriteVerb::Stage, vec![path.to_owned()])
+                .expect("the row's write is built");
+            asked_by(cache, GitHost::Column(seat(n)), question)
+        };
+        let closed = lane
+            .lane
+            .ask_through(stage(&mut closed_cache, 1, "左栏 left.md"), through)
+            .expect("admitted");
+        let live = lane
+            .lane
+            .ask_through(stage(&mut open_cache, 2, "右栏 right.md"), through)
+            .expect("admitted");
+        // Seat 1 closes; its cache goes with it, and tab 1 stays open.
+        drop(closed_cache);
+        let open = standing(&open_cache, Place::Column(seat(2)));
+        let response = delivered(&mut lane, live, &open);
+        assert_eq!(
+            response.host,
+            GitHost::Column(seat(2)),
+            "the column still standing takes its own"
+        );
+        assert!(open_cache.accept(response.answer));
+        lane::wait_until("the closed column's receipt in the sink", || {
+            lane.lane.ended(|request| open.gone(request));
+            !lane.sunk().is_empty()
+        });
+        let sunk = lane.sunk();
+        assert_eq!(
+            sunk.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            [closed],
+            "the closed column's receipt reaches the sink, once"
+        );
+        assert!(
+            matches!(&sunk[0].1, Terminal::Done(GitAnswer::Write { paths, .. }) if paths == &["左栏 left.md"]),
             "with git's own receipt"
         );
     }

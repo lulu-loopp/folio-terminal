@@ -701,6 +701,19 @@ impl Runtime<'_> {
         name: String,
         renamed_from: Option<String>,
     ) -> Result<()> {
+        let active = self.window.active_tab;
+        let tab_id = self.window.tabs[active].id;
+        // The page the row was pressed on is the asker: its rows are drawn from
+        // this cache, so a column with no cache has no row to have pressed.
+        // Read before the document is opened, so no buffer waits on a question
+        // that is never asked.
+        let Some(asker) = self.window.tabs[active]
+            .git_trees
+            .get(&seat)
+            .map(git::GitCache::id)
+        else {
+            return Ok(());
+        };
         let Some(surface) = self.preview_landing_surface() else {
             return Ok(());
         };
@@ -713,17 +726,6 @@ impl Runtime<'_> {
             return Ok(());
         }
         let Some(question) = git_document_question(&source, renamed_from) else {
-            return Ok(());
-        };
-        let active = self.window.active_tab;
-        let tab_id = self.window.tabs[active].id;
-        // The page the row was pressed on is the asker: its rows are drawn from
-        // this cache, so a column with no cache has no row to have pressed.
-        let Some(asker) = self.window.tabs[active]
-            .git_trees
-            .get(&seat)
-            .map(git::GitCache::id)
-        else {
             return Ok(());
         };
         if !self.app.git_worker.request(git::GitRequest {
@@ -1820,6 +1822,19 @@ impl Runtime<'_> {
         name: String,
         renamed_from: Option<String>,
     ) -> Result<()> {
+        let index = self.preview_tab_index(from);
+        let tab_id = self.window.tabs[index].id;
+        // The graph the row was pressed on is the asker: its rows are drawn from
+        // this cache, so a tab with no graph on `root` has no row to have pressed.
+        // Read before the document is opened, so no buffer waits on a question
+        // that is never asked.
+        let Some(asker) = self.window.tabs[index]
+            .git_graphs
+            .get(root)
+            .map(|state| state.cache.id())
+        else {
+            return Ok(());
+        };
         let Some(landing) = self.preview_landing_surface() else {
             return Ok(());
         };
@@ -1832,17 +1847,6 @@ impl Runtime<'_> {
             return Ok(());
         }
         let Some(question) = git_document_question(&source, renamed_from) else {
-            return Ok(());
-        };
-        let index = self.preview_tab_index(from);
-        let tab_id = self.window.tabs[index].id;
-        // The graph the row was pressed on is the asker: its rows are drawn from
-        // this cache, so a tab with no graph on `root` has no row to have pressed.
-        let Some(asker) = self.window.tabs[index]
-            .git_graphs
-            .get(root)
-            .map(|state| state.cache.id())
-        else {
             return Ok(());
         };
         if !self.app.git_worker.request(git::GitRequest {
@@ -4112,6 +4116,20 @@ impl Runtime<'_> {
         name: String,
         renamed_from: Option<String>,
     ) -> Result<()> {
+        let tab = self.window.tabs[self.window.active_tab].id;
+        // The window's page is the asker: the row was pressed on its cache, and
+        // a window that is not live with a Files view has no row to have pressed.
+        // Read before the document is opened, so no buffer waits on a question
+        // that is never asked.
+        let Some(asker) = self
+            .window
+            .float
+            .live(id)
+            .and_then(float::FloatWin::files)
+            .map(|files| files.git.id())
+        else {
+            return Ok(());
+        };
         let Some(surface) = self.preview_landing_surface() else {
             return Ok(());
         };
@@ -4124,18 +4142,6 @@ impl Runtime<'_> {
             return Ok(());
         }
         let Some(question) = git_document_question(&source, renamed_from) else {
-            return Ok(());
-        };
-        let tab = self.window.tabs[self.window.active_tab].id;
-        // The window's page is the asker: the row was pressed on its cache, and
-        // a window that is not live with a Files view has no row to have pressed.
-        let Some(asker) = self
-            .window
-            .float
-            .live(id)
-            .and_then(float::FloatWin::files)
-            .map(|files| files.git.id())
-        else {
             return Ok(());
         };
         if !self.app.git_worker.request(git::GitRequest {

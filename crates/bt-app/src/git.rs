@@ -1041,13 +1041,16 @@ impl GitResponse {
     /// keeps the window routing it already had rather than being pressed into the
     /// `TabId` branch. It holds for the float's two *document* answers too, even
     /// though those land in a tab's pool: a diff asked from a float and answered
-    /// after the tab it recorded has been carried into another window is
-    /// dropped, which is the same cancellation a float dismissed mid-read
-    /// already was.
+    /// after the tab it recorded has been carried into another window is not
+    /// claimed by any window.
     ///
-    /// Read off the address the drain gave the answer: a page's answer names
-    /// where its cache stands now, so a Files view docked or popped out while
-    /// git ran is claimed by the window or the tab it stands in.
+    /// Read off the address the drain gave the answer
+    /// (`git_mutation_lane::OpenPages::address`): a page's answer names where
+    /// its cache stands now, so a Files view docked or popped out while git ran
+    /// is claimed by the window or the tab it stands in. Whether the asker is
+    /// still there at all — a float dismissed mid-read, a column closed — is
+    /// the drain's to decide, by the cache's identity, before any window is
+    /// asked; an answer whose cache is gone never reaches one.
     pub fn owner(&self) -> crate::AnswerOwner {
         owner_of(self.window, &self.host)
     }
