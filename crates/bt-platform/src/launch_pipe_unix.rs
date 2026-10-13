@@ -100,9 +100,14 @@ pub const MAX_FRAME_BYTES: usize = 256 * 1024;
 pub const HANDOVER_BUDGET: Duration = Duration::from_secs(2);
 
 /// How long the server holds one connection open waiting for a step of the
-/// conversation, and how long step 5 waits for the confirmation. A client that
-/// read the reply confirms in microseconds; a client that does not is a client
-/// whose launch is **not committed** (§7.59b).
+/// conversation, how long step 5 waits for the confirmation, and how long a
+/// refused peer is held until its first move ([`answer`]). A client that read
+/// the reply confirms in microseconds; a client that does not is a client whose
+/// launch is **not committed** (§7.59b). The same bound fits the third use
+/// because a client's first move follows its connect by a few local syscalls —
+/// the peer read and the image lookup — and nothing that waits. 250 ms is a
+/// rationale (orders of magnitude over those steps, short beside
+/// [`HANDOVER_BUDGET`]), not a measurement.
 const STEP_DEADLINE: Duration = Duration::from_millis(250);
 
 /// **The client's one word back**, and the whole of step 4's second half. A
@@ -863,7 +868,8 @@ mod tests {
                 Step::OutwaitedFirstMove,
                 Step::Closed
             ],
-            "a refused peer is asked, not listened to, and its end is closed only after its              first move"
+            "a refused peer is asked, not listened to, and its end is closed only after its \
+             first move"
         );
         assert!(committed.is_empty(), "and nothing is committed for it");
 

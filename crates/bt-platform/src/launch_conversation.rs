@@ -13,8 +13,9 @@
 
 use std::io;
 
-/// **One connected end of the launch wire, as the client sees it** — the three things the
-/// conversation does with the transport, and nothing about how the transport does them.
+/// **One connected end of the launch wire, at either end** — the three things a conversation does
+/// with the transport, and nothing about how the transport does them. The client's conversation
+/// ([`hand_over_on`]) needs these three; the Unix server's extends them with one more.
 pub(crate) trait Connection {
     /// The process at the other end, if it is a Folio of this user — its id as the kernel names
     /// it, never a number out of a frame — or the refusal that says why it is not.

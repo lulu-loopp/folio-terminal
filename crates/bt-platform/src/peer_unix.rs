@@ -188,6 +188,16 @@ mod tests {
         Ok(Some(std::process::id()))
     }
 
+    /// **A scratch directory removed when it is dropped** — after the test, and
+    /// on a red assertion's unwinding too.
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// **PIN (T-LAUNCH-WIRE-PEER-READ) — what each kernel still answers about a
     /// peer that has closed its end.**
     ///
@@ -199,9 +209,9 @@ mod tests {
     /// question is asked, deliberately.
     #[test]
     fn what_the_kernel_still_answers_after_the_peer_has_closed() {
-        let directory = bt_testpath::temp_path("peer-closed 对端");
-        std::fs::create_dir_all(&directory).expect("make the scratch directory");
-        let path = directory.join("s");
+        let directory = Scratch(bt_testpath::temp_path("peer-closed 对端"));
+        std::fs::create_dir_all(&directory.0).expect("make the scratch directory");
+        let path = directory.0.join("s");
         let listener = UnixListener::bind(&path).expect("bind a socket");
         let client = UnixStream::connect(&path).expect("connect to it");
         let (server, _) = listener.accept().expect("accept the connection");
@@ -225,7 +235,5 @@ mod tests {
             the_pid_once_the_peer_has_closed(),
             "the peer's process, asked after it has closed"
         );
-        drop(client);
-        let _ = std::fs::remove_dir_all(&directory);
     }
 }
