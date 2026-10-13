@@ -516,7 +516,7 @@ impl KeybindingsPass {
 
     /// **Whether this pass, or the cancelled quit it puts in force, took `action`'s
     /// departure from the file** — a refusal of it is the file's line not applied.
-    fn from_the_file(&self, action: &str) -> bool {
+    fn took_from_the_file(&self, action: &str) -> bool {
         self.about
             .from_the_file
             .iter()
@@ -593,7 +593,7 @@ pub(crate) fn run_pass(window: &mut impl KeybindingsWindow) -> PassOutcome {
     };
     let (table, faults) = read_keybindings(&pass.document, pass.platform);
     for fault in faults {
-        if pass.from_the_file(&fault.id) {
+        if pass.took_from_the_file(&fault.id) {
             pass.refused.push((name(&table, &fault.id), fault.reason));
         }
     }

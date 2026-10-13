@@ -65,11 +65,11 @@ const FOLDER: &str = r"C:\项目 folio";
 /// every write**: each stays owed — in memory, not in its file.
 fn press_all_four_and_refuse(rig: &mut StoragePassRig) {
     assert!(rig.settings.store(settings_with(ThemeModeV1::Light)));
+    assert!(rig.keybindings.store(vec![binding("zoom-pane", "Ctrl+i")]));
     assert!(
-        rig.keybindings
-            .store(vec![binding("zoom-pane", "Ctrl+i")])
+        rig.profiles
+            .store(profiles_of(&[row("a", "甲 我们的 Ours")]))
     );
-    assert!(rig.profiles.store(profiles_of(&[row("a", "甲 我们的 Ours")])));
     assert!(
         !rig.pins.toggle(PinKind::Folder, FOLDER),
         "the pin is taken off"
@@ -171,7 +171,10 @@ fn a_checkout_of_all_four_files_is_four_merges_and_one_notice() {
         quiet_after.push(at - Duration::from_micros(400) + watch_clock::WATCH_QUIET);
     }
     *clock.lock().unwrap() = at;
-    listener(&root, bt_platform::DirChange::Named(&[OsString::from(".git")]));
+    listener(
+        &root,
+        bt_platform::DirChange::Named(&[OsString::from(".git")]),
+    );
 
     // The loop's turns: the watch at each document's own quiet instant, the
     // read answers each on a turn of its own.
