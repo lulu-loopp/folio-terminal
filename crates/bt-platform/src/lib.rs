@@ -8787,6 +8787,10 @@ pub mod hotkey;
 /// platform — the one owner both `video` arms read and move.
 mod engine_ledger;
 
+/// A playback engine's load — its budget, the length's three readings and the
+/// deadline's decision — with one owner for both `video` arms.
+mod video_load;
+
 /// The first frame of a video, out of Media Foundation — see the module's own
 /// note for the apartment it runs in and for why the set of files it can draw is
 /// not the set that could be played.

@@ -276,6 +276,12 @@ pub mod engine {
     pub const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
     /// How long opening a source may take.
     pub const OPEN_BUDGET: Duration = Duration::from_secs(5);
+    /// The load's budget and the length's readings are one owner's for both
+    /// arms.
+    #[cfg(any(test, feature = "trust-harness"))]
+    #[doc(hidden)]
+    pub use crate::video_load::LOAD_ANSWER_PATIENCE;
+    pub use crate::video_load::{LOAD_BUDGET, Length};
     /// How long shutting one down may take.
     pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);
 
@@ -293,12 +299,17 @@ pub mod engine {
         Unsupported,
         /// Something else went wrong, and it says what.
         Other(&'static str),
+        /// **The engine's own refusal**: the source said neither what it is
+        /// nor why it could not be opened within [`LOAD_BUDGET`] of the open.
+        NotLoaded,
     }
 
     /// What the engine is doing right now. See the module note.
     #[derive(Clone, Copy, Debug, Default, PartialEq)]
     pub struct EngineState {
-        /// How long the video is, or `None` before the metadata has arrived.
+        /// How long the video is, or `None` before the metadata has arrived and
+        /// for a source that declares no length. The two `None`s are told apart
+        /// by [`Self::ready`], and [`Self::length`] is that reading.
         pub duration_secs: Option<f64>,
         /// Where the playhead is, in seconds from the start.
         pub position_secs: f64,
@@ -321,6 +332,14 @@ pub mod engine {
         /// Whether this source has a picture at all.
         pub has_video: bool,
         pub has_audio: bool,
+    }
+
+    impl EngineState {
+        /// **What this state says about the source's length** — see [`Length`].
+        #[must_use]
+        pub fn length(&self) -> Length {
+            Length::of(self.duration_secs, self.ready)
+        }
     }
 
     /// One frame on its way to the renderer. See the module note.
