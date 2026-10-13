@@ -470,9 +470,11 @@ owned by the tab's preview pool, holds the content, the revision, the
 incarnation, the encoding and line-ending facts, the undo log, and the disk
 baseline; the dirty dot is simply the undo log's position at the last save. The
 caret (`preview_edit::EditCaret`, seated by `preview_live::CaretSeat`) belongs to
-the **view**. `PreviewBuffer::save` compares the recorded modified time against
-the file and, on disagreement, **writes nothing** and answers a conflict — the
-edits survive and the foot says so. A rename moves the buffer's identity onto the
+the **view**. A save is a request on the storage worker
+(`PreviewBuffer::request_save`, S-6a), conditional on the file's exact bytes as
+the buffer last read or wrote them; when the file holds others it **writes
+nothing** — or, when they crossed the save itself, puts them back — and answers
+a conflict: the edits survive and the foot says so. A rename moves the buffer's identity onto the
 new path; the new suffix changes the view but cannot take back the content sniff.
 On a rendered page **every block the selection touches is drawn as source, as one
 unbroken run with the caret's own block** (`preview_live::source_span`), each in

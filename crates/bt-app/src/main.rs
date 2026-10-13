@@ -13323,6 +13323,12 @@ struct App {
     /// two `AppEvent`s are separate: a directory read and a file read are both
     /// disk questions but they are not each other's queue, and a preview of a
     /// large file must not be what a tree waits behind to draw its next row.
+    /// **The preview's saves on the storage worker**, each owed its answer
+    /// (S-6a): every interactive save is a request on the one storage worker the
+    /// four hand-editable documents write through, heard on
+    /// `AppEvent::DocumentsAnswered` by the buffer that asked, in whichever
+    /// window its tab now stands.
+    preview_saves: preview::PreviewSaves,
     preview_worker: preview::PreviewWorker,
     preview_worker_running: bool,
     preview_worker_notice_pending: bool,
@@ -46685,6 +46691,7 @@ impl Runtime<'_> {
             files_worker_notice_pending: false,
             file_index_worker,
             file_indexes: palette_index::FileIndexes::default(),
+            preview_saves: preview::PreviewSaves::on(session_store.lane()),
             preview_worker,
             preview_worker_running: true,
             preview_worker_notice_pending: false,
@@ -67044,6 +67051,7 @@ impl FolioApp {
     /// the storage pass's are. With no window standing the answers wait in their
     /// channels for the next wake.
     fn take_document_answers(&mut self) -> Result<()> {
+        self.take_preview_save_answers()?;
         // **Not while a quit holds the storage worker** (T-QUIT-DOCUMENTS): its documents and
         // recovery phases take the answers themselves, on the turn this wake brings, and merge
         // without the doors.
@@ -67065,6 +67073,37 @@ impl FolioApp {
             return runtime.take_document_answers();
         }
         Ok(())
+    }
+
+    /// **The storage worker's answers about preview saves** (S-6a): each heard by
+    /// the buffer that asked, in whichever standing window its tab is in now
+    /// (`Runtime::hear_preview_saves`); an answer no buffer is waiting for — its
+    /// tab, pane or edits gone, or its window leaving — goes to the sink,
+    /// recorded and then ignored (C6). Not held back by a quit: these answers are
+    /// the buffers', and the quit's documents phase takes only the stores'.
+    fn take_preview_save_answers(&mut self) -> Result<()> {
+        let Some(mut answers) = self.app.as_mut().map(App::take_preview_save_answers) else {
+            return Ok(());
+        };
+        if answers.is_empty() {
+            return Ok(());
+        }
+        // Every standing window hears its buffers' answers whatever another
+        // window's repaint answered, and every answer taken is ended — heard,
+        // or sunk — before the first error is passed on (C6).
+        let mut first_error = None;
+        for index in 0..self.windows.len() {
+            if let Some(mut runtime) = self.runtime_at(index)
+                && runtime.window.leaving.is_none()
+                && let Err(error) = runtime.hear_preview_saves(&mut answers)
+            {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Some(app) = self.app.as_mut() {
+            app.sink_preview_save_answers(answers);
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     fn announce_recovered_edits(&mut self) -> Result<()> {
@@ -73069,8 +73108,8 @@ mod floated_page_tests {
     /// false; }` back at the top of `preview_is_editable` and the source-reading
     /// assertion fails — which on screen is the defect verbatim. RED GATE ②:
     /// drop the same question from `page_with_the_keyboard` and block ② fails.
-    /// RED GATE ③: make `PreviewBuffer::save` write in place instead of
-    /// atomically, or stop `refresh_preview_file` reloading pages, and block ③
+    /// RED GATE ③: make the save's request (`PreviewBuffer::request_save`) write
+    /// nothing, or stop `refresh_preview_file` reloading pages, and block ③
     /// fails.
     #[test]
     fn the_source_face_of_a_page_is_the_editor_and_a_save_reloads_the_page() {
@@ -73107,7 +73146,11 @@ mod floated_page_tests {
             text.push_str("<p>two</p>\n");
             true
         }));
-        assert_eq!(buffer.save(), SaveOutcome::Saved);
+        let mut saves = crate::test_support::a_save_desk();
+        assert_eq!(
+            crate::test_support::save_through(&mut buffer, &mut saves),
+            Some(SaveOutcome::Saved)
+        );
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "<p>one</p>\n<p>two</p>\n",

@@ -61,8 +61,10 @@
 //! latest-value lane on [`Coalescing`], the computation lane (`computation_lane`, S-8), three
 //! first-in-first-out shares on [`Queue`], each with its own ledger, and the git mutation lane
 //! (`git_mutation_lane`), a first-in-first-out share on [`Queue`] per repository; each adapter
-//! hands its real lane a scripted [`Executor`], and every lane keeps every claim. S-6a (the
-//! storage worker) and S-7 (the clipboard) each move one more onto it, the same way.
+//! hands its real lane a scripted [`Executor`], and every lane keeps every claim. S-7 (the
+//! clipboard) moves one more onto it, the same way. The storage worker is not on it: its requests
+//! end once through their own answer channels and the worker's end (`persist`'s `WorkerEnd`), and
+//! its move onto the seam is T-STORAGE-WORKER-ON-THE-SEAM (`docs/plans/structural-debt.md` D-97).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -98,10 +100,10 @@ pub(crate) enum Terminal<Id, T, E> {
         not(test),
         expect(
             dead_code,
-            reason = "T-DOCUMENT-SAVE-LANE until 2026-11-30: no lane on the seam cancels a \
-                      request yet; the contract's terminal set keeps it (C2), and the storage \
-                      worker's document saves (S-6a) are the first lane that may drop one at its \
-                      requester's word"
+            reason = "T-STORAGE-WORKER-ON-THE-SEAM until 2026-12-31: no lane on the seam \
+                      cancels a request yet; the contract's terminal set keeps it (C2), and the \
+                      storage worker, once on the seam, is the first lane that may drop one at \
+                      its requester's word"
         )
     )]
     Cancelled,
