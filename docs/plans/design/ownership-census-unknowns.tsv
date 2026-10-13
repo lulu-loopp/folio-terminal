@@ -19,43 +19,24 @@ site	module	function	reason	sites
 ?.files	crate::shell_integration::profile_runtime	operate_with	call `extend` through a receiver that does not resolve: `discover` is not a function the workspace declares	2
 ?.git_scroll	crate::runtime::git	Runtime::push_float_git_page	assign through a receiver that does not resolve: what `and_then` returns	1
 ?.git_scroll	crate::runtime::git	Runtime::scroll_float_git_page	assign through a receiver that does not resolve: what `and_then` returns	1
-?.ime_active	crate	FolioApp::on_window_event	assign through a receiver that does not resolve: `hang_watch::during`	1
-?.ime_cursor	crate	FolioApp::on_window_event	call `reset` through a receiver that does not resolve: `hang_watch::during`	1
 ?.integration	crate::profiles	compose_on	assign through a receiver that does not resolve: the value of a block, a branch or a loop	1
-?.key_hint	crate	FolioApp::on_window_event	call `hide` through a receiver that does not resolve: `hang_watch::during`	1
 ?.leaving	crate	FolioApp::windows_left_after	call `is_none` through a receiver that does not resolve: a closure parameter without a type	1
-?.modifiers	crate	FolioApp::on_window_event	assign through a receiver that does not resolve: `hang_watch::during`	1
-?.modifiers_held	crate	FolioApp::on_window_event	assign through a receiver that does not resolve: `hang_watch::during`	1
 ?.pinned	crate::profiles	apply_pins	assign through a receiver that does not resolve: the value of a block, a branch or a loop	1
 ?.preview_panes	crate::runtime::panes	Runtime::seats_wearing_a_play_button	call `get` through a receiver that does not resolve: the value of a block, a branch or a loop	1
 ?.preview_panes	crate::runtime::preview	Runtime::request_revived_previews	call `iter` through a receiver that does not resolve: a closure parameter without a type	1
 ?.program	crate::profiles	compose_on	assign through a receiver that does not resolve: the value of a block, a branch or a loop	1
-?.quake	crate	FolioApp::on_window_event	call `is_showing` through a receiver that does not resolve: `hang_watch::during`	2
-?.quake	crate	FolioApp::on_window_event	call `note_blur` through a receiver that does not resolve: `hang_watch::during`	1
-?.quake	crate	FolioApp::on_window_event	call `press` through a receiver that does not resolve: `hang_watch::during`	1
-?.renderer	crate	rebuild_every_native_surface	a `&mut` lend through a receiver that does not resolve: a closure parameter without a type	1
 ?.seats	crate::runtime::panes	Runtime::seats_wearing_a_play_button	call `preview_seats` through a receiver that does not resolve: the value of a block, a branch or a loop	1
 ?.session	crate::runtime::frame	Runtime::turn	call `resize_finish_deadline` through a receiver that does not resolve: what `flat_map` returns	1
 ?.session	crate::runtime::preview	Runtime::advance_strip_animation	call `status` through a receiver that does not resolve: what `flat_map` returns	1
 ?.sessions	crate	Runtime::trigger_root	call `get` through a receiver that does not resolve: a closure parameter without a type	1
-?.settings_store	crate	FolioApp::on_window_event	call `loaded` through a receiver that does not resolve: `hang_watch::during`	1
-?.tab_clicks	crate	FolioApp::on_window_event	call `interrupt` through a receiver that does not resolve: `hang_watch::during`	1
 ?.tabs	crate	FolioApp::settle_restore_answer	call `iter` through a receiver that does not resolve: iterating _	1
 ?.tabs	crate	Runtime::trigger_rect	call `get` through a receiver that does not resolve: `seats::tab_strip_geometry`	1
 ?.tabs	crate::runtime::peek	Runtime::layout_peek_layer	call `get` through a receiver that does not resolve: `seats::tab_strip_geometry`	1
 ?.tabs	crate::runtime::tabs	Runtime::measure_open_rename	call `get` through a receiver that does not resolve: `seats::tab_strip_geometry`	1
 ?.tabs	crate::runtime::tabs	Runtime::measure_open_rename	call `get` through a receiver that does not resolve: a closure parameter without a type	1
 ?.tabs	crate::runtime::windows	Runtime::open_window	call `clone` through a receiver that does not resolve: a closure parameter without a type	1
-?.taskbar_flash	crate	FolioApp::on_window_event	assign through a receiver that does not resolve: `hang_watch::during`	1
 ?.title	crate::runtime::preview	Runtime::dress_preview_head	call `clone` through a receiver that does not resolve: what `map` returns	1
 ?.title	crate::seats	rail_chrome	call `clone` through a receiver that does not resolve: iterating _	1
 ?.title	crate::seats	window_tab_strip	call `clone` through a receiver that does not resolve: iterating _	2
 ?.title	crate::shortcuts	Shortcuts::editor_rows	call `text` through a receiver that does not resolve: a closure parameter without a type	1
 ?.web	crate	FolioApp::about_to_wait_inner	call `is_empty` through a receiver that does not resolve: a closure parameter without a type	1
-?.window	crate	FolioApp::on_window_event	assign through a receiver that does not resolve: `hang_watch::during`	4
-?.window	crate	FolioApp::on_window_event	call `hide` through a receiver that does not resolve: `hang_watch::during`	1
-?.window	crate	FolioApp::on_window_event	call `interrupt` through a receiver that does not resolve: `hang_watch::during`	1
-?.window	crate	FolioApp::on_window_event	call `reset` through a receiver that does not resolve: `hang_watch::during`	1
-?.window	crate	FolioApp::on_window_event	call:mem::take through a receiver that does not resolve: `hang_watch::during`	1
-?.window_close_requested	crate	FolioApp::on_window_event	call:mem::take through a receiver that does not resolve: `hang_watch::during`	1
-WindowRuntime.renderer	crate	Runtime::create	call `init_timings`: `init_timings` on `B::Glass`, whose bounds declare no such method	1
