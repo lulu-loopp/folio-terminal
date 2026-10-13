@@ -156,11 +156,22 @@ pub fn git_not_found() -> &'static str {
 /// moves with it, so the answer is filed wherever that cache stands when the
 /// answer is taken (`git_mutation_lane::OpenPages::resolve`), not where it
 /// stood when it asked.
+///
+/// **And, for a document, the buffer opened for it** ([`Self::buffer`]): a
+/// diff, a file at a commit or a diff between two commits is not the page's —
+/// the page has no slot for one — but the preview buffer's that the press
+/// opened, so that buffer is who waits for it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitRequest {
     pub window: WindowId,
     pub host: GitHost,
     pub asker: GitCacheId,
+    /// **The preview buffer this question is asked for**, when it is a
+    /// document's (T-GIT-DOCUMENT-GATED-BY-POOL): its answer is filed into that
+    /// buffer wherever it is kept when the answer is taken — whichever tab's
+    /// pool holds it by then, or the hover card's slot — and nowhere else
+    /// (`git_mutation_lane::OpenPages::file`). `None` for a page's question.
+    pub buffer: Option<crate::preview::BufferId>,
     pub question: GitQuestion,
 }
 
@@ -227,11 +238,12 @@ pub enum GitHost {
     /// there. `live_mut` finds the window that asked, and two windows on one
     /// folder never fill in with each other's answers.
     ///
-    /// `tab` is here for the *other* kind of answer this host can receive. Two
-    /// of git's six questions come back as **documents**, and a document goes
-    /// into a pool, which is a tab's (§7.1.3) — so the window records which tab
-    /// was in front when it opened one, because that is the pool the reader is
-    /// looking at it in. It is unused by the five answers that make the page.
+    /// `tab` is the tab that was in front when the window asked: a checkout or
+    /// a ref verb the window ran moves the repository under that tab's columns
+    /// and graph too, and they are read again (`Runtime::apply_git_results`).
+    /// A **document** the window asks for is not filed by it: it goes to the
+    /// preview buffer opened for it ([`GitRequest::buffer`]), in whichever
+    /// tab's pool that buffer is kept by then.
     Float { id: u64, tab: crate::TabId },
 }
 
@@ -1006,11 +1018,29 @@ impl GitQuestion {
 }
 
 impl GitRequest {
-    /// The same question from the same cache: the newer answer makes the older
-    /// worthless. Two caches are two askers wherever they stand — the cache, not
-    /// its place, is who is waiting.
+    /// The same question from the same cache, for the same buffer: the newer
+    /// answer makes the older worthless. Two caches are two askers wherever they
+    /// stand — the cache, not its place, is who is waiting — and two buffers
+    /// are two documents waiting even on one question (a floating Files view
+    /// opening one diff in two tabs' pools): replacing one's question with the
+    /// other's would leave the first buffer waiting for an answer never asked.
     fn same_target(&self, other: &Self) -> bool {
-        self.asker == other.asker && self.question.same_target(&other.question)
+        self.asker == other.asker
+            && self.buffer == other.buffer
+            && self.question.same_target(&other.question)
+    }
+
+    /// **This question's answer, addressed as the question was** — to the
+    /// window, the place, the cache and the buffer it was asked from.
+    #[must_use]
+    pub fn answered(&self, answer: GitAnswer) -> GitResponse {
+        GitResponse {
+            window: self.window,
+            host: self.host.clone(),
+            asker: self.asker,
+            buffer: self.buffer,
+            answer,
+        }
     }
 }
 
@@ -1021,7 +1051,9 @@ impl GitRequest {
 /// `window` and `host` say where the asking cache stood when it asked until the
 /// drain takes the answer; the drain then addresses a page's answer to where
 /// that cache stands now (`git_mutation_lane::OpenPages::address`), so when a
-/// window files it they name the cache's place in that turn.
+/// window files it they name the cache's place in that turn. A document's
+/// answer ([`Self::buffer`]) is not filed as a `GitResponse` at all: the drain
+/// turns it into a [`DocumentAnswer`] addressed to the buffer it was asked for.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitResponse {
     /// The window the asking surface was in — see [`GitRequest::window`].
@@ -1029,20 +1061,20 @@ pub struct GitResponse {
     pub host: GitHost,
     /// The cache that asked — see [`GitRequest::asker`].
     pub asker: GitCacheId,
+    /// The buffer a document was asked for — see [`GitRequest::buffer`].
+    pub buffer: Option<crate::preview::BufferId>,
     pub answer: GitAnswer,
 }
 
 impl GitResponse {
-    /// **Who this answer belongs to** (F1b).
+    /// **Who this answer belongs to** (F1b) — a page's answer; a document's is
+    /// a [`DocumentAnswer`], whose owner is where its buffer is kept.
     ///
     /// A column and a graph belong to their tab and travel with it between
     /// windows. A **float** belongs to the window that minted its epoch, which is
     /// `codex-final.md` §2's instruction read literally: a host that is not a tab
     /// keeps the window routing it already had rather than being pressed into the
-    /// `TabId` branch. It holds for the float's two *document* answers too, even
-    /// though those land in a tab's pool: a diff asked from a float and answered
-    /// after the tab it recorded has been carried into another window is not
-    /// claimed by any window.
+    /// `TabId` branch.
     ///
     /// Read off the address the drain gave the answer
     /// (`git_mutation_lane::OpenPages::address`): a page's answer names where
@@ -1062,6 +1094,45 @@ fn owner_of(window: WindowId, host: &GitHost) -> crate::AnswerOwner {
         GitHost::Column(leaf) => crate::AnswerOwner::Tab(leaf.tab),
         GitHost::Graph { tab, .. } => crate::AnswerOwner::Tab(*tab),
         GitHost::Float { .. } => crate::AnswerOwner::Window(window),
+    }
+}
+
+/// **Where a preview buffer is kept** — the two keepers a git document's buffer
+/// can be in when its answer is taken.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Shelf {
+    /// One tab's pool (§7.1.3). The tab is named and not the window: a tab
+    /// carried into another window takes its pool with it.
+    Pool(crate::TabId),
+    /// One window's hover card ([`crate::preview::GlanceSlot`]): a glance over
+    /// a commit's file never enters a pool.
+    Glance(WindowId),
+}
+
+/// **A document's answer, addressed to the buffer it was asked for**
+/// (T-GIT-DOCUMENT-GATED-BY-POOL) — made by the drain from a [`GitResponse`]
+/// whose [`GitResponse::buffer`] is kept somewhere this turn
+/// (`git_mutation_lane::OpenPages::file`).
+///
+/// The page that asked is not consulted: it may have closed, and the buffer
+/// that was opened for the document is still waiting. A buffer nothing keeps
+/// any more — evicted, its tab closed, its card gone — takes nothing, and the
+/// answer goes to the drain's sink instead.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DocumentAnswer {
+    pub shelf: Shelf,
+    pub buffer: crate::preview::BufferId,
+    pub answer: GitAnswer,
+}
+
+impl DocumentAnswer {
+    /// **Who takes it**: the window whose strip holds the tab whose pool keeps
+    /// the buffer, or the window whose hover card does.
+    pub fn owner(&self) -> crate::AnswerOwner {
+        match self.shelf {
+            Shelf::Pool(tab) => crate::AnswerOwner::Tab(tab),
+            Shelf::Glance(window) => crate::AnswerOwner::Window(window),
+        }
     }
 }
 
@@ -1159,21 +1230,6 @@ pub enum GitAnswer {
         target: String,
         outcome: GitOutcome<()>,
     },
-}
-
-impl GitAnswer {
-    /// **Whether this answer is a document** — a diff, a file at a commit or a
-    /// diff between two commits — which goes to the preview pool of the tab it
-    /// was asked in, keyed by its own source, and never into the cache that
-    /// asked ([`GitCache::accept`] has no slot for one). Every other answer is
-    /// the page's, filed into that cache.
-    #[must_use]
-    pub fn is_document(&self) -> bool {
-        matches!(
-            self,
-            Self::Diff { .. } | Self::Show { .. } | Self::DiffRange { .. }
-        )
-    }
 }
 
 /// An answer or the reason there is none. A plain [`Result`] because that is
@@ -4301,15 +4357,7 @@ impl GitWorker {
                 run_git_worker(request_rx, |request| {
                     turns.question_turn(ctx, request.question.folder(), || {
                         let answer = ask_git(ctx, &request.question);
-                        if response_tx
-                            .send(GitResponse {
-                                window: request.window,
-                                host: request.host.clone(),
-                                asker: request.asker,
-                                answer,
-                            })
-                            .is_ok()
-                        {
+                        if response_tx.send(request.answered(answer)).is_ok() {
                             let _ = proxy.send_event(AppEvent::GitReady);
                         }
                     });
@@ -4927,6 +4975,7 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
             window: winit::window::WindowId::from(1_u64),
             host: GitHost::Column(seat(1)),
             asker,
+            buffer: None,
             question: GitQuestion::Diff {
                 root: PathBuf::from(r"D:\repo"),
                 path: "src/main.rs".to_owned(),
@@ -4961,6 +5010,7 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
             window: winit::window::WindowId::from(1_u64),
             host: GitHost::Column(seat(1)),
             asker,
+            buffer: None,
             question: GitQuestion::Log {
                 root: PathBuf::from(r"D:\repo"),
                 refs: Vec::new(),
@@ -4988,6 +5038,7 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
             window: winit::window::WindowId::from(1_u64),
             host: GitHost::Column(host),
             asker: GitCacheId::mint(),
+            buffer: None,
             question: GitQuestion::Status {
                 root: PathBuf::from(r"D:\repo"),
             },
@@ -5000,6 +5051,63 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
         assert_eq!(served.len(), 2, "an answer is addressed, not broadcast");
     }
 
+    /// RED (T-GIT-DOCUMENT-GATED-BY-POOL) — **one document asked for two
+    /// buffers is two questions; asked twice for one buffer, it is one.**
+    ///
+    /// A floating Files view opens the diff of `说明 notes.md` while tab 1 is in
+    /// front and again after switching to tab 2: one asker, one question, but a
+    /// buffer in each tab's pool, and each buffer waits for its answer. Were the
+    /// second to replace the first while it waited in line, tab 1's buffer
+    /// would say "Loading …" for an answer nobody asks. The same buffer asking
+    /// twice is still coalesced.
+    ///
+    /// MUTATION: leave the buffer out of `GitRequest::same_target` — tab 1's
+    /// question is replaced, and one question is served instead of two.
+    #[test]
+    fn one_document_asked_for_two_buffers_is_two_questions() {
+        let (tx, rx) = mpsc::channel();
+        let asker = GitCacheId::mint();
+        let mut pool = crate::preview::PreviewPool::default();
+        let buffer_in = |pool: &mut crate::preview::PreviewPool| {
+            let source = crate::preview::PreviewSource::GitDiff {
+                root: PathBuf::from("仓库 repo"),
+                path: "说明 notes.md".to_owned(),
+                against: crate::preview::GitDiffAgainst::WorkingTree,
+            };
+            pool.open(source.clone(), "说明 notes.md".to_owned(), &[]);
+            pool.ask_composer(&source)
+        };
+        let first = buffer_in(&mut pool);
+        let mut other_pool = crate::preview::PreviewPool::default();
+        let second = buffer_in(&mut other_pool);
+        let ask = |buffer| GitRequest {
+            window: winit::window::WindowId::from(1_u64),
+            host: GitHost::Float {
+                id: 7,
+                tab: crate::TabId(1),
+            },
+            asker,
+            buffer,
+            question: GitQuestion::Diff {
+                root: PathBuf::from("仓库 repo"),
+                path: "说明 notes.md".to_owned(),
+                against: crate::preview::GitDiffAgainst::WorkingTree,
+                renamed_from: None,
+            },
+        };
+        tx.send(ask(first)).unwrap();
+        tx.send(ask(second)).unwrap();
+        tx.send(ask(second)).unwrap();
+        drop(tx);
+        let mut served = Vec::new();
+        run_git_worker(rx, |request| served.push(request));
+        assert_eq!(
+            served,
+            vec![ask(first), ask(second)],
+            "each buffer's question is served; the repeat for one buffer collapses"
+        );
+    }
+
     /// PIN — a question superseded *while an earlier one is running* is dropped
     /// rather than asked, which is the case the queue exists for.
     #[test]
@@ -5010,6 +5118,7 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
             window: winit::window::WindowId::from(1_u64),
             host: GitHost::Column(seat(1)),
             asker,
+            buffer: None,
             question: GitQuestion::Status {
                 root: PathBuf::from(root),
             },

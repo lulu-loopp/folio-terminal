@@ -1948,6 +1948,10 @@ text_entries! {
     /// A diff with nothing in it, which is not a failure: a commit's reading of
     /// a file it did not touch, or two copies that agree.
     GitDocumentEmpty,
+    /// A diff or a file at a commit whose question nobody will answer — git
+    /// reading stopped, or would not take it — said where "Loading …" would
+    /// stand, with the way back: opening it again asks again.
+    GitDocumentUnanswered,
 
     // ── a drag's landing caption, the two that escaped ─────────────────────
     /// The captions a file row and a folder row earn over a preview seat, beside
@@ -4975,6 +4979,11 @@ impl Text {
             Self::FolderMenuNewTerminal => pick(lang, "New terminal here", "在这里新建终端"),
 
             Self::GitDocumentEmpty => pick(lang, "No changes to show", "没有可显示的改动"),
+            Self::GitDocumentUnanswered => pick(
+                lang,
+                "Not loaded. Open it again to retry",
+                "Not loaded. Open it again to retry", // zh: pending T-GIT-DOCUMENT-GATED-BY-POOL
+            ),
 
             // ── a drag's landing caption ───────────────────────────────────
             Self::DragOpenInPreview => pick(lang, "Open in this preview", "在这个预览里打开"),
@@ -6588,6 +6597,10 @@ impl Text {
         (Self::GitNotRunNotStarted, HostPlatform::MacOs),
         (Self::GitUnfinished, HostPlatform::Windows),
         (Self::GitUnfinished, HostPlatform::MacOs),
+        // zh: pending T-GIT-DOCUMENT-GATED-BY-POOL — a git document whose question nobody will
+        // answer.
+        (Self::GitDocumentUnanswered, HostPlatform::Windows),
+        (Self::GitDocumentUnanswered, HostPlatform::MacOs),
     ];
 }
 

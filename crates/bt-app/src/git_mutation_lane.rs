@@ -685,19 +685,37 @@ pub(crate) enum Place {
     Float(crate::float::FloatId),
 }
 
-/// **Every repository cache the open windows hold, by its identity**, gathered by the window
-/// thread before its drain: each column's, each graph's and each floating Files view's, with the
-/// window it stands in, for every window that is not leaving.
+/// **Every repository cache and every git document's buffer the open windows hold, by its
+/// identity**, gathered by the window thread before its drain: each column's, each graph's and
+/// each floating Files view's cache, with the window it stands in, and each buffer a git document
+/// can be answered into — in a tab's pool or a hover card — with where it is kept, for every
+/// window that is not leaving.
 ///
-/// An answer is owed to the cache that asked ([`git::GitCacheId`]), never to the place it asked
-/// from, so a Files view docked into a column or popped out into a float while git ran is found
-/// where it stands now ([`Self::resolve`]) — the one resolution both the drain's test for a gone
-/// page ([`Self::gone`]) and the filing ([`Self::address`], whose host `apply_git_results` files
-/// by) read. Only a cache no open surface holds is gone: its view was closed, its window
+/// A page's answer is owed to the cache that asked ([`git::GitCacheId`]), never to the place it
+/// asked from, so a Files view docked into a column or popped out into a float while git ran is
+/// found where it stands now ([`Self::resolve`]) — the one resolution both the drain's test for a
+/// gone page ([`Self::gone`]) and the filing ([`Self::address`], whose host `apply_git_results`
+/// files by) read. Only a cache no open surface holds is gone: its view was closed, its window
 /// dismissed or its column pointed at another folder.
+///
+/// A document's answer is owed to the buffer opened for it ([`GitRequest::buffer`]), never to the
+/// page whose row was pressed: it is filed into that buffer wherever it is kept now
+/// ([`Self::file`]) — the pool of whichever tab holds it since a pool merged or a pane carried it
+/// off — even when the page that asked has closed, and goes to the drain's sink when nothing keeps
+/// the buffer any more.
 #[derive(Default)]
 pub(crate) struct OpenPages {
     places: std::collections::BTreeMap<git::GitCacheId, (winit::window::WindowId, Place)>,
+    buffers: std::collections::BTreeMap<crate::preview::BufferId, git::Shelf>,
+}
+
+/// **Where one answer of the read worker goes** ([`OpenPages::file`]).
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum Filed {
+    /// A page's answer, addressed to where its cache stands now.
+    Page(GitResponse),
+    /// A document's answer, addressed to the buffer it was asked for.
+    Document(git::DocumentAnswer),
 }
 
 impl OpenPages {
@@ -715,10 +733,20 @@ impl OpenPages {
         );
     }
 
+    /// The buffer `buffer`, which a git document can be answered into, is kept on `shelf` this
+    /// turn.
+    pub(crate) fn keep(&mut self, buffer: crate::preview::BufferId, shelf: git::Shelf) {
+        let earlier = self.buffers.insert(buffer, shelf);
+        debug_assert!(
+            earlier.is_none(),
+            "one buffer is kept in one place: {buffer:?} was already kept at {earlier:?}"
+        );
+    }
+
     /// **The window and the host the cache `asker` is reached under now**, or `None` when no open
     /// surface holds it. `asked` is where the question was asked from: a floating view keeps the
-    /// tab a document it asked for goes to (`GitHost::Float`'s `tab`), which is the tab the
-    /// question was asked in, wherever the view stood then.
+    /// tab that was in front when it asked (`GitHost::Float`'s `tab`), wherever the view stood
+    /// then.
     pub(crate) fn resolve(
         &self,
         asker: git::GitCacheId,
@@ -745,21 +773,41 @@ impl OpenPages {
         self.resolve(request.asker, &request.host).is_none()
     }
 
-    /// **An answer addressed for the window that files it**, or `None` when the cache that asked
-    /// is gone (the cancellation, arriving as a dropped answer). A page's answer is addressed to
-    /// where its cache stands now. A document ([`GitAnswer::is_document`]) keeps the address it
-    /// was asked under: it is filed into the preview pool of the tab it was asked in, which no
-    /// move of the view changes.
+    /// **A page's answer addressed for the window that files it** — to where its cache stands
+    /// now — or `None` when the cache that asked is gone (the cancellation, arriving as a dropped
+    /// answer).
     pub(crate) fn address(&self, response: GitResponse) -> Option<GitResponse> {
         let (window, host) = self.resolve(response.asker, &response.host)?;
-        if response.answer.is_document() {
-            return Some(response);
-        }
         Some(GitResponse {
             window,
             host,
             ..response
         })
+    }
+
+    /// **Where one answer of the read worker goes.** A document's
+    /// ([`GitResponse::buffer`]) is addressed to the buffer it was asked for, on the shelf that
+    /// keeps it now, whether or not the page that asked is still open; one whose buffer nothing
+    /// keeps goes to `sink` (C6) and is filed nowhere. A page's answer is [`Self::address`]ed.
+    pub(crate) fn file(
+        &self,
+        response: GitResponse,
+        sink: &mut impl FnMut(GitResponse),
+    ) -> Option<Filed> {
+        let Some(buffer) = response.buffer else {
+            return self.address(response).map(Filed::Page);
+        };
+        match self.buffers.get(&buffer) {
+            Some(shelf) => Some(Filed::Document(git::DocumentAnswer {
+                shelf: *shelf,
+                buffer,
+                answer: response.answer,
+            })),
+            None => {
+                sink(response);
+                None
+            }
+        }
     }
 }
 
@@ -781,12 +829,7 @@ pub(crate) fn receipt(terminal: MutationTerminal, request: GitRequest) -> GitRes
             unreachable!("the git mutation lane supersedes and cancels nothing")
         }
     };
-    GitResponse {
-        window: request.window,
-        host: request.host,
-        asker: request.asker,
-        answer,
-    }
+    request.answered(answer)
 }
 
 /// **The receipt a refusal at the door is**: the request's question with [`GitFault::NotRun`] —
@@ -799,12 +842,7 @@ pub(crate) fn refusal(refused: &Refused, request: GitRequest) -> GitResponse {
         Refused::NotStarted(_) => NotRun::NotStarted,
         Refused::TwinEnded => unreachable!("the git mutation lane joins nothing"),
     };
-    GitResponse {
-        answer: git::faulted(&request.question, GitFault::NotRun(why)),
-        window: request.window,
-        host: request.host,
-        asker: request.asker,
-    }
+    request.answered(git::faulted(&request.question, GitFault::NotRun(why)))
 }
 
 /// **A git answer that went through**, for a fake door: the receipt git gives a write or a
@@ -974,6 +1012,7 @@ pub(crate) mod contract_adapter {
                 window: adapter_window(),
                 host: column_of(target),
                 asker,
+                buffer: None,
                 question: GitQuestion::Write {
                     root: PathBuf::from("仓库 repo"),
                     verb: GitWriteVerb::Stage,
@@ -1151,6 +1190,7 @@ mod tests {
             window: WindowId::from(1_u64),
             host: column(tab),
             asker: GitCacheId::mint(),
+            buffer: None,
             question: GitQuestion::Write {
                 root: PathBuf::from(root),
                 verb: GitWriteVerb::Stage,
@@ -1165,6 +1205,7 @@ mod tests {
             window: WindowId::from(1_u64),
             host: column(tab),
             asker: GitCacheId::mint(),
+            buffer: None,
             question: GitQuestion::Checkout {
                 root: PathBuf::from(root),
                 target: target.to_owned(),
@@ -1705,6 +1746,7 @@ mod tests {
             window: moving_window(),
             host,
             asker: cache.id(),
+            buffer: None,
             question,
         }
     }
@@ -1948,15 +1990,10 @@ mod tests {
         };
         cache.mark_pending(&status);
         let asked = asked_by(&cache, float_host(7), status);
-        let answer = GitResponse {
-            window: asked.window,
-            host: asked.host,
-            asker: asked.asker,
-            answer: GitAnswer::Status {
-                root: PathBuf::from("仓库 repo"),
-                outcome: Ok(git::GitStatus::default()),
-            },
-        };
+        let answer = asked.answered(GitAnswer::Status {
+            root: PathBuf::from("仓库 repo"),
+            outcome: Ok(git::GitStatus::default()),
+        });
         let column = LeafId {
             tab: TabId(1),
             seat: SeatId(3),
@@ -1976,51 +2013,153 @@ mod tests {
         );
     }
 
-    /// RED (T-GIT-RECEIPTS-FOLLOW-A-MOVED-HOST, the read side) — **A document asked from a Files
-    /// view keeps the pool it was asked for when the view moves.**
+    /// The diff of `说明 notes.md` against the working tree, in `仓库 repo`.
+    fn notes_diff() -> crate::preview::PreviewSource {
+        crate::preview::PreviewSource::GitDiff {
+            root: PathBuf::from("仓库 repo"),
+            path: "说明 notes.md".to_owned(),
+            against: crate::preview::GitDiffAgainst::WorkingTree,
+        }
+    }
+
+    /// **The press, as `Runtime::open_git_document` makes it**: the diff's buffer opened in
+    /// `pool`, and the question asked by `cache` from `host` for that buffer.
+    fn diff_asked_for_a_buffer(
+        pool: &mut crate::preview::PreviewPool,
+        cache: &git::GitCache,
+        host: GitHost,
+    ) -> GitRequest {
+        let source = notes_diff();
+        pool.open(source.clone(), "说明 notes.md".to_owned(), &[]);
+        let buffer = pool
+            .ask_composer(&source)
+            .expect("a diff opened and not read is asked for");
+        GitRequest {
+            buffer: Some(buffer),
+            ..asked_by(
+                cache,
+                host,
+                git::GitQuestion::Diff {
+                    root: PathBuf::from("仓库 repo"),
+                    path: "说明 notes.md".to_owned(),
+                    against: crate::preview::GitDiffAgainst::WorkingTree,
+                    renamed_from: None,
+                },
+            )
+        }
+    }
+
+    /// git's diff of `说明 notes.md`, as the read worker answers `asked`.
+    fn diff_answered(asked: &GitRequest) -> GitResponse {
+        asked.answered(GitAnswer::Diff {
+            root: PathBuf::from("仓库 repo"),
+            path: "说明 notes.md".to_owned(),
+            against: crate::preview::GitDiffAgainst::WorkingTree,
+            outcome: Ok("@@ -1 +1 @@\n-旧 old line\n+新 new line\n"
+                .as_bytes()
+                .to_vec()),
+        })
+    }
+
+    /// RED (T-GIT-DOCUMENT-GATED-BY-POOL) — **A document's answer fills the buffer that was opened
+    /// for it, though the Files view whose row was pressed has closed and the buffer's pool has
+    /// moved to another tab.**
     ///
-    /// A floating Files view (epoch 7, asked while tab 4 was in front) opens a diff of
-    /// `说明 notes.md` and is docked into column seat 3 of tab 1 before the diff comes. The diff
-    /// is not the cache's: it keeps the address it was asked under, so it is filed into tab 4's
-    /// pool, where its buffer waits — and it is not dropped, because the view that asked is still
-    /// open.
+    /// Column seat 2 of tab 4 presses `说明 notes.md`: its diff's buffer opens in tab 4's pool and
+    /// the question is asked for that buffer. Before git answers, the column closes (no surface
+    /// holds its cache) and tab 4 is merged into tab 1, its pool with it. The answer is addressed
+    /// to the buffer, kept now in tab 1's pool, and filed there: the pane stops saying
+    /// "Loading …" and shows git's text. Nothing reaches the sink.
     ///
-    /// MUTATION: drop the document's early return in `OpenPages::address` — the diff is addressed
-    /// to the column in tab 1, a pool its buffer is not in.
+    /// MUTATION: in `OpenPages::file`, gate a document by its asker (answer `None` when
+    /// `Self::resolve` finds no place for the cache that asked) — the answer is dropped and the
+    /// buffer waits for ever.
     #[test]
-    fn a_document_keeps_the_pool_it_was_asked_for_when_its_view_moves() {
+    fn a_documents_answer_fills_the_buffer_opened_for_it_even_after_its_view_closed() {
         let cache = files_view_cache();
-        let asked_from = GitHost::Float {
-            id: 7,
-            tab: TabId(4),
-        };
-        let answer = GitResponse {
-            window: moving_window(),
-            host: asked_from.clone(),
-            asker: cache.id(),
-            answer: GitAnswer::Diff {
-                root: PathBuf::from("仓库 repo"),
-                path: "说明 notes.md".to_owned(),
-                against: crate::preview::GitDiffAgainst::WorkingTree,
-                outcome: Ok(b"diff".to_vec()),
-            },
-        };
-        let docked = cache;
-        let open = standing(
-            &docked,
-            Place::Column(LeafId {
-                tab: TabId(1),
-                seat: SeatId(3),
+        let mut pool = crate::preview::PreviewPool::default();
+        let asked = diff_asked_for_a_buffer(
+            &mut pool,
+            &cache,
+            GitHost::Column(LeafId {
+                tab: TabId(4),
+                seat: SeatId(2),
             }),
         );
-        let addressed = open
-            .address(answer)
-            .expect("the view that asked is still open");
+        let buffer = asked.buffer.expect("asked for a buffer");
+        // The column closed: no surface holds its cache. Tab 4 was merged into tab 1, and its
+        // pool with it.
+        drop(cache);
+        let mut open = OpenPages::default();
+        open.keep(buffer, git::Shelf::Pool(TabId(1)));
+        let mut sunk = Vec::new();
+        let filed = open.file(diff_answered(&asked), &mut |answer| sunk.push(answer));
+        let Some(Filed::Document(document)) = filed else {
+            panic!("the document's answer is not dropped with the page that asked: {filed:?}");
+        };
         assert_eq!(
-            addressed.host, asked_from,
-            "the document keeps the address it was asked under"
+            document.shelf,
+            git::Shelf::Pool(TabId(1)),
+            "to the pool that keeps it now"
         );
-        assert_eq!(addressed.host.tab(), TabId(4), "and with it its pool");
+        assert_eq!(document.owner(), crate::AnswerOwner::Tab(TabId(1)));
+        let crate::git::GitAnswer::Diff {
+            outcome: Ok(bytes), ..
+        } = document.answer
+        else {
+            panic!("the diff came back as asked");
+        };
+        assert!(pool.answer_composed(document.buffer, Ok(crate::preview::composed_read(&bytes))));
+        let filled = pool.get(&notes_diff()).expect("the buffer is still kept");
+        assert_eq!(
+            *filled.load(),
+            crate::preview::PreviewLoad::Ready,
+            "no longer loading"
+        );
+        assert!(
+            filled
+                .text()
+                .is_some_and(|text| text.contains("+新 new line")),
+            "the pane shows git's text: {:?}",
+            filled.text()
+        );
+        assert!(sunk.is_empty(), "nothing reaches the sink: {sunk:?}");
+    }
+
+    /// RED (T-GIT-DOCUMENT-GATED-BY-POOL; C6) — **A document's answer whose buffer nothing keeps
+    /// any more reaches the sink, once, and is filed nowhere — though the page that asked is open,
+    /// and another buffer of the same document waits in the same pool.**
+    ///
+    /// Column seat 2 of tab 1 opens the diff of `说明 notes.md` and asks for it; the buffer is
+    /// evicted before git answers, and the diff is opened again — a new buffer, with a name of its
+    /// own, asked for separately. The first answer is not that buffer's: the sink takes it, once;
+    /// nothing is addressed to a window, and the page that asked (still open) is not consulted.
+    ///
+    /// MUTATION: in `OpenPages::file`, let a document whose buffer is not kept fall through to
+    /// `Self::address` as a page's answer — it is addressed to the column, and the sink takes
+    /// nothing.
+    #[test]
+    fn a_documents_answer_whose_buffer_is_gone_is_sunk_and_recorded() {
+        let cache = files_view_cache();
+        let column = LeafId {
+            tab: TabId(1),
+            seat: SeatId(2),
+        };
+        let mut evicted = crate::preview::PreviewPool::default();
+        let asked = diff_asked_for_a_buffer(&mut evicted, &cache, GitHost::Column(column));
+        let mut reopened = crate::preview::PreviewPool::default();
+        let asked_again = diff_asked_for_a_buffer(&mut reopened, &cache, GitHost::Column(column));
+        assert_ne!(asked.buffer, asked_again.buffer, "two buffers, two names");
+        let mut open = standing(&cache, Place::Column(column));
+        open.keep(
+            asked_again.buffer.expect("asked for a buffer"),
+            git::Shelf::Pool(TabId(1)),
+        );
+        let answer = diff_answered(&asked);
+        let mut sunk = Vec::new();
+        let filed = open.file(answer.clone(), &mut |answer| sunk.push(answer));
+        assert_eq!(filed, None, "filed nowhere");
+        assert_eq!(sunk, vec![answer], "the sink takes it, once");
     }
 
     /// RED (T-GIT-MUTATIONS round 2, B2) — **A read waits for the verbs owed when it was asked,

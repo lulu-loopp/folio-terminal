@@ -15477,3 +15477,15 @@ Records are never evicted, so they grow with the distinct animated files one win
 
 **Pinned by**
 - `git_mutation_lane::tests::a_column_closed_in_a_tab_that_stays_open_has_its_receipt_sunk`
+
+### 2026-10-13 — A git document is filed into the buffer opened for it, not gated by the page that asked; one nobody will answer says so (T-GIT-DOCUMENT-GATED-BY-POOL)
+
+**What the person sees.** A diff, or a file at a commit, opened from a Git row now fills in even when the Files view or the graph whose row was pressed is closed before git answers, and when its tab is merged into another tab or its pane is carried into one. If Folio's git reading has stopped, a document still waiting says "Not loaded. Open it again to retry" where "Loading…" stood, and pressing its row again asks again. A floating Files view that opens one diff in two tabs gets it in both.
+
+**The rule.** A document's question carries the identity of the preview buffer the press opened for it (`GitRequest::buffer`, a `preview::BufferId` — the buffer's incarnation, kept by the buffer through every move and new for a buffer opened again after an eviction) beside the cache that asked. The drain gathers, besides the caches, every buffer a git document can be answered into — each tab's pool's and each window's hover card's — and `OpenPages::file` addresses a document's answer to the buffer's shelf now (`git::DocumentAnswer`, owned by the tab whose pool keeps it or the window whose card does), without consulting the asker; an answer whose buffer nothing keeps reaches the drain's sink, which ignores it (C6). The window files it by the buffer's name (`PreviewPool::answer_composed`, `GlanceSlot::answer_composed`), never by its source. A buffer asks through one door (`PreviewBuffer::ask_composer`): a document not answered, or answered by nobody, is asked; an answered one is a snapshot and is not. While the read worker is gone, every window settles each buffer still waiting on git (`PreviewLoad::Unanswered`, `Runtime::settle_unanswered_git_documents`), and a press whose question the lane would not take settles at once. The read worker coalesces per asker and per buffer, so one document asked for two buffers is two questions. `GitAnswer::is_document` is gone: an answer asked for a buffer is the buffer's.
+
+**Pinned by**
+- `git_mutation_lane::tests::{a_documents_answer_fills_the_buffer_opened_for_it_even_after_its_view_closed, a_documents_answer_whose_buffer_is_gone_is_sunk_and_recorded}` (replacing `a_document_keeps_the_pool_it_was_asked_for_when_its_view_moves`)
+- `preview::tests::a_buffer_whose_question_was_dropped_says_so_instead_of_loading_for_ever`
+- `git::tests::one_document_asked_for_two_buffers_is_two_questions`
+- `worker_answer_routing_tests::every_lane_names_the_owner_of_its_answer` (a document's owner)

@@ -870,6 +870,25 @@ impl Runtime<'_> {
         self.hide_file_peek()
     }
 
+    /// **A git document's answer, for the card's own buffer** — filed when that
+    /// is the buffer it was asked for (`apply_git_results`); a card that has
+    /// moved on keeps another buffer, and takes nothing. Answers whether it was
+    /// filed.
+    pub(in crate::runtime) fn answer_glanced_git_document(
+        &mut self,
+        buffer: preview::BufferId,
+        answer: Result<preview::HeadOutcome, String>,
+    ) -> bool {
+        self.window.peek_buffer.answer_composed(buffer, answer)
+    }
+
+    /// **Nobody will answer the git document the card is waiting on** — the
+    /// card's half of `Runtime::settle_unanswered_git_documents`. Answers
+    /// whether it was waiting.
+    pub(in crate::runtime) fn settle_glanced_git_document(&mut self) -> bool {
+        self.window.peek_buffer.settle_unanswered()
+    }
+
     /// The intent has matured: read what the card will show (P147).
     ///
     /// **The pool answers first**, and that is P145's "shows the tab's POOL
@@ -941,6 +960,8 @@ impl Runtime<'_> {
         // this window ever shows.
         let mut buffer = preview::PreviewBuffer::glancing(source.clone(), name);
         let wants_read = buffer.claim_head_read();
+        // The card's own buffer is who waits for a git document's answer.
+        let composed = buffer.ask_composer();
         let held = self.window.peek_buffer.put(buffer);
         self.window.peek_pane.show_source(held);
         // **A composed document waits for git and never for a disk.** A glance
@@ -948,8 +969,10 @@ impl Runtime<'_> {
         // `false` for it by construction — so without this the card would sit
         // empty for as long as the hand did. The question is the one the *pane*
         // would ask (`git_document_question`), on the column the glance is over,
-        // and its answer comes home through `apply_git_results`.
+        // and its answer comes home through `apply_git_results` — into this
+        // card's buffer, by its name, or to the sink when the card has moved on.
         if let Some(seat) = git_seat
+            && let Some(buffer) = composed
             && let Some(question) = git_document_question(&source, None)
             && let Some(asker) = self.git_trees.get(&seat).map(git::GitCache::id)
         {
@@ -958,9 +981,11 @@ impl Runtime<'_> {
                 window: self.window_id(),
                 host: git::GitHost::Column(LeafId { tab, seat }),
                 asker,
+                buffer: Some(buffer),
                 question,
             }) {
                 self.disable_git_worker();
+                self.settle_unanswered_git_documents();
             }
             return true;
         }
