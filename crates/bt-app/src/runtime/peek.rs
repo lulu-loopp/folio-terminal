@@ -964,6 +964,24 @@ impl Runtime<'_> {
         if !self.window.video_carried_off_the_card {
             self.window.video.close(PreviewSurface::Peek);
         }
+        // **A card that comes down lets go of what failed for it**, so the next hover over the
+        // same file — the card's own new input — asks again: its file's failed decode and the
+        // resample it was owed. A page it asked about is asked again too (below).
+        if let Some(path) = self
+            .window
+            .file_peek
+            .as_ref()
+            .and_then(|peek| peek.source.file_path())
+        {
+            let key = normalized_local_image_path_key(path);
+            if matches!(
+                self.window.peek_cache.get(&key),
+                Some(PeekCacheEntry::Failed(_))
+            ) {
+                self.window.peek_cache.remove(&key);
+            }
+        }
+        self.window.peek_card_pending = None;
         self.window.file_peek = None;
         // And the hand that was on its head. A press whose card has gone has
         // nothing left to promote, and a promotion that fired afterwards would
@@ -2651,6 +2669,9 @@ impl Runtime<'_> {
     /// (pointer off the span, pointer left, wheel, click, any key).
     pub(in crate::runtime) fn dismiss_peek(&mut self) -> Result<()> {
         self.window.peek_hover.clear();
+        // The next hover is the flyout's new input: a resample still owed — answered late, or
+        // failed on the worker, or never started — is asked again by it rather than waited on.
+        self.window.peek_thumbnail_pending = None;
         self.present_peek_overlay(None)
     }
 

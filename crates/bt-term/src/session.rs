@@ -9345,20 +9345,70 @@ impl DualPlaneSession {
     }
 
     /// **New input reached this session.** Hand-outs resume (a paused hand-out tries its start
-    /// once more). A held task goes back to the head of its queue, in the order it was held, when
-    /// the input could change its answer: a resize or a scroll changes what is laid out and seen,
-    /// so every held task is asked again; output changes only what it wrote, so a held task is
-    /// asked again only if its own content changed ([`Self::held_task_changed`]). A picture whose
-    /// decode failed is therefore not tried again on every batch of a `tail -f`.
+    /// once more). A held task whose own content changed ([`Self::held_task_changed`]) is let go
+    /// as its stale answer would be ([`Self::let_go_stale_task`]): the session's schedulers ask the
+    /// question the new content asks, and the old one is never asked again. A held task still
+    /// current goes back to the head of its queue, in the order it was held, on a resize or a
+    /// scroll — what is laid out and seen moved — and stays held on output that did not touch it.
+    /// A picture whose decode failed is therefore not tried again on every batch of a `tail -f`,
+    /// and a failure about content that has gone is never retried at all.
     fn new_input(&mut self, input: NewInput) {
         self.hand_out_paused = false;
         let held = std::mem::take(&mut self.held_for_new_input);
-        let (asked, still): (Vec<_>, Vec<_>) = held
-            .into_iter()
-            .partition(|task| input == NewInput::Layout || self.held_task_changed(task));
-        self.held_for_new_input = still;
+        let mut asked = Vec::new();
+        for task in held {
+            if self.held_task_changed(&task) {
+                // A question about content that is no longer there: let it go as its stale answer
+                // would, so the session's own schedulers ask the question the content asks now.
+                self.let_go_stale_task(task);
+            } else if input == NewInput::Layout {
+                asked.push(task);
+            } else {
+                self.held_for_new_input.push(task);
+            }
+        }
         for task in asked.into_iter().rev() {
             self.give_back_decoration_worker_task(task);
+        }
+    }
+
+    /// **Let go of a held task its content has moved past**, exactly as its stale completion
+    /// would be let go of: a frozen formula's scan is refused and its candidate re-armed for the
+    /// next quiescent frame; a live formula's scan is refused and its rows re-armed; a picture
+    /// whose occurrence is gone is answered into nothing; a resample's size is no longer owed, so
+    /// the display it is for asks the size it wants now. Nothing is given back: the old question is
+    /// not asked again.
+    fn let_go_stale_task(&mut self, task: SessionDecorationTask) {
+        match task {
+            SessionDecorationTask::Math(task) => match *task {
+                SessionMathTask::Frozen(task) => {
+                    self.complete_worker_result(task, Err(MathRenderError::Aborted));
+                }
+                SessionMathTask::Live(task) => {
+                    self.complete_live_worker_result(task, Err(MathRenderError::Aborted));
+                }
+            },
+            SessionDecorationTask::InlineImage(task) => {
+                self.complete_inline_image_result(
+                    task,
+                    Err(InlineImageDecodeError::Decode(
+                        "the picture is no longer printed".to_owned(),
+                    )),
+                );
+            }
+            SessionDecorationTask::ScaleInlineImage(task) => {
+                self.decoration_work_out
+                    .remove(&DecorationWorkOut::Scale(task.occurrence_id));
+                if let Some(record) = self.inline_images.get_mut(&task.occurrence_id)
+                    && record.display_pending
+                        == Some((task.display_width_px, task.display_height_px))
+                {
+                    record.display_pending = None;
+                }
+            }
+            SessionDecorationTask::VerifyPath(path) => {
+                self.path_verify_in_flight.remove(&path);
+            }
         }
     }
 
@@ -26023,14 +26073,8 @@ mod tests {
         );
     }
 
-    /// RED (S-8 round 3) — **a held live formula is asked again when its own source is rewritten,
-    /// and not by output elsewhere**: a line printed below it leaves it held; the formula's own row
-    /// rewritten gives it back, once.
-    ///
-    /// MUTATION: make `held_task_changed` answer `false` for a live task — the rewrite asks
-    /// nothing.
-    #[test]
-    fn a_held_formula_is_asked_again_when_its_own_source_changes() {
+    /// A pane showing one settled live formula, its scan handed out and held as a failed one.
+    fn a_pane_holding_a_failed_formula() -> DualPlaneSession {
         let start = Instant::now();
         let mut session = DualPlaneSession::new(nz(40), nz(4));
         session
@@ -26046,6 +26090,34 @@ mod tests {
         };
         session.hold_decoration_task_until_new_input(task);
         session
+    }
+
+    /// What a handed-out live formula reads, resolved as the worker resolves it.
+    fn live_source(task: SessionDecorationTask) -> String {
+        let SessionDecorationTask::Math(task) = task else {
+            panic!("a formula");
+        };
+        let SessionMathTask::Live(mut task) = *task else {
+            panic!("a live formula");
+        };
+        assert!(
+            resolve_live_detection_task(&mut task),
+            "the scan finds its formula"
+        );
+        task.span.render_source
+    }
+
+    /// RED (S-8 rounds 3 and 4) — **a held live formula whose own source is rewritten is let go,
+    /// and the question the new source asks is asked**: a line printed below it leaves it held;
+    /// its row rewritten lets the old scan go as a stale answer would (nothing is handed out while
+    /// the row settles), and once the row settles the scan handed out reads the new formula.
+    ///
+    /// MUTATION: give the changed task back instead of letting it go (`give_back_…` for a changed
+    /// task in `new_input`) — the old `x+α` scan is handed out at once.
+    #[test]
+    fn a_held_formula_whose_source_changed_is_let_go_and_the_new_one_asked() {
+        let mut session = a_pane_holding_a_failed_formula();
+        session
             .feed("\r\n\u{65e5}\u{5fd7} log line".as_bytes())
             .unwrap();
         assert!(
@@ -26054,13 +26126,41 @@ mod tests {
         );
         session.feed("\x1b[H$$y+\u{03b2}$$".as_bytes()).unwrap();
         assert!(
-            matches!(
-                session.take_decoration_worker_task(),
-                Some(SessionDecorationTask::Math(_))
-            ),
-            "the formula's own row rewritten asks again"
+            session.take_decoration_worker_task().is_none(),
+            "the old question is let go, and the new one waits for its row to settle"
         );
-        assert!(session.take_decoration_worker_task().is_none(), "once");
+        session.advance_live_stability(Instant::now() + LIVE_MATH_STABLE_INTERVAL);
+        let asked = session
+            .take_decoration_worker_task()
+            .expect("the rewritten row is asked about");
+        let source = live_source(asked);
+        assert!(source.contains('y'), "the new formula is asked: {source}");
+        assert!(!source.contains('x'), "not the old one: {source}");
+    }
+
+    /// RED (S-8 round 4) — **a failed task about content that has gone is never asked again**:
+    /// once the formula's row is rewritten, whatever is handed out and fails again stays held,
+    /// and output that does not touch it asks nothing — no `tail -f` loop.
+    ///
+    /// MUTATION: the round-3 `new_input` (a changed task given back, every output) — the stale
+    /// scan is handed out again on every batch.
+    #[test]
+    fn a_stale_failed_task_asks_nothing_on_later_output() {
+        let mut session = a_pane_holding_a_failed_formula();
+        session.feed("\x1b[H$$y+\u{03b2}$$".as_bytes()).unwrap();
+        if let Some(task) = session.take_decoration_worker_task() {
+            // Handed out, and failed again.
+            session.hold_decoration_task_until_new_input(task);
+        }
+        for line in 0..3 {
+            session
+                .feed(format!("\x1b[4;1H\u{884c} {line}").as_bytes())
+                .unwrap();
+            assert!(
+                session.take_decoration_worker_task().is_none(),
+                "output elsewhere asks nothing"
+            );
+        }
     }
 
     /// RED (S-8 round 3) — **a scroll is new input to a held task**: the reader scrolling the

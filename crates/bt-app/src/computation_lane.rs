@@ -1817,4 +1817,26 @@ mod tests {
         assert!(answer(lane.terminal(Share::Scale, running, nobody)).is_some());
         assert!(answer(lane.terminal(Share::Scale, newer, nobody)).is_some());
     }
+
+    /// RED (S-8 round 4) — **An animation open whose work failed is unanswered, not refused**: a
+    /// refusal is a fact about the file and is kept, while an open that never answered is let go
+    /// by the file's next open, which asks again.
+    ///
+    /// MUTATION: settle a failed open as the decoder's refusal (`PeekAnimation { Err(Undecodable)
+    /// }`, round 3) — it is kept for ever.
+    #[test]
+    fn a_failed_animation_open_is_unanswered_not_refused() {
+        let asked = MathWorkerRequest::PeekAnimation {
+            leaf: probe_leaf(),
+            path: PathBuf::from("不在这里/动图 loading.gif"),
+        }
+        .asked();
+        assert!(
+            matches!(
+                crate::settle_failure(asked),
+                crate::Settled::AnimationUnanswered { path } if path.ends_with("动图 loading.gif")
+            ),
+            "the open is unanswered until the file's next open"
+        );
+    }
 }

@@ -10355,9 +10355,11 @@ impl Runtime<'_> {
             // a container this window has already declined. A decode already in
             // flight is likewise the answer to this open: it will land standing
             // on frame zero.
+            // An unanswered open — its work failed, or its thread could not be started — is no
+            // fact about the file: the new open asks again.
             if matches!(
                 self.window.animations.get(&key),
-                Some(AnimationEntry::Ready { .. })
+                Some(AnimationEntry::Ready { .. } | AnimationEntry::Unanswered)
             ) {
                 self.window.animations.remove(&key);
             }
@@ -10371,18 +10373,24 @@ impl Runtime<'_> {
                 continue;
             }
             let leaf = self.focused_shell_address();
-            if self
+            match self
                 .app
                 .math_worker
                 .decorate(MathWorkerRequest::PeekAnimation {
                     leaf,
                     path: path.clone(),
-                })
-                .is_ok_or_unstarted()
-            {
-                // Asked — or its thread not started, which is asked and failed: no surface asks
-                // again until one begins showing the file anew.
-                self.window.animations.insert(key, AnimationEntry::Pending);
+                }) {
+                Ok(_) => {
+                    self.window.animations.insert(key, AnimationEntry::Pending);
+                }
+                // Its thread not started: asked and unanswered — no redraw asks again, the file's
+                // next open does.
+                Err((crate::lane::Refused::NotStarted(_), _)) => {
+                    self.window
+                        .animations
+                        .insert(key, AnimationEntry::Unanswered);
+                }
+                Err(_) => {}
             }
         }
         // **The refills, over the drawn set and each animation once.** Two

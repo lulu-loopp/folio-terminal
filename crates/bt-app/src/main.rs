@@ -1891,11 +1891,11 @@ enum Asked {
     /// A file's pixels for the window's decode cache (the glance, a preview, a page's picture).
     Pixels { leaf: ShellAddress, path: PathBuf },
     /// An animation opened.
-    Animation { leaf: ShellAddress, path: PathBuf },
+    Animation { path: PathBuf },
     /// An animation's next frames: its decoder went with the request.
     AnimationFill { path: PathBuf, serial: u64 },
-    /// One page of the glance card: it stays counted as asked, so the card asks again when it is
-    /// shown again (a new hover).
+    /// One page of the glance card: it stays counted as asked while the card is up; the card
+    /// coming down lets go of its asked pages (`hide_file_peek`), so the next hover asks again.
     Page,
     /// A preview's formula.
     PreviewMath {
@@ -1903,7 +1903,8 @@ enum Asked {
         key: Box<PreviewMathKey>,
     },
     /// A resample for the glance, a preview or a markdown page: its pending target stays, so the
-    /// surface asks again for a new size (a refit, a resize) or a new hover.
+    /// surface asks again for a new size (a refit, a resize); the card coming down and the flyout's
+    /// dismissal let go of theirs, so the next hover asks again.
     WindowScale,
 }
 
@@ -1918,6 +1919,8 @@ enum Settled {
     },
     /// An animation's fill: its reservation released, the animation standing on its last frame.
     FillLost { path: PathBuf, serial: u64 },
+    /// An animation's open: asked and unanswered, until the file's next open asks again.
+    AnimationUnanswered { path: PathBuf },
     /// Nothing to do: the surface's mark stays and its own new input asks again.
     Nothing,
 }
@@ -1934,12 +1937,14 @@ const DECODE_UNSTARTED: &str = "the decoder could not be started";
 /// - a pane's task is held by its session ([`Settled::Hold`]);
 /// - a pasted picture is a failed decode (`InlineImageDecodeError::Decode`);
 /// - a file's pixels are a failed decode filed in the window's cache (`PeekCacheEntry::Failed`,
-///   the waiting preview panes refusing the picture), which the next settled hover reads again;
-/// - an animation is refused (`AnimationRefusal::Undecodable`) until a surface shows it again;
+///   the waiting preview panes refusing the picture), which the flyout's next settled hover reads
+///   again and the card's coming down lets go of, so its next hover asks again;
+/// - an animation's open is unanswered (`AnimationEntry::Unanswered`): no redraw asks again, and
+///   the file's next open lets go of it and asks;
 /// - an animation's fill releases its reservation, and the animation stands on its last frame;
 /// - a preview formula is refused (`MathRenderError::Aborted`): the page draws its source text,
 ///   and new content is a new formula, asked anew;
-/// - a card page and a resample keep their marks.
+/// - a card page and a resample keep their marks until the surface's next hover (or a new size).
 fn settle_failure(asked: Asked) -> Settled {
     match asked {
         Asked::Pane { leaf, task } => Settled::Hold { leaf, task },
@@ -1967,13 +1972,7 @@ fn settle_failure(asked: Asked) -> Settled {
                 )),
             },
         }),
-        Asked::Animation { leaf, path } => Settled::Answer(MathWorkerResult {
-            leaf,
-            completion: DecorationWorkerCompletion::PeekAnimation {
-                path,
-                frames: Err(animation::AnimationRefusal::Undecodable),
-            },
-        }),
+        Asked::Animation { path } => Settled::AnimationUnanswered { path },
         Asked::AnimationFill { path, serial } => Settled::FillLost { path, serial },
         Asked::PreviewMath { leaf, key } => Settled::Answer(MathWorkerResult {
             leaf,
@@ -2024,10 +2023,7 @@ impl MathWorkerRequest {
                 leaf: *leaf,
                 path: path.clone(),
             },
-            Self::PeekAnimation { leaf, path } => Asked::Animation {
-                leaf: *leaf,
-                path: path.clone(),
-            },
+            Self::PeekAnimation { path, .. } => Asked::Animation { path: path.clone() },
             Self::AnimationFill { path, serial, .. } => Asked::AnimationFill {
                 path: path.clone(),
                 serial: *serial,
@@ -11942,7 +11938,9 @@ fn sort_math_terminals(ended: Vec<computation_lane::Ended>) -> MathAnswers {
             match settle_failure(asked) {
                 Settled::Answer(answer) => answers.done.push(answer),
                 Settled::Nothing => {}
-                settled @ (Settled::Hold { .. } | Settled::FillLost { .. }) => {
+                settled @ (Settled::Hold { .. }
+                | Settled::FillLost { .. }
+                | Settled::AnimationUnanswered { .. }) => {
                     answers.failed.push((owner, settled));
                 }
             }
@@ -32114,12 +32112,17 @@ enum AnimationEntry {
     /// line in the foot of the pane — see [`Runtime::preview_standing_fact`] and
     /// [`animation::AnimationRefusal::is_worth_saying`].
     Refused(animation::AnimationRefusal),
+    /// **Asked, and no answer came**: the open's work failed on the worker, or its thread could
+    /// not be started. Drawn as a refusal is (the picture lane's still, no notice), and — unlike a
+    /// refusal, which is a fact about the file — let go of by the file's next open
+    /// ([`animations_opened`]), which asks again.
+    Unanswered,
 }
 
 impl bt_term::Weighed for AnimationEntry {
     fn bytes_held(&self) -> u64 {
         match self {
-            Self::Pending | Self::Refused(_) => 0,
+            Self::Pending | Self::Refused(_) | Self::Unanswered => 0,
             Self::Ready { animation, .. } => animation.bytes_held(),
         }
     }

@@ -958,6 +958,17 @@ impl Runtime<'_> {
                     normalized_local_image_path_key(&path),
                     serial,
                 ),
+                Settled::AnimationUnanswered { path } => {
+                    let key = normalized_local_image_path_key(&path);
+                    if matches!(
+                        self.window.animations.get(&key),
+                        Some(AnimationEntry::Pending)
+                    ) {
+                        self.window
+                            .animations
+                            .insert(key, AnimationEntry::Unanswered);
+                    }
+                }
                 Settled::Answer(_) | Settled::Nothing => {}
             }
         }

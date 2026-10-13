@@ -1383,12 +1383,14 @@ impl Animation {
         self.in_flight_bytes = 0;
     }
 
-    /// **The fill out for this animation failed**: its cursor went with the request and will not
-    /// come home, so the reservation made for the frames it was ordered ends here — the bytes
-    /// will never exist. With no cursor, no fill is asked again: the animation stands on its last
+    /// **The fill out for this animation failed**: its cursor — and the composition canvas it
+    /// owns — went with the request and will not come home, so the canvas and the reservation made
+    /// for the frames it was ordered both end here: those bytes will never be this process's. With no cursor, no fill is asked again: the animation stands on its last
     /// frame until a surface begins showing the file again and opens a new playback.
     pub fn fill_lost(&mut self) {
         self.in_flight_bytes = 0;
+        // The canvas is the cursor's, and the cursor is gone with the request.
+        self.canvas_bytes = 0;
     }
 
     /// **This animation's first frame is on the glass — start its clock here**
@@ -2190,12 +2192,14 @@ mod tests {
     /// has moved on from changes nothing.
     ///
     /// MUTATION: make `Animation::fill_lost` keep `in_flight_bytes` — the cache overcounts the
-    /// playback for as long as it lives.
+    /// playback for as long as it lives. Or keep `canvas_bytes` — the playback is weighed for a
+    /// canvas no cursor holds any more.
     #[test]
     fn a_failed_fill_releases_its_reservation() {
         const SIDE: u16 = 64;
         let mut animation = decode_bytes(a_gif_of(12, SIDE, 5)).expect("a small capture");
         let parked = animation.bytes_held();
+        let canvas = parked - animation.ring_bytes();
         let (cursor, want) = animation.take_cursor().expect("a ring with room in it");
         assert!(want > 0);
         drop(cursor);
@@ -2220,13 +2224,18 @@ mod tests {
         crate::release_failed_fill(&mut cache, key.clone(), 7);
         assert_eq!(
             cache.bytes_held(),
-            reserved - reservation,
-            "the reservation is released"
+            reserved - reservation - canvas,
+            "the reservation and the canvas are released"
         );
         let Some(crate::AnimationEntry::Ready { animation, .. }) = cache.remove(&key) else {
             panic!("the playback stands");
         };
         let mut animation = animation;
+        assert_eq!(
+            animation.bytes_held(),
+            animation.ring_bytes(),
+            "the canvas went with the cursor: only the frames in the ring are held"
+        );
         assert!(
             animation.take_cursor().is_none(),
             "no fill is asked: the decoder went with the request"
