@@ -1242,7 +1242,21 @@ every request owed to the tab or window that asked and a gone asker's request le
 drain into the lane's ignoring sink, one thread's death observed per share — its own requests
 `WorkerGone` while the other two keep answering — and then the whole feature turned off once,
 with its notice. Each share has an adapter in the suite (`LaneName::Computation`,
-`ComputationScale`, `ComputationPath`). S-6a and
+`ComputationScale`, `ComputationPath`). **The git mutation lane** is built on it
+(T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER, 2026-10-13): a Git page's writes and checkouts left the
+read worker for `bt-app::git_mutation_lane`, one first-in-first-out `lane::Queue` share per
+repository with a ledger and a `bt-git-mutation` worker of its own, made by the repository's first
+press and let go once the window thread holds none of its requests. It keeps the storage rule of
+the table above for git — **serialised per repository**, an identity per verb, every verb's
+outcome kept as its receipt, nothing coalesced — beside the storage worker and not on it: a git
+verb is a command to a program that owns its own files and locks, not a conditional write of bytes
+Folio owns (B6). Its bound is what one Git page can hand it (`MUTATION_BOUND`: a write for each
+status row, `git::GIT_STATUS_CAP`, each held to one in flight, and the page's one checkout); a
+failure, a worker's end and a refusal at the door reach the page as its receipt with
+`GitFault::NotRun`; a closed page's receipt ends in the lane's ignoring sink. The read worker's
+questions take their turn through the lane's `RepoTurns`: a question about a repository runs only
+while its share owes nothing, and a verb starts only while no read of its repository runs, so a
+reading is never taken in the middle of a verb; its adapter is `LaneName::GitMutation`. S-6a and
 S-7 move the storage worker and the clipboard onto the seam (`docs/ARCHITECTURE-GUARDS.md`,
 *Lane contract and the completion seam*).
 **The return rule:** a lane whose

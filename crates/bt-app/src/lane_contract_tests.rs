@@ -25,7 +25,7 @@ use crate::lane::{
 };
 
 /// Every lane's adapter. A lane missing here is a lane [`judge`] reports as skipped.
-fn adapters() -> [Adapter; 7] {
+fn adapters() -> [Adapter; 8] {
     [
         Adapter {
             lane: LaneName::Handoff,
@@ -54,6 +54,10 @@ fn adapters() -> [Adapter; 7] {
         Adapter {
             lane: LaneName::Programs,
             make: crate::programs_lane::contract_adapter::make,
+        },
+        Adapter {
+            lane: LaneName::GitMutation,
+            make: crate::git_mutation_lane::contract_adapter::make,
         },
     ]
 }

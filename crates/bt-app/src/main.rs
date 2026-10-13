@@ -75,6 +75,7 @@ mod foreground_program;
 mod formula_tools;
 mod git;
 mod git_graph;
+mod git_mutation_lane;
 mod git_panel;
 mod git_watch;
 mod glyph_trace;
@@ -13268,6 +13269,11 @@ struct App {
     git_worker: git::GitWorker,
     git_worker_running: bool,
     git_worker_notice_pending: bool,
+    /// **The Git pages' writes and checkouts** (`git_mutation_lane`): a worker
+    /// per repository with verbs owed, each verb run after the one pressed
+    /// before it, and the repository's reads on `git_worker` waiting their turn
+    /// behind them.
+    git_mutations: git_mutation_lane::GitMutationLane,
     /// Whether this Windows knows what a system backdrop is, asked once
     /// (`bt_platform::system_backdrop_available`).
     acrylic_available: bool,
@@ -46120,7 +46126,17 @@ impl Runtime<'_> {
         let files_worker = files::FilesWorker::spawn(proxy.clone())?;
         let file_index_worker = palette_index::IndexWorker::spawn(proxy.clone())?;
         let preview_worker = preview::PreviewWorker::spawn(proxy.clone())?;
-        let git_worker = git::GitWorker::spawn(proxy.clone())?;
+        let git_mutations = git_mutation_lane::GitMutationLane::new(
+            git_mutation_lane::RepoTurns::new(),
+            {
+                let proxy = proxy.clone();
+                move || {
+                    let _ = proxy.send_event(AppEvent::GitReady);
+                }
+            },
+        );
+        let git_worker =
+            git::GitWorker::spawn(proxy.clone(), Arc::clone(git_mutations.turns()))?;
         // **One read per family, and both of the row's facts come out of it**: whether this copy's
         // marks are in that file, and — when the file is one this build will not edit — the reason
         // the row has to say instead of `Off` (closure review R1).
@@ -46156,6 +46172,7 @@ impl Runtime<'_> {
             git_worker,
             git_worker_running: true,
             git_worker_notice_pending: false,
+            git_mutations,
             acrylic_available,
             startup_started,
             trace_startup,
@@ -64765,12 +64782,39 @@ impl FolioApp {
         (batch, gone)
     }
 
-    /// [`Self::drain_preview_answers`] for the repository lane.
+    /// [`Self::drain_preview_answers`] for the repository lanes — the read
+    /// worker's answers and the mutation lane's receipts, in one batch.
+    ///
+    /// **The receipts are taken first and filed last.** A read of a repository
+    /// sends its answer before any later mutation of it can start
+    /// (`git_mutation_lane::RepoTurns`), so every read answer older than a
+    /// receipt taken here is already in the channel when the channel is drained
+    /// after it — and filing the receipts after the answers means a reading
+    /// taken before a verb never lands after the verb's receipt has asked the
+    /// repository again. A receipt whose page no open window holds is let go
+    /// first, and ends in the lane's sink.
     fn drain_git_answers(&mut self) -> (Vec<git::GitResponse>, bool) {
         let mut batch = Vec::new();
+        let mut windows = BTreeSet::new();
+        let mut tabs = BTreeSet::new();
+        for window in self.windows.values() {
+            if window.leaving.is_none() {
+                windows.insert(window.window.id());
+                tabs.extend(window.tabs.iter().map(|tab| tab.id));
+            }
+        }
         let Some(app) = self.app.as_mut() else {
             return (batch, false);
         };
+        let receipts: Vec<git::GitResponse> = app
+            .git_mutations
+            .ended(|owner| match owner {
+                AnswerOwner::Tab(tab) => !tabs.contains(&tab),
+                AnswerOwner::Window(window) => !windows.contains(&window),
+            })
+            .into_iter()
+            .map(|(_, terminal, request)| git_mutation_lane::receipt(terminal, request))
+            .collect();
         let mut gone = false;
         loop {
             match app.git_worker.responses.try_recv() {
@@ -64785,6 +64829,7 @@ impl FolioApp {
                 }
             }
         }
+        batch.extend(receipts);
         (batch, gone)
     }
 
