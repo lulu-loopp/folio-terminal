@@ -75,7 +75,8 @@ pub(crate) struct Account {
     pub(crate) kept: usize,
     /// How many units both sides changed to two values; the file won each.
     pub(crate) conflicted: usize,
-    /// Those units, named.
+    /// Those units, named. Units that share a row (the terminal font's three)
+    /// are named once, so [`Self::conflicted`] can exceed the names.
     pub(crate) conflicts: Vec<String>,
 }
 
