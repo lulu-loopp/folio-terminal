@@ -2014,10 +2014,15 @@ impl MathWorkerRequest {
     /// (`lane::Queue::ask`; T-ANIMATION-ANSWER-IDENTITY). One case is not [`lane::Relation::Other`]:
     /// a newer open of the same animated file for the same window **displaces** the open waiting
     /// for it (`Superseded { by }`). A window asks a file it awaits a decode for only after it let
-    /// that decode go — the file changed under it ([`AnimationCache::let_go_changed_file`]) — so the
-    /// older open answers a question nobody asks any more, and the bytes it would read may be the
-    /// old ones. Another window's open of the same file is its own question and waits its turn.
-    /// Everything else waits behind what is in line: nothing else on this share is coalesced.
+    /// that decode go — the file changed under it ([`AnimationCache::let_go_changed_file`]) — and
+    /// its record then awaits exactly one id, the newer one. A waiting open has read no bytes, so
+    /// running it would answer the same question; it is still superseded rather than joined
+    /// (revision (b)4's `Joined { with }`), because a joined request's answer is delivered under
+    /// the id it joined, and the drain hands the window each answer under its own request's id
+    /// only — the record would await an id whose answer never comes. The cost: the newer open
+    /// takes the back of the line instead of the older one's place. Another window's open of the
+    /// same file is its own question and waits its turn. Everything else waits behind what is in
+    /// line: nothing else on this share is coalesced.
     fn relate(waiting: &Self, asked: &Self) -> lane::Relation {
         match (waiting, asked) {
             (
@@ -32217,7 +32222,7 @@ fn animation_refusal_notice(refusal: animation::AnimationRefusal) -> Option<&'st
 /// | state | its one writer | removed by |
 /// |---|---|---|
 /// | `Pending` | [`Self::ask_for_showing`], under the identity of the request it awaits | the answer to that request ([`Self::opened`], [`Self::open_unanswered`]), which files nothing for a file no surface names ([`Self::answered_for_nobody`]); [`Self::let_go_changed_file`] |
-/// | `Unanswered` | [`Self::open_unanswered`]; [`Self::ask_for_showing`], for an open whose thread could not be started | [`Self::let_go_on_open`], the file's next open; [`Self::let_go_unnamed`] |
+/// | `Unanswered` | [`Self::open_unanswered`] — an open whose work failed, or whose thread could not be started ([`Self::ask_for_showing`]) | [`Self::let_go_on_open`], the file's next open; [`Self::let_go_unnamed`] |
 /// | `Refused` | [`Self::opened`] | [`Self::let_go_unnamed`]; [`Self::let_go_changed_file`] |
 /// | `Ready` | [`Self::opened`] | [`Self::let_go_on_open`]; [`Self::let_go_unnamed`]; [`Self::let_go_changed_file`]; [`Self::adopt_fill`], when the cursor finds the file changed; weight |
 ///
@@ -32413,7 +32418,7 @@ impl AnimationCache {
                         .insert(key, AnimationEntry::Pending { asked });
                 }
                 // Asked, and no request was admitted to answer it.
-                OpenAsked::Unstarted => self.playbacks.insert(key, AnimationEntry::Unanswered),
+                OpenAsked::Unstarted => self.open_unanswered(key, None),
                 OpenAsked::TurnedAway => {}
             }
         }
@@ -32533,13 +32538,19 @@ impl AnimationCache {
         }
     }
 
-    /// **An open whose work failed on the worker** — the request `asked`: the file's entry becomes
+    /// **An open that was asked and not answered** — the one writer of
     /// [`AnimationEntry::Unanswered`], which no walk asks again and the file's next open lets go
-    /// of. Filed only for the decode in flight that awaits `asked` ([`Self::awaits`]): the failure
-    /// of a superseded open changes nothing, and a failure for a file no surface names files
-    /// nothing ([`Self::answered_for_nobody`]).
-    fn open_unanswered(&mut self, key: String, asked: computation_lane::ComputationId) {
-        if !self.awaits(&key, asked) || self.answered_for_nobody(&key) {
+    /// of. `asked` is the request whose work failed on the worker, filed only for the decode in
+    /// flight that awaits it ([`Self::awaits`]): the failure of a superseded open changes nothing.
+    /// `None` is an open no request was admitted for — its thread could not be started — filed
+    /// for a file the walk holds nothing for. Either way a failure for a file no surface names
+    /// files nothing ([`Self::answered_for_nobody`]).
+    fn open_unanswered(&mut self, key: String, asked: Option<computation_lane::ComputationId>) {
+        let answers_this_open = match asked {
+            Some(asked) => self.awaits(&key, asked),
+            None => self.playbacks.peek(&key).is_none(),
+        };
+        if !answers_this_open || self.answered_for_nobody(&key) {
             return;
         }
         self.playbacks.insert(key, AnimationEntry::Unanswered);
@@ -32581,7 +32592,7 @@ impl AnimationCache {
     fn settle(&mut self, settled: Settled) {
         match settled {
             Settled::AnimationUnanswered { path, asked } => {
-                self.open_unanswered(normalized_local_image_path_key(&path), asked);
+                self.open_unanswered(normalized_local_image_path_key(&path), Some(asked));
             }
             Settled::FillLost { path, serial } => {
                 self.release_failed_fill(&normalized_local_image_path_key(&path), serial);

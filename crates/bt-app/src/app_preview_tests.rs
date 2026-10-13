@@ -1748,6 +1748,83 @@ fn a_superseded_answer_is_recorded_as_a_terminal_and_never_shown() {
     std::fs::remove_file(&gif).expect("the scratch file this test wrote");
 }
 
+/// RED (T-ANIMATION-ANSWER-IDENTITY round 2) — **another window's open of the same file is its
+/// own question**: two windows each open one `.gif` while both opens wait behind a busy worker,
+/// and both run and end `Done` — neither displaces the other — and each window files the answer
+/// to its own open. Only a newer open by the same window supersedes (`MathWorkerRequest::relate`).
+///
+/// MUTATION: drop the `waiting_leaf.window == leaf.window` clause from `MathWorkerRequest::relate`
+/// — the second window's open supersedes the first's, whose window never gets an answer.
+#[test]
+fn another_windows_open_of_the_same_file_is_never_superseded() {
+    use crate::computation_lane::{Share, fixtures::nobody};
+    crate::test_support::install_host_answers();
+    let gate = Arc::new(crate::lane::Gate::default());
+    let mut lane = crate::computation_lane::fixtures::watched(crate::lane::Executor::scripted(
+        Arc::clone(&gate),
+    ));
+    let busy = PathBuf::from("\u{4e0d}\u{5728}\u{8fd9}\u{91cc}/\u{5fd9} busy.gif");
+    let gif = scratch_gif_named("\u{4e24}\u{6247}\u{7a97} two windows");
+    std::fs::write(&gif, animated_bytes()).expect("a scratch file this test owns");
+    let key = normalized_local_image_path_key(&gif);
+    let pane = seat_of(TAB_ONE, SeatId(1));
+    let in_window = |window: u64| ShellAddress {
+        window: WindowId::from(window),
+        ..probe_leaf()
+    };
+    let mut first = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+    let mut second = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+
+    gate.hold();
+    assert!(matches!(
+        crate::ask_to_open(&lane.lane, in_window(1), &busy),
+        OpenAsked::Asked(_)
+    ));
+    assert!(gate.wait_entered(1), "the busy open reaches the worker");
+    for (window, cache) in [(1, &mut first), (2, &mut second)] {
+        cache.ask_for_showing(&[(pane, Some(gif.clone()))], |path| {
+            crate::ask_to_open(&lane.lane, in_window(window), path)
+        });
+    }
+    let asked = [
+        first.awaited(&key).expect("the first window's open waits"),
+        second
+            .awaited(&key)
+            .expect("the second window's open waits"),
+    ];
+    gate.release();
+    let mut ended = Vec::new();
+    for _ in 0..3 {
+        ended.push(lane.next_ended(Share::Decoration, nobody));
+    }
+    for id in asked {
+        assert!(
+            ended
+                .iter()
+                .any(|(_, ended_id, terminal, _)| *ended_id == id
+                    && matches!(terminal, crate::lane::Terminal::Done(_))),
+            "each window's open runs and ends Done: {id:?}"
+        );
+    }
+    let answers = crate::sort_math_terminals(ended);
+    let mut filed = Vec::new();
+    for (asked, result) in answers.done {
+        if let DecorationWorkerCompletion::PeekAnimation { path, frames } = result.completion {
+            let path_key = normalized_local_image_path_key(&path);
+            let cache = if first.awaited(&path_key) == Some(asked) {
+                &mut first
+            } else {
+                &mut second
+            };
+            if cache.opened(path_key, asked, 1, frames) {
+                filed.push(asked);
+            }
+        }
+    }
+    assert_eq!(filed, asked, "each window files the answer to its own open");
+    std::fs::remove_file(&gif).expect("the scratch file this test wrote");
+}
+
 /// **One animated file, held the way the window holds it** — a ring of
 /// `frames` frames each standing a tenth of a second, under one playback.
 fn a_playback_of(frames: usize, started: Instant) -> animation::Animation {
