@@ -15437,3 +15437,11 @@ Records are never evicted, so they grow with the distinct animated files one win
 **Pinned by**
 - `git_mutation_lane::tests::{a_receipt_reaches_a_files_view_docked_while_its_verb_ran, a_receipt_reaches_a_files_view_popped_out_while_its_verb_ran, a_closed_files_views_receipt_is_still_sunk_and_recorded, a_read_answer_reaches_a_files_view_docked_while_it_was_read, a_document_keeps_the_pool_it_was_asked_for_when_its_view_moves}`
 - `lane_contract_tests::every_lane_runs_every_claim_and_fails_only_where_the_ledger_says`, with `LaneName::GitMutation` (its adapter files by `OpenPages`).
+
+
+### 2026-10-13 — Git answers follow a moved page, round 2: a column closed in an open tab is gone, a document is asked only with its asker in hand (T-GIT-RECEIPTS-FOLLOW-A-MOVED-HOST round 2)
+
+**Additions to the entry above.** A column closed inside a tab that stays open is gone like any other closed view: no surface holds its cache, so its receipt reaches the lane's sink while the column beside it takes its own. The three places that open a document from a Git row (a column's, a graph's, a floating window's) read the asking cache before the document is opened, so a press that cannot ask never leaves a buffer waiting on a question that was never sent. `OpenPages::stand` asserts that one cache stands in one place. The read worker's coalescing is by asker; whether a float's answer still has a page is decided by the drain, by the cache's identity, before any window is asked. Gating a document by its pool rather than by its asker (a closed asker still leaves its pane on "Loading…") is T-GIT-DOCUMENT-GATED-BY-POOL.
+
+**Pinned by**
+- `git_mutation_lane::tests::a_column_closed_in_a_tab_that_stays_open_has_its_receipt_sunk`
