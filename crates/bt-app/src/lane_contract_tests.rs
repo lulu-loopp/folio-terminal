@@ -25,7 +25,7 @@ use crate::lane::{
 };
 
 /// Every lane's adapter. A lane missing here is a lane [`judge`] reports as skipped.
-fn adapters() -> [Adapter; 7] {
+fn adapters() -> [Adapter; 8] {
     [
         Adapter {
             lane: LaneName::Handoff,
@@ -54,6 +54,10 @@ fn adapters() -> [Adapter; 7] {
         Adapter {
             lane: LaneName::Programs,
             make: crate::programs_lane::contract_adapter::make,
+        },
+        Adapter {
+            lane: LaneName::GitMutation,
+            make: crate::git_mutation_lane::contract_adapter::make,
         },
     ]
 }
@@ -726,7 +730,13 @@ fn play(case: &Case, order: &[Step]) -> Option<String> {
         })
         .count();
     let lines = failed + usize::from(case.worker_ends);
-    if woke.load(Ordering::SeqCst) != usize::from(case.worker_ends) {
+    // A worker that ends wakes its consumer when it ended a request (one was still owed), and
+    // only then: a worker that ends owing nothing ends no request, and there is nothing to take.
+    let ended_owed = case.worker_ends
+        && want
+            .iter()
+            .any(|terminal| matches!(terminal, Some(Terminal::WorkerGone)));
+    if woke.load(Ordering::SeqCst) != usize::from(ended_owed) {
         return Some(format!(
             "{:?}: the worker {} and the consumer was woken {} time(s)",
             Failure::DeathUnannounced,
@@ -782,7 +792,8 @@ const INTERLEAVINGS: usize = 4_103_588;
 /// reference ([`expected`]) reads off the order; taking twice gives one; each failed identity — a
 /// joined one carrying a failure included — is said once and the worker's end once; a joined
 /// identity ends `Joined` carrying its original's terminal, the
-/// worker's end included; the consumer is woken once when the worker ends; the lane is in fault,
+/// worker's end included; the consumer is woken once when the worker ends with a request owed,
+/// and not at all when it ends owing nothing; the lane is in fault,
 /// and refuses at the door, exactly when the worker ended. No clock and no thread is in the proof:
 /// the order is the script. The cases are shared among scoped threads only to finish sooner; the
 /// count and the verdict do not depend on how.
