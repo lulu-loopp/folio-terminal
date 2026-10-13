@@ -24,6 +24,9 @@ fn a_query_end_session_freezes_writes_and_drops_the_sentinel() {
     on_the_window_thread();
     let home = EndSessionHome::new("query");
     let mut store = persist::SessionStore::armed_at(home.session(), home.sentinel());
+    // The writes are real and awaited within the suite's patience: the hold is the subject, not
+    // the product's three-second budget.
+    store.set_save_budget(crate::lane::PATIENCE);
     assert!(home.sentinel().is_file(), "the run's sentinel stands");
     let whole = shells_document(&home.0, 2);
     record_as_the_app_does(&mut store, whole.clone());
@@ -67,6 +70,7 @@ fn a_shutdown_taken_back_lets_the_document_go_and_puts_the_sentinel_back() {
     on_the_window_thread();
     let home = EndSessionHome::new("taken-back");
     let mut store = persist::SessionStore::armed_at(home.session(), home.sentinel());
+    store.set_save_budget(crate::lane::PATIENCE);
     record_as_the_app_does(&mut store, shells_document(&home.0, 2));
     assert_eq!(the_system_asks(), Some(1));
     assert_eq!(

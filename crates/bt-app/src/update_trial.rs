@@ -3023,6 +3023,8 @@ mod tests {
 
             let mut store =
                 persist::SessionStore::launched_at(session_path.clone(), root.join("session.lock"));
+            // Two real writes in order are the subject, awaited within the suite's patience.
+            store.set_save_budget(crate::lane::PATIENCE);
             assert!(GATE.pending().contains(&Writer::Session));
             assert!(!root.join("session.prev.json").exists());
 

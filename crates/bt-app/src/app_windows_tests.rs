@@ -69,6 +69,8 @@ fn a_shell_the_system_ends_after_the_freeze_keeps_its_pane_in_the_document() {
     on_the_window_thread();
     let home = EndSessionHome::new("shell-ended");
     let mut store = persist::SessionStore::armed_at(home.session(), home.sentinel());
+    // The held document's write is real and awaited within the suite's patience.
+    store.set_save_budget(crate::lane::PATIENCE);
     record_as_the_app_does(&mut store, shells_document(&home.0, 2));
     assert_eq!(the_system_asks(), Some(1));
     record_as_the_app_does(&mut store, shells_document(&home.0, 1));
