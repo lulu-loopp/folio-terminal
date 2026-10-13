@@ -86,9 +86,7 @@ fn still_holds_the_edit(tab: &TabState, path: &Path) -> bool {
 /// The window's own event handler, the door every OS close (Alt+F4, the
 /// taskbar's Close window, `performClose:`) comes through, squeezed.
 fn window_event_squeezed() -> String {
-    squeezed(item_body(
-        &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
-    ))
+    squeezed(item_body(&ItemQuery::method("FolioApp", "on_window_event")))
 }
 
 /// RED (58) — **A window close requested while the unsaved-changes gate is up
@@ -1117,7 +1115,7 @@ mod failure_road {
             "an application event's handler",
         ),
         row(
-            "crate::FolioApp::window_event",
+            "crate::FolioApp::on_window_event",
             4,
             "the capture pre-dispatch, the wheel's flush, the drop's flush, the handler's result",
         ),

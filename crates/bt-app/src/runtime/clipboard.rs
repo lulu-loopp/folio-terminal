@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::PtyTarget;
+use crate::window_seam::prelude::*;
 use crate::{
     ClipboardWriteEffect, Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey,
     PasteOffer, PasteTarget, PreparedClipboardPaste, PreviewSurface, Runtime, StagedPaste,
@@ -19,11 +20,12 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use winit::event::Ime;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **`Copy` on a row whose execution policy the user can change**: put the command on the
     /// clipboard and say so only after the platform accepts the write.
     pub(crate) fn copy_policy_command(&mut self) -> Result<()> {
-        match copy_policy_command_with(crate::write_terminal_clipboard_text) {
+        let window = &self.window.window;
+        match copy_policy_command_with(|text| crate::write_terminal_clipboard_text(window, text)) {
             Some(said) => self.toast(toast::ToastKind::Ok, toast::ToastAnchor::Window, None, said),
             None => Ok(()),
         }
@@ -37,7 +39,10 @@ impl Runtime<'_> {
         action: &'static str,
         effect: ClipboardWriteEffect,
     ) -> Result<bool> {
-        if recoverable_clipboard_write(write_terminal_clipboard_text(&text), action) {
+        if recoverable_clipboard_write(
+            write_terminal_clipboard_text(&self.window.window, &text),
+            action,
+        ) {
             self.apply_clipboard_write_effect(effect)?;
             Ok(true)
         } else {
@@ -54,7 +59,7 @@ impl Runtime<'_> {
         let Some(text) = self.preview_selected_text(surface) else {
             return false;
         };
-        if let Err(error) = write_terminal_clipboard_text(&text) {
+        if let Err(error) = write_terminal_clipboard_text(&self.window.window, &text) {
             // Recoverable on `recoverable_clipboard_write`'s terms: the
             // selection stays standing so the reader can try again.
             eprintln!("recoverable preview copy failure: {error:#}");
@@ -86,8 +91,9 @@ impl Runtime<'_> {
         else {
             return;
         };
+        let window = &self.window.window;
         let result = hang_watch::during(hang_watch::Station::ClipboardWrite, || {
-            bt_platform::set_clipboard_text(source)
+            window.set_clipboard_text(source)
         })
         .map_err(|error| anyhow!(error))
         .context("copy original LaTeX source to clipboard");
@@ -198,14 +204,14 @@ impl Runtime<'_> {
 
     pub(in crate::runtime) fn copy_selection(&mut self) -> Result<()> {
         let active = self.window.active_tab;
-        let Some(leaf) = self.window.tabs[active].focused_mut() else {
+        let window = &mut *self.window;
+        let Some(leaf) = window.tabs[active].focused_mut() else {
             return Ok(());
         };
-        if !copy_selection(
-            &mut leaf.session,
-            &mut leaf.projection,
-            write_terminal_clipboard_text,
-        ) {
+        let host = &window.window;
+        if !copy_selection(&mut leaf.session, &mut leaf.projection, |text| {
+            write_terminal_clipboard_text(host, text)
+        }) {
             return Ok(());
         }
         self.publish_interaction_frame()
@@ -220,7 +226,10 @@ impl Runtime<'_> {
         let Some(leaf) = self.sessions.get(&seat) else {
             return;
         };
-        write_selection_text(&leaf.session, true, write_terminal_clipboard_text);
+        let host = &self.window.window;
+        write_selection_text(&leaf.session, true, |text| {
+            write_terminal_clipboard_text(host, text)
+        });
     }
 
     /// **The four questions a text write answers that no other drop has to**
@@ -305,7 +314,7 @@ impl Runtime<'_> {
     /// reader mid-query to report an event they can simply repeat.
     pub(in crate::runtime) fn clipboard_line(&self) -> String {
         hang_watch::during(hang_watch::Station::ClipboardRead, || {
-            bt_platform::clipboard_text()
+            self.window.window.clipboard_text()
         })
         .ok()
         .as_deref()
@@ -328,7 +337,7 @@ impl Runtime<'_> {
     /// rule for a pasted path.
     pub(crate) fn paste_into_field(&mut self, field: TextFieldSeat) -> Result<()> {
         let text = hang_watch::during(hang_watch::Station::ClipboardRead, || {
-            bt_platform::clipboard_text()
+            self.window.window.clipboard_text()
         })
         .unwrap_or_default();
         self.apply_clipboard_text_to_field(field, &text)
@@ -394,7 +403,7 @@ impl Runtime<'_> {
             incarnation: leaf.incarnation,
         };
         let leaving = hang_watch::enter(hang_watch::Station::ClipboardRead);
-        let payload = bt_platform::clipboard_payload();
+        let payload = self.window.window.clipboard_payload();
         hang_watch::at(leaving);
         self.apply_clipboard_payload(target, payload)
     }

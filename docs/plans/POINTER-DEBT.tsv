@@ -86,8 +86,6 @@ crate::file_reads::is_user_input	N-W
 crate::file_reads::is_user_input	N-W
 crate::input (outside any item)	N-B
 crate::input (outside any item)	N-B
-crate::input::is_a_keystroke	N-B
-crate::input::is_a_keystroke	N-B
 crate::input::pressed_button	N-B
 crate::input::pressed_button	N-B
 crate::input::pressed_button	N-B
@@ -391,10 +389,8 @@ crate::runtime::mouse::Runtime::wheel_travel	N-B
 crate::runtime::mouse::Runtime::wheel_travel	N-B
 crate::runtime::mouse::Runtime::wheel_travel	N-B
 crate::runtime::palette (outside any item)	N-B
-crate::runtime::palette (outside any item)	N-B
 crate::runtime::palette (outside any item)	N-E
 crate::runtime::palette::Runtime::drive_palette_hover	N-E
-crate::runtime::palette::Runtime::palette_key	N-B
 crate::runtime::palette::Runtime::scroll_palette_list	N-B
 crate::runtime::palette::Runtime::scroll_palette_list	N-P
 crate::runtime::panes (outside any item)	N-B

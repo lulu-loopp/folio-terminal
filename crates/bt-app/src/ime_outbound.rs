@@ -148,7 +148,7 @@ pub fn caret_line(
     format!("IME_OUT_CARET action={action} reason={reason} position={position:?}")
 }
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     pub(super) fn trace_ime_owner(&self, keyboard: KeyboardOwner) {
         if !enabled() {
             return;

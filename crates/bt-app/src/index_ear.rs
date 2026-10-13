@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
-use winit::event_loop::EventLoopProxy;
+use crate::window_seam::LoopProxy;
 
 use crate::AppEvent;
 use crate::palette_index::{self, FileIndexes, IndexRequest};
@@ -43,7 +43,7 @@ impl IndexEar {
         roots: &BTreeSet<PathBuf>,
         indexes: &mut FileIndexes,
         now: Instant,
-        proxy: &EventLoopProxy<AppEvent>,
+        proxy: &LoopProxy,
     ) {
         let news = Arc::clone(&self.news);
         let proxy = proxy.clone();
@@ -139,10 +139,7 @@ impl IndexEar {
     }
 }
 
-fn listener(
-    news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
-    proxy: &EventLoopProxy<AppEvent>,
-) -> Listener {
+fn listener(news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>, proxy: &LoopProxy) -> Listener {
     let news = Arc::clone(news);
     let proxy = proxy.clone();
     Arc::new(move |root, change| {

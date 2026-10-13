@@ -470,6 +470,9 @@ impl<'d> Resolver<'d> {
                     Kind::Ambiguous(why) => return Err(why),
                 },
                 Ty::Param(name) => return Err(format!("a field of the generic `{name}`")),
+                Ty::Assoc { param, name } => {
+                    return Err(format!("a field of the associated type `{param}::{name}`"));
+                }
                 Ty::Unknown(why) => return Err(why),
                 Ty::Slice(_) | Ty::Iter(_) | Ty::Entry(_) | Ty::Fn(_) => {
                     return Err(format!("`{field}` on a type with no fields"));
@@ -500,7 +503,7 @@ impl<'d> Resolver<'d> {
             .map(|decl| {
                 let map = substitution(&decl.impl_params, &decl.self_args, args);
                 let ret = decl.ret.substitute(&map);
-                let ret = if ret.is_open() {
+                let ret = if ret.is_a_parameter() {
                     Ty::unknown(format!("`{type_name}::{method}` returns a generic type"))
                 } else {
                     ret
@@ -569,6 +572,48 @@ impl<'d> Resolver<'d> {
         Err(format!(
             "the declarations of `{type_name}::{method}` disagree"
         ))
+    }
+
+    /// **A method of the traits an associated type is bounded by** — the trait's own declaration
+    /// of it, read for its receiver and its return as an implementation's would be.
+    fn bound_method(&self, associated: &str, method: &str) -> Result<Option<Method>, String> {
+        let Some(traits) = self.declarations.associated_bounds.get(associated) else {
+            return Ok(None);
+        };
+        let answers: Vec<Method> = traits
+            .iter()
+            .filter_map(|bound| {
+                self.declarations
+                    .trait_declarations
+                    .get(&(bound.clone(), method.to_owned()))
+            })
+            .flatten()
+            .map(|decl| {
+                let ret = if decl.ret.is_a_parameter() {
+                    Ty::unknown(format!("`{associated}::{method}` returns a generic type"))
+                } else {
+                    decl.ret.clone()
+                };
+                let class = match decl.receiver {
+                    Receiver::Unique if holds_unique_reference(&ret) => Class::Access,
+                    Receiver::Unique => Class::Write,
+                    Receiver::Shared | Receiver::Value | Receiver::None => Class::Read,
+                };
+                Method {
+                    class,
+                    ret,
+                    closure: Vec::new(),
+                    by_position: closures_by_position(&decl.params),
+                    callees: BTreeSet::new(),
+                }
+            })
+            .collect();
+        if answers.is_empty() {
+            return Ok(None);
+        }
+        agreement(&answers).map(Some).ok_or_else(|| {
+            format!("the bounds of `{associated}` declare `{method}` in ways that disagree")
+        })
     }
 
     /// Whether `Type::method` is declared with a receiver — called with the
@@ -650,6 +695,21 @@ impl<'d> Resolver<'d> {
                         .map(|found| answer(found, false, shared))
                         .ok_or_else(|| {
                             fail(format!("`{method}` on the generic `{name}`"), shared)
+                        });
+                }
+                Ty::Assoc { param, name } => {
+                    return self
+                        .bound_method(&name, method)
+                        .map_err(|why| fail(why, shared))?
+                        .map(|found| answer(found, false, shared))
+                        .ok_or_else(|| {
+                            fail(
+                                format!(
+                                    "`{method}` on `{param}::{name}`, whose bounds declare no such \
+                                     method"
+                                ),
+                                shared,
+                            )
                         });
                 }
                 Ty::Unknown(why) => return Err(fail(why, shared)),
@@ -1063,6 +1123,6 @@ fn holds_unique_reference(ty: &Ty) -> bool {
         Ty::Tuple(items) => items.iter().any(holds_unique_reference),
         Ty::Iter(inner) | Ty::Slice(inner) => holds_unique_reference(inner),
         Ty::Entry(_) => true,
-        Ty::Fn(_) | Ty::Param(_) | Ty::Unknown(_) => false,
+        Ty::Fn(_) | Ty::Param(_) | Ty::Assoc { .. } | Ty::Unknown(_) => false,
     }
 }

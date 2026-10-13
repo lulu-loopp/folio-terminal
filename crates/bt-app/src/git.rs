@@ -60,8 +60,8 @@ use std::sync::{Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::window_seam::LoopProxy;
 use anyhow::{Context, Result};
-use winit::event_loop::EventLoopProxy;
 use winit::window::WindowId;
 
 use crate::{AppEvent, LeafId};
@@ -4138,7 +4138,7 @@ pub struct GitWorker {
 impl GitWorker {
     /// Start the thread. **Where git is, is read at every question** from
     /// [`GIT_LOCATION`], which the program walk keeps current.
-    pub fn spawn(proxy: EventLoopProxy<AppEvent>) -> Result<Self> {
+    pub fn spawn(proxy: LoopProxy) -> Result<Self> {
         let (request_tx, request_rx) = mpsc::channel::<GitRequest>();
         let (response_tx, response_rx) = mpsc::channel::<GitResponse>();
         bt_platform::spawn_at_priority(

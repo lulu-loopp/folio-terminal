@@ -2,6 +2,8 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use super::pointer::touch::let_the_system_translate_touch;
+use crate::window_seam::Native;
+use crate::window_seam::prelude::*;
 use crate::{
     App, AppEvent, BrokerRelease, Drag, DragHandover, DragSource, FormulaSwitches, HandoverInto,
     INITIAL_HEIGHT, INITIAL_WIDTH, LaunchPlan, LeafSeed, NewWindowParts, NewWindowPlan,
@@ -34,7 +36,7 @@ use winit::dpi::LogicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::WindowId;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn give_foreground_with_retry(&self) -> Result<()> {
         crate::take_owned_keyboard_focus(&self.window.window)
     }
@@ -42,7 +44,9 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn request_window_close(&self) -> Result<()> {
         crate::request_owned_window_close(&self.window.window)
     }
+}
 
+impl Runtime<'_, Native> {
     /// **Open a second window on this application** (multiwindow slice C).
     ///
     /// The first window's door reads four files, revives a saved tree, answers a
@@ -490,7 +494,7 @@ impl Runtime<'_> {
             },
             Instant::now(),
         );
-        let mut window = new_window_runtime(NewWindowParts {
+        let mut window = new_window_runtime::<Native>(NewWindowParts {
             ime_report,
             parked_pans,
             favicons: Rc::clone(&app.favicons),
@@ -571,7 +575,9 @@ impl Runtime<'_> {
         }
         Ok((id, window))
     }
+}
 
+impl<B: Backend> Runtime<'_, B> {
     /// Everything a window owes itself between "its surface exists" and "it can
     /// be shown", shared by both doors that open one.
     ///

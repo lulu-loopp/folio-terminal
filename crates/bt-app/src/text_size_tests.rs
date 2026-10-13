@@ -659,6 +659,10 @@ fn the_rung_has_one_owner() {
         "Runtime::redraw",
         // a table answer for a pane that has since closed goes nowhere
         "Runtime::apply_math_results",
+        // the window seam's mirror of the renderer's own interface (`Glass::base_metrics`),
+        // declared once and answered for the product by the renderer's own reader below
+        "base_metrics",
+        "WindowRenderer::base_metrics",
     ];
     for name in owner_names(&base, source()) {
         assert!(

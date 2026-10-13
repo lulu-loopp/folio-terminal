@@ -1,6 +1,8 @@
 //! `math` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::input::Keystroke;
+use crate::window_seam::prelude::*;
 use crate::{
     AnimationEntry, AnimationFillOutcome, AnswerOwner, DecorationWorkerCompletion, DocumentMath,
     Layered, MathHoverExit, MathWorkerRequest, MathWorkerResult, ModalBand, Motion, OverlayStack,
@@ -22,9 +24,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use winit::dpi::PhysicalPosition;
-use winit::event::KeyEvent;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// What one of those boxes says.
     ///
     /// Split from the boxes because the *geometry* of the tab surface is a pure
@@ -730,7 +731,7 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn preview_text_key(
         &mut self,
         surface: PreviewSurface,
-        event: &KeyEvent,
+        event: &Keystroke,
     ) -> Result<bool> {
         if !matches!(
             self.preview_pane(surface).map(|pane| pane.doc()),

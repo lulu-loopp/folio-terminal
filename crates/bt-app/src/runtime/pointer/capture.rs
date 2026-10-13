@@ -12,6 +12,7 @@
 //! button proves the capture stale and cancels it first
 //! ([`press_against_the_slot`], R-5 rule 2).
 
+use crate::window_seam::prelude::*;
 use crate::{
     App, DividerDrag, Drag, FilePeekPress, FloatDrag, FloatHeadPress, ImageDrag, MouseRoute,
     PanePress, PreviewBlockDrag, PreviewBodyDrag, PreviewSurface, PreviewTextDrag, RowPress,
@@ -254,7 +255,7 @@ pub(crate) fn cancel_then_route<S, T, E>(
     route_press(state)
 }
 
-impl App {
+impl<B: Backend> App<B> {
     pub(crate) fn capture_index_where(
         &self,
         mut predicate: impl FnMut(&PointerCapture) -> bool,
@@ -382,7 +383,7 @@ macro_rules! gesture_door {
     }};
 }
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn held_divider_drag(&self) -> Option<&DividerDrag> {
         gesture_door!(@window held self Divider)
     }
@@ -648,7 +649,7 @@ impl Runtime<'_> {
     }
 }
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **This window's most recently latched capture**, including the bounded
     /// legacy-overlap list retained until cut 4.
     pub(crate) fn own_capture(&self) -> Option<&PointerCapture> {

@@ -1,6 +1,7 @@
 //! `diagnostics` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::window_seam::prelude::*;
 use crate::{
     ApplicationChange, LeafOnStage, Runtime, card_trace, coalesce, resolved_theme_change,
     schedule_leaf_grid_change, system_os_theme, trace_sink,
@@ -10,7 +11,7 @@ use bt_render::GridSize;
 use std::time::Instant;
 use winit::dpi::PhysicalSize;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// Windows changed its mind about light and dark.
     ///
     /// The event is the **trigger**; the answer comes from [`system_os_theme`],

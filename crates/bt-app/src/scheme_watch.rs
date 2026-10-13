@@ -41,7 +41,7 @@
 
 use std::time::Instant;
 
-use winit::event_loop::EventLoopProxy;
+use crate::window_seam::LoopProxy;
 
 use crate::{AppEvent, dir_news::DirNews};
 
@@ -81,7 +81,7 @@ impl SchemeWatch {
     /// in the module header — retrying on a schedule is a timer, and a timer is
     /// the thing this mechanism exists to avoid. The watch steward starts it; a
     /// refusal comes back on a later turn and is said by [`Self::due`].
-    pub fn arm(&mut self, proxy: &EventLoopProxy<AppEvent>) {
+    pub fn arm(&mut self, proxy: &LoopProxy) {
         let directory = crate::persist::storage_dir().join(crate::schemes::USER_SCHEME_DIR);
         if let Some(error) = self.news.take_failure()
             && worth_a_line(&error)

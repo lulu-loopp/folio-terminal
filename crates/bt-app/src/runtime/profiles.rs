@@ -1,6 +1,7 @@
 //! `profiles` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::window_seam::prelude::*;
 use crate::{
     FilesFocusArrival, LeafSession, MachineNews, Popup, ProgramNews, Runtime, ShownProgramRows,
     cli, i18n, launch_wire, persist, profile_menu_anchor, profiles, programs_lane, seats, settings,
@@ -12,7 +13,7 @@ use bt_render::{FrameSource, FrameTrigger};
 use std::path::PathBuf;
 use std::time::Instant;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **Which profile a second launch's tab starts as, and what could not be
     /// honoured** (§7.59).
     ///

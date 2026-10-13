@@ -64,8 +64,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
+use crate::window_seam::LoopProxy;
 use bt_platform::DirChange;
-use winit::event_loop::EventLoopProxy;
 
 use crate::watch_clock::WatchClock;
 use crate::watch_steward::{Depth, EarHandle, Listener, MemberReport};
@@ -217,7 +217,7 @@ pub struct StorageWatch {
 impl StorageWatch {
     /// Open the folder's ear, once, after the four stores have opened.
     /// `write_generations` are the stores' generations at that moment.
-    pub fn arm(&mut self, proxy: &EventLoopProxy<AppEvent>, write_generations: [u64; 4]) {
+    pub fn arm(&mut self, proxy: &LoopProxy, write_generations: [u64; 4]) {
         let directory = persist::storage_dir();
         let news = Arc::clone(&self.news);
         let proxy = proxy.clone();

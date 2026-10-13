@@ -3,6 +3,7 @@
 
 use crate::profiles;
 use crate::shell_integration;
+use crate::window_seam::prelude::*;
 use crate::{
     Announce, Runtime, attention_codex, attention_copilot, attention_hooks, attention_ownership,
     diagnostics, explorer_menu, first_run, i18n, install_channel, persist, psreadline, restore,
@@ -12,7 +13,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 use winit::keyboard::{Key, NamedKey};
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// What the Terminal page's PSReadLine row is describing.
     pub(crate) fn psreadline_row_state(&self) -> psreadline::RowState {
         psreadline::after_the_newest_check(

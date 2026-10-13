@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::PtyTarget;
+use crate::window_seam::prelude::*;
 use crate::{
     ApplicationChange, AttentionDelivery, CommandFlash, DrainOutcome, Fading, FilesFocusArrival,
     FlashBand, FormulaSwitches, LeafId, LeafSession, LocalImageActivation, MouseRoute, PasteTarget,
@@ -26,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **Scroll one pane so that a command's own row stands at the top of it**,
     /// and flash that row so the eye can find it.
     ///
@@ -1551,8 +1552,8 @@ impl Runtime<'_> {
     /// so the two are one origin here and only one of them stays right if that
     /// ever stops being true.
     fn client_origin_on_screen(&self) -> Option<(f64, f64)> {
-        let origin = self.window.window.inner_position().ok()?;
-        Some((f64::from(origin.x), f64::from(origin.y)))
+        let (x, y) = self.window.window.client_origin()?;
+        Some((f64::from(x), f64::from(y)))
     }
 
     /// A pointer of this window's, in screen physical pixels.

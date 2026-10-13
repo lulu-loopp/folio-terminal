@@ -1,6 +1,8 @@
 //! `files` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::input::Keystroke;
+use crate::window_seam::prelude::*;
 use crate::{
     ColumnKeyboard, FOOT_REVEAL_FEEDBACK, FileMenuTarget, FileMenuTreeRow, FilesEditPlace,
     FilesEditRow, FilesFocusArrival, FilesLocate, FolderPick, FootSaying, LeafId, PointerTarget,
@@ -18,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 use winit::dpi::PhysicalPosition;
-use winit::event::{KeyEvent, MouseScrollDelta};
+use winit::event::MouseScrollDelta;
 
 /// The visible folder readers a volume arrival asks again: a failed listing, or a listing whose
 /// requested watch is unheard. Kept pure so the two independent failure roads stay pinned.
@@ -39,7 +41,7 @@ fn volume_rereads(
     asks
 }
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// `Choose a folder…` in the starting-directory picker.
     pub(crate) fn browse_for_start_folder(&mut self) {
         let Some(index) = self.window.settings.editor().map(|editor| editor.index) else {
@@ -976,7 +978,7 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn files_column_key(
         &mut self,
         seat: SeatId,
-        event: &KeyEvent,
+        event: &Keystroke,
     ) -> Result<bool> {
         match column_keyboard(seat, &self.window.git_pages_shown) {
             ColumnKeyboard::GitPage => self.git_page_key(seat, event),
@@ -2465,7 +2467,7 @@ impl Runtime<'_> {
     /// stated as code: with a column focused there is nothing to type into, and
     /// a letter that fell through to the encoder would land in a shell the user
     /// is not looking at.
-    fn files_tree_key(&mut self, seat: SeatId, event: &KeyEvent) -> Result<bool> {
+    fn files_tree_key(&mut self, seat: SeatId, event: &Keystroke) -> Result<bool> {
         let Some(command) = files::tree_command(&event.logical_key, self.window.modifiers) else {
             // Still the tree's key: it owns the keyboard, so nothing here
             // reaches a shell. It simply has nothing to do with this one.

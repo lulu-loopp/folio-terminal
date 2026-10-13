@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use super::pointer::CaptureOwner;
+use crate::window_seam::prelude::*;
 use crate::{
     DragLatch, FilePeek, FilePeekPress, FilePeekSubject, FloatDrag, FloatDragKind, FloatGrasp,
     LeafId, MathWorkerRequest, PeekBodyKind, PeekCacheEntry, PeekCandidate, PeekClock, PeekFacts,
@@ -27,7 +28,7 @@ use std::time::{Duration, Instant};
 use winit::dpi::PhysicalPosition;
 use winit::event::MouseButton;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// Whether this tab has a layout worth showing, and whether now is a moment
     /// to show it (L131).
     ///

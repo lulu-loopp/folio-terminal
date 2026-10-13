@@ -19,6 +19,7 @@
 //! defaults and the merged departures by the reader an import's shortcuts part
 //! uses (T-STORE-MERGE-KEYBINDINGS).
 
+use crate::window_seam::prelude::*;
 use std::path::Path;
 
 use anyhow::Result;
@@ -48,7 +49,7 @@ fn keybindings_for_export(
     )
 }
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **A press on one of the three doors.**
     ///
     /// Export and import only *post* a dialog: the system's own dialogs run a
@@ -98,7 +99,7 @@ impl Runtime<'_> {
             .window
             .save_picker
             .as_ref()
-            .and_then(bt_platform::SaveFilePicker::take_result)
+            .and_then(SavePickerDoor::take_result)
         else {
             return Ok(());
         };
@@ -633,15 +634,15 @@ impl Runtime<'_> {
 /// **One storage pass's merges on this window** ([`Runtime::merge_documents`]):
 /// each pass runs through this window's doors, and what each owes the screen is
 /// noted here — the window presents once, after both passes.
-struct MergeTurn<'r, 'a> {
-    runtime: &'r mut Runtime<'a>,
+struct MergeTurn<'r, 'a, B: Backend> {
+    runtime: &'r mut Runtime<'a, B>,
     present_owed: bool,
 }
 
 /// **This window is the settings merge's** (`settings_merge::run_pass`): the
 /// store's merge steps, what is in force, each row's own door — the import's
 /// `apply_imported_setting` — and the presentation, owed to the turn.
-impl settings_merge::MergeWindow for MergeTurn<'_, '_> {
+impl<B: Backend> settings_merge::MergeWindow for MergeTurn<'_, '_, B> {
     fn merge_begin(&mut self) -> Option<settings_merge::SettingsPass> {
         self.runtime
             .app
@@ -676,7 +677,7 @@ impl settings_merge::MergeWindow for MergeTurn<'_, '_> {
 }
 
 /// `keybindings.json`'s merge, with this window as its door (T-STORE-MERGE-KEYBINDINGS).
-impl keybindings_merge::KeybindingsWindow for MergeTurn<'_, '_> {
+impl<B: Backend> keybindings_merge::KeybindingsWindow for MergeTurn<'_, '_, B> {
     fn keybindings_merge_begin(&mut self) -> Option<keybindings_merge::KeybindingsPass> {
         self.runtime
             .app

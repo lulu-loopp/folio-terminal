@@ -31,8 +31,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use crate::window_seam::LoopProxy;
 use anyhow::{Context, Result};
-use winit::event_loop::EventLoopProxy;
 use winit::window::WindowId;
 
 use crate::seats::FilesLeafState;
@@ -1249,7 +1249,7 @@ pub struct FilesWorker {
 }
 
 impl FilesWorker {
-    pub fn spawn(proxy: EventLoopProxy<AppEvent>) -> Result<Self> {
+    pub fn spawn(proxy: LoopProxy) -> Result<Self> {
         let (request_tx, request_rx) = mpsc::channel::<DirRequest>();
         let (response_tx, response_rx) = mpsc::channel::<DirResponse>();
         bt_platform::spawn_at_priority(

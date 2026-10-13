@@ -854,7 +854,7 @@ impl<'w, 'd> Walk<'w, 'd> {
                 unify(param, &arg.ty, &decl.generics, &mut map);
             }
             let ret = decl.ret.substitute(&map);
-            let ret = if ret.is_open() {
+            let ret = if ret.is_a_parameter() {
                 Ty::unknown(format!("`{name}` returns a generic type"))
             } else {
                 ret

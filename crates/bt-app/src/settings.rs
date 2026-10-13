@@ -17412,7 +17412,7 @@ mod tests {
         assert!(
             !found_in(
                 bt_source::needle!(bt_source::Pattern::text(
-                    "impl settings::geometry::PointerHost for Runtime<'_>"
+                    "impl<B: Backend> settings::geometry::PointerHost for Runtime<'_, B>"
                 )),
                 bt_source::View::Raw,
                 bt_source::Scope::Module("crate".to_owned()),

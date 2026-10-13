@@ -5505,8 +5505,7 @@ fn the_window_holds_the_span_a_gesture_starts_on_and_frees_it_on_a_blur() {
             && keeps.contains("pane.doc_key().and_then(|key|key.source.as_ref())"),
         "the press asks about the span on the glass",
     );
-    let dispatch =
-        item_body(&ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"));
+    let dispatch = item_body(&ItemQuery::method("FolioApp", "on_window_event"));
     let blur = dispatch
         .find("WindowEvent::Focused(false) => {")
         .expect("the window answers losing focus");
@@ -6502,9 +6501,7 @@ fn the_disk_news_reaches_the_glass_by_both_roads() {
         !found_in(
             needle!(Pattern::call("ask_the_unwatched_preview_files")),
             View::Identifiers,
-            Scope::Item(
-                ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler")
-            ),
+            Scope::Item(ItemQuery::method("FolioApp", "on_window_event")),
         )
         .is_empty(),
         "a window given focus asks about the files no kernel speaks for"
