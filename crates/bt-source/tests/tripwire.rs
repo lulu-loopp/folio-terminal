@@ -679,7 +679,7 @@ fn diagnostic_source_shapes(text: &str, closers: &BTreeSet<usize>) -> Vec<(usize
 fn interpolates(value: &str) -> bool {
     value.match_indices('$').any(|(at, _)| {
         let ticks = value[..at].len() - value[..at].trim_end_matches('`').len();
-        ticks % 2 == 0
+        ticks.is_multiple_of(2)
     })
 }
 
