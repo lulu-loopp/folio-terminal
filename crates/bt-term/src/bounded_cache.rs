@@ -41,6 +41,20 @@
 //! in and took out, and past the budget every over-budget insert walks them all.
 //! A cache tuned to hold hundreds of thousands of tiny entries would want a
 //! linked order instead of this. None of the three is: they hold pictures.
+//!
+//! # Who answers `false`
+//!
+//! Two of the three hold records of questions beside their pixels, and both
+//! bound them by the same rule — a record is kept exactly as long as some
+//! surface of the window names its file, and an answer for a file nobody names
+//! is filed nowhere: the window's animations (`bt-app`'s `AnimationCache` — a
+//! decode in flight, a refusal, an open that never answered) and the window's
+//! peek cache (`bt-app`'s `PeekCacheEntry` — a decode in flight and a failed
+//! decode). The decoration worker's local-path memo
+//! ([`crate::inline_image`]'s `CachedLocalImage`) answers `true` for every
+//! value: a decode and a failed read alike are memos of answers, consulted only
+//! when a request for the file has already arrived, so letting one go costs that
+//! request a read and asks nobody anything.
 
 use std::borrow::Borrow;
 use std::cell::Cell;
