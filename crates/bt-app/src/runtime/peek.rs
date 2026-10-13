@@ -42,6 +42,35 @@ pub(in crate::runtime) enum PeekAsk {
 }
 
 impl Runtime<'_> {
+    /// **A glance card's page whose raster failed**: no longer counted as asked, so the next frame
+    /// that draws the card asks again (`computation_lane`'s `Failed`, settled by its window).
+    pub(in crate::runtime) fn forget_failed_page(
+        &mut self,
+        path: &Path,
+        page: u32,
+        fit: (u32, u32),
+    ) {
+        if let Some(slot) = self
+            .window
+            .peek_page
+            .as_mut()
+            .filter(|slot| slot.path == path && slot.fit == fit)
+        {
+            slot.asked.remove(&page);
+        }
+    }
+
+    /// **A glance's resample that failed**: the card's and the flyout's pending target comes down
+    /// when it is this one, so the next hover asks again.
+    pub(in crate::runtime) fn forget_failed_glance_scale(&mut self, target: &PeekThumbnailTarget) {
+        if self.window.peek_card_pending.as_ref() == Some(target) {
+            self.window.peek_card_pending = None;
+        }
+        if self.window.peek_thumbnail_pending.as_ref() == Some(target) {
+            self.window.peek_thumbnail_pending = None;
+        }
+    }
+
     /// Whether this tab has a layout worth showing, and whether now is a moment
     /// to show it (L131).
     ///

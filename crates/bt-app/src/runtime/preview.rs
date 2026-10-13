@@ -72,6 +72,22 @@ use winit::event::{Ime, KeyEvent, MouseScrollDelta};
 use winit::keyboard::{Key, NamedKey};
 
 impl Runtime<'_> {
+    /// **A preview's or a markdown page's resample that failed**: the page's `Pending` raster and
+    /// every preview picture's pending target come down when they are this one, so the next
+    /// resolve asks again (`computation_lane`'s `Failed`, settled by its window).
+    pub(in crate::runtime) fn forget_failed_preview_scale(&mut self, target: &PeekThumbnailTarget) {
+        self.window
+            .markdown_pictures
+            .forget_pending(&MarkdownRasterKey {
+                content: target.0.clone(),
+                width_px: target.1,
+                height_px: target.2,
+            });
+        for surface in self.preview_picture_hosts() {
+            self.preview_pane_mut(surface).forget_picture_scale(target);
+        }
+    }
+
     /// Prefer the live column's order, including watcher refreshes. A preview
     /// outside the tree uses the very same worker and comparator.
     fn preview_folder_listing(
