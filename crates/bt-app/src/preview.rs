@@ -5945,9 +5945,10 @@ impl PreviewBuffer {
     /// | `Landed`, for an older body | the bytes written | stays | Saved — or nothing, when a press is pending and the newer body goes now, whose own answer speaks |
     /// | `Displaced` (the `Merge` policy's landing, never the preview's) | the bytes written; the other writer's kept beside them, named | as for `Landed` | Saved |
     /// | `Moved`, or `Conflict` (the other writer's bytes put back) | theirs | stays | the conflict |
-    /// | the same, after a Reload while the save was out, and the body follows the file (its read out or clean) | theirs; the conflict unanswered until a body read takes the file | stays | reloaded |
+    /// | the same, after a Reload while the save was out, and the body is exactly their bytes | theirs; answered at once | stays | reloaded |
+    /// | the same, after a Reload, and the Reload's read is out or the body is clean | theirs; the conflict unanswered until a body read takes the file | stays | reloaded |
     /// | the same, after a Reload, and typed on since | theirs; the conflict unanswered, the strip up | stays | the conflict |
-    /// | `MovedDuringRead` | unchanged | stays | the conflict |
+    /// | `MovedDuringRead` (no other writer's bytes named) | unchanged | stays | the conflict; after a Reload, reloaded — nothing waits for an answer |
     /// | `Refused` | unchanged | stays | not saved, and why |
     ///
     /// After a conflict or a refusal nothing more is sent for this buffer until
@@ -5995,7 +5996,14 @@ impl PreviewBuffer {
                 }
             }
             Heard::Landed { .. } => Some(SaveOutcome::Saved),
-            Heard::Conflict if reloaded => {
+            // **A Reload, and an answer that names no other writer's bytes**
+            // (round 9): nothing is known to answer, so nothing waits for an
+            // answer — the next save's precondition meets whatever the file then
+            // holds, as without a Reload (round 6, N1).
+            Heard::Conflict { named: false } if reloaded => Some(SaveOutcome::Failed(
+                crate::i18n::Text::PreviewSaveReloaded.text().to_owned(),
+            )),
+            Heard::Conflict { .. } if reloaded => {
                 if self.a_reload_answers_the_conflict() {
                     Some(SaveOutcome::Failed(
                         crate::i18n::Text::PreviewSaveReloaded.text().to_owned(),
@@ -6009,7 +6017,7 @@ impl PreviewBuffer {
                     Some(SaveOutcome::Conflict)
                 }
             }
-            Heard::Conflict => Some(SaveOutcome::Conflict),
+            Heard::Conflict { .. } => Some(SaveOutcome::Conflict),
             Heard::Refused(why) => Some(SaveOutcome::Failed(why)),
         }
     }
@@ -7856,8 +7864,10 @@ pub(crate) enum SaveAsked {
 enum Heard {
     /// The file holds the bytes written; they were body revision `body`.
     Landed { body: u64 },
-    /// The file holds another writer's bytes, and holds them still.
-    Conflict,
+    /// The file holds another writer's bytes, and holds them still. `named`:
+    /// the answer carries those bytes — a file moving while the worker read it,
+    /// or one past the bound, names none (round 9).
+    Conflict { named: bool },
     /// Nothing was written, and this is why, in the pane's words.
     Refused(String),
 }
@@ -8065,9 +8075,10 @@ impl OnDisk {
                 eprintln!(
                     "BT_PERSIST {name} changed on disk; the edits are kept and not written over it"
                 );
+                let named = bytes.is_some();
                 self.bytes = bytes;
                 self.unanswered = !reloaded;
-                Heard::Conflict
+                Heard::Conflict { named }
             }
             // **No other writer's bytes are known**: the file was moving while it
             // was read, the revision stays the bytes Folio last knew, and so no
@@ -8075,7 +8086,7 @@ impl OnDisk {
             // whatever the file then holds (round 6, N1).
             Outcome::MovedDuringRead => {
                 eprintln!("BT_PERSIST {name} was being written by another program; not written");
-                Heard::Conflict
+                Heard::Conflict { named: false }
             }
             // **A landing over a file that had moved** — the `Merge` policy's
             // answer, which the preview's `Restore` never receives (its worker puts
@@ -8119,7 +8130,7 @@ impl OnDisk {
                     }
                     (None, _) => {}
                 }
-                Heard::Conflict
+                Heard::Conflict { named: true }
             }
             Outcome::Refused { cause } => Heard::Refused(refusal_said(&cause)),
         }
@@ -15895,7 +15906,10 @@ mod tests {
     /// when its landing takes the file (round 8: unanswered until then), and the
     /// read after it is armed and brings their bytes. ② The Reload's read
     /// landed after the other writer wrote — the body is exactly their bytes:
-    /// answered, nothing owed. ③ The Reload's read landed before the other
+    /// answered, nothing owed, and a keystroke on it is an ordinary edit the
+    /// quit's writer writes over their bytes (round 9); the same when the worker
+    /// meets them as a crossing writer and puts them back (`Conflict`, round 9).
+    /// ③ The Reload's read landed before the other
     /// writer wrote (the body is the old file, clean): answered when the body
     /// read it asks takes the file. ④ The Reload's read landed and the person
     /// typed on: the conflict stands — the strip goes up, no press has answered
@@ -15915,6 +15929,7 @@ mod tests {
         for case in [
             "read out",
             "read landed, their bytes",
+            "read landed, their bytes put back",
             "read landed, clean",
             "read landed, typed",
         ] {
@@ -15928,7 +15943,7 @@ mod tests {
             let Some(PreviewWant::Whole(base)) = buffer.claim_head_read() else {
                 panic!("{case}: a Markdown buffer reads whole");
             };
-            if case == "read landed, their bytes" {
+            if case.starts_with("read landed, their bytes") {
                 std::fs::write(&path, theirs).unwrap();
             }
             let read = read_whole(&path);
@@ -15941,8 +15956,19 @@ mod tests {
                     true
                 }));
             }
-            std::fs::write(&path, theirs).unwrap();
-            crate::test_support::serve_on_a_worker(crate::test_support::next_document(&jobs), None);
+            // The put-back row: the file holds the bytes the press was taken
+            // against again, and the other writer crosses the worker's write.
+            let crossing = if case == "read landed, their bytes put back" {
+                std::fs::write(&path, "原 O\n").unwrap();
+                Some(theirs.as_bytes().to_vec())
+            } else {
+                std::fs::write(&path, theirs).unwrap();
+                None
+            };
+            crate::test_support::serve_on_a_worker(
+                crate::test_support::next_document(&jobs),
+                crossing,
+            );
             let mut answers = saves.take_answers();
             let said = buffer.hear_save_answer(answers.remove(0), &mut saves);
             match case {
@@ -15965,12 +15991,27 @@ mod tests {
                     assert_eq!(buffer.content.as_deref(), Some(theirs), "{case}");
                     assert!(buffer.on_disk.holds(theirs.as_bytes()), "{case}");
                 }
-                "read landed, their bytes" => {
+                "read landed, their bytes" | "read landed, their bytes put back" => {
                     assert_eq!(said, Some(reloaded.clone()), "{case}");
                     assert!(!buffer.on_disk.has_an_unanswered_conflict(), "{case}");
                     assert!(!buffer.is_behind_the_disk(), "{case}: nothing is owed");
                     assert_eq!(buffer.content.as_deref(), Some(theirs), "{case}");
                     assert!(!buffer.dirty, "{case}");
+                    assert_eq!(std::fs::read_to_string(&path).unwrap(), theirs, "{case}");
+                    assert!(buffer.edit_content(|content| {
+                        content.push_str("键 typed\n");
+                        true
+                    }));
+                    assert_eq!(
+                        buffer.write_now_for_quit(),
+                        SaveOutcome::Saved,
+                        "{case}: an ordinary edit over the file it was read from"
+                    );
+                    assert_eq!(
+                        std::fs::read_to_string(&path).unwrap(),
+                        format!("{theirs}键 typed\n"),
+                        "{case}"
+                    );
                 }
                 "read landed, clean" => {
                     assert_eq!(said, Some(reloaded.clone()), "{case}");
@@ -16280,13 +16321,82 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// RED (S-6a round 9, nit 5) — **a file moving while the worker read it,
+    /// after a Reload, leaves no conflict waiting.**
+    ///
+    /// The answer names no other writer's bytes, so there is nothing for a
+    /// press to answer: with the Reload's body clean, or typed on since, the
+    /// pane says the file changed and was reloaded, no conflict is unanswered,
+    /// and the quit's writer writes against the bytes the file held before the
+    /// press — the file still holds them.
+    ///
+    /// MUTATION: hear `MovedDuringRead` as naming their bytes
+    /// (`Heard::Conflict { named: true }`) — the typed row's conflict is left
+    /// unanswered and the quit's writer refuses it.
+    #[test]
+    fn a_file_moving_during_the_read_after_a_reload_leaves_no_conflict_waiting() {
+        let dir = scratch("moving-after-reload");
+        let mut caret = crate::preview_edit::EditCaret::default();
+        for case in ["clean", "typed"] {
+            let (lane, jobs) = crate::persist::StorageLane::scripted();
+            let mut saves = PreviewSaves::on(lane);
+            let mut buffer = opened(&dir, &format!("{case}.md"), "原 O\n");
+            let path = on_disk(&buffer).to_path_buf();
+            type_into(&mut buffer, &mut caret, 6);
+            assert_eq!(
+                buffer.request_save(&mut saves, crate::test_support::PRESSED_ON),
+                SaveAsked::Sent
+            );
+            assert!(buffer.take_the_disks_copy());
+            let Some(PreviewWant::Whole(base)) = buffer.claim_head_read() else {
+                panic!("{case}: a Markdown buffer reads whole");
+            };
+            assert_eq!(buffer.land_read(read_whole(&path), base), ReadLanded::Took);
+            if case == "typed" {
+                assert!(buffer.edit_content(|content| {
+                    content.push_str("键 typed\n");
+                    true
+                }));
+            }
+            let job = crate::test_support::next_document(&jobs);
+            let _ = job.answer.send(DocumentAnswer {
+                generation: job.generation,
+                version: job.version,
+                asker: job.asker,
+                outcome: Outcome::MovedDuringRead,
+                not_durable: None,
+                retired: Vec::new(),
+                left: None,
+            });
+            let mut answers = saves.take_answers();
+            assert_eq!(
+                buffer.hear_save_answer(answers.remove(0), &mut saves),
+                Some(SaveOutcome::Failed(
+                    crate::i18n::Text::PreviewSaveReloaded.text().to_owned()
+                )),
+                "{case}"
+            );
+            assert!(!buffer.on_disk.has_an_unanswered_conflict(), "{case}");
+            assert!(buffer.on_disk.holds("原 O\n".as_bytes()), "{case}");
+            if case == "typed" {
+                assert_eq!(buffer.write_now_for_quit(), SaveOutcome::Saved, "{case}");
+                assert_eq!(
+                    std::fs::read_to_string(&path).unwrap(),
+                    "原 O\n键 typed\n",
+                    "{case}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// RED (S-6a round 7, B1) — **a `Displaced` answer is heard as the landing
     /// it is**: the file holds the body sent, the other writer's bytes are kept
     /// beside it (named, never removed), and the pane says "Saved". The
     /// preview's `Restore` never receives it; the answer is heard truthfully
     /// all the same.
     ///
-    /// MUTATION: hear it as a conflict (`Heard::Conflict`) — the pane says "not
+    /// MUTATION: hear it as a conflict (`Heard::Conflict { named: true }`) — the pane says "not
     /// saved" over a body that is on the disk.
     #[test]
     fn a_displaced_answer_is_heard_as_the_landing_it_is() {
