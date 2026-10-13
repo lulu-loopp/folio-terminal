@@ -939,7 +939,9 @@ phase, and neither writes over a conflict the pane has said until a press answer
 that cannot exchange refuses the preview's save through one switch
 (`preview::ON_A_VOLUME_THAT_CANNOT_EXCHANGE`), pending the owner's ruling. The watcher's news
 about a buffer's file is answered by a comparison on the preview worker
-(`PreviewWant::Compare`, the whole file up to the save bound), which never lands a body.
+(`PreviewWant::Compare`, the whole file up to the save bound): a body that is dirty, has a save
+on its way or a conflict nobody has answered is only told, and a clean one takes the file's bytes
+only where an opening would have read them whole.
 **The trial's watch** (`folio-trial-watch`, `BelowNormal`, only in a trial) reads
 `H\journal.json` every 250 ms through `file_reads` on `Lane::UpdateJournal`,
 writes nothing, and ends at the transaction's decision (`update_trial`).

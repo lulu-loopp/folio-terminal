@@ -5449,8 +5449,9 @@ impl PreviewBuffer {
     ///
     /// Every caller of this door wants the disk's body. A comparison the
     /// watcher asked and has not sent becomes a body read; one already out
-    /// stays a comparison, which never lands a body itself and asks for the
-    /// body when the body is not the file's ([`Self::land_read`]).
+    /// stays a comparison, which lands the file's bytes as the body only where
+    /// an opening would have read them whole, and otherwise asks for the
+    /// opening's own read ([`Self::land_read`]).
     ///
     /// Answers whether anything was owed, so that a caller can tell a file that
     /// moved from a file that moved under something with nothing to re-read -
@@ -5460,8 +5461,8 @@ impl PreviewBuffer {
         if self.dirty || !self.reads_a_disk() {
             return false;
         }
-        // A comparison already out stays one — its answer never lands a body,
-        // and asks for the body itself when the body is not the file's
+        // A comparison already out stays one — its answer lands a body only as
+        // an opening would, and asks for the opening's read otherwise
         // ([`Self::land_read`]); one not yet asked becomes a body read.
         if !self.head_asked {
             self.confirming = false;
@@ -6253,7 +6254,7 @@ impl PreviewBuffer {
     /// be out of date with.
     pub fn land_read(&mut self, outcome: HeadOutcome, base: PreviewBase) -> ReadLanded {
         if std::mem::take(&mut self.confirming) {
-            return self.land_comparison(&outcome, base);
+            return self.land_comparison(outcome, base);
         }
         // **A body with unsaved edits is never the disk's to replace**, and
         // neither is one the reader has moved past: the answer is compared with
@@ -6286,24 +6287,27 @@ impl PreviewBuffer {
     }
 
     /// **The watcher's question, answered by the file's bytes** (S-6a) — a
-    /// comparison ([`PreviewWant::Compare`]), which never lands a body.
+    /// comparison ([`PreviewWant::Compare`]).
     ///
-    /// A body with unsaved edits, or one the reader has moved past, is only
-    /// told: the strip goes up when the bytes differ from what Folio last read
-    /// or wrote (or is writing), comes down when they are the same, and stays
-    /// as it is when the answer carries no bytes to compare. A clean body that
-    /// is exactly what the file holds stays, with its undo log and its
-    /// editability — Folio's own save moving the stamp is the ordinary way here
-    /// (T-EDIT-DISK finding A4), and the edit ceiling is an opening's question,
-    /// never this one's. A clean body the file no longer holds is owed the
-    /// file: a body read is asked ([`ReadLanded::ReadAgain`]), judged as an
-    /// opening is.
-    fn land_comparison(&mut self, outcome: &HeadOutcome, base: PreviewBase) -> ReadLanded {
+    /// **Only told, never replaced** — a body with unsaved edits, one the
+    /// reader has moved past, one whose save is on its way, and one a conflict
+    /// was said over and no press has answered (S-6a round 4: its history may
+    /// hold the only copy of the body sent): the strip goes up when the bytes
+    /// differ from what Folio last read or wrote (or is writing), comes down
+    /// when they are the same, and stays as it is when the answer carries no
+    /// bytes to compare. Otherwise, a clean body that is exactly what the file
+    /// holds stays, with its undo log and its editability — Folio's own save
+    /// moving the stamp is the ordinary way here (T-EDIT-DISK finding A4), and
+    /// the edit ceiling is an opening's question, never this one's. A clean body
+    /// the file no longer holds is owed the file, as an opening reads it: the
+    /// comparison's bytes when an opening would have read them whole, and the
+    /// opening's own read ([`ReadLanded::ReadAgain`]) otherwise.
+    fn land_comparison(&mut self, outcome: HeadOutcome, base: PreviewBase) -> ReadLanded {
         self.head_asked = false;
         self.stale = false;
         // A comparison cut short is a file past the save bound, which no
         // revision within it can be.
-        let compared = match (self.compare(outcome), outcome) {
+        let compared = match (self.compare(&outcome), &outcome) {
             (
                 Compared::Unknown,
                 HeadOutcome::Read {
@@ -6312,36 +6316,40 @@ impl PreviewBuffer {
             ) => Compared::Differs,
             (compared, _) => compared,
         };
-        if self.dirty || base != self.base() {
+        // A body undone back to clean while its save is out, or under a
+        // conflict nobody has answered, keeps the history that holds the body
+        // sent: the save's answer, or the person, settles it — never the
+        // watcher. (Folio's own bytes on their way compare as the same.)
+        if self.dirty
+            || base != self.base()
+            || self.on_disk.is_out()
+            || self.on_disk.has_an_unanswered_conflict()
+        {
             let news = match compared {
                 Compared::Same => DiskNews::Level,
                 Compared::Differs => DiskNews::Changed,
                 Compared::Unknown => return ReadLanded::Kept { said: false },
             };
-            self.heard_the_stamp_of(outcome);
+            self.heard_the_stamp_of(&outcome);
             // A buffer with nothing on the glass has nothing to disagree about.
             let said = self.content.is_some() && self.say(news);
             return ReadLanded::Kept { said };
         }
-        if let HeadOutcome::Read {
-            bytes: Some(bytes),
-            truncated: false,
-            ..
-        } = outcome
-        {
-            if self.is_the_reading_of(bytes) {
-                self.heard_the_stamp_of(outcome);
-                self.on_disk.was_read(Some(Arc::clone(bytes)));
+        let whole = match &outcome {
+            HeadOutcome::Read {
+                bytes: Some(bytes),
+                truncated: false,
+                ..
+            } => Some(Arc::clone(bytes)),
+            _ => None,
+        };
+        if let Some(bytes) = whole {
+            if self.is_the_reading_of(&bytes) {
+                self.heard_the_stamp_of(&outcome);
+                self.on_disk.was_read(Some(bytes));
                 return ReadLanded::Kept {
                     said: self.say(DiskNews::Level),
                 };
-            }
-            // **Folio's own save, on its way**: the answer settles this body's
-            // place in its history (a body undone back to clean is not the
-            // bytes sent, and is not the disk's to replace).
-            if self.on_disk.sending(bytes) {
-                self.heard_the_stamp_of(outcome);
-                return ReadLanded::Kept { said: false };
             }
             // **A clean body the file no longer holds**, read as an opening
             // reads it: these bytes are the body when an opening would have
@@ -6354,7 +6362,7 @@ impl PreviewBuffer {
                 PREVIEW_HEAD_BYTES
             };
             if bytes.len() <= limit {
-                self.accept(outcome.clone());
+                self.accept(outcome);
                 return ReadLanded::Took;
             }
         }
@@ -7126,7 +7134,8 @@ pub enum PreviewWant {
     /// **The watcher's question about a buffer's file** (S-6a): the whole
     /// file's bytes, up to the bound a save writes within
     /// ([`bt_persist::MAX_DOCUMENT_BYTES`], [`read_to_compare`]), compared with
-    /// the buffer's disk revision and never landed as a body.
+    /// the buffer's disk revision, and landed as the body only where an opening
+    /// would have read the file whole ([`PreviewBuffer::land_read`]).
     Compare(PreviewBase),
     /// How large the whole file is — the third field of a picture's meta line
     /// (mock-up 4955), which is the only thing on that line the decoder cannot
@@ -8354,7 +8363,9 @@ fn read_up_to(path: &Path, limit: usize) -> HeadOutcome {
 /// precondition ([`read_for_the_precondition`]): the preview's own read, up to
 /// the bound a save writes within ([`bt_persist::MAX_DOCUMENT_BYTES`]) rather
 /// than the edit ceiling, so a file Folio saved larger than it opened is read
-/// whole. Its body is never installed: only its bytes are asked about.
+/// whole. Its text becomes a buffer's body only where an opening would have
+/// read the file whole ([`PreviewBuffer::land_read`]); the quit's precondition
+/// asks only its bytes.
 pub fn read_to_compare(path: &Path) -> HeadOutcome {
     read_up_to(path, COMPARE_BYTES)
 }
@@ -14883,6 +14894,202 @@ mod tests {
         }));
         assert_eq!(buffer.write_now_for_quit(), SaveOutcome::Saved);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "二 v2\n再 again\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED (S-6a round 4, R3-1, ordering ①) — **another writer's bytes seen while
+    /// a save is out never replace a body undone back to clean, nor its history.**
+    ///
+    /// The press (body P), an undo back to the file's own body (O, clean), the
+    /// other writer's bytes (T) on the disk, and the watcher's comparison before
+    /// the answer: the body O and the redo path to P are kept, and the strip
+    /// goes up. The worker then finds T: the conflict is said truthfully, P is
+    /// still a redo away, and a press of it is the answer — it lands against T.
+    ///
+    /// MUTATION: drop `|| self.on_disk.is_out() || self.on_disk.has_an_unanswered_conflict()`
+    /// from `land_comparison`'s told condition (the old take) — the comparison
+    /// takes T as the body and the history goes.
+    #[test]
+    fn a_comparison_of_another_writer_while_a_save_is_out_keeps_the_body_and_its_history() {
+        let dir = scratch("other-writer-save-out");
+        let (lane, jobs) = crate::persist::StorageLane::scripted();
+        let mut saves = PreviewSaves::on(lane);
+        let pressed = crate::test_support::PRESSED_ON;
+        let mut caret = crate::preview_edit::EditCaret::default();
+        let mut buffer = opened(&dir, "日记 diary.md", "原 O\n");
+        let path = on_disk(&buffer).to_path_buf();
+        type_into(&mut buffer, &mut caret, 6);
+        let sent = buffer.content.clone();
+        assert_eq!(buffer.request_save(&mut saves, pressed), SaveAsked::Sent);
+        assert!(buffer.undo_edit().is_some());
+        assert!(!buffer.dirty, "undone back to clean");
+
+        let theirs = "他们的 T\n";
+        std::fs::write(&path, theirs).unwrap();
+        move_the_disk_forward(&path);
+        assert_eq!(
+            buffer.note_disk_moved(true, file_mtime(&path)),
+            DiskVerdict::ReadAgain
+        );
+        let Some(PreviewWant::Compare(base)) = buffer.claim_head_read() else {
+            panic!("the watcher's question is a comparison");
+        };
+        assert_eq!(
+            buffer.land_read(read_to_compare(&path), base),
+            ReadLanded::Kept { said: true },
+            "told, not taken"
+        );
+        assert_eq!(buffer.disk, DiskNews::Changed);
+        assert_eq!(buffer.content.as_deref(), Some("原 O\n"));
+
+        crate::test_support::serve_on_a_worker(crate::test_support::next_document(&jobs), None);
+        let mut answers = saves.take_answers();
+        assert_eq!(
+            buffer.hear_save_answer(answers.remove(0), &mut saves),
+            Some(SaveOutcome::Conflict),
+            "the worker found their bytes"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), theirs);
+        assert!(buffer.redo_edit().is_some(), "the body sent is a redo away");
+        assert_eq!(buffer.content, sent);
+        assert_eq!(buffer.request_save(&mut saves, pressed), SaveAsked::Sent);
+        crate::test_support::serve_on_a_worker(crate::test_support::next_document(&jobs), None);
+        let mut answers = saves.take_answers();
+        assert_eq!(
+            buffer.hear_save_answer(answers.remove(0), &mut saves),
+            Some(SaveOutcome::Saved),
+            "a press is the answer, against their bytes"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).ok(),
+            sent.map(|body| body.to_string())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED (S-6a round 4, R3-1, ordering ②) — **after a conflict nobody has
+    /// answered, the watcher's comparison of the other writer's file takes
+    /// nothing.**
+    ///
+    /// The press, an undo back to clean, and the answer first: the worker found
+    /// the other writer's bytes, the conflict is said, and they are the revision.
+    /// The comparison that follows finds the same bytes: the body and the redo
+    /// path to the body sent stay, and nothing is taken a second time.
+    ///
+    /// MUTATION: the old take (as for ordering ①) — the comparison's bytes are
+    /// taken as the body and the history goes.
+    #[test]
+    fn a_comparison_after_the_conflict_keeps_the_body_and_its_history() {
+        let dir = scratch("compare-after-conflict");
+        let (lane, jobs) = crate::persist::StorageLane::scripted();
+        let mut saves = PreviewSaves::on(lane);
+        let mut caret = crate::preview_edit::EditCaret::default();
+        let mut buffer = opened(&dir, "清单 list.md", "原 O\n");
+        let path = on_disk(&buffer).to_path_buf();
+        type_into(&mut buffer, &mut caret, 6);
+        let sent = buffer.content.clone();
+        assert_eq!(
+            buffer.request_save(&mut saves, crate::test_support::PRESSED_ON),
+            SaveAsked::Sent
+        );
+        assert!(buffer.undo_edit().is_some());
+        let theirs = "他们的 T\n";
+        std::fs::write(&path, theirs).unwrap();
+        crate::test_support::serve_on_a_worker(crate::test_support::next_document(&jobs), None);
+        let mut answers = saves.take_answers();
+        assert_eq!(
+            buffer.hear_save_answer(answers.remove(0), &mut saves),
+            Some(SaveOutcome::Conflict)
+        );
+
+        move_the_disk_forward(&path);
+        assert_eq!(
+            buffer.note_disk_moved(true, file_mtime(&path)),
+            DiskVerdict::ReadAgain
+        );
+        let Some(PreviewWant::Compare(base)) = buffer.claim_head_read() else {
+            panic!("the watcher's question is a comparison");
+        };
+        assert!(
+            matches!(
+                buffer.land_read(read_to_compare(&path), base),
+                ReadLanded::Kept { .. }
+            ),
+            "nothing is taken a second time"
+        );
+        assert_eq!(buffer.content.as_deref(), Some("原 O\n"));
+        assert!(buffer.redo_edit().is_some(), "the body sent is a redo away");
+        assert_eq!(buffer.content, sent);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED (S-6a round 3 item 7, round 4) — **a clean body the file no longer
+    /// holds is taken as an opening takes it.**
+    ///
+    /// ① A Markdown buffer (reads whole): the comparison's bytes are the body,
+    /// read once — the history is forgotten with the old body, and the stamp is
+    /// the file's now (a further notification with it is no news). ② A text
+    /// buffer read by its head, its file rewritten past the head: an opening
+    /// would have read a head, so the comparison asks for that read.
+    ///
+    /// MUTATION: judge every buffer against `PREVIEW_EDIT_BYTES` — ② takes the
+    /// whole file as a head buffer's body.
+    #[test]
+    fn a_clean_body_the_file_no_longer_holds_is_taken_as_an_opening_takes_it() {
+        let dir = scratch("taken-as-an-opening");
+        let mut caret = crate::preview_edit::EditCaret::default();
+
+        // ①
+        let mut buffer = opened(&dir, "说明 readme.md", "旧 old\n");
+        let path = on_disk(&buffer).to_path_buf();
+        type_into(&mut buffer, &mut caret, 4);
+        assert!(buffer.undo_edit().is_some(), "a history, back to clean");
+        std::fs::write(&path, "新 new\n").unwrap();
+        move_the_disk_forward(&path);
+        assert_eq!(
+            buffer.note_disk_moved(true, file_mtime(&path)),
+            DiskVerdict::ReadAgain
+        );
+        let Some(PreviewWant::Compare(base)) = buffer.claim_head_read() else {
+            panic!("the watcher's question is a comparison");
+        };
+        assert_eq!(
+            buffer.land_read(read_to_compare(&path), base),
+            ReadLanded::Took
+        );
+        assert_eq!(buffer.content.as_deref(), Some("新 new\n"));
+        assert_eq!(
+            buffer.undo_edit(),
+            None,
+            "the old body's history went with it"
+        );
+        assert_eq!(buffer.redo_edit(), None);
+        assert_eq!(
+            buffer.note_disk_moved(true, file_mtime(&path)),
+            DiskVerdict::Nothing,
+            "the stamp is the file's now"
+        );
+
+        // ②
+        let mut head = opened(&dir, "日志 log.txt", "短 short\n");
+        assert!(!head.reads_whole, "a text file opened by its head");
+        let path = on_disk(&head).to_path_buf();
+        std::fs::write(&path, "行 line\n".repeat(PREVIEW_HEAD_BYTES / 9 + 1024)).unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() as usize > PREVIEW_HEAD_BYTES);
+        move_the_disk_forward(&path);
+        assert_eq!(
+            head.note_disk_moved(true, file_mtime(&path)),
+            DiskVerdict::ReadAgain
+        );
+        let Some(PreviewWant::Compare(base)) = head.claim_head_read() else {
+            panic!("the watcher's question is a comparison");
+        };
+        assert_eq!(
+            head.land_read(read_to_compare(&path), base),
+            ReadLanded::ReadAgain,
+            "an opening would have read a head: that read is asked"
+        );
+        assert_eq!(head.content.as_deref(), Some("短 short\n"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

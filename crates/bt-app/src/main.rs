@@ -66494,12 +66494,14 @@ impl FolioApp {
         // window's repaint answered, and every answer taken is ended — heard,
         // or sunk — before the first error is passed on (C6).
         let mut first_error = None;
-        let _ = self.for_each_window(|runtime| {
-            if let Err(error) = runtime.hear_preview_saves(&mut answers) {
+        for index in 0..self.windows.len() {
+            if let Some(mut runtime) = self.runtime_at(index)
+                && runtime.window.leaving.is_none()
+                && let Err(error) = runtime.hear_preview_saves(&mut answers)
+            {
                 first_error.get_or_insert(error);
             }
-            Ok(())
-        });
+        }
         if let Some(app) = self.app.as_mut() {
             app.sink_preview_save_answers(answers);
         }
