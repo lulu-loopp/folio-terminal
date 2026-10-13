@@ -946,6 +946,12 @@ text_entries! {
     PreviewConflict,
     /// The clause that gets filled into [`not_saved`].
     PreviewNothingToSave,
+    /// The clause [`not_saved`] is filled with when a save could not reach the
+    /// disk at all (S-6a): nothing in this process would write it.
+    PreviewSaveNotStarted,
+    /// The clause for a body too large to save, `{limit}` filled by
+    /// [`preview_save_too_large`] (S-6a).
+    PreviewSaveTooLarge,
     /// The start's toast for one copy a stop kept in the recovered folder, `{folder}` filled
     /// by [`recovered_edits_kept_in`] (T-RECOVERED-FOLDER).
     RecoveredEditKept,
@@ -3891,6 +3897,16 @@ impl Text {
             Self::PreviewNothingToSave => {
                 pick(lang, "there is nothing to save", "没有要保存的内容")
             }
+            Self::PreviewSaveNotStarted => pick(
+                lang,
+                "the file could not be written",
+                "the file could not be written", // zh: pending S-6a
+            ),
+            Self::PreviewSaveTooLarge => pick(
+                lang,
+                "it is larger than {limit}",
+                "it is larger than {limit}", // zh: pending S-6a
+            ),
             Self::RecoveredEditKept => pick(
                 lang,
                 "An unsaved edit was kept at {folder}",
@@ -6446,6 +6462,12 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // zh: pending S-6a — the two clauses a preview save that never reached the disk is
+        // "not saved" for.
+        (Self::PreviewSaveNotStarted, HostPlatform::Windows),
+        (Self::PreviewSaveNotStarted, HostPlatform::MacOs),
+        (Self::PreviewSaveTooLarge, HostPlatform::Windows),
+        (Self::PreviewSaveTooLarge, HostPlatform::MacOs),
         // zh: pending T-SHELL-BIRTH-DEATH — the face of a shell that ended at birth.
         (Self::ShellBirthDeath, HostPlatform::Windows),
         (Self::ShellBirthDeath, HostPlatform::MacOs),
@@ -7687,6 +7709,13 @@ pub fn not_renamed(reason: &str) -> String {
         Lang::English => format!("Not renamed — {reason}"),
         Lang::Chinese => format!("未重命名 —— {reason}"),
     }
+}
+
+/// The clause for a preview body larger than a save may write (S-6a), `limit`
+/// already in words.
+#[must_use]
+pub fn preview_save_too_large(limit: &str) -> String {
+    Text::PreviewSaveTooLarge.text().replace("{limit}", limit)
 }
 
 /// A save that did not happen, and why. The `{reason}` is either

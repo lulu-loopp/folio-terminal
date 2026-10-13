@@ -94,14 +94,8 @@ pub(crate) enum Mode {
     Merge,
     /// The asker has no merge: a displaced file is put back under its name and
     /// the answer is a conflict. No store sends it — all four merge — and it is
-    /// the preview's save's policy on this worker (design note (c)3, J5 S-6a).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T-STORE-MERGE-PROFILES-PINS until 2026-10-31: every store merges; S-6a's preview save sends it"
-        )
-    )]
+    /// the preview's save's policy on this worker (design note (c)3, J5 S-6a;
+    /// `preview::PreviewBuffer::request_save`).
     Restore,
 }
 
@@ -110,16 +104,10 @@ pub(crate) enum Mode {
 pub(crate) enum LinkPolicy {
     /// Refuse: nothing is written ((b)2, owner ruling Q5).
     Refuse,
-    /// Write the link's name the plain way, as the preview's save does today.
-    /// Honoured for a link only: a volume that cannot exchange is refused
-    /// whatever the policy.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T-STORAGE-WORKER-REQUEST until 2026-10-31: S-6a's preview save sends it"
-        )
-    )]
+    /// Write the link's name the plain way — the preview's save, until the
+    /// owner's ruling on links (J5 Q5(b), `Refuse`) is built for it. Honoured
+    /// for a link only: a volume that cannot exchange is refused whatever the
+    /// policy.
     PlainWriter,
 }
 
@@ -268,7 +256,9 @@ impl Refusal {
         matches!(self, Self::Link | Self::ExchangeUnavailable(_))
     }
 
-    fn described(&self) -> String {
+    /// The refusal in words, as `diagnostics.log` and a pane that was not
+    /// saved say it.
+    pub(crate) fn described(&self) -> String {
         match self {
             Self::Link => "it is a link or has a second name".to_owned(),
             Self::ExchangeUnavailable(error) => {

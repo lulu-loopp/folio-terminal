@@ -23,6 +23,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- Saving a preview no longer holds the window while the disk writes, and a save over a file another program changed within the same second now notices it and leaves that program's text on the disk instead of writing over it. <!-- zh: pending S-6a -->
 - A video that never finishes loading now says so after ten seconds instead of showing a player that never starts, and a video that declares no length shows "No length" on its bar instead of a clock stuck at 0:00. <!-- zh: pending T-VIDEO-ENGINE-NO-DURATION -->
 - File paths printed by Cygwin's bash (`/cygdrive/c/…`), by a WSL profile without shell integration, and by a WSL distribution's own launcher are now links, as in Git Bash and WSL panes. <!-- zh: pending T-WINDOWS-SHELL-NAMESPACES -->
 - A path pasted into a Cygwin bash pane is now written as `/cygdrive/c/…`, which Cygwin can open. <!-- zh: pending T-WINDOWS-SHELL-NAMESPACES -->

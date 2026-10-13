@@ -4,10 +4,10 @@
 
 use super::*;
 use crate::test_support::{
-    A, NO_MODIFIERS, PtyPresentationHarness, TAB_ONE, arriving_as, buffer_read_from, buffer_saying,
-    card_text, cross_tab, disk_scratch, document_key, found, frame_row_text, markdown_body,
-    method_body, move_the_disk_forward, one_picture, press, rested_bars, row_box, ruler, seat_of,
-    source, tab_with_a_preview, text_buffer,
+    A, NO_MODIFIERS, PtyPresentationHarness, TAB_ONE, a_save_desk, arriving_as, buffer_read_from,
+    buffer_saying, card_text, cross_tab, disk_scratch, document_key, found, frame_row_text,
+    markdown_body, method_body, move_the_disk_forward, one_picture, press, rested_bars, row_box,
+    ruler, save_through, seat_of, source, tab_with_a_preview, text_buffer,
 };
 use bt_source::{Pattern, View, needle};
 use winit::keyboard::{Key, NamedKey};
@@ -2031,6 +2031,7 @@ fn a_page_this_window_will_not_edit_takes_no_caret_on_either_face() {
         text: "# head\n".to_owned(),
         truncated: true,
         mtime: None,
+        bytes: None,
         content_says_text: true,
         encoding: preview::HeadEncoding::Utf8,
         lossy: false,
@@ -2049,6 +2050,7 @@ fn a_page_this_window_will_not_edit_takes_no_caret_on_either_face() {
         text: "# head\u{fffd}\n".to_owned(),
         truncated: false,
         mtime: None,
+        bytes: None,
         content_says_text: true,
         encoding: preview::HeadEncoding::Utf8,
         lossy: true,
@@ -2105,6 +2107,7 @@ fn a_resize_reflows_the_markdown_without_re_measuring_it() {
         text: source.to_owned(),
         truncated: false,
         mtime: None,
+        bytes: None,
         content_says_text: true,
         encoding: preview::HeadEncoding::Utf8,
         lossy: false,
@@ -2289,6 +2292,7 @@ fn the_caret_changing_block_is_a_layout_change_and_not_a_parse_change() {
         text: source.to_owned(),
         truncated: false,
         mtime: None,
+        bytes: None,
         content_says_text: true,
         encoding: preview::HeadEncoding::Utf8,
         lossy: false,
@@ -2363,6 +2367,7 @@ fn a_selection_reaching_another_block_is_a_layout_change_and_not_a_parse_change(
         text: source.to_owned(),
         truncated: false,
         mtime: None,
+        bytes: None,
         content_says_text: true,
         encoding: preview::HeadEncoding::Utf8,
         lossy: false,
@@ -2727,14 +2732,18 @@ fn a_caret_and_a_scroll_survive_a_switch_to_another_buffer_and_back() {
 /// the two. What the ruling adds is that the disagreement is *reported at
 /// the moment it happens* rather than kept back until somebody presses save,
 /// and that the two answers a person can give it are on the strip beside it.
+/// The moment it happens is the moment the file's bytes say so (S-6a): the
+/// watcher's read of a dirty buffer only compares, and its answer puts the
+/// strip up.
 ///
 /// Both verbs, because they are the two halves of one promise: `Keep my
 /// edits` must leave every character where it is, and `Reload` must be the
 /// only thing in this product that throws them away.
 ///
-/// RED GATE ①: let `note_disk_moved` fall through to `mark_stale` for a
-/// dirty buffer and the first block fails — the edits are gone and nothing
-/// was said, which is the outcome the ruling exists to forbid. RED GATE ②:
+/// RED GATE ①: let `land_read` take a dirty buffer's answer as its body (drop
+/// `self.dirty ||` from its first condition) and the first block fails — the
+/// edits are gone and nothing was said, which is the outcome the ruling
+/// exists to forbid. RED GATE ②:
 /// make [`preview::PreviewBuffer::keep_this_body`] clear `dirty` as well and
 /// the second block fails. RED GATE ③: make
 /// [`preview::PreviewBuffer::take_the_disks_copy`] leave `dirty` standing
@@ -2757,13 +2766,21 @@ fn a_body_with_unsaved_edits_is_not_overwritten_and_says_so() {
     move_the_disk_forward(&path);
     assert_eq!(
         buffer.note_disk_moved(true, preview::file_mtime(&path)),
-        preview::DiskVerdict::Say,
-        "a strip, not a read"
+        preview::DiskVerdict::ReadAgain,
+        "a read, to compare: the stamp alone decides nothing"
+    );
+    let Some(preview::PreviewWant::Whole(base)) = buffer.claim_head_read() else {
+        panic!("a body with unsaved edits is compared whole");
+    };
+    assert_eq!(
+        buffer.land_read(preview::read_whole(&path), base),
+        preview::ReadLanded::Kept { said: true },
+        "the bytes differ, and the strip goes up"
     );
     assert_eq!(buffer.disk(), preview::DiskNews::Changed);
     assert!(
         !buffer.is_behind_the_disk(),
-        "nothing is owed to the worker: the body on the glass is not going anywhere"
+        "nothing more is owed to the worker: the body on the glass is not going anywhere"
     );
     assert!(
         buffer
@@ -2795,16 +2812,23 @@ fn a_body_with_unsaved_edits_is_not_overwritten_and_says_so() {
             .text()
             .is_some_and(|body| body.contains("typed by hand"))
     );
+    let mut saves = a_save_desk();
     assert_eq!(
-        buffer.save(),
-        preview::SaveOutcome::Conflict,
+        save_through(&mut buffer, &mut saves),
+        Some(preview::SaveOutcome::Conflict),
         "ruling 8-9 still stands: dismissing the strip is not permission to overwrite"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "# two\n",
+        "and the other writer's file is theirs"
     );
 
     // ③ Reload: the one door that discards, and it really does read again.
     assert_eq!(
         buffer.note_disk_moved(true, preview::file_mtime(&path)),
-        preview::DiskVerdict::Say
+        preview::DiskVerdict::Nothing,
+        "a notification about the state already said is no news"
     );
     assert!(buffer.take_the_disks_copy(), "a head read is now owed");
     assert!(!buffer.dirty());
