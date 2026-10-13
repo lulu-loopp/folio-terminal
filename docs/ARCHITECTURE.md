@@ -1279,8 +1279,12 @@ write of bytes Folio owns (B6). Its bound is what one Git page can hand it (`MUT
 write for each status row, `git::GIT_STATUS_CAP`, each held to one in flight, and the page's one
 checkout). A verb that never ran — refused at the door, or still in line when its worker ended —
 reaches the page as its receipt with `GitFault::NotRun`; a verb whose task failed, after git may
-have run it, as `GitFault::Unfinished`, and the page reads the repository again; a page that has
-gone — its tab, its floating page or its window — has its receipt end in the lane's ignoring sink.
+have run it, as `GitFault::Unfinished`, and the page reads the repository again. Every receipt
+and every reading is owed to the repository cache that asked (`git::GitCacheId`, carried by the
+cache through a dock, a pop-out or a move into another tab), found where it stands now by one
+function (`OpenPages::resolve`, T-GIT-RECEIPTS-FOLLOW-A-MOVED-HOST): a page that moved while git
+worked still gets its answer, and only a page that has gone — no open window holds its cache —
+has its receipt end in the lane's ignoring sink.
 The read worker's questions take turns with the verbs through the lane's `RepoTurns`: a question
 waits for the verbs its repository's share had minted when it was asked and for a verb running
 there — at most those verbs, each one git child under `GIT_COMMAND_TIMEOUT` — and a verb pressed

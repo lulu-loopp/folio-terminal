@@ -910,11 +910,13 @@ impl Runtime<'_> {
         // and its answer comes home through `apply_git_results`.
         if let Some(seat) = git_seat
             && let Some(question) = git_document_question(&source, None)
+            && let Some(asker) = self.git_trees.get(&seat).map(git::GitCache::id)
         {
             let tab = self.id;
             if !self.app.git_worker.request(git::GitRequest {
                 window: self.window_id(),
                 host: git::GitHost::Column(LeafId { tab, seat }),
+                asker,
                 question,
             }) {
                 self.disable_git_worker();
