@@ -10091,8 +10091,8 @@ mod tests {
     /// gets for a script WSL cannot name: its own words as the row wrote them, the plain shell.
     /// A space and Chinese are handed over whole.
     ///
-    /// MUTATION: accept every text in `reads_alike_in_both_quotes` and the `$` account's line
-    /// names `/mnt/c/Users/al$ice/…`, which the outer shell expands.
+    /// MUTATION: accept every text in `reads_alike_in_both_quotes` and the `$` folder's line
+    /// names `/mnt/c/Users/alice/fo$lio/…`, which the outer shell expands.
     ///
     /// Windows only: a drive-letter path is a Windows path grammar, and WSL is a Windows launcher.
     #[cfg(windows)]
@@ -10115,9 +10115,9 @@ mod tests {
             ))
         };
         for refused in [
-            r"C:\Users\al$ice\folio.bash",
-            r"C:\Users\a`b\folio.bash",
-            r"C:\Users\o'neil\folio.bash",
+            r"C:\Users\alice\fo$lio\folio.bash",
+            r"C:\Users\alice\a`b\folio.bash",
+            r"C:\Users\alice\o'neil\folio.bash",
             r"\\nas\home\folio.bash",
         ] {
             assert_eq!(at(refused, &row), ["--login", "-i"], "{refused}");
@@ -10133,10 +10133,10 @@ mod tests {
                 "{word}: the row's words reach the launcher as written, with no door"
             );
         }
-        let whole = at(r"C:\Users\Alice Smith 样本\folio.bash", &row);
+        let whole = at(r"C:\Users\alice\Program Files 样本\folio.bash", &row);
         assert_eq!(whole[0], "-c");
         assert!(
-            whole[1].contains("--init-file '/mnt/c/Users/Alice Smith 样本/folio.bash'"),
+            whole[1].contains("--init-file '/mnt/c/Users/alice/Program Files 样本/folio.bash'"),
             "{whole:?}"
         );
     }
