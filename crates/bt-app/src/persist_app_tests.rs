@@ -14,6 +14,11 @@ use crate::test_support::{
 /// The behaviour the hold must not touch: a shell that ends for its own reasons (`exit`, a crash)
 /// is a change the reader made, recorded and written as before; the run's sentinel stands.
 ///
+/// The store's writer waits the suite's patience (`lane::PATIENCE`) rather than the product's
+/// three seconds: what this proves is that the pane closes without a freeze, and the two real
+/// writes it asks about are answered when they land, however loaded the machine is. The budget
+/// is pinned by `persist::tests::a_quit_leaves_a_writer_that_never_answers_behind`.
+///
 /// MUTATION: make `session_end::holds_the_document` answer `true` — the closed pane never
 /// reaches the file.
 #[test]
@@ -21,6 +26,7 @@ fn an_ordinary_shell_exit_without_a_freeze_still_closes_the_pane() {
     on_the_window_thread();
     let home = EndSessionHome::new("ordinary");
     let mut store = persist::SessionStore::armed_at(home.session(), home.sentinel());
+    store.set_save_budget(crate::lane::PATIENCE);
     record_as_the_app_does(&mut store, shells_document(&home.0, 2));
     assert!(bt_platform::admission::exiting());
     assert_eq!(store.flush_judged(), Ok(()));
