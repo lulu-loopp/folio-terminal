@@ -852,20 +852,20 @@ pub fn served_by(profile: &Profile) -> Integration {
 }
 
 /// **The door a row is served through**, once the walk has said what kind of program it starts
-/// ([`ShellProgram`], carried by `ProfilePrograms::shell` and a leaf's `program_kind`):
-/// [`served_by`] for every program but a WSL launcher that is not `wsl.exe`, which is served by no
-/// door.
+/// ([`ShellProgram`], carried by `ProfilePrograms::shell` and a leaf's `program_kind`).
 ///
 /// The door follows the program kind; a bash inside WSL is given WSL-spelled paths or no door.
-/// `wsl.exe` is given WSL-spelled paths: its `-e` executes the program it names argv for argv, so
-/// the script crosses as one argument in the distribution's spelling
-/// (`shell_integration::WSL_LOGIN_SHELL`). Every other launcher — `System32\bash.exe`, WSL's
-/// Store `bash.exe` alias, a distribution's own launcher — has no such flag: what follows its name
-/// is joined into one command line and re-parsed by a shell inside the distribution (measured
-/// 2026-10-12: `bash.exe -c '…"$0"…' zero` printed `/bin/bash`, the outer shell's `$0`), whose
-/// grammar this side does not know, and a distribution's launcher reads its own verbs (`run`,
-/// `config`) and refuses anything else. So no path can be handed to one whole, and such a row gets
-/// what `wsl.exe` gets when its script cannot be named in WSL: no init file, the plain shell.
+///
+/// * `wsl.exe`, a Cygwin or a native program: [`served_by`].
+/// * `bash.exe` — `System32\bash.exe` or WSL's Store alias, a launcher of the default
+///   distribution's bash: bash's init-file door when the row's door is that one, else none. The
+///   script is handed over in WSL's spelling inside one `-c` argument
+///   (`shell_integration::wsl_bash_launcher_command`), because `bash.exe` has no `-e`: what follows
+///   its name is re-read by a shell inside the distribution, so the argument is written to mean
+///   the same to that shell's double quotes and to the inner bash's single quotes, and a path or
+///   word either quoting would read differently is not handed over.
+/// * A distribution's own launcher (`ubuntu2204.exe`): no door. It reads its own verbs (`run`,
+///   `config`) and refuses anything else; what `run` does with a command line is not measured.
 #[must_use]
 pub fn door_of(profile: &Profile, program: &ShellProgram) -> Integration {
     door_on(served_by(profile), program)
@@ -874,6 +874,9 @@ pub fn door_of(profile: &Profile, program: &ShellProgram) -> Integration {
 /// `door`, as a program of kind `program` can be handed it — [`door_of`]'s rule.
 fn door_on(door: Integration, program: &ShellProgram) -> Integration {
     match program {
+        ShellProgram::WslLauncher { distribution: None } if door == Integration::BashInitFile => {
+            door
+        }
         ShellProgram::WslLauncher { .. } => Integration::None,
         ShellProgram::WslExe | ShellProgram::Cygwin | ShellProgram::Native => door,
     }
@@ -952,8 +955,8 @@ pub(crate) struct ShellFamily {
 ///
 /// **A row's door is this table's answer for its stem, and then the program kind's**
 /// ([`door_of`]): the door follows the program kind; a bash inside WSL is given WSL-spelled paths
-/// or no door. `System32\bash.exe` has the stem `bash` and is a launcher into WSL, not a bash this
-/// side can hand an init file to.
+/// or no door. `System32\bash.exe` has the stem `bash` and starts a bash inside WSL, so the init
+/// file it is handed is named in WSL's spelling, never in Windows'.
 pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
     ShellFamily {
         stems: &["pwsh", "powershell"],
@@ -3561,21 +3564,30 @@ pub fn integration_name(integration: Integration) -> crate::i18n::Text {
 }
 
 /// `Auto (Bash init file)`, or whichever door the row's program derives as a program of the kind
-/// the walk found (`program`, [`auto_door`]) — that picker's **button** while the row is on the rule, interned so the caption can
-/// ride a `Copy` snapshot of the page.
+/// the walk found (`program`, [`auto_door`]) — that picker's **button** while the row is on the
+/// rule, interned so the caption can ride a `Copy` snapshot of the page. `program` is `None`
+/// while the walk has not answered for the row, and the button then says it is checking.
 ///
 /// `None` when the row has named a door: the button then says the word on the
 /// item that is ticked, which is what every other picker in this dialog does.
 #[must_use]
-pub fn integration_auto_label(index: usize, program: &ShellProgram) -> Option<&'static str> {
+pub fn integration_auto_label(
+    index: usize,
+    program: Option<&ShellProgram>,
+) -> Option<&'static str> {
     with_table(|table| {
         let profile = table.get(index)?;
-        if profile.integration != IntegrationChoice::Auto {
-            return None;
-        }
-        let door = integration_name(auto_door(profile, program)).text();
-        Some(intern(&crate::i18n::profile_integration_auto(door)))
+        (profile.integration == IntegrationChoice::Auto)
+            .then(|| intern(&auto_label(profile, program)))
     })
+}
+
+/// [`integration_auto_label`]'s words for one row on the rule.
+fn auto_label(profile: &Profile, program: Option<&ShellProgram>) -> String {
+    let door = program.map_or_else(checking_text, |program| {
+        integration_name(auto_door(profile, program)).text()
+    });
+    crate::i18n::profile_integration_auto(door)
 }
 
 /// The door the rule picks for `profile` when its program is of kind `program`: the family's,
@@ -4461,9 +4473,10 @@ pub fn capability_of_parts(
 
 /// The editor's `Shell integration` row: the same sentence the list carries, in
 /// the one length the page has room for. `program` is the kind of program the walk found for the
-/// row ([`ProfilePrograms::shell`]).
+/// row ([`ProfilePrograms::known_shell`]): `None` while the walk has not answered, and the row
+/// then says it is checking, as the list's line does.
 #[must_use]
-pub fn capability_in_editor(index: usize, program: &ShellProgram) -> crate::i18n::Text {
+pub fn capability_in_editor(index: usize, program: Option<&ShellProgram>) -> crate::i18n::Text {
     with_table(|table| {
         table
             .get(index)
@@ -4474,14 +4487,16 @@ pub fn capability_in_editor(index: usize, program: &ShellProgram) -> crate::i18n
 }
 
 /// [`capability_in_editor`] for one row: the long sentence of the door it is served through
-/// ([`door_of`]).
-fn editor_capability(profile: &Profile, program: &ShellProgram) -> crate::i18n::Text {
-    capability_of_parts(
-        door_of(profile, program),
-        profile.paths,
-        crate::shell_integration::declares_hyperlinks(profile),
-        true,
-    )
+/// ([`door_of`]), or the checking sentence while its kind is unknown.
+fn editor_capability(profile: &Profile, program: Option<&ShellProgram>) -> crate::i18n::Text {
+    program.map_or(crate::i18n::Text::VersionChecking, |program| {
+        capability_of_parts(
+            door_of(profile, program),
+            profile.paths,
+            crate::shell_integration::declares_hyperlinks(profile),
+            true,
+        )
+    })
 }
 
 /// Every spelling of one profile's name that a shell announcing it would use —
@@ -5997,6 +6012,12 @@ impl ProfilePrograms {
         self.answers
             .get(id)
             .map_or(ShellProgram::Native, |answer| answer.shell.clone())
+    }
+
+    /// [`Self::shell`], or `None` while the row with this id has no answer yet.
+    #[must_use]
+    pub fn known_shell(&self, id: &str) -> Option<ShellProgram> {
+        self.answers.get(id).map(|answer| answer.shell.clone())
     }
 
     /// Whether the row with this id has no answer yet.
@@ -27795,16 +27816,19 @@ mod tests {
         );
     }
 
-    /// PIN — **a WSL launcher's capability sentence is the one `wsl.exe`'s row says for the door
-    /// it is given** (T-WSL-LEGACY-BASH-DOOR): a launcher into WSL that is not `wsl.exe` is served
-    /// by no door ([`door_of`]), so its list line and its editor row say what `wsl.exe`'s row says
-    /// with no door — no shell integration — and its `Auto` picker names that door; `wsl.exe`
-    /// keeps its own sentence, and a Git Bash and a Cygwin bash keep a bash's.
+    /// PIN — **a WSL launcher's capability sentence names the door its program kind gets**
+    /// (T-WSL-LEGACY-BASH-DOOR round 2): `bash.exe` (`System32` or the Store alias) is handed
+    /// bash's init file in WSL's spelling, so its list line and editor row are a bash's and its
+    /// `Auto` picker names bash's door; a distribution's own launcher gets no door and says what
+    /// `wsl.exe`'s row says with none; `wsl.exe`, a Git Bash and a Cygwin bash keep their own.
+    /// Before the walk has said what the program is, the editor's sentence and the `Auto` label say
+    /// "checking", as the list's line does, rather than the stem's answer.
     ///
-    /// MUTATION: decide by stem (`door_of` answers `served_by(profile)` whatever the kind) and
-    /// `System32\bash.exe`'s editor row says `CapFull`, a bash's whole set of marks.
+    /// MUTATIONS: ① decide by stem (`door_on` answers `door` for every launcher) and the
+    /// distribution launcher's editor row says `CapFull`; ② answer an unknown kind as `Native`
+    /// and the unknown row's sentence is `CapFull`.
     #[test]
-    fn a_wsl_launchers_capability_sentence_is_wsl_exes() {
+    fn a_wsl_launchers_capability_sentence_names_the_door_its_kind_gets() {
         use crate::i18n::Text;
         let custom = |program: &str, integration: IntegrationChoice| Profile {
             id: "mine".into(),
@@ -27814,62 +27838,77 @@ mod tests {
         };
         let wsl = windows_row("wsl");
         assert_eq!(
-            editor_capability(&wsl, &ShellProgram::WslExe),
+            editor_capability(&wsl, Some(&ShellProgram::WslExe)),
             Text::CapWslBash
         );
+        let bash_launcher = ShellProgram::WslLauncher { distribution: None };
+        for program in [
+            r"C:\Windows\System32\bash.exe",
+            r"C:\Users\alice\AppData\Local\Microsoft\WindowsApps\bash.exe",
+        ] {
+            let row = custom(program, IntegrationChoice::Auto);
+            assert_eq!(
+                editor_capability(&row, Some(&bash_launcher)),
+                Text::CapFull,
+                "{program}"
+            );
+            assert_eq!(
+                capability_text_for_launch(&row, &bash_launcher, Some(Path::new(program)), true),
+                Text::CapFull,
+                "{program}: the list's sentence"
+            );
+            assert_eq!(
+                auto_door(&row, &bash_launcher),
+                Integration::BashInitFile,
+                "{program}"
+            );
+        }
+        let ubuntu = custom(
+            r"C:\Users\alice\AppData\Local\Microsoft\WindowsApps\ubuntu2204.exe",
+            IntegrationChoice::Named(Integration::BashInitFile),
+        );
+        let distribution = ShellProgram::WslLauncher {
+            distribution: Some("Ubuntu-22.04".into()),
+        };
         let wsl_without_a_door = Profile {
             integration: IntegrationChoice::Named(Integration::None),
             ..wsl.clone()
         };
-        for (program, integration, kind) in [
-            (
-                r"C:\Windows\System32\bash.exe",
-                IntegrationChoice::Auto,
-                ShellProgram::WslLauncher { distribution: None },
-            ),
-            (
-                r"C:\Users\alice\AppData\Local\Microsoft\WindowsApps\bash.exe",
-                IntegrationChoice::Auto,
-                ShellProgram::WslLauncher { distribution: None },
-            ),
-            (
-                r"C:\Users\alice\AppData\Local\Microsoft\WindowsApps\ubuntu2204.exe",
-                IntegrationChoice::Named(Integration::BashInitFile),
-                ShellProgram::WslLauncher {
-                    distribution: Some("Ubuntu-22.04".into()),
-                },
-            ),
-        ] {
-            let row = custom(program, integration);
-            assert_eq!(
-                editor_capability(&row, &kind),
-                editor_capability(&wsl_without_a_door, &ShellProgram::WslExe),
-                "{program}: the editor's sentence"
-            );
-            assert_eq!(
-                editor_capability(&row, &kind),
-                Text::CapNoneLong,
-                "{program}"
-            );
-            assert_eq!(
-                capability_text_for_launch(&row, &kind, Some(Path::new(program)), true),
-                Text::CapNone,
-                "{program}: the list's sentence"
-            );
-            assert_eq!(auto_door(&row, &kind), Integration::None, "{program}");
-        }
+        assert_eq!(
+            editor_capability(&ubuntu, Some(&distribution)),
+            editor_capability(&wsl_without_a_door, Some(&ShellProgram::WslExe)),
+        );
+        assert_eq!(
+            editor_capability(&ubuntu, Some(&distribution)),
+            Text::CapNoneLong
+        );
+        assert_eq!(
+            capability_text_for_launch(&ubuntu, &distribution, None, true),
+            Text::CapNone
+        );
         for (program, kind) in [
             (r"C:\Program Files\Git\bin\bash.exe", ShellProgram::Native),
             (r"C:\cygwin64\bin\bash.exe", ShellProgram::Cygwin),
         ] {
             let row = custom(program, IntegrationChoice::Auto);
-            assert_eq!(editor_capability(&row, &kind), Text::CapFull, "{program}");
+            assert_eq!(
+                editor_capability(&row, Some(&kind)),
+                Text::CapFull,
+                "{program}"
+            );
             assert_eq!(
                 auto_door(&row, &kind),
                 Integration::BashInitFile,
                 "{program}"
             );
         }
+        // Not known yet: the walk has not answered for the row.
+        let unknown = custom(r"C:\Windows\System32\bash.exe", IntegrationChoice::Auto);
+        assert_eq!(editor_capability(&unknown, None), Text::VersionChecking);
+        assert_eq!(
+            auto_label(&unknown, None),
+            crate::i18n::profile_integration_auto(checking_text())
+        );
     }
 
     #[test]

@@ -196,6 +196,10 @@ const CMD_MARKS_AFTER_REPORT: &str = r"$e]133;A$e\";
 /// own answer has it carried into the distribution rather than overwritten by
 /// its absence.
 ///
+/// **Listed for every pane whose program enters WSL** (owner ruling 2026-10-12):
+/// `wsl.exe` or another launcher, handed a script or not, because these say what
+/// the terminal is and not what a script installed.
+///
 /// **[`INSTALLED_MARKER`] is deliberately not among them** (2026-09-07). It is
 /// set inside the distribution, by the one branch of [`WSL_LOGIN_SHELL`] that
 /// actually reads the init file, because it is the only variable here whose
@@ -558,8 +562,9 @@ pub struct ShellCommand {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct EnvironmentDerivation {
     pub(crate) integration: Integration,
+    /// The program enters WSL ([`profiles::ShellProgram::enters_wsl`]): the terminal's
+    /// declarations and the profile's own variables are listed in `WSLENV`.
     pub(crate) crosses_wsl: bool,
-    pub(crate) forwards_terminal_into_wsl: bool,
 }
 
 impl Default for EnvironmentDerivation {
@@ -567,7 +572,6 @@ impl Default for EnvironmentDerivation {
         Self {
             integration: Integration::None,
             crosses_wsl: false,
-            forwards_terminal_into_wsl: false,
         }
     }
 }
@@ -593,8 +597,9 @@ impl Default for EnvironmentDerivation {
 ///
 /// `program_kind` is what the program walk found the row's program to be
 /// ([`profiles::ProfilePrograms::shell`]): the door is the one the row is served through as that
-/// kind of program ([`profiles::door_of`]), and a program that enters WSL lists the profile's own
-/// variables in `WSLENV`, whatever its door.
+/// kind of program ([`profiles::door_of`]), and a program that enters WSL lists the terminal's
+/// declarations ([`FORWARDED`]) and the profile's own variables in `WSLENV`, whatever its door and
+/// whether or not it was handed a script (owner ruling 2026-10-12).
 #[must_use]
 pub fn shell_command(
     profile: &Profile,
@@ -624,14 +629,13 @@ pub fn shell_command(
                 .collect::<Vec<_>>()
         }
     };
-    let mut command = shell_command_for(profile, door, scripts, environment, &own);
+    let mut command = shell_command_for(profile, program_kind, door, scripts, environment, &own);
+    if program_kind.enters_wsl() {
+        command.environment.extend(crossing_environment());
+    }
     command.environment_derivation = EnvironmentDerivation {
         integration: door,
         crosses_wsl: program_kind.enters_wsl(),
-        forwards_terminal_into_wsl: command
-            .environment
-            .iter()
-            .any(|(name, _)| environment_name_eq(name, OsStr::new("WSLENV"))),
     };
     let mine = &profile.env;
     command
@@ -744,10 +748,8 @@ pub(crate) fn derive_environment_for_birth(
             list.push_str(name);
             list.push_str("/u");
         };
-        if derivation.forwards_terminal_into_wsl {
-            for name in FORWARDED {
-                append(name);
-            }
+        for name in FORWARDED {
+            append(name);
         }
         for (name, _) in profile {
             let name = name.to_string_lossy();
@@ -1719,12 +1721,23 @@ fn forward_into_wsl(environment: &mut Vec<(OsString, OsString)>, mine: &[(String
 
 fn shell_command_for(
     profile: &Profile,
+    program_kind: &profiles::ShellProgram,
     door: Integration,
     scripts: Scripts<'_>,
     environment: &dyn ShellEnvironment,
     own: &dyn Fn() -> Vec<OsString>,
 ) -> ShellCommand {
     match door {
+        // `bash.exe`: a bash inside WSL behind a launcher with no `-e`, handed the script in
+        // WSL's spelling through the one line the distribution's shell re-reads.
+        Integration::BashInitFile
+            if matches!(program_kind, profiles::ShellProgram::WslLauncher { .. }) =>
+        {
+            match scripts.bash {
+                Some(script) => wsl_bash_launcher_command(script, profile, own),
+                None => plain_command(own),
+            }
+        }
         Integration::BashInitFile if scripts.bash.is_some() => match profile.paths {
             // Git Bash: bash *is* the program, and takes the flag directly.
             //
@@ -1842,12 +1855,7 @@ fn wsl_command(scripts: Scripts<'_>, own: &dyn Fn() -> Vec<OsString>) -> ShellCo
     let bash = named(scripts.bash);
     let zdotdir = named(scripts.zdotdir);
     if bash.is_empty() && zdotdir.is_empty() {
-        return ShellCommand {
-            arguments: own(),
-            environment: Vec::new(),
-            profile_environment: Vec::new(),
-            environment_derivation: EnvironmentDerivation::default(),
-        };
+        return plain_command(own);
     }
     ShellCommand {
         arguments: own()
@@ -1866,10 +1874,111 @@ fn wsl_command(scripts: Scripts<'_>, own: &dyn Fn() -> Vec<OsString>) -> ShellCo
                 .map(OsString::from),
             )
             .collect(),
-        environment: crossing_environment(),
+        environment: Vec::new(),
         profile_environment: Vec::new(),
         environment_derivation: EnvironmentDerivation::default(),
     }
+}
+
+/// The row's own words and no door.
+fn plain_command(own: &dyn Fn() -> Vec<OsString>) -> ShellCommand {
+    ShellCommand {
+        arguments: own(),
+        environment: Vec::new(),
+        profile_environment: Vec::new(),
+        environment_derivation: EnvironmentDerivation::default(),
+    }
+}
+
+/// **`bash.exe`'s door** (T-WSL-LEGACY-BASH-DOOR): bash's init file, handed to the bash a
+/// launcher with no `-e` starts inside WSL — `System32\bash.exe` or WSL's Store alias.
+///
+/// What follows `bash.exe`'s name is re-read by a shell inside the distribution, and the bash it
+/// starts is the one that runs `-c`'s text (measured 2026-10-12, Ubuntu-24.04, through the
+/// Windows quoting this process's child command line uses: a single-quoted path with a space
+/// arrived whole; `$HOME` and a backtick inside the single quotes were expanded by the outer
+/// shell; the `-c` shell's parent is `/init`). So the launcher is handed `-c` and one line, which
+/// the Windows command line wraps in double quotes because it has a space in it:
+///
+/// `[ -r '<script>' ] && BT_SHELL_INTEGRATION=<mode> exec bash --init-file '<script>' '<word>'… -i;
+/// exec bash '<word>'…`
+///
+/// * The script is named in WSL's spelling, as [`wsl_command`] names it.
+/// * Every path and word is single-quoted for the inner bash and is handed over only when neither
+///   quoting can read it differently ([`reads_alike_in_both_quotes`]); otherwise the row gets no
+///   door, as `wsl.exe` gets none for a script WSL cannot name: its own words, the plain shell.
+///   The row's own words are not dropped one by one: a door that cannot carry all of them is not
+///   opened, and they reach the launcher as the row wrote them.
+/// * `[ -r … ]`: where the distribution cannot read the script (no `/mnt/c`, another mount root),
+///   the second command starts the bash the row asked for, instead of a bash that skips a missing
+///   init file and `~/.bashrc` with it.
+/// * The marker is set by the branch that reads the init file, for the reason [`FORWARDED`]
+///   leaves it out: a bash that did not read the script must not carry it.
+/// * The login flag is traded for the marker's mode exactly as on the Windows road.
+fn wsl_bash_launcher_command(
+    script: &Path,
+    profile: &Profile,
+    own: &dyn Fn() -> Vec<OsString>,
+) -> ShellCommand {
+    let words = own();
+    let named = windows_to_wsl(script)
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .filter(|path| reads_alike_in_both_quotes(path));
+    let said = words
+        .iter()
+        .map(|word| {
+            word.to_str()
+                .filter(|word| reads_alike_in_both_quotes(word))
+                .map(single_quoted)
+        })
+        .collect::<Option<Vec<_>>>();
+    let (Some(script), Some(said)) = (named, said) else {
+        return plain_command(own);
+    };
+    let mut door = vec!["--init-file".to_owned(), single_quoted(&script)];
+    let mut interactive = false;
+    for word in words.iter().filter_map(|word| without_login_flag(word)) {
+        interactive |= word == *"-i" || word == *"--interactive";
+        door.push(single_quoted(&word.to_string_lossy()));
+    }
+    if !interactive {
+        door.push("-i".to_owned());
+    }
+    let mode = if asks_for_login(&profiles::launch_args(profile)) {
+        MODE_LOGIN
+    } else {
+        MODE_INTERACTIVE
+    };
+    let read = format!("{INSTALLED_MARKER}={mode} exec bash {}", door.join(" "));
+    let plain = std::iter::once("exec bash".to_owned())
+        .chain(said)
+        .collect::<Vec<_>>()
+        .join(" ");
+    ShellCommand {
+        arguments: vec![
+            OsString::from("-c"),
+            OsString::from(format!(
+                "[ -r {} ] && {read}; {plain}",
+                single_quoted(&script)
+            )),
+        ],
+        environment: Vec::new(),
+        profile_environment: Vec::new(),
+        environment_derivation: EnvironmentDerivation::default(),
+    }
+}
+
+/// Whether `text` means itself both inside the double quotes the Windows command line wraps a
+/// `bash.exe` argument in, as the distribution's shell re-reads them, and inside the single quotes
+/// the inner bash reads: none of `$`, `` ` ``, `\`, `"` (special inside double quotes in sh, bash,
+/// zsh, dash, fish, tcsh and nu) and no `'` (which would end the single quotes).
+fn reads_alike_in_both_quotes(text: &str) -> bool {
+    !text.contains(['$', '`', '\\', '"', '\''])
+}
+
+/// `text` in single quotes, for a text [`reads_alike_in_both_quotes`] accepts.
+fn single_quoted(text: &str) -> String {
+    format!("'{text}'")
 }
 
 /// `ZDOTDIR`, and the reader's own beside it when this window inherited one.
@@ -9839,29 +9948,32 @@ mod tests {
         }
     }
 
-    /// PIN — **the door follows the program kind, not the stem** (T-WSL-LEGACY-BASH-DOOR): a
-    /// launcher into WSL that is not `wsl.exe` is handed what `wsl.exe` is handed when its script
-    /// cannot be named in WSL — no init file, the row's own words — and never bash's door with a
-    /// Windows-spelled path; the profile's own variables are listed in `WSLENV` for it as for
-    /// `wsl.exe`. A Git Bash and a Cygwin bash keep `--init-file` with the script as Windows
-    /// spells it.
+    /// PIN — **`bash.exe` is handed `wsl.exe`'s door: the script in WSL's spelling**
+    /// (T-WSL-LEGACY-BASH-DOOR round 2). The door follows the program kind, not the stem: a bash
+    /// inside WSL is given WSL-spelled paths or no door.
     ///
-    /// `System32\bash.exe` has the stem `bash`, so the family table alone hands it
-    /// `--init-file C:\…\folio.bash -i`, for a bash that runs inside WSL and cannot open that
-    /// path — and the launcher's command line is re-parsed by a shell inside the distribution,
-    /// so no path can be handed to it whole (`profiles::door_of`).
+    /// `System32\bash.exe` and WSL's Store `bash.exe` alias start the default distribution's bash
+    /// through a shell that re-reads what follows their name, so the door is one `-c` line: the
+    /// script translated as `wsl.exe`'s road translates it, single-quoted, behind a readability
+    /// guard that falls back to the bash the row asked for, with the marker set by the branch that
+    /// reads the script. A distribution's own launcher gets no door. A Git Bash and a Cygwin bash
+    /// keep `--init-file` with the script as Windows spells it. Every program that enters WSL
+    /// lists the terminal's declarations and the profile's own variables in `WSLENV`, and its
+    /// birth re-derives that list (`crosses_wsl`); no other program does.
     ///
-    /// MUTATIONS: ① decide by stem (`door_of` answers `served_by(profile)` whatever the kind)
-    /// and `System32\bash.exe` is handed `--init-file`; ② list the profile's variables only for a
-    /// row whose paths are WSL's and the launcher's own `FOLIO_样本` stays on the Win32 side.
+    /// MUTATIONS: ① decide by stem (`door_on` hands every launcher the row's door, and the
+    /// `WslLauncher` arm of `shell_command_for` is skipped) and `System32\bash.exe` is handed
+    /// `--init-file C:\…`; ② drop the `[ -r … ]` guard and the line differs; ③ `crosses_wsl` read
+    /// off `paths` and the launcher's birth would not re-list `WSLENV`.
     ///
     /// Windows only: a drive-letter path is a Windows path grammar, and WSL is a Windows launcher.
     #[cfg(windows)]
     #[test]
-    fn a_wsl_launcher_that_is_not_wsl_exe_gets_wsl_exes_door() {
+    fn a_wsl_bash_launcher_gets_wsl_exes_translated_door() {
         use profiles::ShellProgram;
         let script =
             Path::new(r"C:\Users\alice\AppData\Roaming\Folio\shell-integration\folio.bash");
+        let translated = "/mnt/c/Users/alice/AppData/Roaming/Folio/shell-integration/folio.bash";
         let mine = [("FOLIO_样本", "混合 text")];
         let custom = |program: &str, integration: profiles::IntegrationChoice| Profile {
             id: "mine".into(),
@@ -9870,6 +9982,13 @@ mod tests {
             ..row_with("gitbash", &mine)
         };
         let auto = profiles::IntegrationChoice::Auto;
+        let crosses = |command: &ShellCommand, wanted: &[&str]| {
+            let listed = value_of(command, "WSLENV").unwrap_or_default();
+            wanted
+                .iter()
+                .all(|name| listed.contains(&format!("{name}/u")))
+                && command.environment_derivation.crosses_wsl
+        };
         let wsl_exe = shell_command(
             &row_with("wsl", &mine),
             &ShellProgram::WslExe,
@@ -9879,59 +9998,61 @@ mod tests {
         );
         assert_eq!(
             args(&wsl_exe),
-            [
-                "-e",
-                "sh",
-                "-c",
-                WSL_LOGIN_SHELL,
-                WSL_ARGV0,
-                "/mnt/c/Users/alice/AppData/Roaming/Folio/shell-integration/folio.bash",
-                "",
-            ],
+            ["-e", "sh", "-c", WSL_LOGIN_SHELL, WSL_ARGV0, translated, ""],
             "wsl.exe: the script, translated into the distribution's spelling"
         );
-        let launchers = [
-            (
-                r"C:\Windows\System32\bash.exe",
-                auto,
-                ShellProgram::WslLauncher { distribution: None },
-            ),
-            (
-                r"C:\Users\alice\AppData\Local\Microsoft\WindowsApps\bash.exe",
-                auto,
-                ShellProgram::WslLauncher { distribution: None },
-            ),
-            (
-                r"C:\Users\alice\AppData\Local\Microsoft\WindowsApps\ubuntu2204.exe",
-                profiles::IntegrationChoice::Named(Integration::BashInitFile),
-                ShellProgram::WslLauncher {
-                    distribution: Some("Ubuntu-22.04".into()),
-                },
-            ),
-        ];
-        for (program, integration, kind) in launchers {
-            let row = custom(program, integration);
-            let command = shell_command(&row, &kind, &[], bash_only(script), &bare());
-            // What `wsl.exe` is handed when its script cannot be named in WSL: the row's own words.
+        assert!(crosses(&wsl_exe, &["TERM_PROGRAM", "FOLIO_样本"]));
+        for program in [
+            r"C:\Windows\System32\bash.exe",
+            r"C:\Users\alice\AppData\Local\Microsoft\WindowsApps\bash.exe",
+        ] {
+            let row = custom(program, auto);
+            assert_eq!(profiles::launch_args(&row), ["--login", "-i"]);
+            let command = shell_command(
+                &row,
+                &ShellProgram::WslLauncher { distribution: None },
+                &[],
+                bash_only(script),
+                &bare(),
+            );
             assert_eq!(
                 args(&command),
-                profiles::launch_args(&row),
-                "{program}: no init file"
+                [
+                    "-c".to_owned(),
+                    format!(
+                        "[ -r '{translated}' ] && BT_SHELL_INTEGRATION=login exec bash \
+                         --init-file '{translated}' '-i'; exec bash '--login' '-i'"
+                    ),
+                ],
+                "{program}: the script in WSL's spelling, read by the bash the launcher starts"
+            );
+            assert_eq!(
+                value_of(&command, INSTALLED_MARKER),
+                None,
+                "{program}: the marker is set inside, by the branch that reads the script"
             );
             assert!(
-                !args(&command)
-                    .iter()
-                    .any(|word| word == "--init-file" || word.contains(r"C:\")),
-                "{program}: no Windows-spelled path is handed to a shell inside WSL: {:?}",
-                args(&command)
-            );
-            assert_eq!(value_of(&command, INSTALLED_MARKER), None, "{program}");
-            assert!(
-                value_of(&command, "WSLENV").is_some_and(|listed| listed.contains("FOLIO_样本/u")),
-                "{program}: the profile's own variable crosses as it does for wsl.exe: {:?}",
+                crosses(&command, &["TERM_PROGRAM", "FORCE_HYPERLINK", "FOLIO_样本"]),
+                "{program}: {:?}",
                 value_of(&command, "WSLENV")
             );
         }
+        // A distribution's own launcher reads its own verbs: no door, and it still crosses.
+        let ubuntu = custom(
+            r"C:\Users\alice\AppData\Local\Microsoft\WindowsApps\ubuntu2204.exe",
+            profiles::IntegrationChoice::Named(Integration::BashInitFile),
+        );
+        let command = shell_command(
+            &ubuntu,
+            &ShellProgram::WslLauncher {
+                distribution: Some("Ubuntu-22.04".into()),
+            },
+            &[],
+            bash_only(script),
+            &bare(),
+        );
+        assert_eq!(args(&command), profiles::launch_args(&ubuntu), "no door");
+        assert!(crosses(&command, &["TERM_PROGRAM", "FOLIO_样本"]));
         // A bash this side starts keeps its own door, with the script as Windows spells it.
         for (program, kind) in [
             (r"C:\Program Files\Git\bin\bash.exe", ShellProgram::Native),
@@ -9954,7 +10075,65 @@ mod tests {
                 "{program}"
             );
             assert_eq!(value_of(&command, "WSLENV"), None, "{program}");
+            assert!(!command.environment_derivation.crosses_wsl, "{program}");
         }
+    }
+
+    /// PIN — **`bash.exe`'s door is not opened for a path or word its two quotings would read
+    /// differently** (T-WSL-LEGACY-BASH-DOOR round 2): `$`, `` ` ``, `\` and `"` inside the outer
+    /// shell's double quotes (measured: `$HOME` and a backtick inside the inner single quotes were
+    /// expanded by it), and `'`, which ends the inner single quotes. Such a row gets what `wsl.exe`
+    /// gets for a script WSL cannot name: its own words as the row wrote them, the plain shell.
+    /// A space and Chinese are handed over whole.
+    ///
+    /// MUTATION: accept every text in `reads_alike_in_both_quotes` and the `$` account's line
+    /// names `/mnt/c/Users/al$ice/…`, which the outer shell expands.
+    ///
+    /// Windows only: a drive-letter path is a Windows path grammar, and WSL is a Windows launcher.
+    #[cfg(windows)]
+    #[test]
+    fn a_wsl_bash_launcher_is_not_handed_what_its_shells_would_reread() {
+        use profiles::ShellProgram;
+        let launcher = ShellProgram::WslLauncher { distribution: None };
+        let row = Profile {
+            id: "mine".into(),
+            program: ProgramSource::Path(PathBuf::from(r"C:\Windows\System32\bash.exe")),
+            ..row("gitbash")
+        };
+        let at = |script: &str, row: &Profile| {
+            args(&shell_command(
+                row,
+                &launcher,
+                &[],
+                bash_only(Path::new(script)),
+                &bare(),
+            ))
+        };
+        for refused in [
+            r"C:\Users\al$ice\folio.bash",
+            r"C:\Users\a`b\folio.bash",
+            r"C:\Users\o'neil\folio.bash",
+            r"\\nas\home\folio.bash",
+        ] {
+            assert_eq!(at(refused, &row), ["--login", "-i"], "{refused}");
+        }
+        for word in ["$HOME", "`id`", r"a\b", "say \"hi\"", "it's"] {
+            let worded = Profile {
+                args: vec![word.to_owned()],
+                ..row.clone()
+            };
+            assert_eq!(
+                at(r"C:\Users\alice\folio.bash", &worded),
+                profiles::launch_args(&worded),
+                "{word}: the row's words reach the launcher as written, with no door"
+            );
+        }
+        let whole = at(r"C:\Users\Alice Smith 样本\folio.bash", &row);
+        assert_eq!(whole[0], "-c");
+        assert!(
+            whole[1].contains("--init-file '/mnt/c/Users/Alice Smith 样本/folio.bash'"),
+            "{whole:?}"
+        );
     }
 
     /// PIN - **a WSL profile's own variables are listed so that they cross.**
@@ -10002,14 +10181,15 @@ mod tests {
             listed(&row("wsl")).is_some_and(|listed| listed.contains("FORCE_HYPERLINK/u")),
             "a WSL pane crosses the boundary whichever shell is behind it"
         );
-        // The one WSL pane that lists nothing new is the one handed no script,
-        // which is the pane that was never injected into.
-        assert_eq!(
+        // **And a WSL pane handed no script lists them too** (owner ruling
+        // 2026-10-12): they say what the terminal is, not what a script installed.
+        assert!(
             value_of(
                 &shipped_command(&row("wsl"), &[], Scripts::default(), &bare()),
                 "WSLENV"
-            ),
-            None
+            )
+            .is_some_and(|listed| listed.contains("TERM_PROGRAM/u")),
+            "a WSL pane with no script crosses the boundary too"
         );
     }
 

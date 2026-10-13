@@ -46551,7 +46551,10 @@ impl Runtime<'_> {
             // with an action run.
             capability: profiles::capability_in_editor(
                 index,
-                &self.app.profile_programs.shell(&profiles::id(index)),
+                self.app
+                    .profile_programs
+                    .known_shell(&profiles::id(index))
+                    .as_ref(),
             )
             .text(),
             // The ghosts are not the reader's and are not counted: they are what
@@ -46563,7 +46566,10 @@ impl Runtime<'_> {
                 .unwrap_or_default(),
             integration_auto: profiles::integration_auto_label(
                 index,
-                &self.app.profile_programs.shell(&profiles::id(index)),
+                self.app
+                    .profile_programs
+                    .known_shell(&profiles::id(index))
+                    .as_ref(),
             ),
             // **Every variable this terminal sets for a session of this profile,
             // less whatever this profile has already said** (owner ruling
