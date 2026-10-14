@@ -132,7 +132,7 @@ impl DocumentSet {
         self.0 & document.bit() != 0
     }
 
-    const fn is_empty(self) -> bool {
+    pub(crate) const fn is_empty(self) -> bool {
         self.0 == 0
     }
 }

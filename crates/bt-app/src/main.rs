@@ -50301,6 +50301,11 @@ impl Runtime<'_> {
         if documents.contains(storage_watch::Document::Pins) {
             self.app.pins_store.ask_reread();
         }
+        // **A pass is an ear event for the session too** (the side-effects contract's C5): a
+        // session document a refusal left owed is handed over once more.
+        if !documents.is_empty() {
+            self.app.session_store.hear_the_storage_pass();
+        }
         Ok(())
     }
 
@@ -68147,7 +68152,7 @@ impl FolioApp {
             if until <= now {
                 return Some(app.session_store.flush_for_quit(until, now));
             }
-            return match app.session_store.hand_over_final(now) {
+            return match app.session_store.hand_over_final() {
                 Ok(Some(generation)) => {
                     quit.requested(generation, now);
                     None
@@ -68156,10 +68161,10 @@ impl FolioApp {
                 Err(refusal) => Some(Err(refusal)),
             };
         };
-        match app.session_store.landing_of(generation, now) {
+        match app.session_store.landing_of(generation) {
             Some(answer) => Some(answer),
             None if quit.receipt_is_overdue(now) => {
-                Some(Err(app.session_store.receipt_overdue(generation, now)))
+                Some(Err(app.session_store.receipt_overdue(generation)))
             }
             None => None,
         }
