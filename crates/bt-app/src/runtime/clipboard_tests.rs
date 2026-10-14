@@ -165,10 +165,34 @@ fn the_edit_menus_clipboard_verbs_land_where_the_keystrokes_do() {
     );
 }
 
+/// How a paste is asked for.
+#[derive(Clone, Copy, Debug)]
+enum PasteRoad {
+    /// The command chord on `V`.
+    Chord,
+    /// `Shift+Insert`, the older paste key — a paste on every host but a Mac, which has no
+    /// `Insert` key's clipboard pair.
+    ShiftInsert,
+    /// Edit ▸ Paste.
+    Menu,
+}
+
+/// The roads a paste is asked by on this host: the chord and the menu everywhere, and
+/// `Shift+Insert` off a Mac. The host decides it here, not the window's own predicate
+/// (`input::is_paste_shortcut_on`): a predicate that forgot the key would otherwise take its road
+/// out of the test with it.
+fn paste_roads() -> Vec<PasteRoad> {
+    let shift_insert = bt_platform::host_platform() != bt_platform::HostPlatform::MacOs;
+    [PasteRoad::Chord, PasteRoad::ShiftInsert, PasteRoad::Menu]
+        .into_iter()
+        .filter(|road| shift_insert || !matches!(road, PasteRoad::ShiftInsert))
+        .collect()
+}
+
 /// One text field a paste can land in, opened in a fresh window: what the clipboard holds is
-/// pasted by the chord or through Edit ▸ Paste, and the field's text is read back with whether the
-/// shell behind it (when there is one) was handed anything.
-fn paste_into(field: crate::TextFieldSeat, through_the_menu: bool) -> (String, bool) {
+/// pasted by `road`, and the field's text is read back with whether the shell behind it (when
+/// there is one) was handed anything.
+fn paste_into(field: crate::TextFieldSeat, road: PasteRoad) -> (String, bool) {
     use crate::TextFieldSeat;
     const PASTED: &str = "粘贴 pasted\r\nsecond";
     let preview = field == TextFieldSeat::GraphSearch;
@@ -240,13 +264,27 @@ fn paste_into(field: crate::TextFieldSeat, through_the_menu: bool) -> (String, b
         }
     }
     *folio.window.window.clipboard.borrow_mut() = Some(PASTED.to_owned());
-    if through_the_menu {
-        folio
+    match road {
+        PasteRoad::Menu => folio
             .runtime()
             .run_an_application_menu_verb(AppMenuAction::PasteIntoFocus)
-            .expect("the menu's paste is answered");
-    } else {
-        chord(&mut folio, "v", KeyCode::KeyV);
+            .expect("the menu's paste is answered"),
+        PasteRoad::Chord => chord(&mut folio, "v", KeyCode::KeyV),
+        PasteRoad::ShiftInsert => {
+            let mut runtime = folio.runtime();
+            runtime.window.modifiers = ModifiersState::SHIFT;
+            runtime
+                .keyboard_input(
+                    &key_down(
+                        Key::Named(winit::keyboard::NamedKey::Insert),
+                        KeyCode::Insert,
+                        None,
+                    ),
+                    false,
+                )
+                .expect("the keystroke is answered");
+            runtime.window.modifiers = ModifiersState::empty();
+        }
     }
     let mut runtime = folio.runtime();
     let text = match field {
@@ -292,7 +330,8 @@ fn paste_into(field: crate::TextFieldSeat, through_the_menu: bool) -> (String, b
 }
 
 /// RED (B-AUDIT-046 RT-1) — **a paste goes to the text field that holds the keyboard, by the
-/// chord and by Edit ▸ Paste, and never to the shell behind it** — every field there is: the find
+/// chord, by `Shift+Insert` (where the host reads it as a paste) and by Edit ▸ Paste, and never to
+/// the shell behind it** — every field there is: the find
 /// bar, the graph's search, a git menu's prompt, the palette, a tab's name and a settings field.
 /// Each takes the clipboard's line (the settings field drops its breaks, the others take the first
 /// line through `text_field::one_line`), by both roads, and the shell behind it is handed nothing.
@@ -304,7 +343,8 @@ fn paste_into(field: crate::TextFieldSeat, through_the_menu: bool) -> (String, b
 /// menu hands the paste to the terminal; drop the paste arm of `git_menu_key`, of
 /// `settings_field_key` or of `palette_key`, or `rename_pastes`' arm of the rename key — that
 /// field's chord pastes nothing; send one of `apply_clipboard_text_to_field`'s six fields to
-/// another's insert — that field stays empty by the menu.
+/// another's insert — that field stays empty by the menu; drop `shift_insert` from
+/// `input::is_paste_shortcut_on` — off a Mac, every field stays empty by `Shift+Insert`.
 #[test]
 fn paste_goes_to_the_focused_field_and_never_to_the_shell_behind_it_by_either_road() {
     use crate::TextFieldSeat;
@@ -321,16 +361,12 @@ fn paste_goes_to_the_focused_field_and_never_to_the_shell_behind_it_by_either_ro
         } else {
             crate::text_field::one_line("粘贴 pasted\r\nsecond")
         };
-        for through_the_menu in [false, true] {
-            let (text, shell_untouched) = paste_into(field, through_the_menu);
-            assert_eq!(
-                text, expected,
-                "{field:?} takes the paste (through the menu: {through_the_menu})"
-            );
+        for road in paste_roads() {
+            let (text, shell_untouched) = paste_into(field, road);
+            assert_eq!(text, expected, "{field:?} takes the paste by {road:?}");
             assert!(
                 shell_untouched,
-                "{field:?}: nothing reached the shell behind it (through the menu: \
-                 {through_the_menu})"
+                "{field:?}: nothing reached the shell behind it by {road:?}"
             );
         }
     }
@@ -380,4 +416,23 @@ fn the_menus_paste_into_the_shell_is_the_chords() {
         "the chord hands the shell its paste"
     );
     assert_eq!(handed(true), by_key, "and the menu hands it the same");
+}
+
+/// GUARD (T-HEADLESS-RUNTIME-SEAM round 3) — **the keystroke ladder has one road to the
+/// terminal's paste**: `keyboard_input` calls `self.paste_from_clipboard()` once, in the clipboard
+/// rung's `Terminal` arm, after `menubar::paste_seat` has answered. The paste test above drives
+/// every field and the shell by every paste key; what it cannot say is that no *other* key or
+/// rung reaches the terminal's paste without asking the seat — a second call site is a fact about
+/// the source, so this count, and only it, is read from it.
+///
+/// MUTATION: add a second `self.paste_from_clipboard()?;` to any rung of `keyboard_input` — the
+/// count is two.
+#[test]
+fn the_keystroke_ladder_has_one_road_to_the_terminals_paste() {
+    let ladder = crate::test_support::method_body("Runtime", "keyboard_input");
+    assert_eq!(
+        ladder.matches("self.paste_from_clipboard()").count(),
+        1,
+        "a second road to the terminal's paste in the keystroke ladder"
+    );
 }
