@@ -1155,10 +1155,10 @@ impl SessionWriter {
                                 generation: request.generation,
                                 result,
                             };
-                            if !end
+                            if end
                                 .receipts
                                 .as_ref()
-                                .is_some_and(|receipts| receipts.send(receipt).is_ok())
+                                .is_none_or(|receipts| receipts.send(receipt).is_err())
                             {
                                 break 'serving;
                             }
@@ -6065,7 +6065,11 @@ mod receipt_wake_tests {
         let changed_at = Instant::now();
         store.record(a_session(), changed_at);
         store.flush_if_due(changed_at + SESSION_DEBOUNCE);
-        assert_eq!(store.writer.in_flight(), Some(1), "the clock handed it over");
+        assert_eq!(
+            store.writer.in_flight(),
+            Some(1),
+            "the clock handed it over"
+        );
         assert_eq!(
             store.deadline(),
             None,
@@ -6136,10 +6140,7 @@ mod receipt_wake_tests {
             Some(Err(SaveRefusal::Refused(WRITER_STOPPED.to_string())))
         );
         assert!(wakes.try_recv().is_err(), "the end woke the loop once");
-        assert!(
-            !root.join(SESSION_FILE_NAME).exists(),
-            "nothing landed"
-        );
+        assert!(!root.join(SESSION_FILE_NAME).exists(), "nothing landed");
         let _ = std::fs::remove_dir_all(&root);
     }
 
