@@ -692,6 +692,11 @@ fn the_door_reads_a_video_with_the_video_decoder_and_refuses_a_share() {
         ("\u{622a}\u{56fe} shot", "png", false),
     ] {
         let path = directory.join(format!("{}.{extension}", bt_testpath::unique_name(name)));
+        assert_eq!(
+            preview::path_names_a_video(&path),
+            video,
+            "the door forks on the predicate the open forks on: {name}"
+        );
         let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
         let PeekAsk::Asked(asked) =
             ask_for_peek_pixels(&mut cache, &lane.lane, probe_leaf(), &path)
@@ -1715,7 +1720,7 @@ fn a_set_aside_peek_answer_is_recorded_and_never_shown() {
 /// verification decodes the same file and offers it to the peek ([`remember_decode`]). The read's
 /// record survives, so its answer is the awaited one — filed, and the surfaces waiting on it told
 /// (`file_peek_answer` answers `true`, which is what `complete_peek_image` notifies on). With no
-/// read out, the decode warms the peek as before.
+/// read out, the decode warms the peek as before, and a `Failed` — no read in flight — is replaced.
 ///
 /// MUTATION: drop `remember_decode`'s `Pending` guard — the decode lands over the record, the
 /// read's answer is awaited by nothing and set aside, and nobody waiting hears of it.
@@ -1766,5 +1771,19 @@ fn a_decode_offered_to_the_peek_never_lands_over_a_read_in_flight() {
             Some(PeekCacheEntry::Ready { width_px: 4, .. })
         ),
         "with no read out, verification warms the peek"
+    );
+
+    let mut failed = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+    failed.insert(
+        key.clone(),
+        PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::UnsupportedFormat),
+    );
+    remember_decode(&mut failed, &source, &decoded);
+    assert!(
+        matches!(
+            failed.peek(&key),
+            Some(PeekCacheEntry::Ready { width_px: 4, .. })
+        ),
+        "a failure is no question in flight: the decode the terminal earned replaces it"
     );
 }
