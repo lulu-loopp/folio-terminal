@@ -3388,3 +3388,18 @@ Pinned by `bt_platform::install_txn::tests::{a_write_asked_again_after_a_refused
 a_write_over_a_held_target_lands_when_let_go_and_a_dropped_one_leaves_nothing}` and
 `update_apply_windows::tests::{a_held_journal_write_flushes_one_temporary_and_lands_when_the_hold_lifts,
 the_window_marks_writer_asked_again_over_a_held_mark_renames_one_temporary}`.
+
+**Round 2 (2026-10-13, the review's nits).** A temporary another program removes between two rounds (a
+scanner's quarantine, a cleaner) makes the next rename answer "not found": that round writes the temporary
+again, once, and renames it — never the write given up at once with no hold to name, as it would have been.
+A write given up removes its temporary through `DurableWrite::give_up`, and a removal refused (another
+program holds the temporary too) is said in a second line after the give-up's, naming the temporary; every
+step of a `DurableWrite`, its removal included, goes through the one surface it was made on. The window's mark
+is written by the asks of one `DurableWrite` made for that election's mark and bytes
+(`update_apply::mark_writer(mark, bytes)`), so no ask can write other bytes. A temporary that a killed process
+leaves in `H\` is swept by nothing in the update code — as before this ticket, only for longer (up to the
+10 s window rather than the moment between a create and its rename) — and goes with the home when the
+uninstall removes it whole.
+
+Pinned by `bt_platform::install_txn::tests::a_temporary_removed_between_asks_is_written_again_and_lands` and
+`update_apply_windows::tests::a_given_up_journal_write_says_a_temporary_it_could_not_remove`.

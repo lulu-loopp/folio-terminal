@@ -3239,8 +3239,7 @@ fn a_held_journal_write_flushes_one_temporary_and_lands_when_the_hold_lifts() {
 
 /// RED (T-JOURNAL-WRITE-UNDER-HOLD) — **the window's mark, asked again over
 /// a held mark, renames the one temporary its first ask flushed and lands
-/// it once the hold is let go; a writer asked for another mark starts a
-/// new write and removes the temporary it never landed.**
+/// it once the hold is let go; asks dropped unlanded remove their temporary.**
 ///
 /// MUTATION: in `mark_writer`, ask `install_txn::durable_write` each time
 /// (the old whole write) — no temporary stands between the asks.
@@ -3250,34 +3249,95 @@ fn the_window_marks_writer_asked_again_over_a_held_mark_renames_one_temporary() 
     let mark = folder.join("owner");
     install_txn::durable_write(&mark, b"1 1").unwrap();
     let mine = "4242 7 窗口 owner".as_bytes();
-    let mut write = mark_writer();
+    let mut ask = mark_writer(&mark, mine);
     let held = hold_without_delete_sharing(&mark).unwrap();
     let mut seen = Vec::new();
     for _ in 0..2 {
-        assert!(write(&mark, mine).is_err(), "a held mark is refused");
+        assert!(ask().is_err(), "a held mark is refused");
         seen.push(temporaries_in(&folder));
     }
     assert_eq!(seen[0].len(), 1, "{seen:?}");
     assert_eq!(seen[0], seen[1], "the same temporary: {seen:?}");
     drop(held);
-    assert!(write(&mark, mine).is_ok());
+    assert!(ask().is_ok());
     assert_eq!(std::fs::read(&mark).unwrap(), mine);
     assert_eq!(temporaries_in(&folder), Vec::<String>::new());
 
-    let other = folder.join("owner-other");
-    std::fs::write(&other, b"old").unwrap();
     let held = hold_without_delete_sharing(&mark).unwrap();
-    assert!(write(&mark, b"5 5").is_err());
+    let mut never = mark_writer(&mark, b"5 5");
+    assert!(never().is_err());
     assert_eq!(temporaries_in(&folder).len(), 1);
-    assert!(write(&other, mine).is_ok(), "another mark is its own write");
-    assert_eq!(std::fs::read(&other).unwrap(), mine);
+    drop(never);
     assert_eq!(
         temporaries_in(&folder),
         Vec::<String>::new(),
-        "the replaced write's temporary is removed"
+        "the dropped asks' temporary is removed"
     );
     drop(held);
     assert_eq!(std::fs::read(&mark).unwrap(), mine, "byte for byte");
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// RED (T-JOURNAL-WRITE-UNDER-HOLD, round 2) — **a journal write given up
+/// whose temporary cannot be removed — another program holds the temporary
+/// too — says so, after the give-up's line, naming the temporary**, and leaves
+/// the journal byte for byte.
+///
+/// MUTATION: in `write_journal`, drop the line said when `give_up` is
+/// refused — the last line is the give-up's.
+#[test]
+fn a_given_up_journal_write_says_a_temporary_it_could_not_remove() {
+    let folder = held_folder("kept");
+    let journal = folder.join("journal.json");
+    install_txn::durable_write(&journal, br#"{"phase":"Armed"}"#).unwrap();
+    let (said, scanned) = on_a_worker({
+        let (folder, journal) = (folder.clone(), journal.clone());
+        move |worker| {
+            let held = hold_without_delete_sharing(&journal).unwrap();
+            let mut scanned = None;
+            let mut said = Vec::new();
+            let answer = write_journal(
+                worker,
+                &journal,
+                "从未落地 never landed".as_bytes(),
+                Duration::from_millis(100),
+                &mut |line| {
+                    said.push(line.to_owned());
+                    if scanned.is_none()
+                        && let Some(name) = temporaries_in(&folder).first()
+                    {
+                        let temporary = folder.join(name);
+                        scanned =
+                            Some((hold_without_delete_sharing(&temporary).unwrap(), temporary));
+                    }
+                },
+            );
+            assert!(answer.is_err(), "{said:?}");
+            drop(held);
+            (
+                said,
+                scanned.map(|(handle, temporary)| {
+                    drop(handle);
+                    temporary
+                }),
+            )
+        }
+    });
+    let temporary = scanned.expect("a temporary stood while held");
+    let [.., given_up, kept] = said.as_slice() else {
+        panic!("{said:?}");
+    };
+    assert!(given_up.contains("the write is given up"), "{said:?}");
+    assert!(
+        kept.starts_with("BT_UPDATE_JOURNAL the given-up write's temporary was not removed: ")
+            && kept.contains(&temporary.display().to_string()),
+        "{said:?}"
+    );
+    assert!(temporary.exists(), "kept where the line says");
+    assert_eq!(
+        std::fs::read_to_string(&journal).unwrap(),
+        r#"{"phase":"Armed"}"#
+    );
     let _ = std::fs::remove_dir_all(&folder);
 }
 

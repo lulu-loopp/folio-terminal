@@ -287,8 +287,10 @@ pub(crate) struct Unwritten {
 /// rename alone** (T-JOURNAL-WRITE-UNDER-HOLD): the temporary is written and
 /// flushed once, by the first round, and each later round renames that same
 /// temporary — one `MoveFileExW`, no flush — so a hold costs one durable
-/// write, landed on the round it lifts; a write given up removes its
-/// temporary. **Each refused round says
+/// write, landed on the round it lifts; a temporary another program removed
+/// between two rounds is written again once. A write given up removes its
+/// temporary, and **a removal refused is said** (a second line after the
+/// give-up's). **Each refused round says
 /// one line** through `say` — the system's refusal and how long the journal
 /// has been held — so a hold is in the log whether or not it outlasts the
 /// window. The door itself never waits: it has other callers and no wait
@@ -306,7 +308,7 @@ pub(crate) fn write_journal(
 ) -> Result<(), Unwritten> {
     let began = Instant::now();
     let mut write = install_txn::DurableWrite::new(path, bytes);
-    write_held_within(
+    let written = write_held_within(
         within,
         || write.ask(),
         install_txn::Failure::refused_while_open,
@@ -317,7 +319,15 @@ pub(crate) fn write_journal(
             true
         },
         say,
-    )
+    );
+    if written.is_err()
+        && let Err(kept) = write.give_up()
+    {
+        say(&format!(
+            "BT_UPDATE_JOURNAL the given-up write's temporary was not removed: {kept}"
+        ));
+    }
+    written
 }
 
 /// [`write_journal`]'s rounds, with the write, its two readings of a failure,
@@ -1938,7 +1948,7 @@ pub(crate) fn take_the_window_within<C: Contender>(
             after_lock: || {},
             read_owner: || read_window_owner(home, txn),
             read_phase: || read_window_phase(home, txn),
-            write: mark_writer(),
+            write: mark_writer,
             wait: |pause| match worker {
                 Some(worker) => {
                     bt_platform::wait::sleep_within(worker, pause);
@@ -1950,24 +1960,18 @@ pub(crate) fn take_the_window_within<C: Contender>(
     )
 }
 
-/// **The window's mark, written in the product** (`install_txn::DurableWrite`):
-/// a write asked again with the same mark and bytes — the election's rounds
-/// while another program holds the mark open — asks the rename of the
-/// temporary its first ask flushed, never a second temporary or file flush
-/// (T-JOURNAL-WRITE-UNDER-HOLD); another mark or other bytes start a new
-/// write, and the write it replaces removes a temporary it never landed.
-pub(crate) fn mark_writer() -> impl FnMut(&Path, &[u8]) -> Result<(), MarkWriteFailure> {
-    let mut asked: Option<install_txn::DurableWrite> = None;
-    move |path: &Path, bytes: &[u8]| {
-        if asked
-            .as_ref()
-            .is_some_and(|write| !write.is_of(path, bytes))
-        {
-            asked = None;
-        }
-        let write = asked.get_or_insert_with(|| install_txn::DurableWrite::new(path, bytes));
-        MarkWriteFailure::from_result(write.ask())
-    }
+/// **The window's mark, written in the product**: one
+/// `install_txn::DurableWrite` of `bytes` at `mark`, and the asks of it — the
+/// election's rounds while another program holds the mark open each ask the
+/// rename of the temporary the first ask flushed, never a second temporary or
+/// file flush (T-JOURNAL-WRITE-UNDER-HOLD). The asks dropped, a temporary never
+/// landed is removed.
+pub(crate) fn mark_writer(
+    mark: &Path,
+    bytes: &[u8],
+) -> impl FnMut() -> Result<(), MarkWriteFailure> + use<> {
+    let mut write = install_txn::DurableWrite::new(mark, bytes);
+    move || MarkWriteFailure::from_result(write.ask())
 }
 
 pub(crate) struct MarkWriteFailure {
@@ -2139,7 +2143,7 @@ impl Contender for Applier {
     }
 }
 
-fn take_the_window_within_using<C, AfterLock, ReadOwner, ReadPhase, Write, Wait>(
+fn take_the_window_within_using<C, AfterLock, ReadOwner, ReadPhase, Write, Ask, Wait>(
     home: &Home,
     txn: TxnId,
     me: Running,
@@ -2152,14 +2156,15 @@ where
     AfterLock: FnOnce(),
     ReadOwner: FnMut() -> io::Result<Option<Running>>,
     ReadPhase: FnMut() -> Result<PhaseKind, PhaseRead>,
-    Write: FnMut(&Path, &[u8]) -> Result<(), MarkWriteFailure>,
+    Write: FnOnce(&Path, &[u8]) -> Ask,
+    Ask: FnMut() -> Result<(), MarkWriteFailure>,
     Wait: FnMut(Duration) -> bool,
 {
     let ElectionOps {
         after_lock,
         mut read_owner,
         mut read_phase,
-        mut write,
+        write,
         mut wait,
     } = operations;
     let until = Instant::now() + within;
@@ -2214,7 +2219,7 @@ where
             let write_until = until.min(Instant::now() + JOURNAL_WRITE_WITHIN);
             match retry_within(
                 write_until,
-                || write(&mark, bytes.as_bytes()),
+                write(&mark, bytes.as_bytes()),
                 |failure| failure.refused_while_open,
                 &mut wait,
             ) {
@@ -2253,7 +2258,7 @@ pub(crate) fn take_the_window_within_at(
             after_lock,
             read_owner: || read_window_owner(home, txn),
             read_phase: || read_window_phase(home, txn),
-            write: mark_writer(),
+            write: mark_writer,
             wait: |_| false,
         },
     )
@@ -2268,7 +2273,7 @@ pub(crate) fn take_the_window_within_writes_at<C: Contender>(
     me: Running,
     within: Duration,
     contender: C,
-    write: impl FnMut(&Path, &[u8]) -> Result<(), MarkWriteFailure>,
+    mut write: impl FnMut(&Path, &[u8]) -> Result<(), MarkWriteFailure>,
 ) -> Window<C> {
     take_the_window_within_using(
         home,
@@ -2280,7 +2285,10 @@ pub(crate) fn take_the_window_within_writes_at<C: Contender>(
             after_lock: || {},
             read_owner: || read_window_owner(home, txn),
             read_phase: || read_window_phase(home, txn),
-            write,
+            write: move |mark: &Path, bytes: &[u8]| {
+                let (mark, bytes) = (mark.to_path_buf(), bytes.to_vec());
+                move || write(&mark, &bytes)
+            },
             wait: |_| true,
         },
     )
@@ -2299,7 +2307,7 @@ pub(crate) fn take_the_window_within_reads_at(
     within: Duration,
     read: impl FnMut() -> io::Result<Option<Running>>,
     read_phase: impl FnMut() -> Result<PhaseKind, PhaseRead>,
-    write: impl FnMut(&Path, &[u8]) -> Result<(), MarkWriteFailure>,
+    mut write: impl FnMut(&Path, &[u8]) -> Result<(), MarkWriteFailure>,
 ) -> Window {
     take_the_window_within_using(
         home,
@@ -2311,7 +2319,10 @@ pub(crate) fn take_the_window_within_reads_at(
             after_lock: || {},
             read_owner: read,
             read_phase,
-            write,
+            write: move |mark: &Path, bytes: &[u8]| {
+                let (mark, bytes) = (mark.to_path_buf(), bytes.to_vec());
+                move || write(&mark, &bytes)
+            },
             wait: |_| true,
         },
     )
