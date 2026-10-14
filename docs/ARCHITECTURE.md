@@ -921,6 +921,19 @@ and wakes the loop), send `Restore` until the merge tickets (a `Conflict` makes
 the restored file the revision and holds the document's write until the merge), and after start the window
 thread reads and writes none of the four documents (§5.3 row 20 narrowed).
 
+**A refused session write waits for a trigger, never for a clock** (0.4.8,
+T-SESSION-WRITER-NO-TIMER-RETRY; the side-effects contract's C5, owner ruling Q3 2026-10-11).
+The debounce schedules a request only from a change (`SessionStore::record`). A refused write,
+or one no writer took, is that request's terminal: the document is owed
+(`SessionStore::retry_on_trigger`) and handed over again only by the next change, the next
+storage pass (`SessionStore::hear_the_storage_pass`, from `Runtime::advance_storage_watch`) or
+the quit's write (`SessionStore::flush_judged`). One autosave is on the writer at a time: a
+quiet window that runs out while one is on its way puts the document in the pending slot
+(`send_again`), handed over when that one is answered. The reader is told once per failure
+streak, at the fifth refusal in a row (`persist::REFUSALS_BEFORE_TOLD`), on the card the
+start-up announcement uses; only a landing ends the streak. The same counter serves the four
+hand-editable documents, whose changed presses no longer start it again.
+
 **And every interactive preview save** (0.4.8, S-6a T-PREVIEW-ON-THE-STORAGE-LANE;
 `docs/plans/design/side-effects-contract-2026-10-11.md` (c)3). `Ctrl+S`, a head's Save button
 and a float's Save part hand the buffer's body to the same worker as a `StorageJob::Document`
