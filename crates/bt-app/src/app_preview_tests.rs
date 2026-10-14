@@ -5,13 +5,13 @@
 
 use super::*;
 use crate::test_support::{
-    PtyPresentationHarness, TAB_ONE, a_held_raster, a_page_that_wants_a_sharper_picture, admitted,
-    answer_awaited, assert_close, buffer_saying, calls_of, card_text, cell_ink, cross_metrics,
-    cross_move, cross_solve, document_key, engines_settling_to, fail_awaited, found_in,
-    free_calls_of, free_fn_body, host_path, in_product, inside, item_body, leaf_saying,
-    ledger_gate, markdown_body, method_body, mono_caret_block, no_directories, one_picture,
-    pictures_drawn, probe_leaf, prose, prose_caret_block, reader_names, rested_bars, scale_task,
-    seat_of, shown_and_opened, source, source_block, squeezed_body, tab_with_a_picture,
+    PtyPresentationHarness, TAB_ONE, a_held_raster, a_page_that_wants_a_sharper_picture,
+    a_read_out, admitted, answer_awaited, assert_close, buffer_saying, calls_of, card_text,
+    cell_ink, cross_metrics, cross_move, cross_solve, document_key, engines_settling_to,
+    fail_awaited, found_in, free_calls_of, free_fn_body, host_path, in_product, inside, item_body,
+    leaf_saying, ledger_gate, markdown_body, method_body, mono_caret_block, no_directories,
+    one_picture, pictures_drawn, probe_leaf, prose, prose_caret_block, reader_names, rested_bars,
+    scale_task, seat_of, shown_and_opened, source, source_block, squeezed_body, tab_with_a_picture,
     tab_with_a_preview, text_buffer,
 };
 use bt_render::LIGHT_CHROME;
@@ -866,7 +866,7 @@ fn a_card_reads_the_picture_this_window_has_and_asks_for_nothing() {
         card_picture_in(&cache, path).is_none(),
         "a file nothing has decoded is a face"
     );
-    cache.insert(key.clone(), PeekCacheEntry::Pending);
+    cache.insert(key.clone(), a_read_out());
     assert!(
         card_picture_in(&cache, path).is_none(),
         "a decode that is still out is a face, not a half-drawn picture"
@@ -4021,7 +4021,7 @@ fn a_page_asks_for_each_picture_once_however_small_the_decode_cache_is() {
                 // The `Pending` the runtime files behind a posted request.
                 peek.insert(
                     bt_term::normalized_local_image_path_key(&paths[index]),
-                    PeekCacheEntry::Pending,
+                    a_read_out(),
                 );
             }
         }
@@ -4132,7 +4132,7 @@ fn ten_keystrokes_ask_for_no_picture_the_page_is_already_drawing() {
                 inbox.push(index);
                 peek.insert(
                     bt_term::normalized_local_image_path_key(&paths[index]),
-                    PeekCacheEntry::Pending,
+                    a_read_out(),
                 );
             }
         }
