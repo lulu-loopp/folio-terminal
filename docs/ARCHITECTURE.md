@@ -1327,8 +1327,10 @@ in the read worker's line, never on its thread (T-GIT-READS-PER-REPOSITORY): one
 not come is parked (`ReadTicket::begin`), keeping its place in the turnstile so later presses still
 wait for it, and the one read worker answers other repositories' questions — draining and
 coalescing its channel — meanwhile; a verb's end that may bring a parked read's turn nudges the
-worker, which takes the parked reads whose turn has come before the questions not yet asked, a
-repository's reads in the order they were asked. Its adapter is `LaneName::GitMutation`. S-7 moves
+worker, which looks at its parked reads again after every drain of its channel before it waits
+for mail, and takes those whose turn has come before the questions not yet asked. A read also
+waits while a read of its repository asked before it still waits, so a repository's reads begin
+in the order they were asked (a history page never before the page it continues). Its adapter is `LaneName::GitMutation`. S-7 moves
 the clipboard onto the seam (`docs/ARCHITECTURE-GUARDS.md`, *Lane contract and the completion
 seam*). The storage worker is not on it: S-6a moved the preview's save onto the worker's own request
 protocol, whose requests each end once through their own answer channel and the worker's end

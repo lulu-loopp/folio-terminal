@@ -15509,3 +15509,11 @@ Records are never evicted, so they grow with the distinct animated files one win
 **Pinned by**
 - `git_mutation_lane::tests::{a_read_of_another_repository_is_answered_while_this_ones_verbs_run, a_waiting_read_runs_after_its_watermark_verbs_and_before_later_presses, reads_waiting_on_two_repositories_keep_their_order_within_each, coalescing_keeps_working_while_a_read_waits, a_newer_ask_replaces_a_parked_read_of_the_same_question}`, through the product's read loop (`git::run_git_worker`) and its nudge
 - the earlier turn tests, now through the same loop: `a_read_of_a_repository_waits_behind_its_in_flight_mutation`, `a_read_waits_for_the_verbs_owed_when_it_was_asked_not_for_later_presses`, `a_verb_waits_for_the_read_running_in_its_repository`, `a_closed_pages_running_verb_keeps_its_repositorys_one_share_and_turn`
+
+
+### 2026-10-14 — Git read turns, round 2: no nudge is lost, and a repository's reads begin in the order they were asked (T-GIT-READS-PER-REPOSITORY round 2)
+
+**Two corrections to the entry above.** The read worker drained its channel after its look at the parked reads (taking the next question), so a verb's nudge could be consumed there while every new question parked: the worker then waited for mail with a parked read whose turn had come and a verb waiting on that read. `PendingGitRequests::next_turn` now looks at the parked reads again after every drain, and answers that nothing can run only straight after a look with nothing drained since. And a later read of a repository could begin while an earlier one still waited — each parked read was looked at under its own lock, and what a share owes is read from its ledger, outside that lock — so a history page could be answered before the page it continues. A read now also waits while a read of its repository asked before it still waits (`TurnState::read_waits`), which keeps the order whatever the ledgers answer between two looks.
+
+**Pinned by**
+- `git::tests::{a_nudge_drained_after_the_look_at_the_parked_reads_is_not_lost, a_repositorys_reads_begin_in_the_order_they_were_asked}` (the read worker's line driven step by step, the verb ending between the look and the next question)

@@ -2483,8 +2483,11 @@ mod tests {
     /// the refs of 甲 and the refs of 乙 are asked, in that order, and all four are parked. When
     /// the checkouts end, each repository's reads run in the order they were asked.
     ///
-    /// MUTATION: have `PendingGitRequests::next_turn` look at the parked reads latest first
-    /// (`(0..self.waiting.len()).rev()`) — a repository's refs run before its status.
+    /// MUTATION: drop the order clause of `TurnState::read_waits` (`asked_before`) and have
+    /// `PendingGitRequests::next_turn` look at the parked reads latest first
+    /// (`(0..self.waiting.len()).rev()`) — a repository's refs run before its status. (With the
+    /// clause kept, the order holds whichever way the line is looked at: that is the clause's
+    /// point; `git::tests::a_repositorys_reads_begin_in_the_order_they_were_asked` pins it alone.)
     #[test]
     fn reads_waiting_on_two_repositories_keep_their_order_within_each() {
         let mut lane = watched(Executor::scripted(Arc::new(Gate::default())));
