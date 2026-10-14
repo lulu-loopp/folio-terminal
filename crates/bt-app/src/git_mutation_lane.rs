@@ -250,13 +250,21 @@ impl TurnState {
         self.running.iter().any(|at| same_folder(at, folder))
     }
 
-    /// Whether the read numbered `read` must still wait: a verb it waits for is owed, or a verb
-    /// runs in its folder.
+    /// Whether the read numbered `read` must still wait: a verb it waits for is owed, a verb runs
+    /// in its folder, or a read of its folder asked before it still waits — so a folder's reads
+    /// begin in the order they were asked. That last clause is what keeps the order: what a share
+    /// owes is read from its ledger, outside this lock, so two reads looked at one after the other
+    /// can see two different answers.
     fn read_waits(&self, read: u64) -> bool {
         self.asked
             .iter()
             .find(|asked| asked.read == read)
-            .is_some_and(|asked| asked.behind_a_verb() || self.running(&asked.folder))
+            .is_some_and(|asked| {
+                let asked_before = self.asked.iter().any(|earlier| {
+                    earlier.read < read && same_folder(&earlier.folder, &asked.folder)
+                });
+                asked_before || asked.behind_a_verb() || self.running(&asked.folder)
+            })
     }
 
     /// Whether the verb `ledger` runs now in `folder` must still wait: a read of the folder runs, or
@@ -320,8 +328,8 @@ pub(crate) struct ReadTicket {
 }
 
 impl ReadTicket {
-    /// **The read's turn, if it has come** — every verb it waits for has ended and no verb runs in
-    /// its folder: the folder is marked as being read until the [`Reading`] answered is dropped,
+    /// **The read's turn, if it has come** — every verb it waits for has ended, no verb runs in
+    /// its folder, and no read of its folder asked before it still waits: the folder is marked as being read until the [`Reading`] answered is dropped,
     /// so no verb of it starts before then. Otherwise the read is parked and its ticket handed
     /// back. Never waits.
     pub(crate) fn begin(self) -> Result<Reading, Self> {

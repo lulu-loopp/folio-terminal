@@ -4135,6 +4135,10 @@ pub(crate) enum GitMail {
 struct PendingGitRequests {
     requests: std::collections::VecDeque<GitRequest>,
     waiting: std::collections::VecDeque<(GitRequest, crate::git_mutation_lane::ReadTicket)>,
+    /// Called after every look at the parked line that began nothing — where a test makes
+    /// something happen between that look and the next question's ask.
+    #[cfg(test)]
+    swept: Option<Box<dyn FnMut()>>,
 }
 
 impl PendingGitRequests {
@@ -4162,7 +4166,8 @@ impl PendingGitRequests {
     fn post(&mut self, mail: GitMail) {
         match mail {
             GitMail::Ask(request) => self.push_latest(request),
-            // The line is looked at before every question; the nudge only wakes the worker.
+            // The parked line is looked at after every drain before the worker waits for mail
+            // (`next_turn`'s loop), so the nudge has only to wake it.
             GitMail::LookAgain => {}
         }
     }
@@ -4173,23 +4178,33 @@ impl PendingGitRequests {
         }
     }
 
-    /// **The next question whose turn has come**, with its folder marked as being read: first a
-    /// parked read whose turn has come — the earliest parked first, so one repository's reads run
-    /// in the order they were asked — then the questions not yet asked, in order, each asked of the
-    /// turnstile as it is taken and parked when its turn has not come. Never waits.
+    /// **The next question whose turn has come**, with its folder marked as being read: a parked
+    /// read whose turn has come, the earliest parked first; else the next question not yet asked,
+    /// asked of the turnstile as it is taken and parked when its turn has not come — and then the
+    /// parked line is looked at again. Never waits.
+    ///
+    /// **No nudge is lost**: the channel is drained only between a look at the parked line and
+    /// the next one, so `None` is answered only straight after a look that began nothing with
+    /// no question left and nothing drained since — a nudge that came after that look is still
+    /// in the channel, where the worker's `recv` finds it.
     fn next_turn(
         &mut self,
         turns: &std::sync::Arc<crate::git_mutation_lane::RepoTurns>,
         receiver: &mpsc::Receiver<GitMail>,
     ) -> Option<(GitRequest, crate::git_mutation_lane::Reading)> {
-        for at in 0..self.waiting.len() {
-            let (request, ticket) = self.waiting.remove(at)?;
-            match ticket.begin() {
-                Ok(reading) => return Some((request, reading)),
-                Err(ticket) => self.waiting.insert(at, (request, ticket)),
+        loop {
+            for at in 0..self.waiting.len() {
+                let (request, ticket) = self.waiting.remove(at)?;
+                match ticket.begin() {
+                    Ok(reading) => return Some((request, reading)),
+                    Err(ticket) => self.waiting.insert(at, (request, ticket)),
+                }
             }
-        }
-        while let Some(request) = self.requests.pop_front() {
+            #[cfg(test)]
+            if let Some(swept) = self.swept.as_mut() {
+                swept();
+            }
+            let request = self.requests.pop_front()?;
             self.drain_channel(receiver);
             if self.contains_target(&request) {
                 continue;
@@ -4199,7 +4214,6 @@ impl PendingGitRequests {
                 Err(ticket) => self.waiting.push_back((request, ticket)),
             }
         }
-        None
     }
 }
 
@@ -7785,5 +7799,196 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
             Text::GitFaultTimedOut.in_lang(Lang::English),
             "the two languages differ, so the Chinese row can tell the tables apart"
         );
+    }
+
+    // ── ⑧ The read worker's line and the verbs' turns ─────────────────────
+
+    /// A question about `root` from a cache of its own.
+    fn asked(question: GitQuestion) -> GitRequest {
+        GitRequest {
+            window: winit::window::WindowId::from(1_u64),
+            host: GitHost::Column(seat(1)),
+            asker: GitCacheId::mint(),
+            question,
+        }
+    }
+
+    /// **A git mutation lane** taking turns with the reads through `turns`, its executor
+    /// scripted; and the receiving end of its wake.
+    fn standing_verbs(
+        turns: &std::sync::Arc<crate::git_mutation_lane::RepoTurns>,
+    ) -> (
+        std::sync::Arc<crate::git_mutation_lane::GitMutationLane>,
+        mpsc::Receiver<()>,
+    ) {
+        let (wake, wakes) = crate::lane::wake_channel();
+        let lane = crate::git_mutation_lane::GitMutationLane::start_with(
+            crate::lane::Executor::scripted(std::sync::Arc::new(crate::lane::Gate::default())),
+            std::sync::Arc::clone(turns),
+            wake,
+            |_| {},
+            |_, _| {},
+        );
+        (std::sync::Arc::new(lane), wakes)
+    }
+
+    /// Press `question` on `lane`, its verb standing in `hold` when it runs.
+    fn press(
+        lane: &crate::git_mutation_lane::GitMutationLane,
+        hold: &std::sync::Arc<crate::lane::Hold>,
+        question: GitQuestion,
+    ) -> crate::git_mutation_lane::MutationId {
+        let hold = std::sync::Arc::clone(hold);
+        lane.ask_through(asked(question), move |_| {
+            Box::new(
+                move |_: &bt_platform::admission::WorkerCtx, question: &GitQuestion| {
+                    hold.pass();
+                    crate::git_mutation_lane::went_through(question)
+                },
+            )
+        })
+        .expect("the press is admitted")
+    }
+
+    /// **The verb `id` ends while the read worker is between its look at the parked line and its
+    /// next question**: the hold is let go, and the verb's terminal awaited — published, and the
+    /// turnstile told, so its nudge is in the worker's channel — within the lane suite's patience.
+    fn ends_after_the_look(
+        lane: std::sync::Arc<crate::git_mutation_lane::GitMutationLane>,
+        wakes: mpsc::Receiver<()>,
+        hold: std::sync::Arc<crate::lane::Hold>,
+        id: crate::git_mutation_lane::MutationId,
+    ) -> Box<dyn FnMut()> {
+        let mut ended = false;
+        Box::new(move || {
+            if std::mem::replace(&mut ended, true) {
+                return;
+            }
+            hold.release();
+            while !lane.ended(|_| false).iter().any(|(taken, ..)| *taken == id) {
+                crate::lane::wait_for_a_wake(&wakes, "the first verb's terminal");
+            }
+        })
+    }
+
+    fn stage_in(root: &str, path: &str) -> GitQuestion {
+        GitQuestion::Write {
+            root: PathBuf::from(root),
+            verb: GitWriteVerb::Stage,
+            paths: vec![path.to_owned()],
+        }
+    }
+
+    /// RED (T-GIT-READS-PER-REPOSITORY round 2, B1) — **A nudge the read worker drains after it
+    /// looked at its parked reads is not lost.**
+    ///
+    /// The status of `仓库 repo` is parked behind a stage that stands in git; a checkout is pressed
+    /// after it, and the refs of the repository are asked. The worker looks at its parked line
+    /// (the stage still stands) — and the stage ends there, its nudge reaching the channel — then
+    /// takes the refs, draining the channel (and with it the nudge) as it does; the refs wait
+    /// their turn. The worker must look at its line again before it would wait for mail: the
+    /// status's turn has come, and the checkout waits on it.
+    ///
+    /// MUTATION: `PendingGitRequests::next_turn` looks at the parked line once, before the
+    /// questions not yet asked, and answers `None` once they have all been parked (round 1's
+    /// shape) — the worker would block in `recv` with the status ready and the checkout waiting
+    /// on it.
+    #[test]
+    fn a_nudge_drained_after_the_look_at_the_parked_reads_is_not_lost() {
+        let turns = crate::git_mutation_lane::RepoTurns::new();
+        let (_asks, inbox) = read_inbox(&turns);
+        let hold = std::sync::Arc::new(crate::lane::Hold::default());
+        hold.hold();
+        let (lane, wakes) = standing_verbs(&turns);
+        let root = "仓库 repo";
+        let first = press(&lane, &hold, stage_in(root, "一 one.md"));
+        hold.wait_standing("the stage running");
+        let status = GitQuestion::Status {
+            root: PathBuf::from(root),
+        };
+        let mut pending = PendingGitRequests::default();
+        pending.post(GitMail::Ask(asked(status.clone())));
+        assert!(
+            pending.next_turn(&turns, &inbox).is_none(),
+            "the status waits behind the stage"
+        );
+        press(
+            &lane,
+            &hold,
+            GitQuestion::Checkout {
+                root: PathBuf::from(root),
+                target: "功能/feature".to_owned(),
+                detach: false,
+            },
+        );
+        pending.post(GitMail::Ask(asked(GitQuestion::Refs {
+            root: PathBuf::from(root),
+        })));
+        pending.swept = Some(ends_after_the_look(
+            std::sync::Arc::clone(&lane),
+            wakes,
+            std::sync::Arc::clone(&hold),
+            first,
+        ));
+        let (request, reading) = pending
+            .next_turn(&turns, &inbox)
+            .expect("the status's turn came while the worker took the refs; it is not left parked");
+        assert_eq!(request.question, status);
+        drop(reading);
+    }
+
+    /// RED (T-GIT-READS-PER-REPOSITORY round 2, B2) — **A repository's reads begin in the order
+    /// they were asked, whenever its verbs end.**
+    ///
+    /// The status of `仓库 repo` is parked behind a stage that stands in git; the refs of the
+    /// repository are asked after it. The stage ends just after the worker looked at its parked
+    /// line, before it asks the refs' turn — both reads may now run — and the status runs first,
+    /// then the refs. (A history page asked after its base page is likewise never answered before
+    /// it.)
+    ///
+    /// MUTATION: have `TurnState::read_waits` let a read begin while a read of its folder asked
+    /// before it still waits (drop its `asked_before` clause) — the refs begin first.
+    #[test]
+    fn a_repositorys_reads_begin_in_the_order_they_were_asked() {
+        let turns = crate::git_mutation_lane::RepoTurns::new();
+        let (_asks, inbox) = read_inbox(&turns);
+        let hold = std::sync::Arc::new(crate::lane::Hold::default());
+        hold.hold();
+        let (lane, wakes) = standing_verbs(&turns);
+        let root = "仓库 repo";
+        let first = press(&lane, &hold, stage_in(root, "一 one.md"));
+        hold.wait_standing("the stage running");
+        let status = GitQuestion::Status {
+            root: PathBuf::from(root),
+        };
+        let refs = GitQuestion::Refs {
+            root: PathBuf::from(root),
+        };
+        let mut pending = PendingGitRequests::default();
+        pending.post(GitMail::Ask(asked(status.clone())));
+        assert!(
+            pending.next_turn(&turns, &inbox).is_none(),
+            "the status waits behind the stage"
+        );
+        pending.post(GitMail::Ask(asked(refs.clone())));
+        pending.swept = Some(ends_after_the_look(
+            std::sync::Arc::clone(&lane),
+            wakes,
+            std::sync::Arc::clone(&hold),
+            first,
+        ));
+        let (request, reading) = pending
+            .next_turn(&turns, &inbox)
+            .expect("both reads' turns have come");
+        assert_eq!(
+            request.question, status,
+            "the status first, as it was asked"
+        );
+        drop(reading);
+        let (request, reading) = pending
+            .next_turn(&turns, &inbox)
+            .expect("the refs' turn has come");
+        assert_eq!(request.question, refs, "then the refs");
+        drop(reading);
     }
 }
