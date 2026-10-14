@@ -1317,15 +1317,12 @@ mod tests {
         }
     }
 
-    fn reader(
-        turns: Arc<RepoTurns>,
-        mut answer: impl FnMut(GitRequest) + Send + 'static,
-    ) -> Reader {
+    fn reader(turns: Arc<RepoTurns>, answer: impl FnMut(GitRequest) + Send + 'static) -> Reader {
         let (asks, inbox) = git::read_inbox(&turns);
         bt_platform::spawn_at_priority(
             "git-mutation-lane-test-reader",
             bt_platform::ThreadPriority::Normal,
-            move |_| git::run_git_worker(inbox, &turns, |request| answer(request)),
+            move |_| git::run_git_worker(inbox, &turns, answer),
         )
         .expect("the test's reader starts");
         Reader { asks }
