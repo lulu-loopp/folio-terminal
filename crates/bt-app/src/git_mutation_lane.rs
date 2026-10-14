@@ -480,10 +480,15 @@ impl RepoTurns {
         self.changed.notify_all();
     }
 
-    /// How many reads are asked and not yet run now, parked or not.
+    /// How many reads are parked in the read worker's line now: asked, and their turn found not
+    /// come — where a test sees a read wait.
     #[cfg(test)]
-    fn reads_waiting(&self) -> usize {
-        locked(&self.state).asked.len()
+    fn reads_parked(&self) -> usize {
+        locked(&self.state)
+            .asked
+            .iter()
+            .filter(|asked| asked.parked)
+            .count()
     }
 
     /// How many verbs wait their turn now.
@@ -1528,7 +1533,7 @@ mod tests {
         let (done, read) = mpsc::channel();
         let _reader = read_on_a_worker(Arc::clone(lane.lane.turns()), root, Arc::clone(&log), done);
         lane::wait_until("the read waiting its turn, or run", || {
-            lane.lane.turns().reads_waiting() == 1 || locked(&log).iter().any(|line| line == "read")
+            lane.lane.turns().reads_parked() == 1 || locked(&log).iter().any(|line| line == "read")
         });
         hold.release();
         lane::receive(&read, "the read's turn");
@@ -1771,7 +1776,7 @@ mod tests {
         let (done, read) = mpsc::channel();
         let _reader = read_on_a_worker(Arc::clone(lane.lane.turns()), root, Arc::clone(&log), done);
         lane::wait_until("the read waiting its turn, or run", || {
-            lane.lane.turns().reads_waiting() == 1 || locked(&log).iter().any(|line| line == "read")
+            lane.lane.turns().reads_parked() == 1 || locked(&log).iter().any(|line| line == "read")
         });
         let next = lane
             .lane
@@ -2212,7 +2217,7 @@ mod tests {
         let (done, read) = mpsc::channel();
         let _reader = read_on_a_worker(Arc::clone(lane.lane.turns()), root, Arc::clone(&log), done);
         lane::wait_until("the read waiting its turn, or run", || {
-            lane.lane.turns().reads_waiting() == 1 || locked(&log).iter().any(|line| line == "read")
+            lane.lane.turns().reads_parked() == 1 || locked(&log).iter().any(|line| line == "read")
         });
         let later: Vec<MutationId> = ["二 two.md", "三 three.md"]
             .into_iter()
@@ -2361,7 +2366,7 @@ mod tests {
         );
         reader.ask(status(one));
         lane::wait_until("the status of 一号 asked and waiting its turn", || {
-            lane.lane.turns().reads_waiting() == 1
+            lane.lane.turns().reads_parked() == 1
         });
         reader.ask(status(two));
         assert_eq!(
@@ -2428,7 +2433,7 @@ mod tests {
         );
         reader.ask(status(root));
         lane::wait_until("the read asked and waiting its turn", || {
-            lane.lane.turns().reads_waiting() == 1
+            lane.lane.turns().reads_parked() == 1
         });
         let second = lane
             .lane
@@ -2511,7 +2516,7 @@ mod tests {
             reader.ask(request);
         }
         lane::wait_until("the four reads asked and waiting their turns", || {
-            lane.lane.turns().reads_waiting() == 4
+            lane.lane.turns().reads_parked() == 4
         });
         hold.release();
         let mut heard: Vec<String> = (0..4)
@@ -2571,7 +2576,7 @@ mod tests {
         );
         reader.ask(status(one));
         lane::wait_until("the status of 一号 asked and waiting its turn", || {
-            lane.lane.turns().reads_waiting() == 1
+            lane.lane.turns().reads_parked() == 1
         });
         reader.ask(status(three));
         busy.wait_standing("the read worker busy in 三号");
@@ -2640,7 +2645,7 @@ mod tests {
         let read = status(root);
         reader.ask(read.clone());
         lane::wait_until("the status asked and waiting its turn", || {
-            lane.lane.turns().reads_waiting() == 1
+            lane.lane.turns().reads_parked() == 1
         });
         reader.ask(read);
         // Asked after the repeat, answered after the worker has taken it.
@@ -2650,7 +2655,7 @@ mod tests {
             format!("status {elsewhere}")
         );
         assert_eq!(
-            lane.lane.turns().reads_waiting(),
+            lane.lane.turns().reads_parked(),
             1,
             "the repeat replaced the parked read"
         );
