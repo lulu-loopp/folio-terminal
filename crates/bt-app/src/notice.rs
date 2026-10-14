@@ -74,8 +74,9 @@ pub enum NoticeVerb {
     /// Throw this window's unsaved edits away and take the file as it now is.
     ReloadFromDisk,
     /// Keep the edits and take the strip down. Nothing is written and nothing is
-    /// read; the disagreement is still there and [`crate::preview::PreviewBuffer::save`]
-    /// is still the thing that will report it.
+    /// read; the disagreement is still there, and a save — conditional on the bytes the
+    /// buffer last read or wrote ([`crate::preview::PreviewBuffer::request_save`]) — is still
+    /// the thing that will report it.
     KeepMyEdits,
     /// **Hand the file to the machine** — the one way out of a page this window
     /// will not let you edit (owner's ruling 2026-09-12).
