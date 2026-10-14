@@ -54,8 +54,10 @@
 //! the window thread: a durable write waits for the device. The window thread
 //! builds the [`HandoffJob`] — pure: the two journals it may write are
 //! encoded before anything is sent — hands it over, and reads the answer on
-//! its turns under [`crate::quit::HANDOFF_DEADLINE`] ([`look`]). The worker
-//! says how long the write and the start each took, in one line.
+//! the turn the worker's wake brings (`AppEvent::DocumentsAnswered`, sent once
+//! the answer is in its channel), under [`crate::quit::HANDOFF_DEADLINE`]
+//! ([`look`]); a worker that ended without answering is read the same way.
+//! The worker says how long the write and the start each took, in one line.
 
 use std::ffi::OsString;
 use std::io;
@@ -723,8 +725,8 @@ impl Leave for OldLeave<'_> {
 pub(crate) enum Looked {
     /// No answer, and the deadline has not passed: look again next turn.
     Waiting,
-    /// The answer came, or the deadline passed without one; the applier it
-    /// started, if it said so.
+    /// The answer came, the storage worker ended without one, or the deadline
+    /// passed without one; the applier it started, if it said so.
     Over {
         line: String,
         applier: Option<Running>,
@@ -733,23 +735,36 @@ pub(crate) enum Looked {
 
 /// **One look at the hand-over's answer** for transaction `txn`, `overdue`
 /// once [`crate::quit::HANDOFF_DEADLINE`] has passed. Never waits.
+///
+/// **A channel read closed is the storage worker's end** (C2): it dropped the
+/// hand-over unanswered — queued behind its end, or inside it when it
+/// panicked — and no answer will come. That is the overdue answer's case, read
+/// on the turn the end's wake brings rather than at the deadline: no applier is
+/// known, and the window's mark decides.
 pub(crate) fn look(answer: Option<&Receiver<HandedOff>>, txn: TxnId, overdue: bool) -> Looked {
-    match answer.and_then(|answer| answer.try_recv().ok()) {
-        Some(handed) => Looked::Over {
+    match answer.map(Receiver::try_recv) {
+        Some(Err(mpsc::TryRecvError::Disconnected)) => Looked::Over {
+            line: format!(
+                "Folio: update {txn}'s hand-over had no answer: the storage worker stopped; the \
+                 window's mark decides who opens Folio as this process leaves"
+            ),
+            applier: None,
+        },
+        Some(Ok(handed)) => Looked::Over {
             line: handed.line(txn),
             applier: match handed {
                 HandedOff::Started { applier } => Some(applier),
                 _ => None,
             },
         },
-        None if overdue => Looked::Over {
+        None | Some(Err(mpsc::TryRecvError::Empty)) if overdue => Looked::Over {
             line: format!(
                 "Folio: update {txn}'s hand-over did not answer in time; the window's mark decides \
                  who opens Folio as this process leaves"
             ),
             applier: None,
         },
-        None => Looked::Waiting,
+        None | Some(Err(mpsc::TryRecvError::Empty)) => Looked::Waiting,
     }
 }
 
@@ -1548,11 +1563,6 @@ mod tests {
             .expect("this store writes");
         assert_eq!(quit.requested(generation, start), QuitStep::Write);
         assert!(!quit.receipt_is_overdue(start + UPDATE_RECEIPT_DEADLINE / 2));
-        assert_eq!(
-            quit.wake_at(start),
-            Some(start + crate::quit::ANSWER_LOOK),
-            "the loop comes back to look, and waits for nothing"
-        );
         let late = start + UPDATE_RECEIPT_DEADLINE;
         assert!(quit.receipt_is_overdue(late), "the bound is a bound");
         let refusal = store.receipt_overdue(generation, late);

@@ -921,6 +921,19 @@ and wakes the loop), send `Restore` until the merge tickets (a `Conflict` makes
 the restored file the revision and holds the document's write until the merge), and after start the window
 thread reads and writes none of the four documents (§5.3 row 20 narrowed).
 
+**And the session's own answers on the same wake** (0.4.8, T-SESSION-RECEIPTS-ON-THE-WAKE; the
+side-effects contract's C2). A `session.json` write's receipt and an update's hand-over answer
+(`StorageJob::Handoff`) each go to their channel and then wake the loop with
+`AppEvent::DocumentsAnswered`; its handler takes the session's receipts first and always
+(`SessionStore::take_receipts` — the session store is the application's, not a window's), and an
+update's quit reads the receipt for its photograph (`SessionStore::landing_of`) and the hand-over's
+answer (`update_handoff::look`) on the turn that wake brings. No clock turns to look for either:
+`SessionStore::flush_if_due` only hands the document over, and `Quit::deadline` is only each answer's
+bound. The worker's end closes the receipts' channel before its wake, so the write it took and will
+not answer is booked refused on that turn (the writer stopped), and a hand-over it dropped is over
+there as an overdue one is. The trial's receipt has no wake: its reader is the trial's watch, on its
+own turn, not the loop.
+
 **And every interactive preview save** (0.4.8, S-6a T-PREVIEW-ON-THE-STORAGE-LANE;
 `docs/plans/design/side-effects-contract-2026-10-11.md` (c)3). `Ctrl+S`, a head's Save button
 and a float's Save part hand the buffer's body to the same worker as a `StorageJob::Document`

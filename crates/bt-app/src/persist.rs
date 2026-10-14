@@ -541,9 +541,15 @@ type LaneWake = Arc<dyn Fn() + Send + Sync>;
 /// marks the lane down and drops every job still queued, so each such request's
 /// answer channel disconnects (its terminal: refused, no worker); no request can
 /// be admitted after that, because admission asks `up` under the same lock. Only
-/// then is the loop woken, so the wake follows every terminal.
+/// then is the loop woken, so the wake follows every terminal — the session
+/// receipts' channel among them: it closes before the wake, so a session write
+/// the worker took and will not answer reads as the worker's end on the turn
+/// that wake brings ([`SessionStore::take_receipts`]).
 struct WorkerEnd {
-    ends: SessionWriterEnds,
+    /// The queue's receiving end.
+    incoming: mpsc::Receiver<StorageJob>,
+    /// Where the session's receipts go; `None` only once the end has closed it.
+    receipts: Option<mpsc::Sender<SessionWriteReceipt>>,
     /// The queue's sending end, weakly: the worker must not keep its own queue
     /// open.
     requests: std::sync::Weak<Mutex<Option<mpsc::Sender<StorageJob>>>>,
@@ -560,11 +566,12 @@ impl Drop for WorkerEnd {
             let requests = self.requests.upgrade();
             let _admission = requests.as_deref().map(lane_lock);
             self.up.store(false, std::sync::atomic::Ordering::Release);
-            for job in self.ends.incoming.try_iter() {
+            for job in self.incoming.try_iter() {
                 drop(job);
             }
             lane_lock(&self.ahead).clear();
         }
+        drop(self.receipts.take());
         (self.wake)();
     }
 }
@@ -999,6 +1006,9 @@ struct SessionWriter {
     /// became of it (U-21). An update's quit waits for one named generation across turns, and
     /// the autosave's own turn may be the one that reads its receipt.
     answered: Option<(u64, Result<(), String>)>,
+    /// **The worker has ended**: its receipts' channel was read closed, so no receipt will
+    /// ever come again ([`Self::collect`]).
+    ended: bool,
     /// **A wait on this writer has already run out of budget** (T-QUIT-HAS-A-DEADLINE).
     ///
     /// Once one has, the thread is inside a call nobody in this process can bound, and every
@@ -1021,6 +1031,7 @@ impl SessionWriter {
             sent: 0,
             landed: 0,
             answered: None,
+            ended: false,
             stalled: false,
             budget: SESSION_SAVE_BUDGET,
         };
@@ -1068,11 +1079,14 @@ impl SessionWriter {
             "session-writer",
             bt_platform::ThreadPriority::BelowNormal,
             move |ctx| {
-                let Some(ends) = ends.lock().ok().and_then(|mut held| held.take()) else {
+                let Some(SessionWriterEnds { incoming, outgoing }) =
+                    ends.lock().ok().and_then(|mut held| held.take())
+                else {
                     return;
                 };
                 let end = WorkerEnd {
-                    ends,
+                    incoming,
+                    receipts: Some(outgoing),
                     requests,
                     up,
                     wake: Arc::clone(&wake),
@@ -1084,7 +1098,7 @@ impl SessionWriter {
                 // ends every job still queued and wakes the loop, as on any other end. The panic's
                 // report is in the panic log.
                 let _ = crate::contained_panic::contain(|| {
-                    'serving: while let Ok(next) = end.ends.incoming.recv() {
+                    'serving: while let Ok(next) = end.incoming.recv() {
                         // **Every job admitted ahead is served before the one the queue gave**
                         // ([`StorageLane::submit_ahead`]): the worker drains them at each job it
                         // takes, and the `Ahead` token wakes it for them when it is idle.
@@ -1120,29 +1134,37 @@ impl SessionWriter {
                                     }
                                     continue;
                                 }
+                                // No wake: its reader is the trial's watch, on its own turn
+                                // (`update_trial::watch`), not the loop.
                                 StorageJob::Receipt { job, answer } => {
                                     let _ = answer.send(write_receipt(&job));
                                     continue;
                                 }
+                                // Read by an update's way out on the turn this wake brings
+                                // (`FolioApp::hand_the_update_over`).
                                 StorageJob::Handoff { job, answer } => {
                                     let _ = answer.send(crate::update_handoff::perform(job));
+                                    wake();
                                     continue;
                                 }
                                 StorageJob::Ahead => continue,
                             };
                             let result = bt_persist::atomic_write(&request.path, &request.bytes)
                                 .map_err(|error| error.to_string());
-                            if end
-                                .ends
-                                .outgoing
-                                .send(SessionWriteReceipt {
-                                    generation: request.generation,
-                                    result,
-                                })
-                                .is_err()
+                            let receipt = SessionWriteReceipt {
+                                generation: request.generation,
+                                result,
+                            };
+                            if !end
+                                .receipts
+                                .as_ref()
+                                .is_some_and(|receipts| receipts.send(receipt).is_ok())
                             {
                                 break 'serving;
                             }
+                            // The receipt is in its channel before the wake, which the loop
+                            // answers by taking it (`SessionStore::take_receipts`).
+                            wake();
                         }
                     }
                 });
@@ -1226,18 +1248,20 @@ impl SessionWriter {
             .then_some(answered)
     }
 
-    /// Every receipt that has arrived, newest-relevant last. Never waits.
-    fn collect(&self) -> Vec<SessionWriteReceipt> {
-        self.receipts.try_iter().collect()
-    }
-
-    /// Whether the writer thread has gone, so that no receipt will ever come again. Never
-    /// waits; asked only after [`Self::collect`] has taken whatever had arrived.
-    fn gone(&self) -> bool {
-        matches!(
-            self.receipts.try_recv(),
-            Err(mpsc::TryRecvError::Disconnected)
-        )
+    /// Every receipt that has arrived, newest-relevant last; a channel read closed after them
+    /// marks the writer [`Self::ended`]. Never waits.
+    fn collect(&mut self) -> Vec<SessionWriteReceipt> {
+        let mut arrived = Vec::new();
+        loop {
+            match self.receipts.try_recv() {
+                Ok(receipt) => arrived.push(receipt),
+                Err(mpsc::TryRecvError::Empty) => return arrived,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.ended = true;
+                    return arrived;
+                }
+            }
+        }
     }
 
     /// Wait for one named generation to land — **the one place this store blocks**, and the one
@@ -1295,6 +1319,7 @@ impl SessionWriter {
                 // The thread is gone and the answer is never coming. That is a refusal and not a
                 // wait that ran long: nothing is on its way, so there is nothing to go on past.
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.ended = true;
                     return (
                         earlier,
                         Err(SaveRefusal::Refused(WRITER_STOPPED.to_string())),
@@ -1604,9 +1629,38 @@ impl SessionStore {
             sent: 0,
             landed: 0,
             answered: None,
+            ended: false,
             stalled: false,
             budget: SESSION_SAVE_BUDGET,
         };
+        store
+    }
+
+    /// [`Self::at`], its writer a worker of its own that wakes `wake` where the product's wakes
+    /// the loop (`AppEvent::DocumentsAnswered`) — so a test hears what the loop would, and takes
+    /// the receipts on that wake as the loop's turn does.
+    #[cfg(test)]
+    pub(crate) fn at_waking(
+        session_path: PathBuf,
+        sentinel_path: PathBuf,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        let mut store = Self::at(session_path, sentinel_path);
+        let (mut lane, receipts) = StorageLane::fresh();
+        Arc::get_mut(&mut lane.shared)
+            .expect("a lane just made has one owner")
+            .wake = Arc::new(wake);
+        store.writer = SessionWriter {
+            lane,
+            receipts,
+            sent: 0,
+            landed: 0,
+            answered: None,
+            ended: false,
+            stalled: false,
+            budget: SESSION_SAVE_BUDGET,
+        };
+        SessionWriter::start(&store.writer.lane);
         store
     }
 
@@ -1680,15 +1734,12 @@ impl SessionStore {
         self.debouncer.deadline(SESSION_DEBOUNCE)
     }
 
-    /// **Take the answers the writer has brought back, and hand it the document if the quiet
-    /// window has elapsed.** The window thread's whole part in a session write.
-    ///
-    /// Both halves in one call because both belong to the same turn of the event loop and the
-    /// second one's bookkeeping depends on the first: a receipt is what says the store is clean,
-    /// and it has to be read before this turn decides whether anything is still owed.
+    /// **Hand the writer the document if the quiet window has elapsed** — the clock's half of a
+    /// session write. Its answer is not read here: the storage worker wakes the loop after each
+    /// receipt (`AppEvent::DocumentsAnswered`), and that turn takes it ([`Self::take_receipts`]),
+    /// so no clock turns for a receipt, and a receipt is heard the moment it lands.
     pub fn flush_if_due(&mut self, now: Instant) {
         crate::hang_watch::at(crate::hang_watch::Station::Autosave);
-        self.take_receipts(now);
         if self.debouncer.should_flush(now, SESSION_DEBOUNCE) {
             self.hand_over(now);
         }
@@ -1813,16 +1864,33 @@ impl SessionStore {
         self.report_write(Err(NO_WRITER_THREAD.to_string()), now);
     }
 
-    /// Read whatever the writer has answered, and let a failure put the document back on the
-    /// clock.
+    /// **Read whatever the writer has answered** — on the turn the storage worker's wake brings
+    /// (`AppEvent::DocumentsAnswered`), and wherever a decision rests on the answer (a quit's
+    /// write, an update's receipt) — and let a failure put the document back on the clock.
     ///
     /// A receipt older than the newest request is **stale and dropped**: a newer document has
     /// already been handed over and will bring its own answer, so letting an old failure mark the
     /// store dirty would schedule a retry of something that has since been superseded, and
     /// letting an old success mark it clean would be answering for a document nobody wrote.
-    fn take_receipts(&mut self, now: Instant) {
+    ///
+    /// **The worker's end is the terminal of the document it took and will not answer** (C2):
+    /// its receipts' channel closes before its end wakes the loop, so the document still in
+    /// flight when the channel reads closed is booked here as refused — the writer stopped —
+    /// once, as a refusal the disk gave would be.
+    pub(crate) fn take_receipts(&mut self, now: Instant) {
         for receipt in self.writer.collect() {
             self.apply_receipt(receipt, now);
+        }
+        if self.writer.ended
+            && let Some(generation) = self.writer.in_flight()
+        {
+            self.apply_receipt(
+                SessionWriteReceipt {
+                    generation,
+                    result: Err(WRITER_STOPPED.to_string()),
+                },
+                now,
+            );
         }
     }
 
@@ -2050,7 +2118,8 @@ impl SessionStore {
         Ok(Some(generation))
     }
 
-    /// **What became of generation `generation`, if the writer has said** — never waits (U-21).
+    /// **What became of generation `generation`, if the writer has said** — never waits (U-21);
+    /// asked on the turn the storage worker's wake brings.
     ///
     /// Only the receipt for that generation answers: an older one is somebody else's document.
     /// A writer thread that has gone answers a refusal, as [`SessionWriter::wait_for`] does:
@@ -2067,7 +2136,7 @@ impl SessionStore {
             return Some(result.clone().map_err(SaveRefusal::Refused));
         }
         self.writer
-            .gone()
+            .ended
             .then(|| Err(SaveRefusal::Refused(WRITER_STOPPED.to_string())))
     }
 
@@ -4456,6 +4525,7 @@ pub(crate) mod tests {
             sent: 0,
             landed: 0,
             answered: None,
+            ended: false,
             stalled: false,
             budget: SESSION_SAVE_BUDGET,
         };
@@ -5896,6 +5966,346 @@ pub(crate) mod tests {
 /// The four stores' revisions (`docs/plans/design/settings-reread-2026-10-11.md`
 /// §3.1, §9.2, revision (b)10 and (b)14-16): what each is set to at open and on
 /// a landed write, and the re-read of profiles and pins measured against it.
+/// **The session's answers on the storage worker's wake** (T-SESSION-RECEIPTS-ON-THE-WAKE; the
+/// side-effects contract's C2): a receipt, the worker's end and an update's hand-over are each
+/// announced by the wake the loop answers, after they are in their channels, and nothing turns a
+/// clock to look for them.
+#[cfg(test)]
+mod receipt_wake_tests {
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Instant;
+
+    use bt_persist::{SessionV1, SessionWindowV1};
+
+    use super::{
+        SENTINEL_FILE_NAME, SESSION_DEBOUNCE, SESSION_FILE_NAME, SaveRefusal, SessionStore,
+        SessionWriter, StorageLane, WRITER_STOPPED, lane_lock,
+    };
+    use crate::document_request::ReadJob;
+    use crate::quit::{HANDOFF_DEADLINE, Quit, Reason, UPDATE_RECEIPT_DEADLINE, WriteVerdict};
+    use crate::update_handoff::{HandedOff, Looked, look};
+    use crate::update_txn::TxnId;
+
+    /// A private folder for one test, named in two scripts.
+    fn folder(case: &str) -> PathBuf {
+        let root = bt_testpath::temp_path(&format!("bt-app-receipt-wake-会话-{case}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a private folder for this test");
+        root
+    }
+
+    /// A wake the test hears: one `()` per wake, as the loop would be woken.
+    fn wakes() -> (impl Fn() + Send + Sync + 'static, mpsc::Receiver<()>) {
+        let (woke, wakes) = mpsc::channel();
+        (
+            move || {
+                let _ = woke.send(());
+            },
+            wakes,
+        )
+    }
+
+    /// A session with one window whose tab carries a Chinese title, so the document is a
+    /// change worth writing.
+    fn a_session() -> SessionV1 {
+        SessionV1 {
+            windows: vec![SessionWindowV1 {
+                tabs: vec![crate::test_support::saved_tab(
+                    "default",
+                    "/会话 session",
+                    Some("标签 tab"),
+                    false,
+                )],
+                ..SessionWindowV1::default()
+            }],
+            ..SessionV1::default()
+        }
+    }
+
+    /// **Hold the storage worker inside a re-read's answer** until the returned sender says go;
+    /// with `end`, that answer then panics — the worker's end (`contained_panic::contain`). A
+    /// re-read that does not panic wakes the loop after its answer, as every document answer
+    /// does.
+    fn hold_the_worker(store: &SessionStore, end: bool) -> mpsc::Sender<()> {
+        let (entered, inside) = mpsc::channel::<()>();
+        let (open, gate) = mpsc::channel::<()>();
+        let admitted = store.lane().send_read(ReadJob {
+            which: bt_testpath::temp_path("bt-app-receipt-wake-held-读"),
+            generation: 1,
+            answer: Box::new(move |_, _| {
+                let _ = entered.send(());
+                crate::lane::receive(&gate, "the test's word to go on");
+                assert!(!end, "scripted: the worker ends here 工作线程结束");
+            }),
+        });
+        assert!(admitted, "the worker takes the re-read");
+        crate::lane::receive(&inside, "the worker inside the held re-read");
+        open
+    }
+
+    /// RED (T-SESSION-RECEIPTS-ON-THE-WAKE) — **a session receipt is heard on its wake, not on
+    /// the clock.** The autosave hands a document over on the clock's turn; the worker writes it
+    /// and wakes the loop; the turn that wake brings takes the receipt
+    /// (`SessionStore::take_receipts`, what `AppEvent::DocumentsAnswered` runs) and the store
+    /// owes nothing more — no later clock turn is needed, and none is asked for.
+    ///
+    /// MUTATION: drop the `wake()` after a session receipt in the worker's loop
+    /// (`SessionWriter::start`) — no wake comes, and the bounded wait runs out.
+    #[test]
+    fn a_session_receipt_is_heard_on_its_wake_not_on_the_clock() {
+        crate::test_support::on_the_window_thread_exiting();
+        let root = folder("heard");
+        let (wake, wakes) = wakes();
+        let mut store = SessionStore::at_waking(
+            root.join(SESSION_FILE_NAME),
+            root.join(SENTINEL_FILE_NAME),
+            wake,
+        );
+        let changed_at = Instant::now();
+        store.record(a_session(), changed_at);
+        store.flush_if_due(changed_at + SESSION_DEBOUNCE);
+        assert_eq!(store.writer.in_flight(), Some(1), "the clock handed it over");
+        assert_eq!(
+            store.deadline(),
+            None,
+            "and asks the clock back for nothing while the write is out"
+        );
+
+        crate::lane::wait_for_a_wake(&wakes, "the worker's wake after the receipt");
+        store.take_receipts(Instant::now());
+        assert_eq!(
+            store.writer.in_flight(),
+            None,
+            "the wake's turn heard the receipt"
+        );
+        assert_eq!(store.writer.answered, Some((1, Ok(()))));
+        assert_eq!(store.deadline(), None, "nothing is owed");
+        assert_eq!(
+            std::fs::read(root.join(SESSION_FILE_NAME)).expect("the file"),
+            bt_persist::serialize_session(&a_session()).expect("the session serialises"),
+        );
+        store.close();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-SESSION-RECEIPTS-ON-THE-WAKE, C2) — **a storage worker that ends wakes the loop,
+    /// and the session write it took reads as refused on that wake's turn.** The worker is held
+    /// inside a re-read whose answer then panics (`contained_panic::contain` makes that its
+    /// end); the autosave's document was queued behind it. The end drops it, closes the
+    /// receipts' channel and wakes the loop: the turn books the document as refused — the writer
+    /// stopped — once, and an update's look at it answers the same.
+    ///
+    /// MUTATION: drop the worker's-end arm of `SessionStore::take_receipts` — the document stays
+    /// in flight, unanswered, after the wake.
+    #[test]
+    fn a_storage_worker_that_ends_wakes_the_loop_and_its_receipts_read_as_refused() {
+        crate::test_support::on_the_window_thread_exiting();
+        let root = folder("ended");
+        let (wake, wakes) = wakes();
+        let mut store = SessionStore::at_waking(
+            root.join(SESSION_FILE_NAME),
+            root.join(SENTINEL_FILE_NAME),
+            wake,
+        );
+        let go = hold_the_worker(&store, true);
+        let changed_at = Instant::now();
+        store.record(a_session(), changed_at);
+        store.flush_if_due(changed_at + SESSION_DEBOUNCE);
+        assert_eq!(
+            store.writer.in_flight(),
+            Some(1),
+            "queued behind the held re-read"
+        );
+        go.send(()).expect("the worker waits at the gate");
+
+        crate::lane::wait_for_a_wake(&wakes, "the worker's end");
+        store.take_receipts(Instant::now());
+        assert_eq!(
+            store.writer.in_flight(),
+            None,
+            "the document has its terminal"
+        );
+        assert_eq!(
+            store.writer.answered,
+            Some((1, Err(WRITER_STOPPED.to_string()))),
+            "refused: the writer stopped"
+        );
+        assert_eq!(
+            store.landing_of(1, Instant::now()),
+            Some(Err(SaveRefusal::Refused(WRITER_STOPPED.to_string())))
+        );
+        assert!(wakes.try_recv().is_err(), "the end woke the loop once");
+        assert!(
+            !root.join(SESSION_FILE_NAME).exists(),
+            "nothing landed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-SESSION-RECEIPTS-ON-THE-WAKE, C2's order) — **the worker's end closes the session
+    /// receipts' channel before it wakes the loop**, so the turn that wake brings reads the end
+    /// rather than an open channel nobody will ever answer on.
+    ///
+    /// MUTATION: in `WorkerEnd::drop`, close the receipts' channel after the wake (or leave it
+    /// to the field's drop) — at the wake the channel is still open.
+    #[test]
+    fn the_workers_end_closes_the_session_receipts_before_its_wake() {
+        let (mut lane, receipts) = StorageLane::fresh();
+        let receipts = Arc::new(Mutex::new(receipts));
+        let seen = Arc::clone(&receipts);
+        let (woke, wakes) = mpsc::channel::<bool>();
+        Arc::get_mut(&mut lane.shared)
+            .expect("a lane just made has one owner")
+            .wake = Arc::new(move || {
+            let closed = matches!(
+                seen.lock().expect("the receipts").try_recv(),
+                Err(mpsc::TryRecvError::Disconnected)
+            );
+            let _ = woke.send(closed);
+        });
+        assert!(SessionWriter::start(&lane), "a worker serves the lane");
+        drop(lane_lock(&lane.shared.requests).take());
+        assert!(
+            crate::lane::receive(&wakes, "the worker's end"),
+            "the receipts' channel was closed when the loop was woken"
+        );
+    }
+
+    /// RED (T-SESSION-RECEIPTS-ON-THE-WAKE) — **an update's quit hears its session's receipt on
+    /// a wake, across turns.** The photograph goes over as a named generation behind a held
+    /// re-read; the quit's first turn finds no answer and asks the clock back only at the
+    /// receipt's bound. Released, the worker answers the re-read (its wake) and then writes the
+    /// photograph and wakes the loop again; that second wake's turn finds the landing.
+    ///
+    /// MUTATION: drop the `wake()` after a session receipt in the worker's loop — the second
+    /// wake never comes, and the bounded wait runs out.
+    #[test]
+    fn the_quits_session_receipt_arrives_on_a_wake_across_turns() {
+        let root = folder("quit");
+        let (wake, wakes) = wakes();
+        let mut store = SessionStore::at_waking(
+            root.join(SESSION_FILE_NAME),
+            root.join(SENTINEL_FILE_NAME),
+            wake,
+        );
+        store.record(a_session(), Instant::now());
+        let mut quit = Quit::begin_for(
+            Vec::new(),
+            Reason::UpdateRestart {
+                txn: TxnId::new([0x5e; 16]),
+            },
+        );
+        let start = Instant::now();
+        quit.documents(&[], start);
+        quit.photographed();
+        let go = hold_the_worker(&store, false);
+        let generation = store
+            .hand_over_final(start)
+            .expect("handed over")
+            .expect("this store writes");
+        quit.requested(generation, start);
+
+        assert_eq!(
+            store.landing_of(generation, Instant::now()),
+            None,
+            "the first turn: the write is behind the held re-read"
+        );
+        assert_eq!(
+            quit.deadline(),
+            Some((start + UPDATE_RECEIPT_DEADLINE).min(quit.session_write_until(start))),
+            "the loop is asked back at the receipt's bound, not to look"
+        );
+
+        go.send(()).expect("the worker waits at the gate");
+        crate::lane::wait_for_a_wake(&wakes, "the re-read's own answer");
+        crate::lane::wait_for_a_wake(&wakes, "the session receipt's wake");
+        assert_eq!(
+            store.landing_of(generation, Instant::now()),
+            Some(Ok(())),
+            "the second wake's turn finds the landing"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-SESSION-RECEIPTS-ON-THE-WAKE) — **with an answer owed, the loop does not wake on
+    /// the clock for it.** An update's quit awaiting its session's receipt, and then its
+    /// hand-over's answer, asks the loop back only at each one's bound (`Quit::deadline`, what
+    /// the loop's `ControlFlow` reads), and the autosave's store asks for no wake while its
+    /// document is out: each answer is announced by the worker's wake.
+    ///
+    /// MUTATION: put the poll back — `Quit::deadline` answers 15 ms from now while a receipt or
+    /// a hand-over's answer is owed (`quit::ANSWER_LOOK` as it was) — the loop is asked back
+    /// before the bound.
+    #[test]
+    fn an_owed_answer_asks_the_clock_for_its_bound_only() {
+        let start = Instant::now();
+        let mut quit = Quit::begin_for(
+            Vec::new(),
+            Reason::UpdateRestart {
+                txn: TxnId::new([0x6f; 16]),
+            },
+        );
+        quit.documents(&[], start);
+        quit.photographed();
+        quit.requested(7, start);
+        assert_eq!(
+            quit.deadline(),
+            Some((start + UPDATE_RECEIPT_DEADLINE).min(quit.session_write_until(start))),
+            "the receipt's bound, and no look before it"
+        );
+        quit.written(WriteVerdict::Landed);
+        quit.retired(start);
+        quit.pages(true, start);
+        quit.handoff_sent(start);
+        assert_eq!(
+            quit.deadline(),
+            Some(start + HANDOFF_DEADLINE),
+            "the hand-over's bound, and no look before it"
+        );
+
+        let root = folder("idle");
+        let (lane, _jobs) = StorageLane::unserved();
+        let mut store = SessionStore::at_on(
+            root.join(SESSION_FILE_NAME),
+            root.join(SENTINEL_FILE_NAME),
+            lane,
+        );
+        let changed_at = Instant::now();
+        store.record(a_session(), changed_at);
+        store.flush_if_due(changed_at + SESSION_DEBOUNCE);
+        assert_eq!(store.writer.in_flight(), Some(1), "the document is out");
+        assert_eq!(store.deadline(), None, "and no clock turns for its receipt");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-SESSION-RECEIPTS-ON-THE-WAKE, C2) — **a hand-over the storage worker ended without
+    /// answering is over on the turn its end's wake brings**, as an overdue one is at its bound:
+    /// no applier is known, and the window's mark decides.
+    ///
+    /// MUTATION: in `update_handoff::look`, read a closed channel as no answer yet — the look
+    /// waits for the deadline.
+    #[test]
+    fn a_hand_over_its_worker_dropped_is_over_on_the_wake() {
+        let txn = TxnId::new([0x7a; 16]);
+        let (answer, answered) = mpsc::channel::<HandedOff>();
+        drop(answer);
+        match look(Some(&answered), txn, false) {
+            Looked::Over { line, applier } => {
+                assert_eq!(applier, None, "no applier is known");
+                assert!(line.contains("the storage worker stopped"), "{line}");
+            }
+            Looked::Waiting => panic!("a closed channel is the worker's end, not a wait"),
+        }
+        let (_open, waiting) = mpsc::channel::<HandedOff>();
+        assert_eq!(
+            look(Some(&waiting), txn, false),
+            Looked::Waiting,
+            "an open channel with nothing in it is no answer yet"
+        );
+    }
+}
+
 #[cfg(test)]
 mod revision_tests {
     use std::path::{Path, PathBuf};
