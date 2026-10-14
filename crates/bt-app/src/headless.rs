@@ -1221,10 +1221,18 @@ impl HeadlessApplication {
 }
 
 /// **A headless application**: every field at the value a launch with nothing on disk gives it,
-/// its stores at `root`, its workers started and waking `proxy`.
+/// its stores at `root`, its workers started and waking `proxy` — but its storage lane, which no
+/// worker serves and none can start: every job handed to it is refused at the door (a preview
+/// save says "not saved"), and nothing a test does reaches a disk through it.
 pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -> App<Headless> {
     use crate::*;
-    let (lane, _) = persist::StorageLane::unserved();
+    let wake = |event: fn() -> AppEvent| {
+        let proxy = proxy.clone();
+        move || {
+            let _ = proxy.send_event(event());
+        }
+    };
+    let lane = persist::StorageLane::without_a_worker(wake(|| AppEvent::DocumentsAnswered));
     let session_store =
         persist::SessionStore::at(root.join("session.json"), root.join("session.lock"));
     let settings_store = persist::SettingsStore::at_on(root.join("settings.json"), lane.clone());
@@ -1232,12 +1240,6 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
         persist::KeybindingsStore::at_on(root.join("keybindings.json"), lane.clone());
     let (shortcuts, _) =
         settings_bundle::shortcuts_at_start(&mut keybindings_store, bt_platform::host_platform());
-    let wake = |event: fn() -> AppEvent| {
-        let proxy = proxy.clone();
-        move || {
-            let _ = proxy.send_event(event());
-        }
-    };
     let git_mutations = git_mutation_lane::GitMutationLane::new(
         git_mutation_lane::RepoTurns::new(),
         wake(|| AppEvent::GitReady),

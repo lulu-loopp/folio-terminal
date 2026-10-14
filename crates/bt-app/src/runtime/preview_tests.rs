@@ -523,6 +523,116 @@ fn the_window_holds_the_span_a_gesture_starts_on_and_frees_it_on_a_blur() {
     );
 }
 
+/// The caret's page typed into: `text` typed at the caret, as the keyboard hands it.
+fn type_on_the_page(folio: &mut HeadlessFolio, text: &str) {
+    let key = key_down(
+        winit::keyboard::Key::Character(winit::keyboard::SmolStr::new(text)),
+        winit::keyboard::KeyCode::KeyX,
+        Some(text),
+    );
+    assert!(
+        folio
+            .runtime()
+            .preview_key(&key)
+            .expect("the key is answered"),
+        "the page takes the key"
+    );
+}
+
+/// Every run of text the glass was last handed for the page, joined.
+fn drawn_text(folio: &HeadlessFolio) -> String {
+    folio
+        .window
+        .renderer
+        .preview_bodies
+        .iter()
+        .flat_map(|body| body.paragraphs.iter())
+        .flat_map(|paragraph| paragraph.runs.iter())
+        .map(|run| run.text.as_str())
+        .collect()
+}
+
+/// RED — **an edit is drawn, in its one draw, with the caret's block as the file's own bytes and
+/// that block written into the document's key** (§7.1.3q): the fresh parse the edit causes
+/// computes the span itself, draws it, and keys it — so the next frame, asked nothing new,
+/// rebuilds nothing.
+///
+/// MUTATIONS (each in `Runtime::rebuild_preview_document`): hand `markdown_source_blocks` `None`
+/// for the fresh span — the edit's draw shows the block rendered, its bold marks hidden; write
+/// `key_parsed_source(None)` — the key says no span where the document drew one, and the next
+/// frame re-lays-out the page.
+#[test]
+fn an_edit_draws_and_keys_its_block_as_source_in_its_one_draw() {
+    let (mut folio, surface) = drawn_page("headless-edit-span");
+    enter_at(&mut folio, surface, "bold here");
+    type_on_the_page(&mut folio, "x");
+    folio.draw();
+    let drawn = drawn_text(&folio);
+    assert!(
+        drawn.contains("**粗体** xbold"),
+        "the edit's one draw shows the caret's block as the file's own bytes:\n{drawn}"
+    );
+    assert!(
+        drawn_span(&mut folio, surface).is_some(),
+        "and the document's key names the span it drew"
+    );
+    let laid = (
+        folio.window.markdown_intrinsics.hits,
+        folio.window.markdown_intrinsics.misses,
+    );
+    folio.draw();
+    assert_eq!(
+        (
+            folio.window.markdown_intrinsics.hits,
+            folio.window.markdown_intrinsics.misses,
+        ),
+        laid,
+        "a frame asked nothing new lays out nothing"
+    );
+}
+
+/// RED — **a save the storage lane refuses is said on the pane, and the page stays dirty**,
+/// driven on a headless window, whose storage lane no worker serves (S-6a, C2): `Ctrl+S`'s verb
+/// hands the edited page to the lane, the lane refuses it at the door, and the pane says why.
+///
+/// MUTATION: in `Runtime::save_preview_on`, answer a refused request as sent — the pane says
+/// nothing and the page looks saved-on-its-way.
+#[test]
+fn a_save_the_lane_refuses_is_said_on_the_pane_and_the_page_stays_dirty() {
+    let (mut folio, surface) = drawn_page("headless-save-refused");
+    enter_at(&mut folio, surface, "bold here");
+    type_on_the_page(&mut folio, "x");
+    let mut runtime = folio.runtime();
+    runtime.save_preview_on(surface).expect("the verb runs");
+    let said = runtime
+        .preview_pane(surface)
+        .and_then(|pane| pane.notice())
+        .map(|(sentence, _)| sentence.clone());
+    let not_started = crate::i18n::Text::PreviewSaveNotStarted.text().to_owned();
+    assert_eq!(
+        said,
+        Some(crate::i18n::not_saved(&not_started)),
+        "the pane says the save was not started, and why"
+    );
+    let index = runtime.preview_tab_index(surface);
+    let source = runtime
+        .preview_pane(surface)
+        .and_then(|pane| pane.source().cloned())
+        .expect("the pane shows a file");
+    assert!(
+        runtime.window.tabs[index]
+            .preview_pool
+            .get(&source)
+            .is_some_and(preview::PreviewBuffer::dirty),
+        "the edit is still the page's, unsaved"
+    );
+    assert_eq!(
+        runtime.app.preview_saves.out(),
+        0,
+        "nothing is owed an answer"
+    );
+}
+
 /// The drawn paragraph whose text holds `text`, as the glass was last handed it.
 fn drawn_rect(folio: &HeadlessFolio, text: &str) -> [f32; 4] {
     folio
@@ -757,9 +867,9 @@ fn product_sites(text: &str) -> usize {
 /// * `want_caret_at(Some(` — one place owes the caret;
 /// * `pane.md_select()` handed to `preview_live::selection_span` by the fresh parse
 ///   (`rebuild_preview_document`) and by the standing span (`standing_source_span`) — the two
-///   producers of the span read the same selection. The fresh parse's arm is read here too: a
-///   mutation that answered no span from it (`parsed_source`) went unnoticed by every driven test
-///   (the standing span draws the same block on the next frame), so it is held as wiring.
+///   producers of the span read the same selection. Whether the fresh parse's span is drawn and
+///   keyed is not read here: an edit's one draw drives it
+///   (`an_edit_draws_and_keys_its_block_as_source_in_its_one_draw`).
 #[test]
 fn the_page_has_one_entrance_one_exit_and_one_owed_caret() {
     for (text, why) in [
