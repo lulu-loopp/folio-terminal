@@ -1853,11 +1853,10 @@ impl Runtime<'_> {
             // and since T-STATION-SPLIT that name covers the file it writes and
             // nothing else: the clock run below says its own name on the very
             // next line.
-            self.app.session_store.flush_if_due(now);
             // **A session that cannot be saved is said once per streak** (`persist`'s
             // `REFUSALS_BEFORE_TOLD`; `docs/M2-persistence-schema-v1.md` §5.3), on the card the
             // start-up announcement uses for it.
-            if let Some(fault) = self.app.session_store.take_fault() {
+            if let Some(fault) = self.app.session_store.autosave(now) {
                 self.toast(
                     toast::ToastKind::Error,
                     toast::ToastAnchor::Window,
