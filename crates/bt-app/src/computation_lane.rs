@@ -32,12 +32,13 @@
 //! * **Ordering.** One worker per share, first in first out: requests run, and end, in the order
 //!   their identities were minted.
 //! * **Supersession.** Nothing on the formula and path shares is coalesced: one question asked
-//!   twice is two requests, two runs and two terminals — but for an animation's open: a newer open
-//!   of the same file for the same window **supersedes** the one waiting for it
-//!   ([`crate::MathWorkerRequest::relate`]), because the window asks again only after letting the
-//!   older decode go (the file changed under it), and the window files an answer only under the
-//!   identity its record awaits, so the answer of an older open that was already running is never
-//!   filed either (`AnimationCache::awaits`). On the scale share a newer request for
+//!   twice is two requests, two runs and two terminals — but for a window's open of an animated
+//!   file and its read of a file's pixels: a newer ask of the same file for the same window
+//!   **supersedes** the one waiting for it ([`crate::MathWorkerRequest::relate`]), because the
+//!   window asks again only after letting the older read go (the file changed under it), and the
+//!   window files an answer only under the identity its record awaits, so the answer of an older
+//!   ask that was already running is never filed either (`AnimationCache::awaits`,
+//!   `peek_awaits`). On the scale share a newer request for
 //!   the same picture on the same pane and surface ([`crate::ScaleWorkerRequest::same_target`])
 //!   that waits behind one not yet started **supersedes** it when it asks for another size
 //!   (`Superseded { by }`) and **joins** it when it asks for the same size (`Joined { with }`) —
@@ -395,8 +396,8 @@ impl ComputationLane {
     /// **Ask for one formula, decode or glance** (C1): admitted and held for its asker — its
     /// identity answered — or refused at the door and handed back. Never waits for the worker.
     /// Nothing is coalesced: one question asked twice is two requests — but a newer open of an
-    /// animated file supersedes the same window's open of it still waiting
-    /// ([`crate::MathWorkerRequest::relate`]).
+    /// animated file, or a newer read of a file's pixels, supersedes the same window's ask of that
+    /// file still waiting ([`crate::MathWorkerRequest::relate`]).
     pub(crate) fn decorate(
         &self,
         request: MathWorkerRequest,
@@ -1126,9 +1127,11 @@ mod tests {
     /// RED (S-8; D-75) — **One question asked twice is two requests: two identities, two runs and
     /// two terminals, each with its own answer.**
     ///
-    /// The glance asks twice for one picture (a name in Chinese and Latin) while the worker is
-    /// busy. Each ask is minted its own identity, and each ends `Done` with an answer of its own —
-    /// neither is folded into the other by its question.
+    /// A pane asks twice for one picture it printed (a name in Chinese and Latin) while the worker
+    /// is busy. Each ask is minted its own identity, and each ends `Done` with an answer of its
+    /// own — neither is folded into the other by its question. (A window's read of a file's pixels
+    /// and its open of an animated file are the share's two exceptions, which a newer ask by the
+    /// same window displaces: `MathWorkerRequest::relate`.)
     ///
     /// MUTATION: have `ComputationLane::decorate` relate every pair `Relation::Same` (an answer
     /// found by its question) — the second ends `Joined`, with no answer of its own.
@@ -1139,9 +1142,12 @@ mod tests {
         lane.lane.decorate(pasted(1, 1)).ok().expect("admitted");
         assert!(gate.wait_entered(1), "the first request reaches the worker");
         let path = PathBuf::from("不在这里/截图 screenshot 1.png");
-        let ask = || MathWorkerRequest::PeekImage {
+        let ask = || MathWorkerRequest::InlineImage {
             leaf: probe_leaf(),
-            path: path.clone(),
+            task: bt_term::InlineImageTask {
+                occurrence_id: 7,
+                source: bt_term::InlineImageSource::LocalPath(path.clone()),
+            },
         };
         let first = lane.lane.decorate(ask()).ok().expect("admitted");
         let second = lane.lane.decorate(ask()).ok().expect("admitted");
@@ -1153,9 +1159,11 @@ mod tests {
                 panic!("request {id:?} ended {terminal:?}-like, not with its own answer");
             };
             let result = answered.take().expect("its own answer, not a twin's");
-            assert!(
-                matches!(&result.completion, DecorationWorkerCompletion::PeekImage { path: asked, .. } if *asked == path)
-            );
+            assert!(matches!(
+                &result.completion,
+                DecorationWorkerCompletion::InlineImage { task, .. }
+                    if matches!(&task.source, bt_term::InlineImageSource::LocalPath(asked) if *asked == path)
+            ));
         }
     }
 

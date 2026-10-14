@@ -1072,7 +1072,7 @@ impl Runtime<'_> {
                 // is permanently outstanding is a picture that never
                 // arrives.
                 DecorationWorkerCompletion::PeekImage { path, result } => {
-                    self.complete_peek_image(path, result)?;
+                    self.complete_peek_image(asked, path, result)?;
                     // Peek state never enters frames, so no republish is needed.
                     false
                 }
@@ -1158,7 +1158,7 @@ impl Runtime<'_> {
                 // claimed by the same file rather than by the same asker, and moves no frame of
                 // its own — see [`Self::complete_peek_video_frame`].
                 DecorationWorkerCompletion::PeekVideoFrame { path, glance } => {
-                    self.complete_peek_video_frame(path, glance)?;
+                    self.complete_peek_video_frame(asked, path, glance)?;
                     false
                 }
                 // **The glance card's page**, on the same reasoning and with one difference: unlike
