@@ -1009,6 +1009,11 @@ struct SessionWriter {
     /// **The worker has ended**: its receipts' channel was read closed, so no receipt will
     /// ever come again ([`Self::collect`]).
     ended: bool,
+    /// **The receipts' sending end, held by a store over a scripted lane**
+    /// ([`SessionStore::at_on`]): no worker answers there and none has ended, so a session
+    /// write queued on it reads as unanswered, never as the worker's end.
+    #[cfg(test)]
+    _receipts_held_open: Option<mpsc::Sender<SessionWriteReceipt>>,
     /// **A wait on this writer has already run out of budget** (T-QUIT-HAS-A-DEADLINE).
     ///
     /// Once one has, the thread is inside a call nobody in this process can bound, and every
@@ -1032,6 +1037,8 @@ impl SessionWriter {
             landed: 0,
             answered: None,
             ended: false,
+            #[cfg(test)]
+            _receipts_held_open: None,
             stalled: false,
             budget: SESSION_SAVE_BUDGET,
         };
@@ -1618,11 +1625,12 @@ impl SessionStore {
     }
 
     /// [`Self::at`], its documents handed to `lane` — a scripted lane's queue
-    /// holds them in order beside the documents' (no receipt comes back to it).
+    /// holds them in order beside the documents' (no receipt comes back to it, and the
+    /// receipts' channel stays open, so a write on it reads as unanswered, not refused).
     #[cfg(test)]
     pub(crate) fn at_on(session_path: PathBuf, sentinel_path: PathBuf, lane: StorageLane) -> Self {
         let mut store = Self::at(session_path, sentinel_path);
-        let (_, receipts) = mpsc::channel();
+        let (held_open, receipts) = mpsc::channel();
         store.writer = SessionWriter {
             lane,
             receipts,
@@ -1630,6 +1638,7 @@ impl SessionStore {
             landed: 0,
             answered: None,
             ended: false,
+            _receipts_held_open: Some(held_open),
             stalled: false,
             budget: SESSION_SAVE_BUDGET,
         };
@@ -1657,6 +1666,8 @@ impl SessionStore {
             landed: 0,
             answered: None,
             ended: false,
+            #[cfg(test)]
+            _receipts_held_open: None,
             stalled: false,
             budget: SESSION_SAVE_BUDGET,
         };
@@ -4526,6 +4537,8 @@ pub(crate) mod tests {
             landed: 0,
             answered: None,
             ended: false,
+            #[cfg(test)]
+            _receipts_held_open: None,
             stalled: false,
             budget: SESSION_SAVE_BUDGET,
         };
@@ -5963,9 +5976,6 @@ pub(crate) mod tests {
     }
 }
 
-/// The four stores' revisions (`docs/plans/design/settings-reread-2026-10-11.md`
-/// §3.1, §9.2, revision (b)10 and (b)14-16): what each is set to at open and on
-/// a landed write, and the re-read of profiles and pins measured against it.
 /// **The session's answers on the storage worker's wake** (T-SESSION-RECEIPTS-ON-THE-WAKE; the
 /// side-effects contract's C2): a receipt, the worker's end and an update's hand-over are each
 /// announced by the wake the loop answers, after they are in their channels, and nothing turns a
@@ -6229,17 +6239,16 @@ mod receipt_wake_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// RED (T-SESSION-RECEIPTS-ON-THE-WAKE) — **with an answer owed, the loop does not wake on
-    /// the clock for it.** An update's quit awaiting its session's receipt, and then its
-    /// hand-over's answer, asks the loop back only at each one's bound (`Quit::deadline`, what
-    /// the loop's `ControlFlow` reads), and the autosave's store asks for no wake while its
-    /// document is out: each answer is announced by the worker's wake.
+    /// RED (T-SESSION-RECEIPTS-ON-THE-WAKE) — **`Quit::deadline` is an owed answer's bound,
+    /// never a look.** An update's quit awaiting its session's receipt, and then its hand-over's
+    /// answer, answers each one's bound — the value the loop's `ControlFlow::WaitUntil` is built
+    /// from — and nothing sooner: the answers themselves are announced by the worker's wake. What
+    /// is pinned is the value; the loop's wake-ups are not counted (no counter for them exists).
     ///
-    /// MUTATION: put the poll back — `Quit::deadline` answers 15 ms from now while a receipt or
-    /// a hand-over's answer is owed (`quit::ANSWER_LOOK` as it was) — the loop is asked back
-    /// before the bound.
+    /// MUTATION: put the look back — `Quit::deadline` answers 15 ms from now while a receipt or
+    /// a hand-over's answer is owed (`quit::ANSWER_LOOK` as it was) — the value is not the bound.
     #[test]
-    fn an_owed_answer_asks_the_clock_for_its_bound_only() {
+    fn quit_deadline_is_the_owed_answers_bound_never_a_look() {
         let start = Instant::now();
         let mut quit = Quit::begin_for(
             Vec::new(),
@@ -6264,8 +6273,18 @@ mod receipt_wake_tests {
             Some(start + HANDOFF_DEADLINE),
             "the hand-over's bound, and no look before it"
         );
+    }
 
-        let root = folder("idle");
+    /// RED (T-SESSION-RECEIPTS-ON-THE-WAKE round 2) — **a session write on a scripted lane reads
+    /// as unanswered, not refused**, and asks the clock back for nothing. No worker serves the
+    /// lane and none has ended: the store holds its receipts' channel open
+    /// (`SessionStore::at_on`), so taking the receipts finds none and books no end.
+    ///
+    /// MUTATION: in `SessionStore::at_on`, drop the receipts' sending end at once (as before round
+    /// 2) — the channel reads closed, and the write is booked refused, the writer stopped.
+    #[test]
+    fn a_scripted_lanes_session_write_reads_as_unanswered_not_refused() {
+        let root = folder("scripted");
         let (lane, _jobs) = StorageLane::unserved();
         let mut store = SessionStore::at_on(
             root.join(SESSION_FILE_NAME),
@@ -6275,7 +6294,13 @@ mod receipt_wake_tests {
         let changed_at = Instant::now();
         store.record(a_session(), changed_at);
         store.flush_if_due(changed_at + SESSION_DEBOUNCE);
-        assert_eq!(store.writer.in_flight(), Some(1), "the document is out");
+        store.take_receipts(Instant::now());
+        assert_eq!(
+            store.writer.in_flight(),
+            Some(1),
+            "the document is out, unanswered"
+        );
+        assert_eq!(store.writer.answered, None, "and nothing was booked for it");
         assert_eq!(store.deadline(), None, "and no clock turns for its receipt");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -6307,6 +6332,9 @@ mod receipt_wake_tests {
     }
 }
 
+/// The four stores' revisions (`docs/plans/design/settings-reread-2026-10-11.md`
+/// §3.1, §9.2, revision (b)10 and (b)14-16): what each is set to at open and on
+/// a landed write, and the re-read of profiles and pins measured against it.
 #[cfg(test)]
 mod revision_tests {
     use std::path::{Path, PathBuf};

@@ -932,7 +932,8 @@ answer (`update_handoff::look`) on the turn that wake brings. No clock turns to 
 bound. The worker's end closes the receipts' channel before its wake, so the write it took and will
 not answer is booked refused on that turn (the writer stopped), and a hand-over it dropped is over
 there as an overdue one is. The trial's receipt has no wake: its reader is the trial's watch, on its
-own turn, not the loop.
+own declared turn, not the loop — read on the watch's own turn, which conforms with C2 by
+ruling (2026-10-14).
 
 **And every interactive preview save** (0.4.8, S-6a T-PREVIEW-ON-THE-STORAGE-LANE;
 `docs/plans/design/side-effects-contract-2026-10-11.md` (c)3). `Ctrl+S`, a head's Save button

@@ -1205,6 +1205,44 @@ mod tests {
         }
     }
 
+    /// RED (T-SESSION-RECEIPTS-ON-THE-WAKE round 2) — **the real storage worker wakes the loop
+    /// after a hand-over's answer is in its channel**, so the way out reads it on the turn that
+    /// wake brings and never lingers to [`crate::quit::HANDOFF_DEADLINE`]. The hand-over is the
+    /// real one — the staged transaction, the durable `Handoff`, a recording spawner that starts
+    /// nothing — served by a store's own worker whose wake the test hears; at that wake the look
+    /// finds the answer already there.
+    ///
+    /// MUTATION: drop the `wake()` after the hand-over's answer in the worker's loop
+    /// (`persist::SessionWriter::start`) — no wake comes, and the bounded wait runs out.
+    #[test]
+    fn a_hand_over_served_by_the_worker_wakes_the_loop_after_its_answer() {
+        let folder = Folder::new("wake-唤醒");
+        let staged = staged(&folder);
+        let (spawner, asked) = recording(&staged, false);
+        let handoff = HandoffJob::new(&staged, nonce(), spawner).expect("Prepared → Handoff");
+        let (woke, wakes) = mpsc::channel::<()>();
+        let mut store = SessionStore::at_waking(
+            folder.0.join("会话 session.json"),
+            folder.0.join("session.lock"),
+            move || {
+                let _ = woke.send(());
+            },
+        );
+        let answer = store
+            .hand_off(handoff)
+            .expect("the storage worker takes the hand-over");
+        crate::lane::wait_for_a_wake(&wakes, "the worker's wake after the hand-over's answer");
+        match look(Some(&answer), TxnId::new(TXN), false) {
+            Looked::Over { applier, .. } => assert_eq!(
+                applier,
+                Some(crate::update_apply::this_process()),
+                "the answer was in its channel at the wake"
+            ),
+            Looked::Waiting => panic!("woken before the hand-over's answer was in its channel"),
+        }
+        assert_eq!(asked.lock().expect("the record").calls.len(), 1, "one start");
+    }
+
     /// RED (U-21) — **`Handoff` is on the disk before the applier is started,
     /// and only after the session landed**: the spawner, reading the journal
     /// at the instant it is asked, finds `Handoff` naming the applier's
