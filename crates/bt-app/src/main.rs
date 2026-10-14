@@ -11958,7 +11958,7 @@ struct MathAnswers {
 #[derive(Default)]
 struct GitAnswers {
     pages: Vec<git::GitResponse>,
-    documents: Vec<git::DocumentAnswer>,
+    documents: Vec<git::GitDocumentAnswer>,
     gone: bool,
 }
 
@@ -17271,13 +17271,13 @@ mod worker_answer_routing_tests {
             against: preview::GitDiffAgainst::Index,
         };
         pool.open(diff.clone(), "说明 notes.md".to_owned(), &[]);
-        let pooled = git::DocumentAnswer {
+        let pooled = git::GitDocumentAnswer {
             shelf: git::Shelf::Pool(tab),
             buffer: pool.ask_composer(&diff).expect("a diff waits on git"),
             answer: column.answer.clone(),
         };
         assert_eq!(pooled.owner(), AnswerOwner::Tab(tab));
-        let glanced = git::DocumentAnswer {
+        let glanced = git::GitDocumentAnswer {
             shelf: git::Shelf::Glance(window_a()),
             ..pooled.clone()
         };
@@ -65224,9 +65224,7 @@ impl FolioApp {
                         };
                         open.stand(graph.cache.id(), id, place);
                     }
-                    for buffer in tab.preview_pool.git_document_ids() {
-                        open.keep(buffer, git::Shelf::Pool(tab.id));
-                    }
+                    open.keep_pool(tab.id, &tab.preview_pool);
                 }
                 for win in window.float.live_windows() {
                     if let Some(files) = win.files() {
@@ -65237,9 +65235,7 @@ impl FolioApp {
                         );
                     }
                 }
-                if let Some(buffer) = window.peek_buffer.git_document_id() {
-                    open.keep(buffer, git::Shelf::Glance(id));
-                }
+                open.keep_glance(id, &window.peek_buffer);
             }
         }
         let Some(app) = self.app.as_mut() else {

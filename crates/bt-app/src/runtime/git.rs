@@ -223,7 +223,7 @@ impl Runtime<'_> {
     pub(crate) fn apply_git_results(
         &mut self,
         batch: &mut Vec<git::GitResponse>,
-        documents: &mut Vec<git::DocumentAnswer>,
+        documents: &mut Vec<git::GitDocumentAnswer>,
         lane_gone: bool,
     ) -> Result<()> {
         let mut changed = lane_gone;
@@ -698,8 +698,10 @@ impl Runtime<'_> {
     /// the honest reading of it: the pane's head names the document, the panel
     /// beside it has already redrawn, and a diff that silently became a diff of
     /// something else while you were reading it would be the one surface here
-    /// that changes under you. Pressing the row again re-asks, because that is a
-    /// person saying "now".
+    /// that changes under you. Pressing the row again asks only for a document
+    /// with no answer yet — one still waiting, or one nobody answered
+    /// ([`preview::PreviewBuffer::ask_composer`]); an answered one stays the
+    /// snapshot it is until its buffer is let go.
     pub(in crate::runtime) fn open_git_document(
         &mut self,
         seat: SeatId,

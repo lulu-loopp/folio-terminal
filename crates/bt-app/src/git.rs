@@ -1053,7 +1053,7 @@ impl GitRequest {
 /// that cache stands now (`git_mutation_lane::OpenPages::address`), so when a
 /// window files it they name the cache's place in that turn. A document's
 /// answer ([`Self::buffer`]) is not filed as a `GitResponse` at all: the drain
-/// turns it into a [`DocumentAnswer`] addressed to the buffer it was asked for.
+/// turns it into a [`GitDocumentAnswer`] addressed to the buffer it was asked for.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitResponse {
     /// The window the asking surface was in — see [`GitRequest::window`].
@@ -1068,7 +1068,7 @@ pub struct GitResponse {
 
 impl GitResponse {
     /// **Who this answer belongs to** (F1b) — a page's answer; a document's is
-    /// a [`DocumentAnswer`], whose owner is where its buffer is kept.
+    /// a [`GitDocumentAnswer`], whose owner is where its buffer is kept.
     ///
     /// A column and a graph belong to their tab and travel with it between
     /// windows. A **float** belongs to the window that minted its epoch, which is
@@ -1119,13 +1119,13 @@ pub enum Shelf {
 /// any more — evicted, its tab closed, its card gone — takes nothing, and the
 /// answer goes to the drain's sink instead.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DocumentAnswer {
+pub struct GitDocumentAnswer {
     pub shelf: Shelf,
     pub buffer: crate::preview::BufferId,
     pub answer: GitAnswer,
 }
 
-impl DocumentAnswer {
+impl GitDocumentAnswer {
     /// **Who takes it**: the window whose strip holds the tab whose pool keeps
     /// the buffer, or the window whose hover card does.
     pub fn owner(&self) -> crate::AnswerOwner {
@@ -4335,6 +4335,51 @@ pub(crate) fn ask_git(
     }
 }
 
+/// **The read worker's end of its answers, and its wake** — which the worker
+/// rings after every answer and once more when it ends
+/// (T-GIT-DOCUMENT-GATED-BY-POOL round 2).
+///
+/// The last ring is what makes a worker's end an event: let go when the
+/// worker's body returns or unwinds, it closes the answer channel first and
+/// then wakes the loop, so the drain that wake brings finds the channel
+/// disconnected, turns git reading off once, and every window then settles
+/// the documents still waiting on it (`Runtime::settle_unanswered_git_documents`)
+/// — without waiting for some other answer to wake it. The request channel's
+/// receiver is spent inside the body, before this is let go, so a press that
+/// reached no worker has been refused by the time the windows settle.
+struct AnswerOut<W: Fn()> {
+    answers: Option<mpsc::Sender<GitResponse>>,
+    wake: W,
+}
+
+impl<W: Fn()> AnswerOut<W> {
+    fn new(answers: mpsc::Sender<GitResponse>, wake: W) -> Self {
+        Self {
+            answers: Some(answers),
+            wake,
+        }
+    }
+
+    /// Send one answer and wake the loop to take it.
+    fn send(&self, response: GitResponse) {
+        if self
+            .answers
+            .as_ref()
+            .is_some_and(|answers| answers.send(response).is_ok())
+        {
+            (self.wake)();
+        }
+    }
+}
+
+impl<W: Fn()> Drop for AnswerOut<W> {
+    /// The channel closes, and then the loop hears of it.
+    fn drop(&mut self) {
+        drop(self.answers.take());
+        (self.wake)();
+    }
+}
+
 impl GitWorker {
     /// Start the thread. **Where git is, is read at every question**
     /// ([`ask_git`]). A question takes its turn with the mutations of the
@@ -4354,12 +4399,15 @@ impl GitWorker {
             "bt-git-worker",
             bt_platform::ThreadPriority::BelowNormal,
             move |ctx| {
+                // Made before the requests are served, so it is let go after
+                // the request channel: see [`AnswerOut`].
+                let out = AnswerOut::new(response_tx, move || {
+                    let _ = proxy.send_event(AppEvent::GitReady);
+                });
                 run_git_worker(request_rx, |request| {
                     turns.question_turn(ctx, request.question.folder(), || {
                         let answer = ask_git(ctx, &request.question);
-                        if response_tx.send(request.answered(answer)).is_ok() {
-                            let _ = proxy.send_event(AppEvent::GitReady);
-                        }
+                        out.send(request.answered(answer));
                     });
                 });
             },
@@ -5106,6 +5154,62 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
             vec![ask(first), ask(second)],
             "each buffer's question is served; the repeat for one buffer collapses"
         );
+    }
+
+    /// RED (T-GIT-DOCUMENT-GATED-BY-POOL round 2) — **a read worker that ends
+    /// wakes the loop after its answers have closed, so every window's waiting
+    /// document says it was not loaded with no other event.**
+    ///
+    /// Two windows each wait on the diff of `说明 notes.md`. The worker's body
+    /// ends; nothing else happens. Its answer end ([`AnswerOut`]) closes the
+    /// channel and wakes the loop; the drain that wake brings finds the channel
+    /// disconnected and turns git reading off, once; and each window, finding
+    /// git reading off (`Runtime::apply_git_results`), settles its document.
+    ///
+    /// MUTATION: drop the wake from `AnswerOut`'s `drop` — no wake comes, and
+    /// the test runs out of the suite's patience. (Waking before the channel
+    /// closes instead: the drain finds the channel open, and the assertion on
+    /// it is red.)
+    #[test]
+    fn a_read_worker_that_ends_settles_every_waiting_document_with_no_other_event() {
+        let source = crate::preview::PreviewSource::GitDiff {
+            root: PathBuf::from("仓库 repo"),
+            path: "说明 notes.md".to_owned(),
+            against: crate::preview::GitDiffAgainst::WorkingTree,
+        };
+        let mut windows = [
+            crate::preview::PreviewPool::default(),
+            crate::preview::PreviewPool::default(),
+        ];
+        for pool in &mut windows {
+            pool.open(source.clone(), "说明 notes.md".to_owned(), &[]);
+            pool.ask_composer(&source)
+                .expect("a diff not read is asked for");
+        }
+        let (answers, responses) = mpsc::channel::<GitResponse>();
+        let (wake, wakes) = crate::lane::wake_channel();
+        let worker = std::thread::spawn(move || {
+            let _out = AnswerOut::new(answers, wake);
+            // The worker's body ends here: its requests are spent.
+        });
+        crate::lane::wait_for_a_wake(&wakes, "the ended read worker's wake");
+        assert!(
+            matches!(responses.try_recv(), Err(mpsc::TryRecvError::Disconnected)),
+            "the drain the wake brings finds git reading gone"
+        );
+        let (mut running, mut notice) = (true, false);
+        assert!(
+            disable_git_worker_state(&mut running, &mut notice),
+            "git reading is turned off, once"
+        );
+        for pool in &mut windows {
+            assert!(pool.settle_unanswered(), "each window settles its document");
+            assert_eq!(
+                *pool.get(&source).expect("kept").load(),
+                crate::preview::PreviewLoad::Unanswered
+            );
+        }
+        worker.join().expect("the worker's body returned");
     }
 
     /// PIN — a question superseded *while an earlier one is running* is dropped

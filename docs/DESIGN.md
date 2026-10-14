@@ -15511,3 +15511,11 @@ Records are never evicted, so they grow with the distinct animated files one win
 - `preview::tests::a_buffer_whose_question_was_dropped_says_so_instead_of_loading_for_ever`
 - `git::tests::one_document_asked_for_two_buffers_is_two_questions`
 - `worker_answer_routing_tests::every_lane_names_the_owner_of_its_answer` (a document's owner)
+
+### 2026-10-14 — A git document left unanswered by an ended read worker is settled on the worker's own wake (T-GIT-DOCUMENT-GATED-BY-POOL round 2)
+
+**Additions to the entry above.** The read worker's end is now an event: its answer end (`git::AnswerOut`), made before the worker serves anything and let go when its body returns or unwinds, closes the answer channel and then wakes the loop, so the drain that wake brings finds the channel disconnected, turns git reading off once, and every window settles its waiting documents — round 1 settled them only at the next unrelated wake. The drain's collection of the buffers a document can land in is `OpenPages::keep_pool` / `OpenPages::keep_glance`, pinned on a real pool merge and a real cap eviction. The sink for a document whose buffer is gone ignores it, as the mutation lane's does (the read lane is not on the completion seam); the test is renamed `a_documents_answer_whose_buffer_is_gone_is_sunk` (it was `…_is_sunk_and_recorded`). `git::DocumentAnswer` is renamed `git::GitDocumentAnswer`, apart from the storage lane's `DocumentAnswer`.
+
+**Pinned by**
+- `git::tests::a_read_worker_that_ends_settles_every_waiting_document_with_no_other_event`
+- `git_mutation_lane::tests::{a_documents_answer_fills_the_buffer_opened_for_it_even_after_its_view_closed, a_documents_answer_whose_buffer_is_gone_is_sunk}` (now on `PreviewPool::merge_from` and the `PV_BUFFER_CAP` eviction)

@@ -715,7 +715,7 @@ pub(crate) enum Filed {
     /// A page's answer, addressed to where its cache stands now.
     Page(GitResponse),
     /// A document's answer, addressed to the buffer it was asked for.
-    Document(git::DocumentAnswer),
+    Document(git::GitDocumentAnswer),
 }
 
 impl OpenPages {
@@ -733,9 +733,30 @@ impl OpenPages {
         );
     }
 
+    /// **Every buffer a git document can be answered into that one tab's pool keeps** this turn
+    /// ([`crate::preview::PreviewPool::git_document_ids`]) — the pool as it is now, after any
+    /// merge into this tab, any pane carried in or out and any eviction.
+    pub(crate) fn keep_pool(&mut self, tab: crate::TabId, pool: &crate::preview::PreviewPool) {
+        for buffer in pool.git_document_ids() {
+            self.keep(buffer, git::Shelf::Pool(tab));
+        }
+    }
+
+    /// The buffer one window's hover card keeps this turn, if a git document can be answered
+    /// into it.
+    pub(crate) fn keep_glance(
+        &mut self,
+        window: winit::window::WindowId,
+        card: &crate::preview::GlanceSlot,
+    ) {
+        if let Some(buffer) = card.git_document_id() {
+            self.keep(buffer, git::Shelf::Glance(window));
+        }
+    }
+
     /// The buffer `buffer`, which a git document can be answered into, is kept on `shelf` this
     /// turn.
-    pub(crate) fn keep(&mut self, buffer: crate::preview::BufferId, shelf: git::Shelf) {
+    fn keep(&mut self, buffer: crate::preview::BufferId, shelf: git::Shelf) {
         let earlier = self.buffers.insert(buffer, shelf);
         debug_assert!(
             earlier.is_none(),
@@ -798,7 +819,7 @@ impl OpenPages {
             return self.address(response).map(Filed::Page);
         };
         match self.buffers.get(&buffer) {
-            Some(shelf) => Some(Filed::Document(git::DocumentAnswer {
+            Some(shelf) => Some(Filed::Document(git::GitDocumentAnswer {
                 shelf: *shelf,
                 buffer,
                 answer: response.answer,
@@ -2067,9 +2088,11 @@ mod tests {
     ///
     /// Column seat 2 of tab 4 presses `说明 notes.md`: its diff's buffer opens in tab 4's pool and
     /// the question is asked for that buffer. Before git answers, the column closes (no surface
-    /// holds its cache) and tab 4 is merged into tab 1, its pool with it. The answer is addressed
-    /// to the buffer, kept now in tab 1's pool, and filed there: the pane stops saying
-    /// "Loading …" and shows git's text. Nothing reaches the sink.
+    /// holds its cache) and tab 4 is merged into tab 1 — the pool's own merge
+    /// (`PreviewPool::merge_from`) carries the buffer into tab 1's pool. The drain's collection
+    /// (`OpenPages::keep_pool`, over both tabs' pools as they are now) finds it there; the answer
+    /// is addressed to it and filed: the pane stops saying "Loading …" and shows git's text.
+    /// Nothing reaches the sink.
     ///
     /// MUTATION: in `OpenPages::file`, gate a document by its asker (answer `None` when
     /// `Self::resolve` finds no place for the cache that asked) — the answer is dropped and the
@@ -2077,21 +2100,28 @@ mod tests {
     #[test]
     fn a_documents_answer_fills_the_buffer_opened_for_it_even_after_its_view_closed() {
         let cache = files_view_cache();
-        let mut pool = crate::preview::PreviewPool::default();
+        let mut tab_four = crate::preview::PreviewPool::default();
         let asked = diff_asked_for_a_buffer(
-            &mut pool,
+            &mut tab_four,
             &cache,
             GitHost::Column(LeafId {
                 tab: TabId(4),
                 seat: SeatId(2),
             }),
         );
-        let buffer = asked.buffer.expect("asked for a buffer");
         // The column closed: no surface holds its cache. Tab 4 was merged into tab 1, and its
         // pool with it.
         drop(cache);
+        let mut pool = crate::preview::PreviewPool::default();
+        pool.open(
+            crate::preview::PreviewSource::file("笔记 notes.txt"),
+            "笔记 notes.txt".to_owned(),
+            &[],
+        );
+        pool.merge_from(std::mem::take(&mut tab_four));
         let mut open = OpenPages::default();
-        open.keep(buffer, git::Shelf::Pool(TabId(1)));
+        open.keep_pool(TabId(4), &tab_four);
+        open.keep_pool(TabId(1), &pool);
         let mut sunk = Vec::new();
         let filed = open.file(diff_answered(&asked), &mut |answer| sunk.push(answer));
         let Some(Filed::Document(document)) = filed else {
@@ -2130,36 +2160,51 @@ mod tests {
     /// any more reaches the sink, once, and is filed nowhere — though the page that asked is open,
     /// and another buffer of the same document waits in the same pool.**
     ///
-    /// Column seat 2 of tab 1 opens the diff of `说明 notes.md` and asks for it; the buffer is
-    /// evicted before git answers, and the diff is opened again — a new buffer, with a name of its
-    /// own, asked for separately. The first answer is not that buffer's: the sink takes it, once;
-    /// nothing is addressed to a window, and the page that asked (still open) is not consulted.
+    /// Column seat 2 of tab 1 opens the diff of `说明 notes.md` and asks for it; before git
+    /// answers, browsing opens [`crate::preview::PV_BUFFER_CAP`] files, and the pool's own cap
+    /// evicts the diff's buffer (the earliest clean one no pane shows). The diff is opened again —
+    /// a new buffer, with a name of its own, asked for separately. The drain's collection
+    /// (`OpenPages::keep_pool`) keeps only the new one, so the first answer is not that buffer's:
+    /// the sink takes it, once, and nothing is addressed to a window — the page that asked, still
+    /// open, is not consulted. The second answer reaches the new buffer. The product's sink
+    /// ignores what it takes (the git read lane is not on the completion seam; nobody waits).
     ///
     /// MUTATION: in `OpenPages::file`, let a document whose buffer is not kept fall through to
     /// `Self::address` as a page's answer — it is addressed to the column, and the sink takes
     /// nothing.
     #[test]
-    fn a_documents_answer_whose_buffer_is_gone_is_sunk_and_recorded() {
+    fn a_documents_answer_whose_buffer_is_gone_is_sunk() {
         let cache = files_view_cache();
         let column = LeafId {
             tab: TabId(1),
             seat: SeatId(2),
         };
-        let mut evicted = crate::preview::PreviewPool::default();
-        let asked = diff_asked_for_a_buffer(&mut evicted, &cache, GitHost::Column(column));
-        let mut reopened = crate::preview::PreviewPool::default();
-        let asked_again = diff_asked_for_a_buffer(&mut reopened, &cache, GitHost::Column(column));
+        let mut pool = crate::preview::PreviewPool::default();
+        let asked = diff_asked_for_a_buffer(&mut pool, &cache, GitHost::Column(column));
+        for n in 0..crate::preview::PV_BUFFER_CAP {
+            let name = format!("笔记 {n} notes.txt");
+            pool.open(crate::preview::PreviewSource::file(&name), name, &[]);
+        }
+        assert!(
+            pool.get(&notes_diff()).is_none(),
+            "the cap evicted the diff's buffer"
+        );
+        let asked_again = diff_asked_for_a_buffer(&mut pool, &cache, GitHost::Column(column));
         assert_ne!(asked.buffer, asked_again.buffer, "two buffers, two names");
         let mut open = standing(&cache, Place::Column(column));
-        open.keep(
-            asked_again.buffer.expect("asked for a buffer"),
-            git::Shelf::Pool(TabId(1)),
-        );
+        open.keep_pool(TabId(1), &pool);
         let answer = diff_answered(&asked);
         let mut sunk = Vec::new();
         let filed = open.file(answer.clone(), &mut |answer| sunk.push(answer));
         assert_eq!(filed, None, "filed nowhere");
         assert_eq!(sunk, vec![answer], "the sink takes it, once");
+        let Some(Filed::Document(again)) =
+            open.file(diff_answered(&asked_again), &mut |answer| sunk.push(answer))
+        else {
+            panic!("the new buffer's own answer reaches it");
+        };
+        assert_eq!(again.shelf, git::Shelf::Pool(TabId(1)));
+        assert_eq!(sunk.len(), 1, "and nothing more is sunk");
     }
 
     /// RED (T-GIT-MUTATIONS round 2, B2) — **A read waits for the verbs owed when it was asked,
