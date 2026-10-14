@@ -53,7 +53,6 @@ bt-app	-	crate::palette_index::walk_bounded	std::fs::read_dir	1
 bt-app	-	crate::persist::SessionWriter::start	std::sync::mpsc::Receiver::recv	1
 bt-app	-	crate::persist::make_data_folder	std::fs::create_dir_all	1
 bt-app	-	crate::persist::relocate	std::fs::rename	1
-bt-app	-	crate::preview::file_mtime	std::fs::metadata	1
 bt-app	-	crate::preview::read_size	std::fs::metadata	1
 bt-app	-	crate::preview::run_preview_worker	std::sync::mpsc::Receiver::recv	1
 bt-app	-	crate::preview_watch::Stamp::of	std::fs::metadata	1

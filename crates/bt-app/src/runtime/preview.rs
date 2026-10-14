@@ -7759,26 +7759,92 @@ impl Runtime<'_> {
     /// mock-up's "from any focus state", 6139-6150), a button means the window it
     /// is drawn on. Splitting the naming from the verb is what keeps them one
     /// verb.
+    ///
+    /// **A request on the storage worker, and nothing written here** (S-6a): the
+    /// buffer hands its body to the worker ([`preview::PreviewBuffer::request_save`])
+    /// and the door returns. The sentence is said when the answer comes back
+    /// ([`Self::hear_preview_saves`], `AppEvent::DocumentsAnswered`) — "Saved", the
+    /// conflict, or why not — and the press itself says nothing, because the
+    /// answer is back within the turn or two a frame takes. A press the door
+    /// refuses (no file, a body over the bound, nothing that would write it) is
+    /// said now. The meter (`Station::PreviewSave`) holds the encode and the
+    /// hand-over, the one part of a save still on this thread.
     pub(in crate::runtime) fn save_preview_on(&mut self, surface: PreviewSurface) -> Result<()> {
         if !self.preview_is_editable(surface) {
             return Ok(());
         }
-        let Some(buffer) = self.preview_buffer_on_mut(surface) else {
+        let flipped = self.page_source_shown_on(surface).map(Path::to_path_buf);
+        let index = self.preview_tab_index(surface);
+        let Some(source) = flipped.map(preview::PreviewSource::file).or_else(|| {
+            self.window.tabs[index]
+                .preview_panes
+                .get(surface)?
+                .source()
+                .cloned()
+        }) else {
+            return Ok(());
+        };
+        let saves = &mut self.app.preview_saves;
+        let Some(buffer) = self.window.tabs[index].preview_pool.get_mut(&source) else {
             return Ok(());
         };
         if !buffer.dirty() {
             return Ok(());
         }
-        let notice = match hang_watch::during(hang_watch::Station::PreviewSave, || buffer.save()) {
-            preview::SaveOutcome::Saved => preview::preview_saved_notice().to_owned(),
-            preview::SaveOutcome::Conflict => preview::preview_conflict_notice().to_owned(),
-            preview::SaveOutcome::Failed(error) => {
-                eprintln!("recoverable preview save failure: {error}");
-                i18n::not_saved(&error)
+        let asked = hang_watch::during(hang_watch::Station::PreviewSave, || {
+            buffer.request_save(saves, surface)
+        });
+        match asked {
+            preview::SaveAsked::Sent | preview::SaveAsked::Pending => Ok(()),
+            preview::SaveAsked::Refused(why) => {
+                self.preview_pane_mut(surface).say(Some((
+                    preview::save_notice(preview::SaveOutcome::Failed(why)),
+                    Instant::now(),
+                )));
+                self.repaint_preview()
             }
-        };
-        self.preview_pane_mut(surface)
-            .say(Some((notice, Instant::now())));
+        }
+    }
+
+    /// **The storage worker's answers about preview saves, heard by this
+    /// window's buffers** (S-6a): each answer goes to the buffer that asked, if
+    /// one of this window's tabs holds it ([`preview::PreviewSaves::deliver`]),
+    /// and its sentence to the surface that pressed, if it still shows that
+    /// file. An
+    /// answer this window holds no buffer for is left in `answers`, for the next
+    /// window or the sink.
+    pub(crate) fn hear_preview_saves(
+        &mut self,
+        answers: &mut Vec<preview::SaveAnswer>,
+    ) -> Result<()> {
+        let mut pools: Vec<&mut preview::PreviewPool> = self
+            .window
+            .tabs
+            .iter_mut()
+            .map(|tab| &mut tab.preview_pool)
+            .collect();
+        let heard = self.app.preview_saves.deliver(answers, &mut pools);
+        if heard.is_empty() {
+            return Ok(());
+        }
+        let now = Instant::now();
+        for (surface, source, said) in heard {
+            let Some(said) = said else {
+                continue;
+            };
+            let still_shows_it = self
+                .preview_buffer_on(surface)
+                .is_some_and(|buffer| buffer.source() == &source);
+            if still_shows_it {
+                self.preview_pane_mut(surface)
+                    .say(Some((preview::save_notice(said), now)));
+            }
+        }
+        // A body a Reload replaced while its save was out is owed the file the
+        // save just wrote (`PreviewBuffer::hear_save`): its read is asked.
+        for index in 0..self.window.tabs.len() {
+            self.request_stale_previews(index);
+        }
         self.repaint_preview()
     }
 
@@ -11087,6 +11153,7 @@ impl Runtime<'_> {
         // Whether a read landing raised the "this file changed on disk" strip
         // over a document somebody had typed in — see [`preview::ReadLanded`].
         let mut said_disk_news = false;
+        let mut read_again = Vec::new();
         let answers: Vec<preview::PreviewResponse> =
             answers_for(batch, |response| self.owns(response.owner()));
         for response in answers {
@@ -11140,6 +11207,15 @@ impl Runtime<'_> {
                     let Some((landed, content)) = landed else {
                         continue;
                     };
+                    // **News that arrived while this read was out** (round 6):
+                    // the buffer owes another read, asked below.
+                    if self.window.tabs[index]
+                        .preview_pool
+                        .get(&response.source)
+                        .is_some_and(preview::PreviewBuffer::is_behind_the_disk)
+                    {
+                        read_again.push(index);
+                    }
                     match landed {
                         // **And out by the one door**, whichever slot it landed
                         // in.
@@ -11157,6 +11233,9 @@ impl Runtime<'_> {
                         // somebody's document, so the seats are re-solved and
                         // not merely repainted.
                         preview::ReadLanded::Kept { said } => said_disk_news |= said,
+                        // The watcher's comparison found a clean body the file
+                        // no longer holds: its body is asked for (S-6a).
+                        preview::ReadLanded::ReadAgain => read_again.push(index),
                     }
                 }
                 // A picture's byte count, for the meta line under it.
@@ -11221,6 +11300,9 @@ impl Runtime<'_> {
         // the seats are re-solved when the set of panes wearing one moves.
         if said_disk_news {
             self.settle_preview_disk_notices()?;
+        }
+        for index in read_again {
+            self.request_stale_previews(index);
         }
         Ok(())
     }
@@ -14030,5 +14112,27 @@ impl Runtime<'_> {
         });
         self.finish_present_attempt(attempt, &result);
         result
+    }
+}
+
+/// **The preview's saves on the storage worker, as the application holds them**
+/// (S-6a) — written here and nowhere else: the press hands a request over
+/// ([`Runtime::save_preview_on`]), each window's buffers hear the answers owed
+/// them ([`Runtime::hear_preview_saves`]), and these two take the answers off
+/// the worker's channels and end the ones no buffer is waiting for.
+impl crate::App {
+    /// Every answer the storage worker has given about a preview save. Never
+    /// waits.
+    pub(crate) fn take_preview_save_answers(&mut self) -> Vec<preview::SaveAnswer> {
+        self.preview_saves.take_answers()
+    }
+
+    /// The answers no standing window's buffer was waiting for — its tab, pane
+    /// or edits gone, or its window leaving: recorded by the sink, then ignored
+    /// (C6).
+    pub(crate) fn sink_preview_save_answers(&mut self, answers: Vec<preview::SaveAnswer>) {
+        for answer in answers {
+            self.preview_saves.sink(answer);
+        }
     }
 }
