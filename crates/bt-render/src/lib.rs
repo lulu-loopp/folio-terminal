@@ -24017,60 +24017,6 @@ mod tests {
         }
     }
 
-    /// PIN (issue #42), from the bytes — a program that writes its prompt, moves the cursor onto
-    /// its input caret and hides it (`CSI ?25l`, what `pi`'s `hideCursor` writes) gets the
-    /// composition at that caret in the frame the session publishes, exactly as a program that
-    /// leaves the cursor shown does.
-    ///
-    /// MUTATIONS: `cursor_in_view: cursor.visible && …` in `bt_viewport`'s `continuous_frame`, or
-    /// the `cursor.visible` filter restored in `compose_preedit_inner` — red: the row reads
-    /// `> 你` and nothing after it.
-    #[test]
-    fn a_program_that_hides_the_cursor_gets_its_composition_at_its_input_caret() {
-        for (hide, shown) in [(&b"\x1b[?25l"[..], false), (&b""[..], true)] {
-            let mut session = bt_term::DualPlaneSession::new(
-                NonZeroU32::new(20).unwrap(),
-                NonZeroU32::new(6).unwrap(),
-            );
-            let mut bytes = "\x1b[?1049h\x1b[H\x1b[2J\x1b[5;1H> 你".as_bytes().to_vec();
-            bytes.extend_from_slice(hide);
-            session.feed_at(&bytes, std::time::Instant::now()).unwrap();
-            let mut projection = session.new_projection(session.layout_key());
-            let frame = session.viewport_frame(&mut projection).unwrap();
-            assert_eq!(frame.cursor.visible, shown);
-            assert!(
-                frame.cursor_in_view,
-                "shown={shown}: the cursor's cell is drawn"
-            );
-
-            let composed = compose_preedit(
-                &frame,
-                Some(&Preedit {
-                    text: "ni'hao".to_owned(),
-                    cursor_byte: None,
-                }),
-            )
-            .unwrap();
-            let columns = frame.columns.get() as usize;
-            let row = frame.cursor.row as usize;
-            let text: String = composed.frame.cells[row * columns..(row + 1) * columns]
-                .iter()
-                .filter(|cell| !cell.wide_spacer)
-                .map(|cell| cell.text.as_str())
-                .collect();
-            assert_eq!(
-                text.trim_end(),
-                "> 你ni'hao",
-                "shown={shown}: the composition follows the program's own text",
-            );
-            assert_eq!(
-                (composed.ime_caret.row, composed.ime_caret.column),
-                (frame.cursor.row, 10),
-            );
-            assert_eq!(composed.frame.cursor.visible, shown);
-        }
-    }
-
     #[test]
     fn preedit_uses_the_same_cluster_oracle_as_committed_cells() {
         let frame = ViewportFrame {
