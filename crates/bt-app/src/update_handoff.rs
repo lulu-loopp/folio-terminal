@@ -1240,7 +1240,11 @@ mod tests {
             ),
             Looked::Waiting => panic!("woken before the hand-over's answer was in its channel"),
         }
-        assert_eq!(asked.lock().expect("the record").calls.len(), 1, "one start");
+        assert_eq!(
+            asked.lock().expect("the record").calls.len(),
+            1,
+            "one start"
+        );
     }
 
     /// RED (U-21) — **`Handoff` is on the disk before the applier is started,
