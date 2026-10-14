@@ -33,8 +33,11 @@ $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $relative = "docs/plans/window-seam-native.tsv"
 $list = Join-Path $repo $relative
 
-# The rows the list was introduced with (T-HEADLESS-RUNTIME-SEAM round 2), by identity.
+# The rows the list was introduced with (T-HEADLESS-RUNTIME-SEAM round 2), by identity; and
+# `main`, which the guard reads since round 3 taught it expression position (`main` builds the
+# native `FolioApp` by inference through `run_app`) — seeded in the commit that taught it.
 $seed = @(
+    "function`tcrate`tmain",
     "method`tRuntime`tcreate",
     "method`tRuntime`topen_window",
     "trait`tFolioApp`tApplicationHandler",

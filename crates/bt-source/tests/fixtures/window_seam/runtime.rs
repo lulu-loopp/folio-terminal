@@ -65,3 +65,70 @@ fn rebuild_every_window(_windows: Vec<&mut Runtime<'_>>) {}
 
 // PLANTED: a `const` naming a native holder.
 const PLANTED: Option<Runtime<'static>> = None;
+
+impl<B: Backend> Runtime<'_, B> {
+    // PLANTED: a method of a generic block taking a holder whose backend defaults to the native
+    // one.
+    fn takes_the_native(&mut self, _other: &mut Runtime<'_>) {}
+}
+
+// PLANTED: a generic trait impl of a holder naming the native backend in its body.
+impl<B: Backend> std::fmt::Debug for Shell<B> {
+    fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let _native: Option<Shell<Native>> = None;
+        Ok(())
+    }
+}
+
+pub trait Twin<T> {}
+
+// PLANTED: a generic trait impl of a holder naming the native backend in its trait's arguments.
+impl<B: Backend> Twin<Shell<Native>> for Shell<B> {}
+
+// PLANTED: a native holder built in expression position, its backend chosen by inference.
+fn builds_by_inference() {
+    Runtime::create();
+}
+
+// PLANTED: a native holder taken apart in a struct pattern.
+fn takes_apart_by_pattern() {
+    let Shell { window: _ } = unimplemented!();
+}
+
+// PLANTED: a type whose field holds a native holder.
+pub struct Keeper {
+    runtime: Runtime<'static>,
+}
+
+// PLANTED: an associated const naming a native holder.
+impl crate::Plain {
+    const NATIVE: Option<Runtime<'static>> = None;
+}
+
+// PLANTED: an associated type of a generic holder block naming a native holder.
+impl<B: Backend> Iterator for Shell<B> {
+    type Item = Shell<Native>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        None
+    }
+}
+
+/// Generic over the backend: a holder built by inference ties to the parameter.
+fn builds_generically<B: Backend>() -> Runtime<'static, B> {
+    Runtime { window: unimplemented!() }
+}
+
+// PLANTED: the native backend named by its path.
+fn names_it_by_its_path() {
+    let _ = crate::window_seam::Native;
+}
+
+/// Not the backend: an enum's variant spelled as it.
+pub enum Kind {
+    Native,
+}
+
+fn a_variant_spelled_as_the_backend() -> Kind {
+    Kind::Native
+}
