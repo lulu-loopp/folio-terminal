@@ -8,11 +8,11 @@ use crate::test_support::{
     PtyPresentationHarness, TAB_ONE, a_held_raster, a_page_that_wants_a_sharper_picture, admitted,
     answer_awaited, assert_close, buffer_saying, calls_of, card_text, cell_ink, cross_metrics,
     cross_move, cross_solve, document_key, engines_settling_to, fail_awaited, found_in,
-    free_calls_of, free_fn_body, host_path, in_product, inside, leaf_saying,
-    ledger_gate, markdown_body, method_body, mono_caret_block, no_directories, one_picture,
-    pictures_drawn, probe_leaf, prose, prose_caret_block, reader_names, rested_bars, scale_task,
-    seat_of, shown_and_opened, source, source_block, squeezed_body, tab_with_a_picture,
-    tab_with_a_preview, text_buffer,
+    free_calls_of, free_fn_body, host_path, in_product, inside, leaf_saying, ledger_gate,
+    markdown_body, method_body, mono_caret_block, no_directories, one_picture, pictures_drawn,
+    probe_leaf, prose, prose_caret_block, reader_names, rested_bars, scale_task, seat_of,
+    shown_and_opened, source, source_block, squeezed_body, tab_with_a_picture, tab_with_a_preview,
+    text_buffer,
 };
 use bt_render::LIGHT_CHROME;
 use bt_source::{ItemQuery, Pattern, Scope, View, needle};

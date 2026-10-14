@@ -1263,8 +1263,7 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
             .expect("the index worker starts"),
         preview_worker: preview::PreviewWorker::spawn(proxy.clone())
             .expect("the preview worker starts"),
-        git_worker: git::GitWorker::spawn(proxy.clone(), git_turns)
-            .expect("the git worker starts"),
+        git_worker: git::GitWorker::spawn(proxy.clone(), git_turns).expect("the git worker starts"),
         acrylic_available: false,
         startup_started: Instant::now(),
         trace_startup: false,
