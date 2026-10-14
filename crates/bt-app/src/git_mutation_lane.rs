@@ -329,9 +329,9 @@ pub(crate) struct ReadTicket {
 
 impl ReadTicket {
     /// **The read's turn, if it has come** — every verb it waits for has ended, no verb runs in
-    /// its folder, and no read of its folder asked before it still waits: the folder is marked as being read until the [`Reading`] answered is dropped,
-    /// so no verb of it starts before then. Otherwise the read is parked and its ticket handed
-    /// back. Never waits.
+    /// its folder, and no read of its folder asked before it still waits: the folder is marked as
+    /// being read until the [`Reading`] answered is dropped, so no verb of it starts before then.
+    /// Otherwise the read is parked and its ticket handed back. Never waits.
     pub(crate) fn begin(self) -> Result<Reading, Self> {
         let parked = {
             let mut state = locked(&self.turns.state);

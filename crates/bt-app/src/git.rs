@@ -4194,7 +4194,10 @@ impl PendingGitRequests {
     ) -> Option<(GitRequest, crate::git_mutation_lane::Reading)> {
         loop {
             for at in 0..self.waiting.len() {
-                let (request, ticket) = self.waiting.remove(at)?;
+                let (request, ticket) = self
+                    .waiting
+                    .remove(at)
+                    .expect("`at` is below the line's length, which the look does not change");
                 match ticket.begin() {
                     Ok(reading) => return Some((request, reading)),
                     Err(ticket) => self.waiting.insert(at, (request, ticket)),
