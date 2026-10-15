@@ -780,8 +780,9 @@ struct FileWalk<'r, 'a> {
     /// Whether the walk is in a body whose mentions the guard does not read: a native block's
     /// method, a listed function, a listed `const`.
     unread: bool,
-    /// The module-level impl being walked: whether it is written for the native backend, and its
-    /// self type's last segment.
+    /// The module-level impl being walked: whether it is written for the native backend, and the
+    /// names its self type is spelled with ([`type_names`]: every path's last segment, generics
+    /// and lifetimes aside).
     block: Option<(bool, BTreeSet<String>)>,
     scopes: Vec<UseScope>,
     refusals: Vec<String>,
@@ -1490,7 +1491,14 @@ fn judge(
                 && block.module_paths().contains(&SEAM)
                 && block.trait_path().is_some_and(|path| {
                     block.module_paths().into_iter().any(|module| {
-                        checked(&resolver, package, module, path, "the trait").contains(&backend)
+                        checked(
+                            &resolver,
+                            package,
+                            module,
+                            path,
+                            "the trait of a native candidate",
+                        )
+                        .contains(&backend)
                     })
                 })
         })
@@ -1652,7 +1660,18 @@ fn judge(
         block_generics.push((block.body(), generic.clone()));
         let seam_block = modules.contains(&SEAM);
 
-        for door in resolver.implemented(package, block) {
+        // The doors it implements, through `checked`: a cutoff here is refused by name (outside the
+        // seam the module-level trait check below refuses it too; inside it, only this does).
+        let implemented: BTreeSet<TraitId> = block
+            .trait_path()
+            .map(|path| {
+                modules
+                    .iter()
+                    .flat_map(|module| checked(&resolver, package, module, path, "the trait"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for door in implemented {
             if door.package == package && door.module_path == SEAM && !modules.contains(&SEAM) {
                 refusals.push(format!(
                     "{door} is implemented for `{}` in {} — a door of the seam is implemented in \
@@ -2392,7 +2411,9 @@ fn row(kind: &str, owner: &str, name: &str) -> (String, String, String) {
 /// under another name; a listed trait default body and a listed method behind a reference self
 /// type, each introducing a name; a listed method behind a tuple self type holding a lifetime,
 /// introducing a name; a holder bounded, and a backend trait's supertrait, through a chain of
-/// re-exports of `Backend` past the resolver's hop limit; and a list row nothing uses. A
+/// re-exports of `Backend` past the resolver's hop limit; a seam type implementing that chain's far
+/// end (the native list's decision, and the door check, each refuse it); and a list row nothing
+/// uses. A
 /// module-level impl of a dependency's trait passes, and so do a module-level and a nested impl of
 /// a first-party trait spelled as a seam trait, which the resolver follows to that trait. The generic blocks (the bound written
 /// directly, through the prelude's glob, through a rename, in a `where` clause and through a
@@ -2591,10 +2612,16 @@ fn every_road_around_the_window_seam_is_named() {
              module level is a shape the guard does not read",
             "the supertrait `crate::elsewhere::Bk20` in crate chains past the resolver's hop \
              limit — refused, never passed",
+            "the trait `Hop20` in crate::elsewhere chains past the resolver's hop limit — \
+             refused, never passed",
+            "the trait `crate::elsewhere::Bk20` in crate::window_seam chains past the resolver's \
+             hop limit — refused, never passed",
             "the trait `crate::runtime::Bounded` names Native, Runtime, Shell for the native \
              backend in its declaration — the window is reached through the seam",
             "the trait `crate::runtime::Keeps` names Native, Runtime, Shell for the native \
              backend in its declaration — the window is reached through the seam",
+            "the trait of a native candidate `crate::elsewhere::Bk20` in crate::window_seam \
+             chains past the resolver's hop limit — refused, never passed",
             "the type `Aliased` at lib.rs:101 inside `fn listed_rebuild` — a body the guard does \
              not read for mentions (a native block's method, a listed function or `const`) \
              introduces no names",

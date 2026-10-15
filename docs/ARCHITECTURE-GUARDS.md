@@ -586,39 +586,41 @@ anything in it names a holder or the native backend for the native backend (a
 method body reaching a native-only method included). **A body the guard does not
 read for mentions introduces no names:** in a native block's method, a listed
 function, method or trait default (any self-type shape: the row's owner and the
-self type spell the same paths, generics and lifetimes aside) or a listed
-`const`, every `use` and `type`, and any other item spelling a holder, is
-refused by name; a `mod` below module level is refused anywhere, and an `extern
-crate` anywhere in a product file. **A body does not alias the seam's traits or
-module:** a body `use` whose leaves, expanded through the body's own to a fixed
-point, pass through the seam module or resolve to a seam trait is refused by
-name. A body `use` of a re-exported non-trait seam item (`LoopProxy as Win`) or
-a body glob of a re-exporting module is not refused by this rule — the resolver
-follows traits only — and leaves no hole: holders and the native backend are
-read by name wherever they are written, the seam's traits under every name a
-module-level `use` gives them, and a body glob in scope refuses any nested trait
-impl. **Every trait impl's trait is resolved, or shown to be another crate's, or
-refused — at module level and below it alike:** its path is expanded through the
-body's `use` leaves (each block's own, every path per name, a `{self}` leaf
-under the module's name) and resolved with the module's resolver, whose hop
-limit refuses — for every decision the guard takes from it: a trait impl's
-trait, a bound that makes a type parameter a backend parameter, a supertrait
-that makes a trait a backend trait, the trait that makes a type the native
-backend (a cycle among `use`s and globs names nothing more, and is not a
-cutoff); one the resolver does not follow passes only when, after the module's
-own `use` leaves and first-party globs, it is rooted at `std`, `core`, `alloc`
-or a dependency in the package's manifest that is not also a first-party
-module's name, or is a single segment naming a prelude trait; one spelled as a
-seam trait is a door — only when the resolver followed nothing, at module level
-and below it alike (one it followed to a first-party trait of the same name is
-that trait); a path that does not settle, any other unresolved path, and a body
-`use` glob in scope are refused by name. The seam's traits go by every name a
-module-level first-party `use` gives them, and a holder, a native name or a seam
-trait under any of those names in a macro's tokens is refused by name — the
-guard does not read macros; `paste!`, `concat_idents!` and any `use` of the
-`paste` crate are refused, since they build names from pieces. With all of
-these, every door of the seam the product implements is implemented in the seam
-(the headless backend is test-only and is not read).
+self type name the same set of types, each path's last segment, order, prefixes,
+generics and lifetimes aside) or a listed `const`, every `use` and `type`, and
+any other item spelling a holder, is refused by name; a `mod` below module level
+is refused anywhere, and an `extern crate` anywhere in a product file. **A body
+does not alias the seam's traits or module:** a body `use` whose leaves,
+expanded through the body's own to a fixed point, pass through the seam module
+or resolve to a seam trait is refused by name. A body `use` of a re-exported
+non-trait seam item (`LoopProxy as Win`) or a body glob of a re-exporting module
+is not refused by this rule — the resolver follows traits only — and leaves no
+hole: holders and the native backend are read by name wherever they are written,
+the seam's traits under every name a module-level `use` gives them, and a body
+glob in scope refuses any nested trait impl. **Every trait impl's trait is
+resolved, or shown to be another crate's, or refused — at module level and below
+it alike:** its path is expanded through the body's `use` leaves (each block's
+own, every path per name, a `{self}` leaf under the module's name) and resolved
+with the module's resolver, whose hop limit refuses — for every decision the
+guard takes from it: a trait impl's trait, a bound that makes a type parameter a
+backend parameter, a supertrait that makes a trait a backend trait, the trait
+that makes a type the native backend (a cycle among `use`s and globs names
+nothing more, and is not a cutoff); one the resolver does not follow passes only
+when, after the module's own `use` leaves and first-party globs, it is rooted at
+`std`, `core`, `alloc` or a dependency in the package's manifest that is not
+also a first-party module's name in scope (beside the module, at the crate root,
+or in a module the module's own globs open, one level), or is a single segment
+naming a prelude trait; one spelled as a seam trait is a door — only when the
+resolver followed nothing, at module level and below it alike (one it followed
+to a first-party trait of the same name is that trait); a path that does not
+settle, any other unresolved path, and a body `use` glob in scope are refused by
+name. The seam's traits go by every name a module-level first-party `use` gives
+them, and a holder, a native name or a seam trait under any of those names in a
+macro's tokens is refused by name — the guard does not read macros; `paste!`,
+`concat_idents!` and any `use` of the `paste` crate are refused, since they
+build names from pieces. With all of these, every door of the seam the product
+implements is implemented in the seam (the headless backend is test-only and is
+not read).
 
 **What the guard does not hold**: the platform handle. `WindowHost::native_handle`
 and `CompositorDoor::platform_tree` hand generic code a `bt_platform` value that
