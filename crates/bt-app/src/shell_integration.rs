@@ -4165,7 +4165,6 @@ pub(crate) fn check_powershell_in(
 
 /// **A PowerShell check asked from a command-line verb's own process**, which births no pane and
 /// so takes no turn ([`CheckAsker::Verb`]).
-#[cfg(windows)]
 fn check_powershell_from_a_verb(
     program: &Path,
     command: &str,
@@ -4325,12 +4324,15 @@ pub(crate) fn run_powershell_probe(
 /// **Where this PowerShell keeps `$PROFILE`, and nothing else** — the one question a removal
 /// needs (release read M1). No cmdlet runs: a cmdlet is found through command discovery, which is
 /// what a cold module analysis cache makes slow, while `$PROFILE` is a variable the host sets
-/// before its first command. Windows only, like [`PROFILE_COMMAND`].
-#[cfg(windows)]
+/// before its first command. The same command on every platform; off Windows no PowerShell is
+/// listed to ask ([`installed_powershells`]), so nothing asks it there.
 const PROFILE_PATH_COMMAND: &str =
     "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $PROFILE.CurrentUserCurrentHost";
 
-#[cfg(windows)]
+/// **Ask `program` where it keeps `$PROFILE`**, from where `asker` stands: a worker of this
+/// application through [`check_powershell`] — whose turn door answers "no package, no turn" for a
+/// program in no package, which is every program off Windows — or a command-line verb's own
+/// process through [`check_powershell_from_a_verb`]. One road on every platform.
 fn run_profile_path_probe(
     asker: CheckAsker<'_>,
     program: &Path,
@@ -4357,19 +4359,8 @@ fn run_profile_path_probe(
     parse_profile_path(std::str::from_utf8(&output.stdout).ok()?)
 }
 
-#[cfg(not(windows))]
-fn run_profile_path_probe(
-    _asker: CheckAsker<'_>,
-    _program: &Path,
-    _patience: bt_platform::ProbePatience,
-    _environment: &ProbeEnvironment,
-) -> Option<PathBuf> {
-    None
-}
-
 /// The path [`PROFILE_PATH_COMMAND`] prints: its first line, taken verbatim, and only when it is
 /// absolute — whatever the shell names is the file, wherever it is.
-#[cfg(windows)]
 fn parse_profile_path(stdout: &str) -> Option<PathBuf> {
     stdout
         .lines()
