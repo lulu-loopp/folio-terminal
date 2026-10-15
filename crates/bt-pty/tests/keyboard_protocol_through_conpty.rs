@@ -1131,7 +1131,8 @@ const READ_BACK: [(&str, &str, &str); 169] = [
 /// carry): it marks the end of one input, and drops whatever ConPTY was holding.
 const FLUSH: &[u8] = b"\x1b[0;0;167;1;0;1_\x1b[0;0;167;0;0;1_";
 
-/// Shift+Enter's record pair, the first record of the session.
+/// Shift+Enter's record pair, an input of its own. It is not the session's first record: the
+/// flush after the first input already is one.
 const SHIFT_ENTER_RECORDS: &[u8] = b"\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_";
 
 /// The second bytes after ESC that ConPTY holds, measured for every byte 0x00–0x7F: ESC, `O`,
@@ -1147,11 +1148,13 @@ struct Delivery {
 /// Send each input in a read of its own, then the flush, and collect what the reader printed for
 /// the input — every `BT_E<n>=` line before the flush's. The reader prints one line per key event
 /// (or per read), numbered from 0. Order, not time, decides: an input ConPTY passed on is printed
-/// before the flush; one it held never is, because the flush drops it.
+/// before the flush; one it held never is, and the flush's own line is exactly `flush_line` —
+/// the flush alone, with nothing held glued to it, so what was held was dropped.
 fn deliveries(
     probe: &mut Probe,
     inputs: &[(String, Vec<u8>)],
     is_flush: fn(&str) -> bool,
+    flush_line: &str,
 ) -> Vec<Delivery> {
     let mut next = 0usize;
     let mut out = Vec::new();
@@ -1163,6 +1166,10 @@ fn deliveries(
             let line = probe.wait_for(&format!("BT_E{next}="));
             next += 1;
             if is_flush(&line) {
+                assert_eq!(
+                    line, flush_line,
+                    "{name}: the flush arrives alone, and whatever was held is dropped"
+                );
                 break;
             }
             before_flush.push(line);
@@ -1237,7 +1244,7 @@ while ($true) {
     let inputs = escape_inputs();
     let mut probe = Probe::spawn_with_rows(powershell(SCRIPT), CHORD_ROWS);
     probe.wait_for("BT_EREADY");
-    let read = deliveries(&mut probe, &inputs, |line| line.ends_with("/a7"));
+    let read = deliveries(&mut probe, &inputs, |line| line.ends_with("/a7"), "0/0/a7");
     for delivery in &read {
         eprintln!("BT_ESC_HELD {} {:?}", delivery.name, delivery.before_flush);
     }
@@ -1320,7 +1327,7 @@ while ($true) {
         probe.value_after("BT_ENOMODE").is_none(),
         "the console must accept ENABLE_VIRTUAL_TERMINAL_INPUT for this reader to be one"
     );
-    let read = deliveries(&mut probe, &inputs, |line| line.ends_with("00a7"));
+    let read = deliveries(&mut probe, &inputs, |line| line.ends_with("00a7"), "00a7");
     for delivery in &read {
         eprintln!(
             "BT_ESC_HELD_VT {} {:?}",

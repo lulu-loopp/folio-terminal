@@ -645,6 +645,8 @@ Issue #42: "codex sometimes does not receive the Esc I press". The ticket assume
 
 Pinned by `input::tests::the_bytes_conpty_would_hold_are_the_press_record_on_every_road`, `with_win32_input_mode_only_the_chords_vt_cannot_express_change`, `every_row_of_the_key_encoding_table`, `the_windows_us_records_file_is_what_the_encoder_writes`; `bt-pty`'s `conpty_holds_exactly_these_escapes_once_it_has_seen_a_record` (key-record reader, with the flag-1 forms) and `a_vt_input_reader_loses_the_same_escapes_and_reads_csi_27u_whole`, and the per-chord readers of revision (e) over the new rows.
 
+**Known limits (round 2 of the review).** This widens §7.1's Q1 = A as RULES §27 words it — "Folio does not adopt the mode for any other key" — to the bytes ConPTY would hold. Escape with Ctrl or Alt keeps its ESC, and that is a loss, not only a refusal: Windows takes Ctrl+Esc, Alt+Esc, Shift+Alt+Esc and Ctrl+Shift+Esc for itself, but Ctrl+Alt+Esc and Ctrl+Shift+Alt+Esc reach Folio, and from the pane's first record on neither form reaches a program — ConPTY swallows their record and holds their ESC. On the inbox ConPTY no key press is a record, but a PowerShell multi-line paste still writes `SHIFT_ENTER_RECORDS` whatever the ConPTY kind, so after such a paste a lone ESC may be held there too; not measured.
+
 ## Sources
 
 - kitty keyboard protocol: https://sw.kovidgoyal.net/kitty/keyboard-protocol/ (source `docs/keyboard-protocol.rst`), and kitty's encoder `kitty/key_encoding.c` (https://github.com/kovidgoyal/kitty).

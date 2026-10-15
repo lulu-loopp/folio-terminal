@@ -794,7 +794,8 @@ written only to the ConPTY Folio ships, and never for a dead key*.
 Added 2026-10-14 (issue #42): bytes ConPTY holds once it has read a record — a lone
 ESC, or ESC with ESC/O/P/X/^/_/[/]/DEL — are written as the press's record on every
 road but kitty's; byte readers read the same bytes; Escape with Ctrl or Alt keeps its
-ESC. Entry: DESIGN 2026-10-14.
+ESC. This widens the sentence above, "Folio does not adopt the mode for any other
+key". Entry: DESIGN 2026-10-14.
 
 ### 28. Mouse routing — `not yet folded` (the wheel half is folded, 2026-09-24)
 Entries: §7.1.5f, §7.1.5g, §7.1.5i; §7.21 and §7.22 *gesture disclosure*; §7.60
