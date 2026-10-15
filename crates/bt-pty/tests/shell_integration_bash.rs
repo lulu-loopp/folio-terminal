@@ -130,6 +130,9 @@ fn session_bytes(directory: &Path, commands: &str) -> Vec<u8> {
         // `login`, because that is what a Git Bash profile's own `--login`
         // asks for and what the launcher therefore tells the script it owes.
         .env("BT_SHELL_INTEGRATION", "login")
+        // The one variable only the login chain sets (see the startup-chain test): a
+        // `cargo test` started from inside a Git Bash would otherwise hand it down.
+        .env_remove(LOGIN_CHAIN_PREFIX)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -238,27 +241,61 @@ fn git_bash_marks_every_command_region_and_reports_the_exit_code() {
     std::fs::remove_dir(&directory).unwrap();
 }
 
+/// What `/etc/profile` exports through `/etc/msystem`: the install-relative
+/// prefix of the MSYS2 environment `MSYSTEM` names (`/mingw64` for `MINGW64`,
+/// `/ucrt64` for `UCRT64`).
+const LOGIN_CHAIN_PREFIX: &str = "MSYSTEM_PREFIX";
+
+/// The value a session's own output gives `key`, written by the shell as
+/// `key=value` on a line of its own. The command line that asks for it spells
+/// the key as `key""=`, so its echo never matches.
+fn reported<'t>(text: &'t str, key: &str) -> Option<&'t str> {
+    let needle = format!("{key}=");
+    let start = text.find(&needle)? + needle.len();
+    let rest = &text[start..];
+    Some(&rest[..rest.find(['\r', '\n']).unwrap_or(rest.len())])
+}
+
 /// PIN — the script leaves the user's own startup files in charge.
 ///
 /// `--init-file` displaces `~/.bashrc` and, because Folio also drops
 /// `--login` to make the flag take effect at all, `/etc/profile` with it. On Git
-/// for Windows `/etc/profile` is what puts `/mingw64/bin` on the path, so a
-/// shell that skipped it is a Git Bash that cannot find git — the one thing that
-/// profile exists to provide. Red gate: an injection that only adds the init
-/// file and never runs the chain passes every marker test above and hands the
-/// user a shell with a broken `PATH`.
+/// for Windows `/etc/profile` is what selects the MSYS2 environment's prefix and
+/// puts its `bin` at the front of the path, so a shell that skipped it runs on
+/// whatever the launcher and the inherited `PATH` happen to offer.
+///
+/// **Observed through the prefix, not through `MSYSTEM` or a found git.**
+/// `<root>\bin\bash.exe` is a launcher that sets `MSYSTEM` and puts its own
+/// `<prefix>\bin` on `PATH` before bash starts, so both of those are present with
+/// no startup file read at all; only `MSYSTEM_PREFIX` comes from the chain
+/// (`/etc/profile` → `/etc/msystem`). The environment itself is the
+/// installation's: Git for Windows 2.55 is `MINGW64` (`/mingw64/bin/git`), 2.56
+/// is `UCRT64` (`/ucrt64/bin/git`), and the assertions hold the prefix, the
+/// environment's name and git's location against each other rather than naming
+/// one of them. Red gate: an injection that only adds the init file and never
+/// runs the chain passes every marker test above and leaves the prefix unset.
 #[test]
 fn the_startup_chain_the_init_file_displaced_is_put_back() {
     let directory = temporary_directory();
-    let bytes = session_bytes(&directory, "command -v git; echo MSYSTEM=$MSYSTEM\nexit\n");
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    assert!(
-        text.contains("/mingw64/bin/git") || text.contains("/bin/git"),
-        "`/etc/profile` ran and git is on the path: {text:?}"
+    let bytes = session_bytes(
+        &directory,
+        "echo prefix\"\"=$MSYSTEM_PREFIX; echo msystem\"\"=$MSYSTEM; echo git\"\"=$(command -v git)\nexit\n",
     );
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let prefix = reported(&text, "prefix").expect("the shell answered the line it was given");
     assert!(
-        text.contains("MSYSTEM=MINGW"),
-        "the MSYS environment the login chain sets up is present: {text:?}"
+        prefix.starts_with('/') && prefix.len() > 1,
+        "`/etc/profile` ran and exported the environment's prefix: {text:?}"
+    );
+    assert_eq!(
+        reported(&text, "msystem").map(str::to_ascii_lowercase),
+        Some(prefix[1..].to_owned()),
+        "the prefix is the one of the MSYS2 environment the shell runs in: {text:?}"
+    );
+    assert_eq!(
+        reported(&text, "git"),
+        Some(format!("{prefix}/bin/git").as_str()),
+        "git is found in the environment's own `bin`, which the chain put first on the path: {text:?}"
     );
     std::fs::remove_dir(&directory).unwrap();
 }
