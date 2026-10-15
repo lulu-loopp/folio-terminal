@@ -6674,7 +6674,7 @@ mod receipt_wake_tests {
             "refused: the writer stopped"
         );
         assert_eq!(
-            store.landing_of(1, Instant::now()),
+            store.landing_of(1),
             Some(Err(SaveRefusal::Refused(WRITER_STOPPED.to_string())))
         );
         assert!(wakes.try_recv().is_err(), "the end woke the loop once");
@@ -6740,13 +6740,13 @@ mod receipt_wake_tests {
         quit.photographed();
         let go = hold_the_worker(&store, false);
         let generation = store
-            .hand_over_final(start)
+            .hand_over_final()
             .expect("handed over")
             .expect("this store writes");
         quit.requested(generation, start);
 
         assert_eq!(
-            store.landing_of(generation, Instant::now()),
+            store.landing_of(generation),
             None,
             "the first turn: the write is behind the held re-read"
         );
@@ -6760,7 +6760,7 @@ mod receipt_wake_tests {
         crate::lane::wait_for_a_wake(&wakes, "the re-read's own answer");
         crate::lane::wait_for_a_wake(&wakes, "the session receipt's wake");
         assert_eq!(
-            store.landing_of(generation, Instant::now()),
+            store.landing_of(generation),
             Some(Ok(())),
             "the second wake's turn finds the landing"
         );
