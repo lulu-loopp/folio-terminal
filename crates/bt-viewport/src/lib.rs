@@ -806,6 +806,14 @@ pub struct ViewportFrame {
     /// window does not show is not `visible`, exactly as a caret on a row the frame does not draw
     /// is not (plan §5.5).
     pub cursor: GridCursor,
+    /// Whether [`Self::cursor`] names a cell this frame draws, whatever the program says about
+    /// showing it: its row is a presentation row, its column is in the window, and no rendered
+    /// formula stands over it.
+    ///
+    /// `cursor.visible` is this **and** the program's own DECTCEM bit. An IME composition needs
+    /// only this one: a full-screen program that hides the terminal cursor and draws its own still
+    /// leaves the hidden one at its input caret, and the composition belongs there (issue #42).
+    pub cursor_in_view: bool,
     pub cell_anchors: Vec<CellAnchor>,
     pub row_map: Vec<FrameVisualRow>,
     pub selection_spans: Vec<SelectionSpan>,
@@ -2668,6 +2676,7 @@ impl ViewportProjection {
                 visible: cursor.visible && drawn_cursor_column.is_some(),
                 ..cursor
             },
+            cursor_in_view: drawn_cursor_column.is_some(),
             cell_anchors,
             row_map,
             selection_spans: Vec::new(),
@@ -3752,6 +3761,9 @@ impl ViewportProjection {
         // column the window does not show is exactly as undrawable as one standing on a row the
         // frame does not carry, and says so the same way (plan §5.5).
         let projected_cursor_column = axis.to_viewport(ContentColumn(cursor.column));
+        let cursor_in_view = projected_cursor_row.is_some()
+            && projected_cursor_column.is_some()
+            && !cursor_hidden_by_math;
         debug_assert_eq!(
             cells.len(),
             cell_anchors.len(),
@@ -3770,11 +3782,9 @@ impl ViewportProjection {
                 // still has to name a cell inside the rectangle, and a content column in a viewport
                 // field is the confusion this whole axis exists to end.
                 column: projected_cursor_column.map_or(0, |column| column.0),
-                visible: cursor.visible
-                    && projected_cursor_row.is_some()
-                    && projected_cursor_column.is_some()
-                    && !cursor_hidden_by_math,
+                visible: cursor.visible && cursor_in_view,
             },
+            cursor_in_view,
             cell_anchors,
             row_map,
             selection_spans,
@@ -13461,6 +13471,105 @@ mod tests {
             !frame.cursor.visible,
             "grid column three is nine columns left of the window"
         );
+    }
+
+    /// A cursor the program hid (DECTCEM) is in view exactly where a shown one would be drawn,
+    /// and is never drawn itself; a cursor scrolled off the frame's rows or out of its window is
+    /// out of view whether shown or not (issue #42: the IME composition goes where it is in view).
+    ///
+    /// MUTATIONS: `cursor_in_view = cursor.visible && …` in `continuous_frame`, or
+    /// `cursor_in_view: cursor.visible && …` in `live_frame` — the hidden rows go red, and the
+    /// composition of a program that hides the cursor is dropped again.
+    #[test]
+    fn a_hidden_cursor_is_in_view_wherever_a_shown_one_would_be_drawn() {
+        const COLUMNS: u32 = 10;
+        let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
+        let mut document = HistoryDocument::default();
+        for row in ["历史-0      ", "history-1 ", "历史-2      "] {
+            let finalized = store.capture(fixture_row(row, false)).finalized;
+            document.finalize_transaction(finalized.into_iter().next().unwrap());
+        }
+        let live = || {
+            vec![
+                fixture_row("> 你好      ", false),
+                fixture_row("          ", false),
+                fixture_row("          ", false),
+            ]
+        };
+        for shown in [true, false] {
+            for offset in 0..=3u32 {
+                let mut projection = ViewportProjection::new(
+                    key(COLUMNS),
+                    DetectionRevision(1),
+                    nz32(3),
+                    cell_height(),
+                    store.source_generation(),
+                    GridGeneration(1),
+                );
+                projection.project(&document);
+                let cursor = GridCursor {
+                    row: 1,
+                    column: 2,
+                    visible: shown,
+                };
+                projection
+                    .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+                    .unwrap();
+                projection.scroll_by_rows(offset as i32);
+                let frame = projection
+                    .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+                    .unwrap();
+                let in_view = 1 + offset < 3;
+                assert_eq!(
+                    frame.cursor_in_view, in_view,
+                    "shown={shown} offset={offset}: in view is where the row is, not what DECTCEM says"
+                );
+                assert_eq!(frame.cursor.visible, shown && in_view);
+                if in_view {
+                    assert_eq!((frame.cursor.row, frame.cursor.column), (1 + offset, 2));
+                }
+            }
+        }
+
+        let (mut projection, document) = axis_pane(flattened_key(8), 2, &["0123456789abcdefghij"]);
+        let hidden_at = |column| GridCursor {
+            visible: false,
+            ..cursor_at(column)
+        };
+        let live = || vec![grid_row("提示符ROW1", 8); 2];
+        projection.set_horizontal_origin(ContentColumn(4));
+        let frame = axis_frame(&mut projection, &document, &[], live(), hidden_at(6));
+        assert!(frame.cursor_in_view && !frame.cursor.visible);
+        assert_eq!(frame.cursor.column, 2);
+        projection.set_horizontal_origin(ContentColumn(9));
+        let frame = axis_frame(&mut projection, &document, &[], live(), hidden_at(3));
+        assert!(
+            !frame.cursor_in_view,
+            "a column left of the window is out of view, hidden or not"
+        );
+
+        // The bare live frame answers the same way.
+        let mut projection = ViewportProjection::new(
+            key(4),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let frame = projection
+            .live_frame(
+                nz32(4),
+                vec![fixture_row("> 你 ", false), fixture_row("    ", false)],
+                GridCursor {
+                    row: 0,
+                    column: 2,
+                    visible: false,
+                },
+            )
+            .unwrap();
+        assert!(frame.cursor_in_view && !frame.cursor.visible);
+        assert_eq!((frame.cursor.row, frame.cursor.column), (0, 2));
     }
 
     /// Plan §5.5 — **a word is a word in the content, not in the window**, and a line selection

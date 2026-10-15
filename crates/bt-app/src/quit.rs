@@ -163,14 +163,6 @@ pub(crate) const QUIT_RECOVERY_BY: Duration = crate::persist::SESSION_SAVE_BUDGE
 /// which starts Folio again (`update_handoff::leave_armed`).
 pub(crate) const HANDOFF_DEADLINE: Duration = Duration::from_secs(15);
 
-/// **How often the loop comes back to look for an answer the quit is waiting
-/// on** — the session's receipt, the hand-over's (U-21).
-///
-/// Neither worker wakes the loop when it answers, so the loop wakes itself:
-/// about once a frame, only while such an answer is owed, and never past the
-/// bound the answer is held to. A look is a `try_recv`; nothing here waits.
-pub(crate) const ANSWER_LOOK: Duration = Duration::from_millis(15);
-
 /// **Why a quit began** (0.4.6 U-21, §C.3). The transaction is the same either
 /// way — every cancelable step runs unchanged, the card, the save, the
 /// photograph, the write — and the reason says only what else rides on it.
@@ -1319,13 +1311,15 @@ impl Quit {
         }
     }
 
-    /// When the loop has to come back and look at the clock, if it does.
+    /// When the loop has to come back and look at the clock, if it does — **a bound, never a
+    /// look**: every answer the storage worker owes a quit wakes the loop itself — the
+    /// documents' and their copies', the session's receipt and the hand-over's, each with
+    /// `AppEvent::DocumentsAnswered` once it is in its channel (T-SESSION-RECEIPTS-ON-THE-WAKE)
+    /// — so no clock turns to look for one.
     #[must_use]
     pub fn deadline(&self) -> Option<Instant> {
         match self.phase {
-            // The two phases' bounds, both measured from the documents phase's start:
-            // its answers and its copies' wake the loop themselves, so the bound is
-            // the only clock either needs.
+            // The two phases' bounds, both measured from the documents phase's start.
             Phase::Documents => self.documents_from.map(|start| start + QUIT_DOCUMENTS_BY),
             Phase::Recovery => self.documents_from.map(|start| start + QUIT_RECOVERY_BY),
             Phase::Waiting { until }
@@ -1337,26 +1331,6 @@ impl Quit {
             } => Some(until),
             _ => None,
         }
-    }
-
-    /// **When the loop has to come back**, at the latest: the bound, and —
-    /// while an answer from a worker is owed — [`ANSWER_LOOK`] from `now`,
-    /// because neither worker wakes the loop itself (U-21).
-    #[must_use]
-    pub(crate) fn wake_at(&self, now: Instant) -> Option<Instant> {
-        let deadline = self.deadline()?;
-        let waiting_for_an_answer = matches!(
-            self.phase,
-            Phase::Writing { receipt: Some(_) }
-                | Phase::Leaving {
-                    handoff: Handoff::Sent { .. }
-                }
-        );
-        Some(if waiting_for_an_answer {
-            deadline.min(now + ANSWER_LOOK)
-        } else {
-            deadline
-        })
     }
 }
 
@@ -1757,7 +1731,11 @@ mod tests {
                         until: now + HANDOFF_DEADLINE
                     }
                 );
-                assert_eq!(quit.wake_at(now), Some(now + ANSWER_LOOK));
+                assert_eq!(
+                    quit.deadline(),
+                    Some(now + HANDOFF_DEADLINE),
+                    "the hand-over is held to its bound"
+                );
                 assert!(quit.handoff_is_overdue(now + HANDOFF_DEADLINE));
                 quit.handed_off();
                 assert_eq!(quit.handoff(), Handoff::Done);
