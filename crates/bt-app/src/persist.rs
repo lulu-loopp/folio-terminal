@@ -5726,10 +5726,13 @@ pub(crate) mod tests {
     /// goes ahead and is refused at the door, and is owed like any refusal — not parked in the
     /// pending slot for ever.
     ///
+    /// And the quit that follows meets the same refusal, in its own words.
+    ///
     /// MUTATION: `SessionWriter::busy` reduced to `self.in_flight().is_some()` — the change waits
     /// in the pending slot and no refusal is booked.
     #[test]
     fn a_save_after_the_worker_ended_goes_ahead_and_is_refused_at_the_door() {
+        crate::test_support::on_the_window_thread_exiting();
         let (mut store, jobs, _answer, root) = a_store_the_test_answers("worker-ended");
         let start = Instant::now();
         store.record(a_layout(1), start);
@@ -5740,18 +5743,19 @@ pub(crate) mod tests {
             "one write on its way"
         );
 
-        // The worker's end, as `WorkerEnd` makes it: the lane is down and its queue closed,
-        // under the queue's lock; the write it took is never answered.
+        // The worker's end, as `WorkerEnd` makes it: under the queue's lock the lane is marked
+        // down, and the queue's receiving end — which the worker owned — is gone, so a job sent
+        // to it is refused. The write it took is never answered.
         {
-            let mut requests = lane_lock(&store.writer.lane.shared.requests);
+            let _admission = lane_lock(&store.writer.lane.shared.requests);
             store
                 .writer
                 .lane
                 .shared
                 .up
                 .store(false, std::sync::atomic::Ordering::Release);
-            *requests = None;
         }
+        drop(jobs);
 
         let changed = start + SESSION_DEBOUNCE * 2;
         store.record(a_layout(2), changed);
@@ -5766,6 +5770,49 @@ pub(crate) mod tests {
             "the change went ahead, was refused at the door, and is owed"
         );
         assert_eq!(store.writes.streak, 1, "and the refusal is booked");
+        assert_eq!(
+            store.flush_judged(),
+            Err(SaveRefusal::Refused(NO_WRITER_THREAD.to_string())),
+            "the quit hands the owed document over and meets the refusal at the door"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-SESSION-WRITER-NO-TIMER-RETRY round 3, nit 1) — **a quit with no budget left gives
+    /// up the pending slot too**: a write is on its way and a change waits behind it; the way
+    /// out's close hands neither over again.
+    ///
+    /// MUTATION: leave `send_again` set on `SessionStore::flush_for_quit`'s past-budget road
+    /// (clear only `retry_on_trigger`) — the close's flush hands the parked change over.
+    #[test]
+    fn a_quit_with_no_budget_left_gives_up_a_parked_change() {
+        crate::test_support::on_the_window_thread_exiting();
+        let (mut store, jobs, _answer, root) = a_store_the_test_answers("no-budget-parked");
+        let start = Instant::now();
+        store.record(a_layout(1), start);
+        store.flush_if_due(start + SESSION_DEBOUNCE);
+        let changed = start + SESSION_DEBOUNCE * 2;
+        store.record(a_layout(2), changed);
+        store.flush_if_due(changed + SESSION_DEBOUNCE);
+        assert_eq!(
+            documents_handed_over(&jobs),
+            vec![1],
+            "one write on its way"
+        );
+        assert!(store.send_again, "and a change parked behind it");
+
+        let spent = changed + SESSION_DEBOUNCE * 2;
+        let verdict = store.flush_for_quit(spent, spent);
+        assert!(
+            verdict.as_ref().is_err_and(SaveRefusal::quit_may_proceed),
+            "given up as a write whose budget ran out: {verdict:?}"
+        );
+        store.close();
+        assert_eq!(
+            documents_handed_over(&jobs),
+            Vec::<u64>::new(),
+            "the way out's close hands nothing over"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
