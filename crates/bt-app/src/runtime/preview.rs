@@ -1,8 +1,7 @@
 //! `preview` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
-use super::peek::{PeekAsk, unstarted_pixels};
-use crate::computation_lane::Asking;
+use crate::computation_lane::{Asking, ComputationId};
 use crate::input::Keystroke;
 use crate::window_seam::prelude::*;
 use crate::{
@@ -15,7 +14,7 @@ use crate::{
     MarkdownCaretPaint, MarkdownCaretSeat, MarkdownLive, MarkdownPage, MarkdownPicture,
     MarkdownPreedit, MarkdownRaster, MarkdownRasterKey, MarkdownRasterRequest, MarkdownSourceBlock,
     MarkdownSourceBytes, MathWorkerRequest, Motion, NoticeHost, PAGE_ADDRESS_REFUSAL,
-    PREVIEW_REFUSAL_HOLD, PageArt, PageArtKey, PageHandOff, PagePicture, PasteTarget,
+    PREVIEW_REFUSAL_HOLD, PageArt, PageArtKey, PageHandOff, PagePicture, PasteTarget, PeekAsk,
     PeekCacheEntry, PeekThumbnailTarget, PictureErrand, PictureOnGlass, PictureReach,
     PictureRefusal, PopoverTrigger, Popup, PresentIntent, PreviewBlockDrag, PreviewBodyDrag,
     PreviewDocument, PreviewEditPaint, PreviewHeadFrame, PreviewHexHover, PreviewImageState,
@@ -8928,25 +8927,16 @@ impl<B: Backend> Runtime<'_, B> {
                 if !needs_pixels {
                     return answer;
                 }
-                let asked = self.request_peek_pixels(path);
-                // The lane was full: nothing is out, and the page's next resolve asks again.
-                if asked == PeekAsk::NotNow {
-                    return answer;
-                }
-                // Its thread not started: filed as a failed decode, asked again by new input.
-                if asked == PeekAsk::Unstarted {
-                    self.window.peek_cache.insert(
-                        bt_term::normalized_local_image_path_key(path),
-                        unstarted_pixels(),
-                    );
-                }
-                if asked == PeekAsk::Asked {
-                    preview_trace::picture_read(preview_trace::global(), path);
-                    self.window.peek_cache.insert(
-                        bt_term::normalized_local_image_path_key(path),
-                        PeekCacheEntry::Pending,
-                    );
-                    return answer;
+                // The one door files what it asked: the read under its identity, or —
+                // its thread not started — a failed decode, asked again by new input.
+                match self.request_peek_pixels(path) {
+                    // The lane was full: nothing is out, and the page's next resolve asks again.
+                    PeekAsk::NotNow => return answer,
+                    PeekAsk::Asked(_) => {
+                        preview_trace::picture_read(preview_trace::global(), path);
+                        return answer;
+                    }
+                    PeekAsk::Unstarted | PeekAsk::Refused => {}
                 }
                 // A file this window will not open draws what a picture it cannot
                 // read draws — unless the page already has something true to show,
@@ -10850,16 +10840,12 @@ impl<B: Backend> Runtime<'_, B> {
                     if asked {
                         return None;
                     }
+                    // The one door files what it asked: the read under its identity, or the
+                    // unstarted record.
                     match self.request_peek_pixels(&path) {
-                        PeekAsk::Asked => {
-                            self.window
-                                .peek_cache
-                                .insert(cache_key, PeekCacheEntry::Pending);
-                        }
-                        // Nothing is out, and the pane's next resolve asks again.
-                        PeekAsk::NotNow => {}
+                        // Out, or nothing is out and the pane's next resolve asks again.
+                        PeekAsk::Asked(_) | PeekAsk::NotNow => {}
                         PeekAsk::Unstarted => {
-                            self.window.peek_cache.insert(cache_key, unstarted_pixels());
                             self.preview_pane_mut(surface).refuse_picture(Some(
                                 PictureRefusal::this_window_cannot(
                                     i18n::Text::PreviewFailedImageWorker.text(),
@@ -11053,17 +11039,7 @@ impl<B: Backend> Runtime<'_, B> {
             // on the glass while it travels; the store's own `Pending` is what
             // keeps it to one. This is [`answer_one_picture`]'s own arm, said for
             // a pane instead of for a page.
-            match self.request_peek_pixels(&path) {
-                PeekAsk::Asked => {
-                    self.window
-                        .peek_cache
-                        .insert(cache_key, PeekCacheEntry::Pending);
-                }
-                PeekAsk::Unstarted => {
-                    self.window.peek_cache.insert(cache_key, unstarted_pixels());
-                }
-                PeekAsk::NotNow | PeekAsk::Refused => {}
-            }
+            self.request_peek_pixels(&path);
             return produced;
         };
         // **Every exact-size question this surface puts to the resample lane.**
@@ -13419,12 +13395,47 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// Record a peek decode outcome and, when the hover is still settled on that path, show the
     /// flyout at the settle pointer.
+    ///
+    /// **Only the answer to the read the window awaits** (T-PEEK-ANSWER-IDENTITY): `asked` is the
+    /// identity of the request this answers, and [`crate::file_peek_answer`] files it only for the
+    /// file's read in flight under that identity. An answer the window has let go of — the file
+    /// changed under the read and a surface asked about the bytes there now — is set aside here:
+    /// nothing is filed, no surface is told, no page is sharpened from it.
     pub(in crate::runtime) fn complete_peek_image(
         &mut self,
+        asked: ComputationId,
         path: PathBuf,
         result: std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError>,
     ) -> Result<()> {
         let cache_key = normalized_local_image_path_key(&path);
+        let sharpening = result.as_ref().ok().map(|decoded| {
+            (
+                decoded.key.clone(),
+                Arc::clone(&decoded.rgba),
+                [decoded.width_px, decoded.height_px],
+            )
+        });
+        let failure = result.as_ref().err().cloned();
+        // **Filed with its reason** (owner's ruling 2026-09-12), so that a surface which opens
+        // this file later says the same sentence rather than the one generic line — see
+        // [`PeekCacheEntry::Failed`]. A failure is filed only while some surface names the file.
+        let named = self.peek_files_named();
+        let answer = result.map(|decoded| PeekCacheEntry::Ready {
+            key: decoded.key,
+            rgba: decoded.rgba,
+            width_px: decoded.width_px,
+            height_px: decoded.height_px,
+            native_size: decoded.native_size,
+        });
+        if !crate::file_peek_answer(
+            &mut self.window.peek_cache,
+            &named,
+            cache_key.clone(),
+            asked,
+            answer,
+        ) {
+            return Ok(());
+        }
         // **Every picture waiting on this file, not just the lane's.** A decode
         // is addressed by *path* and the answer is the same pixels for whoever
         // asked: a pane, a window torn off it, or both at once. Asking only the
@@ -13440,68 +13451,41 @@ impl<B: Backend> Runtime<'_, B> {
             })
             .collect();
         let preview_matches = !waiting.is_empty();
-        match result {
-            Ok(decoded) => {
-                // **And the pages that asked for these pixels to sharpen a
-                // picture they are already drawing** (§7.1.3u ③). Owed here,
-                // before the pixels go into the store, because this is the one
-                // moment they are in hand and named: the page cannot make the
-                // exact-size pass itself, which is why it asked for the file at
-                // all. See [`owe_sharpened_rasters`] — and note what is *not*
-                // done, which is ticking the picture generation: nothing about
-                // the document's shape has changed, so no paragraph is re-shaped
-                // for a picture that is already the right size on the glass.
-                owe_sharpened_rasters(
-                    &mut self.window.markdown_pictures,
-                    // The one walk ([`documents_held_in`]), spelled with the two
-                    // fields it reads rather than through `Self::documents_held`:
-                    // the ledger being written is a third field of the same
-                    // window, and borrowing it mutably while the holders are read
-                    // is only possible when the compiler can see the three are
-                    // different fields.
-                    documents_pictures(documents_held_in(
-                        &self.window.tabs,
-                        &self.window.peek_pane,
-                    )),
-                    &cache_key,
-                    &decoded.key,
-                    &decoded.rgba,
-                    [decoded.width_px, decoded.height_px],
-                    Instant::now(),
-                );
-                self.window.peek_cache.insert(
-                    cache_key.clone(),
-                    PeekCacheEntry::Ready {
-                        key: decoded.key,
-                        rgba: decoded.rgba,
-                        width_px: decoded.width_px,
-                        height_px: decoded.height_px,
-                        native_size: decoded.native_size,
-                    },
-                );
-                if let Some(active) = self.window.peek_hover.active.clone()
-                    && active.subject.key == cache_key
-                {
-                    self.show_or_request_peek(&active, false)?;
-                }
+        if let Some((content, rgba, native)) = sharpening {
+            // **And the pages that asked for these pixels to sharpen a
+            // picture they are already drawing** (§7.1.3u ③). Owed here,
+            // because this is the one moment the pixels are in hand and
+            // named: the page cannot make the exact-size pass itself, which
+            // is why it asked for the file at all. See
+            // [`owe_sharpened_rasters`] — and note what is *not* done, which
+            // is ticking the picture generation: nothing about the document's
+            // shape has changed, so no paragraph is re-shaped for a picture
+            // that is already the right size on the glass.
+            owe_sharpened_rasters(
+                &mut self.window.markdown_pictures,
+                // The one walk ([`documents_held_in`]), spelled with the two
+                // fields it reads rather than through `Self::documents_held`:
+                // the ledger being written is a third field of the same
+                // window, and borrowing it mutably while the holders are read
+                // is only possible when the compiler can see the three are
+                // different fields.
+                documents_pictures(documents_held_in(&self.window.tabs, &self.window.peek_pane)),
+                &cache_key,
+                &content,
+                &rgba,
+                native,
+                Instant::now(),
+            );
+            if let Some(active) = self.window.peek_hover.active.clone()
+                && active.subject.key == cache_key
+            {
+                self.show_or_request_peek(&active, false)?;
             }
-            Err(error) => {
-                for surface in &waiting {
-                    self.preview_pane_mut(*surface)
-                        .refuse_picture(Some(PictureRefusal::decoded(&error)));
-                }
-                // **Filed with its reason** (owner's ruling 2026-09-12), so that
-                // a surface which opens this file later says the same sentence
-                // rather than the one generic line — see [`PeekCacheEntry::Failed`].
-                // Filed only while some surface names the file
-                // ([`crate::file_peek_failure`]).
-                let named = self.peek_files_named();
-                crate::file_peek_failure(
-                    &mut self.window.peek_cache,
-                    &named,
-                    cache_key.clone(),
-                    error,
-                );
+        }
+        if let Some(error) = failure {
+            for surface in &waiting {
+                self.preview_pane_mut(*surface)
+                    .refuse_picture(Some(PictureRefusal::decoded(&error)));
             }
         }
         // **And every markdown page that was waiting to see this file**
@@ -13557,34 +13541,31 @@ impl<B: Backend> Runtime<'_, B> {
     /// `.png` that is not one is a thing the reader should be told about. A video that will not
     /// decode is very often an ordinary file in a container this machine has no codec for, and the
     /// card and the pane have something true to draw either way: the format and the size. So the
-    /// facts are filed **before** the frame is looked at, and the cache is marked `Failed` without
+    /// facts are filed with the frame or without one, and the cache is marked `Failed` without
     /// anybody's failure line being written.
+    ///
+    /// **And only the answer to the read the window awaits** (T-PEEK-ANSWER-IDENTITY), for
+    /// [`Self::complete_peek_image`]'s reason: a frame and facts read from bytes the file no
+    /// longer holds are set aside, and neither is filed.
     pub(in crate::runtime) fn complete_peek_video_frame(
         &mut self,
+        asked: ComputationId,
         path: PathBuf,
         glance: VideoGlance,
     ) -> Result<()> {
         let cache_key = normalized_local_image_path_key(&path);
-        // Filed first and unconditionally: these outlive the pixels and are the whole of the
-        // degraded card — see [`WindowRuntime::video_facts`].
-        self.window
-            .video_facts
-            .insert(cache_key.clone(), glance.facts);
-        match glance.frame {
-            Some(frame) => self.window.peek_cache.insert(
-                cache_key.clone(),
-                PeekCacheEntry::Ready {
-                    key: video_frame_texture_key(&path, glance.mtime, frame.width, frame.height),
-                    rgba: Arc::from(frame.rgba.into_boxed_slice()),
-                    width_px: frame.width,
-                    height_px: frame.height,
-                    // A frame is already fitted into [`VIDEO_FRAME_FIT_PX`] and the
-                    // recording's own size is filed beside it in `video_facts`,
-                    // which is where every surface reads it from — see
-                    // [`PreviewImageState::stated_size`].
-                    native_size: None,
-                },
-            ),
+        let answer = match glance.frame {
+            Some(frame) => Ok(PeekCacheEntry::Ready {
+                key: video_frame_texture_key(&path, glance.mtime, frame.width, frame.height),
+                rgba: Arc::from(frame.rgba.into_boxed_slice()),
+                width_px: frame.width,
+                height_px: frame.height,
+                // A frame is already fitted into [`VIDEO_FRAME_FIT_PX`] and the
+                // recording's own size is filed beside it in `video_facts`,
+                // which is where every surface reads it from — see
+                // [`PreviewImageState::stated_size`].
+                native_size: None,
+            }),
             // **A container this machine has no codec for, said in the
             // decoder's own words.** The picture lane's variants are about a
             // picture file's size and none of them is this; `Decode` is the
@@ -13592,19 +13573,26 @@ impl<B: Backend> Runtime<'_, B> {
             // what the pane has always printed for a video that would not
             // decode — and it prints nothing at all for one, by the paragraph
             // above. Filed only while some surface names the file
-            // ([`crate::file_peek_failure`]).
-            None => {
-                let named = self.peek_files_named();
-                crate::file_peek_failure(
-                    &mut self.window.peek_cache,
-                    &named,
-                    cache_key.clone(),
-                    bt_term::InlineImageDecodeError::Decode(
-                        "no decoder for this container".to_owned(),
-                    ),
-                );
-            }
+            // ([`crate::file_peek_answer`]).
+            None => Err(bt_term::InlineImageDecodeError::Decode(
+                "no decoder for this container".to_owned(),
+            )),
+        };
+        let named = self.peek_files_named();
+        if !crate::file_peek_answer(
+            &mut self.window.peek_cache,
+            &named,
+            cache_key.clone(),
+            asked,
+            answer,
+        ) {
+            return Ok(());
         }
+        // Filed with or without a frame: these outlive the pixels and are the whole of the
+        // degraded card — see [`WindowRuntime::video_facts`].
+        self.window
+            .video_facts
+            .insert(cache_key.clone(), glance.facts);
         // Every surface standing on this file, for `complete_peek_image`'s reason: a decode is
         // addressed by path and the answer is the same pixels for a pane, for a window torn off
         // it, or for both at once.

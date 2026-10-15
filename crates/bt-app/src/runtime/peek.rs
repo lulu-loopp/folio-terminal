@@ -3,16 +3,15 @@
 
 use super::pointer::CaptureOwner;
 use crate::computation_lane::Asking;
-use crate::lane::Refused;
 use crate::window_seam::prelude::*;
 use crate::{
     DragLatch, FilePeek, FilePeekPress, FilePeekSubject, FloatDrag, FloatDragKind, FloatGrasp,
-    LeafId, MathWorkerRequest, PeekBodyKind, PeekCacheEntry, PeekCandidate, PeekClock, PeekFacts,
-    PeekFootPress, PeekPageOutcome, PeekPageRaster, PeekPageSlot, PeekSubject, PeekThumbnail,
-    PeekThumbnailTarget, PreviewPane, PreviewSurface, ReferenceCard, RowHost, Runtime,
-    ScaleWorkerRequest, ScrollThumbState, ShellAddress, facts_of_a_file_the_user_chose, file_peek,
-    file_peek_promotion, files, float, git, git_document_question, git_panel, hang_watch, i18n,
-    input, mark_opacity, marks, peek_body_kind, peek_cache_key_for_decode, peek_foot_press,
+    LeafId, MathWorkerRequest, PeekAsk, PeekBodyKind, PeekCacheEntry, PeekCandidate, PeekClock,
+    PeekFacts, PeekFootPress, PeekPageOutcome, PeekPageRaster, PeekPageSlot, PeekSubject,
+    PeekThumbnail, PeekThumbnailTarget, PreviewPane, PreviewSurface, ReferenceCard, RowHost,
+    Runtime, ScaleWorkerRequest, ScrollThumbState, ShellAddress, facts_of_a_file_the_user_chose,
+    file_peek, file_peek_promotion, files, float, git, git_document_question, git_panel,
+    hang_watch, i18n, input, mark_opacity, marks, peek_body_kind, peek_foot_press,
     peek_page_texture_key, peek_reads_the_file, peek_scale_task, peek_strip, preview,
     preview_body_bar, profiles, ring_arc, risen_frame, scroll_bar_layer, seats,
     session_is_breathing, tooltip, wait_pulse,
@@ -29,32 +28,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::dpi::PhysicalPosition;
 use winit::event::MouseButton;
-
-/// **What became of a request for a file's pixels** ([`Runtime::request_peek_pixels`]).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::runtime) enum PeekAsk {
-    /// The computation lane admitted it; its answer is on its way.
-    Asked,
-    /// The lane was full: nothing is out, and the surface's next resolve asks again (the answers
-    /// that free the lane are the next hand-out).
-    NotNow,
-    /// The lane's thread could not be started: the file is filed as failed
-    /// ([`unstarted_pixels`]), so it is asked again only by new input to the surface — a new
-    /// hover, the file opened again.
-    Unstarted,
-    /// It was not asked and will not be: a file this window does not open, or a lane that has
-    /// stopped.
-    Refused,
-}
-
-/// **What a file's pixels are filed as when the lane's thread could not be started**: a failed
-/// decode, in the decoder error's words, so every surface reading the window's cache agrees and
-/// asks again only on its own new input.
-pub(in crate::runtime) fn unstarted_pixels() -> PeekCacheEntry {
-    PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Decode(
-        crate::DECODE_UNSTARTED.to_owned(),
-    ))
-}
 
 impl<B: Backend> Runtime<'_, B> {
     /// Whether this tab has a layout worth showing, and whether now is a moment
@@ -370,46 +343,24 @@ impl<B: Backend> Runtime<'_, B> {
         peek_strip::build(&layout, &leaves, &palette, scale)
     }
 
-    /// **Ask the decoration worker for one file's native pixels**, down whichever of the two
-    /// decoders can read it (user ruling 2026-08-27; §7.23).
-    ///
-    /// One door for both surfaces that show pixels — the preview pane and the glance card — and
-    /// therefore the one place the fork between the picture decoder and the video decoder is
-    /// written. Both fill the same cache under the same key, so the callers below this line do not
-    /// know which of them answered and must not: what they asked for is "this file's pixels", and
-    /// a second reading of the name at the *delivery* end is how a `.png` and a `.mp4` would come
-    /// to disagree about who owns an entry.
-    ///
-    /// The name is read with [`preview::path_names_a_video`], which is the very predicate
-    /// [`preview_open_lane`] forks on, so a file that opened as a video is decoded as one.
+    /// **Ask the decoration worker for one file's native pixels, and file the record of the
+    /// question** — [`crate::ask_for_peek_pixels`] for the window's focused shell, the one door
+    /// every surface that shows a file's pixels asks through (the picture pane's refit, a markdown
+    /// page's pictures, the glance card and the hover flyout). A window whose decoration worker has
+    /// stopped asks nothing.
     ///
     /// Answers whether the question went out ([`PeekAsk`]).
-    pub(in crate::runtime) fn request_peek_pixels(&self, path: &Path) -> PeekAsk {
-        // **The door itself asks whether this is a file to read** (routes A and E of the
-        // untrusted-path audit, 2026-09-08). Three surfaces reach this line — the preview pane,
-        // the glance card and a markdown page's own pictures — and each of them used to decide
-        // locality for itself or not at all, so a share reached the decoder through whichever of
-        // the three had not asked. One door, one question: what goes out of here is a request to
-        // open a file, and a request nobody may make is one this window does not send.
-        if !preview::is_readable_unasked(path) {
-            return PeekAsk::Refused;
-        }
+    pub(in crate::runtime) fn request_peek_pixels(&mut self, path: &Path) -> PeekAsk {
         if !self.app.math_worker_running {
             return PeekAsk::Refused;
         }
         let leaf = self.focused_shell_address();
-        let path = path.to_owned();
-        let request = if preview::path_names_a_video(&path) {
-            MathWorkerRequest::PeekVideoFrame { leaf, path }
-        } else {
-            MathWorkerRequest::PeekImage { leaf, path }
-        };
-        match self.app.math_worker.decorate(request) {
-            Ok(_) => PeekAsk::Asked,
-            Err((Refused::Full { .. }, _)) => PeekAsk::NotNow,
-            Err((Refused::NotStarted(_), _)) => PeekAsk::Unstarted,
-            Err(_) => PeekAsk::Refused,
-        }
+        crate::ask_for_peek_pixels(
+            &mut self.window.peek_cache,
+            &self.app.math_worker,
+            leaf,
+            path,
+        )
     }
 
     /// **Every file a surface of this window names to the peek cache** — [`crate::peek_files_named`]
@@ -1202,7 +1153,7 @@ impl<B: Backend> Runtime<'_, B> {
                 height_px,
                 ..
             } => Some((*width_px, *height_px)),
-            PeekCacheEntry::Pending | PeekCacheEntry::Failed(_) => None,
+            PeekCacheEntry::Pending { .. } | PeekCacheEntry::Failed(_) => None,
         }
     }
 
@@ -1233,17 +1184,11 @@ impl<B: Backend> Runtime<'_, B> {
                     height_px,
                     ..
                 }) => (key.clone(), Arc::clone(rgba), *width_px, *height_px),
-                Some(PeekCacheEntry::Pending | PeekCacheEntry::Failed(_)) => return None,
+                Some(PeekCacheEntry::Pending { .. } | PeekCacheEntry::Failed(_)) => return None,
                 None => {
-                    match self.request_peek_pixels(path) {
-                        PeekAsk::Asked => {
-                            self.window.peek_cache.insert(key, PeekCacheEntry::Pending);
-                        }
-                        PeekAsk::Unstarted => {
-                            self.window.peek_cache.insert(key, unstarted_pixels());
-                        }
-                        PeekAsk::NotNow | PeekAsk::Refused => {}
-                    }
+                    // The one door files what it asked: the read under its identity, or the
+                    // unstarted record.
+                    self.request_peek_pixels(path);
                     return None;
                 }
             };
@@ -2772,22 +2717,8 @@ impl<B: Backend> Runtime<'_, B> {
                     let Some(path) = candidate.subject.path.clone() else {
                         return Ok(());
                     };
-                    if !self.app.math_worker_running {
-                        return Ok(());
-                    }
-                    if self
-                        .app
-                        .math_worker
-                        .decorate(MathWorkerRequest::PeekImage {
-                            leaf: self.focused_shell_address(),
-                            path,
-                        })
-                        .is_ok()
-                    {
-                        self.window
-                            .peek_cache
-                            .insert(cache_key, PeekCacheEntry::Pending);
-                    }
+                    // Through the one door, which files the read under its identity.
+                    self.request_peek_pixels(&path);
                     return Ok(());
                 }
             };
@@ -2860,17 +2791,7 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(decoded) = decoded else {
             return;
         };
-        let cache_key = peek_cache_key_for_decode(&task.source, decoded);
-        self.window.peek_cache.insert(
-            cache_key,
-            PeekCacheEntry::Ready {
-                key: decoded.key.clone(),
-                rgba: Arc::clone(&decoded.rgba),
-                width_px: decoded.width_px,
-                height_px: decoded.height_px,
-                native_size: decoded.native_size,
-            },
-        );
+        crate::remember_decode(&mut self.window.peek_cache, &task.source, decoded);
     }
 
     /// **Take delivery of a glance card's first page** (user ruling 2026-08-25).

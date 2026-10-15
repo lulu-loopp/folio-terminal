@@ -5,8 +5,8 @@
 
 use super::*;
 use crate::test_support::{
-    a_decode, a_held_raster, chevron_button, glance_fixture, method_body, peek_open,
-    tab_with_a_picture, the_three_chevrons,
+    a_decode, a_held_raster, a_read_out, chevron_button, glance_fixture, method_body, peek_open,
+    probe_leaf, tab_with_a_picture, the_three_chevrons,
 };
 use std::time::Duration;
 
@@ -294,7 +294,7 @@ fn a_file_whose_peek_failed_is_read_again_by_the_next_hover() {
         "a re-entry of the same peek does not"
     );
     assert!(
-        !peek_reads_the_file(Some(&PeekCacheEntry::Pending), true, true),
+        !peek_reads_the_file(Some(&a_read_out()), true, true),
         "one read at a time"
     );
     assert!(peek_reads_the_file(None, true, false), "a miss reads");
@@ -484,7 +484,7 @@ fn a_pane_whose_picture_was_evicted_does_not_ask_again() {
         PictureErrand::Read,
         "a size it does not hold, with nothing to resample from, is one read"
     );
-    peek.insert(keys[0].clone(), PeekCacheEntry::Pending);
+    peek.insert(keys[0].clone(), a_read_out());
     let asked = surface_pixels(
         &mut peek,
         Some(held.content_key.as_str()),
@@ -606,7 +606,7 @@ fn a_picture_opened_again_after_a_rename_is_read_off_the_disk() {
                 height_px,
                 ..
             } => Some((*width_px, *height_px)),
-            PeekCacheEntry::Pending | PeekCacheEntry::Failed(_) => None,
+            PeekCacheEntry::Pending { .. } | PeekCacheEntry::Failed(_) => None,
         }
     }
 
@@ -667,16 +667,82 @@ fn a_picture_opened_again_after_a_rename_is_read_off_the_disk() {
 
 /// RED — **the frame under a hover card and the frame in the preview pane
 /// come out of one decoder, asked through one door** (user ruling
-/// 2026-08-27; §7.23).
+/// 2026-08-27; §7.23; behaviour since T-PEEK-ANSWER-IDENTITY round 2).
 ///
 /// The whole of §7.10 ⑥ said about a *lane* rather than about a name: a
 /// glance card and a pane over the same file must show the same picture, and
 /// the only way that is true by construction is that both ask
-/// [`WindowRuntime::request_peek_pixels`] and neither reads the file's name
-/// for itself. The two surfaces are hundreds of lines apart and each has its
-/// own cache guard, so a second `MathWorkerRequest::PeekVideoFrame` built at
-/// one of them would compile, would work, and would be the place the two
-/// drift the day the fork grows a third arm.
+/// [`WindowRuntime::request_peek_pixels`] — whose body is [`ask_for_peek_pixels`] — and neither
+/// reads the file's name for itself. The door's half is asserted on the real lane: a `.mp4` is
+/// answered by the video decoder and a `.png` by the picture decoder, each read filed under the
+/// identity its answer comes home with, and a share on another machine is refused at the door
+/// with nothing asked and nothing filed.
+///
+/// MUTATION: have `ask_for_peek_pixels` build `PeekImage` whatever the name — the `.mp4` comes
+/// home from the picture decoder. Or drop its `is_readable_unasked` refusal — the share is asked.
+#[test]
+fn the_door_reads_a_video_with_the_video_decoder_and_refuses_a_share() {
+    crate::test_support::install_host_answers();
+    let mut lane = crate::computation_lane::fixtures::watched(crate::lane::Executor::scripted(
+        Arc::new(crate::lane::Gate::default()),
+    ));
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/peek-tests");
+    for (name, extension, video) in [
+        ("\u{5f55}\u{5c4f} capture", "mp4", true),
+        ("\u{622a}\u{56fe} shot", "png", false),
+    ] {
+        let path = directory.join(format!("{}.{extension}", bt_testpath::unique_name(name)));
+        assert_eq!(
+            preview::path_names_a_video(&path),
+            video,
+            "the door forks on the predicate the open forks on: {name}"
+        );
+        let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+        let PeekAsk::Asked(asked) =
+            ask_for_peek_pixels(&mut cache, &lane.lane, probe_leaf(), &path)
+        else {
+            panic!("a local file is asked about: {name}");
+        };
+        assert!(
+            peek_awaits(&cache, &normalized_local_image_path_key(&path), asked),
+            "the read is filed under the identity the lane minted: {name}"
+        );
+        let terminal = lane.terminal(
+            crate::computation_lane::Share::Decoration,
+            asked,
+            crate::computation_lane::fixtures::nobody,
+        );
+        let answer = crate::computation_lane::fixtures::answer(terminal)
+            .unwrap_or_else(|| panic!("the read of {name} is answered"));
+        assert_eq!(
+            matches!(
+                answer.completion,
+                DecorationWorkerCompletion::PeekVideoFrame { .. }
+            ),
+            video,
+            "{name} is answered by the {} decoder",
+            if video { "video" } else { "picture" }
+        );
+    }
+    let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+    assert_eq!(
+        ask_for_peek_pixels(
+            &mut cache,
+            &lane.lane,
+            probe_leaf(),
+            Path::new(r"\\server\share\a.png"),
+        ),
+        PeekAsk::Refused,
+        "a share on another machine is not read unasked"
+    );
+    assert_eq!(cache.iter().count(), 0, "and nothing is filed for it");
+}
+
+/// RED — **the surfaces that show pixels name no decoder; each asks through the one door**
+/// ([`WindowRuntime::request_peek_pixels`]). The two surfaces are hundreds of lines apart and each
+/// has its own cache guard, so a second `MathWorkerRequest::PeekVideoFrame` built at one of them
+/// would compile, would work, and would be the place the two drift the day the fork grows a third
+/// arm.
 ///
 /// Asserted as text for [`files_locate_door_tests`]' reason exactly: what is
 /// being pinned is *which function builds which request*, and no value any
@@ -690,16 +756,6 @@ fn one_door_decides_which_decoder_a_hover_and_a_pane_ask() {
     // Built at run time so that this test's own text is not one of the
     // sites it is counting.
     let lane = |variant: &str| format!("MathWorkerRequest::{variant} {{");
-    let door = method_body("Runtime", "request_peek_pixels");
-    for variant in ["PeekImage", "PeekVideoFrame"] {
-        assert!(
-            door.contains(&lane(variant)),
-            "the door does not build {variant}:\n{door}"
-        );
-    }
-    // And the two surfaces that show pixels name neither: what they ask for
-    // is "this file's pixels", and a second reading of the name at either of
-    // them is where the card and the pane come to disagree.
     for surface in ["refit_preview_picture", "file_peek_fitted_pixels"] {
         let text = method_body("Runtime", surface);
         for variant in ["PeekImage", "PeekVideoFrame"] {
@@ -713,12 +769,6 @@ fn one_door_decides_which_decoder_a_hover_and_a_pane_ask() {
             "`{surface}` must ask through the one door"
         );
     }
-    // The door reads the class through the same predicate the open lane
-    // forks on, so a file that *opened* as a video is decoded as one.
-    assert!(
-        door.contains("preview::path_names_a_video("),
-        "the door must ask the class's own predicate:\n{door}"
-    );
 }
 
 /// RED — **the card keeps the last few pages of the document it is over, and
@@ -1132,7 +1182,7 @@ fn a_peek_records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them()
     let unstarted = PathBuf::from(r"D:\截图\未开工.png");
     let key = |path: &Path| normalized_local_image_path_key(path);
     let mut cache = PeekCache::with_budget(BUDGET);
-    cache.insert(key(&reading), PeekCacheEntry::Pending);
+    cache.insert(key(&reading), a_read_out());
     cache.insert(
         key(&broken),
         PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::UnsupportedFormat),
@@ -1158,7 +1208,10 @@ fn a_peek_records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them()
     );
 
     assert!(
-        matches!(cache.peek(&key(&reading)), Some(PeekCacheEntry::Pending)),
+        matches!(
+            cache.peek(&key(&reading)),
+            Some(PeekCacheEntry::Pending { .. })
+        ),
         "a decode in flight is the record of a question, and weight never takes it"
     );
     assert!(
@@ -1230,7 +1283,7 @@ fn a_failed_peeks_record_leaves_with_the_last_surface_that_named_it() {
             "系统找不到指定的文件".to_owned(),
         )),
     );
-    cache.insert(reading.clone(), PeekCacheEntry::Pending);
+    cache.insert(reading.clone(), a_read_out());
     let failed = |cache: &PeekCache| matches!(cache.peek(&key), Some(PeekCacheEntry::Failed(_)));
 
     let mut tabs = vec![tab_with_a_picture(1, shot).0, tab_with_a_picture(2, shot).0];
@@ -1260,7 +1313,7 @@ fn a_failed_peeks_record_leaves_with_the_last_surface_that_named_it() {
         "the last surface naming the file is gone, and the record with it"
     );
     assert!(
-        matches!(cache.peek(&reading), Some(PeekCacheEntry::Pending)),
+        matches!(cache.peek(&reading), Some(PeekCacheEntry::Pending { .. })),
         "a decode in flight is kept until its answer"
     );
 }
@@ -1268,23 +1321,24 @@ fn a_failed_peeks_record_leaves_with_the_last_surface_that_named_it() {
 /// RED (T-PEEK-CACHE-QUESTION-RECORDS) — **a failure that comes home for a file no surface names
 /// files no record**, and lets the decode it answers go.
 ///
-/// MUTATION (observed red): [`file_peek_failure`] filing the failure whoever names the file — the
+/// MUTATION (observed red): [`file_peek_answer`] filing the failure whoever names the file — the
 /// second assertion goes red.
 #[test]
 fn a_failure_for_a_file_no_surface_names_files_no_record() {
     let shown = normalized_local_image_path_key(Path::new(r"D:\截图\还在看.png"));
     let left = normalized_local_image_path_key(Path::new(r"D:\截图\走开了.png"));
     let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
-    cache.insert(shown.clone(), PeekCacheEntry::Pending);
-    cache.insert(left.clone(), PeekCacheEntry::Pending);
     let named = BTreeSet::from([shown.clone()]);
-    for key in [&shown, &left] {
-        file_peek_failure(
+    for (key, asked) in [(&shown, 1), (&left, 2)] {
+        let asked = crate::computation_lane::ComputationId::from(asked);
+        cache.insert(key.clone(), PeekCacheEntry::Pending { asked });
+        assert!(file_peek_answer(
             &mut cache,
             &named,
             key.clone(),
-            bt_term::InlineImageDecodeError::UnsupportedFormat,
-        );
+            asked,
+            Err(bt_term::InlineImageDecodeError::UnsupportedFormat),
+        ));
     }
     assert!(
         matches!(cache.peek(&shown), Some(PeekCacheEntry::Failed(_))),
@@ -1345,5 +1399,381 @@ fn a_card_coming_down_leaves_the_failure_a_pane_still_shows() {
     assert!(
         !cache.contains_key(&key),
         "a card opening over the file reads it again"
+    );
+}
+
+/// One picture's bytes, `width` × `height` of one colour, as a PNG this process wrote.
+fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+    let picture = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        width,
+        height,
+        image::Rgba([0x2a, 0x6f, 0xd0, 0xff]),
+    ));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    picture
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .expect("a PNG this process wrote");
+    bytes.into_inner()
+}
+
+/// A scratch `.png` of this test's own under the build directory, named by `bt_testpath`.
+fn scratch_png_named(tag: &str) -> PathBuf {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/peek-tests");
+    std::fs::create_dir_all(&directory).expect("a scratch directory under the build directory");
+    directory.join(format!("{}.png", bt_testpath::unique_name(tag)))
+}
+
+/// **A picture pane's walk over one file, as `refit_preview_picture` takes it**: the pane reads
+/// what the window holds for the file ([`surface_pixels`]) and asks through the one door
+/// ([`ask_for_peek_pixels`]) only when nothing is held and no read is out.
+fn a_pane_walks(
+    cache: &mut PeekCache,
+    lane: &crate::computation_lane::ComputationLane,
+    path: &Path,
+) {
+    let key = normalized_local_image_path_key(path);
+    if matches!(
+        surface_pixels(cache, None, None, None, &key),
+        SurfacePixels::Nothing { asked: false }
+    ) {
+        ask_for_peek_pixels(cache, lane, probe_leaf(), path);
+    }
+}
+
+/// The read the window awaits for `path`, if one is out.
+fn read_awaited(cache: &PeekCache, path: &Path) -> Option<crate::computation_lane::ComputationId> {
+    match cache.peek(&normalized_local_image_path_key(path)) {
+        Some(PeekCacheEntry::Pending { asked }) => Some(*asked),
+        _ => None,
+    }
+}
+
+/// **What one drain hands the window, filed as `Runtime::complete_peek_image` files it**: each
+/// read's answer through [`file_peek_answer`] under the identity of the request it answers, with
+/// `named` the files the window's surfaces name. The identities whose answer was filed, in the
+/// order they came.
+fn file_the_peek_drain(
+    cache: &mut PeekCache,
+    named: &BTreeSet<String>,
+    answers: crate::MathAnswers,
+) -> Vec<crate::computation_lane::ComputationId> {
+    let mut filed = Vec::new();
+    for (asked, result) in answers.done {
+        if let DecorationWorkerCompletion::PeekImage { path, result } = result.completion {
+            let answer = result.map(|decoded| PeekCacheEntry::Ready {
+                key: decoded.key,
+                rgba: decoded.rgba,
+                width_px: decoded.width_px,
+                height_px: decoded.height_px,
+                native_size: decoded.native_size,
+            });
+            if file_peek_answer(
+                cache,
+                named,
+                normalized_local_image_path_key(&path),
+                asked,
+                answer,
+            ) {
+                filed.push(asked);
+            }
+        }
+    }
+    filed
+}
+
+/// RED (T-PEEK-ANSWER-IDENTITY) — **a peek answer for an older ask is set aside, not filed**: the
+/// file changed under its read ([`forget_a_picture`]), a surface asked again, and the two answers
+/// come home in either order. Identity decides, not arrival: whichever comes first, only the
+/// answer to the read the record awaits is filed, and the older read's answer — pixels or a
+/// failure — changes nothing, before the newer answer or after it.
+///
+/// MUTATION: have [`file_peek_answer`] file by arrival (drop its `peek_awaits` gate) — the older
+/// answer is filed over the newer question.
+#[test]
+fn a_peek_answer_for_an_older_ask_is_set_aside_not_filed() {
+    let path = PathBuf::from("D:/\u{6539}\u{5199}/\u{622a}\u{56fe} screenshot.png");
+    let key = normalized_local_image_path_key(&path);
+    let named = BTreeSet::from([key.clone()]);
+    let older = crate::computation_lane::ComputationId::from(41);
+    let newer = crate::computation_lane::ComputationId::from(42);
+    for newer_first in [true, false] {
+        let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+        let mut video_facts = BTreeMap::new();
+        let mut pictures = MarkdownPictures::default();
+        cache.insert(key.clone(), PeekCacheEntry::Pending { asked: older });
+        forget_a_picture(&mut cache, &mut video_facts, &mut pictures, &path);
+        cache.insert(key.clone(), PeekCacheEntry::Pending { asked: newer });
+        let old_bytes = || Ok(a_decode("\u{65e7} old bytes", (4, 2), 32));
+        let new_bytes = || Ok(a_decode("\u{65b0} new bytes", (8, 4), 128));
+        if newer_first {
+            assert!(file_peek_answer(
+                &mut cache,
+                &named,
+                key.clone(),
+                newer,
+                new_bytes()
+            ));
+            assert!(
+                !file_peek_answer(
+                    &mut cache,
+                    &named,
+                    key.clone(),
+                    older,
+                    Err(bt_term::InlineImageDecodeError::UnsupportedFormat),
+                ),
+                "the older answer, arriving second, is set aside"
+            );
+        } else {
+            assert!(
+                !file_peek_answer(&mut cache, &named, key.clone(), older, old_bytes()),
+                "the older answer, arriving first, is set aside"
+            );
+            assert!(
+                peek_awaits(&cache, &key, newer),
+                "and the newer read is still awaited"
+            );
+            assert!(file_peek_answer(
+                &mut cache,
+                &named,
+                key.clone(),
+                newer,
+                new_bytes()
+            ));
+        }
+        assert!(
+            matches!(
+                cache.peek(&key),
+                Some(PeekCacheEntry::Ready { key: content, .. }) if content == "\u{65b0} new bytes"
+            ),
+            "the newer read's pixels stand (newer first: {newer_first})"
+        );
+    }
+}
+
+/// RED (T-PEEK-ANSWER-IDENTITY) — **a peek read in flight when its file changes is set aside, and
+/// the new bytes are read**: on the real computation lane with the product's door, a `.png`
+/// caught half-written is read by a pane's walk and its decode reads those bytes (a failure); the
+/// file-change news ([`forget_a_picture`]) arrives before the window has taken that answer, the
+/// walk asks about the bytes there now under a new identity, and of the two answers only the
+/// second — the finished picture — is filed.
+///
+/// MUTATION: have [`forget_a_picture`] keep a `Pending` (remove only what is not a read out) —
+/// the news lets go of nothing, the walk asks nothing, and the old bytes' failure would stand.
+#[test]
+fn a_peek_read_in_flight_when_its_file_changes_is_set_aside_and_the_new_bytes_are_read() {
+    crate::test_support::install_host_answers();
+    let mut lane = crate::computation_lane::fixtures::watched(crate::lane::Executor::scripted(
+        Arc::new(crate::lane::Gate::default()),
+    ));
+    let png = scratch_png_named("\u{5199}\u{5165}\u{4e2d} half-written");
+    let finished = png_bytes(6, 3);
+    std::fs::write(&png, &finished[..finished.len() / 3]).expect("a scratch file this test owns");
+    let key = normalized_local_image_path_key(&png);
+    let named = BTreeSet::from([key.clone()]);
+    let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+    let mut video_facts = BTreeMap::new();
+    let mut pictures = MarkdownPictures::default();
+
+    a_pane_walks(&mut cache, &lane.lane, &png);
+    let older = read_awaited(&cache, &png).expect("the read is out");
+    // The decode reads the half-written bytes and answers; the window has not taken it yet.
+    let first = lane.next_ended(
+        crate::computation_lane::Share::Decoration,
+        crate::computation_lane::fixtures::nobody,
+    );
+    std::fs::write(&png, &finished).expect("the writer finishes");
+    forget_a_picture(&mut cache, &mut video_facts, &mut pictures, &png);
+    a_pane_walks(&mut cache, &lane.lane, &png);
+    let newer = read_awaited(&cache, &png).expect("the walk asks about the bytes there now");
+    assert_ne!(older, newer, "a new question, under a new identity");
+    let second = lane.next_ended(
+        crate::computation_lane::Share::Decoration,
+        crate::computation_lane::fixtures::nobody,
+    );
+    let answers = crate::sort_math_terminals(vec![first, second]);
+    assert!(
+        matches!(
+            answers.done.as_slice(),
+            [
+                (a, MathWorkerResult { completion: DecorationWorkerCompletion::PeekImage { result: Err(_), .. }, .. }),
+                (b, MathWorkerResult { completion: DecorationWorkerCompletion::PeekImage { result: Ok(_), .. }, .. }),
+            ] if *a == older && *b == newer
+        ),
+        "the first read found the half-written bytes, the second the finished file"
+    );
+    assert_eq!(
+        file_the_peek_drain(&mut cache, &named, answers),
+        [newer],
+        "only the answer to the question the window asks now is filed"
+    );
+    assert!(
+        matches!(
+            cache.peek(&key),
+            Some(PeekCacheEntry::Ready {
+                width_px: 6,
+                height_px: 3,
+                ..
+            })
+        ),
+        "the changed file shows its new contents"
+    );
+    std::fs::remove_file(&png).expect("the scratch file this test wrote");
+}
+
+/// RED (T-PEEK-ANSWER-IDENTITY; side-effects contract (b)4, owner ruling Q4) — **a set-aside peek
+/// answer is recorded and never shown**: while the worker is busy, a pane's read of a file waits in
+/// line; the file changes and the walk asks again, and the waiting read ends `Superseded { by }`
+/// the newer one in the lane's ledger — taken by the drain at once, carrying no answer, so the
+/// window files nothing for it and the person sees nothing of it — and the newer read is the one
+/// the file is filed under.
+///
+/// MUTATION: drop the pixel reads' arm from `MathWorkerRequest::relate` (they relate
+/// `Relation::Other`) — the waiting read is run, and ends `Done` rather than `Superseded`.
+#[test]
+fn a_set_aside_peek_answer_is_recorded_and_never_shown() {
+    use crate::computation_lane::{Share, fixtures::nobody};
+    crate::test_support::install_host_answers();
+    let gate = Arc::new(crate::lane::Gate::default());
+    let mut lane = crate::computation_lane::fixtures::watched(crate::lane::Executor::scripted(
+        Arc::clone(&gate),
+    ));
+    let png = scratch_png_named("\u{88ab}\u{53d6}\u{4ee3} superseded");
+    std::fs::write(&png, png_bytes(5, 2)).expect("a scratch file this test owns");
+    let key = normalized_local_image_path_key(&png);
+    let named = BTreeSet::from([key.clone()]);
+    let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+    let mut video_facts = BTreeMap::new();
+    let mut pictures = MarkdownPictures::default();
+
+    gate.hold();
+    lane.lane
+        .decorate(MathWorkerRequest::PeekImage {
+            leaf: probe_leaf(),
+            path: PathBuf::from("\u{4e0d}\u{5728}\u{8fd9}\u{91cc}/\u{5fd9} busy.png"),
+        })
+        .ok()
+        .expect("the busy read is admitted");
+    assert!(gate.wait_entered(1), "the busy read reaches the worker");
+    a_pane_walks(&mut cache, &lane.lane, &png);
+    let older = read_awaited(&cache, &png).expect("the pane's read waits in line");
+    forget_a_picture(&mut cache, &mut video_facts, &mut pictures, &png);
+    a_pane_walks(&mut cache, &lane.lane, &png);
+    let newer = read_awaited(&cache, &png).expect("the walk asks again");
+    crate::lane::wait_for_a_wake(&lane.wakes, "the supersession's wake");
+    let ended = lane.lane.ended(nobody);
+    assert!(
+        ended
+            .iter()
+            .any(|(share, id, terminal, _)| *share == Share::Decoration
+                && *id == older
+                && matches!(terminal, crate::lane::Terminal::Superseded { by } if *by == newer)),
+        "the waiting read ends Superseded by the newer one, in the ledger"
+    );
+    let answers = crate::sort_math_terminals(ended);
+    assert!(
+        answers.done.is_empty() && answers.failed.is_empty(),
+        "a superseded terminal carries nothing to the window"
+    );
+    assert!(file_the_peek_drain(&mut cache, &named, answers).is_empty());
+    assert!(
+        peek_awaits(&cache, &key, newer),
+        "the person sees nothing of it: the file still awaits the newer read"
+    );
+
+    gate.release();
+    let mut filed = Vec::new();
+    for _ in 0..2 {
+        let ended = lane.next_ended(Share::Decoration, nobody);
+        filed.extend(file_the_peek_drain(
+            &mut cache,
+            &named,
+            crate::sort_math_terminals(vec![ended]),
+        ));
+    }
+    assert!(filed.contains(&newer) && !filed.contains(&older));
+    assert!(
+        matches!(
+            cache.peek(&key),
+            Some(PeekCacheEntry::Ready {
+                width_px: 5,
+                height_px: 2,
+                ..
+            })
+        ),
+        "the newer read's pixels stand"
+    );
+    std::fs::remove_file(&png).expect("the scratch file this test wrote");
+}
+
+/// RED (T-PEEK-ANSWER-IDENTITY round 2) — **a decode the session's worker made never lands over a
+/// read in flight**: a surface's read of a file is out under its identity when the terminal's own
+/// verification decodes the same file and offers it to the peek ([`remember_decode`]). The read's
+/// record survives, so its answer is the awaited one — filed, and the surfaces waiting on it told
+/// (`file_peek_answer` answers `true`, which is what `complete_peek_image` notifies on). With no
+/// read out, the decode warms the peek as before, and a `Failed` — no read in flight — is replaced.
+///
+/// MUTATION: drop `remember_decode`'s `Pending` guard — the decode lands over the record, the
+/// read's answer is awaited by nothing and set aside, and nobody waiting hears of it.
+#[test]
+fn a_decode_offered_to_the_peek_never_lands_over_a_read_in_flight() {
+    let path = PathBuf::from("D:/\u{9a8c}\u{8bc1}/\u{622a}\u{56fe} verified.png");
+    let key = normalized_local_image_path_key(&path);
+    let named = BTreeSet::from([key.clone()]);
+    let decoded = bt_term::DecodedInlineImage {
+        occurrence_id: 3,
+        key: "image:\u{9a8c}\u{8bc1} verified".to_owned(),
+        rgba: Arc::from(vec![0x40_u8; 4 * 2 * 4]),
+        width_px: 4,
+        height_px: 2,
+        native_size: None,
+        animated: false,
+    };
+    let source = bt_term::InlineImageSource::LocalPath(path.clone());
+    let asked = crate::computation_lane::ComputationId::from(7);
+    let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+    cache.insert(key.clone(), PeekCacheEntry::Pending { asked });
+
+    remember_decode(&mut cache, &source, &decoded);
+    assert!(
+        peek_awaits(&cache, &key, asked),
+        "the surface's read is still the one awaited"
+    );
+    assert!(
+        file_peek_answer(
+            &mut cache,
+            &named,
+            key.clone(),
+            asked,
+            Ok(a_decode("image:\u{9a8c}\u{8bc1} verified", (4, 2), 32)),
+        ),
+        "its answer is filed, and the surfaces waiting on it are told"
+    );
+    assert!(matches!(
+        cache.peek(&key),
+        Some(PeekCacheEntry::Ready { .. })
+    ));
+
+    let mut warm = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+    remember_decode(&mut warm, &source, &decoded);
+    assert!(
+        matches!(
+            warm.peek(&key),
+            Some(PeekCacheEntry::Ready { width_px: 4, .. })
+        ),
+        "with no read out, verification warms the peek"
+    );
+
+    let mut failed = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+    failed.insert(
+        key.clone(),
+        PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::UnsupportedFormat),
+    );
+    remember_decode(&mut failed, &source, &decoded);
+    assert!(
+        matches!(
+            failed.peek(&key),
+            Some(PeekCacheEntry::Ready { width_px: 4, .. })
+        ),
+        "a failure is no question in flight: the decode the terminal earned replaces it"
     );
 }
