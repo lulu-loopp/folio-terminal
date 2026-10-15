@@ -574,30 +574,38 @@ brought from the seam), a module-level type alias of a holder or of the native
 backend (its type or its generics), and an `impl` whose self type names a holder
 natively without being its path.
 
-Three general rules close what an enumeration of positions would leave open.
+Four general rules close what an enumeration of positions would leave open.
 **Every impl below module level is read whole, in its own scope, and no listing
 covers it:** one `syn` walk over each product file finds every `ItemImpl` that is
 not at module level — in a signature, a body, a type position, an initializer, a
 default body, wherever the syntax tree holds one — and refuses it by name when
 its trait is a door of the seam, when its self type reaches a holder (spelled,
-or through the body's `use` leaves and type aliases followed to a fixed point),
-or when anything in it names a holder or the native backend for the native
-backend (a method body reaching a native-only method included). **A body the
-guard does not read for mentions introduces no names:** in a native block's
-method, a listed function or a listed `const`, every `use`, `type` and `extern
-crate`, and any other item spelling a holder, is refused by name; a `mod` below
-module level is refused anywhere. **A nested impl's trait is resolved or shown
-to be another crate's, or refused:** its path is expanded through the body's
-`use` leaves (each block's own, every path per name, a `{self}` leaf under the
-module's name) to a fixed point and resolved with the module's resolver; one the
-resolver does not follow passes only when, after the module's own `use` leaves,
-it is rooted at `std`, `core`, `alloc` or a dependency in the package's manifest,
-or is a single segment naming a prelude trait; a path that does not settle, any
-other unresolved path, and a body `use` glob in scope are refused by name. A
-holder, a native name, or a seam trait under any name a first-party `use` gives
-it (its own, or a renamed re-export's) in a macro's tokens is refused by name —
-the guard does not read macros — and so is `paste!`/`concat_idents!`, which
-build names from pieces. With these rules, every door of the seam the product
+or through the body's `use` leaves and type aliases composed with each other to
+a fixed point, refused when they do not settle), or when anything in it names a
+holder or the native backend for the native backend (a method body reaching a
+native-only method included). **A body the guard does not read for mentions
+introduces no names:** in a native block's method, a listed function, method or
+trait default (any self-type shape) or a listed `const`, every `use` and `type`,
+and any other item spelling a holder, is refused by name; a `mod` below module
+level is refused anywhere, and an `extern crate` anywhere in a product file.
+**A body does not alias the seam:** a body `use` whose leaves, expanded through
+the body's own to a fixed point, pass through the seam module or resolve to a
+seam trait is refused by name. **Every trait impl's trait is resolved, or shown
+to be another crate's, or refused — at module level and below it alike:** its
+path is expanded through the body's `use` leaves (each block's own, every path
+per name, a `{self}` leaf under the module's name) and resolved with the module's
+resolver, whose hop limit refuses (a cycle among `use`s and globs names nothing
+more, and is not a cutoff); one the resolver does not follow passes only when,
+after the module's own `use` leaves and first-party globs, it is rooted at
+`std`, `core`, `alloc` or a dependency in the package's manifest that is not
+also a first-party module's name, or is a single segment naming a prelude trait;
+one spelled as a seam trait is a door; a path that does not settle, any other
+unresolved path, and a body `use` glob in scope are refused by name. The seam's
+traits go by every name a module-level first-party `use` gives them, and a
+holder, a native name or a seam trait under any of those names in a macro's
+tokens is refused by name — the guard does not read macros; `paste!`,
+`concat_idents!` and any `use` of the `paste` crate are refused, since they
+build names from pieces. With all of these, every door of the seam the product
 implements is implemented in the seam (the headless backend is test-only and is
 not read).
 

@@ -118,10 +118,30 @@ impl<'i> TraitResolver<'i> {
     /// third-party trait, a name the index cannot follow).
     #[must_use]
     pub fn resolve(&self, package: &str, module: &str, path: &[String]) -> BTreeSet<TraitId> {
+        self.resolve_checked(package, module, path)
+            .unwrap_or_else(|ResolveCutoff(found)| found)
+    }
+
+    /// [`Self::resolve`], **saying when it gave up**: a path whose `use` items, renames and globs
+    /// chain further than the resolver follows (its hop limit) is `Err`, carrying what it found
+    /// before it stopped — a caller that must not pass what it could not read refuses it instead
+    /// of reading the shortfall as "names no trait".
+    ///
+    /// # Errors
+    ///
+    /// [`ResolveCutoff`] when the hop limit was reached anywhere on the way.
+    pub fn resolve_checked(
+        &self,
+        package: &str,
+        module: &str,
+        path: &[String],
+    ) -> Result<BTreeSet<TraitId>, ResolveCutoff> {
         let Some(at) = self.package_at(package) else {
-            return BTreeSet::new();
+            return Ok(BTreeSet::new());
         };
-        self.path(at, module, path, 0)
+        let walk = Walk::default();
+        let found: BTreeSet<TraitId> = self
+            .path(at, module, path, 0, &walk)
             .into_iter()
             .filter_map(|named| match named {
                 Named::Trait(at, module_path, name) => Some(TraitId {
@@ -131,7 +151,12 @@ impl<'i> TraitResolver<'i> {
                 }),
                 Named::Module(..) => None,
             })
-            .collect()
+            .collect();
+        if walk.cut.get() {
+            Err(ResolveCutoff(found))
+        } else {
+            Ok(found)
+        }
     }
 
     /// The identities a trait declaration answers to, one per module path that
@@ -194,11 +219,19 @@ impl<'i> TraitResolver<'i> {
     }
 
     /// What `path`, written in `module` of package `at`, names.
-    fn path(&self, at: usize, module: &str, path: &[String], hops: usize) -> Vec<Named> {
+    fn path(
+        &self,
+        at: usize,
+        module: &str,
+        path: &[String],
+        hops: usize,
+        walk: &Walk,
+    ) -> Vec<Named> {
         let Some((first, rest)) = path.split_first() else {
             return Vec::new();
         };
         if hops > HOPS {
+            walk.cut.set(true);
             return Vec::new();
         }
         let starts = match first.as_str() {
@@ -207,7 +240,7 @@ impl<'i> TraitResolver<'i> {
             "super" => parent(module)
                 .map(|parent| vec![Named::Module(at, parent.to_owned())])
                 .unwrap_or_default(),
-            name => self.in_scope(at, module, name, hops, true),
+            name => self.in_scope(at, module, name, hops, true, walk),
         };
         let mut current = starts;
         for segment in rest {
@@ -219,7 +252,7 @@ impl<'i> TraitResolver<'i> {
                         "super" => parent(&module)
                             .map(|parent| vec![Named::Module(at, parent.to_owned())])
                             .unwrap_or_default(),
-                        name => self.in_scope(at, &module, name, hops, false),
+                        name => self.in_scope(at, &module, name, hops, false, walk),
                     },
                     Named::Trait(..) => Vec::new(),
                 })
@@ -241,6 +274,27 @@ impl<'i> TraitResolver<'i> {
         name: &str,
         hops: usize,
         first: bool,
+        walk: &Walk,
+    ) -> Vec<Named> {
+        // A name already being looked up in this module, further up this walk, is a cycle
+        // (`use anyhow::anyhow;`, two modules' globs of each other): it names nothing more there.
+        let key = (at, module.to_owned(), name.to_owned(), first);
+        if !walk.open.borrow_mut().insert(key.clone()) {
+            return Vec::new();
+        }
+        let found = self.in_scope_once(at, module, name, hops, first, walk);
+        walk.open.borrow_mut().remove(&key);
+        found
+    }
+
+    fn in_scope_once(
+        &self,
+        at: usize,
+        module: &str,
+        name: &str,
+        hops: usize,
+        first: bool,
+        walk: &Walk,
     ) -> Vec<Named> {
         let mut found = Vec::new();
         if self.declared.contains_key(&(at, module, name)) {
@@ -256,7 +310,7 @@ impl<'i> TraitResolver<'i> {
             .unwrap_or_default()
         {
             if *alias == name {
-                found.extend(self.path(at, module, path, hops + 1));
+                found.extend(self.path(at, module, path, hops + 1, walk));
             }
         }
         if !found.is_empty() {
@@ -266,9 +320,9 @@ impl<'i> TraitResolver<'i> {
             .map(|imports| imports.globs.as_slice())
             .unwrap_or_default()
         {
-            for opened in self.path(at, module, glob, hops + 1) {
+            for opened in self.path(at, module, glob, hops + 1, walk) {
                 if let Named::Module(at, module) = opened {
-                    found.extend(self.in_scope(at, &module, name, hops + 1, false));
+                    found.extend(self.in_scope(at, &module, name, hops + 1, false, walk));
                 }
             }
         }
@@ -282,6 +336,19 @@ impl<'i> TraitResolver<'i> {
             .unwrap_or_default()
     }
 }
+
+/// One resolution's state: whether the hop limit was reached, and the names being looked up
+/// along the way (a cycle among them names nothing more).
+#[derive(Default)]
+struct Walk {
+    cut: std::cell::Cell<bool>,
+    open: std::cell::RefCell<BTreeSet<(usize, String, String, bool)>>,
+}
+
+/// **The resolver gave up**: a path chained past its hop limit. Carries what was found before it
+/// stopped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolveCutoff(pub BTreeSet<TraitId>);
 
 /// The module `module` is declared in; `None` for a crate root.
 fn parent(module: &str) -> Option<&str> {

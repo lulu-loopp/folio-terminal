@@ -394,3 +394,47 @@ macro_rules! door_through_a_reexport {
 paste::paste! {
     fn [<built _ here>]() {}
 }
+
+// A macro implementing whatever trait path it is handed (its tokens name nothing).
+macro_rules! implements {
+    ($door:path, $made:ident) => {
+        impl $door for $made {
+            fn request_redraw(&self) {}
+        }
+    };
+}
+
+// PLANTED: a body `use` aliasing a re-exported door, handed to that macro.
+fn hides_a_door_in_a_macro() {
+    use crate::elsewhere::Host as H;
+    struct Made;
+    implements!(H, Made);
+}
+
+// PLANTED: a crate alias, and a door implemented through it at module level.
+extern crate self as me;
+
+pub struct Aliased;
+
+impl me::window_seam::WindowHost for Aliased {
+    fn request_redraw(&self) {}
+}
+
+// PLANTED: a body `use` of a body alias, composed.
+fn composes_a_use_and_an_alias() {
+    type Aliased = Runtime<'static>;
+    use Aliased as Composed;
+    impl Composed {
+        fn sneaky() {}
+    }
+}
+
+// PLANTED: a module-level impl of a trait rooted at a name that is both a dependency and a
+// first-party module.
+impl elsewhere::Imported for crate::Plain {}
+
+/// Passes: a module-level impl of a dependency's trait.
+impl outside::Thing for crate::Plain {}
+
+// PLANTED: the `paste` crate brought in under another name.
+use paste::paste as glue;

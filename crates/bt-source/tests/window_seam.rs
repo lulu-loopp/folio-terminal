@@ -33,8 +33,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use bt_source::{
-    Certainty, DiskScope, ImplRecord, Index, ItemKind, MacroKind, MacroRecord, Occurrence, Span,
-    TargetId, TargetKind, TargetRoot, TraitId, TraitResolver, Universe, Vendor, report,
+    Certainty, DiskScope, ImplRecord, Index, ItemKind, MacroKind, MacroRecord, Occurrence,
+    ResolveCutoff, Span, TargetId, TargetKind, TargetRoot, TraitId, TraitResolver, Universe,
+    Vendor, report,
 };
 use proc_macro2::TokenTree;
 use syn::visit::Visit;
@@ -281,6 +282,10 @@ struct Reading<'a> {
     seam_traits: BTreeSet<String>,
     /// Each module's own `use` leaves: a local name with every path it was written for.
     module_uses: BTreeMap<String, BTreeMap<String, Vec<Vec<String>>>>,
+    /// Each module's own `use` globs, each as the path it opens.
+    module_globs: BTreeMap<String, Vec<Vec<String>>>,
+    /// Every first-party module path.
+    module_paths: BTreeSet<String>,
     /// The package's dependencies, as crate names: a path rooted at one is another crate's.
     dependencies: BTreeSet<String>,
     native_only: BTreeMap<String, BTreeSet<String>>,
@@ -290,6 +295,110 @@ struct Reading<'a> {
 }
 
 impl Reading<'_> {
+    /// The first-party module a glob's path opens, written in `module`: `crate`, `self`, `super`
+    /// and child modules followed; `None` for anything else (another crate's module, a name the
+    /// guard does not follow).
+    fn module_of(&self, module: &str, path: &[String]) -> Option<String> {
+        let mut current = module.to_owned();
+        for (at, segment) in path.iter().enumerate() {
+            current = match segment.as_str() {
+                "crate" if at == 0 => String::from("crate"),
+                "self" => current,
+                "super" => current
+                    .rsplit_once("::")
+                    .map(|(parent, _)| parent.to_owned())?,
+                name => {
+                    let child = format!("{current}::{name}");
+                    self.module_paths.contains(&child).then_some(child)?
+                }
+            };
+        }
+        Some(current)
+    }
+
+    /// **Whether a trait path the resolver did not follow is provably another crate's**, written
+    /// in one of `modules`: followed through each module's own `use` leaves and its first-party
+    /// globs to a fixed point, it is rooted at `std`, `core`, `alloc` or a dependency of the
+    /// package (not also a first-party module's name — that is ambiguous, and refused), or is a
+    /// single segment naming one of the prelude's traits. A path rooted at `crate`, `self` or
+    /// `super` is first-party and is not; nor is one that does not settle within [`HOPS`].
+    fn foreign(&self, path: &[String], modules: &[&str]) -> bool {
+        let mut frontier: Vec<(Vec<String>, String)> = modules
+            .iter()
+            .map(|module| (path.to_vec(), (*module).to_owned()))
+            .collect();
+        for _ in 0..HOPS {
+            let mut next = Vec::new();
+            for (path, module) in &frontier {
+                let Some(root) = path.first() else {
+                    return false;
+                };
+                if ["crate", "self", "super"].contains(&root.as_str()) {
+                    return false;
+                }
+                let own: Vec<&Vec<String>> = self
+                    .module_uses
+                    .get(module)
+                    .and_then(|names| names.get(root))
+                    .map(|leaves| {
+                        leaves
+                            .iter()
+                            .filter(|leaf| leaf.as_slice() != [root.clone()])
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !own.is_empty() {
+                    for leaf in own {
+                        next.push((
+                            leaf.iter().chain(path.iter().skip(1)).cloned().collect(),
+                            module.clone(),
+                        ));
+                    }
+                    continue;
+                }
+                let globbed: Vec<String> = self
+                    .module_globs
+                    .get(module)
+                    .map(|globs| {
+                        globs
+                            .iter()
+                            .filter_map(|glob| self.module_of(module, glob))
+                            .filter(|opened| {
+                                self.module_uses
+                                    .get(opened)
+                                    .is_some_and(|names| names.contains_key(root))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !globbed.is_empty() {
+                    for opened in globbed {
+                        next.push((path.clone(), opened));
+                    }
+                    continue;
+                }
+                let settled = match path.as_slice() {
+                    [single] => PRELUDE_TRAITS.contains(&single.as_str()),
+                    [root, ..] => {
+                        ["std", "core", "alloc"].contains(&root.as_str())
+                            || (self.dependencies.contains(root)
+                                && !self.module_paths.contains(&format!("{module}::{root}"))
+                                && !self.module_paths.contains(&format!("crate::{root}")))
+                    }
+                    [] => false,
+                };
+                if !settled {
+                    return false;
+                }
+            }
+            if next.is_empty() {
+                return true;
+            }
+            frontier = next;
+        }
+        false
+    }
+
     /// The backend parameters `generics` declares, its bounds resolved in one of `modules`.
     fn parameters(&self, generics: &syn::Generics, modules: &[&str]) -> BTreeSet<String> {
         modules
@@ -661,95 +770,53 @@ impl FileWalk<'_, '_> {
         Err(())
     }
 
-    /// The holders a self type reaches through the body's `use` leaves (a path expanded to a
-    /// holder's name) and type aliases (an alias's type, followed to a fixed point).
-    fn holders_behind(&self, written: &syn::Type) -> Vec<String> {
+    /// **The holders a self type reaches** through the body's `use` leaves and type aliases,
+    /// composed to a fixed point: a path is expanded through the `use` leaves; an expansion — or the
+    /// written path — that is one segment naming a body alias is followed into the alias's type,
+    /// whose own paths are read the same way. `Err` when that does not settle within [`HOPS`].
+    fn holders_behind(&self, written: &syn::Type) -> Result<Vec<String>, ()> {
         let mut found = Vec::new();
         let mut types = vec![written.clone()];
         for _ in 0..HOPS {
             let mut next = Vec::new();
             for found_type in &types {
-                let syn::Type::Path(path) = found_type else {
-                    let mut inner = Vec::new();
-                    AnyHolder(&self.reading.holders, &mut inner).visit_type(found_type);
-                    found.extend(inner);
-                    continue;
-                };
-                let written = segments(&path.path);
-                if let Ok(expansions) = self.expand(written.clone()) {
-                    for expansion in expansions {
-                        if expansion
+                let mut inner = Vec::new();
+                AnyHolder(&self.reading.holders, &mut inner).visit_type(found_type);
+                found.extend(inner);
+                let mut paths = Vec::new();
+                AllTypePaths(&mut paths).visit_type(found_type);
+                for written in paths {
+                    let mut names = vec![written.clone()];
+                    if let Ok(expansions) = self.expand(written.clone()) {
+                        names.extend(expansions);
+                    } else {
+                        return Err(());
+                    }
+                    for name in names {
+                        if name
                             .last()
                             .is_some_and(|last| self.reading.holders.contains_key(last))
                         {
-                            found.push(expansion.last().cloned().unwrap_or_default());
+                            found.push(name.last().cloned().unwrap_or_default());
                         }
-                    }
-                }
-                if let [single] = written.as_slice()
-                    && let Some(aliased) = self
-                        .scopes
-                        .iter()
-                        .rev()
-                        .find_map(|scope| scope.aliases.get(single))
-                {
-                    for aliased in aliased {
-                        let mut inner = Vec::new();
-                        AnyHolder(&self.reading.holders, &mut inner).visit_type(aliased);
-                        found.extend(inner);
-                        next.push(aliased.clone());
+                        if let [single] = name.as_slice()
+                            && let Some(aliased) = self
+                                .scopes
+                                .iter()
+                                .rev()
+                                .find_map(|scope| scope.aliases.get(single))
+                        {
+                            next.extend(aliased.iter().cloned());
+                        }
                     }
                 }
             }
             if next.is_empty() {
-                break;
+                return Ok(found);
             }
             types = next;
         }
-        found
-    }
-
-    /// Whether a trait path the resolver did not follow is provably another crate's: rooted, after
-    /// the module's own `use` leaves are followed, at `std`, `core`, `alloc` or a dependency of
-    /// the package, or a single segment naming one of the prelude's traits.
-    fn foreign(&self, path: &[String], modules: &[&str]) -> bool {
-        let mut paths = vec![path.to_vec()];
-        for _ in 0..HOPS {
-            let mut next = Vec::new();
-            let mut moved = false;
-            for path in &paths {
-                let Some(root) = path.first() else {
-                    continue;
-                };
-                let leaves: Vec<&Vec<String>> = modules
-                    .iter()
-                    .filter_map(|module| self.reading.module_uses.get(*module))
-                    .filter_map(|names| names.get(root))
-                    .flatten()
-                    .filter(|leaf| leaf.as_slice() != [root.clone()])
-                    .collect();
-                if leaves.is_empty() {
-                    next.push(path.clone());
-                } else {
-                    moved = true;
-                    for leaf in leaves {
-                        next.push(leaf.iter().chain(path.iter().skip(1)).cloned().collect());
-                    }
-                }
-            }
-            paths = next;
-            if !moved {
-                return paths.iter().all(|path| match path.as_slice() {
-                    [single] => PRELUDE_TRAITS.contains(&single.as_str()),
-                    [root, ..] => {
-                        ["std", "core", "alloc"].contains(&root.as_str())
-                            || self.reading.dependencies.contains(root)
-                    }
-                    [] => false,
-                });
-            }
-        }
-        false
+        Err(())
     }
 
     /// **An item introducing a name below module level**, judged where it stands: a `mod` is
@@ -836,6 +903,13 @@ impl FileWalk<'_, '_> {
             ));
             return;
         }
+        if kind == "extern crate" {
+            self.refusals.push(format!(
+                "{at} — an `extern crate` is refused in product files: the guard reads `use` \
+                 items, not crate aliases"
+            ));
+            return;
+        }
         if !self.unread {
             return;
         }
@@ -844,11 +918,88 @@ impl FileWalk<'_, '_> {
             idents.visit_item(node);
             !idents.1.is_empty()
         };
-        if ["use", "type", "extern crate"].contains(&kind) || names_a_holder {
+        if ["use", "type"].contains(&kind) || names_a_holder {
             self.refusals.push(format!(
                 "{at} — a body the guard does not read for mentions (a native block's method, a \
                  listed function or `const`) introduces no names"
             ));
+        }
+    }
+
+    /// **A body's `use` that reaches the seam, or the `paste` crate, is refused by name**: each
+    /// leaf (and glob) is expanded through the body's leaves to a fixed point; one passing through
+    /// the seam module or resolving to a seam trait aliases the seam in a body, which a body does
+    /// not do; one rooted at `paste` brings in name construction the guard cannot read.
+    fn body_use(&mut self, used: &syn::ItemUse) {
+        let mut scope = UseScope::default();
+        scope.leaves(&used.tree, &mut Vec::new());
+        let line = used.use_token.span.start().line;
+        let modules: Vec<String> = self.modules.clone();
+        let modules: Vec<&str> = modules.iter().map(String::as_str).collect();
+        let leaves: Vec<(String, Vec<String>)> = scope
+            .names
+            .iter()
+            .flat_map(|(name, paths)| paths.iter().map(|path| (name.clone(), path.clone())))
+            .chain(
+                scope
+                    .globs
+                    .iter()
+                    .map(|glob| (format!("{}::*", glob.join("::")), glob.clone())),
+            )
+            .collect();
+        for (name, path) in leaves {
+            let at = format!(
+                "the use `{name}` at {}:{line} inside `{}`",
+                self.file, self.outer
+            );
+            let Ok(expansions) = self.expand(path.clone()) else {
+                self.refusals.push(format!(
+                    "{at} does not settle within {HOPS} hops — the guard does not follow it"
+                ));
+                continue;
+            };
+            for expansion in expansions {
+                if expansion.first().is_some_and(|root| root == "paste") {
+                    self.refusals.push(format!(
+                        "{at} brings in the `paste` crate, which builds names the guard cannot \
+                         read — refused wherever it is written"
+                    ));
+                }
+                let mut doors: BTreeSet<String> = BTreeSet::new();
+                for module in &modules {
+                    let found = match self.reading.resolver.resolve_checked(
+                        self.reading.package,
+                        module,
+                        &expansion,
+                    ) {
+                        Ok(found) => found,
+                        Err(ResolveCutoff(found)) => {
+                            self.refusals.push(format!(
+                                "{at} reaches `{}` through a chain past the resolver's hop limit \
+                                 — refused, never passed",
+                                expansion.join("::")
+                            ));
+                            found
+                        }
+                    };
+                    doors.extend(
+                        found
+                            .iter()
+                            .filter(|id| {
+                                id.package == self.reading.package && id.module_path == SEAM
+                            })
+                            .map(ToString::to_string),
+                    );
+                }
+                if expansion.iter().any(|segment| segment == seam_name()) {
+                    doors.insert(expansion.join("::"));
+                }
+                if let Some(door) = doors.into_iter().next() {
+                    self.refusals.push(format!(
+                        "{at} reaches the seam ({door}) — a body does not alias the seam"
+                    ));
+                }
+            }
         }
     }
 
@@ -861,7 +1012,13 @@ impl FileWalk<'_, '_> {
         // makes a block of the holder below module level.
         let mut holders = Vec::new();
         AnyHolder(&reading.holders, &mut holders).visit_type(&block.self_ty);
-        holders.extend(self.holders_behind(&block.self_ty));
+        match self.holders_behind(&block.self_ty) {
+            Ok(behind) => holders.extend(behind),
+            Err(()) => self.refusals.push(format!(
+                "{place} has a self type whose body `use` leaves and aliases do not settle within \
+                 {HOPS} hops — the guard does not follow them"
+            )),
+        }
         holders.sort();
         holders.dedup();
         if !holders.is_empty() {
@@ -906,10 +1063,23 @@ impl FileWalk<'_, '_> {
         // all the same; one it did follow is named by its identity.
         let mut spelled = BTreeSet::new();
         for expansion in &expansions {
-            let resolved: BTreeSet<TraitId> = modules
-                .iter()
-                .flat_map(|module| reading.resolver.resolve(reading.package, module, expansion))
-                .collect();
+            let mut resolved: BTreeSet<TraitId> = BTreeSet::new();
+            for module in &modules {
+                match reading
+                    .resolver
+                    .resolve_checked(reading.package, module, expansion)
+                {
+                    Ok(found) => resolved.extend(found),
+                    Err(ResolveCutoff(found)) => {
+                        resolved.extend(found);
+                        self.refusals.push(format!(
+                            "{place} implements `{shown}`, which reaches `{}` through a chain past \
+                             the resolver's hop limit — refused, never passed",
+                            expansion.join("::")
+                        ));
+                    }
+                }
+            }
             doors.extend(
                 resolved
                     .iter()
@@ -922,7 +1092,7 @@ impl FileWalk<'_, '_> {
             {
                 spelled.insert(expansion.join("::"));
             }
-            if resolved.is_empty() && !self.foreign(expansion, &modules) {
+            if resolved.is_empty() && !reading.foreign(expansion, &modules) {
                 self.refusals.push(format!(
                     "{place} implements `{shown}`, which reaches `{}`, a trait the guard cannot \
                      resolve and cannot show to be another crate's — the guard does not follow it",
@@ -974,6 +1144,16 @@ impl<'ast> Visit<'ast> for FileWalk<'_, '_> {
             if test_only(attrs) {
                 return;
             }
+            if let syn::Item::ExternCrate(item) = node {
+                self.refusals.push(format!(
+                    "the extern crate `{}` at {}:{} — an `extern crate` is refused in product \
+                     files: the guard reads `use` items, not crate aliases",
+                    item.ident,
+                    self.file,
+                    item.ident.span().start().line
+                ));
+                return;
+            }
             let owner = self.modules.join(", ");
             let allowed = self.allowed;
             let file = self.file.clone();
@@ -996,17 +1176,20 @@ impl<'ast> Visit<'ast> for FileWalk<'_, '_> {
                             !written_for_a_parameter(last, self.reading.holders[&holder], &generic);
                         Some((native, holder))
                     }
-                    None => match &*item.self_ty {
-                        syn::Type::Path(path) => Some((
+                    None => {
+                        // Any shape of self type: every type path's last segment is an owner a
+                        // `function` row may name.
+                        let mut paths = Vec::new();
+                        AllTypePaths(&mut paths).visit_type(&item.self_ty);
+                        Some((
                             false,
-                            path.path
-                                .segments
-                                .last()
-                                .map(|last| last.ident.to_string())
-                                .unwrap_or_default(),
-                        )),
-                        _ => None,
-                    },
+                            paths
+                                .iter()
+                                .filter_map(|path| path.last().cloned())
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        ))
+                    }
                 },
                 _ => None,
             };
@@ -1035,17 +1218,47 @@ impl<'ast> Visit<'ast> for FileWalk<'_, '_> {
         if self.nesting == 0
             && let Some((native, owner)) = &self.block
         {
-            let listed = self.allowed.contains(&(
-                "function".to_owned(),
-                owner.clone(),
-                node.sig.ident.to_string(),
-            ));
+            // Any listed row of this method's name whose owner — read past a reference and
+            // generics, as the index spells a non-path self type (`&Plain`) — is one of the self
+            // type's paths makes the body unread, whatever the self type's shape.
+            let method = node.sig.ident.to_string();
+            let listed = self.allowed.iter().any(|(kind, row_owner, name)| {
+                let spelled = row_owner
+                    .trim_start_matches(['&', ' '])
+                    .trim_start_matches("mut ")
+                    .split('<')
+                    .next()
+                    .unwrap_or_default();
+                let spelled = spelled.rsplit("::").next().unwrap_or(spelled);
+                kind == "function"
+                    && *name == method
+                    && owner.split('\n').any(|candidate| candidate == spelled)
+            });
             self.unread = *native || listed;
             syn::visit::visit_impl_item_fn(self, node);
             self.unread = false;
             return;
         }
         syn::visit::visit_impl_item_fn(self, node);
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        if test_only(&node.attrs) {
+            return;
+        }
+        // A module-level trait's default method: unread when the list names it (a trait method's
+        // row is owned by its module).
+        if self.nesting == 0 && self.outer.starts_with("trait ") {
+            self.unread = self.allowed.contains(&(
+                "function".to_owned(),
+                self.modules.join(", "),
+                node.sig.ident.to_string(),
+            ));
+            syn::visit::visit_trait_item_fn(self, node);
+            self.unread = false;
+            return;
+        }
+        syn::visit::visit_trait_item_fn(self, node);
     }
 
     fn visit_block(&mut self, node: &'ast syn::Block) {
@@ -1067,6 +1280,11 @@ impl<'ast> Visit<'ast> for FileWalk<'_, '_> {
             }
         }
         self.scopes.push(scope);
+        for statement in &node.stmts {
+            if let syn::Stmt::Item(syn::Item::Use(used)) = statement {
+                self.body_use(used);
+            }
+        }
         syn::visit::visit_block(self, node);
         self.scopes.pop();
     }
@@ -1301,11 +1519,26 @@ fn judge(
         .map(|declared| declared.name().to_owned())
         .collect();
     let mut module_uses: BTreeMap<String, BTreeMap<String, Vec<Vec<String>>>> = BTreeMap::new();
+    let mut module_globs: BTreeMap<String, Vec<Vec<String>>> = BTreeMap::new();
+    let mut early_refusals = Vec::new();
     for declared in index.uses() {
         if !in_the_product(index, declared.whole()) {
             continue;
         }
         for module in declared.module_paths() {
+            module_globs
+                .entry(module.to_owned())
+                .or_default()
+                .extend(declared.globs().iter().cloned());
+            for (name, path) in declared.names() {
+                if path.first().is_some_and(|root| root == "paste") {
+                    early_refusals.push(format!(
+                        "`use {} as {name}` in {module} brings in the `paste` crate, which builds \
+                         names the guard cannot read — refused wherever it is written",
+                        path.join("::")
+                    ));
+                }
+            }
             for (name, path) in declared.names() {
                 module_uses
                     .entry(module.to_owned())
@@ -1313,8 +1546,18 @@ fn judge(
                     .entry(name.clone())
                     .or_default()
                     .push(path.clone());
-                if resolver
-                    .resolve(package, module, path)
+                let resolved = match resolver.resolve_checked(package, module, path) {
+                    Ok(found) => found,
+                    Err(ResolveCutoff(found)) => {
+                        early_refusals.push(format!(
+                            "`use {} as {name}` in {module} chains past the resolver's hop limit — \
+                             refused, never passed",
+                            path.join("::")
+                        ));
+                        found
+                    }
+                };
+                if resolved
                     .iter()
                     .any(|id| id.package == package && id.module_path == SEAM)
                 {
@@ -1328,6 +1571,12 @@ fn judge(
         natives: natives.clone(),
         seam_traits,
         module_uses,
+        module_globs,
+        module_paths: index
+            .modules()
+            .iter()
+            .flat_map(|module| module.module_paths().iter().cloned())
+            .collect(),
         dependencies: dependencies.clone(),
         native_only,
         resolver: &resolver,
@@ -1335,7 +1584,7 @@ fn judge(
         backends: &backends,
     };
 
-    let mut refusals = Vec::new();
+    let mut refusals = early_refusals;
     let mut used: BTreeSet<(String, String, String)> = BTreeSet::new();
     let mut allow = |kind: &str, owner: &str, name: &str| {
         let row = (kind.to_owned(), owner.to_owned(), name.to_owned());
@@ -1380,6 +1629,50 @@ fn judge(
         }
 
         let owner = block.type_owner();
+        // Its trait: resolved, or shown to be another crate's, or refused (RULE B at module
+        // level); a path spelled as a seam trait the resolver did not follow is a door all the
+        // same.
+        if let Some(path) = block.trait_path()
+            && !seam_block
+        {
+            let shown = path.join("::");
+            let mut resolved = BTreeSet::new();
+            let mut cut = false;
+            for module in &modules {
+                match resolver.resolve_checked(package, module, path) {
+                    Ok(found) => resolved.extend(found),
+                    Err(ResolveCutoff(found)) => {
+                        resolved.extend(found);
+                        cut = true;
+                    }
+                }
+            }
+            if cut {
+                refusals.push(format!(
+                    "the impl of `{shown}` for `{owner}` in {}: its path chains past the \
+                     resolver's hop limit — refused, never passed",
+                    modules.join(", ")
+                ));
+            } else if resolved.is_empty() {
+                if path
+                    .last()
+                    .is_some_and(|last| reading.seam_traits.contains(last))
+                {
+                    refusals.push(format!(
+                        "the impl of `{shown}` for `{owner}` in {} is spelled as a door of the \
+                         seam — a door of the seam is implemented in the seam",
+                        modules.join(", ")
+                    ));
+                } else if !reading.foreign(path, &modules) {
+                    refusals.push(format!(
+                        "the impl of `{shown}` for `{owner}` in {}: a trait the guard cannot \
+                         resolve and cannot show to be another crate's — the guard does not follow \
+                         it",
+                        modules.join(", ")
+                    ));
+                }
+            }
+        }
         let Some(last) = holder_path(&parsed, &holders) else {
             // Not a holder's own block: whatever it names for the native backend in its self type
             // is a shape this guard does not read.
@@ -1930,6 +2223,16 @@ fn file_items(
     }
 }
 
+/// Every path written in a type position, as its segments.
+struct AllTypePaths<'a>(&'a mut Vec<Vec<String>>);
+
+impl<'ast> Visit<'ast> for AllTypePaths<'_> {
+    fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
+        self.0.push(segments(&node.path));
+        syn::visit::visit_type_path(self, node);
+    }
+}
+
 /// Every holder a type names, by name.
 struct AnyHolder<'a>(&'a BTreeMap<String, usize>, &'a mut Vec<String>);
 
@@ -2002,7 +2305,14 @@ fn row(kind: &str, owner: &str, name: &str) -> (String, String, String) {
 /// alias and a renaming body `use` inside the listed `create` and `listed_rebuild` (a listed body
 /// introduces no names) and through a body alias in a body the guard reads; a module below module
 /// level; a nested impl of a trait the guard cannot resolve or show to be another crate's; a macro
-/// implementing a door through a renamed re-export; `paste!`; and a list row nothing uses. The generic blocks (the bound written
+/// implementing a door through a renamed re-export; `paste!`; a body `use` aliasing a re-exported
+/// door handed to a path macro (`implements!(H, Made)`); an `extern crate self as me` and a door
+/// implemented through it at module level; a chain of renamed re-exports past the resolver's hop
+/// limit and an impl through its far end; a body `use` of a body alias, composed; a module-level
+/// impl rooted at a name that is both a dependency and a first-party module; the `paste` crate
+/// under another name; a listed trait default body and a listed method behind a reference self
+/// type, each introducing a name; and a list row nothing uses. A module-level impl of a
+/// dependency's trait passes. The generic blocks (the bound written
 /// directly, through the prelude's glob, through a rename, in a `where` clause and through a
 /// supertrait), a holder built by inference inside a generic function, a trait method's default
 /// body written for the trait's own backend parameter and for a backend trait's `Self`, an enum's
@@ -2016,8 +2326,15 @@ fn every_road_around_the_window_seam_is_named() {
         row("method", "Runtime", "retired"),
         row("function", "crate", "listed_rebuild"),
         row("const", "lib.rs", "_"),
+        row("function", "crate", "listed_default"),
+        row("function", "&Plain", "listed_on_a_reference"),
     ]);
-    let (refusals, unused) = judge(&index, "window-seam", &allowed, &BTreeSet::new());
+    let (refusals, unused) = judge(
+        &index,
+        "window-seam",
+        &allowed,
+        &BTreeSet::from(["elsewhere".to_owned(), "outside".to_owned()]),
+    );
     assert_eq!(
         refusals,
         [
@@ -2035,6 +2352,8 @@ fn every_road_around_the_window_seam_is_named() {
              window is reached through the seam",
             "`crate::runtime::builds_by_inference` names Runtime for the native backend — the \
              window is reached through the seam",
+            "`crate::runtime::composes_a_use_and_an_alias` names Runtime for the native backend \
+             — the window is reached through the seam",
             "`crate::runtime::generic_builds` names Runtime for the native backend — the window \
              is reached through the seam",
             "`crate::runtime::hides_a_native_block` names Native, Runtime for the native backend \
@@ -2067,12 +2386,22 @@ fn every_road_around_the_window_seam_is_named() {
              the guard does not read macros",
             "`paste!` at runtime.rs:394: it builds names from pieces, which the guard cannot \
              read — refused wherever it is written",
+            "`use Hop16 as Hop17` in crate::elsewhere chains past the resolver's hop limit — \
+             refused, never passed",
+            "`use Hop17 as Hop18` in crate::elsewhere chains past the resolver's hop limit — \
+             refused, never passed",
+            "`use Hop18 as Hop19` in crate::elsewhere chains past the resolver's hop limit — \
+             refused, never passed",
+            "`use Hop19 as Hop20` in crate::elsewhere chains past the resolver's hop limit — \
+             refused, never passed",
             "`use crate::Runtime as Rt` in crate::runtime renames the holder Runtime — the guard \
              reads holders by their own name; write the holder",
             "`use crate::window_seam as ws` in crate::runtime renames window_seam — the guard \
              reads the native backend and the seam by their own names",
             "`use crate::window_seam::Native as N` in crate::runtime renames Native — the guard \
              reads the native backend and the seam by their own names",
+            "`use paste::paste as glue` in crate::runtime brings in the `paste` crate, which \
+             builds names the guard cannot read — refused wherever it is written",
             "`vec!` at runtime.rs:138: a macro's tokens name Runtime — the guard does not read \
              macros",
             "an impl for `Runtime` in crate::runtime names Native, Shell for the native backend \
@@ -2085,6 +2414,8 @@ fn every_road_around_the_window_seam_is_named() {
              backend — the window is reached through the seam",
             "the associated type `Shell::Item` in crate::runtime names Native, Shell for the \
              native backend — the window is reached through the seam",
+            "the extern crate `self` at runtime.rs:415 — an `extern crate` is refused in product \
+             files: the guard reads `use` items, not crate aliases",
             "the impl at lib.rs:102 inside `fn listed_rebuild` is a block of `Runtime` — a \
              holder's block is written at module level",
             "the impl at lib.rs:106 inside `fn listed_rebuild` is a block of `Runtime` — a \
@@ -2153,8 +2484,16 @@ fn every_road_around_the_window_seam_is_named() {
             "the impl at runtime.rs:380 inside `fn implements_a_mystery` implements `Mystery`, \
              which reaches `Mystery`, a trait the guard cannot resolve and cannot show to be \
              another crate's — the guard does not follow it",
+            "the impl at runtime.rs:427 inside `fn composes_a_use_and_an_alias` is a block of \
+             `Runtime` — a holder's block is written at module level",
+            "the impl of `Hop20` for `Far` in crate::elsewhere: its path chains past the \
+             resolver's hop limit — refused, never passed",
             "the impl of `Twin` for `Shell` in crate::runtime names Native, Shell for the native \
              backend in its trait — the window is reached through the seam",
+            "the impl of `elsewhere::Imported` for `Plain` in crate::runtime: a trait the guard \
+             cannot resolve and cannot show to be another crate's — the guard does not follow it",
+            "the impl of `me::window_seam::WindowHost` for `Aliased` in crate::runtime is \
+             spelled as a door of the seam — a door of the seam is implemented in the seam",
             "the module `hidden` at runtime.rs:368 inside `fn hides_a_module` — a module below \
              module level is a shape the guard does not read",
             "the trait `crate::runtime::Bounded` names Native, Runtime, Shell for the native \
@@ -2167,6 +2506,9 @@ fn every_road_around_the_window_seam_is_named() {
             "the type `Aliased` at lib.rs:73 inside `impl Runtime` — a body the guard does not \
              read for mentions (a native block's method, a listed function or `const`) \
              introduces no names",
+            "the type `Inner` at lib.rs:141 inside `impl` — a body the guard does not read for \
+             mentions (a native block's method, a listed function or `const`) introduces no \
+             names",
             "the type `crate::runtime::Counted` holds Runtime for the native backend — the \
              window is reached through the seam",
             "the type `crate::runtime::Defaulted` holds Runtime for the native backend — the \
@@ -2181,6 +2523,19 @@ fn every_road_around_the_window_seam_is_named() {
              reads holders by their own name; write the holder",
             "the type alias `Windowed` in runtime.rs names Native for the native backend — the \
              window is reached through the seam",
+            "the use `Chained` at runtime.rs:313 inside `fn hides_behind_a_chain` reaches the \
+             seam (window-seam crate::window_seam::WindowHost) — a body does not alias the seam",
+            "the use `Door` at runtime.rs:250 inside `fn hides_a_renamed_door` reaches the seam \
+             (crate::window_seam::WindowHost) — a body does not alias the seam",
+            "the use `Either` at runtime.rs:323 inside `fn hides_in_a_sibling_block` reaches the \
+             seam (window-seam crate::window_seam::WindowHost) — a body does not alias the seam",
+            "the use `H` at runtime.rs:409 inside `fn hides_a_door_in_a_macro` reaches the seam \
+             (window-seam crate::window_seam::WindowHost) — a body does not alias the seam",
+            "the use `Host` at runtime.rs:274 inside `fn hides_a_reexported_door` reaches the \
+             seam (window-seam crate::window_seam::WindowHost) — a body does not alias the seam",
+            "the use `Inside` at lib.rs:131 inside `trait Listed` — a body the guard does not \
+             read for mentions (a native block's method, a listed function or `const`) \
+             introduces no names",
             "the use `Renamed` at lib.rs:105 inside `fn listed_rebuild` — a body the guard does \
              not read for mentions (a native block's method, a listed function or `const`) \
              introduces no names",

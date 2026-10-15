@@ -177,5 +177,5 @@ pub use query::{
 };
 pub use reject::{Position, Rejection, report};
 pub use scope::FileScoped;
-pub use traits::{TraitId, TraitResolver};
+pub use traits::{ResolveCutoff, TraitId, TraitResolver};
 pub use universe::{DiskScope, Universe, Vendor, is_vendored, targets_of};

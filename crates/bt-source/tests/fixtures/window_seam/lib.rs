@@ -123,3 +123,21 @@ mod tests {
         fn a_test_may_name_the_native_window() {}
     }
 }
+
+/// A trait whose default method is listed.
+pub trait Listed {
+    // PLANTED: a listed default body introducing a name.
+    fn listed_default() {
+        use crate::Runtime as Inside;
+    }
+}
+
+pub trait Twinned {}
+
+/// A listed method of an impl whose self type is a reference.
+impl Twinned for &Plain {
+    // PLANTED: a listed body, behind a reference self type, introducing a name.
+    fn listed_on_a_reference() {
+        type Inner = Runtime<'static>;
+    }
+}
