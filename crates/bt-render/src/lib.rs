@@ -23884,7 +23884,12 @@ mod tests {
     /// `bt_viewport`'s `continuous_frame` — red: the rectangle stands on presentation row 1.
     #[test]
     fn an_ime_caret_for_a_scrolled_away_cursor_is_not_an_unrelated_row() {
-        let metrics = input_box_metrics();
+        // One geometry: the metrics' cell is exactly as tall as the session's rows, so the
+        // pane's bottom (what the measurement clamps to) is the bottom of the frame's last row.
+        let metrics = CellMetrics {
+            cell_height_px: (bt_term::SPIKE_CELL_HEIGHT_SUBPIXELS.get() / SUBPIXELS_PER_PX) as f32,
+            ..input_box_metrics()
+        };
         let started = std::time::Instant::now();
         let mut session = bt_term::DualPlaneSession::new(
             NonZeroU32::new(20).unwrap(),
@@ -23937,6 +23942,12 @@ mod tests {
                 ),
                 "offset={offset}: the candidate window stands at the pane's bottom edge, in the \
                  cursor's column",
+            );
+            assert_eq!(
+                area.y + area.height as i32,
+                (metrics.padding_px + resting.grid_rows.get() as f32 * metrics.cell_height_px)
+                    as i32,
+                "offset={offset}: the edge cell ends where the pane does",
             );
             assert_ne!(edge.live_grid_row, Some(1));
             projection.scroll_by_rows(-offset);
