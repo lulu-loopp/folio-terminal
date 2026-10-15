@@ -87,7 +87,7 @@ fn bt_source() -> Arc<Index> {
 /// `panic_selftest_if_due`'s pair and one disappears; drop the kind from the
 /// key and the field/method pairs flood the first list.
 #[test]
-fn the_identities_bt_app_declares_twice_are_the_ten() {
+fn the_identities_bt_app_declares_twice_are_the_nine() {
     let index = bt_app();
     let mut by_identity: BTreeMap<(&'static str, String), Vec<String>> = BTreeMap::new();
     for record in index.items() {
@@ -135,12 +135,11 @@ fn the_identities_bt_app_declares_twice_are_the_ten() {
             "crate::panic_selftest_if_due",
             "crate::psreadline::run_probe",
             "crate::shell_integration::installed_powershells",
-            "crate::shell_integration::run_profile_path_probe",
             "crate::wsl::<CurrentUser as Registry>::string",
             "crate::wsl::<CurrentUser as Registry>::subkeys",
         ],
-        "the ten of `docs/plans/bt-app-split-prep.md` §2.4 (eleven until ticket 72), \
-         regenerated — an eleventh is a finding about the tree, never a row added to make \
+        "the nine of `docs/plans/bt-app-split-prep.md` §2.4 (ten until \
+         T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH round 4, eleven until ticket 72), regenerated — an eleventh is a finding about the tree, never a row added to make \
          this green"
     );
 
