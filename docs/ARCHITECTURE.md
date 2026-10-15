@@ -815,8 +815,9 @@ and the headless one alike.
   `Runtime::open_window` (a further window), which build what the parameter is then instantiated
   with; the `winit` adapter (`impl ApplicationHandler<AppEvent> for FolioApp`), which hands each
   event to the generic doors (`FolioApp::on_window_event`, `settle_quit` with the loop door);
-  `rebuild_every_native_surface`, the native backend's `Backend::rebuild_every_surface`; and the
-  compile-time check that `Runtime` is its two layers.
+  `rebuild_every_native_surface`, the native backend's `Backend::rebuild_every_surface`; the
+  compile-time check that `Runtime` is its two layers; and `main`, the process entry, which builds
+  the native `FolioApp` the event loop runs (listed since the guard reads expression position).
 * **What still crosses the seam: the platform handle.** `WindowHost::native_handle` answers the
   `bt_platform::NativeWindow` of a native window (and an error on a headless one), and
   `CompositorDoor::platform_tree` the platform's composition tree a page's engine hangs in. Generic

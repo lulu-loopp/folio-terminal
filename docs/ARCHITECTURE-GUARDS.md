@@ -549,10 +549,19 @@ that has it among its supertraits — are written for that parameter, so the
 compiler sees every call that code makes to the window as a call on a seam
 trait. A holder named for the **native** backend — its backend argument left to
 its default or a concrete type — is refused wherever it is written (an `impl`
-of it, any other function's signature or body, a `const` or `static`) unless
-`docs/plans/window-seam-native.tsv` names the place with its reason; a type
-alias of a holder, and an `impl` whose self type names a holder natively without
-being its path, are shapes the guard does not read and are refused by name.
+of it, any other function's signature or body — the methods of a generic
+holder block and of a generic trait impl included, read with the block's
+parameter in scope — a `const` or `static`, a struct, enum or union's field)
+unless `docs/plans/window-seam-native.tsv` names the place with its reason. It
+is read in type position and in expression and pattern position
+(`FolioApp::new(..)`, a struct literal, a struct pattern): there an unwritten
+backend is chosen by inference, read as native where no backend parameter is in
+scope. The native backend's own name (`Native`, standing first or after
+`crate`/`self`/`super`/`window_seam`) is a native mention anywhere outside the
+seam. An impl's trait arguments, associated types and consts, and a native
+block's associated items have no row and are refused by name; so are a type
+alias of a holder and an `impl` whose self type names a holder natively without
+being its path, shapes the guard does not read.
 Every door trait of the seam is implemented in the seam (the headless backend is
 test-only and is not read).
 
