@@ -260,9 +260,11 @@ fn reported<'t>(text: &'t str, key: &str) -> Option<&'t str> {
 ///
 /// `--init-file` displaces `~/.bashrc` and, because Folio also drops
 /// `--login` to make the flag take effect at all, `/etc/profile` with it. On Git
-/// for Windows `/etc/profile` is what selects the MSYS2 environment's prefix and
-/// puts its `bin` at the front of the path, so a shell that skipped it runs on
-/// whatever the launcher and the inherited `PATH` happen to offer.
+/// for Windows `/etc/profile` is what sets the environment's prefix variables
+/// (`MSYSTEM_PREFIX`, `MINGW_PREFIX`, …) and rebuilds `PATH` in the MSYS2 order
+/// (`<prefix>/bin`, then `/usr/bin`, then the Windows path), so a shell that
+/// skipped it has no prefix variables and runs on the `PATH` the launcher and
+/// the parent handed it.
 ///
 /// **Observed through the prefix, not through `MSYSTEM` or a found git.**
 /// `<root>\bin\bash.exe` is a launcher that sets `MSYSTEM` and puts its own
@@ -295,7 +297,7 @@ fn the_startup_chain_the_init_file_displaced_is_put_back() {
     assert_eq!(
         reported(&text, "git"),
         Some(format!("{prefix}/bin/git").as_str()),
-        "git is found in the environment's own `bin`, which the chain put first on the path: {text:?}"
+        "git is the environment's own: {text:?}"
     );
     std::fs::remove_dir(&directory).unwrap();
 }
