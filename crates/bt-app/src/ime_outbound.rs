@@ -256,10 +256,7 @@ impl Runtime<'_> {
         let Some(metrics) = self.focused().map(|leaf| leaf.metrics) else {
             return;
         };
-        let area = window_ime_cursor_area(
-            self.window.renderer.seat_viewport(),
-            self.window.renderer.ime_cursor_area(metrics, frame),
-        );
+        let area = terminal_ime_cursor_area(self.window.renderer.seat_viewport(), metrics, frame);
         let reason = draw_reason(
             ime_owner(self.keyboard_owner()) == ImeOwner::Shell,
             frame.cursor_in_view,

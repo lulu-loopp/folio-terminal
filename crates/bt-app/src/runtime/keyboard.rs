@@ -10,7 +10,7 @@ use crate::{
     ime_caret_source, ime_commit_bytes, ime_cursor_area_of, ime_outbound, ime_owner, ime_report,
     input, keyboard_owner_is_a_shell, keyhint, marks, menubar, native_window, paste_card_key,
     popup_takes_the_key, preedit_caret_byte, profiles, quit, rename_key, rename_pastes, restore,
-    settings, settings_key_of, shortcuts, toast, window_ime_cursor_area, write_pty_input,
+    settings, settings_key_of, shortcuts, terminal_ime_cursor_area, toast, write_pty_input,
 };
 use anyhow::Result;
 use bt_layout::{Axis, SeatId};
@@ -791,10 +791,7 @@ impl Runtime<'_> {
             ImeCaretSource::TerminalCursor => grid
                 .zip(self.focused().map(|leaf| leaf.metrics))
                 .map(|(frame, metrics)| {
-                    window_ime_cursor_area(
-                        self.window.renderer.seat_viewport(),
-                        self.window.renderer.ime_cursor_area(metrics, frame),
-                    )
+                    terminal_ime_cursor_area(self.window.renderer.seat_viewport(), metrics, frame)
                 }),
         };
         let Some(area) = area else {
@@ -902,7 +899,7 @@ impl Runtime<'_> {
     /// A seat-origin one does — and it belongs to the *caller* now that there is
     /// more than one caller. The terminal's caret is computed by the frame
     /// machinery in the seat's own coordinates and is translated by
-    /// [`window_ime_cursor_area`] where it is read (§4.1, one translation); the
+    /// [`crate::window_ime_cursor_area`] where it is read (§4.1, one translation); the
     /// preview's is measured off the pane rectangle and is already the window's.
     /// Translating here would have applied the seat's origin to a rectangle that
     /// never had one.
