@@ -1778,6 +1778,18 @@ pub(crate) fn a_decode(content: &str, native: (u32, u32), bytes: usize) -> PeekC
     }
 }
 
+/// **A read of a file's pixels out under an identity of its own**, as the computation lane admits
+/// each request — the record a surface's ask files, for the tests whose subject is not which read
+/// an answer is for. No two calls in the process share one.
+pub(crate) fn a_read_out() -> PeekCacheEntry {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    PeekCacheEntry::Pending {
+        asked: computation_lane::ComputationId::from(
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ),
+    }
+}
+
 /// One exact-size raster, in the shape a picture surface holds it.
 pub(crate) fn a_held_raster(content: &str, (width_px, height_px): (u32, u32)) -> PeekThumbnail {
     PeekThumbnail {
@@ -1837,10 +1849,7 @@ pub(crate) fn resolve_sharpening_page(
             );
             if needs_pixels {
                 *reads += 1;
-                peek.insert(
-                    bt_term::normalized_local_image_path_key(path),
-                    PeekCacheEntry::Pending,
-                );
+                peek.insert(bt_term::normalized_local_image_path_key(path), a_read_out());
             }
             answer
         },
