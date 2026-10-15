@@ -166,29 +166,29 @@ fn a_birth_of_another_program_never_waits() {
 }
 
 /// The program a check that never settles runs: it sleeps far past any patience, whatever
-/// PowerShell arguments it is handed — Windows PowerShell here — and its scratch directory (none).
-#[cfg(windows)]
+/// PowerShell arguments it is handed — Windows PowerShell on Windows, a shell script elsewhere —
+/// and its scratch directory, if any.
 fn never_settling() -> (std::process::Command, Option<std::path::PathBuf>) {
-    let program = Path::new(&std::env::var_os("SystemRoot").expect("Windows sets SystemRoot"))
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe");
-    (bt_platform::quiet_command(program), None)
-}
-
-/// The program a check that never settles runs: a shell script that sleeps far past any patience
-/// whatever arguments it is handed, and its scratch directory.
-#[cfg(unix)]
-fn never_settling() -> (std::process::Command, Option<std::path::PathBuf>) {
-    use std::os::unix::fs::PermissionsExt as _;
-    let directory = bt_testpath::temp_path("packaged-turns-never-settles");
-    std::fs::create_dir_all(&directory).expect("the stand-in's directory");
-    let program = directory.join("pwsh");
-    std::fs::write(&program, "#!/bin/sh\nexec sleep 600\n").expect("the stand-in");
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-        .expect("the stand-in runs");
-    (bt_platform::quiet_command(&program), Some(directory))
+    #[cfg(windows)]
+    {
+        let program = Path::new(&std::env::var_os("SystemRoot").expect("Windows sets SystemRoot"))
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        (bt_platform::quiet_command(program), None)
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = bt_testpath::temp_path("packaged-turns-never-settles");
+        std::fs::create_dir_all(&directory).expect("the stand-in's directory");
+        let program = directory.join("pwsh");
+        std::fs::write(&program, "#!/bin/sh\nexec sleep 600\n").expect("the stand-in");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("the stand-in runs");
+        (bt_platform::quiet_command(&program), Some(directory))
+    }
 }
 
 /// RED — **a birth's wait is bounded by the check's own deadline, never a clock of its own**: a
