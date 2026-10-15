@@ -77758,7 +77758,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 27] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 28] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -77788,6 +77788,10 @@ mod platform_gate_tests {
         // The startup path: the native-window door's two arms, and the five
         // platform calls M1-1 made non-fatal.
         "main.rs",
+        // Windows-only test fixtures: the Store PowerShell's app execution alias and package (an
+        // MSIX fact), and the never-settling check's program, Windows PowerShell beside its Unix
+        // shell-script twin; the door itself is portable.
+        "packaged_turns_tests.rs",
         // Which rows the palette offers on this machine.
         "palette_index.rs",
         // Windows-only test fixtures: the drive, share, verbatim and WSL spellings of
