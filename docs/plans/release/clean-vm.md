@@ -949,7 +949,7 @@ macOS 上,trial 在被观察前结束(M9 在 `Trial` 之前被杀)不再耗费 9
 窗)修掉,stuck-a/b 的预期按 U-32 计划缺陷 8 改正。**这份仓库版本尚未整轮跑过**:下一次演练
 是它的第一次。
 
-**2026-10-15(H6)演练脚本的三处改动。**
+**2026-10-15(H6)演练脚本的改动。**
 
 - **macOS 截图只截 Folio 的窗。** 全屏截图曾拍到这台 Mac 上一扇远程桌面窗口和上面的密钥。`row.sh` 的
   `capture_folio_window` 经 `osascript -l JavaScript`(`CGWindowListCopyWindowInfo`,只读窗口号与所属进程,
@@ -957,12 +957,17 @@ macOS 上,trial 在被观察前结束(M9 在 `Trial` 之前被杀)不再耗费 9
   在该行日志里写一行 `REFUSED`,绝不退回全屏。没有本文件夹进程时(`after-cleanup`)与 R-D5 的系统提示框
   (不属于 Folio 进程)因此如实拒绝。`row.sh --capture-dry-run <应用名>` 只找窗、从不截图。
 - **`-KillNewInstallProcess` 在句柄上等。** 原先 `Stop-Process -Force` 之后既不等也不核实就记「ended」;
-  现在 `Kill()` 之后在同一句柄上 `WaitForExit`,界限 `$KillWithinMs` = 2 秒(产品的 `CHILD_EXIT_BUDGET`),
-  到界仍在运行则该行 `FAILED` 并写出 pid,不再往下走。
-- **W4 不再空转。** 原先 120 秒墙钟、到时不判失败,主循环读到仍是 `Handoff` 又进同一自旋,直到 900 秒总超时;
+  现在第一次看到这个进程时就打开并持有它的句柄(句柄开着,pid 不会被别的进程重用),路径核对、`Kill()`
+  与等待退出都落在这一个进程上;界限 `$KillWithinMs` = 2 秒(产品的 `CHILD_EXIT_BUDGET`),到界仍在运行则该行
+  `FAILED` 并写出 pid,不再往下走。
+- **W4 不再空转。** 原先 120 秒墙钟、到时不判失败,主循环读到仍是 `Handoff` 又进同一自旋,直到监视器的总超时(切电行是 `-MarkerTimeoutSeconds`,
+  默认 600 秒);
   现在 `Wait-RunValue` 等 Run 值,界限 `$W4RunWithinMs` = 90 秒(`old_within` 60 秒加 30 秒),日志目录项变了
   而 Run 值没来即结束等待,到界该行 `FAILED` 并写出最后所见。其余毫秒级行的自旋同理,界限 `$SpinWithinMs`
   = 180 秒。三个界限的推导在 `guest/waits.ps1` 文件头。
+- **失败传到宿主。** `run-row.ps1` 把切电行的哨兵拷回(`marker.txt`),并在每次收集回来的监视器日志里找
+  `ROW <行> FAILED`;哨兵缺失或为 `MISSED`/`NOT_REACHED`/`FAILED`、或日志里有失败行,该行在宿主上记为
+  FAILED。最后打印各行结果表,有失败则以退出码 1 结束。
 
 ---
 

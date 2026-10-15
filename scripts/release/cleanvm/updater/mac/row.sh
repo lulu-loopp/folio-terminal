@@ -4,6 +4,7 @@
 #
 #   row.sh <row> [--cut all|named] [--no-clean]
 #   row.sh --capture-dry-run <app name>
+#   row.sh --capture-window <png> <app name> <pid>...
 #
 # rows: happy M1 M2 M3 M4 M5 M6 M7 M8 rollback M9cut stuck-a stuck-b
 #       M11-rolledback M11-abandoned M11-committed R-W15 R-D5 D14
@@ -14,6 +15,8 @@
 # nothing is captured. The screen of the Mac may show anything else (once, a remote-desktop
 # window with secrets on it). `--capture-dry-run <app name>` resolves the window of that owner
 # name among all processes, prints what it found or the refusal (exit 1), and never captures.
+# `--capture-window <png> <app name> <pid>...` captures as a row does: exit 1 when refused or when
+# screencapture wrote no image, and then no file is left behind.
 #
 # Each run: precondition (no Folio outside the folder; exit 3) -> Accessibility no-op (exit 4 when
 # refused; nothing is started then) -> app/ re-placed from a-pristine (a fresh ditto of A's image
@@ -89,20 +92,31 @@ capture_folio_window() { # capture_folio_window <png> <pid>...: that window only
   if screencapture -x -o -l "$id" "$out" 2>> "$LOG" && [ -s "$out" ]; then
     say "screenshot $(basename "$out") (window $id)"
   else
-    say "screenshot $(basename "$out") FAILED: screencapture -l $id refused; nothing captured"
+    rm -f "$out"
+    say "screenshot $(basename "$out") FAILED: screencapture -l $id wrote no image; nothing captured"
     return 1
   fi
 }
-if [ "${1:-}" = "--capture-dry-run" ]; then
-  [ $# -eq 2 ] || { echo "row.sh --capture-dry-run <app name>"; exit 2; }
-  CAPTURE_APP=$2
-  CAPTURE_DRY=1
-  LOG=/dev/null
-  say() { printf '%s\n' "$*"; }
-  # shellcheck disable=SC2046 # one argument per pid
-  capture_folio_window dry-run.png $(ps -Ao pid=)
-  exit $?
-fi
+case "${1:-}" in
+  --capture-dry-run)
+    [ $# -eq 2 ] || { echo "row.sh --capture-dry-run <app name>"; exit 2; }
+    CAPTURE_APP=$2
+    CAPTURE_DRY=1
+    LOG=/dev/null
+    say() { printf '%s\n' "$*"; }
+    # shellcheck disable=SC2046 # one argument per pid
+    capture_folio_window dry-run.png $(ps -Ao pid=)
+    exit $? ;;
+  --capture-window)
+    [ $# -ge 4 ] || { echo "row.sh --capture-window <png> <app name> <pid>..."; exit 2; }
+    CAPTURE_OUT=$2
+    CAPTURE_APP=$3
+    shift 3
+    LOG=/dev/null
+    say() { printf '%s\n' "$*"; }
+    capture_folio_window "$CAPTURE_OUT" "$@"
+    exit $? ;;
+esac
 
 ROW="${1:-}"
 [ $# -gt 0 ] && shift

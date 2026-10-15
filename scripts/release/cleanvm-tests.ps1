@@ -55,7 +55,17 @@
     stubbed: a window list with no window of the name refuses (exit 1, a
     `REFUSED` line), as does an unreadable list; a window found is named and
     not captured; `screencapture` is never run. MUTATION: in
-    `capture_folio_window`, drop the `-z "${id:-}"` refusal.
+    `capture_folio_window`, drop the `-z "${id:-}"` refusal. Not dry
+    (`--capture-window`): a screencapture that fails after a partial write, or
+    writes an empty file, leaves no file and says FAILED; an image written is
+    kept; screencapture is only asked for the window found (`-l`). MUTATION:
+    drop the `rm -f "$out"`.
+
+    **the_host_reports_what_the_guest_saw** (H6) — `rows.ps1`
+    `Get-RowVerdict`: a cut row's marker of FAILED, MISSED or NOT_REACHED, a
+    cut row with no marker, and a `ROW <row> FAILED:` line in a live row's
+    watcher log each fail the row on the host; a reached marker and a log with
+    no failure line are ok. MUTATION: drop `'FAILED'` from the failing phases.
 #>
 [CmdletBinding()]
 param()
@@ -287,6 +297,49 @@ try {
     $found = Invoke-DryCapture '43 812'
     Check ($found.Exit -eq 0 -and $found.Text -eq 'dry run: window 812 of NoSuchApp found among 43 windows; nothing captured') "a window found is named, not captured (exit $($found.Exit): $($found.Text))"
     Check (-not (Test-Path -LiteralPath $called)) 'the dry run never runs screencapture'
+
+    # A capture that is not dry: screencapture stubbed to fail after a partial write, to write an
+    # empty file, or to write an image. No file may be left when the log says nothing was captured.
+    [IO.File]::WriteAllText((Join-Path $stubs 'screencapture'), (@(
+                '#!/bin/sh', "echo `"`$*`" >> '$(ConvertTo-Posix $called)'", 'for a; do out=$a; done',
+                'case "$STUB_SHOT" in', "  fail) printf 'PN' > `"`$out`"; exit 1 ;;", '  empty) : > "$out" ;;',
+                "  ok) printf 'PNG-bytes' > `"`$out`" ;;", 'esac') -join "`n") + "`n")
+    function Invoke-WindowCapture([string] $shot, [string] $png) {
+        $env:STUB_WINDOWS = '43 812'; $env:STUB_SHOT = $shot
+        try {
+            $said = & $bash -c 'PATH="$1:$PATH"; export PATH; bash "$2" --capture-window "$3" Folio 101' _ (ConvertTo-Posix $stubs) (ConvertTo-Posix $rowSh) (ConvertTo-Posix $png) 2>&1 | Out-String
+            return @{ Exit = $LASTEXITCODE; Text = $said.Trim() }
+        }
+        finally { Remove-Item Env:STUB_WINDOWS, Env:STUB_SHOT }
+    }
+    foreach ($shot in 'fail', 'empty') {
+        $png = Join-Path $scratch "shot-$shot.png"
+        $r = Invoke-WindowCapture $shot $png
+        Check ($r.Exit -eq 1 -and $r.Text -eq "screenshot shot-$shot.png FAILED: screencapture -l 812 wrote no image; nothing captured" -and -not (Test-Path -LiteralPath $png)) `
+            "screencapture that $(if ($shot -eq 'fail') { 'fails after a partial write' } else { 'writes an empty file' }): no file is left (exit $($r.Exit): $($r.Text))"
+    }
+    $png = Join-Path $scratch 'shot-ok.png'
+    $r = Invoke-WindowCapture 'ok' $png
+    Check ($r.Exit -eq 0 -and $r.Text -eq 'screenshot shot-ok.png (window 812)' -and (Test-Path -LiteralPath $png)) "an image written is kept (exit $($r.Exit): $($r.Text))"
+    $args812 = @(Get-Content -LiteralPath $called)
+    Check ($args812.Count -eq 3 -and @($args812 | Where-Object { $_ -notmatch '^-x -o -l 812 ' }).Count -eq 0) "screencapture is only ever asked for window 812 ($($args812 -join ' | '))"
+
+    # ── the_host_reports_what_the_guest_saw ───────────────────────────────────
+    $v = Get-RowVerdict -Cut -Marker "row=W4 phase=FAILED at=10:00:01.250`r`n" -WatchLog @()
+    Check ($v.Failed -and $v.Line -eq 'marker: row=W4 phase=FAILED at=10:00:01.250') "a FAILED marker fails the row on the host ($($v.Line))"
+    foreach ($phase in 'MISSED', 'NOT_REACHED') {
+        $v = Get-RowVerdict -Cut -Marker "row=W5 phase=$phase at=10:00:02.000" -WatchLog @()
+        Check $v.Failed "a $phase marker fails the row on the host ($($v.Line))"
+    }
+    $v = Get-RowVerdict -Cut -Marker $null -WatchLog @()
+    Check ($v.Failed -and $v.Line -eq 'no marker came back from the guest') "a cut row with no marker fails ($($v.Line))"
+    $v = Get-RowVerdict -Cut -Marker 'row=W1 phase=Allocated at=10:00:03.000' -WatchLog @('10:00:00.000 watch start row=W1')
+    Check (-not $v.Failed -and $v.Line -eq 'reached Allocated') "a reached marker is ok ($($v.Line))"
+    $log = @('10:00:00.000 watch start row= freeze=False', '10:02:00.000 ROW rollback FAILED: the trial pid=4242 was killed and is still running 2000 ms later')
+    $v = Get-RowVerdict -WatchLog $log
+    Check ($v.Failed -and $v.Line -eq 'watcher: 10:02:00.000 ROW rollback FAILED: the trial pid=4242 was killed and is still running 2000 ms later') "a live row's FAILED log line fails it on the host ($($v.Line))"
+    $v = Get-RowVerdict -WatchLog @('10:00:00.000 watch start', '10:00:05.000 watch end')
+    Check (-not $v.Failed) "a live row with no failure line is ok ($($v.Line))"
 }
 finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue

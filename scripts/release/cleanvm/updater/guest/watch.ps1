@@ -42,8 +42,9 @@
     delete sharing), `-HoldPath` (E-7, W10: a file of the install held with no
     sharing). `-KillNewInstallProcess` ends the first new folio.exe of the
     install folder after the one running at the start: the trial the applier
-    started (the rollback rows); it kills it on its handle and waits on that
-    handle for its exit.
+    started (the rollback rows): its handle is opened when it is first seen and
+    held, so the path check, the kill and the wait for its exit are of that one
+    process.
 
     Writes, in -GuestHome: updater-watch-<Tag>.txt (the log),
     updater-journal-<Tag>.txt (every version of the journal),
@@ -187,6 +188,9 @@ function Kill-NewInstallProcess {
   foreach ($p in @(Get-Process folio -ErrorAction SilentlyContinue)) {
     if ($known.ContainsKey($p.Id)) { continue }
     $known[$p.Id] = $true
+    # The handle is opened now and held by $p: the path check, the kill and the wait below all
+    # name this process (its pid cannot be reused while the handle is open).
+    try { $null = $p.Handle } catch { Say "new folio process pid=$($p.Id) could not be opened: $($_.Exception.Message)"; continue }
     $pp = $null; try { $pp = $p.Path } catch { }
     if ($pp -eq $exePath -and (Test-Path -LiteralPath $H)) {
       if (Stop-Within -Process $p -Kill { param($x) $x.Kill() }) {
