@@ -311,7 +311,8 @@ enum Unkept {
 /// **What the watch still owes the `unkept` mark** ([`Gate::owes_unkept_mark`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MarkAsk {
-    /// The whole durable write.
+    /// Its durable write: the whole order, or — once a refused rename kept its
+    /// flushed temporary — that temporary's rename alone.
     Write,
     /// The flush of its folder alone: its bytes are at its name.
     FolderFlush,
