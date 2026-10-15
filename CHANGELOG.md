@@ -25,6 +25,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- When Folio cannot save your window layout (a full disk, a folder that became read-only), it tells you once and stops trying again every couple of seconds; it tries again at your next change and when you quit. <!-- zh: pending T-SESSION-WRITER-NO-TIMER-RETRY -->
 - A picture that could not be loaded is no longer read again and again while the window holds many other pictures. <!-- zh: pending T-PEEK-CACHE-QUESTION-RECORDS -->
 - A GIF caught while it was being written plays once the write finishes. <!-- zh: pending T-ANIMATION-RECORDS-BOUND -->
 - A GIF that changes while it is being opened shows its new contents, not the old ones. <!-- zh: pending T-ANIMATION-ANSWER-IDENTITY -->
@@ -33,10 +34,13 @@ All notable changes to Folio are recorded here. The format follows
 - On the Git page, presses in one repository run one after another and never wait for work in another repository, and a press Folio could not carry out says so and lets its row go instead of leaving it dimmed. <!-- zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER -->
 - After an update, Folio no longer says that changes made while the new version was being tried were not kept when they were, in a rare case where the disk took the note but would not confirm it. <!-- zh: pending T-TRIAL-WATCH-REPEATS-BOUND -->
 - A Git page that is docked, popped out or moved to another tab while git is still working on it now gets the answer: its dimmed rows come back and a checkout it started no longer blocks the next one. <!-- zh: pending T-GIT-RECEIPTS-FOLLOW-A-MOVED-HOST -->
+- A slow checkout or other git action in one repository no longer holds up the Git pages of other repositories: their files and branches are read while it runs. <!-- zh: pending T-GIT-READS-PER-REPOSITORY -->
+- A diff or a file at a commit opened from a Git page now shows up even when that page is closed, or its tab merged into another, before git answers; if Folio's git reading has stopped, the pane says it was not loaded instead of "Loading…" for ever, and opening it again tries again. <!-- zh: pending T-GIT-DOCUMENT-GATED-BY-POOL -->
 - A failure while Folio checks your PowerShell profiles for its line no longer closes Folio, and a check that could not start when Folio opened is tried again at the next chance (after an update is confirmed, say) instead of waiting until you open the Profiles page. <!-- zh: pending T-HEADLESS-RUNTIME-SEAM -->
 - A panic in one picture or formula no longer ends Folio; that picture or formula stays as it was and is tried again after the next change in its pane. <!-- zh: pending S-8 -->
 - Saving a preview no longer holds the window while the disk writes, and a save over a file another program changed within the same second now notices it and leaves that program's text on the disk instead of writing over it. <!-- zh: pending S-6a -->
 - A video that never finishes loading now says so after ten seconds instead of showing a player that never starts, and a video that declares no length shows "No length" on its bar instead of a clock stuck at 0:00. <!-- zh: pending T-VIDEO-ENGINE-NO-DURATION -->
+- On Windows, Esc reaches Codex and other programs every time; it was sometimes lost after a key such as Shift+Enter or Shift+Tab, and so were Ctrl+[ and some Alt keys (Alt+[ and Alt+], for example). <!-- zh: pending T-ESC-UNDER-KITTY-ON-CONPTY -->
 - File paths printed by Cygwin's bash (`/cygdrive/c/…`), by a WSL profile without shell integration, and by a WSL distribution's own launcher are now links, as in Git Bash and WSL panes. <!-- zh: pending T-WINDOWS-SHELL-NAMESPACES -->
 - A path pasted into a Cygwin bash pane is now written as `/cygdrive/c/…`, which Cygwin can open. <!-- zh: pending T-WINDOWS-SHELL-NAMESPACES -->
 - A pane whose shell could not start and fell back to another one now reads the paths printed in it in the spelling of the shell that started, not of the one that was asked for. <!-- zh: pending T-WINDOWS-SHELL-NAMESPACES -->
@@ -112,6 +116,8 @@ All notable changes to Folio are recorded here. The format follows
 - A page that cannot open in a web pane says why in one line under "Cannot open" and the address — the name that did not resolve, or the kind of address a preview does not open — and the card no longer carries a button: reload, the address and copy are in the row right above it. <!-- zh: 网页窗格无法打开页面时，在「无法打开」和地址下用一行说明原因——无法解析的域名，或预览不打开的地址类型——卡片不再带按钮：重新加载、地址和复制都在它正上方的一行。 -->
 - While a page loads, the address bar shows the address you asked for, and after a page fails to load it still shows it, so you can correct it instead of retyping it. <!-- zh: 页面加载时，地址栏显示你请求的地址；页面加载失败后仍保留，可以直接修改，不必重新输入。 -->
 - Letting go of a divider, tab or scroll thumb while a card or menu is over it now ends the drag. <!-- zh: pending -->
+- Typing with an input method (Microsoft Pinyin, say) in a program that hides the terminal's cursor and draws its own, such as pi, now shows what you are composing in its input box, with the candidate list beside it. <!-- zh: pending T-PREEDIT-ON-A-HIDDEN-CURSOR -->
+- Right after Windows starts, Folio no longer closes a moment after opening when its PowerShell 7 tabs come from the Microsoft Store: a background check of PowerShell 7 no longer runs while such a tab is starting. <!-- zh: pending T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH -->
 
 ### Changed
 

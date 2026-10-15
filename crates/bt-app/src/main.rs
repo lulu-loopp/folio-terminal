@@ -123,6 +123,7 @@ mod notice;
 mod notify;
 mod owner_door;
 mod pace;
+mod packaged_turns;
 mod palette;
 mod palette_index;
 mod pane_content;
@@ -752,7 +753,10 @@ enum AppEvent {
     /// **The storage worker answered a hand-editable document's request**
     /// (T-STORAGE-WORKER-REQUEST, `document_request`): a conditional write or a
     /// re-read of `settings.json`, `keybindings.json`, `profiles.json` or
-    /// `pins.json`.
+    /// `pins.json` — **or the session's own** (T-SESSION-RECEIPTS-ON-THE-WAKE):
+    /// a write of `session.json` (its receipt, taken by
+    /// `SessionStore::take_receipts`) or an update's hand-over at quit (read by
+    /// `FolioApp::hand_the_update_over` on the turn this brings).
     ///
     /// Carries nothing: each answer is already in the asking store's own
     /// channel when this is sent — the answer first, the wake after — and the
@@ -11986,6 +11990,17 @@ struct MathAnswers {
     lane_gone: bool,
 }
 
+/// **What the repository lanes' drain hands the windows** ([`FolioApp::drain_git_answers`]): the
+/// pages' answers and receipts, each addressed to where its cache stands; the documents' answers,
+/// each addressed to where its buffer is kept; and whether the read worker was found gone on this
+/// turn.
+#[derive(Default)]
+struct GitAnswers {
+    pages: Vec<git::GitResponse>,
+    documents: Vec<git::GitDocumentAnswer>,
+    gone: bool,
+}
+
 /// **The terminals one drain took, sorted for the windows**: an answer joins `done`; a failed
 /// request — its own failure, or the one it joined — is settled ([`settle_failure`]): an error
 /// answer joins `done`, a pane task or an animation fill joins `failed` for the window that holds
@@ -17494,6 +17509,7 @@ mod worker_answer_routing_tests {
             window: window_a(),
             host: git::GitHost::Column(leaf),
             asker: git::GitCacheId::mint(),
+            buffer: None,
             answer: git::GitAnswer::Repo {
                 dir: PathBuf::from("/repo"),
                 outcome: Ok(PathBuf::from("/repo")),
@@ -17513,6 +17529,26 @@ mod worker_answer_routing_tests {
             ..column.clone()
         };
         assert_eq!(popped_out.owner(), AnswerOwner::Window(window_a()));
+        // A document's answer belongs where its buffer is kept: a pool travels
+        // inside its tab, and the hover card is its window's.
+        let mut pool = preview::PreviewPool::default();
+        let diff = preview::PreviewSource::GitDiff {
+            root: PathBuf::from("/repo"),
+            path: "说明 notes.md".to_owned(),
+            against: preview::GitDiffAgainst::Index,
+        };
+        pool.open(diff.clone(), "说明 notes.md".to_owned(), &[]);
+        let pooled = git::GitDocumentAnswer {
+            shelf: git::Shelf::Pool(tab),
+            buffer: pool.ask_composer(&diff).expect("a diff waits on git"),
+            answer: column.answer.clone(),
+        };
+        assert_eq!(pooled.owner(), AnswerOwner::Tab(tab));
+        let glanced = git::GitDocumentAnswer {
+            shelf: git::Shelf::Glance(window_a()),
+            ..pooled.clone()
+        };
+        assert_eq!(glanced.owner(), AnswerOwner::Window(window_a()));
 
         let head = preview::PreviewResponse {
             window: window_a(),
@@ -50659,6 +50695,11 @@ impl<B: Backend> Runtime<'_, B> {
         if documents.contains(storage_watch::Document::Pins) {
             self.app.pins_store.ask_reread();
         }
+        // **A pass is an ear event for the session too** (the side-effects contract's C5): a
+        // session document a refusal left owed is handed over once more.
+        if !documents.is_empty() {
+            self.app.session_store.hear_the_storage_pass();
+        }
         Ok(())
     }
 
@@ -52363,6 +52404,7 @@ impl<B: Backend> Runtime<'_, B> {
                 window: self.window_id(),
                 host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
                 asker,
+                buffer: None,
                 question,
             })
         {
@@ -52397,6 +52439,7 @@ impl<B: Backend> Runtime<'_, B> {
             window: self.window_id(),
             host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
             asker,
+            buffer: None,
             question,
         }) {
             self.disable_git_worker();
@@ -65297,7 +65340,8 @@ impl<B: Backend> FolioApp<B> {
     }
 
     /// [`Self::drain_preview_answers`] for the repository lanes — the read
-    /// worker's answers and the mutation lane's receipts, in one batch.
+    /// worker's answers and the mutation lane's receipts, in one batch, and the
+    /// answers to git documents beside it.
     ///
     /// **The receipts are taken first and filed last.** A read of a repository
     /// sends its answer before any later mutation of it can start
@@ -65307,15 +65351,21 @@ impl<B: Backend> FolioApp<B> {
     /// taken before a verb never lands after the verb's receipt has asked the
     /// repository again.
     ///
-    /// **Every answer is owed to the cache that asked** (`git::GitCacheId`),
+    /// **Every page's answer is owed to the cache that asked** (`git::GitCacheId`),
     /// found where it stands now among the caches the open windows hold
     /// (`git_mutation_lane::OpenPages`): a page's answer is addressed there, so a
     /// Files view docked into a column or popped out into a float while git ran
     /// still receives it. A receipt whose cache no open window holds is let go
     /// first, and ends in the lane's sink; a read answer whose cache is gone is
     /// dropped.
-    fn drain_git_answers(&mut self) -> (Vec<git::GitResponse>, bool) {
-        let mut batch = Vec::new();
+    ///
+    /// **Every document's answer is owed to the buffer opened for it**
+    /// (`preview::BufferId`), found where it is kept now — in whichever tab's pool,
+    /// or on a window's hover card — whether or not the page whose row was pressed
+    /// is still open. One whose buffer nothing keeps any more reaches the sink,
+    /// which ignores it: nobody is waiting for it.
+    fn drain_git_answers(&mut self) -> GitAnswers {
+        let mut answers = GitAnswers::default();
         let mut open = git_mutation_lane::OpenPages::default();
         for window in self.windows.values() {
             if window.leaving.is_none() {
@@ -65335,6 +65385,7 @@ impl<B: Backend> FolioApp<B> {
                         };
                         open.stand(graph.cache.id(), id, place);
                     }
+                    open.keep_pool(tab.id, &tab.preview_pool);
                 }
                 for win in window.float.live_windows() {
                     if let Some(files) = win.files() {
@@ -65345,10 +65396,11 @@ impl<B: Backend> FolioApp<B> {
                         );
                     }
                 }
+                open.keep_glance(id, &window.peek_buffer);
             }
         }
         let Some(app) = self.app.as_mut() else {
-            return (batch, false);
+            return answers;
         };
         let receipts: Vec<git::GitResponse> = app
             .git_mutations
@@ -65358,13 +65410,20 @@ impl<B: Backend> FolioApp<B> {
                 open.address(git_mutation_lane::receipt(terminal, request))
             })
             .collect();
-        let mut gone = false;
+        // The sink for a document whose buffer is gone (C6): nobody waits for it.
+        let mut sink = |_unkept: git::GitResponse| {};
         loop {
             match app.git_worker.responses.try_recv() {
-                Ok(response) => batch.extend(open.address(response)),
+                Ok(response) => match open.file(response, &mut sink) {
+                    Some(git_mutation_lane::Filed::Page(page)) => answers.pages.push(page),
+                    Some(git_mutation_lane::Filed::Document(document)) => {
+                        answers.documents.push(document);
+                    }
+                    None => {}
+                },
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    gone = git::disable_git_worker_state(
+                    answers.gone = git::disable_git_worker_state(
                         &mut app.git_worker_running,
                         &mut app.git_worker_notice_pending,
                     );
@@ -65372,8 +65431,8 @@ impl<B: Backend> FolioApp<B> {
                 }
             }
         }
-        batch.extend(receipts);
-        (batch, gone)
+        answers.pages.extend(receipts);
+        answers
     }
 
     /// [`Self::drain_preview_answers`] for the computation lane — the formulas,
@@ -67026,7 +67085,16 @@ impl<B: Backend> FolioApp<B> {
     /// opening order — the one that turns the application's clocks, whose cards
     /// the storage pass's are. With no window standing the answers wait in their
     /// channels for the next wake.
+    ///
+    /// **The session's receipts first, and always** (T-SESSION-RECEIPTS-ON-THE-WAKE): the
+    /// session store is the application's, not a window's, so its receipts are taken whether
+    /// or not a window stands or a quit holds the worker; an update's quit then reads the one it
+    /// waits for, and the hand-over's answer, on the turn this wake brings
+    /// (`Self::settle_quit`).
     fn take_document_answers(&mut self) -> Result<()> {
+        if let Some(app) = self.app.as_mut() {
+            app.session_store.take_receipts();
+        }
         self.take_preview_save_answers()?;
         // **Not while a quit holds the storage worker** (T-QUIT-DOCUMENTS): its documents and
         // recovery phases take the answers themselves, on the turn this wake brings, and merge
@@ -67970,7 +68038,8 @@ impl<B: Backend> FolioApp<B> {
                         // **An update's quit does not stand still for its write** (0.4.6 U-21,
                         // §C.3): the photograph goes to the writer as a named generation, the
                         // loop keeps turning, and the receipt for that generation is looked for
-                        // on each turn under `quit::UPDATE_RECEIPT_DEADLINE` — a clock, not a
+                        // on the turn the writer's wake brings (`AppEvent::DocumentsAnswered`),
+                        // under `quit::UPDATE_RECEIPT_DEADLINE` — a bound read on the turn, not a
                         // wait. Only a verdict that leaves begins the way out.
                         let Some(landed) = self.update_session_answer(Instant::now()) else {
                             return Ok(());
@@ -68296,7 +68365,7 @@ impl<B: Backend> FolioApp<B> {
             if until <= now {
                 return Some(app.session_store.flush_for_quit(until, now));
             }
-            return match app.session_store.hand_over_final(now) {
+            return match app.session_store.hand_over_final() {
                 Ok(Some(generation)) => {
                     quit.requested(generation, now);
                     None
@@ -68305,10 +68374,10 @@ impl<B: Backend> FolioApp<B> {
                 Err(refusal) => Some(Err(refusal)),
             };
         };
-        match app.session_store.landing_of(generation, now) {
+        match app.session_store.landing_of(generation) {
             Some(answer) => Some(answer),
             None if quit.receipt_is_overdue(now) => {
-                Some(Err(app.session_store.receipt_overdue(generation, now)))
+                Some(Err(app.session_store.receipt_overdue(generation)))
             }
             None => None,
         }
@@ -68675,7 +68744,7 @@ impl<B: Backend> FolioApp<B> {
                 .app
                 .as_ref()
                 .and_then(|app| app.quit.as_ref())
-                .and_then(|quit| quit.wake_at(now));
+                .and_then(quit::Quit::deadline);
             event_loop.set_control_flow(
                 earliest_deadline([waking, bound])
                     .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
@@ -68820,14 +68889,14 @@ impl<B: Backend> FolioApp<B> {
                 }
             }
         }
-        // **And the quit's, while it waits for an answer across turns** (0.4.6 U-21): an update's
-        // quit looks for its session's receipt with the windows still up, and neither the writer
-        // nor anything else wakes the loop when it comes.
+        // **And the quit's bound, while it waits for an answer across turns** (0.4.6 U-21): an
+        // update's quit looks for its session's receipt with the windows still up. The answer
+        // itself wakes the loop (`AppEvent::DocumentsAnswered`); the clock is only the bound.
         let quit_wake = self
             .app
             .as_ref()
             .and_then(|app| app.quit.as_ref())
-            .and_then(|quit| quit.wake_at(now));
+            .and_then(quit::Quit::deadline);
         let wake_deadline = earliest_deadline([wake_deadline, quit_wake]);
         event_loop
             .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
@@ -69835,8 +69904,14 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             }
             AppEvent::FileIndexReady => self.apply_file_index_results(),
             AppEvent::GitReady => {
-                let (mut batch, gone) = self.drain_git_answers();
-                self.for_each_window(|runtime| runtime.apply_git_results(&mut batch, gone))
+                let mut answers = self.drain_git_answers();
+                self.for_each_window(|runtime| {
+                    runtime.apply_git_results(
+                        &mut answers.pages,
+                        &mut answers.documents,
+                        answers.gone,
+                    )
+                })
             }
             // Nothing is done here. The news has already been stamped into the
             // watcher's own mailbox by the thread that heard it; this only
@@ -76997,7 +77072,7 @@ fn main() -> Result<()> {
     // uninstall that said nothing at all.
     if cli::remove_shell_integration(std::env::args_os().skip(1)) {
         let report = shell_integration::remove_shell_integration(
-            shell_integration::profile_marks::Asker::Door,
+            shell_integration::CheckAsker::Verb,
             &shell_integration::ProbeEnvironment::Inherited,
         );
         let done = report.text(false);
@@ -77702,7 +77777,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 27] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 29] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -77732,6 +77807,10 @@ mod platform_gate_tests {
         // The startup path: the native-window door's two arms, and the five
         // platform calls M1-1 made non-fatal.
         "main.rs",
+        // Windows-only test fixtures: the Store PowerShell's app execution alias and package (an
+        // MSIX fact), and the never-settling check's program, Windows PowerShell beside its Unix
+        // shell-script twin; the door itself is portable.
+        "packaged_turns_tests.rs",
         // Which rows the palette offers on this machine.
         "palette_index.rs",
         // Windows-only test fixtures: the drive, share, verbatim and WSL spellings of
@@ -77754,6 +77833,9 @@ mod platform_gate_tests {
         "tests.rs",
         // Native junction and sharing-mode fixtures, never product platform policy.
         "uninstall_tests.rs",
+        // Only the held-journal fixtures: a hold that refuses a replacing rename is a
+        // Windows fact; their platform-free halves run beside the door everywhere.
+        "update_apply_windows_tests.rs",
         // Only the symlinked-log regression fixture; the recovery road is portable.
         "update_recover.rs",
         // Only the real detached-handoff regression fixture; the handoff API is portable.

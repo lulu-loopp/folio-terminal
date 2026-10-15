@@ -431,8 +431,9 @@ order for a login shell: `/etc/profile`, then the first of `~/.bash_profile`, `~
 `~/.profile`, and never `~/.bashrc`. `interactive` is bash's order for a shell that is not one:
 `~/.bashrc` and nothing else. Which is which is a fact about the profile's own arguments, and only
 the Windows side can read them. This is not cosmetic on Git for Windows:
-`/etc/profile` is what puts `/mingw64/bin` on the path, so a shell that skipped it is a Git Bash
-that cannot find git. The chain is a pinned test (`crates/bt-pty/tests/shell_integration_bash.rs`),
+Git Bash's launcher already sets `MSYSTEM` and puts git on the path, but `/etc/profile` is what
+sets the environment's prefix variables (`MSYSTEM_PREFIX`, `MINGW_PREFIX`, …) and the MSYS2
+`PATH` order, so a shell that skipped it runs without them. The chain is a pinned test (`crates/bt-pty/tests/shell_integration_bash.rs`),
 and `PATH`, `MSYSTEM` and `command -v git` were verified byte-identical to a plain `--login` shell.
 
 Everything the script finds, it keeps: your `PROMPT_COMMAND` is called rather than replaced — as a

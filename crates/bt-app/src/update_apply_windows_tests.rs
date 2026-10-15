@@ -3120,6 +3120,238 @@ fn a_trial_whose_start_cannot_be_recorded_is_ended_and_rolled_back() {
     );
 }
 
+// ── a journal write held (T-JOURNAL-WRITE-UNDER-HOLD) ───────────────────────
+
+/// **A journal write, and the window's mark, over a file another program holds
+/// open** (T-JOURNAL-WRITE-UNDER-HOLD), with real files and a real hold
+/// (`trust_harness::hold_without_delete_sharing`, a scanner's open). The rounds
+/// are counted by what the write says on each: the hold is let go when a given
+/// round is said, so the round the write lands on is the test's, not a clock's.
+///
+/// **Windows only**: a hold that refuses a replacing rename is a Windows fact —
+/// on macOS `rename(2)` replaces an open file and `hold_without_delete_sharing`
+/// answers `Unsupported`, so there is no hold to make. What these pin that is
+/// platform-free is pinned beside the door on every platform:
+/// `bt_platform::install_txn::tests` (one file flush per hold, a removed
+/// temporary written again) and `update_apply::held_journal_tests` (the line
+/// a refused removal says).
+#[cfg(windows)]
+mod held_writes {
+    use super::*;
+    use bt_platform::trust_harness::hold_without_delete_sharing;
+
+    use crate::update_apply::{JOURNAL_HELD_WITHIN, mark_writer, write_journal};
+
+    /// A folder of this test's own, empty.
+    fn held_folder(tag: &str) -> PathBuf {
+        let folder = bt_testpath::temp_path(&format!("bt-journal-hold-{tag}"));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        folder
+    }
+
+    /// The temporaries a durable write left in `folder`, by name.
+    fn temporaries_in(folder: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with('.') && name.ends_with(".tmp"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// RED (T-JOURNAL-WRITE-UNDER-HOLD) — **a journal write another program
+    /// holds writes and flushes its temporary once: every refused round finds
+    /// the same one temporary beside the journal, the write lands on the round
+    /// after the hold is let go, and nothing is left beside the journal; a hold
+    /// past the window is given up as before, its temporary removed and the
+    /// journal byte for byte.**
+    ///
+    /// MUTATION: in `write_journal`, ask `install_txn::durable_write` each
+    /// round (the old whole write) — no temporary stands between rounds.
+    #[test]
+    fn a_held_journal_write_flushes_one_temporary_and_lands_when_the_hold_lifts() {
+        let folder = held_folder("journal");
+        let journal = folder.join("journal.json");
+        install_txn::durable_write(&journal, br#"{"phase":"Armed"}"#).unwrap();
+        let next = r#"{"phase":"Moving","note":"移动中 moving"}"#;
+        let (answer, rounds) = on_a_worker({
+            let (folder, journal) = (folder.clone(), journal.clone());
+            move |worker| {
+                let mut held = Some(hold_without_delete_sharing(&journal).unwrap());
+                let mut rounds: Vec<(String, Vec<String>)> = Vec::new();
+                let answer = write_journal(
+                    worker,
+                    &journal,
+                    next.as_bytes(),
+                    JOURNAL_HELD_WITHIN,
+                    &mut |line| {
+                        rounds.push((line.to_owned(), temporaries_in(&folder)));
+                        if rounds.len() == 3 {
+                            held = None;
+                        }
+                    },
+                );
+                drop(held);
+                (answer.map_err(|unwritten| unwritten.said), rounds)
+            }
+        });
+        assert_eq!(answer, Ok(()), "{rounds:?}");
+        assert_eq!(
+            rounds.len(),
+            3,
+            "landed on the round after the third: {rounds:?}"
+        );
+        let first = &rounds[0].1;
+        assert_eq!(first.len(), 1, "one temporary while held: {rounds:?}");
+        for (line, temporaries) in &rounds {
+            assert!(
+                line.starts_with("BT_UPDATE_JOURNAL held by another program for "),
+                "{line}"
+            );
+            assert_eq!(
+                temporaries, first,
+                "the same temporary each round: {rounds:?}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&journal).unwrap(), next);
+        assert_eq!(temporaries_in(&folder), Vec::<String>::new());
+
+        // Held for good, past a short window: given up, as before.
+        let (answer, rounds) = on_a_worker({
+            let (folder, journal) = (folder.clone(), journal.clone());
+            move |worker| {
+                let held = hold_without_delete_sharing(&journal).unwrap();
+                let mut rounds = Vec::new();
+                let answer = write_journal(
+                    worker,
+                    &journal,
+                    b"never landed",
+                    Duration::from_millis(100),
+                    &mut |_| rounds.push(temporaries_in(&folder)),
+                );
+                drop(held);
+                (answer.map_err(|unwritten| unwritten.held), rounds)
+            }
+        });
+        let held = answer.expect_err("a hold past the window is given up");
+        assert!(held.is_some(), "the hold is the refusal kept for the card");
+        assert!(!rounds.is_empty());
+        assert!(
+            rounds.iter().all(|temporaries| temporaries.len() == 1),
+            "{rounds:?}"
+        );
+        assert_eq!(temporaries_in(&folder), Vec::<String>::new(), "removed");
+        assert_eq!(std::fs::read_to_string(&journal).unwrap(), next);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// RED (T-JOURNAL-WRITE-UNDER-HOLD) — **the window's mark, asked again over
+    /// a held mark, renames the one temporary its first ask flushed and lands
+    /// it once the hold is let go; asks dropped unlanded remove their temporary.**
+    ///
+    /// MUTATION: in `mark_writer`, ask `install_txn::durable_write` each time
+    /// (the old whole write) — no temporary stands between the asks.
+    #[test]
+    fn the_window_marks_writer_asked_again_over_a_held_mark_renames_one_temporary() {
+        let folder = held_folder("mark");
+        let mark = folder.join("owner");
+        install_txn::durable_write(&mark, b"1 1").unwrap();
+        let mine = "4242 7 窗口 owner".as_bytes();
+        let mut ask = mark_writer(&mark, mine);
+        let held = hold_without_delete_sharing(&mark).unwrap();
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            assert!(ask().is_err(), "a held mark is refused");
+            seen.push(temporaries_in(&folder));
+        }
+        assert_eq!(seen[0].len(), 1, "{seen:?}");
+        assert_eq!(seen[0], seen[1], "the same temporary: {seen:?}");
+        drop(held);
+        assert!(ask().is_ok());
+        assert_eq!(std::fs::read(&mark).unwrap(), mine);
+        assert_eq!(temporaries_in(&folder), Vec::<String>::new());
+
+        let held = hold_without_delete_sharing(&mark).unwrap();
+        let mut never = mark_writer(&mark, b"5 5");
+        assert!(never().is_err());
+        assert_eq!(temporaries_in(&folder).len(), 1);
+        drop(never);
+        assert_eq!(
+            temporaries_in(&folder),
+            Vec::<String>::new(),
+            "the dropped asks' temporary is removed"
+        );
+        drop(held);
+        assert_eq!(std::fs::read(&mark).unwrap(), mine, "byte for byte");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// RED (T-JOURNAL-WRITE-UNDER-HOLD, round 2) — **a journal write given up
+    /// whose temporary cannot be removed — another program holds the temporary
+    /// too — says so, after the give-up's line, naming the temporary**, and leaves
+    /// the journal byte for byte.
+    ///
+    /// MUTATION: in `write_journal`, drop the line said when `give_up` is
+    /// refused — the last line is the give-up's.
+    #[test]
+    fn a_given_up_journal_write_says_a_temporary_it_could_not_remove() {
+        let folder = held_folder("kept");
+        let journal = folder.join("journal.json");
+        install_txn::durable_write(&journal, br#"{"phase":"Armed"}"#).unwrap();
+        let (said, scanned) = on_a_worker({
+            let (folder, journal) = (folder.clone(), journal.clone());
+            move |worker| {
+                let held = hold_without_delete_sharing(&journal).unwrap();
+                let mut scanned = None;
+                let mut said = Vec::new();
+                let answer = write_journal(
+                    worker,
+                    &journal,
+                    "从未落地 never landed".as_bytes(),
+                    Duration::from_millis(100),
+                    &mut |line| {
+                        said.push(line.to_owned());
+                        if scanned.is_none()
+                            && let Some(name) = temporaries_in(&folder).first()
+                        {
+                            let temporary = folder.join(name);
+                            scanned =
+                                Some((hold_without_delete_sharing(&temporary).unwrap(), temporary));
+                        }
+                    },
+                );
+                assert!(answer.is_err(), "{said:?}");
+                drop(held);
+                (
+                    said,
+                    scanned.map(|(handle, temporary)| {
+                        drop(handle);
+                        temporary
+                    }),
+                )
+            }
+        });
+        let temporary = scanned.expect("a temporary stood while held");
+        let [.., given_up, kept] = said.as_slice() else {
+            panic!("{said:?}");
+        };
+        assert!(given_up.contains("the write is given up"), "{said:?}");
+        assert!(
+            kept.starts_with("BT_UPDATE_JOURNAL the given-up write's temporary was not removed: ")
+                && kept.contains(&temporary.display().to_string()),
+            "{said:?}"
+        );
+        assert!(temporary.exists(), "kept where the line says");
+        assert_eq!(
+            std::fs::read_to_string(&journal).unwrap(),
+            r#"{"phase":"Armed"}"#
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+}
+
 // ── the trial's gaps (U-37, U-38) ───────────────────────────────────────────
 
 /// **D-14's shape, as the clean VM's row W14 (120 s) met it**: the journal

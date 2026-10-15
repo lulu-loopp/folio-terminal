@@ -687,7 +687,8 @@ if ($m) { $m.Version.ToString() } else { '' }; \
 fn run_probe(ctx: &bt_platform::admission::WorkerCtx) -> Option<Probe> {
     let environment = crate::shell_integration::ProbeEnvironment::current(ctx, "PSReadLine probe");
     run_probe_with(&environment, |program, command, patience, environment| {
-        crate::shell_integration::run_powershell_probe(
+        crate::shell_integration::check_powershell(
+            ctx,
             program,
             command,
             None,

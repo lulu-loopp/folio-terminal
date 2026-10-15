@@ -592,7 +592,7 @@ fn record_chords() -> Vec<Chord> {
             chord(name, bytes.replace("\\e", "\x1b").into_bytes(), true)
         })
         .collect::<Vec<_>>();
-    assert_eq!(chords.len(), 155, "every chord the encoder file holds");
+    assert_eq!(chords.len(), 163, "every chord the encoder file holds");
     for (mods, state) in [
         ("A", 2),
         ("SA", 18),
@@ -744,7 +744,7 @@ fn per_chord(probe: &mut Probe, chords: &[Chord], last: &str) -> Vec<String> {
 
 /// Gate 2, **a key-record reader gets every chord the encoder writes as that key, with its
 /// modifiers and its character** — `Enter` with `Control` for Ctrl+Enter, and likewise each of
-/// the 155 — **and gets nothing for the six Escape chords ConPTY swallows.**
+/// the 163 — **and gets nothing for the six Escape chords ConPTY swallows.**
 ///
 /// PowerShell's `[Console]::ReadKey`, as PSReadLine, cmd, .NET and Codex on Windows read. Each
 /// chord is sent as the encoder's record pair, then a separator; the reader prints, per chord,
@@ -942,7 +942,7 @@ fn read_back(chord: &Chord) -> (&'static str, &'static str) {
 /// same for Node. These are those answers, pinned so a change in either is caught — the
 /// translations Windows Terminal's users get from the same records (design note revision (e)).
 /// An empty cell reads nothing.
-const READ_BACK: [(&str, &str, &str); 161] = [
+const READ_BACK: [(&str, &str, &str); 169] = [
     ("S+Enter", "0d", "0d"),
     ("A+Enter", "1b0d", "1b0d"),
     ("SA+Enter", "1b0d", "1b0d"),
@@ -1098,6 +1098,16 @@ const READ_BACK: [(&str, &str, &str); 161] = [
     ("SC+NumpadEnter", "0a", "0a"),
     ("AC+NumpadEnter", "1b0a", "1b0a"),
     ("SAC+NumpadEnter", "1b0a", "1b0a"),
+    // The chords whose legacy bytes ConPTY holds once it has read a record (T-ESC-UNDER-KITTY-
+    // ON-CONPTY): their records reach both byte readers as exactly those legacy bytes.
+    ("-+Escape", "1b", "1b"),
+    ("C+[", "1b", "1b"),
+    ("A+[", "1b5b", "1b5b"),
+    ("A+]", "1b5d", "1b5d"),
+    ("SA+o", "1b4f", "1b4f"),
+    ("SA+p", "1b50", "1b50"),
+    ("SA+x", "1b58", "1b58"),
+    ("SA+6", "1b5e", "1b5e"),
     ("A+Escape", "", ""),
     ("SA+Escape", "", ""),
     ("C+Escape", "", ""),
@@ -1105,3 +1115,242 @@ const READ_BACK: [(&str, &str, &str); 161] = [
     ("AC+Escape", "", ""),
     ("SAC+Escape", "", ""),
 ];
+
+// ── T-ESC-UNDER-KITTY-ON-CONPTY (design note revision (l); issue #42) ─────────────────────────
+//
+// ConPTY's input parser ends every read by deciding what to do with a sequence the read left
+// unfinished. Until it has parsed one win32-input-mode record it flushes a trailing ESC, or ESC
+// and one byte, as Escape or as that key with Alt; from the first record on it keeps them as the
+// start of a sequence split across reads (microsoft/terminal `src/terminal/parser/
+// stateMachine.cpp`, the end of `ProcessString`). Kept bytes reach no program: a following
+// character is read with Alt, a following record drops them. That is why Folio's encoder writes
+// such bytes as the press's record (`bt-app`'s `input::held_by_conpty`); these tests pin the
+// transport fact the encoder's list stands on, for a key-record reader and a VT-input reader.
+
+/// A record whose key event types `§` (virtual key 0, as ConPTY's own events for a character
+/// carry): it marks the end of one input, and drops whatever ConPTY was holding.
+const FLUSH: &[u8] = b"\x1b[0;0;167;1;0;1_\x1b[0;0;167;0;0;1_";
+
+/// Shift+Enter's record pair, an input of its own. It is not the session's first record: the
+/// flush after the first input already is one.
+const SHIFT_ENTER_RECORDS: &[u8] = b"\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_";
+
+/// The second bytes after ESC that ConPTY holds, measured for every byte 0x00–0x7F: ESC, `O`,
+/// `P`, `X`, `^`, `_`, `[`, `]` and DEL. Written here from the measurement, not read from `bt-app`.
+const HELD_AFTER_ESC: [u8; 9] = [0x1B, b'O', b'P', b'X', b'^', b'_', b'[', b']', 0x7F];
+
+/// What one input brought: the reader's lines before the flush's own.
+struct Delivery {
+    name: String,
+    before_flush: Vec<String>,
+}
+
+/// Send each input in a read of its own, then the flush, and collect what the reader printed for
+/// the input — every `BT_E<n>=` line before the flush's. The reader prints one line per key event
+/// (or per read), numbered from 0. Order, not time, decides: an input ConPTY passed on is printed
+/// before the flush; one it held never is, and the flush's own line is exactly `flush_line` —
+/// the flush alone, with nothing held glued to it, so what was held was dropped.
+fn deliveries(
+    probe: &mut Probe,
+    inputs: &[(String, Vec<u8>)],
+    is_flush: fn(&str) -> bool,
+    flush_line: &str,
+) -> Vec<Delivery> {
+    let mut next = 0usize;
+    let mut out = Vec::new();
+    for (name, bytes) in inputs {
+        probe.send(bytes);
+        probe.pty.write(FLUSH).unwrap();
+        let mut before_flush = Vec::new();
+        loop {
+            let line = probe.wait_for(&format!("BT_E{next}="));
+            next += 1;
+            if is_flush(&line) {
+                assert_eq!(
+                    line, flush_line,
+                    "{name}: the flush arrives alone, and whatever was held is dropped"
+                );
+                break;
+            }
+            before_flush.push(line);
+        }
+        out.push(Delivery {
+            name: name.clone(),
+            before_flush,
+        });
+    }
+    out
+}
+
+/// ESC alone before any record; Shift+Enter's records; then ESC alone and ESC with every byte
+/// 0x00–0x7F but ETX (ESC ETX is Ctrl+Alt+C, which a console reader takes as a break), ESC with
+/// `é` and with `中`; then kitty's forms of Esc under flag 1.
+fn escape_inputs() -> Vec<(String, Vec<u8>)> {
+    let mut inputs = vec![
+        ("ESC, before any record".to_owned(), b"\x1b".to_vec()),
+        (
+            "Shift+Enter's records".to_owned(),
+            SHIFT_ENTER_RECORDS.to_vec(),
+        ),
+        ("ESC".to_owned(), b"\x1b".to_vec()),
+    ];
+    for byte in (0x00u8..=0x7F).filter(|byte| *byte != 0x03) {
+        inputs.push((format!("ESC {byte:02x}"), vec![0x1B, byte]));
+    }
+    for text in ["\x1b\u{e9}", "\x1b\u{4e2d}"] {
+        inputs.push((format!("{text:?}"), text.as_bytes().to_vec()));
+    }
+    for kitty in ["\x1b[27u", "\x1b[27;2u", "\x1b[27;3u", "\x1b[27;5u"] {
+        inputs.push((format!("{kitty:?}"), kitty.as_bytes().to_vec()));
+    }
+    inputs
+}
+
+/// Whether input `index` of [`escape_inputs`] is one ConPTY holds: after the first record, ESC
+/// alone or ESC and a byte of [`HELD_AFTER_ESC`].
+fn held(index: usize, bytes: &[u8]) -> bool {
+    index > 1
+        && match bytes {
+            [0x1B] => true,
+            [0x1B, second] => HELD_AFTER_ESC.contains(second),
+            _ => false,
+        }
+}
+
+/// **Once ConPTY has parsed a record it holds exactly a lone ESC and ESC with ESC, `O`, `P`, `X`,
+/// `^`, `_`, `[`, `]` or DEL, and a key-record reader never gets them; before that, and for every
+/// other ESC pair, it gets one key event at once. Under kitty's flag 1, Esc's forms reach it as
+/// characters with no virtual key, never as Escape.**
+///
+/// PowerShell's `[Console]::ReadKey`, as Codex, PSReadLine, cmd and .NET read. Issue #42's lost Esc
+/// is the first held row: Codex asks for no protocol, so its Esc was a lone ESC, and Codex's own
+/// Shift+Tab, Shift+Enter and Ctrl+Enter are records. The flag-1 rows are why the encoder does not
+/// trade a program's `CSI 27u` for a record: a record reader cannot read it, and Codex on Windows
+/// never asks for it, while a VT reader (the next test) reads it whole.
+///
+/// MUTATION: take `]` out of [`HELD_AFTER_ESC`] (ESC `]` is expected at once and never arrives),
+/// or expect `Escape` for `CSI 27u`.
+#[test]
+fn conpty_holds_exactly_these_escapes_once_it_has_seen_a_record() {
+    const SCRIPT: &str = r#"
+Write-Output ('BT_E' + 'READY')
+$n = 0
+while ($true) {
+  $k = [Console]::ReadKey($true)
+  Write-Output ('BT_E' + $n + '=' + ('{0}/{1}/{2:x2}' -f [int]$k.Key, [int]$k.Modifiers, [int]$k.KeyChar))
+  $n++
+}
+"#;
+    let inputs = escape_inputs();
+    let mut probe = Probe::spawn_with_rows(powershell(SCRIPT), CHORD_ROWS);
+    probe.wait_for("BT_EREADY");
+    let read = deliveries(&mut probe, &inputs, |line| line.ends_with("/a7"), "0/0/a7");
+    for delivery in &read {
+        eprintln!("BT_ESC_HELD {} {:?}", delivery.name, delivery.before_flush);
+    }
+    for (index, ((_, bytes), delivery)) in inputs.iter().zip(&read).enumerate() {
+        let name = &delivery.name;
+        let events = &delivery.before_flush;
+        if index == 1 {
+            assert_eq!(events, &["13/2/0d"], "{name}: Shift+Enter");
+        } else if held(index, bytes) {
+            assert!(
+                events.is_empty(),
+                "{name}: held and dropped, read {events:?}"
+            );
+        } else if bytes.starts_with(b"\x1b[") {
+            assert_eq!(
+                events.len(),
+                bytes.len(),
+                "{name}: one character per byte, read {events:?}"
+            );
+            for (event, byte) in events.iter().zip(bytes) {
+                assert_eq!(
+                    event,
+                    &format!("0/0/{byte:02x}"),
+                    "{name}: a character with no virtual key, never Escape"
+                );
+            }
+        } else {
+            assert_eq!(
+                events.len(),
+                1,
+                "{name}: one key event at once, read {events:?}"
+            );
+        }
+    }
+    assert_eq!(
+        read[0].before_flush,
+        ["27/0/1b"],
+        "before any record a lone ESC is Escape"
+    );
+    probe.finish();
+}
+
+/// **A reader of VT input — WSL's relay — loses the same escapes, and under flag 1 reads Esc's
+/// kitty forms as exactly their bytes, in one read.**
+///
+/// The reader of case 3, one line per `ReadConsoleW`, each UTF-16 unit as four hex digits. What
+/// ConPTY holds is lost to a WSL program as it is to Codex; what it passes on arrives as its bytes
+/// in one read. Under flag 1, `CSI 27u` and its modified forms arrive whole, which is what the
+/// encoder keeps for a program that asked.
+///
+/// MUTATION: take `O` out of [`HELD_AFTER_ESC`], or expect `CSI 27u` split across two reads.
+#[test]
+fn a_vt_input_reader_loses_the_same_escapes_and_reads_csi_27u_whole() {
+    const SCRIPT: &str = r#"
+$sig = @'
+[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int which);
+[DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr handle, out uint mode);
+[DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr handle, uint mode);
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern bool ReadConsoleW(IntPtr handle, [Out] char[] buffer, uint wanted, out uint read, IntPtr control);
+'@
+Add-Type -MemberDefinition $sig -Name Console -Namespace FolioProbe | Out-Null
+$h = [FolioProbe.Console]::GetStdHandle(-10)
+$m = [uint32]0
+[void][FolioProbe.Console]::GetConsoleMode($h, [ref]$m)
+$vt = ($m -bor 0x200) -band (-bnot 0x7)
+if (-not [FolioProbe.Console]::SetConsoleMode($h, $vt)) { Write-Output ('BT_E' + 'NOMODE') }
+Write-Output ('BT_E' + 'READY')
+$buffer = New-Object char[] 256
+$c = 0
+while ($true) {
+  $n = [uint32]0
+  if (-not [FolioProbe.Console]::ReadConsoleW($h, $buffer, 256, [ref]$n, [IntPtr]::Zero)) { break }
+  if ($n -gt 0) { Write-Output ('BT_E' + $c + '=' + (($buffer[0..([int]$n - 1)] | ForEach-Object { '{0:x4}' -f [int]$_ }) -join '')); $c++ }
+}
+"#;
+    let inputs = escape_inputs();
+    let mut probe = Probe::spawn_with_rows(powershell(SCRIPT), CHORD_ROWS);
+    probe.wait_for("BT_EREADY");
+    assert!(
+        probe.value_after("BT_ENOMODE").is_none(),
+        "the console must accept ENABLE_VIRTUAL_TERMINAL_INPUT for this reader to be one"
+    );
+    let read = deliveries(&mut probe, &inputs, |line| line.ends_with("00a7"), "00a7");
+    for delivery in &read {
+        eprintln!(
+            "BT_ESC_HELD_VT {} {:?}",
+            delivery.name, delivery.before_flush
+        );
+    }
+    for (index, ((_, bytes), delivery)) in inputs.iter().zip(&read).enumerate() {
+        let name = &delivery.name;
+        let reads = &delivery.before_flush;
+        if index == 1 {
+            // Shift+Enter's records: what ConPTY encodes for them is `READ_BACK`'s.
+            continue;
+        }
+        if held(index, bytes) {
+            assert!(reads.is_empty(), "{name}: held and dropped, read {reads:?}");
+        } else {
+            let units = String::from_utf8(bytes.clone())
+                .expect("UTF-8")
+                .encode_utf16()
+                .map(|unit| format!("{unit:04x}"))
+                .collect::<String>();
+            assert_eq!(reads, &[units], "{name}: its bytes, in one read");
+        }
+    }
+    probe.finish();
+}

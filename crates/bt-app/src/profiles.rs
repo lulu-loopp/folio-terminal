@@ -17180,7 +17180,7 @@ mod tests {
         assert_eq!(
             launch_args(&gitbash),
             &["--login", "-i"],
-            "without --login this is a bash that cannot find git — the row's \
+            "without --login this bash never runs `/etc/profile` — the row's \
              `login` since 0.4.6 ticket 74, and the same command line"
         );
     }

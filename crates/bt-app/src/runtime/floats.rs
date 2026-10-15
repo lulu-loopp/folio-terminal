@@ -2776,6 +2776,7 @@ impl<B: Backend> Runtime<'_, B> {
                 window: self.window_id(),
                 host: git::GitHost::Float { id, tab },
                 asker,
+                buffer: None,
                 question,
             })
         {
@@ -2803,6 +2804,7 @@ impl<B: Backend> Runtime<'_, B> {
             window: self.window_id(),
             host: git::GitHost::Float { id, tab },
             asker,
+            buffer: None,
             question,
         }) {
             self.disable_git_worker();

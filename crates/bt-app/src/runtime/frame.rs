@@ -11,8 +11,8 @@ use crate::{
     foreground_program_deadline, git, hang_watch, hyperlink_activation, ime_outbound,
     mark_leaf_painted, math_copy_window, native_window, present_diagnostics, present_gate, preview,
     pty_drain_says_nothing_new, pty_frame_is_unchanged, sample_window_place, seats, settings,
-    settling, startup_poll_delay, take_math_worker_notice, trace_sink, trace_unchanged_present,
-    update, webhost,
+    settling, startup_poll_delay, take_math_worker_notice, toast, trace_sink,
+    trace_unchanged_present, update, webhost,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -1854,7 +1854,17 @@ impl<B: Backend> Runtime<'_, B> {
             // and since T-STATION-SPLIT that name covers the file it writes and
             // nothing else: the clock run below says its own name on the very
             // next line.
-            self.app.session_store.flush_if_due(now);
+            // **A session that cannot be saved is said once per streak** (`persist`'s
+            // `REFUSALS_BEFORE_TOLD`; `docs/M2-persistence-schema-v1.md` §5.3), on the card the
+            // start-up announcement uses for it.
+            if let Some(fault) = self.app.session_store.autosave(now) {
+                self.toast(
+                    toast::ToastKind::Error,
+                    toast::ToastAnchor::Window,
+                    None,
+                    fault,
+                )?;
+            }
         }
         // **The one rule, in the one place it can be kept.** Whichever rung holds
         // the keyboard publishes its caret here, at the tail of every pass —

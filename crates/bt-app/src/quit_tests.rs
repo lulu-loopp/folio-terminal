@@ -188,7 +188,7 @@ fn drive(
             QuitStep::Photograph => quit.photographed(),
             QuitStep::Write => {
                 session
-                    .hand_over_final(now)
+                    .hand_over_final()
                     .expect("the session document is handed over");
                 disk.look();
                 quit.written(WriteVerdict::Landed)
@@ -1548,7 +1548,7 @@ fn a_trial_committed_during_the_documents_phase_does_not_queue_its_release_until
     );
     assert_eq!(quit.photographed(), QuitStep::Write);
     run.session
-        .hand_over_final(start)
+        .hand_over_final()
         .expect("the quit's final session write");
     assert_eq!(quit.written(WriteVerdict::Landed), QuitStep::Retire);
     run.settle(&mut quit);
