@@ -567,9 +567,10 @@ fn laid_out(folio: &mut HeadlessFolio, surface: PreviewSurface) -> usize {
 /// it, so the frame that follows, asked nothing new, re-flows nothing.
 ///
 /// Driven as one parse — the buffer's bytes moved, then `Runtime::rebuild_preview_document` once,
-/// then the body's repaint and a frame — because a typed key reveals its caret, and the reveal's
-/// own passes would put a missing span back before anything could look (one wasted re-flow per
-/// keystroke, which is the defect).
+/// then the body's repaint and a frame (the page's wrap the same allocation, its block
+/// measurements neither hit nor missed again) — because a typed key reveals its caret, and the
+/// reveal's own passes would put a missing span back before anything could look (one wasted
+/// re-flow per keystroke, which is the defect).
 ///
 /// MUTATIONS (each in `Runtime::rebuild_preview_document`): write `key_parsed_source(None)` — the
 /// key says no span where the document drew one; hand `markdown_source_blocks` `None` for the
@@ -607,6 +608,10 @@ fn an_edit_draws_and_keys_its_block_as_source_in_its_one_draw() {
         "the edit's parse writes the span it drew into the document's key"
     );
     let parsed = laid_out(&mut folio, surface);
+    let measured = (
+        folio.window.markdown_intrinsics.hits,
+        folio.window.markdown_intrinsics.misses,
+    );
     folio
         .runtime()
         .repaint_preview()
@@ -616,6 +621,14 @@ fn an_edit_draws_and_keys_its_block_as_source_in_its_one_draw() {
         laid_out(&mut folio, surface),
         parsed,
         "the frame after the parse re-flows nothing it laid out"
+    );
+    assert_eq!(
+        (
+            folio.window.markdown_intrinsics.hits,
+            folio.window.markdown_intrinsics.misses,
+        ),
+        measured,
+        "and measures no block again"
     );
     let drawn = drawn_text(&folio);
     assert!(
