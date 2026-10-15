@@ -743,7 +743,10 @@ enum AppEvent {
     /// **The storage worker answered a hand-editable document's request**
     /// (T-STORAGE-WORKER-REQUEST, `document_request`): a conditional write or a
     /// re-read of `settings.json`, `keybindings.json`, `profiles.json` or
-    /// `pins.json`.
+    /// `pins.json` — **or the session's own** (T-SESSION-RECEIPTS-ON-THE-WAKE):
+    /// a write of `session.json` (its receipt, taken by
+    /// `SessionStore::take_receipts`) or an update's hand-over at quit (read by
+    /// `FolioApp::hand_the_update_over` on the turn this brings).
     ///
     /// Carries nothing: each answer is already in the asking store's own
     /// channel when this is sent — the answer first, the wake after — and the
@@ -67101,7 +67104,16 @@ impl FolioApp {
     /// opening order — the one that turns the application's clocks, whose cards
     /// the storage pass's are. With no window standing the answers wait in their
     /// channels for the next wake.
+    ///
+    /// **The session's receipts first, and always** (T-SESSION-RECEIPTS-ON-THE-WAKE): the
+    /// session store is the application's, not a window's, so its receipts are taken whether
+    /// or not a window stands or a quit holds the worker; an update's quit then reads the one it
+    /// waits for, and the hand-over's answer, on the turn this wake brings
+    /// (`Self::settle_quit`).
     fn take_document_answers(&mut self) -> Result<()> {
+        if let Some(app) = self.app.as_mut() {
+            app.session_store.take_receipts(Instant::now());
+        }
         self.take_preview_save_answers()?;
         // **Not while a quit holds the storage worker** (T-QUIT-DOCUMENTS): its documents and
         // recovery phases take the answers themselves, on the turn this wake brings, and merge
@@ -68045,7 +68057,8 @@ impl FolioApp {
                         // **An update's quit does not stand still for its write** (0.4.6 U-21,
                         // §C.3): the photograph goes to the writer as a named generation, the
                         // loop keeps turning, and the receipt for that generation is looked for
-                        // on each turn under `quit::UPDATE_RECEIPT_DEADLINE` — a clock, not a
+                        // on the turn the writer's wake brings (`AppEvent::DocumentsAnswered`),
+                        // under `quit::UPDATE_RECEIPT_DEADLINE` — a bound read on the turn, not a
                         // wait. Only a verdict that leaves begins the way out.
                         let Some(landed) = self.update_session_answer(Instant::now()) else {
                             return Ok(());
@@ -68746,7 +68759,7 @@ impl FolioApp {
                 .app
                 .as_ref()
                 .and_then(|app| app.quit.as_ref())
-                .and_then(|quit| quit.wake_at(now));
+                .and_then(quit::Quit::deadline);
             event_loop.set_control_flow(
                 earliest_deadline([waking, bound])
                     .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
@@ -68891,14 +68904,14 @@ impl FolioApp {
                 }
             }
         }
-        // **And the quit's, while it waits for an answer across turns** (0.4.6 U-21): an update's
-        // quit looks for its session's receipt with the windows still up, and neither the writer
-        // nor anything else wakes the loop when it comes.
+        // **And the quit's bound, while it waits for an answer across turns** (0.4.6 U-21): an
+        // update's quit looks for its session's receipt with the windows still up. The answer
+        // itself wakes the loop (`AppEvent::DocumentsAnswered`); the clock is only the bound.
         let quit_wake = self
             .app
             .as_ref()
             .and_then(|app| app.quit.as_ref())
-            .and_then(|quit| quit.wake_at(now));
+            .and_then(quit::Quit::deadline);
         let wake_deadline = earliest_deadline([wake_deadline, quit_wake]);
         event_loop
             .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
