@@ -4,7 +4,7 @@
 
 The bytes a key sends to the program in a pane, in each mode a program can ask for: nothing asked (*legacy*), the kitty keyboard protocol's first tier (*kitty flag 1*), or xterm's modifyOtherKeys (*1* or *2*). When a program asks for both, kitty wins. A program that never asks receives the legacy column, which is what Folio sent before either protocol existed here.
 
-On Windows, a program that never asks reads the *Windows records* column instead, while ConPTY has win32-input-mode on (it turns it on for every session): the chords whose legacy bytes cannot tell them apart — a modified Enter, Tab, Backspace or Space, Shift+Escape, and Ctrl with a key that has no control code or with Ctrl+Alt — go as the key records `CSI Vk;Sc;Uc;Kd;Cs;Rc _` (down, then up), which ConPTY turns into those exact key events. Every other chord sends its legacy bytes. A program that asks for kitty or modifyOtherKeys gets that protocol instead.
+On Windows, a program that never asks reads the *Windows records* column instead, while ConPTY has win32-input-mode on (it turns it on for every session): the chords whose legacy bytes cannot tell them apart — a modified Enter, Tab, Backspace or Space, Shift+Escape, and Ctrl with a key that has no control code or with Ctrl+Alt — go as the key records `CSI Vk;Sc;Uc;Kd;Cs;Rc _` (down, then up), which ConPTY turns into those exact key events. So do plain Escape, Ctrl+[ and the Alt chords that send ESC with `[`, `]`, `O`, `P`, `X`, `^` or `_`: once ConPTY has read one key record it holds those bytes and never passes them on. Every other chord sends its legacy bytes. A program that asks for kitty or modifyOtherKeys gets that protocol instead; with modifyOtherKeys, the bytes ConPTY would hold are still written as records on Windows.
 
 `CSI` is `ESC [`. `—` sends nothing. *(table)* is a chord Folio's shortcut table claims on Windows, so no program receives it. *(system)* is taken by Windows first; *(n/a)* never arrives on Windows and is encoded for macOS. Chords are as a US layout produces them. The design is `docs/plans/design/keyboard-protocol-2026-09-29.md`.
 
@@ -34,7 +34,7 @@ On Windows, a program that never asks reads the *Windows records* column instead
 | Backspace | standard | SC | off | `\x7f` | `CSI 127;6u` | `\x7f` | `CSI 27;6;127~` | `CSI 8;14;0;1;24;1_CSI 8;14;0;0;24;1_` |
 | Backspace | standard | AC | off | `\e\x7f` | `CSI 127;7u` | `\e\x7f` | `CSI 27;7;127~` | `CSI 8;14;0;1;10;1_CSI 8;14;0;0;10;1_` |
 | Backspace | standard | SAC | off | `\e\x7f` | `CSI 127;8u` | `\e\x7f` | `CSI 27;8;127~` | `CSI 8;14;0;1;26;1_CSI 8;14;0;0;26;1_` |
-| Escape | standard | - | off | `\e` | `CSI 27u` | `\e` | `\e` | `\e` |
+| Escape | standard | - | off | `\e` | `CSI 27u` | `\e` | `\e` | `CSI 27;1;27;1;0;1_CSI 27;1;27;0;0;1_` |
 | Escape | standard | S | off | `\e` | `CSI 27;2u` | `\e` | `CSI 27;2;27~` | `CSI 27;1;27;1;16;1_CSI 27;1;27;0;16;1_` |
 | Escape | standard | A | off | `\e` | `CSI 27;3u` | `CSI 27;3;27~` | `CSI 27;3;27~` | `\e` |
 | Escape | standard | SA | off | `\e` | `CSI 27;4u` | `CSI 27;4;27~` | `CSI 27;4;27~` | `\e` |
@@ -76,9 +76,9 @@ On Windows, a program that never asks reads the *Windows records* column instead
 | m | standard | SAC | off | — | `CSI 109;8u` | `CSI 27;8;77~` | `CSI 27;8;77~` | `CSI 77;50;0;1;26;1_CSI 77;50;0;0;26;1_` |
 | [ | standard | - | off | `[` | `[` | `[` | `[` | `[` |
 | [ | standard | S | off | `{` | `{` | `{` | `CSI 27;2;123~` | `{` |
-| [ | standard | A | off | `\e[` | `CSI 91;3u` | `CSI 27;3;91~` | `CSI 27;3;91~` | `\e[` |
+| [ | standard | A | off | `\e[` | `CSI 91;3u` | `CSI 27;3;91~` | `CSI 27;3;91~` | `CSI 219;26;91;1;2;1_CSI 219;26;91;0;2;1_` |
 | [ | standard | SA | off | `\e{` | `CSI 91;4u` | `CSI 27;4;123~` | `CSI 27;4;123~` | `\e{` |
-| [ | standard | C | off | `\e` | `CSI 91;5u` | `\e` | `CSI 27;5;91~` | `\e` |
+| [ | standard | C | off | `\e` | `CSI 91;5u` | `\e` | `CSI 27;5;91~` | `CSI 219;26;27;1;8;1_CSI 219;26;27;0;8;1_` |
 | [ | standard | SC | off | — | `CSI 91;6u` | — | `CSI 27;6;123~` | `CSI 219;26;0;1;24;1_CSI 219;26;0;0;24;1_` |
 | [ | standard | AC | off | — | `CSI 91;7u` | `CSI 27;7;91~` | `CSI 27;7;91~` | `CSI 219;26;0;1;10;1_CSI 219;26;0;0;10;1_` |
 | [ | standard | SAC | off | — | `CSI 91;8u` | `CSI 27;8;123~` | `CSI 27;8;123~` | `CSI 219;26;0;1;26;1_CSI 219;26;0;0;26;1_` |
