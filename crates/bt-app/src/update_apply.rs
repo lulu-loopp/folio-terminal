@@ -320,8 +320,20 @@ pub(crate) fn write_journal(
         },
         say,
     );
+    given_up_said(written, || write.give_up(), say)
+}
+
+/// **A journal write's end**: when it did not land, the write is given up
+/// (`give_up`: its kept temporary removed), and a removal refused is said in a
+/// line of its own, after what the rounds said; `written` is the answer either
+/// way.
+fn given_up_said(
+    written: Result<(), Unwritten>,
+    give_up: impl FnOnce() -> Result<(), install_txn::Failure>,
+    say: &mut dyn FnMut(&str),
+) -> Result<(), Unwritten> {
     if written.is_err()
-        && let Err(kept) = write.give_up()
+        && let Err(kept) = give_up()
     {
         say(&format!(
             "BT_UPDATE_JOURNAL the given-up write's temporary was not removed: {kept}"
@@ -3606,6 +3618,72 @@ mod held_journal_tests {
         );
         let refused = answer.expect_err("refused");
         assert_eq!((asks, said.len(), refused.held), (1, 0, None));
+    }
+
+    /// RED (T-JOURNAL-WRITE-UNDER-HOLD, round 3) — **a write given up whose
+    /// kept temporary cannot be removed says so, naming the temporary, in a
+    /// line of its own; a landed write asks no removal, and a removal done says
+    /// nothing** — on every platform (the real hold this happens under is
+    /// Windows', pinned beside it in `update_apply_windows::tests::held_writes`).
+    ///
+    /// MUTATION: in `given_up_said`, drop the line said when `give_up` is
+    /// refused — nothing is said.
+    #[test]
+    fn a_refused_removal_of_the_given_up_temporary_is_said() {
+        let temporary = PathBuf::from("H").join(".journal.json.4242.0.tmp");
+        let unwritten = || Unwritten {
+            said: "install_txn rename H\\journal.json: 拒绝访问。 (os error 5)".to_owned(),
+            held: Some("拒绝访问。 (os error 5)".to_owned()),
+        };
+        let mut said = Vec::new();
+        let answer = given_up_said(
+            Err(unwritten()),
+            || {
+                Err(install_txn::Failure {
+                    stage: install_txn::Stage::Remove,
+                    path: temporary.clone(),
+                    error: io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "另一个程序正在使用此文件 held by a scanner",
+                    ),
+                })
+            },
+            &mut |line| said.push(line.to_owned()),
+        );
+        assert!(
+            answer.unwrap_err().held.is_some(),
+            "the answer is the write's"
+        );
+        let [line] = said.as_slice() else {
+            panic!("one line: {said:?}");
+        };
+        assert!(
+            line.starts_with("BT_UPDATE_JOURNAL the given-up write's temporary was not removed: ")
+                && line.contains(&temporary.display().to_string())
+                && line.contains("held by a scanner"),
+            "{line}"
+        );
+
+        let mut asked = false;
+        let mut said = Vec::new();
+        assert!(
+            given_up_said(
+                Ok(()),
+                || {
+                    asked = true;
+                    Ok(())
+                },
+                &mut |line| said.push(line.to_owned())
+            )
+            .is_ok()
+        );
+        assert!(!asked && said.is_empty(), "a landed write asks no removal");
+        assert!(
+            given_up_said(Err(unwritten()), || Ok(()), &mut |line| said
+                .push(line.to_owned()))
+            .is_err()
+        );
+        assert!(said.is_empty(), "a removal done says nothing: {said:?}");
     }
 }
 

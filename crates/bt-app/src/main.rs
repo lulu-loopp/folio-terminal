@@ -77532,7 +77532,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 27] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 28] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -77584,6 +77584,9 @@ mod platform_gate_tests {
         "tests.rs",
         // Native junction and sharing-mode fixtures, never product platform policy.
         "uninstall_tests.rs",
+        // Only the held-journal fixtures: a hold that refuses a replacing rename is a
+        // Windows fact; their platform-free halves run beside the door everywhere.
+        "update_apply_windows_tests.rs",
         // Only the symlinked-log regression fixture; the recovery road is portable.
         "update_recover.rs",
         // Only the real detached-handoff regression fixture; the handoff API is portable.

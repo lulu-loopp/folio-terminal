@@ -3403,3 +3403,9 @@ uninstall removes it whole.
 
 Pinned by `bt_platform::install_txn::tests::a_temporary_removed_between_asks_is_written_again_and_lands` and
 `update_apply_windows::tests::a_given_up_journal_write_says_a_temporary_it_could_not_remove`.
+
+**Round 3 (2026-10-14).** The tests that make a real hold are Windows-only,
+`update_apply_windows::tests::held_writes` (`#[cfg(windows)]`: on macOS a rename replaces an open file, so no
+hold can be made); the line a refused removal says is pinned on every platform by
+`update_apply::held_journal_tests::a_refused_removal_of_the_given_up_temporary_is_said`, and the door's own facts
+by `bt_platform::install_txn::tests` as above.
