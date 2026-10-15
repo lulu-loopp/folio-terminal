@@ -5542,6 +5542,7 @@ pub(crate) mod tests {
         answer
             .send(refused(1))
             .expect("the store holds its receipts");
+        store.take_receipts(); // the turn the receipt's wake brings
         for period in 2..10 {
             store.flush_if_due(changed + SESSION_DEBOUNCE * period);
         }
@@ -5575,6 +5576,7 @@ pub(crate) mod tests {
         answer
             .send(refused(1))
             .expect("the store holds its receipts");
+        store.take_receipts(); // the turn the receipt's wake brings
         store.flush_if_due(start + SESSION_DEBOUNCE * 2);
         assert_eq!(documents_handed_over(&jobs), Vec::<u64>::new());
 
@@ -5601,6 +5603,7 @@ pub(crate) mod tests {
         answer
             .send(refused(2))
             .expect("the store holds its receipts");
+        store.take_receipts(); // the turn the receipt's wake brings
         store.flush_if_due(again + SESSION_DEBOUNCE * 2);
         assert_eq!(
             documents_handed_over(&jobs),
@@ -5625,6 +5628,7 @@ pub(crate) mod tests {
         answer
             .send(refused(1))
             .expect("the store holds its receipts");
+        store.take_receipts(); // the turn the receipt's wake brings
         store.flush_if_due(start + SESSION_DEBOUNCE * 4);
         assert_eq!(documents_handed_over(&jobs), vec![1]);
 
@@ -5646,6 +5650,7 @@ pub(crate) mod tests {
                 result: Ok(()),
             })
             .expect("the store holds its receipts");
+        store.take_receipts(); // the turn the receipt's wake brings
         store.flush_if_due(start + SESSION_DEBOUNCE * 5);
         store.hear_the_storage_pass();
         assert_eq!(
@@ -5734,6 +5739,7 @@ pub(crate) mod tests {
             answer
                 .send(SessionWriteReceipt { generation, result })
                 .expect("the store holds its receipts");
+            store.take_receipts(); // the turn the receipt's wake brings
             now += SESSION_DEBOUNCE;
             store.autosave(now)
         };
@@ -5788,6 +5794,7 @@ pub(crate) mod tests {
         answer
             .send(refused(1))
             .expect("the store holds its receipts");
+        store.take_receipts(); // the turn the receipt's wake brings
         store.flush_if_due(start + SESSION_DEBOUNCE * 2);
         assert_eq!(documents_handed_over(&jobs), vec![1]);
         assert!(store.owes_a_write(), "owed after the refusal");
@@ -5939,6 +5946,7 @@ pub(crate) mod tests {
             answer
                 .send(refused(generation))
                 .expect("the store holds its receipts");
+            store.take_receipts(); // the turn the receipt's wake brings
             now += SESSION_DEBOUNCE;
             assert_eq!(store.autosave(now), None, "not yet");
         }
