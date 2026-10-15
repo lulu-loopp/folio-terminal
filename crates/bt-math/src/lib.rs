@@ -1562,7 +1562,8 @@ mod tests {
             );
             assert!(
                 deepest >= 60,
-                "{name}: the limit must admit a formula deep enough to be worth drawing, not                  {deepest}"
+                "{name}: the limit must admit a formula deep enough to be worth drawing, not \
+                 {deepest}"
             );
             // The deepest one that also fits the source budget, so `render` can be asked at all.
             let mut drawable = deepest;
@@ -1581,7 +1582,8 @@ mod tests {
             let converted = convert_math(&source);
             assert!(
                 converted.is_ok(),
-                "{name}: {drawable} levels must convert, not merely escape the depth guard:                  {converted:?}"
+                "{name}: {drawable} levels must convert, not merely escape the depth guard: \
+                 {converted:?}"
             );
             let (outcome, refused) = std::thread::Builder::new()
                 .stack_size(MATH_WORKER_STACK_BYTES / MATH_STACK_HEADROOM)
