@@ -195,3 +195,65 @@ where
 
 // PLANTED: a generic parameter's default on a type that holds no backend.
 pub struct Defaulted<T = Runtime<'static>>(T);
+
+// PLANTED: a `use` renaming a holder, and a function written through the new name.
+use crate::Runtime as Rt;
+
+fn through_a_renamed_holder(_runtime: Rt<'_>) {}
+
+// PLANTED: a `use` in a body renaming a holder.
+fn renames_a_holder_inside() {
+    use crate::Shell as Sh;
+    let _: Option<Sh> = None;
+}
+
+// PLANTED: a module-level type alias of the native backend, and one whose generic default is it.
+type NativeBackend = crate::window_seam::Native;
+type Windowed<W = Native> = Option<W>;
+
+// PLANTED (with `generic_builds` above): a generic trait impl holding a method of the native
+// block's name; a path finds the inherent method first, so `Runtime::create()` in a generic scope
+// is still the native one.
+pub trait Creates {
+    fn create();
+}
+
+impl<B: Backend> Creates for Runtime<'_, B> {
+    fn create() {}
+}
+
+/// Passes: a trait's own backend parameter is in scope in its method's default body.
+pub trait Hosts<B: Backend> {
+    fn host(runtime: &Runtime<'_, B>) {
+        let _ = runtime;
+    }
+}
+
+/// Passes: a backend trait's `Self` is in scope in its method's default body.
+pub trait SelfHosted: Backend {
+    fn hosted(_runtime: &Runtime<'_, Self>) {}
+}
+
+// PLANTED: a door of the seam implemented inside a function's body.
+fn hides_a_door() {
+    struct Hidden;
+    impl WindowHost for Hidden {
+        fn request_redraw(&self) {}
+    }
+}
+
+// PLANTED: a door of the seam, renamed in a body and implemented there.
+fn hides_a_renamed_door() {
+    use crate::window_seam::WindowHost as Door;
+    struct Hidden;
+    impl Door for Hidden {
+        fn request_redraw(&self) {}
+    }
+}
+
+// PLANTED: a native block of a holder written inside a function's body (a mention of the holder).
+fn hides_a_native_block() {
+    impl Runtime<'_, Native> {
+        fn hidden() {}
+    }
+}

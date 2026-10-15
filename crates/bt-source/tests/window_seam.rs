@@ -186,6 +186,7 @@ fn seam_name() -> &'static str {
 struct Reading<'a> {
     holders: BTreeMap<String, usize>,
     natives: BTreeSet<String>,
+    seam_traits: BTreeSet<String>,
     native_only: BTreeMap<String, BTreeSet<String>>,
     resolver: &'a TraitResolver<'a>,
     package: &'a str,
@@ -351,12 +352,63 @@ impl<'ast> Visit<'ast> for NativeMentions<'_> {
         self.generic = outer;
     }
 
-    fn visit_use_rename(&mut self, node: &'ast syn::UseRename) {
-        let name = node.ident.to_string();
-        if self.reading.natives.contains(&name) || name == seam_name() {
-            self.found.insert(name);
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        self.renames(&node.tree, &mut Vec::new());
+    }
+}
+
+impl NativeMentions<'_> {
+    /// **A `use` in a body that renames** a holder, the native backend, the seam module, or
+    /// anything brought from the seam: the body names it (`Runtime` for a holder, `Native` for
+    /// the native backend, `WindowHost (renamed from the seam)` for one of the seam's items), so
+    /// the item holding the body is refused. A module-level `use` is judged by the `use` pass.
+    fn renames(&mut self, tree: &syn::UseTree, path: &mut Vec<String>) {
+        match tree {
+            syn::UseTree::Path(step) => {
+                path.push(step.ident.to_string());
+                self.renames(&step.tree, path);
+                path.pop();
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    self.renames(item, path);
+                }
+            }
+            syn::UseTree::Rename(rename) => {
+                let name = rename.ident.to_string();
+                if name == rename.rename.to_string() {
+                    return;
+                }
+                if self.reading.holders.contains_key(&name)
+                    || self.reading.natives.contains(&name)
+                    || name == seam_name()
+                {
+                    self.found.insert(name);
+                } else if path.iter().any(|step| step == seam_name()) {
+                    self.found.insert(format!("{name} (renamed from the seam)"));
+                }
+            }
+            syn::UseTree::Name(_) | syn::UseTree::Glob(_) => {}
         }
-        syn::visit::visit_use_rename(self, node);
+    }
+}
+
+/// **The impl blocks written inside a function's body**, each as its trait's path (when it has
+/// one) and its self type: they are no impl of the index, so the guard reads them here.
+#[derive(Default)]
+struct NestedImpls(Vec<(Option<syn::Path>, String)>);
+
+impl<'ast> Visit<'ast> for NestedImpls {
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        let self_type = match &*node.self_ty {
+            syn::Type::Path(path) => segments(&path.path).join("::"),
+            _ => String::from("a type that is not a path"),
+        };
+        self.0.push((
+            node.trait_.as_ref().map(|(_, path, _)| path.clone()),
+            self_type,
+        ));
+        syn::visit::visit_item_impl(self, node);
     }
 }
 
@@ -531,9 +583,14 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
          has no name to read"
     );
     // The methods a holder has only in a block written for the native backend: a path call to
-    // one of them is native in any scope, because inference can pick nothing else for it.
+    // one of them is native in any scope, because inference can pick nothing else for it. A path
+    // finds an inherent method before a trait's, so a native inherent method is native-only
+    // unless a generic *inherent* block has it too; a native trait impl's method, unless any
+    // generic block has it.
     let mut native_methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut native_trait_methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut generic_methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut generic_trait_methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for block in index.impls() {
         if !in_the_product(index, block.whole()) {
             continue;
@@ -556,26 +613,49 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
             syn::ImplItem::Fn(method) => Some(method.sig.ident.to_string()),
             _ => None,
         });
-        if written_for_a_parameter(last, holders[&holder], &generic) {
-            generic_methods.entry(holder).or_default().extend(methods);
-        } else {
-            native_methods.entry(holder).or_default().extend(methods);
-        }
+        let target = match (
+            written_for_a_parameter(last, holders[&holder], &generic),
+            whole.trait_.is_some(),
+        ) {
+            (true, false) => &mut generic_methods,
+            (true, true) => &mut generic_trait_methods,
+            (false, false) => &mut native_methods,
+            (false, true) => &mut native_trait_methods,
+        };
+        target.entry(holder).or_default().extend(methods);
     }
-    let native_only = native_methods
-        .into_iter()
-        .map(|(holder, methods)| {
-            let generic = generic_methods.get(&holder);
-            let only = methods
-                .into_iter()
-                .filter(|method| generic.is_none_or(|generic| !generic.contains(method)))
-                .collect();
-            (holder, only)
-        })
-        .collect();
+    let mut native_only: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (holder, methods) in &native_methods {
+        let generic = generic_methods.get(holder);
+        native_only.entry(holder.clone()).or_default().extend(
+            methods
+                .iter()
+                .filter(|method| generic.is_none_or(|generic| !generic.contains(*method)))
+                .cloned(),
+        );
+    }
+    for (holder, methods) in &native_trait_methods {
+        let generic = generic_methods.get(holder);
+        let generic_trait = generic_trait_methods.get(holder);
+        native_only.entry(holder.clone()).or_default().extend(
+            methods
+                .iter()
+                .filter(|method| {
+                    generic.is_none_or(|generic| !generic.contains(*method))
+                        && generic_trait.is_none_or(|generic| !generic.contains(*method))
+                })
+                .cloned(),
+        );
+    }
     let reading = Reading {
         holders: holders.clone(),
         natives: natives.clone(),
+        seam_traits: index
+            .traits()
+            .iter()
+            .filter(|declared| declared.module_paths().contains(&SEAM))
+            .map(|declared| declared.name().to_owned())
+            .collect(),
         native_only,
         resolver: &resolver,
         package,
@@ -694,6 +774,27 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
         }
     }
 
+    // A trait's backend parameters are in scope in its methods' declarations and default bodies:
+    // its own type parameters bounded by the backend, and `Self` when the trait is itself a
+    // backend trait (the backend among its supertraits) or its `where` clause bounds `Self`.
+    let mut trait_generics: Vec<(Span, BTreeSet<String>)> = Vec::new();
+    for declared in index.traits() {
+        if !in_the_product(index, declared.whole()) {
+            continue;
+        }
+        let parsed: syn::ItemTrait = syn::parse_str(index.text(declared.whole()))
+            .unwrap_or_else(|error| panic!("the trait `{}` parses: {error}", declared.name()));
+        let mut generic = reading.parameters(&parsed.generics, &declared.module_paths());
+        if resolver
+            .identities(package, declared)
+            .iter()
+            .any(|id| backends.contains(id))
+        {
+            generic.insert(String::from("Self"));
+        }
+        trait_generics.push((declared.body(), generic));
+    }
+
     // Every other function: its signature and its body.
     for item in index.items() {
         if !matches!(
@@ -729,9 +830,41 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
                 backend_parameters(&parsed.sig.generics, &resolver, package, module, &backends)
             })
             .collect();
-        for (body, block) in &block_generics {
+        for (body, block) in block_generics.iter().chain(&trait_generics) {
             if body.holds(at) {
                 generic.extend(block.iter().cloned());
+            }
+        }
+        let owner = item
+            .type_owner()
+            .map_or_else(|| item.module_paths().join(", "), str::to_owned);
+        // The impl blocks written inside the body: a door of the seam implemented there is a door
+        // implemented outside the seam. (A holder's block there is a mention of the holder, read
+        // below with the rest of the body.)
+        let mut nested = NestedImpls::default();
+        nested.visit_block(&parsed.block);
+        for (path, self_type) in nested.0 {
+            let Some(path) = path else {
+                continue;
+            };
+            let written = segments(&path);
+            let doors: Vec<String> = item
+                .module_paths()
+                .iter()
+                .flat_map(|module| resolver.resolve(package, module, &written))
+                .filter(|id| id.package == package && id.module_path == SEAM)
+                .map(|id| id.to_string())
+                .collect();
+            let named_like_a_door = written
+                .last()
+                .is_some_and(|last| reading.seam_traits.contains(last));
+            if !doors.is_empty() || named_like_a_door {
+                let door = doors.first().cloned().unwrap_or_else(|| written.join("::"));
+                refusals.push(format!(
+                    "`{owner}::{}` implements {door} for `{self_type}` inside its body — a door \
+                     of the seam is implemented in the seam",
+                    item.name()
+                ));
             }
         }
         let named = native_mentions(&reading, &item.module_paths(), &generic, |visit| {
@@ -740,9 +873,6 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
         if named.is_empty() {
             continue;
         }
-        let owner = item
-            .type_owner()
-            .map_or_else(|| item.module_paths().join(", "), str::to_owned);
         if !allow("function", &owner, item.name()) {
             refusals.push(format!(
                 "`{owner}::{}` names {} for the native backend — the window is reached through \
@@ -833,6 +963,10 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
                     "the type alias `{item_name}` in {name} names {what} — the window-seam guard \
                      reads holders by their own name; write the holder"
                 )),
+                "alias-native" => refusals.push(format!(
+                    "the type alias `{item_name}` in {name} names {what} for the native backend — \
+                     the window is reached through the seam"
+                )),
                 _ => {
                     if !allow("const", &name, item_name) {
                         refusals.push(format!(
@@ -855,6 +989,14 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
             let Some(last) = path.last() else {
                 continue;
             };
+            if holders.contains_key(last) && name != last {
+                refusals.push(format!(
+                    "`use {} as {name}` in {} renames the holder {last} — the guard reads holders \
+                     by their own name; write the holder",
+                    path.join("::"),
+                    declared.module_paths().join(", ")
+                ));
+            }
             if (natives.contains(last) || last == seam_name()) && name != last {
                 refusals.push(format!(
                     "`use {} as {name}` in {} renames {last} — the guard reads the native backend \
@@ -1042,6 +1184,20 @@ fn file_items(
                 if !any.is_empty() {
                     found("alias", &alias.ident.to_string(), &any.join(", "));
                 }
+                // And the native backend, in its type or its generics (a default, a bound): an
+                // alias of it reaches the native window through `<N as Backend>::…` with no
+                // mention left to read.
+                let native: BTreeSet<String> = native_mentions(reading, &[], &none, |visit| {
+                    visit.visit_generics(&alias.generics);
+                    visit.visit_type(&alias.ty);
+                })
+                .into_iter()
+                .filter(|name| !reading.holders.contains_key(name))
+                .collect();
+                if !native.is_empty() {
+                    let names = native.into_iter().collect::<Vec<_>>().join(", ");
+                    found("alias-native", &alias.ident.to_string(), &names);
+                }
             }
             syn::Item::Const(constant) => {
                 let named = native_mentions(reading, &[], &none, |visit| {
@@ -1135,10 +1291,15 @@ fn row(kind: &str, owner: &str, name: &str) -> (String, String, String) {
 /// whose supertrait and bound, name them; a holder block's own `where` clause naming one; the
 /// native backend named by its path and through a module that brought it in; `use` items
 /// renaming the native backend and the seam; a holder named in a macro invocation's tokens and in
-/// a `macro_rules!` body; and a list row nothing uses. The generic blocks (the bound written
+/// a `macro_rules!` body; a `use` renaming a holder, at module level and in a body; module-level
+/// type aliases of the native backend, by its type and by a generic default; a native-only method
+/// beside a generic trait impl's method of the same name (`generic_builds` stays refused); a door
+/// of the seam implemented inside a body, directly and through a renaming `use`; a native block of
+/// a holder written inside a body; and a list row nothing uses. The generic blocks (the bound written
 /// directly, through the prelude's glob, through a rename, in a `where` clause and through a
-/// supertrait), a holder built by inference inside a generic function, an enum's variant spelled
-/// as the backend, the listed native method, function and `const`, a type with no backend and a
+/// supertrait), a holder built by inference inside a generic function, a trait method's default
+/// body written for the trait's own backend parameter and for a backend trait's `Self`, an enum's
+/// variant spelled as the backend, the listed native method, function and `const`, a type with no backend and a
 /// test module's native block pass.
 #[test]
 fn every_road_around_the_window_seam_is_named() {
@@ -1167,11 +1328,20 @@ fn every_road_around_the_window_seam_is_named() {
              window is reached through the seam",
             "`crate::runtime::generic_builds` names Runtime for the native backend — the window \
              is reached through the seam",
+            "`crate::runtime::hides_a_door` implements window-seam \
+             crate::window_seam::WindowHost for `Hidden` inside its body — a door of the seam is \
+             implemented in the seam",
+            "`crate::runtime::hides_a_native_block` names Native, Runtime for the native backend \
+             — the window is reached through the seam",
+            "`crate::runtime::hides_a_renamed_door` names WindowHost (renamed from the seam) for \
+             the native backend — the window is reached through the seam",
             "`crate::runtime::holds_an_inner_function` names Shell for the native backend — the \
              window is reached through the seam",
             "`crate::runtime::names_it_by_its_path` names Native for the native backend — the \
              window is reached through the seam",
             "`crate::runtime::rebuild_every_window` names Runtime for the native backend — the \
+             window is reached through the seam",
+            "`crate::runtime::renames_a_holder_inside` names Shell for the native backend — the \
              window is reached through the seam",
             "`crate::runtime::takes_a_pair_apart` names Pair for the native backend — the window \
              is reached through the seam",
@@ -1183,6 +1353,8 @@ fn every_road_around_the_window_seam_is_named() {
              window is reached through the seam",
             "`macro_rules! builds_one` at runtime.rs:142: a macro's tokens name Runtime — the \
              guard does not read macros",
+            "`use crate::Runtime as Rt` in crate::runtime renames the holder Runtime — the guard \
+             reads holders by their own name; write the holder",
             "`use crate::window_seam as ws` in crate::runtime renames window_seam — the guard \
              reads the native backend and the seam by their own names",
             "`use crate::window_seam::Native as N` in crate::runtime renames Native — the guard \
@@ -1209,8 +1381,14 @@ fn every_road_around_the_window_seam_is_named() {
              window is reached through the seam",
             "the type `crate::runtime::Keeper` holds Runtime for the native backend — the window \
              is reached through the seam",
+            "the type alias `NativeBackend` in runtime.rs names Native for the native backend — \
+             the window is reached through the seam",
+            "the type alias `NativeRuntime` in runtime.rs names Native for the native backend — \
+             the window is reached through the seam",
             "the type alias `NativeRuntime` in runtime.rs names Runtime — the window-seam guard \
              reads holders by their own name; write the holder",
+            "the type alias `Windowed` in runtime.rs names Native for the native backend — the \
+             window is reached through the seam",
             "window-seam crate::window_seam::WindowHost is implemented for `Stray` in \
              crate::elsewhere — a door of the seam is implemented in the seam",
         ],
