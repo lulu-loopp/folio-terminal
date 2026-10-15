@@ -552,42 +552,75 @@ fn drawn_text(folio: &HeadlessFolio) -> String {
         .collect()
 }
 
-/// RED — **an edit is drawn, in its one draw, with the caret's block as the file's own bytes and
-/// that block written into the document's key** (§7.1.3q): the fresh parse the edit causes
-/// computes the span itself, draws it, and keys it — so the next frame, asked nothing new,
-/// rebuilds nothing.
+/// The page's laid-out wrap, by its address: a re-flow lays the page out into a new one.
+fn laid_out(folio: &mut HeadlessFolio, surface: PreviewSurface) -> usize {
+    match folio.runtime().preview_pane(surface).map(|pane| pane.doc()) {
+        Some(PreviewDocument::Markdown { wrap, .. }) => std::sync::Arc::as_ptr(wrap) as usize,
+        _ => panic!("the pane holds a laid-out page"),
+    }
+}
+
+/// RED — **the parse of an edit draws the caret's block as the file's own bytes and writes that
+/// block into the document's key, and the frame after it lays nothing out again** (§7.1.3q): the
+/// key the parse is asked under carries the span read off the page *before* the edit, and the
+/// parse — the only one that indexes the new bytes — computes the span itself, draws it and keys
+/// it, so the frame that follows, asked nothing new, re-flows nothing.
 ///
-/// MUTATIONS (each in `Runtime::rebuild_preview_document`): hand `markdown_source_blocks` `None`
-/// for the fresh span — the edit's draw shows the block rendered, its bold marks hidden; write
-/// `key_parsed_source(None)` — the key says no span where the document drew one, and the next
-/// frame re-lays-out the page.
+/// Driven as one parse — the buffer's bytes moved, then `Runtime::rebuild_preview_document` once,
+/// then the body's repaint and a frame — because a typed key reveals its caret, and the reveal's
+/// own passes would put a missing span back before anything could look (one wasted re-flow per
+/// keystroke, which is the defect).
+///
+/// MUTATIONS (each in `Runtime::rebuild_preview_document`): write `key_parsed_source(None)` — the
+/// key says no span where the document drew one; hand `markdown_source_blocks` `None` for the
+/// fresh span — the page draws the block rendered, its bold marks hidden.
 #[test]
 fn an_edit_draws_and_keys_its_block_as_source_in_its_one_draw() {
     let (mut folio, surface) = drawn_page("headless-edit-span");
-    enter_at(&mut folio, surface, "bold here");
-    type_on_the_page(&mut folio, "x");
+    let caret = enter_at(&mut folio, surface, "bold here");
+    {
+        let mut runtime = folio.runtime();
+        let index = runtime.preview_tab_index(surface);
+        let source = runtime
+            .preview_pane(surface)
+            .and_then(|pane| pane.source().cloned())
+            .expect("the pane shows a file");
+        assert!(
+            runtime.window.tabs[index]
+                .preview_pool
+                .get_mut(&source)
+                .expect("the page's buffer")
+                .edit_content(|content| {
+                    content.insert(caret, 'x');
+                    true
+                }),
+            "the bytes move under the caret"
+        );
+        let scale = runtime.window.renderer.scale_factor() as f32;
+        let body = runtime
+            .preview_surface_body_rect(surface, scale)
+            .expect("the page has a body");
+        runtime.rebuild_preview_document(surface, body, scale);
+    }
+    assert!(
+        drawn_span(&mut folio, surface).is_some(),
+        "the edit's parse writes the span it drew into the document's key"
+    );
+    let parsed = laid_out(&mut folio, surface);
+    folio
+        .runtime()
+        .repaint_preview()
+        .expect("the page asks for its frame");
     folio.draw();
+    assert_eq!(
+        laid_out(&mut folio, surface),
+        parsed,
+        "the frame after the parse re-flows nothing it laid out"
+    );
     let drawn = drawn_text(&folio);
     assert!(
         drawn.contains("**粗体** xbold"),
-        "the edit's one draw shows the caret's block as the file's own bytes:\n{drawn}"
-    );
-    assert!(
-        drawn_span(&mut folio, surface).is_some(),
-        "and the document's key names the span it drew"
-    );
-    let laid = (
-        folio.window.markdown_intrinsics.hits,
-        folio.window.markdown_intrinsics.misses,
-    );
-    folio.draw();
-    assert_eq!(
-        (
-            folio.window.markdown_intrinsics.hits,
-            folio.window.markdown_intrinsics.misses,
-        ),
-        laid,
-        "a frame asked nothing new lays out nothing"
+        "the page shows the caret's block as the file's own bytes:\n{drawn}"
     );
 }
 
