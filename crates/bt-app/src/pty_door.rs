@@ -228,34 +228,45 @@ fn bear(ctx: &WorkerCtx, spec: ShellSpec, wake: OutputWake) -> Born {
         &mut folio_environment,
         &profile_environment,
     );
-    let session = match refresh {
-        Some(refresh) => PtySession::spawn_refreshed(
-            program,
-            &args,
-            &fallback_args,
-            &folio_environment,
-            &profile_environment,
-            refresh,
-            size,
-            wake,
-            working_directory,
-        ),
-        // No account environment to read: the shell inherits this process's, and what a launch
-        // carried is laid over it in the same place it is laid over the account's.
-        None => PtySession::spawn_shell_in(
-            program,
-            &args,
-            &fallback_args,
-            &launch_overrides
-                .into_iter()
-                .chain(folio_environment)
-                .chain(profile_environment)
-                .collect::<Vec<_>>(),
-            size,
-            wake,
-            working_directory,
-        ),
-    };
+    // **In its package's turn** (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH): a shell whose program
+    // is a packaged app's (PowerShell 7 from the Store) is not started while a check of the same
+    // package runs, and no such check starts until this spawn has returned; a birth that waited
+    // says so once in `diagnostics.log`.
+    let package = crate::packaged_turns::package_of_birth(Path::new(&program), &before_folio);
+    let session = crate::packaged_turns::born_in_turn(
+        &crate::packaged_turns::TURNS,
+        ctx,
+        package,
+        &crate::diagnostics::note,
+        || match refresh {
+            Some(refresh) => PtySession::spawn_refreshed(
+                program,
+                &args,
+                &fallback_args,
+                &folio_environment,
+                &profile_environment,
+                refresh,
+                size,
+                wake,
+                working_directory,
+            ),
+            // No account environment to read: the shell inherits this process's, and what a launch
+            // carried is laid over it in the same place it is laid over the account's.
+            None => PtySession::spawn_shell_in(
+                program,
+                &args,
+                &fallback_args,
+                &launch_overrides
+                    .into_iter()
+                    .chain(folio_environment)
+                    .chain(profile_environment)
+                    .collect::<Vec<_>>(),
+                size,
+                wake,
+                working_directory,
+            ),
+        },
+    );
     Born {
         session,
         folder_gone,

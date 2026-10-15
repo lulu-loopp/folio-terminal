@@ -3507,8 +3507,14 @@ fn publish_parse_attempt(key: ParseKey, number: u8, result: Result<bool, ParsePr
     }
 }
 
-fn run_parse_attempt(attempt: ParseAttempt, parse: ParseProbe, environment: &ProbeEnvironment) {
+fn run_parse_attempt(
+    worker: &bt_platform::admission::WorkerCtx,
+    attempt: ParseAttempt,
+    parse: ParseProbe,
+    environment: &ProbeEnvironment,
+) {
     let result = parse(
+        worker,
         &attempt.question.program,
         &attempt.question.text,
         environment,
@@ -3517,21 +3523,32 @@ fn run_parse_attempt(attempt: ParseAttempt, parse: ParseProbe, environment: &Pro
 }
 
 fn ask_parse_question(
+    worker: &bt_platform::admission::WorkerCtx,
     question: ParseQuestion,
     asker: ParseAsker,
     parse: ParseProbe,
     environment: &ProbeEnvironment,
 ) {
     if let Some(attempt) = claim_or_say(question, asker, &crate::diagnostics::note) {
-        run_parse_attempt(attempt, parse, environment);
+        run_parse_attempt(worker, attempt, parse, environment);
     }
 }
 
 /// **The Profiles page's visit asks every failed parse question again** (release read m2), on
 /// the visit's own observation worker; a question with an answer, or one in flight, is not asked.
-fn ask_failed_parse_questions_again(questions: Vec<ParseQuestion>, environment: &ProbeEnvironment) {
+fn ask_failed_parse_questions_again(
+    worker: &bt_platform::admission::WorkerCtx,
+    questions: Vec<ParseQuestion>,
+    environment: &ProbeEnvironment,
+) {
     for question in questions {
-        ask_parse_question(question, ParseAsker::Visit, run_parse_probe, environment);
+        ask_parse_question(
+            worker,
+            question,
+            ParseAsker::Visit,
+            run_parse_probe,
+            environment,
+        );
     }
 }
 
@@ -3711,15 +3728,23 @@ fn output_prefix(bytes: &[u8]) -> String {
     format!("[{rendered}]")
 }
 
-/// How a parse question is put to a PowerShell: [`run_parse_probe`], or a test's stand-in.
-type ParseProbe = fn(&Path, &str, &ProbeEnvironment) -> Result<bool, ParseProbeFailure>;
+/// How a parse question is put to a PowerShell, on the worker that asks it: [`run_parse_probe`],
+/// or a test's stand-in.
+type ParseProbe = fn(
+    &bt_platform::admission::WorkerCtx,
+    &Path,
+    &str,
+    &ProbeEnvironment,
+) -> Result<bool, ParseProbeFailure>;
 
 fn run_parse_probe(
+    worker: &bt_platform::admission::WorkerCtx,
     program: &Path,
     text: &str,
     environment: &ProbeEnvironment,
 ) -> Result<bool, ParseProbeFailure> {
-    let output = run_powershell_probe(
+    let output = check_powershell(
+        worker,
         program,
         PARSE_COMMAND,
         Some(text),
@@ -3760,8 +3785,9 @@ fn profile_key(program: &Path) -> PathBuf {
 /// **What a caller brings to `program`'s `$PROFILE` slot**: a question to ask when the slot holds
 /// no answer, with the asker's patience ([`POWERSHELL_PROBE_PATIENCE`] for the Profiles page,
 /// [`REMOVAL_PROBE_PATIENCE`] for a removal somebody asked for), or an answer heard elsewhere.
-enum ProfileQuestion {
-    Ask(bt_platform::ProbePatience),
+enum ProfileQuestion<'a> {
+    /// Asked from `asker` ([`CheckAsker`]).
+    Ask(bt_platform::ProbePatience, CheckAsker<'a>),
     /// **A newer answer**, heard by edition observation run number `.1` (which asks the same
     /// edition the same question at every Profiles-page open, T-PROBE-NO-CACHED-FAILURE): it
     /// replaces the slot's unless a newer run's is held, so a removal reads the newest any probe
@@ -3775,7 +3801,7 @@ enum ProfileQuestion {
 fn cached_profile_answer(
     program: &Path,
     environment: &ProbeEnvironment,
-    question: ProfileQuestion,
+    question: ProfileQuestion<'_>,
 ) -> Option<PathBuf> {
     let resolved = environment
         .program(program)
@@ -3795,8 +3821,8 @@ fn cached_profile_answer(
         slot
     };
     match question {
-        ProfileQuestion::Ask(patience) => answer_once(&slot.path, || {
-            run_profile_path_probe(&resolved, patience, environment)
+        ProfileQuestion::Ask(patience, asker) => answer_once(&slot.path, || {
+            run_profile_path_probe(asker, &resolved, patience, environment)
         }),
         ProfileQuestion::Heard(path, observation) => {
             let mut held = slot.path.lock().unwrap_or_else(|error| error.into_inner());
@@ -4071,12 +4097,77 @@ fn stopped_output(mut child: bt_platform::ProbeChild) -> ProbeOutput {
 const REMOVAL_PROBE_PATIENCE: bt_platform::ProbePatience =
     bt_platform::ProbePatience::fixed(std::time::Duration::from_secs(60));
 
-pub(crate) fn run_powershell_probe(
+/// **Where a PowerShell check is asked from** (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH): a worker
+/// of this application, whose panes are born in this process, so the check takes its turn with
+/// their births ([`crate::packaged_turns`]); or a command-line verb's process of its own
+/// (`--remove-shell-integration`, `--uninstall-cleanup`), which births no pane and takes none.
+/// Carried by the one question both ask, where a PowerShell keeps `$PROFILE`.
+#[derive(Clone, Copy)]
+pub enum CheckAsker<'a> {
+    Worker(&'a bt_platform::admission::WorkerCtx),
+    Verb,
+}
+
+/// The edition a PowerShell check is of, in a diagnostics line's words.
+fn edition_words(program: &Path) -> &'static str {
+    match powershell_edition(program) {
+        PowerShellEdition::PowerShellSeven => "PowerShell 7",
+        PowerShellEdition::WindowsPowerShell => "Windows PowerShell",
+    }
+}
+
+/// **A PowerShell check asked on `worker`, in its package's turn**
+/// (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH): the program as `environment` resolves it, then the
+/// turn ([`crate::packaged_turns::PackagedTurns::check_turn`] — it waits while a pane of the same
+/// package is being born, and holds the package until the check has settled), then the probe.
+pub(crate) fn check_powershell(
+    worker: &bt_platform::admission::WorkerCtx,
     program: &Path,
     command: &str,
     input: Option<&str>,
     patience: bt_platform::ProbePatience,
     environment: &ProbeEnvironment,
+) -> Result<ProbeOutput, ParseProbeFailure> {
+    let probe = powershell_probe_command(program, environment)?;
+    let package = bt_platform::package_family_of(Path::new(probe.get_program()));
+    let turn = crate::packaged_turns::TURNS.check_turn(worker, package, edition_words(program));
+    run_powershell_probe(probe, Some(turn), program, command, input, patience)
+}
+
+/// **A PowerShell check asked from a command-line verb's own process**, which births no pane and
+/// so takes no turn ([`CheckAsker::Verb`]).
+#[cfg(windows)]
+fn check_powershell_from_a_verb(
+    program: &Path,
+    command: &str,
+    patience: bt_platform::ProbePatience,
+    environment: &ProbeEnvironment,
+) -> Result<ProbeOutput, ParseProbeFailure> {
+    let probe = powershell_probe_command(program, environment)?;
+    run_powershell_probe(probe, None, program, command, None, patience)
+}
+
+/// The `diagnostics.log` line a check leaves when its job held other processes as it settled
+/// ([`bt_platform::ProbeChild::others_at_settlement`]): closing the job ended them with it. Never
+/// expected while the turns hold; `None` when it held none.
+fn settled_beside_line(program: &Path, others: Option<usize>) -> Option<String> {
+    others.filter(|others| *others > 0).map(|others| {
+        format!(
+            "Folio: the {} check settled with {others} other processes in its job",
+            edition_words(program)
+        )
+    })
+}
+
+/// **One PowerShell probe of `program`, already resolved into `probe`**, run while `turn` holds
+/// its package; the turn is let go as soon as the probe has settled.
+pub(crate) fn run_powershell_probe(
+    mut probe: std::process::Command,
+    turn: Option<crate::packaged_turns::CheckTurn<'_>>,
+    program: &Path,
+    command: &str,
+    input: Option<&str>,
+    patience: bt_platform::ProbePatience,
 ) -> Result<ProbeOutput, ParseProbeFailure> {
     // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
     // window opens on screen the first time a PowerShell pane is opened.
@@ -4085,8 +4176,7 @@ pub(crate) fn run_powershell_probe(
     // `pwsh.exe` with no path at all, and a bare name is resolved by
     // `CreateProcess` out of the working directory before `PATH`. The probe
     // asks about the program a pane will run, so it asks about the one an
-    // administrator installed.
-    let mut probe = powershell_probe_command(program, environment)?;
+    // administrator installed ([`powershell_probe_command`], the caller's).
     probe.args(["-NoProfile", "-NonInteractive", "-Command", command]);
     let stdio = if input.is_some() {
         bt_platform::ProbeStdio::FED
@@ -4115,12 +4205,22 @@ pub(crate) fn run_powershell_probe(
     }
     // **Waited for while it works** (G-SWEEP-048): the probe door's own patience, looked at every
     // 20 ms on this worker; a probe that shows no life for the quiet period, or works past the
-    // budget, is ended with everything it started.
+    // budget, is ended with everything it started. **Its turn ends with its settlement**
+    // (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH): a birth of its package waits no longer than this
+    // patience lets the probe run.
     match child.wait_within(patience, &mut || {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }) {
-        Ok(Ok(_)) => {}
+        Ok(Ok(_)) => {
+            drop(turn);
+            if let Some(line) =
+                settled_beside_line(program, child.others_at_settlement().map(<[u32]>::len))
+            {
+                crate::diagnostics::note(&line);
+            }
+        }
         Ok(Err(overdue)) => {
+            drop(turn);
             crate::diagnostics::note(&overdue_line(program, overdue, patience));
             let output = stopped_output(child);
             return Err(ParseProbeFailure::Overdue {
@@ -4132,6 +4232,7 @@ pub(crate) fn run_powershell_probe(
         }
         Err(error) => {
             let output = stopped_output(child);
+            drop(turn);
             return Err(ParseProbeFailure::Wait {
                 error: error.to_string(),
                 stdout: output_prefix(&output.stdout),
@@ -4170,6 +4271,7 @@ const PROFILE_PATH_COMMAND: &str =
 
 #[cfg(windows)]
 fn run_profile_path_probe(
+    asker: CheckAsker<'_>,
     program: &Path,
     patience: bt_platform::ProbePatience,
     environment: &ProbeEnvironment,
@@ -4177,13 +4279,26 @@ fn run_profile_path_probe(
     if profile_sandboxed() {
         return None;
     }
-    let output =
-        run_powershell_probe(program, PROFILE_PATH_COMMAND, None, patience, environment).ok()?;
+    let output = match asker {
+        CheckAsker::Worker(worker) => check_powershell(
+            worker,
+            program,
+            PROFILE_PATH_COMMAND,
+            None,
+            patience,
+            environment,
+        ),
+        CheckAsker::Verb => {
+            check_powershell_from_a_verb(program, PROFILE_PATH_COMMAND, patience, environment)
+        }
+    }
+    .ok()?;
     parse_profile_path(std::str::from_utf8(&output.stdout).ok()?)
 }
 
 #[cfg(not(windows))]
 fn run_profile_path_probe(
+    _asker: CheckAsker<'_>,
     _program: &Path,
     _patience: bt_platform::ProbePatience,
     _environment: &ProbeEnvironment,
@@ -4212,13 +4327,15 @@ const PROFILE_PROBE_EXISTS: bool = cfg!(windows);
 /// **One edition observed**, its child in `environment` — the block the ordinary session's Process
 /// scope is read out of too ([`ordinary_process_scope`]), so one read serves both.
 fn probe_profile_observation(
+    worker: &bt_platform::admission::WorkerCtx,
     program: &Path,
     environment: &ProbeEnvironment,
 ) -> Option<ProfileObservation> {
     probe_profile_observation_unless(profile_sandboxed(), || {
         #[cfg(windows)]
         {
-            let output = run_powershell_probe(
+            let output = check_powershell(
+                worker,
                 program,
                 PROFILE_COMMAND,
                 None,
@@ -4233,7 +4350,7 @@ fn probe_profile_observation(
         }
         #[cfg(not(windows))]
         {
-            let _ = (program, environment);
+            let _ = (worker, program, environment);
             None
         }
     })
@@ -4514,6 +4631,7 @@ fn spawn_powershell_preparation(
                 let environment = (effects.environment)(ctx);
                 for question in questions {
                     ask_parse_question(
+                        ctx,
                         question,
                         ParseAsker::Background,
                         effects.parse,
@@ -4522,7 +4640,7 @@ fn spawn_powershell_preparation(
                 }
             }
             PowershellPreparation::ParseAttempt(attempt) => {
-                run_parse_attempt(attempt, effects.parse, &(effects.environment)(ctx));
+                run_parse_attempt(ctx, attempt, effects.parse, &(effects.environment)(ctx));
             }
         },
     )
@@ -5140,7 +5258,7 @@ mod tests {
             cached_profile_answer(
                 &program,
                 &environment,
-                ProfileQuestion::Ask(POWERSHELL_PROBE_PATIENCE),
+                ProfileQuestion::Ask(POWERSHELL_PROBE_PATIENCE, CheckAsker::Verb),
             )
         };
         file_profile_answer(&program, old.clone(), 1, &environment);
@@ -5209,7 +5327,7 @@ mod tests {
             cached_profile_answer(
                 &program,
                 &environment,
-                ProfileQuestion::Ask(POWERSHELL_PROBE_PATIENCE)
+                ProfileQuestion::Ask(POWERSHELL_PROBE_PATIENCE, CheckAsker::Verb)
             ),
             Some(PathBuf::from(newer)),
             "a removal reads the newer run's path"
@@ -7982,7 +8100,8 @@ mod tests {
         let environment = ProbeEnvironment::Logon(block);
         let mut failures = Vec::new();
         for attempt in 1..=PARSE_PROBE_ATTEMPT_LIMIT {
-            match run_parse_probe(program, text, &environment) {
+            let asked = (program.to_path_buf(), text.to_owned(), environment.clone());
+            match on_a_worker(move |worker| run_parse_probe(worker, &asked.0, &asked.1, &asked.2)) {
                 Ok(answer) => return answer,
                 Err(failure) => {
                     eprintln!(
@@ -8516,6 +8635,7 @@ mod tests {
 
         /// The [`ParseProbe`] stand-in.
         fn probe(
+            _worker: &bt_platform::admission::WorkerCtx,
             program: &Path,
             _text: &str,
             _environment: &ProbeEnvironment,
@@ -10901,6 +11021,45 @@ mod tests {
     /// rather than asking a shell where it is.
     const PROFILE_LEAF: &str = "Microsoft.PowerShell_profile.ps1";
 
+    /// Run `body` on a worker the thread door started — where every PowerShell check is asked —
+    /// and wait for it.
+    fn on_a_worker<T: Send + 'static>(
+        body: impl FnOnce(&bt_platform::admission::WorkerCtx) -> T + Send + 'static,
+    ) -> T {
+        match bt_platform::spawn_at_priority(
+            "bt-shell-integration-test",
+            bt_platform::ThreadPriority::BelowNormal,
+            body,
+        )
+        .expect("the thread door starts a thread")
+        .join()
+        {
+            Ok(answer) => answer,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// RED (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH) — **the proof line**: a check whose job held
+    /// other processes as it settled says how many, naming its edition; one whose job held none,
+    /// or was not read, says nothing.
+    ///
+    /// MUTATION: say the line for every settlement (drop the `> 0` filter) — a check whose job
+    /// held nothing else leaves a line.
+    #[test]
+    fn a_check_settled_beside_other_processes_says_so() {
+        let pwsh = Path::new(r"C:\Users\张三\AppData\Local\Microsoft\WindowsApps\pwsh.exe");
+        assert_eq!(
+            settled_beside_line(pwsh, Some(2)).as_deref(),
+            Some("Folio: the PowerShell 7 check settled with 2 other processes in its job")
+        );
+        assert_eq!(
+            settled_beside_line(Path::new("powershell.exe"), Some(1)).as_deref(),
+            Some("Folio: the Windows PowerShell check settled with 1 other processes in its job")
+        );
+        assert_eq!(settled_beside_line(pwsh, Some(0)), None);
+        assert_eq!(settled_beside_line(pwsh, None), None);
+    }
+
     /// A stand-in for a PowerShell that the parse probe asks: it reads the
     /// whole of standard input and answers `1`, as the parse command does for
     /// text that parses.
@@ -10921,11 +11080,15 @@ mod tests {
     #[test]
     fn a_parse_probe_on_unix_answers_after_its_poll_settled_the_child() {
         let (directory, program) = parse_stand_in("unix-parse");
-        let answer = run_parse_probe(
-            &program,
-            "Write-Output 'na\u{ef}ve \u{3a9}\u{3bc}\u{3ad}\u{3b3}\u{3b1}'",
-            &ProbeEnvironment::Inherited,
-        );
+        let asked = program.clone();
+        let answer = on_a_worker(move |worker| {
+            run_parse_probe(
+                worker,
+                &asked,
+                "Write-Output 'na\u{ef}ve \u{3a9}\u{3bc}\u{3ad}\u{3b3}\u{3b1}'",
+                &ProbeEnvironment::Inherited,
+            )
+        });
         let _ = std::fs::remove_dir_all(&directory);
         assert_eq!(answer, Ok(true));
     }

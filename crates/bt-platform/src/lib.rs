@@ -3336,6 +3336,9 @@ pub struct ProbeChild {
     stderr: Option<ProbePipe>,
     guard: ProbeChildGuard,
     settled: Option<std::process::ExitStatus>,
+    /// How many processes other than the immediate child the probe's job held when the child was
+    /// seen to have exited, read just before the job closed ([`Self::others_at_settlement`]).
+    others_at_settlement: Option<Vec<u32>>,
 }
 
 /// The immediate child of a probe. On Windows the probe door created it
@@ -3423,6 +3426,36 @@ impl ProbeChild {
         })
     }
 
+    /// **The processes outside its own tree the probe's job held when its immediate child was
+    /// seen to have exited**, by id — read at that settlement, just before the job closed and
+    /// ended them (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH: the proof that closing a check's job
+    /// took nothing but the check's own tree with it). The probe's own tree is its immediate child
+    /// and every member whose parent, followed through the job's members, is that child — the
+    /// console host it was given and a descendant it left running among them; a member already
+    /// gone from the system is nobody's; anything else in the job is another's. The child's id names nobody else while the probe holds its handle,
+    /// which it does until it is reaped. `None` when it was not read: a probe ended
+    /// before its child exited ([`Self::kill`] closes the job first), a probe not yet settled, an
+    /// uncontained one, a list the kernel would not give, and off Windows, where a process group
+    /// has no such list.
+    #[must_use]
+    pub fn others_at_settlement(&self) -> Option<&[u32]> {
+        self.others_at_settlement.as_deref()
+    }
+
+    /// The processes in the probe's job outside its own tree, while the job is held.
+    #[cfg(windows)]
+    fn others_in_job(&self) -> Option<Vec<u32>> {
+        let job = self.guard.job.as_ref()?;
+        let members = job_process_ids(job).ok()?;
+        let parents = process_parents().ok()?;
+        Some(outside_the_tree(self.leader.id, &members, &parents))
+    }
+
+    #[cfg(not(windows))]
+    fn others_in_job(&self) -> Option<Vec<u32>> {
+        None
+    }
+
     /// The one settlement road: observe the immediate child without reaping
     /// it, end the unit, then reap and keep the status. `block` waits for the
     /// child; otherwise a running child answers `None`.
@@ -3433,6 +3466,7 @@ impl ProbeChild {
         if !probe_leader_has_exited(&self.leader, block)? {
             return Ok(None);
         }
+        self.others_at_settlement = self.others_in_job();
         let ended = self.guard.end();
         let status = reap_probe_leader(&self.leader, ended)?;
         self.settled = Some(status);
@@ -3495,6 +3529,108 @@ impl Drop for ProbeChild {
     fn drop(&mut self) {
         let _ = self.guard.end();
     }
+}
+
+/// **The processes a job holds now**, by id — every process in it and in the jobs nested in it, as
+/// the kernel lists them (`JobObjectBasicProcessIdList`). A probe's tree is a handful, so room for
+/// [`JOB_LIST_ROOM`] is asked; a job holding more is the kernel's refusal (`ERROR_MORE_DATA`).
+#[cfg(windows)]
+fn job_process_ids(job: &std::os::windows::io::OwnedHandle) -> std::io::Result<Vec<u32>> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::JobObjects::{
+        JOBOBJECT_BASIC_PROCESS_ID_LIST, JobObjectBasicProcessIdList, QueryInformationJobObject,
+    };
+
+    #[repr(C)]
+    struct Listed {
+        head: JOBOBJECT_BASIC_PROCESS_ID_LIST,
+        more: [usize; JOB_LIST_ROOM - 1],
+    }
+
+    let mut list = Listed {
+        head: JOBOBJECT_BASIC_PROCESS_ID_LIST::default(),
+        more: [0; JOB_LIST_ROOM - 1],
+    };
+    // SAFETY: the job handle is live; `list` is a process-id list header followed by room for
+    // `JOB_LIST_ROOM` ids in all, and its size is what the call is told.
+    unsafe {
+        QueryInformationJobObject(
+            Some(HANDLE(job.as_raw_handle())),
+            JobObjectBasicProcessIdList,
+            std::ptr::from_mut(&mut list).cast(),
+            u32::try_from(std::mem::size_of::<Listed>()).expect("process-id list size fits u32"),
+            None,
+        )
+    }?;
+    let listed = usize::try_from(list.head.NumberOfProcessIdsInList).unwrap_or(JOB_LIST_ROOM);
+    Ok(std::iter::once(list.head.ProcessIdList[0])
+        .chain(list.more)
+        .take(listed.min(JOB_LIST_ROOM))
+        .filter_map(|id| u32::try_from(id).ok())
+        .collect())
+}
+
+/// Room for this many process ids in one read of a job's list ([`job_process_ids`]).
+#[cfg(windows)]
+const JOB_LIST_ROOM: usize = 64;
+
+/// **Each running process's parent**, by id, from one snapshot of the system's processes.
+#[cfg(windows)]
+fn process_parents() -> std::io::Result<std::collections::HashMap<u32, u32>> {
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+
+    // SAFETY: a snapshot of the system's processes; its handle moves to `OwnedHandle` at once.
+    let snapshot =
+        unsafe { OwnedHandle::from_raw_handle(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?.0) };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: u32::try_from(std::mem::size_of::<PROCESSENTRY32W>())
+            .expect("process entry size fits u32"),
+        ..PROCESSENTRY32W::default()
+    };
+    let mut parents = std::collections::HashMap::new();
+    // SAFETY: the snapshot handle is live and `entry` carries its own size.
+    let mut more =
+        unsafe { Process32FirstW(HANDLE(snapshot.as_raw_handle()), &raw mut entry) }.is_ok();
+    while more {
+        parents.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+        // SAFETY: as for `Process32FirstW`.
+        more = unsafe { Process32NextW(HANDLE(snapshot.as_raw_handle()), &raw mut entry) }.is_ok();
+    }
+    Ok(parents)
+}
+
+/// **The members of a probe's job outside the tree of `leader`**: a member is in the tree when
+/// its parent is `leader`, or another member in the tree; the rest are outside it. A member the
+/// snapshot (taken after the list) does not hold has exited since — the console host of a child
+/// that just ended — and is nobody's. `leader` itself is not listed.
+#[cfg(windows)]
+fn outside_the_tree(
+    leader: u32,
+    members: &[u32],
+    parents: &std::collections::HashMap<u32, u32>,
+) -> Vec<u32> {
+    let in_tree = |mut at: u32| {
+        // Each step moves to another member, so a chain longer than the members is a cycle.
+        for _ in 0..=members.len() {
+            match parents.get(&at) {
+                Some(parent) if *parent == leader => return true,
+                Some(parent) if members.contains(parent) && *parent != at => at = *parent,
+                _ => return false,
+            }
+        }
+        false
+    };
+    members
+        .iter()
+        .copied()
+        .filter(|id| *id != leader && parents.contains_key(id) && !in_tree(*id))
+        .collect()
 }
 
 /// **How long a probe's owner waits for it** (G-SWEEP-048): a probe may go `quiet` without
@@ -3780,44 +3916,10 @@ impl ProbeChild {
         use windows::Win32::System::Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
         };
-        use windows::Win32::System::JobObjects::{
-            JOBOBJECT_BASIC_PROCESS_ID_LIST, JobObjectBasicProcessIdList, QueryInformationJobObject,
-        };
         use windows::Win32::System::Threading::{OpenThread, THREAD_QUERY_LIMITED_INFORMATION};
 
-        /// Room for this many process ids in a job's list; a probe's tree is a handful.
-        const ROOM: usize = 64;
-        #[repr(C)]
-        struct Listed {
-            head: JOBOBJECT_BASIC_PROCESS_ID_LIST,
-            more: [usize; ROOM - 1],
-        }
-
         let processes: Vec<u32> = match &self.guard.job {
-            Some(job) => {
-                let mut list = Listed {
-                    head: JOBOBJECT_BASIC_PROCESS_ID_LIST::default(),
-                    more: [0; ROOM - 1],
-                };
-                // SAFETY: the job handle is live; `list` is a process-id list header followed by
-                // room for `ROOM` ids in all, and its size is what the call is told.
-                unsafe {
-                    QueryInformationJobObject(
-                        Some(HANDLE(job.as_raw_handle())),
-                        JobObjectBasicProcessIdList,
-                        std::ptr::from_mut(&mut list).cast(),
-                        u32::try_from(std::mem::size_of::<Listed>())
-                            .expect("process-id list size fits u32"),
-                        None,
-                    )
-                }?;
-                let listed = usize::try_from(list.head.NumberOfProcessIdsInList).unwrap_or(ROOM);
-                std::iter::once(list.head.ProcessIdList[0])
-                    .chain(list.more)
-                    .take(listed.min(ROOM))
-                    .filter_map(|id| u32::try_from(id).ok())
-                    .collect()
-            }
+            Some(job) => job_process_ids(job)?,
             None => vec![self.leader.id],
         };
         // SAFETY: a snapshot of the system's threads; its handle moves to `OwnedHandle` at once.
@@ -4439,8 +4541,9 @@ impl ProbeStdio {
 /// resumed through the primary thread `CreateProcess` returned,
 /// so its descendants are still contained; a termination of this process while
 /// that `CreateProcess` is still running can leave it behind, suspended. Only
-/// that exact refusal (`PACKAGED_JOB_LIST_REFUSAL`) takes this road; any other
-/// failure of the first `CreateProcess` is the start's answer. If the
+/// that refusal takes this road ([`packaged_job_list_refusal`]: its status form,
+/// or access denied for a program in a package); any other failure of the first
+/// `CreateProcess` is the start's answer. If the
 /// assignment or the resume is refused, the suspended child is ended and the
 /// start fails: nothing suspended is left behind.
 ///
@@ -4552,6 +4655,7 @@ fn spawn_probe_with(
         leader: child,
         guard: held,
         settled: None,
+        others_at_settlement: None,
     };
     if let Some(error) = refused {
         // No guard holds the child: it is ended and reaped through the probe's
@@ -4599,6 +4703,28 @@ struct ProbeBirthSeam {
 /// with PowerShell 7 from the Microsoft Store, from a parent in a job and not.
 #[cfg(windows)]
 const PACKAGED_JOB_LIST_REFUSAL: i32 = i32::from_ne_bytes(0xC007_0005_u32.to_ne_bytes());
+
+/// **Whether a refused first `CreateProcess` is Windows refusing the job list for a packaged
+/// app's executable**: [`PACKAGED_JOB_LIST_REFUSAL`] for any program, or `ERROR_ACCESS_DENIED`
+/// (5) for a program [`package_family_of`] places in a package. The refusal reads in both forms:
+/// `0xC0070005` when the program is the package's own `pwsh.exe`, and 5 when it is the Store's
+/// app execution alias (`%LocalAppData%\Microsoft\WindowsApps\pwsh.exe`, measured 2026-10-14
+/// from a test process: one attempt, refused with 5), which is the path a pane's and a probe's
+/// PowerShell 7 resolve to on a Store install. A 5 for a program in no package is an ordinary
+/// refusal and the start's own answer.
+#[cfg(windows)]
+fn packaged_job_list_refusal(error: &std::io::Error, program: &std::path::Path) -> bool {
+    match error.raw_os_error() {
+        Some(PACKAGED_JOB_LIST_REFUSAL) => true,
+        Some(code)
+            if u32::try_from(code).ok()
+                == Some(windows::Win32::Foundation::ERROR_ACCESS_DENIED.0) =>
+        {
+            package_family_of(program).is_some()
+        }
+        _ => false,
+    }
+}
 
 /// A refused `CreateProcess` as the standard library reports it: the Win32
 /// error itself (`ERROR_FILE_NOT_FOUND` is `NotFound`), not the `HRESULT` the
@@ -4821,7 +4947,7 @@ fn spawn_probe_born(
                 // this process inside that `CreateProcess` can leave it behind.
                 // Any other refusal is the start's own answer and is returned
                 // as it is, without a second attempt.
-                Err(error) if error.raw_os_error() == Some(PACKAGED_JOB_LIST_REFUSAL) => {
+                Err(error) if packaged_job_list_refusal(&error, program) => {
                     // The refused attempt has already named its job, and
                     // Windows then refuses to assign any process to that job
                     // (`ERROR_ACCESS_DENIED`, measured): the child goes into a
@@ -4901,6 +5027,7 @@ fn spawn_probe_born(
         stderr,
         guard,
         settled: None,
+        others_at_settlement: None,
     })
 }
 
@@ -6436,6 +6563,97 @@ mod probe_child_tests {
         let _ = child.wait().expect("settle direct child");
         assert!(child.guard.job.is_none(), "the settled probe kept its job");
         grandchild.wait_gone();
+    }
+
+    /// RED (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH) — **a probe settled while its job held a
+    /// process outside its own tree names it**: an unrelated helper the test puts in the probe's
+    /// job (as a container's member would be, were it nested there) is listed at the settlement,
+    /// read before the close, which then ends it; the probe's own descendant left running and its
+    /// console host are its tree and are not. A probe whose job held only its tree lists none, and
+    /// one ended before its child exited is not read.
+    ///
+    /// MUTATION: in `ProbeChild::settle`, read the job's list after `self.guard.end()` (the job is
+    /// gone, nothing is read) — the list is `None`; or answer every member but the leader from
+    /// `outside_the_tree` — the descendant is listed too.
+    #[test]
+    fn a_probe_settled_beside_another_process_names_it() {
+        use windows::Win32::System::JobObjects::AssignProcessToJobObject;
+
+        let mut command = helper_command_for("child-exits");
+        let mut child = spawn_probe(&mut command, HELPER_STDIO).expect("start contained helper");
+        let _child_tree = HelperTree::of(child.id());
+        // The grandchild inherits this pipe: it is kept open, so the grandchild is still running
+        // when its parent exits.
+        let mut output = child.take_stdout().expect("helper stdout");
+        let pids = announced(&mut output, "ready");
+        let grandchild = Witness::of(pids[1]);
+        assert!(grandchild.alive(), "the grandchild runs");
+        let mut stranger = quiet_command(std::env::current_exe().expect("test executable"));
+        stranger
+            .args([
+                "--exact",
+                "probe_child_tests::helper_grandchild_waits",
+                "--nocapture",
+            ])
+            .env(HELPER_MODE, "grandchild-inherits-output")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let stranger = stranger.spawn().expect("start the stranger");
+        let stranger_id = stranger.id();
+        let _stranger_tree = HelperTree::of(stranger_id);
+        let stranger_alive = Witness::of(stranger_id);
+        // SAFETY: both handles are live: the probe's job, owned by its guard, and the stranger
+        // this test started.
+        unsafe {
+            AssignProcessToJobObject(
+                HANDLE(
+                    child
+                        .guard
+                        .job
+                        .as_ref()
+                        .expect("the probe has its job")
+                        .as_raw_handle(),
+                ),
+                HANDLE(stranger.as_raw_handle()),
+            )
+        }
+        .expect("put the stranger in the probe's job");
+        assert_eq!(child.others_at_settlement(), None, "not settled yet");
+        let _ = child.wait().expect("settle direct child");
+        let others = child
+            .others_at_settlement()
+            .expect("read at the settlement");
+        assert!(
+            others.contains(&stranger_id),
+            "{others:?} lacks {stranger_id}"
+        );
+        assert!(
+            !others.contains(&pids[1]),
+            "the probe's own descendant was listed: {others:?}"
+        );
+        grandchild.wait_gone();
+        stranger_alive.wait_gone();
+        drop((stranger, output));
+
+        let mut alone = helper_command_for("child-exits");
+        let mut alone = spawn_probe(&mut alone, HELPER_STDIO).expect("start a lone helper");
+        let _alone_tree = HelperTree::of(alone.id());
+        let mut alone_output = alone.take_stdout().expect("helper stdout");
+        let _ = announced(&mut alone_output, "ready");
+        let _ = alone.wait().expect("settle the lone helper");
+        drop(alone_output);
+        assert_eq!(alone.others_at_settlement(), Some(&[][..]));
+
+        let mut ended = spawn_probe(&mut helper_command(), HELPER_STDIO).expect("start helper");
+        let _ended_tree = HelperTree::of(ended.id());
+        let _ = ready_probe(&mut ended);
+        ended.kill().expect("end the probe at its deadline");
+        assert_eq!(
+            ended.others_at_settlement(),
+            None,
+            "ended before its child exited"
+        );
     }
 
     /// Start the owner helper — inside a fresh job of `outer` limits when
@@ -8598,6 +8816,13 @@ pub mod mem;
 /// thread's own `WH_CALLWNDPROC` pair, and the names the self-report calls
 /// them by. Nothing is installed off Windows; see the module's own header.
 pub mod pump;
+
+/// **Which installed package a program belongs to** (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH):
+/// the identity Windows keeps one desktop app container per account by. Read from the app
+/// execution alias's own data or the installed package's own directory on Windows; `None`
+/// everywhere off it.
+pub mod packaged_program;
+pub use packaged_program::{PackageFamily, package_family_of};
 
 /// **The system ending the session — a shutdown, a restart, a sign-out** (B-ENDSESSION): one
 /// subclass per window that hears `WM_QUERYENDSESSION` and a shutdown taken back, answers the

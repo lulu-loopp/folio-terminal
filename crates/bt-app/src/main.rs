@@ -119,6 +119,7 @@ mod notice;
 mod notify;
 mod owner_door;
 mod pace;
+mod packaged_turns;
 mod palette;
 mod palette_index;
 mod pane_content;
@@ -76825,7 +76826,7 @@ fn main() -> Result<()> {
     // uninstall that said nothing at all.
     if cli::remove_shell_integration(std::env::args_os().skip(1)) {
         let report = shell_integration::remove_shell_integration(
-            shell_integration::profile_marks::Asker::Door,
+            shell_integration::CheckAsker::Verb,
             &shell_integration::ProbeEnvironment::Inherited,
         );
         let done = report.text(false);
