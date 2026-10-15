@@ -33,6 +33,29 @@
 
     **every_guest_script_carries_a_bom** — the updater's guest scripts and
     `ui-probe.ps1` start with a UTF-8 byte-order mark (U-31 H-3).
+
+    **the_kill_waits_on_the_handle_within_its_bound** (H6) — `waits.ps1`
+    `Stop-Within` on a sleeping `pwsh` this case starts (no window; ended by
+    this case on its own handle at the end): a real kill answers true and the
+    process has exited; a kill that has not ended it (a no-op kill, the stand-in
+    for a process the kernel has not let go of) answers false at the bound, and
+    the process is still running.
+    MUTATION: in `Stop-Within`, `return $true` in place of the handle's
+    `WaitForExit`.
+
+    **the_w4_wait_fails_at_its_bound** (H6) — `Wait-RunValue` on a Run key
+    with no FolioUpdate-* value and a journal entry that does not change
+    answers `bound`, with what it last saw, once its bound has passed; a value
+    answers `held`; an entry that changes answers `gone`. `Wait-Fact` refuses a
+    pause over 250 ms. MUTATION: in `Wait-Fact`, `if ($true)` in place of
+    `if ($wfLeft -le 0)` (the bound ends at once: the elapsed check goes red).
+
+    **the_mac_capture_refuses_without_a_window** (H6) — `mac/row.sh
+    --capture-dry-run` under bash, with `osascript`, `ps` and `screencapture`
+    stubbed: a window list with no window of the name refuses (exit 1, a
+    `REFUSED` line), as does an unreadable list; a window found is named and
+    not captured; `screencapture` is never run. MUTATION: in
+    `capture_folio_window`, drop the `-z "${id:-}"` refusal.
 #>
 [CmdletBinding()]
 param()
@@ -174,12 +197,96 @@ try {
     }
 
     # ── every_guest_script_carries_a_bom ──────────────────────────────────────
-    foreach ($rel in @('scripts\release\cleanvm\updater\guest\watch.ps1', 'scripts\release\cleanvm\updater\guest\keys.ps1',
+    foreach ($rel in @('scripts\release\cleanvm\updater\guest\watch.ps1', 'scripts\release\cleanvm\updater\guest\waits.ps1',
+            'scripts\release\cleanvm\updater\guest\keys.ps1',
             'scripts\release\cleanvm\updater\guest\collect.ps1', 'scripts\dev\ui-probe.ps1',
             'scripts\release\release-manifest.ps1', 'scripts\release\smoke.ps1', 'scripts\release\cleanvm\in-guest.ps1')) {
         $head = [IO.File]::ReadAllBytes((Join-Path $root $rel))
         Check ($head.Length -ge 3 -and $head[0] -eq 0xEF -and $head[1] -eq 0xBB -and $head[2] -eq 0xBF) "$rel starts with a UTF-8 byte-order mark"
     }
+
+    # ── the_kill_waits_on_the_handle_within_its_bound ─────────────────────────
+    . (Join-Path $root 'scripts\release\cleanvm\updater\guest\waits.ps1')
+    Check ($KillWithinMs -eq 2000) "the kill's bound is the product's CHILD_EXIT_BUDGET, 2 s ($KillWithinMs ms)"
+    # A sleeping pwsh of this case's own, with no window; every one is ended here on its handle.
+    $sleepers = [System.Collections.Generic.List[Diagnostics.Process]]::new()
+    function Start-Sleeper {
+        $info = [Diagnostics.ProcessStartInfo]::new($pwsh)
+        foreach ($a in '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 600') { $info.ArgumentList.Add($a) }
+        $info.UseShellExecute = $false
+        $info.CreateNoWindow = $true
+        $p = [Diagnostics.Process]::Start($info)
+        $sleepers.Add($p)
+        return $p
+    }
+    try {
+        $killed = Start-Sleeper
+        $ended = Stop-Within -Process $killed -Kill { param($x) $x.Kill() }
+        Check ($ended -and $killed.HasExited) "a killed process is waited for on its handle and has exited (pid $($killed.Id))"
+
+        $stuck = Start-Sleeper
+        $ended = Stop-Within -Process $stuck -Kill { param($x) } -WithinMs 300
+        Check (-not $ended -and -not $stuck.HasExited) "a process still running at the bound answers false (pid $($stuck.Id))"
+    }
+    finally {
+        foreach ($p in $sleepers) {
+            if (-not $p.HasExited) { $p.Kill(); [void]$p.WaitForExit(5000) }
+            Check $p.HasExited "this case's sleeper pid $($p.Id) is ended"
+            $p.Dispose()
+        }
+    }
+
+    # ── the_w4_wait_fails_at_its_bound ────────────────────────────────────────
+    Check ($W4RunWithinMs -eq 90000) "W4's bound is old_within 60 s + 30 s ($W4RunWithinMs ms)"
+    $noValue = [pscustomobject]@{}
+    $noValue | Add-Member -MemberType ScriptMethod -Name GetValueNames -Value { @('OneDrive', 'SecurityHealth') }
+    $w4 = Wait-RunValue -RunKey $noValue -EntrySig { '638000000000000000:812:637999999999999999' } -WithinMs 300
+    Check ($w4.Outcome -eq 'bound' -and $w4.ElapsedMs -ge 300) "no Run value: the W4 wait ends at its bound ($($w4.Outcome) after $($w4.ElapsedMs) ms)"
+    Check ($w4.Seen -eq 'run=[] journal entry 638000000000000000:812:637999999999999999') "the W4 wait says what it last saw ($($w4.Seen))"
+    $withValue = [pscustomobject]@{}
+    $withValue | Add-Member -MemberType ScriptMethod -Name GetValueNames -Value { @('OneDrive', 'FolioUpdate-0123abcd') }
+    $w4 = Wait-RunValue -RunKey $withValue -EntrySig { 'x' } -WithinMs 300
+    Check ($w4.Outcome -eq 'held' -and $w4.Seen -eq 'run=[FolioUpdate-0123abcd]') "a FolioUpdate-* value holds W4 ($($w4.Outcome): $($w4.Seen))"
+    $script:entries = 0
+    $w4 = Wait-RunValue -RunKey $noValue -EntrySig { $script:entries++; "sig$([Math]::Min($script:entries, 2))" } -WithinMs 30000
+    Check ($w4.Outcome -eq 'gone' -and $w4.Seen -eq 'run=[] journal entry sig1 -> sig2') "a journal entry that changes with no Run value ends W4's wait ($($w4.Outcome): $($w4.Seen))"
+    $refused = $false
+    try { [void](Wait-Fact -Look { @{ Holds = $true } } -WithinMs 10 -PauseMs 251) } catch { $refused = $true }
+    Check $refused 'a fact wait refuses a pause over 250 ms'
+    Check ($SpinWithinMs -eq 180000) "the millisecond rows' bound is 170 s of product bounds + 10 s ($SpinWithinMs ms)"
+
+    # ── the_mac_capture_refuses_without_a_window ──────────────────────────────
+    # Git for Windows' bash, never WSL's bash.exe: `git --exec-path` is <git>/<mingw64>/libexec/git-core
+    # whichever git.exe answers, and the bash is <git>/bin/bash.exe. Elsewhere the system's.
+    $bash = if ($IsWindows) { Join-Path ((& git --exec-path) | Split-Path -Parent | Split-Path -Parent | Split-Path -Parent) 'bin\bash.exe' } else { '/bin/bash' }
+    Check (Test-Path -LiteralPath $bash) "a bash to run row.sh with ($bash)"
+    function ConvertTo-Posix([string] $path) {
+        if (-not $IsWindows) { return $path }
+        return '/' + $path.Substring(0, 1).ToLowerInvariant() + $path.Substring(2).Replace('\', '/')
+    }
+    $stubs = Join-Path $scratch 'mac-stubs'
+    [IO.Directory]::CreateDirectory($stubs) | Out-Null
+    $called = Join-Path $scratch 'screencapture-called.txt'
+    [IO.File]::WriteAllText((Join-Path $stubs 'osascript'), "#!/bin/sh`nprintf '%s\n' `"`$STUB_WINDOWS`"`n")
+    [IO.File]::WriteAllText((Join-Path $stubs 'ps'), "#!/bin/sh`nprintf '%s\n' 101 202`n")
+    [IO.File]::WriteAllText((Join-Path $stubs 'screencapture'), "#!/bin/sh`necho `"`$*`" >> '$(ConvertTo-Posix $called)'`n")
+    $rowSh = Join-Path $root 'scripts\release\cleanvm\updater\mac\row.sh'
+    function Invoke-DryCapture([string] $windows) {
+        $env:STUB_WINDOWS = $windows
+        try {
+            $said = & $bash -c 'PATH="$1:$PATH"; export PATH; bash "$2" --capture-dry-run NoSuchApp' _ (ConvertTo-Posix $stubs) (ConvertTo-Posix $rowSh) 2>&1 | Out-String
+            return @{ Exit = $LASTEXITCODE; Text = $said.Trim() }
+        }
+        finally { Remove-Item Env:STUB_WINDOWS }
+    }
+    $none = Invoke-DryCapture '43 '
+    Check ($none.Exit -eq 1 -and $none.Text -eq 'screenshot dry-run.png REFUSED: no on-screen NoSuchApp window of pids [101 202] among 43 windows; nothing captured') `
+        "no window of the name: the capture refuses (exit $($none.Exit): $($none.Text))"
+    $unread = Invoke-DryCapture ''
+    Check ($unread.Exit -eq 1 -and $unread.Text -match 'REFUSED: the window list could not be read') "an unreadable window list: the capture refuses (exit $($unread.Exit): $($unread.Text))"
+    $found = Invoke-DryCapture '43 812'
+    Check ($found.Exit -eq 0 -and $found.Text -eq 'dry run: window 812 of NoSuchApp found among 43 windows; nothing captured') "a window found is named, not captured (exit $($found.Exit): $($found.Text))"
+    Check (-not (Test-Path -LiteralPath $called)) 'the dry run never runs screencapture'
 }
 finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue

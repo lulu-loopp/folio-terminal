@@ -10,7 +10,7 @@
 
         revertToSnapshot <Snapshot>   the candidate A, installed (install-candidate.ps1)
         start nogui, wait             a guest operation, then an interactive program
-        copy in                       guest\watch.ps1, keys.ps1, collect.ps1, ui-probe.ps1
+        copy in                       guest\watch.ps1, waits.ps1, keys.ps1, collect.ps1, ui-probe.ps1
                                       into <GuestHome>\updater; the feed into C:\feed
         watch.ps1 -noWait             the row's watcher
         keys.ps1  -noWait             Folio started with --update-feed file:///C:/feed/, the card pressed
@@ -130,6 +130,7 @@ $guestSide = Join-Path $PSScriptRoot 'guest'
 $uiProbe = Join-Path $root 'scripts\dev\ui-probe.ps1'
 $guestScripts = @(
     (Join-Path $guestSide 'watch.ps1'),
+    (Join-Path $guestSide 'waits.ps1'),
     (Join-Path $guestSide 'keys.ps1'),
     (Join-Path $guestSide 'collect.ps1'),
     $uiProbe
