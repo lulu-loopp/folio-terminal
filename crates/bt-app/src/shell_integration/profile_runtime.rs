@@ -116,8 +116,8 @@ fn spawn_profile_observation(data: PathBuf, rows: Vec<PathBuf>, questions: Vec<P
                     programs.push(program);
                 }
             }
-            let report = observe_profile_lines(&data, &programs, &environment);
-            ask_failed_parse_questions_again(questions, &environment);
+            let report = observe_profile_lines(worker, &data, &programs, &environment);
+            ask_failed_parse_questions_again(worker, questions, &environment);
             for refusal in report.refusals() {
                 eprintln!(
                     "BT_SHELL_PROFILE {}: {}",
@@ -164,6 +164,7 @@ fn owned_forms(marks: &Marks, data: &Path) -> Forms {
 /// answer for its program ([`file_profile_answer`]), so the removal's path question below is
 /// asked only of an edition that did not answer.
 fn observe_profile_lines(
+    worker: &bt_platform::admission::WorkerCtx,
     data: &Path,
     programs: &[PathBuf],
     environment: &ProbeEnvironment,
@@ -172,7 +173,7 @@ fn observe_profile_lines(
     let observation = next_observation();
     if !profile_sandboxed() {
         for program in programs {
-            match probe_profile_observation(program, environment) {
+            match probe_profile_observation(worker, program, environment) {
                 Some(mut observed) => {
                     observed.seen = ProfileRevision::read(&observed.path);
                     file_profile_answer(program, observed.path.clone(), observation, environment);
@@ -182,7 +183,12 @@ fn observe_profile_lines(
             }
         }
     }
-    let answers = profile_answers(data, POWERSHELL_PROBE_PATIENCE, environment);
+    let answers = profile_answers(
+        CheckAsker::Worker(worker),
+        data,
+        POWERSHELL_PROBE_PATIENCE,
+        environment,
+    );
     let (marks, files) = match Marks::read(data).and_then(|marks| {
         let files = ProfileFiles::read(data)?;
         Ok((marks, files))
@@ -272,7 +278,7 @@ fn candidates(marks: &Marks, files: &ProfileFiles, answers: PathAnswers) -> (Vec
 ///
 /// `environment` is where its PowerShells are looked up and asked: the current logon block on the
 /// Settings remover's worker, this process's own for the command-line verb.
-pub fn remove_shell_integration(asker: Asker, environment: &ProbeEnvironment) -> Report {
+pub fn remove_shell_integration(asker: CheckAsker<'_>, environment: &ProbeEnvironment) -> Report {
     operate(&persist::storage_dir(), asker, Action::Remove, environment)
 }
 
@@ -283,7 +289,12 @@ pub fn remove_shell_integration_at(data: &Path, profiles: Option<&[PathBuf]>) ->
     // already refused if a Folio is running. Only a run that will ask the machine
     // where its profiles are pays for asking.
     let answers = match profiles {
-        None => profile_answers(data, REMOVAL_PROBE_PATIENCE, &ProbeEnvironment::Inherited),
+        None => profile_answers(
+            CheckAsker::Verb,
+            data,
+            REMOVAL_PROBE_PATIENCE,
+            &ProbeEnvironment::Inherited,
+        ),
         Some(_) => Vec::new(),
     };
     operate_with(
@@ -312,6 +323,7 @@ pub fn remove_shell_integration_at(data: &Path, profiles: Option<&[PathBuf]>) ->
 /// the asker's ([`POWERSHELL_PROBE_PATIENCE`], [`REMOVAL_PROBE_PATIENCE`]). The record is read here without
 /// the lock — to decide only which editions to ask; the removal reads it again under the lock.
 fn profile_answers(
+    asker: CheckAsker<'_>,
     data: &Path,
     patience: bt_platform::ProbePatience,
     environment: &ProbeEnvironment,
@@ -323,7 +335,9 @@ fn profile_answers(
     answers_for(
         &ProfileFiles::read(data).unwrap_or_default(),
         installed_powershells(environment),
-        |program| cached_profile_answer(program, environment, ProfileQuestion::Ask(patience)),
+        |program| {
+            cached_profile_answer(program, environment, ProfileQuestion::Ask(patience, asker))
+        },
     )
 }
 
@@ -344,8 +358,19 @@ fn answers_for(
         .collect()
 }
 
-fn operate(data: &Path, asker: Asker, action: Action, environment: &ProbeEnvironment) -> Report {
-    let answers = profile_answers(data, REMOVAL_PROBE_PATIENCE, environment);
+/// `asker` is who runs the operation: the Settings row's worker ([`Asker::InApp`]) or a
+/// command-line verb's own process ([`Asker::Door`]).
+fn operate(
+    data: &Path,
+    asker: CheckAsker<'_>,
+    action: Action,
+    environment: &ProbeEnvironment,
+) -> Report {
+    let answers = profile_answers(asker, data, REMOVAL_PROBE_PATIENCE, environment);
+    let asker = match asker {
+        CheckAsker::Worker(_) => Asker::InApp,
+        CheckAsker::Verb => Asker::Door,
+    };
     operate_with(data, asker, action, Ok(MANAGED_LINE), |marks, files| {
         candidates(marks, files, answers)
     })
@@ -527,7 +552,7 @@ fn install_for_program(
     };
     let environment = ProbeEnvironment::current(worker, "PowerShell profile install");
     let observation = next_observation();
-    let Some(mut observed) = probe_profile_observation(program, &environment) else {
+    let Some(mut observed) = probe_profile_observation(worker, program, &environment) else {
         publish_profile_observation_failed(program, observation);
         return Err(io::Error::other(Text::ShellProfileProbeFailed.text()));
     };
@@ -622,7 +647,7 @@ pub fn begin_profile_install_undo(
                 Ok(()) => {
                     let environment =
                         ProbeEnvironment::current(worker, "PowerShell profile observation");
-                    let _ = observe_profile_lines(&data, &[program], &environment);
+                    let _ = observe_profile_lines(worker, &data, &[program], &environment);
                     ProfileInstallOutcome::Undone
                 }
                 Err(error) => ProfileInstallOutcome::UndoRefused(error.to_string()),
@@ -658,7 +683,7 @@ pub fn begin_removal() {
         bt_platform::ThreadPriority::BelowNormal,
         |worker| {
             let environment = ProbeEnvironment::current(worker, "PowerShell profile removal");
-            let report = remove_shell_integration(Asker::InApp, &environment);
+            let report = remove_shell_integration(CheckAsker::Worker(worker), &environment);
             if let Ok(mut outcome) = REMOVAL.lock() {
                 *outcome = Some(report);
             }

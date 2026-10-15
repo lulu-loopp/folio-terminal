@@ -1421,7 +1421,6 @@ impl<T: StoredDocument> DocumentState<T> {
             T::apply_press(&mut self.desired, &self.projection, &next);
             self.version += 1;
             self.projection = next;
-            self.writes.rearm();
         }
         if !held {
             self.send_owed();

@@ -119,6 +119,7 @@ mod notice;
 mod notify;
 mod owner_door;
 mod pace;
+mod packaged_turns;
 mod palette;
 mod palette_index;
 mod pane_content;
@@ -742,7 +743,10 @@ enum AppEvent {
     /// **The storage worker answered a hand-editable document's request**
     /// (T-STORAGE-WORKER-REQUEST, `document_request`): a conditional write or a
     /// re-read of `settings.json`, `keybindings.json`, `profiles.json` or
-    /// `pins.json`.
+    /// `pins.json` — **or the session's own** (T-SESSION-RECEIPTS-ON-THE-WAKE):
+    /// a write of `session.json` (its receipt, taken by
+    /// `SessionStore::take_receipts`) or an update's hand-over at quit (read by
+    /// `FolioApp::hand_the_update_over` on the turn this brings).
     ///
     /// Carries nothing: each answer is already in the asking store's own
     /// channel when this is sent — the answer first, the wake after — and the
@@ -50502,6 +50506,11 @@ impl Runtime<'_> {
         if documents.contains(storage_watch::Document::Pins) {
             self.app.pins_store.ask_reread();
         }
+        // **A pass is an ear event for the session too** (the side-effects contract's C5): a
+        // session document a refusal left owed is handed over once more.
+        if !documents.is_empty() {
+            self.app.session_store.hear_the_storage_pass();
+        }
         Ok(())
     }
 
@@ -67100,7 +67109,16 @@ impl FolioApp {
     /// opening order — the one that turns the application's clocks, whose cards
     /// the storage pass's are. With no window standing the answers wait in their
     /// channels for the next wake.
+    ///
+    /// **The session's receipts first, and always** (T-SESSION-RECEIPTS-ON-THE-WAKE): the
+    /// session store is the application's, not a window's, so its receipts are taken whether
+    /// or not a window stands or a quit holds the worker; an update's quit then reads the one it
+    /// waits for, and the hand-over's answer, on the turn this wake brings
+    /// (`Self::settle_quit`).
     fn take_document_answers(&mut self) -> Result<()> {
+        if let Some(app) = self.app.as_mut() {
+            app.session_store.take_receipts();
+        }
         self.take_preview_save_answers()?;
         // **Not while a quit holds the storage worker** (T-QUIT-DOCUMENTS): its documents and
         // recovery phases take the answers themselves, on the turn this wake brings, and merge
@@ -68044,7 +68062,8 @@ impl FolioApp {
                         // **An update's quit does not stand still for its write** (0.4.6 U-21,
                         // §C.3): the photograph goes to the writer as a named generation, the
                         // loop keeps turning, and the receipt for that generation is looked for
-                        // on each turn under `quit::UPDATE_RECEIPT_DEADLINE` — a clock, not a
+                        // on the turn the writer's wake brings (`AppEvent::DocumentsAnswered`),
+                        // under `quit::UPDATE_RECEIPT_DEADLINE` — a bound read on the turn, not a
                         // wait. Only a verdict that leaves begins the way out.
                         let Some(landed) = self.update_session_answer(Instant::now()) else {
                             return Ok(());
@@ -68366,7 +68385,7 @@ impl FolioApp {
             if until <= now {
                 return Some(app.session_store.flush_for_quit(until, now));
             }
-            return match app.session_store.hand_over_final(now) {
+            return match app.session_store.hand_over_final() {
                 Ok(Some(generation)) => {
                     quit.requested(generation, now);
                     None
@@ -68375,10 +68394,10 @@ impl FolioApp {
                 Err(refusal) => Some(Err(refusal)),
             };
         };
-        match app.session_store.landing_of(generation, now) {
+        match app.session_store.landing_of(generation) {
             Some(answer) => Some(answer),
             None if quit.receipt_is_overdue(now) => {
-                Some(Err(app.session_store.receipt_overdue(generation, now)))
+                Some(Err(app.session_store.receipt_overdue(generation)))
             }
             None => None,
         }
@@ -68745,7 +68764,7 @@ impl FolioApp {
                 .app
                 .as_ref()
                 .and_then(|app| app.quit.as_ref())
-                .and_then(|quit| quit.wake_at(now));
+                .and_then(quit::Quit::deadline);
             event_loop.set_control_flow(
                 earliest_deadline([waking, bound])
                     .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
@@ -68890,14 +68909,14 @@ impl FolioApp {
                 }
             }
         }
-        // **And the quit's, while it waits for an answer across turns** (0.4.6 U-21): an update's
-        // quit looks for its session's receipt with the windows still up, and neither the writer
-        // nor anything else wakes the loop when it comes.
+        // **And the quit's bound, while it waits for an answer across turns** (0.4.6 U-21): an
+        // update's quit looks for its session's receipt with the windows still up. The answer
+        // itself wakes the loop (`AppEvent::DocumentsAnswered`); the clock is only the bound.
         let quit_wake = self
             .app
             .as_ref()
             .and_then(|app| app.quit.as_ref())
-            .and_then(|quit| quit.wake_at(now));
+            .and_then(quit::Quit::deadline);
         let wake_deadline = earliest_deadline([wake_deadline, quit_wake]);
         event_loop
             .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
@@ -77050,7 +77069,7 @@ fn main() -> Result<()> {
     // uninstall that said nothing at all.
     if cli::remove_shell_integration(std::env::args_os().skip(1)) {
         let report = shell_integration::remove_shell_integration(
-            shell_integration::profile_marks::Asker::Door,
+            shell_integration::CheckAsker::Verb,
             &shell_integration::ProbeEnvironment::Inherited,
         );
         let done = report.text(false);
@@ -77757,7 +77776,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 27] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 29] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -77787,6 +77806,10 @@ mod platform_gate_tests {
         // The startup path: the native-window door's two arms, and the five
         // platform calls M1-1 made non-fatal.
         "main.rs",
+        // Windows-only test fixtures: the Store PowerShell's app execution alias and package (an
+        // MSIX fact), and the never-settling check's program, Windows PowerShell beside its Unix
+        // shell-script twin; the door itself is portable.
+        "packaged_turns_tests.rs",
         // Which rows the palette offers on this machine.
         "palette_index.rs",
         // Windows-only test fixtures: the drive, share, verbatim and WSL spellings of
@@ -77809,6 +77832,9 @@ mod platform_gate_tests {
         "tests.rs",
         // Native junction and sharing-mode fixtures, never product platform policy.
         "uninstall_tests.rs",
+        // Only the held-journal fixtures: a hold that refuses a replacing rename is a
+        // Windows fact; their platform-free halves run beside the door everywhere.
+        "update_apply_windows_tests.rs",
         // Only the symlinked-log regression fixture; the recovery road is portable.
         "update_recover.rs",
         // Only the real detached-handoff regression fixture; the handoff API is portable.
