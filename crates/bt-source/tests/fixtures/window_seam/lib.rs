@@ -68,6 +68,18 @@ impl Runtime<'_, Native> {
                 Runtime::create()
             }
         }
+        // PLANTED: a holder reached through a body alias and through a renaming body `use`,
+        // inside a listed native method: a listed body introduces no names.
+        type Aliased<'a> = Runtime<'a>;
+        impl Aliased<'_> {
+            fn sneaky(&self) {
+                self.window.request_redraw()
+            }
+        }
+        use crate::Runtime as Renamed;
+        impl Renamed<'_> {
+            fn sneakier(&self) {}
+        }
         // PLANTED: a trait impl for a reference to a native holder, below module level.
         impl Clone for &Runtime<'_, Native> {
             fn clone(&self) -> Self {
@@ -84,6 +96,15 @@ fn listed_rebuild(_windows: Vec<&mut Runtime<'_>>) {
     // PLANTED: a native block of a holder written inside a listed function.
     impl Runtime<'_, Native> {
         fn hidden_in_a_listed_function() {}
+    }
+    // PLANTED: the same two inside a listed function.
+    type Aliased<'a> = Runtime<'a>;
+    impl Aliased<'_> {
+        fn sneaky_in_a_listed_function(&self) {}
+    }
+    use crate::Runtime as Renamed;
+    impl Renamed<'_> {
+        fn sneakier_in_a_listed_function(&self) {}
     }
     // PLANTED: a non-holder's block below module level whose method reaches a native-only method.
     impl crate::Plain {

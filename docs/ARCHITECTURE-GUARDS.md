@@ -574,23 +574,32 @@ brought from the seam), a module-level type alias of a holder or of the native
 backend (its type or its generics), and an `impl` whose self type names a holder
 natively without being its path.
 
-Two general rules close what an enumeration of positions would leave open.
+Three general rules close what an enumeration of positions would leave open.
 **Every impl below module level is read whole, in its own scope, and no listing
-covers it:** one `syn` walk over each product file finds every `ItemImpl` that
-is not at module level — in a signature, a body, a type position, an
-initializer, a default body, wherever the syntax tree holds one — and refuses it
-by name when its trait is a door of the seam, when its self type names a holder
-at all, or when anything in it names a holder or the native backend for the
-native backend (a method body reaching a native-only method included). **A
-body's `use` leaves are followed to a fixed point, or refused:** each block
-keeps its own leaves (every path per name, a `{self}` leaf under the module's
-name), a nested trait impl's trait path is expanded through the blocks around it
-and resolved with the module's resolver, and a path that does not settle, a
-first-party path that resolves to nothing, or a body `use` glob in scope is
-refused by name. A holder, native name or seam trait in a macro's tokens (an
-invocation's or a `macro_rules!` body's) is refused by name — the guard does not
-read macros — and with that rule, every door of the seam the product implements
-is implemented in the seam (the headless backend is test-only and is not read).
+covers it:** one `syn` walk over each product file finds every `ItemImpl` that is
+not at module level — in a signature, a body, a type position, an initializer, a
+default body, wherever the syntax tree holds one — and refuses it by name when
+its trait is a door of the seam, when its self type reaches a holder (spelled,
+or through the body's `use` leaves and type aliases followed to a fixed point),
+or when anything in it names a holder or the native backend for the native
+backend (a method body reaching a native-only method included). **A body the
+guard does not read for mentions introduces no names:** in a native block's
+method, a listed function or a listed `const`, every `use`, `type` and `extern
+crate`, and any other item spelling a holder, is refused by name; a `mod` below
+module level is refused anywhere. **A nested impl's trait is resolved or shown
+to be another crate's, or refused:** its path is expanded through the body's
+`use` leaves (each block's own, every path per name, a `{self}` leaf under the
+module's name) to a fixed point and resolved with the module's resolver; one the
+resolver does not follow passes only when, after the module's own `use` leaves,
+it is rooted at `std`, `core`, `alloc` or a dependency in the package's manifest,
+or is a single segment naming a prelude trait; a path that does not settle, any
+other unresolved path, and a body `use` glob in scope are refused by name. A
+holder, a native name, or a seam trait under any name a first-party `use` gives
+it (its own, or a renamed re-export's) in a macro's tokens is refused by name —
+the guard does not read macros — and so is `paste!`/`concat_idents!`, which
+build names from pieces. With these rules, every door of the seam the product
+implements is implemented in the seam (the headless backend is test-only and is
+not read).
 
 **What the guard does not hold**: the platform handle. `WindowHost::native_handle`
 and `CompositorDoor::platform_tree` hand generic code a `bt_platform` value that

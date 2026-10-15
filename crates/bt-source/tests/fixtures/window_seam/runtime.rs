@@ -354,3 +354,43 @@ macro_rules! makes_a_door {
         }
     };
 }
+
+// PLANTED: a holder reached through a body alias, in a body the guard reads.
+fn aliases_a_holder_inside() {
+    type Aliased = Runtime<'static>;
+    impl Aliased {
+        fn sneaky() {}
+    }
+}
+
+// PLANTED: a module below module level, holding a door.
+fn hides_a_module() {
+    mod hidden {
+        use crate::elsewhere::Host;
+        struct Hidden;
+        impl Host for Hidden {
+            fn request_redraw(&self) {}
+        }
+    }
+}
+
+// PLANTED: a nested impl of a single-segment trait the guard cannot resolve.
+fn implements_a_mystery() {
+    struct Hidden;
+    impl Mystery for Hidden {}
+}
+
+// PLANTED: a macro implementing a door through a renamed re-export.
+macro_rules! door_through_a_reexport {
+    () => {
+        struct Made;
+        impl crate::elsewhere::Host for Made {
+            fn request_redraw(&self) {}
+        }
+    };
+}
+
+// PLANTED: names built from pieces.
+paste::paste! {
+    fn [<built _ here>]() {}
+}

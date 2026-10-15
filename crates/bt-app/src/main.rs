@@ -258,6 +258,12 @@ use input::Keystroke;
 use text_scale::{TextScale, TextStep};
 use window_seam::prelude::*;
 use window_seam::{LoopProxy, Native};
+// `main`'s event-loop builder methods, at module level: `main` is on the window-seam native list,
+// and a listed body introduces no names (bt-source's `window_seam` guard).
+#[cfg(target_os = "macos")]
+use winit::platform::macos::EventLoopBuilderExtMacOS;
+#[cfg(windows)]
+use winit::platform::windows::EventLoopBuilderExtWindows;
 // Step 2a moved these two names' last non-test users into `runtime/` (the
 // `peek` and `windows` topics), which import them themselves; the root keeps
 // them for the root's test modules, which read them through `use super::*`.
@@ -77301,7 +77307,6 @@ fn main() -> Result<()> {
     });
     #[cfg(windows)]
     {
-        use winit::platform::windows::EventLoopBuilderExtWindows;
         // The summon hook is asked first; every message it lets through is
         // then dispatched between the pump timing's pair (ticket 64).
         builder.with_msg_hook(bt_platform::pump::timed_dispatch(
@@ -77327,7 +77332,6 @@ fn main() -> Result<()> {
     // library that cannot know this program has a session to write.
     #[cfg(target_os = "macos")]
     {
-        use winit::platform::macos::EventLoopBuilderExtMacOS;
         builder.with_default_menu(false);
     }
     let event_loop = match builder.build() {
