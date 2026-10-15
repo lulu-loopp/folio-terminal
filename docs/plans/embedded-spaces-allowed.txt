@@ -58,7 +58,7 @@ crates/bt-app/src/main.rs:63060 code sample: the indentation after an escaped li
 crates/bt-app/src/main.rs:63060 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/main.rs:63252 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/main.rs:64235 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:78680 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:78683 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/preview_live.rs:1686 table fixture: each cell padded to its column
 crates/bt-app/src/preview_select.rs:777 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/preview.rs:11100 a diff line sample: the code's indentation after the `+`/`-` sign is the input
