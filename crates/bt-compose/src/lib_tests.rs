@@ -481,3 +481,168 @@ fn the_draw_list_puts_the_focused_pane_first_and_only_it_may_own_the_caret() {
         );
     }
 }
+
+// ── an IME composition on the frame `project` makes (issue #42) ─────────────────────────────
+
+/// One frame row's text as it reads on screen: a wide character's spacer adds nothing.
+fn row_text(frame: &ViewportFrame, row: u32) -> String {
+    let columns = frame.columns.get() as usize;
+    let row = row as usize;
+    frame.cells[row * columns..(row + 1) * columns]
+        .iter()
+        .filter(|cell| !cell.wide_spacer)
+        .map(|cell| cell.text.as_str())
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
+}
+
+fn composing(text: &str) -> bt_render::Preedit {
+    bt_render::Preedit {
+        text: text.to_owned(),
+        cursor_byte: None,
+    }
+}
+
+/// PIN (issue #42) — **a program that hides the cursor and then moves it to its input caret gets
+/// the composition at that caret**, in the frame [`project`] makes, exactly as one that leaves the
+/// cursor shown does.
+///
+/// pi's own order (`tui-main-screen.ts`'s `positionHardwareCursor`, `tui-alt-screen.ts`): the
+/// screen is written — the prompt, then a status line below it, which leaves the cursor there —
+/// the cursor is hidden (`CSI ?25l`), and only then moved onto the input caret (`CSI row;col H`).
+/// A frame is projected between the writes, as a host does, so the second `project` refreshes a
+/// view that has already drawn this pane.
+///
+/// MUTATIONS: the `cursor.visible` filter restored in `bt_render::compose_preedit_inner` — red:
+/// the prompt row reads `> 你` and nothing after it; `cursor_in_view = cursor.visible && …` in
+/// `bt_viewport`'s `continuous_frame` — red: the hidden cursor's cell is not in view.
+#[test]
+fn a_composition_lands_at_the_caret_a_program_moves_its_hidden_cursor_to() {
+    let start = Instant::now();
+    for hides in [true, false] {
+        let (mut session, mut view) = pane_of(24, 6);
+        session
+            .feed_at(
+                "\x1b[?1049h\x1b[H\x1b[2J> \u{4f60}\x1b[6;1H\u{72b6}\u{6001} ready".as_bytes(),
+                start,
+            )
+            .unwrap();
+        let first = project(Pane {
+            session: &mut session,
+            view: &mut view,
+        })
+        .unwrap()
+        .frame;
+        assert_eq!(
+            (first.cursor.row, first.cursor.column),
+            (5, 10),
+            "the status line leaves the cursor below the box"
+        );
+
+        let hide: &[u8] = if hides { b"\x1b[?25l" } else { b"" };
+        session.feed_at(hide, start).unwrap();
+        // Onto the caret after `> 你`: columns 0 and 1, then a wide character over 2 and 3.
+        session.feed_at(b"\x1b[1;5H", start).unwrap();
+        let frame = project(Pane {
+            session: &mut session,
+            view: &mut view,
+        })
+        .unwrap()
+        .frame;
+        assert_eq!(frame.cursor.visible, !hides);
+        assert!(
+            frame.cursor_in_view,
+            "hides={hides}: the cursor's cell is drawn"
+        );
+        assert_eq!((frame.cursor.row, frame.cursor.column), (0, 4));
+
+        let composed = bt_render::compose_preedit(&frame, Some(&composing("ni'hao"))).unwrap();
+        assert_eq!(
+            row_text(&composed.frame, 0),
+            "> \u{4f60}ni'hao",
+            "hides={hides}: the composition stands at the caret the program moved to",
+        );
+        assert_eq!(
+            row_text(&composed.frame, 5),
+            "\u{72b6}\u{6001} ready",
+            "hides={hides}: and not where the cursor was before it moved",
+        );
+        assert_eq!(
+            (composed.ime_caret.row, composed.ime_caret.column),
+            (0, 10),
+            "hides={hides}: the IME caret ends the composition",
+        );
+        assert_eq!(
+            composed.frame.cursor.visible, !hides,
+            "hides={hides}: a hidden cursor stays hidden under its composition",
+        );
+    }
+}
+
+/// PIN (issue #42) — **a cursor under a live formula's picture is not in view**: the frame draws
+/// the formula over its rows, so a composition there would be letters written into cells nobody
+/// sees. Nothing is composed, and the IME is told the frame's cursor — the covered cell itself.
+///
+/// The formula is settled and drawn first, and the cursor is then moved onto its row without
+/// writing anything, shown and hidden alike.
+///
+/// MUTATION: drop `&& !cursor_hidden_by_math` from `cursor_in_view` in `bt_viewport`'s
+/// `continuous_frame` — red: the cursor under the picture is in view, and a composition would be
+/// written into the formula's row.
+#[test]
+fn a_cursor_under_a_live_formula_composes_nothing() {
+    let start = Instant::now();
+    for hides in [true, false] {
+        let mut host = Host::new(40, 24, true);
+        host.session
+            .feed_at("\u{516c}\u{5f0f}\r\n$$x^2$$\r\n".as_bytes(), start)
+            .unwrap();
+        assert_eq!(host.compose(start), Composed::Published);
+        let due = deadlines(&host.session)
+            .live_stability
+            .expect("the formula's row is settling");
+        assert!(
+            advance(&mut host.session, due)
+                .unwrap()
+                .live_stability_advanced
+        );
+        assert_eq!(answer_math(&mut host.session), 1);
+        host.present(true);
+
+        let hide: &[u8] = if hides { b"\x1b[?25l" } else { b"" };
+        host.session.feed_at(hide, due).unwrap();
+        host.session.feed_at(b"\x1b[2;3H", due).unwrap();
+        let frame = project(Pane {
+            session: &mut host.session,
+            view: &mut host.view,
+        })
+        .unwrap()
+        .frame;
+        assert_eq!(
+            frame.math_blocks.len(),
+            1,
+            "hides={hides}: the formula is a picture"
+        );
+        assert!(
+            !frame.cursor_in_view,
+            "hides={hides}: a cursor under the picture is not in view"
+        );
+        assert!(!frame.cursor.visible);
+
+        let composed = bt_render::compose_preedit(&frame, Some(&composing("ni'hao"))).unwrap();
+        assert_eq!(
+            composed.frame, frame,
+            "hides={hides}: nothing is composed under the picture"
+        );
+        assert_eq!(composed.ime_caret, frame.cursor);
+        assert_eq!(
+            (
+                frame.row_map[composed.ime_caret.row as usize].live_grid_row,
+                composed.ime_caret.column
+            ),
+            (Some(1), 2),
+            "hides={hides}: the IME caret is the covered cell",
+        );
+    }
+}

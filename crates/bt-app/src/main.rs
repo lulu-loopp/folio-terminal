@@ -742,7 +742,10 @@ enum AppEvent {
     /// **The storage worker answered a hand-editable document's request**
     /// (T-STORAGE-WORKER-REQUEST, `document_request`): a conditional write or a
     /// re-read of `settings.json`, `keybindings.json`, `profiles.json` or
-    /// `pins.json`.
+    /// `pins.json` — **or the session's own** (T-SESSION-RECEIPTS-ON-THE-WAKE):
+    /// a write of `session.json` (its receipt, taken by
+    /// `SessionStore::take_receipts`) or an update's hand-over at quit (read by
+    /// `FolioApp::hand_the_update_over` on the turn this brings).
     ///
     /// Carries nothing: each answer is already in the asking store's own
     /// channel when this is sent — the answer first, the wake after — and the
@@ -2022,9 +2025,23 @@ impl MathWorkerRequest {
     /// the id it joined, and the drain hands the window each answer under its own request's id
     /// only — the record would await an id whose answer never comes. The cost: the newer open
     /// takes the back of the line instead of the older one's place. Another window's open of the
-    /// same file is its own question and waits its turn. Everything else waits behind what is in
-    /// line: nothing else on this share is coalesced.
+    /// same file is its own question and waits its turn.
+    ///
+    /// **A read of a file's pixels is the same case** (T-PEEK-ANSWER-IDENTITY): a newer read of
+    /// the same file — a picture's decode or a video's frame, the two roads of one record in the
+    /// window's peek cache ([`ask_for_peek_pixels`]) — for the same window displaces the read
+    /// waiting for it, on the same three grounds: the window asks a file whose read is out only
+    /// after the file-change news let that read go ([`forget_a_picture`]), its record then awaits
+    /// the newer id alone ([`peek_awaits`]), and a joined read would leave it awaiting an answer
+    /// that never comes. Everything else waits behind what is in line: nothing else on this share
+    /// is coalesced.
     fn relate(waiting: &Self, asked: &Self) -> lane::Relation {
+        let same_file_for_the_same_window =
+            |waiting_leaf: &ShellAddress, waiting_path: &Path, leaf: &ShellAddress, path: &Path| {
+                waiting_leaf.window == leaf.window
+                    && normalized_local_image_path_key(waiting_path)
+                        == normalized_local_image_path_key(path)
+            };
         match (waiting, asked) {
             (
                 Self::PeekAnimation {
@@ -2032,10 +2049,18 @@ impl MathWorkerRequest {
                     path: waiting_path,
                 },
                 Self::PeekAnimation { leaf, path },
-            ) if waiting_leaf.window == leaf.window
-                && normalized_local_image_path_key(waiting_path)
-                    == normalized_local_image_path_key(path) =>
-            {
+            )
+            | (
+                Self::PeekImage {
+                    leaf: waiting_leaf,
+                    path: waiting_path,
+                }
+                | Self::PeekVideoFrame {
+                    leaf: waiting_leaf,
+                    path: waiting_path,
+                },
+                Self::PeekImage { leaf, path } | Self::PeekVideoFrame { leaf, path },
+            ) if same_file_for_the_same_window(waiting_leaf, waiting_path, leaf, path) => {
                 lane::Relation::Displaces
             }
             _ => lane::Relation::Other,
@@ -3953,7 +3978,10 @@ fn answer_one_picture(
     // the page *draws* — that is the answer below — and everything about whether
     // this pass is the one that must ask: the store's own `Pending` is the latch
     // that keeps one read from becoming one read per frame.
-    let read_is_out = matches!(peek_cache.get(&cache_key), Some(PeekCacheEntry::Pending));
+    let read_is_out = matches!(
+        peek_cache.get(&cache_key),
+        Some(PeekCacheEntry::Pending { .. })
+    );
     // What this window is holding, and what it has merely been told. The decode
     // cache is the first; the answer the page is standing on is the second, and
     // it outlives the pixels.
@@ -3971,7 +3999,7 @@ fn answer_one_picture(
         // keeps drawing what it was drawing rather than going blank, and it goes
         // on down this function either way, because what it is drawing may still
         // be the soft raster the decode is wanted to sharpen.
-        Some(PeekCacheEntry::Pending) | None => match standing {
+        Some(PeekCacheEntry::Pending { .. }) | None => match standing {
             // Answered once, and the cache has since let the pixels go. The
             // decode's own size and its content key are the whole of what the
             // passes below need; `rgba` is the decode's own pixels only while
@@ -11951,6 +11979,17 @@ struct MathAnswers {
     lane_gone: bool,
 }
 
+/// **What the repository lanes' drain hands the windows** ([`FolioApp::drain_git_answers`]): the
+/// pages' answers and receipts, each addressed to where its cache stands; the documents' answers,
+/// each addressed to where its buffer is kept; and whether the read worker was found gone on this
+/// turn.
+#[derive(Default)]
+struct GitAnswers {
+    pages: Vec<git::GitResponse>,
+    documents: Vec<git::GitDocumentAnswer>,
+    gone: bool,
+}
+
 /// **The terminals one drain took, sorted for the windows**: an answer joins `done`; a failed
 /// request — its own failure, or the one it joined — is settled ([`settle_failure`]): an error
 /// answer joins `done`, a pane task or an animation fill joins `failed` for the window that holds
@@ -17231,6 +17270,7 @@ mod worker_answer_routing_tests {
             window: window_a(),
             host: git::GitHost::Column(leaf),
             asker: git::GitCacheId::mint(),
+            buffer: None,
             answer: git::GitAnswer::Repo {
                 dir: PathBuf::from("/repo"),
                 outcome: Ok(PathBuf::from("/repo")),
@@ -17250,6 +17290,26 @@ mod worker_answer_routing_tests {
             ..column.clone()
         };
         assert_eq!(popped_out.owner(), AnswerOwner::Window(window_a()));
+        // A document's answer belongs where its buffer is kept: a pool travels
+        // inside its tab, and the hover card is its window's.
+        let mut pool = preview::PreviewPool::default();
+        let diff = preview::PreviewSource::GitDiff {
+            root: PathBuf::from("/repo"),
+            path: "说明 notes.md".to_owned(),
+            against: preview::GitDiffAgainst::Index,
+        };
+        pool.open(diff.clone(), "说明 notes.md".to_owned(), &[]);
+        let pooled = git::GitDocumentAnswer {
+            shelf: git::Shelf::Pool(tab),
+            buffer: pool.ask_composer(&diff).expect("a diff waits on git"),
+            answer: column.answer.clone(),
+        };
+        assert_eq!(pooled.owner(), AnswerOwner::Tab(tab));
+        let glanced = git::GitDocumentAnswer {
+            shelf: git::Shelf::Glance(window_a()),
+            ..pooled.clone()
+        };
+        assert_eq!(glanced.owner(), AnswerOwner::Window(window_a()));
 
         let head = preview::PreviewResponse {
             window: window_a(),
@@ -25094,7 +25154,14 @@ impl PeekHover {
 /// `Ready` holds the *native* decode. It is CPU memory the worker's decoder already retains, and
 /// it is what a resample at any later display size is computed from — it never reaches the GPU.
 enum PeekCacheEntry {
-    Pending,
+    /// **A read is out, and the answer awaited is the one to the request `asked`** — the identity
+    /// the computation lane minted for it (T-PEEK-ANSWER-IDENTITY). An answer is filed only for
+    /// the read that asked it: one that comes home under another identity answers a question this
+    /// window no longer asks — the file changed under the read, and a surface asked again — and is
+    /// set aside, never filed ([`peek_awaits`]).
+    Pending {
+        asked: computation_lane::ComputationId,
+    },
     /// **And why it failed** (owner's ruling 2026-09-12). The entry used to be a
     /// bare word, so the only surface that ever heard the reason was one that
     /// happened to be on the glass at the moment the answer landed; a pane that
@@ -25126,7 +25193,7 @@ fn peek_reads_the_file(entry: Option<&PeekCacheEntry>, readable: bool, settled: 
         && match entry {
             None => true,
             Some(PeekCacheEntry::Failed(_)) => settled,
-            Some(PeekCacheEntry::Pending | PeekCacheEntry::Ready { .. }) => false,
+            Some(PeekCacheEntry::Pending { .. } | PeekCacheEntry::Ready { .. }) => false,
         }
 }
 
@@ -25146,7 +25213,7 @@ fn peek_reads_the_file(entry: Option<&PeekCacheEntry>, readable: bool, settled: 
 impl bt_term::Weighed for PeekCacheEntry {
     fn bytes_held(&self) -> u64 {
         match self {
-            Self::Pending | Self::Failed(_) => 0,
+            Self::Pending { .. } | Self::Failed(_) => 0,
             Self::Ready { rgba, .. } => rgba.len() as u64,
         }
     }
@@ -25198,7 +25265,7 @@ fn peek_files_named(
 /// A `Failed` record is kept exactly as long as some surface names its file (`named`, from
 /// [`peek_files_named`]): while one does, its redraws read the failure and ask nothing; when the
 /// last one has gone, the file's next showing is new input and asks. A decode in flight is kept
-/// until its answer, which [`file_peek_failure`] files nowhere if the file is unnamed by then. A
+/// until its answer, which [`file_peek_answer`] files nowhere if the file is unnamed by then. A
 /// decode is weight, which the budget governs.
 fn let_go_unnamed_peek_records(peek_cache: &mut PeekCache, named: &BTreeSet<String>) {
     let unnamed: Vec<String> = peek_cache
@@ -25213,22 +25280,159 @@ fn let_go_unnamed_peek_records(peek_cache: &mut PeekCache, named: &BTreeSet<Stri
     }
 }
 
-/// **A failure that came home for one file — its decode's, or a video's with no frame — filed
-/// only for a file some surface names** (T-PEEK-CACHE-QUESTION-RECORDS;
-/// [`AnimationCache::answered_for_nobody`]'s rule, for the peek cache). For a file no surface names
-/// by the time it lands, its decode in flight is let go of and nothing is filed: a record nobody
-/// is showing would be one [`let_go_unnamed_peek_records`] exists to end.
-fn file_peek_failure(
+/// **Whether the file's read in flight awaits the answer to the request `asked`**
+/// (T-PEEK-ANSWER-IDENTITY; [`AnimationCache::awaits`]'s rule, for the peek cache) — the one
+/// question a peek answer may be filed for. An answer under any other identity is set aside: its
+/// read was let go of — the file changed under it ([`forget_a_picture`]) — and a newer one asked
+/// in its place, or none.
+fn peek_awaits(peek_cache: &PeekCache, key: &str, asked: computation_lane::ComputationId) -> bool {
+    matches!(
+        peek_cache.peek(key),
+        Some(PeekCacheEntry::Pending { asked: awaited }) if *awaited == asked
+    )
+}
+
+/// **The worker's answer to the peek read `asked`, filed** (T-PEEK-ANSWER-IDENTITY) — a file's
+/// decode or a video's frame (`Ok`, the `Ready` entry it makes), or the failure that came home
+/// for it: its decode's, or a video's with no frame (`Err`).
+///
+/// Filed only for the read in flight that awaits `asked` ([`peek_awaits`]): the answer to a read
+/// the window has let go of is set aside — it was read from bytes the file no longer holds, and
+/// the window's newer read is the one filed. A failure is filed only for a file some surface
+/// names (T-PEEK-CACHE-QUESTION-RECORDS; [`AnimationCache::answered_for_nobody`]'s rule): for a
+/// file no surface names by the time it lands, its read in flight is let go of and nothing is
+/// filed, since a record nobody is showing would be one [`let_go_unnamed_peek_records`] exists to
+/// end. Pixels are filed either way: they are weight, which the budget governs. `true` when the
+/// answer was the awaited one — the one case in which the surfaces standing on the file are told.
+fn file_peek_answer(
     peek_cache: &mut PeekCache,
     named: &BTreeSet<String>,
     key: String,
-    failure: bt_term::InlineImageDecodeError,
-) {
-    if named.contains(&key) {
-        peek_cache.insert(key, PeekCacheEntry::Failed(failure));
-    } else if matches!(peek_cache.peek(&key), Some(PeekCacheEntry::Pending)) {
-        peek_cache.remove(&key);
+    asked: computation_lane::ComputationId,
+    answer: Result<PeekCacheEntry, bt_term::InlineImageDecodeError>,
+) -> bool {
+    if !peek_awaits(peek_cache, &key, asked) {
+        return false;
     }
+    match answer {
+        Ok(pixels) => peek_cache.insert(key, pixels),
+        Err(failure) if named.contains(&key) => {
+            peek_cache.insert(key, PeekCacheEntry::Failed(failure));
+        }
+        Err(_) => {
+            peek_cache.remove(&key);
+        }
+    }
+    true
+}
+
+/// **A decode the session's own worker made, remembered for the peek** — a pasted picture under
+/// its content key, a printed path's picture under its normalized path
+/// ([`peek_cache_key_for_decode`]; `Runtime::remember_decode_for_peek` says why).
+///
+/// **Never over a read in flight** (T-PEEK-ANSWER-IDENTITY round 2): a `Pending` is the record of
+/// a surface's question, and its answer is the one road that tells the surfaces waiting on it — the
+/// flyout's re-entry, a page's sharpening and re-flow, the panes' and card's redraw. Pixels filed
+/// over it would leave that answer awaited by no record and set aside ([`peek_awaits`]), and the
+/// surfaces waiting would hear nothing. The read's own answer files the same file's pixels.
+fn remember_decode(
+    peek_cache: &mut PeekCache,
+    source: &bt_term::InlineImageSource,
+    decoded: &bt_term::DecodedInlineImage,
+) {
+    let key = peek_cache_key_for_decode(source, decoded);
+    if matches!(peek_cache.peek(&key), Some(PeekCacheEntry::Pending { .. })) {
+        return;
+    }
+    peek_cache.insert(
+        key,
+        PeekCacheEntry::Ready {
+            key: decoded.key.clone(),
+            rgba: Arc::clone(&decoded.rgba),
+            width_px: decoded.width_px,
+            height_px: decoded.height_px,
+            native_size: decoded.native_size,
+        },
+    );
+}
+
+/// **What became of a request for a file's pixels** ([`ask_for_peek_pixels`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PeekAsk {
+    /// The computation lane admitted it under this identity: the file is `Pending` until the
+    /// answer to it.
+    Asked(computation_lane::ComputationId),
+    /// The lane was full: nothing is out, and the surface's next resolve asks again (the answers
+    /// that free the lane are the next hand-out).
+    NotNow,
+    /// The lane's thread could not be started: the file is filed as failed
+    /// ([`unstarted_pixels`]), so it is asked again only by new input to the surface — a new
+    /// hover, the file opened again.
+    Unstarted,
+    /// It was not asked and will not be: a file this window does not open, or a lane that has
+    /// stopped.
+    Refused,
+}
+
+/// **What a file's pixels are filed as when the lane's thread could not be started**: a failed
+/// decode, in the decoder error's words, so every surface reading the window's cache agrees and
+/// asks again only on its own new input.
+fn unstarted_pixels() -> PeekCacheEntry {
+    PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Decode(
+        DECODE_UNSTARTED.to_owned(),
+    ))
+}
+
+/// **Ask the computation lane for one file's native pixels for the window at `leaf`, and file
+/// the record of the question** (user ruling 2026-08-27, §7.23; T-PEEK-ANSWER-IDENTITY) — the one
+/// door every surface that shows a file's pixels asks through: the picture pane's refit, a
+/// markdown page's pictures, the glance card and the hover flyout, by way of
+/// `Runtime::request_peek_pixels`.
+///
+/// **The door itself asks whether this is a file to read** (routes A and E of the untrusted-path
+/// audit, 2026-09-08): what goes out of here is a request to open a file, and a request nobody
+/// may make is one this window does not send. **It is the one place the fork between the picture
+/// decoder and the video decoder is written**, read with [`preview::path_names_a_video`] — the
+/// predicate the preview's open forks on, so a file that opened as a video is decoded as one —
+/// because both fill the same record under the same key and a second reading of the name at the
+/// delivery end is how a `.png` and a `.mp4` would come to disagree about who owns it.
+///
+/// **And it files what it asked**: a read admitted is `Pending` under the identity the lane
+/// minted, which its answer is filed by ([`file_peek_answer`]); a thread that could not be
+/// started is the unstarted record. A full lane or a refusal files nothing.
+fn ask_for_peek_pixels(
+    peek_cache: &mut PeekCache,
+    computation: &computation_lane::ComputationLane,
+    leaf: ShellAddress,
+    path: &Path,
+) -> PeekAsk {
+    if !preview::is_readable_unasked(path) {
+        return PeekAsk::Refused;
+    }
+    let request = if preview::path_names_a_video(path) {
+        MathWorkerRequest::PeekVideoFrame {
+            leaf,
+            path: path.to_owned(),
+        }
+    } else {
+        MathWorkerRequest::PeekImage {
+            leaf,
+            path: path.to_owned(),
+        }
+    };
+    let asked = match computation.decorate(request) {
+        Ok(asked) => PeekAsk::Asked(asked),
+        Err((lane::Refused::Full { .. }, _)) => PeekAsk::NotNow,
+        Err((lane::Refused::NotStarted(_), _)) => PeekAsk::Unstarted,
+        Err(_) => PeekAsk::Refused,
+    };
+    let key = bt_term::normalized_local_image_path_key(path);
+    match asked {
+        PeekAsk::Asked(asked) => peek_cache.insert(key, PeekCacheEntry::Pending { asked }),
+        PeekAsk::Unstarted => peek_cache.insert(key, unstarted_pixels()),
+        PeekAsk::NotNow | PeekAsk::Refused => {}
+    }
+    asked
 }
 
 /// **A glance card opening over a file** (T-PEEK-CACHE-QUESTION-RECORDS round 2): a new card is
@@ -27002,7 +27206,7 @@ fn surface_pixels(
         Some(PeekCacheEntry::Failed(reason)) => SurfacePixels::Failed(reason.clone()),
         // A read is out. What this surface is holding stays on the glass while
         // the answer travels, rather than the picture vanishing and coming back.
-        Some(PeekCacheEntry::Pending) => match held {
+        Some(PeekCacheEntry::Pending { .. }) => match held {
             Some((content, native)) => SurfacePixels::Standing {
                 content,
                 native,
@@ -52010,6 +52214,7 @@ impl Runtime<'_> {
                 window: self.window_id(),
                 host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
                 asker,
+                buffer: None,
                 question,
             })
         {
@@ -52044,6 +52249,7 @@ impl Runtime<'_> {
             window: self.window_id(),
             host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
             asker,
+            buffer: None,
             question,
         }) {
             self.disable_git_worker();
@@ -65150,7 +65356,8 @@ impl FolioApp {
     }
 
     /// [`Self::drain_preview_answers`] for the repository lanes — the read
-    /// worker's answers and the mutation lane's receipts, in one batch.
+    /// worker's answers and the mutation lane's receipts, in one batch, and the
+    /// answers to git documents beside it.
     ///
     /// **The receipts are taken first and filed last.** A read of a repository
     /// sends its answer before any later mutation of it can start
@@ -65160,15 +65367,21 @@ impl FolioApp {
     /// taken before a verb never lands after the verb's receipt has asked the
     /// repository again.
     ///
-    /// **Every answer is owed to the cache that asked** (`git::GitCacheId`),
+    /// **Every page's answer is owed to the cache that asked** (`git::GitCacheId`),
     /// found where it stands now among the caches the open windows hold
     /// (`git_mutation_lane::OpenPages`): a page's answer is addressed there, so a
     /// Files view docked into a column or popped out into a float while git ran
     /// still receives it. A receipt whose cache no open window holds is let go
     /// first, and ends in the lane's sink; a read answer whose cache is gone is
     /// dropped.
-    fn drain_git_answers(&mut self) -> (Vec<git::GitResponse>, bool) {
-        let mut batch = Vec::new();
+    ///
+    /// **Every document's answer is owed to the buffer opened for it**
+    /// (`preview::BufferId`), found where it is kept now — in whichever tab's pool,
+    /// or on a window's hover card — whether or not the page whose row was pressed
+    /// is still open. One whose buffer nothing keeps any more reaches the sink,
+    /// which ignores it: nobody is waiting for it.
+    fn drain_git_answers(&mut self) -> GitAnswers {
+        let mut answers = GitAnswers::default();
         let mut open = git_mutation_lane::OpenPages::default();
         for window in self.windows.values() {
             if window.leaving.is_none() {
@@ -65188,6 +65401,7 @@ impl FolioApp {
                         };
                         open.stand(graph.cache.id(), id, place);
                     }
+                    open.keep_pool(tab.id, &tab.preview_pool);
                 }
                 for win in window.float.live_windows() {
                     if let Some(files) = win.files() {
@@ -65198,10 +65412,11 @@ impl FolioApp {
                         );
                     }
                 }
+                open.keep_glance(id, &window.peek_buffer);
             }
         }
         let Some(app) = self.app.as_mut() else {
-            return (batch, false);
+            return answers;
         };
         let receipts: Vec<git::GitResponse> = app
             .git_mutations
@@ -65211,13 +65426,20 @@ impl FolioApp {
                 open.address(git_mutation_lane::receipt(terminal, request))
             })
             .collect();
-        let mut gone = false;
+        // The sink for a document whose buffer is gone (C6): nobody waits for it.
+        let mut sink = |_unkept: git::GitResponse| {};
         loop {
             match app.git_worker.responses.try_recv() {
-                Ok(response) => batch.extend(open.address(response)),
+                Ok(response) => match open.file(response, &mut sink) {
+                    Some(git_mutation_lane::Filed::Page(page)) => answers.pages.push(page),
+                    Some(git_mutation_lane::Filed::Document(document)) => {
+                        answers.documents.push(document);
+                    }
+                    None => {}
+                },
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    gone = git::disable_git_worker_state(
+                    answers.gone = git::disable_git_worker_state(
                         &mut app.git_worker_running,
                         &mut app.git_worker_notice_pending,
                     );
@@ -65225,8 +65447,8 @@ impl FolioApp {
                 }
             }
         }
-        batch.extend(receipts);
-        (batch, gone)
+        answers.pages.extend(receipts);
+        answers
     }
 
     /// [`Self::drain_preview_answers`] for the computation lane — the formulas,
@@ -66886,7 +67108,16 @@ impl FolioApp {
     /// opening order — the one that turns the application's clocks, whose cards
     /// the storage pass's are. With no window standing the answers wait in their
     /// channels for the next wake.
+    ///
+    /// **The session's receipts first, and always** (T-SESSION-RECEIPTS-ON-THE-WAKE): the
+    /// session store is the application's, not a window's, so its receipts are taken whether
+    /// or not a window stands or a quit holds the worker; an update's quit then reads the one it
+    /// waits for, and the hand-over's answer, on the turn this wake brings
+    /// (`Self::settle_quit`).
     fn take_document_answers(&mut self) -> Result<()> {
+        if let Some(app) = self.app.as_mut() {
+            app.session_store.take_receipts();
+        }
         self.take_preview_save_answers()?;
         // **Not while a quit holds the storage worker** (T-QUIT-DOCUMENTS): its documents and
         // recovery phases take the answers themselves, on the turn this wake brings, and merge
@@ -67830,7 +68061,8 @@ impl FolioApp {
                         // **An update's quit does not stand still for its write** (0.4.6 U-21,
                         // §C.3): the photograph goes to the writer as a named generation, the
                         // loop keeps turning, and the receipt for that generation is looked for
-                        // on each turn under `quit::UPDATE_RECEIPT_DEADLINE` — a clock, not a
+                        // on the turn the writer's wake brings (`AppEvent::DocumentsAnswered`),
+                        // under `quit::UPDATE_RECEIPT_DEADLINE` — a bound read on the turn, not a
                         // wait. Only a verdict that leaves begins the way out.
                         let Some(landed) = self.update_session_answer(Instant::now()) else {
                             return Ok(());
@@ -68531,7 +68763,7 @@ impl FolioApp {
                 .app
                 .as_ref()
                 .and_then(|app| app.quit.as_ref())
-                .and_then(|quit| quit.wake_at(now));
+                .and_then(quit::Quit::deadline);
             event_loop.set_control_flow(
                 earliest_deadline([waking, bound])
                     .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
@@ -68676,14 +68908,14 @@ impl FolioApp {
                 }
             }
         }
-        // **And the quit's, while it waits for an answer across turns** (0.4.6 U-21): an update's
-        // quit looks for its session's receipt with the windows still up, and neither the writer
-        // nor anything else wakes the loop when it comes.
+        // **And the quit's bound, while it waits for an answer across turns** (0.4.6 U-21): an
+        // update's quit looks for its session's receipt with the windows still up. The answer
+        // itself wakes the loop (`AppEvent::DocumentsAnswered`); the clock is only the bound.
         let quit_wake = self
             .app
             .as_ref()
             .and_then(|app| app.quit.as_ref())
-            .and_then(|quit| quit.wake_at(now));
+            .and_then(quit::Quit::deadline);
         let wake_deadline = earliest_deadline([wake_deadline, quit_wake]);
         event_loop
             .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
@@ -69229,8 +69461,14 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             }
             AppEvent::FileIndexReady => self.apply_file_index_results(),
             AppEvent::GitReady => {
-                let (mut batch, gone) = self.drain_git_answers();
-                self.for_each_window(|runtime| runtime.apply_git_results(&mut batch, gone))
+                let mut answers = self.drain_git_answers();
+                self.for_each_window(|runtime| {
+                    runtime.apply_git_results(
+                        &mut answers.pages,
+                        &mut answers.documents,
+                        answers.gone,
+                    )
+                })
             }
             // Nothing is done here. The news has already been stamped into the
             // watcher's own mailbox by the thread that heard it; this only
@@ -75315,7 +75553,7 @@ fn card_picture_in<'a>(cache: &'a PeekCache, path: &Path) -> Option<focus_thumb:
             width_px: *width_px,
             height_px: *height_px,
         }),
-        PeekCacheEntry::Pending | PeekCacheEntry::Failed(_) => None,
+        PeekCacheEntry::Pending { .. } | PeekCacheEntry::Failed(_) => None,
     }
 }
 

@@ -31,10 +31,14 @@
 //!   is minted at the press, so a read asked after a press never runs in the middle of that verb —
 //!   and for a verb running there; a verb pressed after the read was asked waits for the read
 //!   instead, so later presses never lengthen a read's wait. A verb starts only while no read of
-//!   its repository runs. Both waits are on workers. A read waits at most the verbs owed when it
-//!   was asked, each one git child bounded by [`crate::git::GIT_COMMAND_TIMEOUT`] (up to
-//!   [`MUTATION_BOUND`] of them); while it waits, the one read worker answers no other repository
-//!   either. A verb waits at most the one read running, or the reads asked before it was pressed.
+//!   its repository runs. A read waits **in the read worker's line, never on its thread**: one
+//!   whose turn has not come is parked ([`ReadTicket::begin`] hands its ticket back) and the
+//!   worker answers the next question — of any other repository — meanwhile; when a verb's end
+//!   may have brought a parked read's turn, the worker is nudged and takes the parked reads whose
+//!   turn has come first, in the order they were parked. A read waits at most the verbs owed when
+//!   it was asked, each one git child bounded by [`crate::git::GIT_COMMAND_TIMEOUT`] (up to
+//!   [`MUTATION_BOUND`] of them); a read of another repository is not held by it. A verb waits, on
+//!   its share's worker, at most the one read running, or the reads asked before it was pressed.
 //! * **Capacity.** A share owes at most [`MUTATION_BOUND`] requests, a terminal not yet taken
 //!   holding its place: what one Git page can hand it at once. A request past it — or asked of a
 //!   share whose worker has ended — is refused at the door, synchronously, with no identity minted
@@ -65,8 +69,8 @@
 //!   two workers with verbs.
 //! * **Wake.** Each worker publishes the terminal first and then wakes the loop
 //!   (`AppEvent::GitReady`, the read worker's own wake); each ledger wakes it the same way when its
-//!   worker ends with requests owed. Every wake also tells the read worker's turn ([`RepoTurns`])
-//!   that what a repository owes may have changed.
+//!   worker ends with requests owed. Every wake also tells the turnstile ([`RepoTurns`]) that what
+//!   a repository owes may have changed, which nudges the read worker when a read is parked.
 
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
@@ -167,8 +171,10 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 // ------------------------------------------------------------------------------------------------
 
 /// **Whose turn a repository is**: the read worker's, or its mutation share's — never both. Shared
-/// by the read worker (`git::GitWorker`) and every share of the lane; waited on only on those
-/// workers.
+/// by the read worker (`git::GitWorker`) and every share of the lane. Only a share's worker ever
+/// waits in it ([`RepoTurns::verb_turn`]); the read worker never does — a read whose turn has not
+/// come is parked in the worker's own line ([`ReadTicket::begin`]), and the worker is nudged when
+/// it may have come.
 ///
 /// What a share owes is its ledger's to say ([`Ledger::earliest_owed`]): the turnstile holds each
 /// repository's ledger, never a count of its own. A request is owed from its admission until its
@@ -178,6 +184,9 @@ pub(crate) struct RepoTurns {
     state: Mutex<TurnState>,
     changed: Condvar,
 }
+
+/// **The read worker's nudge**: what tells it that a parked read's turn may have come.
+type Nudge = Box<dyn Fn() + Send>;
 
 #[derive(Default)]
 struct TurnState {
@@ -191,18 +200,22 @@ struct TurnState {
     reading: Vec<PathBuf>,
     /// The folders a verb is running in.
     running: Vec<PathBuf>,
+    /// The read worker's nudge, once it has one ([`RepoTurns::nudge_with`]).
+    nudge: Option<Nudge>,
     /// How many verbs wait their turn now — where a test sees a verb wait.
     #[cfg(test)]
     verbs_waiting: usize,
 }
 
-/// **A read asked and not yet run**: its folder, and the verbs it waits for — every one its
-/// folder's share had minted when the read was asked, named by that share's ledger and the last
-/// number it had minted; none when the folder had no share or the share had minted nothing.
+/// **A read asked and not yet run**: its folder, the verbs it waits for — every one its folder's
+/// share had minted when the read was asked, named by that share's ledger and the last number it
+/// had minted; none when the folder had no share or the share had minted nothing — and whether it
+/// is parked in the read worker's line, its turn not come when it was last looked at.
 struct Asked {
     read: u64,
     folder: PathBuf,
     behind: Option<(Arc<MutationLedger>, Minted)>,
+    parked: bool,
 }
 
 impl Asked {
@@ -237,17 +250,26 @@ impl TurnState {
         self.running.iter().any(|at| same_folder(at, folder))
     }
 
-    /// Whether the read numbered `read` must still wait: a verb it waits for is owed, or a verb
-    /// runs in its folder.
+    /// Whether the read numbered `read` must still wait: a verb it waits for is owed, a verb runs
+    /// in its folder, or a read of its folder asked before it still waits — so a folder's reads
+    /// begin in the order they were asked. That last clause is what keeps the order: what a share
+    /// owes is read from its ledger, outside this lock, so two reads looked at one after the other
+    /// can see two different answers.
     fn read_waits(&self, read: u64) -> bool {
         self.asked
             .iter()
             .find(|asked| asked.read == read)
-            .is_some_and(|asked| asked.behind_a_verb() || self.running(&asked.folder))
+            .is_some_and(|asked| {
+                let asked_before = self.asked.iter().any(|earlier| {
+                    earlier.read < read && same_folder(&earlier.folder, &asked.folder)
+                });
+                asked_before || asked.behind_a_verb() || self.running(&asked.folder)
+            })
     }
 
     /// Whether the verb `ledger` runs now in `folder` must still wait: a read of the folder runs, or
-    /// a read of it was asked before the verb was pressed (one that does not wait for it).
+    /// a read of it was asked before the verb was pressed (one that does not wait for it) — parked
+    /// in the read worker's line or not.
     fn verb_waits(&self, folder: &Path, ledger: &Arc<MutationLedger>) -> bool {
         let running = ledger.earliest_owed();
         self.reading(folder)
@@ -255,23 +277,112 @@ impl TurnState {
                 same_folder(&asked.folder, folder) && !asked.waits_for(ledger, running)
             })
     }
+
+    /// **Tell the read worker to look at its line again** when a read is parked there. Called,
+    /// under the lock, after every change that can bring a parked read's turn: a verb's terminal
+    /// published or its share's worker ended ([`RepoTurns::changed`]) and a verb's mark coming off
+    /// ([`Running`]). A read is parked under the same lock in which its turn was found not come,
+    /// so a change either came before that look, which saw it, or finds the read parked here.
+    fn nudge_if_parked(&self) {
+        if self.asked.iter().any(|asked| asked.parked)
+            && let Some(nudge) = &self.nudge
+        {
+            nudge();
+        }
+    }
 }
 
-/// A turn's mark in the turnstile — a read or a verb running in a folder — taken off when it is
-/// over, or its work unwound.
-struct Turn<'a> {
+/// **A verb's mark in the turnstile** — a verb running in a folder — taken off when it is over,
+/// or its work unwound; the read worker is nudged, since a read parked behind it may run now.
+struct Running<'a> {
     turns: &'a RepoTurns,
     folder: &'a Path,
-    of: fn(&mut TurnState) -> &mut Vec<PathBuf>,
 }
 
-impl Drop for Turn<'_> {
+impl Drop for Running<'_> {
     fn drop(&mut self) {
         {
             let mut state = locked(&self.turns.state);
-            let marks = (self.of)(&mut state);
-            if let Some(at) = marks.iter().position(|at| same_folder(at, self.folder)) {
-                marks.remove(at);
+            if let Some(at) = state
+                .running
+                .iter()
+                .position(|at| same_folder(at, self.folder))
+            {
+                state.running.remove(at);
+            }
+            state.nudge_if_parked();
+        }
+        self.turns.changed.notify_all();
+    }
+}
+
+/// **One read asked of the turnstile and not yet run** ([`RepoTurns::ask`]): its number, and the
+/// folder it reads. It keeps the read's place — the verbs it waits for, fixed when it was asked —
+/// however many times it is parked and looked at again ([`Self::begin`]); a verb pressed after it
+/// waits for it while it stands. Dropped unrun — a newer ask of the same question replaced it, or
+/// the read worker ended — it takes its place out, so no verb waits on a read that will not run.
+pub(crate) struct ReadTicket {
+    turns: Arc<RepoTurns>,
+    read: u64,
+    folder: PathBuf,
+}
+
+impl ReadTicket {
+    /// **The read's turn, if it has come** — every verb it waits for has ended, no verb runs in
+    /// its folder, and no read of its folder asked before it still waits: the folder is marked as
+    /// being read until the [`Reading`] answered is dropped, so no verb of it starts before then.
+    /// Otherwise the read is parked and its ticket handed back. Never waits.
+    pub(crate) fn begin(self) -> Result<Reading, Self> {
+        let parked = {
+            let mut state = locked(&self.turns.state);
+            let waits = state.read_waits(self.read);
+            if waits {
+                if let Some(asked) = state.asked.iter_mut().find(|asked| asked.read == self.read) {
+                    asked.parked = true;
+                }
+            } else {
+                state.asked.retain(|asked| asked.read != self.read);
+                state.reading.push(self.folder.clone());
+            }
+            waits
+        };
+        if parked {
+            return Err(self);
+        }
+        // Dropping the ticket wakes the verbs that waited on this read as asked: it runs now.
+        Ok(Reading {
+            turns: Arc::clone(&self.turns),
+            folder: self.folder.clone(),
+        })
+    }
+}
+
+impl Drop for ReadTicket {
+    fn drop(&mut self) {
+        locked(&self.turns.state)
+            .asked
+            .retain(|asked| asked.read != self.read);
+        self.turns.changed.notify_all();
+    }
+}
+
+/// **A read running in a folder** ([`ReadTicket::begin`]): while it stands, no verb of the
+/// folder starts. The read worker runs the question and sends its answer before dropping it.
+pub(crate) struct Reading {
+    turns: Arc<RepoTurns>,
+    folder: PathBuf,
+}
+
+impl Drop for Reading {
+    fn drop(&mut self) {
+        {
+            let mut state = locked(&self.turns.state);
+            if let Some(at) = state
+                .reading
+                .iter()
+                .position(|at| same_folder(at, &self.folder))
+            {
+                state.reading.remove(at);
             }
         }
         self.turns.changed.notify_all();
@@ -286,47 +397,33 @@ impl RepoTurns {
         })
     }
 
-    /// **The read worker's turn on `folder`** (`worker`, the capability the thread door lent it):
-    /// waits until every verb the folder's share had minted when the read was asked has ended and
-    /// no verb runs there, then runs `question` — the question and the sending of its answer — with
-    /// the folder marked as being read, so no verb of it starts until `question` is over. A verb
-    /// pressed after the read was asked does not lengthen the wait: it waits for the read.
-    pub(crate) fn question_turn<T>(
-        &self,
-        worker: &WorkerCtx,
-        folder: &Path,
-        question: impl FnOnce() -> T,
-    ) -> T {
-        let _ = worker;
-        {
-            let mut state = locked(&self.state);
-            state.reads += 1;
-            let read = state.reads;
-            let behind = state
-                .share(folder)
-                .and_then(|ledger| ledger.last_minted().map(|last| (Arc::clone(ledger), last)));
-            state.asked.push(Asked {
-                read,
-                folder: folder.to_path_buf(),
-                behind,
-            });
-            while state.read_waits(read) {
-                state = self
-                    .changed
-                    .wait(state)
-                    .unwrap_or_else(PoisonError::into_inner);
-            }
-            state.asked.retain(|asked| asked.read != read);
-            state.reading.push(folder.to_path_buf());
+    /// **Ask for a read's turn on `folder`**, on the read worker as it takes the question from its
+    /// line: the read waits for every verb the folder's share has minted now, and a verb pressed
+    /// from now on waits for the read. Never waits; the turn is taken by [`ReadTicket::begin`].
+    pub(crate) fn ask(self: &Arc<Self>, folder: &Path) -> ReadTicket {
+        let mut state = locked(&self.state);
+        state.reads += 1;
+        let read = state.reads;
+        let behind = state
+            .share(folder)
+            .and_then(|ledger| ledger.last_minted().map(|last| (Arc::clone(ledger), last)));
+        state.asked.push(Asked {
+            read,
+            folder: folder.to_path_buf(),
+            behind,
+            parked: false,
+        });
+        ReadTicket {
+            turns: Arc::clone(self),
+            read,
+            folder: folder.to_path_buf(),
         }
-        // Verbs waiting on this read as asked look again: it is running now.
-        self.changed.notify_all();
-        let _reading = Turn {
-            turns: self,
-            folder,
-            of: |state| &mut state.reading,
-        };
-        question()
+    }
+
+    /// **How the read worker is told to look at its parked reads again** (`git::read_inbox`).
+    /// Called under the turnstile's lock: it must not wait, nor call back into the turnstile.
+    pub(crate) fn nudge_with(&self, nudge: impl Fn() + Send + 'static) {
+        locked(&self.state).nudge = Some(Box::new(nudge));
     }
 
     /// **A share worker's turn on `folder`** for the verb its ledger owes first (`ledger`): waits
@@ -359,10 +456,9 @@ impl RepoTurns {
             }
             state.running.push(folder.to_path_buf());
         }
-        let _running = Turn {
+        let _running = Running {
             turns: self,
             folder,
-            of: |state| &mut state.running,
         };
         verb()
     }
@@ -384,17 +480,23 @@ impl RepoTurns {
         self.changed.notify_all();
     }
 
-    /// What a repository owes may have changed: every turn waiting looks again. The lock is taken
-    /// first, so a worker between its look and its wait cannot miss this.
+    /// What a repository owes may have changed: every verb waiting looks again, and the read
+    /// worker is nudged when a read is parked. The lock is taken after the change, so a turn
+    /// between its look and its wait — or a read being parked — cannot miss this.
     fn changed(&self) {
-        drop(locked(&self.state));
+        locked(&self.state).nudge_if_parked();
         self.changed.notify_all();
     }
 
-    /// How many reads wait their turn now.
+    /// How many reads are parked in the read worker's line now: asked, and their turn found not
+    /// come — where a test sees a read wait.
     #[cfg(test)]
-    fn reads_waiting(&self) -> usize {
-        locked(&self.state).asked.len()
+    fn reads_parked(&self) -> usize {
+        locked(&self.state)
+            .asked
+            .iter()
+            .filter(|asked| asked.parked)
+            .count()
     }
 
     /// How many verbs wait their turn now.
@@ -685,19 +787,37 @@ pub(crate) enum Place {
     Float(crate::float::FloatId),
 }
 
-/// **Every repository cache the open windows hold, by its identity**, gathered by the window
-/// thread before its drain: each column's, each graph's and each floating Files view's, with the
-/// window it stands in, for every window that is not leaving.
+/// **Every repository cache and every git document's buffer the open windows hold, by its
+/// identity**, gathered by the window thread before its drain: each column's, each graph's and
+/// each floating Files view's cache, with the window it stands in, and each buffer a git document
+/// can be answered into — in a tab's pool or a hover card — with where it is kept, for every
+/// window that is not leaving.
 ///
-/// An answer is owed to the cache that asked ([`git::GitCacheId`]), never to the place it asked
-/// from, so a Files view docked into a column or popped out into a float while git ran is found
-/// where it stands now ([`Self::resolve`]) — the one resolution both the drain's test for a gone
-/// page ([`Self::gone`]) and the filing ([`Self::address`], whose host `apply_git_results` files
-/// by) read. Only a cache no open surface holds is gone: its view was closed, its window
+/// A page's answer is owed to the cache that asked ([`git::GitCacheId`]), never to the place it
+/// asked from, so a Files view docked into a column or popped out into a float while git ran is
+/// found where it stands now ([`Self::resolve`]) — the one resolution both the drain's test for a
+/// gone page ([`Self::gone`]) and the filing ([`Self::address`], whose host `apply_git_results`
+/// files by) read. Only a cache no open surface holds is gone: its view was closed, its window
 /// dismissed or its column pointed at another folder.
+///
+/// A document's answer is owed to the buffer opened for it ([`GitRequest::buffer`]), never to the
+/// page whose row was pressed: it is filed into that buffer wherever it is kept now
+/// ([`Self::file`]) — the pool of whichever tab holds it since a pool merged or a pane carried it
+/// off — even when the page that asked has closed, and goes to the drain's sink when nothing keeps
+/// the buffer any more.
 #[derive(Default)]
 pub(crate) struct OpenPages {
     places: std::collections::BTreeMap<git::GitCacheId, (winit::window::WindowId, Place)>,
+    buffers: std::collections::BTreeMap<crate::preview::BufferId, git::Shelf>,
+}
+
+/// **Where one answer of the read worker goes** ([`OpenPages::file`]).
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum Filed {
+    /// A page's answer, addressed to where its cache stands now.
+    Page(GitResponse),
+    /// A document's answer, addressed to the buffer it was asked for.
+    Document(git::GitDocumentAnswer),
 }
 
 impl OpenPages {
@@ -715,10 +835,41 @@ impl OpenPages {
         );
     }
 
+    /// **Every buffer a git document can be answered into that one tab's pool keeps** this turn
+    /// ([`crate::preview::PreviewPool::git_document_ids`]) — the pool as it is now, after any
+    /// merge into this tab, any pane carried in or out and any eviction.
+    pub(crate) fn keep_pool(&mut self, tab: crate::TabId, pool: &crate::preview::PreviewPool) {
+        for buffer in pool.git_document_ids() {
+            self.keep(buffer, git::Shelf::Pool(tab));
+        }
+    }
+
+    /// The buffer one window's hover card keeps this turn, if a git document can be answered
+    /// into it.
+    pub(crate) fn keep_glance(
+        &mut self,
+        window: winit::window::WindowId,
+        card: &crate::preview::GlanceSlot,
+    ) {
+        if let Some(buffer) = card.git_document_id() {
+            self.keep(buffer, git::Shelf::Glance(window));
+        }
+    }
+
+    /// The buffer `buffer`, which a git document can be answered into, is kept on `shelf` this
+    /// turn.
+    fn keep(&mut self, buffer: crate::preview::BufferId, shelf: git::Shelf) {
+        let earlier = self.buffers.insert(buffer, shelf);
+        debug_assert!(
+            earlier.is_none(),
+            "one buffer is kept in one place: {buffer:?} was already kept at {earlier:?}"
+        );
+    }
+
     /// **The window and the host the cache `asker` is reached under now**, or `None` when no open
     /// surface holds it. `asked` is where the question was asked from: a floating view keeps the
-    /// tab a document it asked for goes to (`GitHost::Float`'s `tab`), which is the tab the
-    /// question was asked in, wherever the view stood then.
+    /// tab that was in front when it asked (`GitHost::Float`'s `tab`), wherever the view stood
+    /// then.
     pub(crate) fn resolve(
         &self,
         asker: git::GitCacheId,
@@ -745,21 +896,41 @@ impl OpenPages {
         self.resolve(request.asker, &request.host).is_none()
     }
 
-    /// **An answer addressed for the window that files it**, or `None` when the cache that asked
-    /// is gone (the cancellation, arriving as a dropped answer). A page's answer is addressed to
-    /// where its cache stands now. A document ([`GitAnswer::is_document`]) keeps the address it
-    /// was asked under: it is filed into the preview pool of the tab it was asked in, which no
-    /// move of the view changes.
+    /// **A page's answer addressed for the window that files it** — to where its cache stands
+    /// now — or `None` when the cache that asked is gone (the cancellation, arriving as a dropped
+    /// answer).
     pub(crate) fn address(&self, response: GitResponse) -> Option<GitResponse> {
         let (window, host) = self.resolve(response.asker, &response.host)?;
-        if response.answer.is_document() {
-            return Some(response);
-        }
         Some(GitResponse {
             window,
             host,
             ..response
         })
+    }
+
+    /// **Where one answer of the read worker goes.** A document's
+    /// ([`GitResponse::buffer`]) is addressed to the buffer it was asked for, on the shelf that
+    /// keeps it now, whether or not the page that asked is still open; one whose buffer nothing
+    /// keeps goes to `sink` (C6) and is filed nowhere. A page's answer is [`Self::address`]ed.
+    pub(crate) fn file(
+        &self,
+        response: GitResponse,
+        sink: &mut impl FnMut(GitResponse),
+    ) -> Option<Filed> {
+        let Some(buffer) = response.buffer else {
+            return self.address(response).map(Filed::Page);
+        };
+        match self.buffers.get(&buffer) {
+            Some(shelf) => Some(Filed::Document(git::GitDocumentAnswer {
+                shelf: *shelf,
+                buffer,
+                answer: response.answer,
+            })),
+            None => {
+                sink(response);
+                None
+            }
+        }
     }
 }
 
@@ -781,12 +952,7 @@ pub(crate) fn receipt(terminal: MutationTerminal, request: GitRequest) -> GitRes
             unreachable!("the git mutation lane supersedes and cancels nothing")
         }
     };
-    GitResponse {
-        window: request.window,
-        host: request.host,
-        asker: request.asker,
-        answer,
-    }
+    request.answered(answer)
 }
 
 /// **The receipt a refusal at the door is**: the request's question with [`GitFault::NotRun`] —
@@ -799,12 +965,7 @@ pub(crate) fn refusal(refused: &Refused, request: GitRequest) -> GitResponse {
         Refused::NotStarted(_) => NotRun::NotStarted,
         Refused::TwinEnded => unreachable!("the git mutation lane joins nothing"),
     };
-    GitResponse {
-        answer: git::faulted(&request.question, GitFault::NotRun(why)),
-        window: request.window,
-        host: request.host,
-        asker: request.asker,
-    }
+    request.answered(git::faulted(&request.question, GitFault::NotRun(why)))
 }
 
 /// **A git answer that went through**, for a fake door: the receipt git gives a write or a
@@ -974,6 +1135,7 @@ pub(crate) mod contract_adapter {
                 window: adapter_window(),
                 host: column_of(target),
                 asker,
+                buffer: None,
                 question: GitQuestion::Write {
                     root: PathBuf::from("仓库 repo"),
                     verb: GitWriteVerb::Stage,
@@ -1151,6 +1313,7 @@ mod tests {
             window: WindowId::from(1_u64),
             host: column(tab),
             asker: GitCacheId::mint(),
+            buffer: None,
             question: GitQuestion::Write {
                 root: PathBuf::from(root),
                 verb: GitWriteVerb::Stage,
@@ -1165,6 +1328,7 @@ mod tests {
             window: WindowId::from(1_u64),
             host: column(tab),
             asker: GitCacheId::mint(),
+            buffer: None,
             question: GitQuestion::Checkout {
                 root: PathBuf::from(root),
                 target: target.to_owned(),
@@ -1207,24 +1371,103 @@ mod tests {
         Box::new(|_: &WorkerCtx, question: &GitQuestion| went_through(question))
     }
 
-    /// A read's turn on `folder`, taken on a worker of its own as the read worker takes it: it
-    /// logs `read` when its turn comes, and says so on `done`.
+    /// **The read worker under a test's eye**: the product's loop ([`git::run_git_worker`]) on a
+    /// thread of its own, its channel and its nudge made as the product's are
+    /// ([`git::read_inbox`]), each question answered by the test's `answer` while its folder is
+    /// marked as being read. Dropped, its channel closes and the worker ends.
+    struct Reader {
+        asks: Arc<mpsc::Sender<git::GitMail>>,
+    }
+
+    impl Reader {
+        fn ask(&self, request: GitRequest) {
+            self.asks
+                .send(git::GitMail::Ask(request))
+                .expect("the test's reader is there");
+        }
+    }
+
+    fn reader(turns: Arc<RepoTurns>, answer: impl FnMut(GitRequest) + Send + 'static) -> Reader {
+        let (asks, inbox) = git::read_inbox(&turns);
+        bt_platform::spawn_at_priority(
+            "git-mutation-lane-test-reader",
+            bt_platform::ThreadPriority::Normal,
+            move |_| git::run_git_worker(inbox, &turns, answer),
+        )
+        .expect("the test's reader starts");
+        Reader { asks }
+    }
+
+    /// The status of `root`, asked by a cache of its own.
+    fn status(root: &str) -> GitRequest {
+        GitRequest {
+            window: WindowId::from(1_u64),
+            host: column(1),
+            asker: GitCacheId::mint(),
+            buffer: None,
+            question: GitQuestion::Status {
+                root: PathBuf::from(root),
+            },
+        }
+    }
+
+    /// The refs of `root`, asked by a cache of its own.
+    fn refs(root: &str) -> GitRequest {
+        GitRequest {
+            window: WindowId::from(1_u64),
+            host: column(1),
+            asker: GitCacheId::mint(),
+            buffer: None,
+            question: GitQuestion::Refs {
+                root: PathBuf::from(root),
+            },
+        }
+    }
+
+    /// What a read asks, for a log: `status <root>` or `refs <root>`.
+    fn read_subject(question: &GitQuestion) -> String {
+        match question {
+            GitQuestion::Status { root } => format!("status {}", root.display()),
+            GitQuestion::Refs { root } => format!("refs {}", root.display()),
+            other => format!("{other:?}"),
+        }
+    }
+
+    /// **A read worker whose answers log** `read <subject>` as each read begins, stand in `hold`
+    /// when the read's folder is `held_root`, and are announced, by subject, on the receiver.
+    fn logging_reader(
+        turns: Arc<RepoTurns>,
+        log: Arc<Mutex<Vec<String>>>,
+        hold: Arc<Hold>,
+        held_root: &str,
+    ) -> (Reader, mpsc::Receiver<String>) {
+        let held_root = PathBuf::from(held_root);
+        let (told, answered) = mpsc::channel();
+        let reader = reader(turns, move |request| {
+            let subject = read_subject(&request.question);
+            locked(&log).push(format!("read {subject}"));
+            if same_folder(request.question.folder(), &held_root) {
+                hold.pass();
+            }
+            let _ = told.send(subject);
+        });
+        (reader, answered)
+    }
+
+    /// One status read of `folder` on a read worker of its own: it logs `read` when its turn comes,
+    /// and says so on `done`. The reader answered keeps its worker; dropping it ends the worker.
     fn read_on_a_worker(
         turns: Arc<RepoTurns>,
         folder: &str,
         log: Arc<Mutex<Vec<String>>>,
         done: mpsc::Sender<()>,
-    ) {
-        let folder = PathBuf::from(folder);
-        bt_platform::spawn_at_priority(
-            "git-mutation-lane-test-read",
-            bt_platform::ThreadPriority::Normal,
-            move |ctx| {
-                turns.question_turn(ctx, &folder, || locked(&log).push("read".to_owned()));
-                let _ = done.send(());
-            },
-        )
-        .expect("the test's reader starts");
+    ) -> Reader {
+        let reader = reader(turns, move |_| {
+            locked(&log).push("read".to_owned());
+            let _ = done.send(());
+        });
+        reader.ask(status(folder));
+        reader
     }
 
     /// RED (T-GIT-MUTATIONS; A§5.1's storage rule) — **Two presses on one repository run one after
@@ -1339,7 +1582,7 @@ mod tests {
     /// is asked meanwhile. The read is seen waiting, and runs only after the checkout has ended: a
     /// status read in the middle of a checkout would describe neither branch.
     ///
-    /// MUTATION: have `RepoTurns::question_turn` not wait (drop its `while state.owes(folder)` loop) — the
+    /// MUTATION: have `ReadTicket::begin` begin every read (ignore `TurnState::read_waits`) — the
     /// read runs while the checkout stands.
     #[test]
     fn a_read_of_a_repository_waits_behind_its_in_flight_mutation() {
@@ -1357,9 +1600,9 @@ mod tests {
             .expect("admitted");
         hold.wait_standing("the checkout running");
         let (done, read) = mpsc::channel();
-        read_on_a_worker(Arc::clone(lane.lane.turns()), root, Arc::clone(&log), done);
+        let _reader = read_on_a_worker(Arc::clone(lane.lane.turns()), root, Arc::clone(&log), done);
         lane::wait_until("the read waiting its turn, or run", || {
-            lane.lane.turns().reads_waiting() == 1 || locked(&log).iter().any(|line| line == "read")
+            lane.lane.turns().reads_parked() == 1 || locked(&log).iter().any(|line| line == "read")
         });
         hold.release();
         lane::receive(&read, "the read's turn");
@@ -1538,7 +1781,7 @@ mod tests {
         );
         let log = Arc::new(Mutex::new(Vec::new()));
         let (done, read) = mpsc::channel();
-        read_on_a_worker(Arc::clone(lane.lane.turns()), root, log, done);
+        let _reader = read_on_a_worker(Arc::clone(lane.lane.turns()), root, log, done);
         lane::receive(&read, "a read after the worker's death");
         let next = lane
             .lane
@@ -1547,30 +1790,24 @@ mod tests {
         assert!(matches!(lane.terminal(next, nobody).0, Terminal::Done(_)));
     }
 
-    /// A read's turn on `folder`, taken on a worker of its own, that logs `read start`, stands in
+    /// One status read of `folder` on a read worker of its own, that logs `read start`, stands in
     /// `hold`, then logs `read end` — a read whose git child is still running — and says so on
-    /// `done`.
+    /// `done`. The reader answered keeps its worker; dropping it ends the worker.
     fn standing_read(
         turns: Arc<RepoTurns>,
         folder: &str,
         log: Arc<Mutex<Vec<String>>>,
         hold: Arc<Hold>,
         done: mpsc::Sender<()>,
-    ) {
-        let folder = PathBuf::from(folder);
-        bt_platform::spawn_at_priority(
-            "git-mutation-lane-test-read",
-            bt_platform::ThreadPriority::Normal,
-            move |ctx| {
-                turns.question_turn(ctx, &folder, || {
-                    locked(&log).push("read start".to_owned());
-                    hold.pass();
-                    locked(&log).push("read end".to_owned());
-                });
-                let _ = done.send(());
-            },
-        )
-        .expect("the test's reader starts");
+    ) -> Reader {
+        let reader = reader(turns, move |_| {
+            locked(&log).push("read start".to_owned());
+            hold.pass();
+            locked(&log).push("read end".to_owned());
+            let _ = done.send(());
+        });
+        reader.ask(status(folder));
+        reader
     }
 
     /// RED (T-GIT-MUTATIONS round 2, B1) — **A closed page's verb still running keeps its
@@ -1606,9 +1843,9 @@ mod tests {
             "nothing has ended yet"
         );
         let (done, read) = mpsc::channel();
-        read_on_a_worker(Arc::clone(lane.lane.turns()), root, Arc::clone(&log), done);
+        let _reader = read_on_a_worker(Arc::clone(lane.lane.turns()), root, Arc::clone(&log), done);
         lane::wait_until("the read waiting its turn, or run", || {
-            lane.lane.turns().reads_waiting() == 1 || locked(&log).iter().any(|line| line == "read")
+            lane.lane.turns().reads_parked() == 1 || locked(&log).iter().any(|line| line == "read")
         });
         let next = lane
             .lane
@@ -1705,6 +1942,7 @@ mod tests {
             window: moving_window(),
             host,
             asker: cache.id(),
+            buffer: None,
             question,
         }
     }
@@ -1948,15 +2186,10 @@ mod tests {
         };
         cache.mark_pending(&status);
         let asked = asked_by(&cache, float_host(7), status);
-        let answer = GitResponse {
-            window: asked.window,
-            host: asked.host,
-            asker: asked.asker,
-            answer: GitAnswer::Status {
-                root: PathBuf::from("仓库 repo"),
-                outcome: Ok(git::GitStatus::default()),
-            },
-        };
+        let answer = asked.answered(GitAnswer::Status {
+            root: PathBuf::from("仓库 repo"),
+            outcome: Ok(git::GitStatus::default()),
+        });
         let column = LeafId {
             tab: TabId(1),
             seat: SeatId(3),
@@ -1976,51 +2209,177 @@ mod tests {
         );
     }
 
-    /// RED (T-GIT-RECEIPTS-FOLLOW-A-MOVED-HOST, the read side) — **A document asked from a Files
-    /// view keeps the pool it was asked for when the view moves.**
+    /// The diff of `说明 notes.md` against the working tree, in `仓库 repo`.
+    fn notes_diff() -> crate::preview::PreviewSource {
+        crate::preview::PreviewSource::GitDiff {
+            root: PathBuf::from("仓库 repo"),
+            path: "说明 notes.md".to_owned(),
+            against: crate::preview::GitDiffAgainst::WorkingTree,
+        }
+    }
+
+    /// **The press, as `Runtime::open_git_document` makes it**: the diff's buffer opened in
+    /// `pool`, and the question asked by `cache` from `host` for that buffer.
+    fn diff_asked_for_a_buffer(
+        pool: &mut crate::preview::PreviewPool,
+        cache: &git::GitCache,
+        host: GitHost,
+    ) -> GitRequest {
+        let source = notes_diff();
+        pool.open(source.clone(), "说明 notes.md".to_owned(), &[]);
+        let buffer = pool
+            .ask_composer(&source)
+            .expect("a diff opened and not read is asked for");
+        GitRequest {
+            buffer: Some(buffer),
+            ..asked_by(
+                cache,
+                host,
+                git::GitQuestion::Diff {
+                    root: PathBuf::from("仓库 repo"),
+                    path: "说明 notes.md".to_owned(),
+                    against: crate::preview::GitDiffAgainst::WorkingTree,
+                    renamed_from: None,
+                },
+            )
+        }
+    }
+
+    /// git's diff of `说明 notes.md`, as the read worker answers `asked`.
+    fn diff_answered(asked: &GitRequest) -> GitResponse {
+        asked.answered(GitAnswer::Diff {
+            root: PathBuf::from("仓库 repo"),
+            path: "说明 notes.md".to_owned(),
+            against: crate::preview::GitDiffAgainst::WorkingTree,
+            outcome: Ok("@@ -1 +1 @@\n-旧 old line\n+新 new line\n"
+                .as_bytes()
+                .to_vec()),
+        })
+    }
+
+    /// RED (T-GIT-DOCUMENT-GATED-BY-POOL) — **A document's answer fills the buffer that was opened
+    /// for it, though the Files view whose row was pressed has closed and the buffer's pool has
+    /// moved to another tab.**
     ///
-    /// A floating Files view (epoch 7, asked while tab 4 was in front) opens a diff of
-    /// `说明 notes.md` and is docked into column seat 3 of tab 1 before the diff comes. The diff
-    /// is not the cache's: it keeps the address it was asked under, so it is filed into tab 4's
-    /// pool, where its buffer waits — and it is not dropped, because the view that asked is still
-    /// open.
+    /// Column seat 2 of tab 4 presses `说明 notes.md`: its diff's buffer opens in tab 4's pool and
+    /// the question is asked for that buffer. Before git answers, the column closes (no surface
+    /// holds its cache) and tab 4 is merged into tab 1 — the pool's own merge
+    /// (`PreviewPool::merge_from`) carries the buffer into tab 1's pool. The drain's collection
+    /// (`OpenPages::keep_pool`, over both tabs' pools as they are now) finds it there; the answer
+    /// is addressed to it and filed: the pane stops saying "Loading …" and shows git's text.
+    /// Nothing reaches the sink.
     ///
-    /// MUTATION: drop the document's early return in `OpenPages::address` — the diff is addressed
-    /// to the column in tab 1, a pool its buffer is not in.
+    /// MUTATION: in `OpenPages::file`, gate a document by its asker (answer `None` when
+    /// `Self::resolve` finds no place for the cache that asked) — the answer is dropped and the
+    /// buffer waits for ever.
     #[test]
-    fn a_document_keeps_the_pool_it_was_asked_for_when_its_view_moves() {
+    fn a_documents_answer_fills_the_buffer_opened_for_it_even_after_its_view_closed() {
         let cache = files_view_cache();
-        let asked_from = GitHost::Float {
-            id: 7,
-            tab: TabId(4),
-        };
-        let answer = GitResponse {
-            window: moving_window(),
-            host: asked_from.clone(),
-            asker: cache.id(),
-            answer: GitAnswer::Diff {
-                root: PathBuf::from("仓库 repo"),
-                path: "说明 notes.md".to_owned(),
-                against: crate::preview::GitDiffAgainst::WorkingTree,
-                outcome: Ok(b"diff".to_vec()),
-            },
-        };
-        let docked = cache;
-        let open = standing(
-            &docked,
-            Place::Column(LeafId {
-                tab: TabId(1),
-                seat: SeatId(3),
+        let mut tab_four = crate::preview::PreviewPool::default();
+        let asked = diff_asked_for_a_buffer(
+            &mut tab_four,
+            &cache,
+            GitHost::Column(LeafId {
+                tab: TabId(4),
+                seat: SeatId(2),
             }),
         );
-        let addressed = open
-            .address(answer)
-            .expect("the view that asked is still open");
-        assert_eq!(
-            addressed.host, asked_from,
-            "the document keeps the address it was asked under"
+        // The column closed: no surface holds its cache. Tab 4 was merged into tab 1, and its
+        // pool with it.
+        drop(cache);
+        let mut pool = crate::preview::PreviewPool::default();
+        pool.open(
+            crate::preview::PreviewSource::file("笔记 notes.txt"),
+            "笔记 notes.txt".to_owned(),
+            &[],
         );
-        assert_eq!(addressed.host.tab(), TabId(4), "and with it its pool");
+        pool.merge_from(std::mem::take(&mut tab_four));
+        let mut open = OpenPages::default();
+        open.keep_pool(TabId(4), &tab_four);
+        open.keep_pool(TabId(1), &pool);
+        let mut sunk = Vec::new();
+        let filed = open.file(diff_answered(&asked), &mut |answer| sunk.push(answer));
+        let Some(Filed::Document(document)) = filed else {
+            panic!("the document's answer is not dropped with the page that asked: {filed:?}");
+        };
+        assert_eq!(
+            document.shelf,
+            git::Shelf::Pool(TabId(1)),
+            "to the pool that keeps it now"
+        );
+        assert_eq!(document.owner(), crate::AnswerOwner::Tab(TabId(1)));
+        let crate::git::GitAnswer::Diff {
+            outcome: Ok(bytes), ..
+        } = document.answer
+        else {
+            panic!("the diff came back as asked");
+        };
+        assert!(pool.answer_composed(document.buffer, Ok(crate::preview::composed_read(&bytes))));
+        let filled = pool.get(&notes_diff()).expect("the buffer is still kept");
+        assert_eq!(
+            *filled.load(),
+            crate::preview::PreviewLoad::Ready,
+            "no longer loading"
+        );
+        assert!(
+            filled
+                .text()
+                .is_some_and(|text| text.contains("+新 new line")),
+            "the pane shows git's text: {:?}",
+            filled.text()
+        );
+        assert!(sunk.is_empty(), "nothing reaches the sink: {sunk:?}");
+    }
+
+    /// RED (T-GIT-DOCUMENT-GATED-BY-POOL; C6) — **A document's answer whose buffer nothing keeps
+    /// any more reaches the sink, once, and is filed nowhere — though the page that asked is open,
+    /// and another buffer of the same document waits in the same pool.**
+    ///
+    /// Column seat 2 of tab 1 opens the diff of `说明 notes.md` and asks for it; before git
+    /// answers, browsing opens [`crate::preview::PV_BUFFER_CAP`] files, and the pool's own cap
+    /// evicts the diff's buffer (the earliest clean one no pane shows). The diff is opened again —
+    /// a new buffer, with a name of its own, asked for separately. The drain's collection
+    /// (`OpenPages::keep_pool`) keeps only the new one, so the first answer is not that buffer's:
+    /// the sink takes it, once, and nothing is addressed to a window — the page that asked, still
+    /// open, is not consulted. The second answer reaches the new buffer. The product's sink
+    /// ignores what it takes (the git read lane is not on the completion seam; nobody waits).
+    ///
+    /// MUTATION: in `OpenPages::file`, let a document whose buffer is not kept fall through to
+    /// `Self::address` as a page's answer — it is addressed to the column, and the sink takes
+    /// nothing.
+    #[test]
+    fn a_documents_answer_whose_buffer_is_gone_is_sunk() {
+        let cache = files_view_cache();
+        let column = LeafId {
+            tab: TabId(1),
+            seat: SeatId(2),
+        };
+        let mut pool = crate::preview::PreviewPool::default();
+        let asked = diff_asked_for_a_buffer(&mut pool, &cache, GitHost::Column(column));
+        for n in 0..crate::preview::PV_BUFFER_CAP {
+            let name = format!("笔记 {n} notes.txt");
+            pool.open(crate::preview::PreviewSource::file(&name), name, &[]);
+        }
+        assert!(
+            pool.get(&notes_diff()).is_none(),
+            "the cap evicted the diff's buffer"
+        );
+        let asked_again = diff_asked_for_a_buffer(&mut pool, &cache, GitHost::Column(column));
+        assert_ne!(asked.buffer, asked_again.buffer, "two buffers, two names");
+        let mut open = standing(&cache, Place::Column(column));
+        open.keep_pool(TabId(1), &pool);
+        let answer = diff_answered(&asked);
+        let mut sunk = Vec::new();
+        let filed = open.file(answer.clone(), &mut |answer| sunk.push(answer));
+        assert_eq!(filed, None, "filed nowhere");
+        assert_eq!(sunk, vec![answer], "the sink takes it, once");
+        let Some(Filed::Document(again)) =
+            open.file(diff_answered(&asked_again), &mut |answer| sunk.push(answer))
+        else {
+            panic!("the new buffer's own answer reaches it");
+        };
+        assert_eq!(again.shelf, git::Shelf::Pool(TabId(1)));
+        assert_eq!(sunk.len(), 1, "and nothing more is sunk");
     }
 
     /// RED (T-GIT-MUTATIONS round 2, B2) — **A read waits for the verbs owed when it was asked,
@@ -2047,9 +2406,9 @@ mod tests {
             .expect("admitted");
         hold.wait_standing("the first verb running");
         let (done, read) = mpsc::channel();
-        read_on_a_worker(Arc::clone(lane.lane.turns()), root, Arc::clone(&log), done);
+        let _reader = read_on_a_worker(Arc::clone(lane.lane.turns()), root, Arc::clone(&log), done);
         lane::wait_until("the read waiting its turn, or run", || {
-            lane.lane.turns().reads_waiting() == 1 || locked(&log).iter().any(|line| line == "read")
+            lane.lane.turns().reads_parked() == 1 || locked(&log).iter().any(|line| line == "read")
         });
         let later: Vec<MutationId> = ["二 two.md", "三 three.md"]
             .into_iter()
@@ -2096,7 +2455,7 @@ mod tests {
         hold.hold();
         let root = "仓库 repo";
         let (done, read) = mpsc::channel();
-        standing_read(
+        let _reader = standing_read(
             Arc::clone(lane.lane.turns()),
             root,
             Arc::clone(&log),
@@ -2161,5 +2520,350 @@ mod tests {
             "the door runs where the hook lets a panic unwind"
         );
         assert!(matches!(lane.terminal(id, nobody).0, Terminal::Done(_)));
+    }
+
+    /// RED (T-GIT-READS-PER-REPOSITORY) — **A read of another repository is answered while this
+    /// one's verb runs.**
+    ///
+    /// A checkout of `发布/release` stands in git in `仓库 一号`; the status of `仓库 一号` is asked
+    /// and waits its turn; the status of `仓库 二号`, asked after it, is answered while the checkout
+    /// still stands — the read worker parked the first read and went on. The first is answered
+    /// after the checkout.
+    ///
+    /// MUTATION: have `ReadTicket::begin` wait on the turnstile until the read's turn comes (the
+    /// blocking wait: `while state.read_waits(self.read) { wait }`) — the read worker stands in the
+    /// first read's wait, and the second is not answered within the lane suite's patience.
+    #[test]
+    fn a_read_of_another_repository_is_answered_while_this_ones_verbs_run() {
+        let mut lane = watched(Executor::scripted(Arc::new(Gate::default())));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let hold = Arc::new(Hold::default());
+        hold.hold();
+        let one = "仓库 一号 one";
+        let two = "仓库 二号 two";
+        let checkout = lane
+            .lane
+            .ask_through(
+                checkout(1, one, "发布/release"),
+                logging(Arc::clone(&log), Arc::clone(&hold), PathBuf::from(one)),
+            )
+            .expect("admitted");
+        hold.wait_standing("the checkout running");
+        let (reader, answered) = logging_reader(
+            Arc::clone(lane.lane.turns()),
+            Arc::clone(&log),
+            Arc::new(Hold::default()),
+            "无 none",
+        );
+        reader.ask(status(one));
+        lane::wait_until("the status of 一号 asked and waiting its turn", || {
+            lane.lane.turns().reads_parked() == 1
+        });
+        reader.ask(status(two));
+        assert_eq!(
+            lane::receive(&answered, "the status of 二号"),
+            format!("status {two}")
+        );
+        assert!(
+            !locked(&log).iter().any(|line| line == "end 发布/release"),
+            "answered while the checkout in 一号 still stood"
+        );
+        hold.release();
+        assert_eq!(
+            lane::receive(&answered, "the status of 一号"),
+            format!("status {one}")
+        );
+        assert!(matches!(
+            lane.terminal(checkout, nobody).0,
+            Terminal::Done(_)
+        ));
+        assert_eq!(
+            *locked(&log),
+            [
+                "start 发布/release".to_owned(),
+                format!("read status {two}"),
+                "end 发布/release".to_owned(),
+                format!("read status {one}"),
+            ],
+            "二号's read beside 一号's checkout; 一号's read after it"
+        );
+    }
+
+    /// RED (T-GIT-READS-PER-REPOSITORY; the watermark rule kept) — **A parked read runs after the
+    /// verbs owed when it was asked, and before a verb pressed after it.**
+    ///
+    /// `一 one.md` is being staged in `仓库 repo`; its status is asked and parked; `二 two.md` is
+    /// pressed after it. The read worker is then kept busy elsewhere (the status of `仓库 三号`
+    /// stands) while the first verb ends, so the parked read cannot run yet: the second verb is
+    /// seen waiting for it, not starting. Once the worker is free, the parked read runs, then the
+    /// second verb.
+    ///
+    /// MUTATION: have `TurnState::verb_waits` pass over a parked read (`&& !asked.parked`) — the
+    /// second verb starts while the read is parked, before it.
+    #[test]
+    fn a_waiting_read_runs_after_its_watermark_verbs_and_before_later_presses() {
+        let mut lane = watched(Executor::scripted(Arc::new(Gate::default())));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let hold = Arc::new(Hold::default());
+        hold.hold();
+        let busy = Arc::new(Hold::default());
+        busy.hold();
+        let root = "仓库 repo";
+        let elsewhere = "仓库 三号 three";
+        let door = || logging(Arc::clone(&log), Arc::clone(&hold), PathBuf::from(root));
+        let first = lane
+            .lane
+            .ask_through(stage(1, root, "一 one.md"), door())
+            .expect("admitted");
+        hold.wait_standing("the first verb running");
+        let (reader, answered) = logging_reader(
+            Arc::clone(lane.lane.turns()),
+            Arc::clone(&log),
+            Arc::clone(&busy),
+            elsewhere,
+        );
+        reader.ask(status(root));
+        lane::wait_until("the read asked and waiting its turn", || {
+            lane.lane.turns().reads_parked() == 1
+        });
+        let second = lane
+            .lane
+            .ask_through(stage(1, root, "二 two.md"), door())
+            .expect("admitted");
+        reader.ask(status(elsewhere));
+        busy.wait_standing("the read worker busy in 三号");
+        hold.release();
+        assert!(matches!(lane.terminal(first, nobody).0, Terminal::Done(_)));
+        lane::wait_until("the second verb waiting its turn, or started", || {
+            lane.lane.turns().verbs_waiting() == 1
+                || locked(&log).iter().any(|line| line == "start 二 two.md")
+        });
+        busy.release();
+        assert_eq!(
+            lane::receive(&answered, "the status of 三号"),
+            format!("status {elsewhere}")
+        );
+        assert_eq!(
+            lane::receive(&answered, "the parked status"),
+            format!("status {root}")
+        );
+        assert!(matches!(lane.terminal(second, nobody).0, Terminal::Done(_)));
+        assert_eq!(
+            *locked(&log),
+            [
+                "start 一 one.md".to_owned(),
+                format!("read status {elsewhere}"),
+                "end 一 one.md".to_owned(),
+                format!("read status {root}"),
+                "start 二 two.md".to_owned(),
+                "end 二 two.md".to_owned(),
+            ],
+            "the parked read after the verb owed when it was asked, before the press after it"
+        );
+    }
+
+    /// RED (T-GIT-READS-PER-REPOSITORY) — **Reads parked on two repositories keep their order
+    /// within each.**
+    ///
+    /// A checkout stands in `仓库 甲` and another in `仓库 乙`; the status of 甲, the status of 乙,
+    /// the refs of 甲 and the refs of 乙 are asked, in that order, and all four are parked. When
+    /// the checkouts end, each repository's reads run in the order they were asked.
+    ///
+    /// MUTATION: drop the order clause of `TurnState::read_waits` (`asked_before`) and have
+    /// `PendingGitRequests::next_turn` look at the parked reads latest first
+    /// (`(0..self.waiting.len()).rev()`) — a repository's refs run before its status. (With the
+    /// clause kept, the order holds whichever way the line is looked at: that is the clause's
+    /// point; `git::tests::a_repositorys_reads_begin_in_the_order_they_were_asked` pins it alone.)
+    #[test]
+    fn reads_waiting_on_two_repositories_keep_their_order_within_each() {
+        let mut lane = watched(Executor::scripted(Arc::new(Gate::default())));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let hold = Arc::new(Hold::default());
+        hold.hold();
+        let jia = "仓库 甲 jia";
+        let yi = "仓库 乙 yi";
+        let checkouts: Vec<MutationId> = [jia, yi]
+            .into_iter()
+            .map(|root| {
+                lane.lane
+                    .ask_through(
+                        checkout(1, root, "主线/main"),
+                        logging(Arc::clone(&log), Arc::clone(&hold), PathBuf::from(root)),
+                    )
+                    .expect("admitted")
+            })
+            .collect();
+        lane::wait_until("both checkouts running", || {
+            locked(&log)
+                .iter()
+                .filter(|line| line.starts_with("start"))
+                .count()
+                == 2
+        });
+        let (reader, answered) = logging_reader(
+            Arc::clone(lane.lane.turns()),
+            Arc::clone(&log),
+            Arc::new(Hold::default()),
+            "无 none",
+        );
+        for request in [status(jia), status(yi), refs(jia), refs(yi)] {
+            reader.ask(request);
+        }
+        lane::wait_until("the four reads asked and waiting their turns", || {
+            lane.lane.turns().reads_parked() == 4
+        });
+        hold.release();
+        let mut heard: Vec<String> = (0..4)
+            .map(|_| lane::receive(&answered, "a parked read's answer"))
+            .collect();
+        for id in checkouts {
+            assert!(matches!(lane.terminal(id, nobody).0, Terminal::Done(_)));
+        }
+        heard.sort_by_key(|subject| !subject.ends_with(jia));
+        assert_eq!(
+            heard,
+            [
+                format!("status {jia}"),
+                format!("refs {jia}"),
+                format!("status {yi}"),
+                format!("refs {yi}"),
+            ],
+            "within each repository, its reads in the order they were asked"
+        );
+    }
+
+    /// RED (T-GIT-READS-PER-REPOSITORY) — **Asks keep coalescing while a read waits its turn.**
+    ///
+    /// A checkout stands in `仓库 一号` and its status is parked; the read worker is busy with the
+    /// status of `仓库 三号` while the same cache asks the status of `仓库 二号` twice. Once the
+    /// worker is free it answers 二号 once — the two asks were one — before the status of `仓库 四号`
+    /// asked after them, all while the checkout still stands.
+    ///
+    /// MUTATIONS: (1) have `ReadTicket::begin` wait for the read's turn (the blocking wait) — the
+    /// worker never reaches 三号; (2) have `PendingGitRequests::drain_channel` take nothing (the
+    /// worker takes one ask at a time) — 二号 is answered twice.
+    #[test]
+    fn coalescing_keeps_working_while_a_read_waits() {
+        let mut lane = watched(Executor::scripted(Arc::new(Gate::default())));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let hold = Arc::new(Hold::default());
+        hold.hold();
+        let busy = Arc::new(Hold::default());
+        busy.hold();
+        let one = "仓库 一号 one";
+        let two = "仓库 二号 two";
+        let three = "仓库 三号 three";
+        let four = "仓库 四号 four";
+        let checkout = lane
+            .lane
+            .ask_through(
+                checkout(1, one, "发布/release"),
+                logging(Arc::clone(&log), Arc::clone(&hold), PathBuf::from(one)),
+            )
+            .expect("admitted");
+        hold.wait_standing("the checkout running");
+        let (reader, answered) = logging_reader(
+            Arc::clone(lane.lane.turns()),
+            Arc::clone(&log),
+            Arc::clone(&busy),
+            three,
+        );
+        reader.ask(status(one));
+        lane::wait_until("the status of 一号 asked and waiting its turn", || {
+            lane.lane.turns().reads_parked() == 1
+        });
+        reader.ask(status(three));
+        busy.wait_standing("the read worker busy in 三号");
+        let twice = status(two);
+        reader.ask(twice.clone());
+        reader.ask(twice);
+        busy.release();
+        reader.ask(status(four));
+        let heard: Vec<String> = (0..3)
+            .map(|_| lane::receive(&answered, "an answer"))
+            .collect();
+        assert_eq!(
+            heard,
+            [
+                format!("status {three}"),
+                format!("status {two}"),
+                format!("status {four}"),
+            ],
+            "the two asks of 二号 were one question, answered once"
+        );
+        assert!(
+            !locked(&log).iter().any(|line| line == "end 发布/release"),
+            "all while the checkout in 一号 still stood"
+        );
+        hold.release();
+        assert_eq!(
+            lane::receive(&answered, "the status of 一号"),
+            format!("status {one}")
+        );
+        assert!(matches!(
+            lane.terminal(checkout, nobody).0,
+            Terminal::Done(_)
+        ));
+    }
+
+    /// RED (T-GIT-READS-PER-REPOSITORY) — **A newer ask of a parked read replaces it.**
+    ///
+    /// A stage stands in `仓库 repo`; a cache's status of the repository is parked, and the same
+    /// cache asks it again. The parked read is replaced — one read waits, not two — and the
+    /// repository's status is answered once when the verb ends.
+    ///
+    /// MUTATION: have `PendingGitRequests::push_latest` leave the parked reads alone (drop its
+    /// `self.waiting.retain(…)`) — two reads wait, and the status is answered twice.
+    #[test]
+    fn a_newer_ask_replaces_a_parked_read_of_the_same_question() {
+        let mut lane = watched(Executor::scripted(Arc::new(Gate::default())));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let hold = Arc::new(Hold::default());
+        hold.hold();
+        let root = "仓库 repo";
+        let elsewhere = "仓库 别处 elsewhere";
+        let verb = lane
+            .lane
+            .ask_through(
+                stage(1, root, "说明 notes.md"),
+                logging(Arc::clone(&log), Arc::clone(&hold), PathBuf::from(root)),
+            )
+            .expect("admitted");
+        hold.wait_standing("the stage running");
+        let (reader, answered) = logging_reader(
+            Arc::clone(lane.lane.turns()),
+            Arc::clone(&log),
+            Arc::new(Hold::default()),
+            "无 none",
+        );
+        let read = status(root);
+        reader.ask(read.clone());
+        lane::wait_until("the status asked and waiting its turn", || {
+            lane.lane.turns().reads_parked() == 1
+        });
+        reader.ask(read);
+        // Asked after the repeat, answered after the worker has taken it.
+        reader.ask(status(elsewhere));
+        assert_eq!(
+            lane::receive(&answered, "the status elsewhere"),
+            format!("status {elsewhere}")
+        );
+        assert_eq!(
+            lane.lane.turns().reads_parked(),
+            1,
+            "the repeat replaced the parked read"
+        );
+        hold.release();
+        assert!(matches!(lane.terminal(verb, nobody).0, Terminal::Done(_)));
+        assert_eq!(
+            lane::receive(&answered, "the repository's status"),
+            format!("status {root}")
+        );
+        reader.ask(status(elsewhere));
+        assert_eq!(
+            lane::receive(&answered, "the status elsewhere, again"),
+            format!("status {elsewhere}"),
+            "no second answer of the repository's status before it"
+        );
     }
 }

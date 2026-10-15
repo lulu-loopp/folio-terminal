@@ -97,11 +97,13 @@ fn ruling_line(
 
 /// Reports the terminal projection only. Alternate-screen mode is context,
 /// never a veto: the compositor can and does draw in a TUI's alternate screen.
-fn draw_reason(owner_matches: bool, visible: bool, nonzero: bool, written: bool) -> &'static str {
+/// `in_view` is the frame's `cursor_in_view`: a cursor the program hid is still where a
+/// composition is drawn, so only a cursor whose cell the frame does not draw stops it.
+fn draw_reason(owner_matches: bool, in_view: bool, nonzero: bool, written: bool) -> &'static str {
     if !owner_matches {
         "owner_mismatch"
-    } else if !visible {
-        "cursor_invisible"
+    } else if !in_view {
+        "cursor_out_of_view"
     } else if !nonzero {
         "zero_size_rectangle"
     } else if !written {
@@ -260,7 +262,7 @@ impl Runtime<'_> {
         );
         let reason = draw_reason(
             ime_owner(self.keyboard_owner()) == ImeOwner::Shell,
-            frame.cursor.visible,
+            frame.cursor_in_view,
             area.width != 0 && area.height != 0,
             written,
         );
@@ -532,10 +534,10 @@ mod tests {
             alt: true,
             area,
         };
-        let draw = draw_line("cursor_invisible", facts);
+        let draw = draw_line("cursor_out_of_view", facts);
         assert_eq!(
             draw,
-            "IME_DRAW surface=terminal drawn=false reason=cursor_invisible bytes=25 cursor_visible=false row=3 column=7 alt=true x=-3 y=4 width=5 height=6"
+            "IME_DRAW surface=terminal drawn=false reason=cursor_out_of_view bytes=25 cursor_visible=false row=3 column=7 alt=true x=-3 y=4 width=5 height=6"
         );
         assert!(!draw.contains(text));
         assert_eq!(
@@ -570,21 +572,21 @@ mod tests {
 
     #[test]
     fn ime_draw_answers_and_change_latch() {
-        for (owner, visible, nonzero, written, expected) in [
+        for (owner, in_view, nonzero, written, expected) in [
             (false, true, true, true, "owner_mismatch"),
-            (true, false, true, false, "cursor_invisible"),
+            (true, false, true, false, "cursor_out_of_view"),
             (true, true, false, true, "zero_size_rectangle"),
             (true, true, true, false, "no_visible_cells"),
             (true, true, true, true, "drawn"),
         ] {
-            assert_eq!(draw_reason(owner, visible, nonzero, written), expected);
+            assert_eq!(draw_reason(owner, in_view, nonzero, written), expected);
         }
         let last = Cell::new(None);
         assert!(changed(&last, Some("drawn")));
         assert!(!changed(&last, Some("drawn")));
-        assert!(changed(&last, Some("cursor_invisible")));
-        assert!(!changed(&last, Some("cursor_invisible")));
+        assert!(changed(&last, Some("cursor_out_of_view")));
+        assert!(!changed(&last, Some("cursor_out_of_view")));
         assert!(!changed(&last, None));
-        assert!(changed(&last, Some("cursor_invisible")));
+        assert!(changed(&last, Some("cursor_out_of_view")));
     }
 }
