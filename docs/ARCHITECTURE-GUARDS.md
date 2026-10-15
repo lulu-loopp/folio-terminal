@@ -551,36 +551,46 @@ trait. A holder named for the **native** backend — its backend argument left t
 its default or a concrete type — is refused wherever it is written (an `impl` of
 it, any other function's signature or body — the methods of a generic holder
 block and of a generic trait impl included, read with the block's parameter in
-scope — a `const` or `static`, a struct, enum or union's fields or generics, a
-backend parameter's own default aside) unless
-`docs/plans/window-seam-native.tsv` names the place with its reason. It is read
-in type position and in expression and pattern position (`FolioApp::new(..)`, a
-struct literal, a struct or tuple-struct pattern): there an unwritten backend is
-chosen by inference, read as native where no backend parameter is in scope, and
-in any scope when the path names a method the holder has only in a native block
-(`Runtime::create` inside a function generic over the backend still builds the
-native one; a path finds an inherent method before a trait's, so a native
-inherent or trait-impl method stays native-only unless a generic inherent block
-has it). A nested item sees none of the scope around it; a trait's own backend
-parameters, and `Self` for a backend trait, are in scope in its methods' default
-bodies. The native backend's own name (`Native`, standing first or after a
-module's name) is a native mention anywhere outside the seam. An impl's
-generics, trait arguments, associated types and consts, a trait's declaration
-(its generics, supertraits and associated items), and a native block's
-associated items have no row and are refused by name; so are a `use` that
-renames a holder, the native backend or the seam (at module level by name; in a
-body as a mention of the item holding it, as is a rename of anything brought
-from the seam), a module-level type alias of a holder or of the native backend
-(its type or its generics), and, inside any body — a function's (a native
-block's methods and the listed functions included), a `const`'s or `static`'s
-initializer, an associated const, a trait's declaration — an impl of a door of
-the seam (its trait resolved through the body's own `use` leaves, re-exports
-followed, or spelled as one of the seam's traits) or a block of a holder for the
-native backend, with no list row; a holder or native name in a macro's tokens
-(an invocation's or a `macro_rules!` body's — the guard does not read macros),
-and an `impl` whose self type names a holder natively without being its path,
-shapes the guard does not read. Every door trait of the seam is implemented in
-the seam (the headless backend is test-only and is not read).
+scope — a `const` or `static`, a struct, enum or union's whole declaration —
+fields, generics, discriminants — a backend parameter's own default aside)
+unless `docs/plans/window-seam-native.tsv` names the place with its reason. It
+is read in type position and in expression and pattern position
+(`FolioApp::new(..)`, a struct literal, a struct or tuple-struct pattern): there
+an unwritten backend is chosen by inference, read as native where no backend
+parameter is in scope, and in any scope when the path names a method the holder
+has only in a native block (`Runtime::create` inside a function generic over the
+backend still builds the native one; a path finds an inherent method before a
+trait's, so a native inherent or trait-impl method stays native-only unless a
+generic inherent block has it). A nested item sees none of the scope around it;
+a trait's own backend parameters, and `Self` for a backend trait, are in scope
+in its methods' default bodies. The native backend's own name (`Native`,
+standing first or after a module's name) is a native mention anywhere outside
+the seam. An impl's generics, trait arguments, associated types and consts, a
+trait's declaration (its generics, supertraits and associated items), and a
+native block's associated items have no row and are refused by name; so are a
+`use` that renames a holder, the native backend or the seam (at module level by
+name; in a body as a mention of the item holding it, as is a rename of anything
+brought from the seam), a module-level type alias of a holder or of the native
+backend (its type or its generics), and an `impl` whose self type names a holder
+natively without being its path.
+
+Two general rules close what an enumeration of positions would leave open.
+**Every impl below module level is read whole, in its own scope, and no listing
+covers it:** one `syn` walk over each product file finds every `ItemImpl` that
+is not at module level — in a signature, a body, a type position, an
+initializer, a default body, wherever the syntax tree holds one — and refuses it
+by name when its trait is a door of the seam, when its self type names a holder
+at all, or when anything in it names a holder or the native backend for the
+native backend (a method body reaching a native-only method included). **A
+body's `use` leaves are followed to a fixed point, or refused:** each block
+keeps its own leaves (every path per name, a `{self}` leaf under the module's
+name), a nested trait impl's trait path is expanded through the blocks around it
+and resolved with the module's resolver, and a path that does not settle, a
+first-party path that resolves to nothing, or a body `use` glob in scope is
+refused by name. A holder, native name or seam trait in a macro's tokens (an
+invocation's or a `macro_rules!` body's) is refused by name — the guard does not
+read macros — and with that rule, every door of the seam the product implements
+is implemented in the seam (the headless backend is test-only and is not read).
 
 **What the guard does not hold**: the platform handle. `WindowHost::native_handle`
 and `CompositorDoor::platform_tree` hand generic code a `bt_platform` value that

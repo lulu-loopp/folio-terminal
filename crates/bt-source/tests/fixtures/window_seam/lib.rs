@@ -3,13 +3,18 @@
 //! ```text
 //! window_seam   the seam: `Backend`, the door `WindowHost`, the native backend and its door
 //! (root)        `Runtime`, `Shell` and `Pair`, which hold a backend; `Plain`, which does not;
-//!               `Indirect`, bound through a supertrait; the listed native method, function
-//!               and `const`; a test module's native block
+//!               `Indirect`, bound through a supertrait; the listed native method `create`, the
+//!               listed function `listed_rebuild` and the listed `const`; a test module's native
+//!               block; and the PLANTED impls below module level inside `create` and
+//!               `listed_rebuild` (a door, a native holder block, a generic holder block and a
+//!               non-holder block reaching a native-only method, a trait impl for a native holder)
 //! runtime       the generic roads (named directly, through a glob, through a rename, in a
 //!               `where` clause), the passing controls (a holder built by inference inside a
-//!               generic function, an enum's variant spelled as the backend), and every PLANTED
-//!               shape the guard refuses, each marked where it is written
-//! elsewhere     the PLANTED door implemented outside the seam
+//!               generic function, an enum's variant spelled as the backend, a trait's default
+//!               bodies written for its own scope), and every other PLANTED shape, each marked
+//!               where it is written
+//! elsewhere     the PLANTED door implemented outside the seam, and a renamed re-export of the
+//!               door (`Host`) that bodies reach
 //! ```
 
 mod elsewhere;
@@ -56,6 +61,19 @@ impl Runtime<'_, Native> {
         impl window_seam::WindowHost for Made {
             fn request_redraw(&self) {}
         }
+        // PLANTED: a generic holder block below module level whose method reaches a native-only
+        // method.
+        impl<B: Backend> Runtime<'_, B> {
+            fn again() {
+                Runtime::create()
+            }
+        }
+        // PLANTED: a trait impl for a reference to a native holder, below module level.
+        impl Clone for &Runtime<'_, Native> {
+            fn clone(&self) -> Self {
+                self
+            }
+        }
     }
 }
 
@@ -66,6 +84,12 @@ fn listed_rebuild(_windows: Vec<&mut Runtime<'_>>) {
     // PLANTED: a native block of a holder written inside a listed function.
     impl Runtime<'_, Native> {
         fn hidden_in_a_listed_function() {}
+    }
+    // PLANTED: a non-holder's block below module level whose method reaches a native-only method.
+    impl crate::Plain {
+        fn road() {
+            Runtime::create()
+        }
     }
 }
 

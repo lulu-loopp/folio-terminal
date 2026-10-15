@@ -277,3 +277,80 @@ fn hides_a_reexported_door() {
         fn request_redraw(&self) {}
     }
 }
+
+// PLANTED: a door implemented inside an array length in a signature.
+fn sized(
+    _: [u8; {
+        struct Made;
+        impl WindowHost for Made {
+            fn request_redraw(&self) {}
+        }
+        1
+    }],
+) {
+}
+
+// PLANTED: an enum discriminant naming a native holder.
+pub enum Counted {
+    One = {
+        let _ = Runtime::create;
+        1
+    },
+}
+
+// PLANTED: a door reached through a body `use` glob.
+fn hides_behind_a_glob() {
+    use crate::elsewhere::*;
+    struct Hidden;
+    impl Host for Hidden {
+        fn request_redraw(&self) {}
+    }
+}
+
+// PLANTED: a door reached through a chain of body `use`s.
+fn hides_behind_a_chain() {
+    use crate::elsewhere;
+    use elsewhere::Host as Chained;
+    struct Hidden;
+    impl Chained for Hidden {
+        fn request_redraw(&self) {}
+    }
+}
+
+// PLANTED: one local name for two traits in sibling blocks; the first block's is the door.
+fn hides_in_a_sibling_block() {
+    {
+        use crate::elsewhere::Host as Either;
+        struct First;
+        impl Either for First {
+            fn request_redraw(&self) {}
+        }
+    }
+    {
+        use std::fmt::Debug as Either;
+        struct Second;
+        impl Either for Second {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                Ok(())
+            }
+        }
+    }
+}
+
+// PLANTED: a door reached through a module brought in by a `{self}` leaf.
+fn hides_behind_self() {
+    use crate::elsewhere::{self};
+    struct Hidden;
+    impl elsewhere::Host for Hidden {
+        fn request_redraw(&self) {}
+    }
+}
+
+// PLANTED: a macro whose tokens implement a door wherever it is expanded.
+macro_rules! makes_a_door {
+    ($made:ident) => {
+        impl WindowHost for $made {
+            fn request_redraw(&self) {}
+        }
+    };
+}
