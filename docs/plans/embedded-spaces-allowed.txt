@@ -147,5 +147,5 @@ crates/bt-term/tests/repaint_flash_oracle.rs:356 terminal screen fixture: the co
 crates/bt-term/tests/repaint_flash_oracle.rs:1268 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-transcript/src/lib.rs:2771 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-transcript/src/paths.rs:5464 terminal screen fixture: the columns are where the terminal draws them
-crates/bt-viewport/src/lib.rs:14014 terminal screen fixture: the columns are where the terminal draws them
+crates/bt-viewport/src/lib.rs:14123 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-winres/src/release_manifest.rs:641 a release manifest fixture: the file column padded before the kind column

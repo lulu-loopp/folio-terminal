@@ -293,6 +293,7 @@ mod tests {
                 column: 0,
                 visible: false,
             },
+            cursor_in_view: true,
             cell_anchors: Vec::new(),
             row_map: Vec::new(),
             selection_spans: Vec::new(),
