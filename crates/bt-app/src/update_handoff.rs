@@ -1600,14 +1600,14 @@ mod tests {
             SessionStore::at(folder.0.join("session.json"), folder.0.join("session.lock"));
         let start = Instant::now();
         let generation = store
-            .hand_over_final(start)
+            .hand_over_final()
             .expect("handed over")
             .expect("this store writes");
         assert_eq!(quit.requested(generation, start), QuitStep::Write);
         assert!(!quit.receipt_is_overdue(start + UPDATE_RECEIPT_DEADLINE / 2));
         let late = start + UPDATE_RECEIPT_DEADLINE;
         assert!(quit.receipt_is_overdue(late), "the bound is a bound");
-        let refusal = store.receipt_overdue(generation, late);
+        let refusal = store.receipt_overdue(generation);
         assert!(refusal.quit_may_proceed(), "{refusal:?}");
         assert_eq!(quit.written(WriteVerdict::TimedOut), QuitStep::Retire);
         deliver(&mut quit, &mut job);

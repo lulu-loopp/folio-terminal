@@ -25,6 +25,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- When Folio cannot save your window layout (a full disk, a folder that became read-only), it tells you once and stops trying again every couple of seconds; it tries again at your next change and when you quit. <!-- zh: pending T-SESSION-WRITER-NO-TIMER-RETRY -->
 - A picture that could not be loaded is no longer read again and again while the window holds many other pictures. <!-- zh: pending T-PEEK-CACHE-QUESTION-RECORDS -->
 - A GIF caught while it was being written plays once the write finishes. <!-- zh: pending T-ANIMATION-RECORDS-BOUND -->
 - A GIF that changes while it is being opened shows its new contents, not the old ones. <!-- zh: pending T-ANIMATION-ANSWER-IDENTITY -->
@@ -38,6 +39,7 @@ All notable changes to Folio are recorded here. The format follows
 - A panic in one picture or formula no longer ends Folio; that picture or formula stays as it was and is tried again after the next change in its pane. <!-- zh: pending S-8 -->
 - Saving a preview no longer holds the window while the disk writes, and a save over a file another program changed within the same second now notices it and leaves that program's text on the disk instead of writing over it. <!-- zh: pending S-6a -->
 - A video that never finishes loading now says so after ten seconds instead of showing a player that never starts, and a video that declares no length shows "No length" on its bar instead of a clock stuck at 0:00. <!-- zh: pending T-VIDEO-ENGINE-NO-DURATION -->
+- On Windows, Esc reaches Codex and other programs every time; it was sometimes lost after a key such as Shift+Enter or Shift+Tab, and so were Ctrl+[ and some Alt keys (Alt+[ and Alt+], for example). <!-- zh: pending T-ESC-UNDER-KITTY-ON-CONPTY -->
 - File paths printed by Cygwin's bash (`/cygdrive/c/…`), by a WSL profile without shell integration, and by a WSL distribution's own launcher are now links, as in Git Bash and WSL panes. <!-- zh: pending T-WINDOWS-SHELL-NAMESPACES -->
 - A path pasted into a Cygwin bash pane is now written as `/cygdrive/c/…`, which Cygwin can open. <!-- zh: pending T-WINDOWS-SHELL-NAMESPACES -->
 - A pane whose shell could not start and fell back to another one now reads the paths printed in it in the spelling of the shell that started, not of the one that was asked for. <!-- zh: pending T-WINDOWS-SHELL-NAMESPACES -->

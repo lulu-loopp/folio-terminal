@@ -39,22 +39,21 @@ const PREVIOUS_SESSION_FILE_NAME: &str = "session.prev.json";
 /// And the preferences document's, on the same terms.
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
 
-/// **How many times in a row a document may fail to reach the disk before the
-/// reader is told and the retrying stops** (review rows R4-10 and R4-11).
+/// **How many refusals in a row a document's writes meet before the reader is
+/// told** (review row R4-10; `docs/M2-persistence-schema-v1.md` §5.3).
 ///
-/// The session store's retry lives on the debounce, so an unbounded one is a
-/// write attempt every 1.5 seconds for as long as the window is open — against a
-/// disk that is full, a folder that has gone read-only or a volume that was
-/// unplugged, none of which the next attempt is going to fix. Five is enough to
-/// ride out the transient case (an antivirus holding the file open for a moment,
-/// a sync client mid-rename) and short enough that the reader hears about the
-/// permanent one while they can still do something about it.
+/// Nothing writes a refused document again on a clock (the side-effects
+/// contract's C5, owner ruling Q3 2026-10-11): each refusal counted here is the
+/// answer to one trigger — a change, a press, a storage pass, a quit. Five is
+/// enough to ride out the transient case (an antivirus holding the file open for
+/// a moment, a sync client mid-rename) and short enough that a disk that is
+/// full, a folder that has gone read-only or a volume that was unplugged is said
+/// while the reader can still do something about it.
 ///
-/// **It is a bound on retries and not a surrender.** Any new change re-arms the
-/// counter — see [`DocumentWrites::rearm`] — because a reader who has just
-/// changed something is a reader asking for it to be saved, and because the
-/// condition may well have gone away in the meantime.
-const MAX_WRITE_ATTEMPTS: u32 = 5;
+/// **Said once per streak, and a streak ends only at a success** (§5.3, ruled
+/// 2026-08-03): a change does not start the count again, so a reader who keeps
+/// changing things over a disk that keeps refusing hears it once.
+const REFUSALS_BEFORE_TOLD: u32 = 5;
 
 /// **The disk half of a store that writes a whole document on a press** (review
 /// row R4-10).
@@ -72,13 +71,16 @@ const MAX_WRITE_ATTEMPTS: u32 = 5;
 /// whether it is on the disk is the store's own comparison: for a hand-editable
 /// document, the document Folio wants against the revision the file is known to
 /// hold (`document_request::DocumentState::owed`, design note 2026-10-11 (b)6);
-/// for the session, the debounce this records a failure on.
+/// for the session, the document the store owes after a refusal
+/// (`SessionStore::owes_a_write`).
 #[derive(Debug)]
 pub(crate) struct DocumentWrites {
     failures: WriteFailureTracker,
-    /// Failures since the last success or the last re-arming.
+    /// Refusals since the last success.
     streak: u32,
-    /// The sentence the reader is owed, once, when the streak has run out.
+    /// Whether this streak has been said: a card is owed once per streak.
+    said: bool,
+    /// The sentence the reader is owed, until it is taken.
     fault: Option<String>,
     /// How many writes of this document the reader has asked for — the event
     /// the storage watch retries an unheard folder on.
@@ -90,15 +92,10 @@ impl DocumentWrites {
         Self {
             failures: WriteFailureTracker::new(),
             streak: 0,
+            said: false,
             fault: None,
             generation: 0,
         }
-    }
-
-    /// Whether there is any point trying again on a clock rather than on a
-    /// press.
-    pub(crate) fn may_retry(&self) -> bool {
-        self.streak < MAX_WRITE_ATTEMPTS
     }
 
     /// Count a write the reader asked for and the store accepted.
@@ -126,30 +123,38 @@ impl DocumentWrites {
         }
         if landed {
             self.streak = 0;
+            self.said = false;
             return true;
         }
         self.streak = self.streak.saturating_add(1);
-        if self.streak == MAX_WRITE_ATTEMPTS {
-            self.fault
-                .get_or_insert_with(|| crate::i18n::persisted_file_unwritable(file));
+        if self.streak >= REFUSALS_BEFORE_TOLD {
+            self.say(file);
         }
         false
     }
 
     /// **A refusal that trying again will not change** — a link, a volume that
     /// cannot exchange two files (design note 2026-10-11 (b)7): said at its
-    /// first occurrence, not after a streak.
+    /// first occurrence, not after a streak — and, like any refusal, once per
+    /// streak.
     pub(crate) fn refused_for_good(&mut self, file: &str, error: String) {
         eprintln!("BT_PERSIST could not write {file}: {error}");
         self.failures.record(false);
         self.streak = self.streak.saturating_add(1);
-        self.fault
-            .get_or_insert_with(|| crate::i18n::persisted_file_unwritable(file));
+        self.say(file);
     }
 
-    /// A new decision has been made, so the retrying starts again.
-    pub(crate) fn rearm(&mut self) {
-        self.streak = 0;
+    /// Owe the reader the sentence, unless this streak has been said.
+    fn say(&mut self, file: &str) {
+        if !std::mem::replace(&mut self.said, true) {
+            self.fault = Some(crate::i18n::persisted_file_unwritable(file));
+        }
+    }
+
+    /// **This streak has been said by another card**: nothing more is owed for it.
+    pub(crate) fn said_elsewhere(&mut self) {
+        self.said = true;
+        self.fault = None;
     }
 
     /// Take the sentence, so a card about it is raised once and not once a frame.
@@ -952,6 +957,11 @@ impl StorageLane {
         self.admit_document_job(StorageJob::Recovered(job))
     }
 
+    /// Whether a worker serves the queue now ([`LaneShared::up`]). Never waits.
+    fn is_served(&self) -> bool {
+        self.shared.up.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// **Wake the loop** — after a document answer is in its channel: the
     /// worker's, or a refusal the request door completed itself.
     pub(crate) fn wake(&self) {
@@ -1197,14 +1207,21 @@ impl SessionWriter {
         (self.sent > self.landed).then_some(self.sent)
     }
 
+    /// **Whether an autosave must wait for the one on its way**: a document is in flight and a
+    /// worker serves the lane to answer it. A worker that has ended answers nothing more, so the
+    /// next hand-over goes ahead and meets the refusal at the door.
+    fn busy(&self) -> bool {
+        self.in_flight().is_some() && self.lane.is_served()
+    }
+
     /// Hand one document over. Answers the generation it was filed under.
     ///
     /// A thread the operating system would not start leaves this returning `None`, and the
     /// caller reports that rather than writing the document itself: this store has exactly one
     /// road to `session.json` and it is not the window thread (release review X-9). The attempt
     /// is made again here on every hand-over, so a machine that could not spare a thread for a
-    /// moment gets its writer at the next quiet window rather than going the rest of the run
-    /// without one.
+    /// moment gets its writer at the next trigger's hand-over rather than going the rest of the
+    /// run without one.
     fn send(&mut self, path: &Path, bytes: Vec<u8>) -> Option<u64> {
         let generation = self.sent + 1;
         if !self
@@ -1433,6 +1450,18 @@ pub struct SessionStore {
     debouncer: Debouncer,
     writes: DocumentWrites,
     writer: SessionWriter,
+    /// **A refused document is owed, and no clock owes it** (the side-effects
+    /// contract's C5; owner ruling Q3, 2026-10-11): set when the newest document
+    /// handed over was refused, or could not be handed over at all; cleared when
+    /// a document is handed over. Only a trigger sends it again — the next change
+    /// (its debounce, [`Self::record`]), the next storage pass
+    /// ([`Self::hear_the_storage_pass`]) or the quit's write.
+    retry_on_trigger: bool,
+    /// **The pending slot**: the quiet window ran out while a document was still
+    /// on its way, so the document as it then stands — this store's own, not a
+    /// copy — is handed over when that one is answered, whatever the answer
+    /// says. One autosave on the writer at a time.
+    send_again: bool,
     /// Held only while an update trial holds all durable writes. A commit queues
     /// it immediately before the first session write; an ended trial drops it.
     launch_backup: Option<SessionBackupRequest>,
@@ -1562,6 +1591,8 @@ impl SessionStore {
             debouncer: Debouncer::new(),
             writes: DocumentWrites::new(),
             writer: SessionWriter::open(),
+            retry_on_trigger: false,
+            send_again: false,
             launch_backup,
             armed,
             sentinel_dropped_for_the_systems_end: false,
@@ -1615,6 +1646,8 @@ impl SessionStore {
             debouncer: Debouncer::new(),
             writes: DocumentWrites::new(),
             writer: SessionWriter::open(),
+            retry_on_trigger: false,
+            send_again: false,
             launch_backup: None,
             armed: false,
             sentinel_dropped_for_the_systems_end: false,
@@ -1697,6 +1730,8 @@ impl SessionStore {
             debouncer: Debouncer::new(),
             writes: DocumentWrites::new(),
             writer: SessionWriter::open(),
+            retry_on_trigger: false,
+            send_again: false,
             launch_backup,
             armed: false,
             sentinel_dropped_for_the_systems_end: false,
@@ -1727,17 +1762,33 @@ impl SessionStore {
 
     /// Replace the in-memory document and start the debounce window. Called on
     /// a meaningful change: a tree edit, or the end of a resize.
+    ///
+    /// **A change is a trigger** (C5): a document owed after a refusal goes with
+    /// it, because what is handed over at the end of the quiet window is the
+    /// document as it then stands.
     pub fn record(&mut self, session: SessionV1, now: Instant) {
         if self.session == session {
             return;
         }
         self.session = session;
-        // **A new arrangement re-arms the retrying** (review row R4-11). The
-        // bound below is on repeating one failed write on a clock; a reader who
-        // has just moved a divider is asking for *this* document to be kept, and
-        // the condition that refused the last one may well be gone.
-        self.writes.rearm();
         self.debouncer.mark_dirty(now);
+    }
+
+    /// **Whether this store owes the disk a document**: a change in its quiet
+    /// window, a document owed after a refusal, or one waiting in the pending
+    /// slot. A document on its way is not owed; it is answered.
+    fn owes_a_write(&self) -> bool {
+        self.debouncer.is_dirty() || self.retry_on_trigger || self.send_again
+    }
+
+    /// **A storage pass ran** (`storage_watch`, the storage folder's ear): an
+    /// ear event, so a document owed after a refusal is handed over once more
+    /// (C5's "next ear event"). A change already in its quiet window carries it
+    /// there instead.
+    pub(crate) fn hear_the_storage_pass(&mut self) {
+        if self.retry_on_trigger && !self.debouncer.is_dirty() {
+            self.hand_over();
+        }
     }
 
     /// When the event loop should wake to write, if it should.
@@ -1749,11 +1800,27 @@ impl SessionStore {
     /// session write. Its answer is not read here: the storage worker wakes the loop after each
     /// receipt (`AppEvent::DocumentsAnswered`), and that turn takes it ([`Self::take_receipts`]),
     /// so no clock turns for a receipt, and a receipt is heard the moment it lands.
+    ///
+    /// **And the pending slot** (one autosave on the writer at a time): a document that waited
+    /// for the one before it is handed over on the first turn after that one was answered —
+    /// the wake's own turn, since the wake follows the receipt.
     pub fn flush_if_due(&mut self, now: Instant) {
         crate::hang_watch::at(crate::hang_watch::Station::Autosave);
-        if self.debouncer.should_flush(now, SESSION_DEBOUNCE) {
-            self.hand_over(now);
+        if self.debouncer.should_flush(now, SESSION_DEBOUNCE)
+            || (self.send_again && !self.writer.busy())
+        {
+            self.hand_over();
         }
+    }
+
+    /// **The autosave's turn, and the sentence it owes the reader**: [`Self::flush_if_due`],
+    /// then the card a failure streak owes (once per streak, [`DocumentWrites::record`]) —
+    /// whichever turn booked it, this one or an earlier one. The window raises what this
+    /// answers; ignoring it is a session that cannot be saved and is never said.
+    #[must_use = "a session that cannot be saved is said on a card"]
+    pub fn autosave(&mut self, now: Instant) -> Option<String> {
+        self.flush_if_due(now);
+        self.take_fault()
     }
 
     /// Whether this process is the one that writes `session.json` — see
@@ -1788,7 +1855,7 @@ impl SessionStore {
         }
         self.arm_sentinel();
         self.queue_launch_backup();
-        self.hand_over(Instant::now());
+        self.hand_over();
     }
 
     /// **Arm this run's sentinel, if it is not armed** — what [`Self::release_trial`] does
@@ -1838,74 +1905,93 @@ impl SessionStore {
     /// Hand the current document to the writer, without waiting for it to land.
     ///
     /// The debounce is marked flushed here rather than at the receipt, and the two are different
-    /// questions: the debouncer answers "when should this be tried again", and handing it over is
+    /// questions: the debouncer answers "when should this be tried", and handing it over is
     /// exactly the moment the answer becomes "not until something changes". Whether it *landed*
-    /// is [`Self::take_receipts`]'s, and a failure there marks the document dirty again so the
-    /// next quiet window retries it.
-    fn hand_over(&mut self, now: Instant) {
+    /// is [`Self::take_receipts`]'s, and a refusal there leaves the document owed to the next
+    /// trigger — never to a clock ([`Self::retry_on_trigger`]).
+    ///
+    /// **One autosave on the writer at a time.** While one is on its way the document goes to
+    /// the pending slot ([`Self::send_again`]) and is handed over when that one is answered: a
+    /// writer inside an `fsync` that does not come back is not handed a document every quiet
+    /// window.
+    fn hand_over(&mut self) {
         if !self.writes_to_disk() {
             // The second Folio over this directory (review row R4-5). Marked
             // flushed rather than left dirty, because nothing is owed: there is
             // no attempt to retry and no failure to report — this process was
             // never the one keeping this file.
             self.debouncer.mark_flushed();
+            self.retry_on_trigger = false;
+            self.send_again = false;
+            return;
+        }
+        if self.writer.busy() {
+            self.debouncer.mark_flushed();
+            self.send_again = true;
             return;
         }
         self.queue_launch_backup();
         let bytes = match bt_persist::serialize_session(&self.session) {
             Ok(bytes) => bytes,
             // A document that cannot be turned into JSON is not a disk problem and no thread will
-            // fix it. It goes through the same one-alert-per-streak tracker so a broken document
-            // does not print every 1.5 seconds.
+            // fix it. It goes through the same one-alert-per-streak tracker, and is owed to the
+            // next trigger like any refusal.
             Err(error) => {
-                self.report_write(Err(error.to_string()), now);
+                self.debouncer.mark_flushed();
+                self.send_again = false;
+                self.report_write(Err(error.to_string()));
                 return;
             }
         };
-        if self.writer.send(&self.session_path, bytes).is_some() {
-            self.debouncer.mark_flushed();
-            return;
+        if self.send_to_the_writer(bytes).is_none() {
+            // **No writer thread, and therefore no write** (release review X-9). The only way
+            // `spawn_at_priority` fails is that the operating system would not start a thread
+            // at all, and the one thing this document may not be written on is this thread,
+            // which is the window's. So it is reported instead: the document is owed, and the
+            // next trigger's hand-over asks for a thread again.
+            self.report_write(Err(NO_WRITER_THREAD.to_string()));
         }
-        // **No writer thread, and therefore no write** (release review X-9). The only way
-        // `spawn_at_priority` fails is that the operating system would not start a thread at
-        // all, and the one thing this document may not be written on is this thread, which is
-        // the window's. So it is reported instead, which puts it back on the clock: the next
-        // quiet window tries the thread again, and the bounded retry in [`Self::report_write`]
-        // is what stops a machine that will never spare one from asking for ever.
-        self.report_write(Err(NO_WRITER_THREAD.to_string()), now);
+    }
+
+    /// **Hand the document's bytes to the writer**: the one place a session document is sent.
+    /// Whatever was owed — the quiet window, the pending slot, a refusal — goes with it; what
+    /// becomes of it is its receipt's. `None` when no writer thread took it.
+    fn send_to_the_writer(&mut self, bytes: Vec<u8>) -> Option<u64> {
+        self.debouncer.mark_flushed();
+        self.send_again = false;
+        self.retry_on_trigger = false;
+        self.writer.send(&self.session_path, bytes)
     }
 
     /// **Read whatever the writer has answered** — on the turn the storage worker's wake brings
     /// (`AppEvent::DocumentsAnswered`), and wherever a decision rests on the answer (a quit's
-    /// write, an update's receipt) — and let a failure put the document back on the clock.
+    /// write, an update's receipt) — and let a refusal leave the document owed to the next
+    /// trigger.
     ///
     /// A receipt older than the newest request is **stale and dropped**: a newer document has
-    /// already been handed over and will bring its own answer, so letting an old failure mark the
-    /// store dirty would schedule a retry of something that has since been superseded, and
-    /// letting an old success mark it clean would be answering for a document nobody wrote.
+    /// already been handed over and will bring its own answer, so letting an old refusal leave
+    /// the store owing would send again something that has since been superseded, and letting an
+    /// old success mark it clean would be answering for a document nobody wrote.
     ///
     /// **The worker's end is the terminal of the document it took and will not answer** (C2):
     /// its receipts' channel closes before its end wakes the loop, so the document still in
     /// flight when the channel reads closed is booked here as refused — the writer stopped —
     /// once, as a refusal the disk gave would be.
-    pub(crate) fn take_receipts(&mut self, now: Instant) {
+    pub(crate) fn take_receipts(&mut self) {
         for receipt in self.writer.collect() {
-            self.apply_receipt(receipt, now);
+            self.apply_receipt(receipt);
         }
         if self.writer.ended
             && let Some(generation) = self.writer.in_flight()
         {
-            self.apply_receipt(
-                SessionWriteReceipt {
-                    generation,
-                    result: Err(WRITER_STOPPED.to_string()),
-                },
-                now,
-            );
+            self.apply_receipt(SessionWriteReceipt {
+                generation,
+                result: Err(WRITER_STOPPED.to_string()),
+            });
         }
     }
 
-    fn apply_receipt(&mut self, receipt: SessionWriteReceipt, now: Instant) {
+    fn apply_receipt(&mut self, receipt: SessionWriteReceipt) {
         // Recorded for every receipt, stale or not: what this answers is "is anything still on
         // its way", and a stale receipt is still one fewer document in flight.
         self.writer.landed = self.writer.landed.max(receipt.generation);
@@ -1913,35 +1999,21 @@ impl SessionStore {
             return;
         }
         self.writer.answered = Some((receipt.generation, receipt.result.clone()));
-        self.report_write(receipt.result, now);
+        self.report_write(receipt.result);
     }
 
-    /// One alert per failure streak (§5.3), and a failure leaves the document
-    /// owed — **for a bounded number of tries** (review row R4-11).
+    /// One alert per failure streak (§5.3), and a refusal leaves the document owed — **to the
+    /// next trigger, not to a clock** (the side-effects contract's C5; owner ruling Q3,
+    /// 2026-10-11).
     ///
-    /// The retry used to be unconditional, which over a full disk or a volume
-    /// that was unplugged meant one `atomic_write` every 1.5 seconds for as long
-    /// as the window stayed open, each of them leaving a temp file behind
-    /// (`bt_persist::atomic`'s own half of that row). Past the bound the document
-    /// stops going back on the clock and the reader is told instead — and the
-    /// next change re-arms it, because [`Self::record`] does.
-    fn report_write(&mut self, result: Result<(), String>, now: Instant) {
-        if self.writes.record(SESSION_FILE_NAME, result) {
-            return;
-        }
-        if self.writes.may_retry() {
-            self.debouncer.mark_dirty(now);
-            return;
-        }
-        // **Past the bound the clock is stopped, not merely left un-wound.**
-        // Leaving the document dirty would keep `flush_if_due` handing it over
-        // every quiet window, which is the loop this bound exists to end; and
-        // it would keep the event loop waking for a deadline it can do nothing
-        // about. Marked flushed is the honest reading of "this store is not
-        // going to try again" — it is not a claim that anything landed, which
-        // is what the fault sentence taken by the window says instead. The next
-        // real change re-arms both, in [`Self::record`].
-        self.debouncer.mark_flushed();
+    /// A refused write is a terminal answer for that request. Nothing schedules another: the
+    /// next change (its quiet window), the next storage pass ([`Self::hear_the_storage_pass`])
+    /// or the quit's write ([`Self::flush_judged`]) is what sends the document again, as it then
+    /// stands. A disk that is full or a volume that was unplugged is therefore not written to
+    /// every quiet window while nothing changes, and the reader is told once per streak
+    /// ([`DocumentWrites::record`]).
+    fn report_write(&mut self, result: Result<(), String>) {
+        self.retry_on_trigger = !self.writes.record(SESSION_FILE_NAME, result);
     }
 
     /// Write now, whatever the debounce says. The clean-exit path uses this:
@@ -1995,7 +2067,6 @@ impl SessionStore {
     /// [`Self::flush_judged`], its wait ending at `until` at the latest — a quit's one
     /// budget (T-QUIT-DOCUMENTS).
     fn flush_judged_until(&mut self, until: Instant) -> Result<(), SaveRefusal> {
-        let now = Instant::now();
         if !self.writes_to_disk() {
             // The second Folio over this directory (review row R4-5). `Ok(())`
             // and not an error, because the quit's question is "did what this
@@ -2006,32 +2077,30 @@ impl SessionStore {
             return Ok(());
         }
         self.queue_launch_backup();
-        self.take_receipts(now);
-        if !self.debouncer.is_dirty() {
-            // Clean, but not necessarily *landed*: a document handed over a moment ago can still
-            // be on the writer's channel.
+        self.take_receipts();
+        // **The quit's write is a trigger** (C5): a document owed after a refusal, or waiting in
+        // the pending slot, is handed over here like a change in its quiet window.
+        if !self.owes_a_write() {
+            // Owing nothing, but not necessarily *landed*: a document handed over a moment ago
+            // can still be on the writer's channel.
             let Some(outstanding) = self.writer.in_flight() else {
                 return Ok(());
             };
-            return self.wait_for_landing(outstanding, now, until);
+            return self.wait_for_landing(outstanding, until);
         }
         let bytes = bt_persist::serialize_session(&self.session).map_err(|error| {
             let error = error.to_string();
-            self.report_write(Err(error.clone()), now);
+            self.report_write(Err(error.clone()));
             SaveRefusal::Refused(error)
         })?;
-        let Some(generation) = self.writer.send(&self.session_path, bytes) else {
+        let Some(generation) = self.send_to_the_writer(bytes) else {
             // No writer thread and no second road to the file (release review X-9). This is a
             // refusal and not a wait that ran long: nothing was queued, nothing is on its way,
             // and a window hidden over it would be the session gone.
-            self.report_write(Err(NO_WRITER_THREAD.to_string()), now);
+            self.report_write(Err(NO_WRITER_THREAD.to_string()));
             return Err(SaveRefusal::Refused(NO_WRITER_THREAD.to_string()));
         };
-        let landed = self.wait_for_landing(generation, now, until);
-        if landed.is_ok() {
-            self.debouncer.mark_flushed();
-        }
-        landed
+        self.wait_for_landing(generation, until)
     }
 
     /// **A quit's session write, inside what is left of its one budget**
@@ -2053,18 +2122,24 @@ impl SessionStore {
         now: Instant,
     ) -> Result<(), SaveRefusal> {
         if now < until {
-            return self.flush_judged_until(until);
+            let verdict = self.flush_judged_until(until);
+            self.said_by_the_quit(&verdict);
+            return verdict;
         }
         if !self.writes_to_disk() {
             self.debouncer.mark_flushed();
             return Ok(());
         }
-        self.take_receipts(now);
-        if !self.debouncer.is_dirty() && self.writer.in_flight().is_none() {
+        self.take_receipts();
+        if !self.owes_a_write() && self.writer.in_flight().is_none() {
             return Ok(());
         }
+        // **Given up, all of it**: nothing this store owed — the quiet window, a document a
+        // refusal left owed, the pending slot — is handed over by the way out's close either.
         self.writer.stalled = true;
         self.debouncer.mark_flushed();
+        self.retry_on_trigger = false;
+        self.send_again = false;
         let said = quit_budget_spent();
         eprintln!("Folio: {said}");
         Err(SaveRefusal::TimedOut(said))
@@ -2109,23 +2184,29 @@ impl SessionStore {
     /// # Errors
     /// The document could not be serialised, or there is no writer thread: a refusal, as
     /// [`Self::flush_judged`] reports it.
-    pub(crate) fn hand_over_final(&mut self, now: Instant) -> Result<Option<u64>, SaveRefusal> {
+    pub(crate) fn hand_over_final(&mut self) -> Result<Option<u64>, SaveRefusal> {
         if !self.writes_to_disk() {
             self.debouncer.mark_flushed();
             return Ok(None);
         }
         self.queue_launch_backup();
-        self.take_receipts(now);
-        let bytes = bt_persist::serialize_session(&self.session).map_err(|error| {
-            let error = error.to_string();
-            self.report_write(Err(error.clone()), now);
-            SaveRefusal::Refused(error)
-        })?;
-        let Some(generation) = self.writer.send(&self.session_path, bytes) else {
-            self.report_write(Err(NO_WRITER_THREAD.to_string()), now);
-            return Err(SaveRefusal::Refused(NO_WRITER_THREAD.to_string()));
+        self.take_receipts();
+        let bytes = match bt_persist::serialize_session(&self.session) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let error = error.to_string();
+                self.report_write(Err(error.clone()));
+                let verdict = Err(SaveRefusal::Refused(error));
+                self.said_by_the_quit(&verdict);
+                return verdict.map(|()| None);
+            }
         };
-        self.debouncer.mark_flushed();
+        let Some(generation) = self.send_to_the_writer(bytes) else {
+            self.report_write(Err(NO_WRITER_THREAD.to_string()));
+            let verdict = Err(SaveRefusal::Refused(NO_WRITER_THREAD.to_string()));
+            self.said_by_the_quit(&verdict);
+            return verdict.map(|()| None);
+        };
         Ok(Some(generation))
     }
 
@@ -2135,37 +2216,48 @@ impl SessionStore {
     /// Only the receipt for that generation answers: an older one is somebody else's document.
     /// A writer thread that has gone answers a refusal, as [`SessionWriter::wait_for`] does:
     /// nothing is on its way.
-    pub(crate) fn landing_of(
-        &mut self,
-        generation: u64,
-        now: Instant,
-    ) -> Option<Result<(), SaveRefusal>> {
-        self.take_receipts(now);
-        if let Some((answered, result)) = &self.writer.answered
+    pub(crate) fn landing_of(&mut self, generation: u64) -> Option<Result<(), SaveRefusal>> {
+        self.take_receipts();
+        let landing = if let Some((answered, result)) = &self.writer.answered
             && *answered == generation
         {
-            return Some(result.clone().map_err(SaveRefusal::Refused));
+            Some(result.clone().map_err(SaveRefusal::Refused))
+        } else {
+            self.writer
+                .ended
+                .then(|| Err(SaveRefusal::Refused(WRITER_STOPPED.to_string())))
+        };
+        if let Some(verdict) = &landing {
+            self.said_by_the_quit(verdict);
         }
-        self.writer
-            .ended
-            .then(|| Err(SaveRefusal::Refused(WRITER_STOPPED.to_string())))
+        landing
+    }
+
+    /// **A quit's refusal is said by the quit's own card** (`QuitSessionNotWritten`, on every
+    /// window): this streak counts as said, so the autosave's turn does not say it a second
+    /// time after the quit is abandoned. A budget that ran out is not a refusal and raises no
+    /// card — the process leaves.
+    fn said_by_the_quit(&mut self, verdict: &Result<(), SaveRefusal>) {
+        if verdict
+            .as_ref()
+            .is_err_and(|refusal| !refusal.quit_may_proceed())
+        {
+            self.writes.said_elsewhere();
+        }
     }
 
     /// **The receipt for `generation` did not come back in time** (U-21): the same answer, and
     /// the same bookkeeping, as a synchronous wait whose budget ran out — the writer is marked
     /// stalled, so the close does not spend the budget again and leaves `session.lock` standing,
     /// and the one line is said.
-    pub(crate) fn receipt_overdue(&mut self, generation: u64, now: Instant) -> SaveRefusal {
+    pub(crate) fn receipt_overdue(&mut self, generation: u64) -> SaveRefusal {
         self.writer.stalled = true;
         report_save_did_not_finish(self.writer.budget);
         let refusal = SaveRefusal::TimedOut(save_did_not_finish(self.writer.budget));
-        self.apply_receipt(
-            SessionWriteReceipt {
-                generation,
-                result: Err(refusal.message().to_string()),
-            },
-            now,
-        );
+        self.apply_receipt(SessionWriteReceipt {
+            generation,
+            result: Err(refusal.message().to_string()),
+        });
         refusal
     }
 
@@ -2182,12 +2274,7 @@ impl SessionStore {
     /// Stand still until one named document has an answer, and book every answer that arrives on
     /// the way — a synchronous wait must not swallow the receipts the ordinary path was going to
     /// read.
-    fn wait_for_landing(
-        &mut self,
-        generation: u64,
-        now: Instant,
-        until: Instant,
-    ) -> Result<(), SaveRefusal> {
+    fn wait_for_landing(&mut self, generation: u64, until: Instant) -> Result<(), SaveRefusal> {
         // The one wait in this store is an owner-thread door. A refusal did not wait: it is the
         // stalled answer a spent budget gives, so a quit goes on rather than stopping over a
         // document that may still be on its way.
@@ -2202,19 +2289,16 @@ impl SessionStore {
             )
         });
         for receipt in earlier {
-            self.apply_receipt(receipt, now);
+            self.apply_receipt(receipt);
         }
         // The tracker books one fact — "this document is not on the disk" — and both refusals
         // are that fact. Which of the two it was is the caller's question, not the clock's.
-        self.apply_receipt(
-            SessionWriteReceipt {
-                generation,
-                result: landed
-                    .clone()
-                    .map_err(|refusal| refusal.message().to_string()),
-            },
-            now,
-        );
+        self.apply_receipt(SessionWriteReceipt {
+            generation,
+            result: landed
+                .clone()
+                .map_err(|refusal| refusal.message().to_string()),
+        });
         landed
     }
 
@@ -3867,7 +3951,7 @@ pub(crate) mod tests {
         // sends no receipt of its own, so the receipt says both have been written. How fast that
         // is on a loaded disk is not this test's subject, and the session's budget would make it
         // one.
-        store.hand_over(Instant::now());
+        store.hand_over();
         let landed = crate::lane::receive(&store.writer.receipts, "the session write's receipt");
         assert_eq!(landed.result, Ok(()));
 
@@ -3979,11 +4063,6 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Far above any honest cost of one `atomic_write`, and reached only when the answer this is
-    /// waiting for is never coming. The judgement it protects is "did that happen yet", not "has
-    /// enough time passed" — see CONVENTIONS §三.
-    const RECEIPT_CEILING: Duration = Duration::from_secs(60);
-
     /// RED (0.4.6 U-21) — **an update's quit is answered only by the receipt for the document it
     /// photographed.**
     ///
@@ -4016,7 +4095,7 @@ pub(crate) mod tests {
 
         store.record(earlier, Instant::now());
         let first = store
-            .hand_over_final(Instant::now())
+            .hand_over_final()
             .expect("handed over")
             .expect("this store writes");
         let receipt = store
@@ -4025,9 +4104,9 @@ pub(crate) mod tests {
             .recv()
             .expect("the writer answers for the earlier document");
         assert_eq!(receipt.generation, first);
-        store.apply_receipt(receipt, Instant::now());
+        store.apply_receipt(receipt);
         let landed = store
-            .landing_of(first, Instant::now())
+            .landing_of(first)
             .expect("the signalled receipt answers this generation");
         assert_eq!(landed, Ok(()), "an earlier document has landed");
 
@@ -4035,12 +4114,12 @@ pub(crate) mod tests {
         let (relay, held) = mpsc::channel();
         let real = std::mem::replace(&mut store.writer.receipts, held);
         let second = store
-            .hand_over_final(Instant::now())
+            .hand_over_final()
             .expect("handed over")
             .expect("this store writes");
         assert!(second > first, "the photograph is a generation of its own");
         assert_eq!(
-            store.landing_of(second, Instant::now()),
+            store.landing_of(second),
             None,
             "the earlier landing is not the photograph's"
         );
@@ -4051,14 +4130,14 @@ pub(crate) mod tests {
             })
             .expect("the relay");
         assert_eq!(
-            store.landing_of(second, Instant::now()),
+            store.landing_of(second),
             None,
             "nor is an older receipt arriving late"
         );
         let receipt = real.recv().expect("the writer answers for the photograph");
         assert_eq!(receipt.generation, second);
         relay.send(receipt).expect("the relay");
-        assert_eq!(store.landing_of(second, Instant::now()), Some(Ok(())));
+        assert_eq!(store.landing_of(second), Some(Ok(())));
         assert_eq!(
             std::fs::read(root.join("session.json")).expect("the file"),
             bt_persist::serialize_session(&photograph).expect("the photograph serialises"),
@@ -4082,11 +4161,12 @@ pub(crate) mod tests {
     /// so the write cannot succeed. Synchronously that failure was already in hand when
     /// `flush_if_due` came back, and the document was still owed. Off-thread it cannot be: the
     /// call returns having handed the document over and owing nothing more *this turn*, and the
-    /// failure arrives later, as a receipt, which is what puts the document back on the clock.
+    /// failure arrives later, as a receipt, which is what leaves the document owed to the next
+    /// trigger.
     ///
     /// Red gate: put `write_session_atomic` back into `hand_over` and the first assertion goes —
-    /// the store is already dirty again when the call returns, because the `fsync` happened on
-    /// this thread.
+    /// the store already owes the document again when the call returns, because the `fsync`
+    /// happened on this thread.
     #[test]
     fn the_autosave_hands_the_document_over_and_hears_the_verdict_later() {
         // The session's waits are owner-thread doors, admitted only on the way out.
@@ -4107,23 +4187,25 @@ pub(crate) mod tests {
 
         store.flush_if_due(changed_at + SESSION_DEBOUNCE);
         assert!(
-            !store.debouncer.is_dirty(),
-            "the turn that hands the document over owes nothing more; a store that is already \
-             dirty again knows the verdict, which means the fsync happened on this thread"
+            !store.owes_a_write(),
+            "the turn that hands the document over owes nothing more; a store that already owes \
+             it again knows the verdict, which means the fsync happened on this thread"
         );
 
         // And the verdict does arrive — asked as "has it happened yet", not as "have I slept
         // long enough", so a busy machine delivers the same answer later rather than a different
         // one.
-        let waiting_since = Instant::now();
-        while !store.debouncer.is_dirty() {
-            assert!(
-                waiting_since.elapsed() < RECEIPT_CEILING,
-                "no receipt ever came back for a write that cannot have succeeded"
-            );
-            store.take_receipts(Instant::now());
-            std::thread::yield_now();
-        }
+        assert!(
+            crate::lane::within_patience(|| {
+                store.take_receipts();
+                store.owes_a_write()
+            }),
+            "no receipt ever came back for a write that cannot have succeeded"
+        );
+        assert!(
+            !store.debouncer.is_dirty(),
+            "and the refusal owes the document to the next trigger, not to a quiet window"
+        );
 
         store.close();
         let _ = std::fs::remove_dir_all(&root);
@@ -4550,11 +4632,11 @@ pub(crate) mod tests {
     /// One writer thread means the writes land in the order they were decided, so the *last*
     /// request is the one that says what is on the disk. An older receipt arriving afterwards is
     /// news about a document that no longer exists: letting its success mark the store clean
-    /// would be answering for bytes nobody wrote, and letting its failure mark the store dirty
-    /// would schedule a retry of something already superseded.
+    /// would be answering for bytes nobody wrote, and letting its failure leave the store owing
+    /// would send again something already superseded.
     ///
     /// Red gate: drop the generation comparison in `apply_receipt` and the stale failure below
-    /// puts a document back on the clock that a newer write has already carried.
+    /// leaves owed a document that a newer write has already carried.
     #[test]
     fn a_receipt_for_a_superseded_document_is_dropped() {
         // The session's waits are owner-thread doors, admitted only on the way out.
@@ -4564,30 +4646,27 @@ pub(crate) mod tests {
         let mut store = SessionStore::at(root.join("session.json"), root.join("session.lock"));
         // Two documents have gone out; the second is the one that speaks for the store.
         store.writer.sent = 2;
-        let now = Instant::now();
 
-        store.apply_receipt(
-            SessionWriteReceipt {
-                generation: 1,
-                result: Err("the volume went away".to_string()),
-            },
-            now,
-        );
+        store.apply_receipt(SessionWriteReceipt {
+            generation: 1,
+            result: Err("the volume went away".to_string()),
+        });
         assert!(
-            !store.debouncer.is_dirty(),
+            !store.owes_a_write(),
             "an older document's failure is not this document's problem"
         );
 
-        store.apply_receipt(
-            SessionWriteReceipt {
-                generation: 2,
-                result: Err("the volume went away".to_string()),
-            },
-            now,
+        store.apply_receipt(SessionWriteReceipt {
+            generation: 2,
+            result: Err("the volume went away".to_string()),
+        });
+        assert!(
+            store.owes_a_write(),
+            "the newest one's failure is, and the document is owed to the next trigger"
         );
         assert!(
-            store.debouncer.is_dirty(),
-            "the newest one's failure is, and it is what schedules the retry"
+            !store.debouncer.is_dirty(),
+            "and not to the clock: no quiet window was started by the refusal"
         );
 
         store.close();
@@ -5380,73 +5459,585 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// RED (review rows R4-10 and R4-11) — **a write that keeps failing stops
-    /// being retried and is said out loud.**
-    ///
-    /// The other half. `SessionStore` marked the document dirty again on every
-    /// failure, unconditionally, so a full disk or a volume that was unplugged
-    /// meant one `atomic_write` every 1.5 seconds for as long as the window
-    /// stayed open — each of them leaving a temp file behind, which is
-    /// `bt_persist::atomic`'s own half of R4-11 — and one line on a console
-    /// nobody was watching.
-    ///
-    /// Red gate: mark dirty without asking `may_retry` and the store is still
-    /// dirty after the bound; never fill `fault` and the card is never owed.
-    #[test]
-    fn a_document_that_will_not_write_stops_retrying_and_says_so() {
-        // The session's waits are owner-thread doors, admitted only on the way out.
-        crate::test_support::on_the_window_thread_exiting();
-        let root = appdata("give-up");
-        let gone = root.join("not-here");
-        let mut store = SessionStore::at(gone.join("session.json"), gone.join("session.lock"));
-        // Each attempt is answered by the disk's refusal, not by a budget running out: the
-        // retry bound is the subject, so the writer waits the suite's patience.
-        store.set_save_budget(crate::lane::PATIENCE);
+    /// A session store whose writer is the test: every document it hands over arrives on the
+    /// queue this returns, in order, and the test answers each on the receipts sender — the
+    /// answer arrives when the test sends it, and no thread decides when.
+    fn a_store_the_test_answers(
+        case: &str,
+    ) -> (
+        SessionStore,
+        mpsc::Receiver<StorageJob>,
+        mpsc::Sender<SessionWriteReceipt>,
+        PathBuf,
+    ) {
+        let root = appdata(case);
+        let mut store = SessionStore::at(root.join(SESSION_FILE_NAME), root.join("session.lock"));
+        let (lane, jobs) = StorageLane::held();
+        let (answer, receipts) = mpsc::channel();
+        store.writer = SessionWriter {
+            lane,
+            receipts,
+            sent: 0,
+            landed: 0,
+            answered: None,
+            ended: false,
+            // The test holds the sending end itself, and drops it for a worker's end.
+            _receipts_held_open: None,
+            stalled: false,
+            budget: SESSION_SAVE_BUDGET,
+        };
+        (store, jobs, answer, root)
+    }
 
-        let mut document = SessionV1::default();
-        document.recent_folders.push(bt_persist::RecentFolderV1 {
-            path: r"D:\work".to_owned(),
-            opened_at: "2026-09-08T00:00:00Z".to_owned(),
+    /// The generations of the session documents handed over since the last look.
+    fn documents_handed_over(jobs: &mpsc::Receiver<StorageJob>) -> Vec<u64> {
+        jobs.try_iter()
+            .filter_map(|job| match job {
+                StorageJob::Session(request) => Some(request.generation),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A layout that differs from every other `step`: one recent folder, its name mixed-script.
+    fn a_layout(step: u32) -> SessionV1 {
+        let mut layout = SessionV1::default();
+        layout.recent_folders.push(bt_persist::RecentFolderV1 {
+            path: format!(r"D:\项目 notes\第{step}章 chapter"),
+            opened_at: "2026-10-13T00:00:00Z".to_owned(),
         });
-        let now = Instant::now();
-        store.record(document, now);
+        layout
+    }
 
-        // Every attempt the bound allows. `flush_judged` rather than the
-        // autosave's own `hand_over`, because it is the one that waits for the
-        // writer thread's answer — the autosave hands a document over and hears
-        // about it a turn or two later, which is a race a test may not run on.
-        // The retry rule is the same either way: it lives in `report_write`.
-        for _ in 0..MAX_WRITE_ATTEMPTS {
-            assert!(store.debouncer.is_dirty(), "still owed");
-            assert!(store.flush_judged().is_err(), "and it still cannot be kept");
+    /// The disk's refusal of generation `generation`.
+    fn refused(generation: u64) -> SessionWriteReceipt {
+        SessionWriteReceipt {
+            generation,
+            result: Err("磁盘已满 the disk is full".to_owned()),
         }
+    }
+
+    /// RED (T-SESSION-WRITER-NO-TIMER-RETRY; the side-effects contract's C5, owner ruling Q3
+    /// 2026-10-11) — **a refused session write is not sent again because time passed.**
+    ///
+    /// The store used to put a refused document back on the debounce, so a disk that stayed full
+    /// was handed the same document every 1.5 seconds. Here the writer refuses the one document
+    /// handed over, and eight quiet windows go by with nothing changing: nothing else is handed
+    /// over, and the store asks the loop for no wake.
+    ///
+    /// MUTATION: in `SessionStore::report_write`, put a refused document back on the debounce
+    /// (`self.debouncer.mark_dirty(Instant::now())`) — the later turns hand it over again.
+    #[test]
+    fn a_refused_session_write_is_not_retried_by_the_clock() {
+        let (mut store, jobs, answer, root) = a_store_the_test_answers("no-clock-retry");
+        let changed = Instant::now();
+        store.record(a_layout(1), changed);
+        store.flush_if_due(changed + SESSION_DEBOUNCE);
+        assert_eq!(
+            documents_handed_over(&jobs),
+            vec![1],
+            "the change is handed over"
+        );
+
+        answer
+            .send(refused(1))
+            .expect("the store holds its receipts");
+        store.take_receipts(); // the turn the receipt's wake brings
+        for period in 2..10 {
+            store.flush_if_due(changed + SESSION_DEBOUNCE * period);
+        }
+        assert_eq!(
+            documents_handed_over(&jobs),
+            Vec::<u64>::new(),
+            "eight quiet windows later, nothing more was handed over"
+        );
+        assert_eq!(store.deadline(), None, "and no wake is asked for");
+        assert!(store.owes_a_write(), "the document is still owed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-SESSION-WRITER-NO-TIMER-RETRY) — **a refused session write is sent again by the
+    /// next change**, as the document then stands; and a change made while the refused write was
+    /// still on its way waits in the pending slot and goes once the refusal is heard.
+    ///
+    /// MUTATION: drop the pending slot's send (`|| (self.send_again && !self.writer.busy())` in
+    /// `SessionStore::flush_if_due`) — the change made while the write was out is never handed
+    /// over.
+    /// MUTATION: a refusal stops the autosave until a success (`if self.retry_on_trigger
+    /// { self.debouncer.mark_flushed(); return; }` at the head of `SessionStore::hand_over`) —
+    /// the next change is not handed over.
+    #[test]
+    fn a_refused_session_write_is_resent_on_the_next_change() {
+        let (mut store, jobs, answer, root) = a_store_the_test_answers("resent-on-change");
+        let start = Instant::now();
+        store.record(a_layout(1), start);
+        store.flush_if_due(start + SESSION_DEBOUNCE);
+        assert_eq!(documents_handed_over(&jobs), vec![1]);
+        answer
+            .send(refused(1))
+            .expect("the store holds its receipts");
+        store.take_receipts(); // the turn the receipt's wake brings
+        store.flush_if_due(start + SESSION_DEBOUNCE * 2);
+        assert_eq!(documents_handed_over(&jobs), Vec::<u64>::new());
+
+        // The next change, after the refusal was heard.
+        let changed = start + SESSION_DEBOUNCE * 3;
+        store.record(a_layout(2), changed);
+        store.flush_if_due(changed + SESSION_DEBOUNCE);
+        assert_eq!(
+            documents_handed_over(&jobs),
+            vec![2],
+            "the change hands the document over again"
+        );
+
+        // A change while that write is still on its way: one autosave on the writer at a time.
+        let again = changed + SESSION_DEBOUNCE * 2;
+        store.record(a_layout(3), again);
+        store.flush_if_due(again + SESSION_DEBOUNCE);
+        assert_eq!(
+            documents_handed_over(&jobs),
+            Vec::<u64>::new(),
+            "it waits in the pending slot"
+        );
+        assert_eq!(store.deadline(), None, "and asks for no wake of its own");
+        answer
+            .send(refused(2))
+            .expect("the store holds its receipts");
+        store.take_receipts(); // the turn the receipt's wake brings
+        store.flush_if_due(again + SESSION_DEBOUNCE * 2);
+        assert_eq!(
+            documents_handed_over(&jobs),
+            vec![3],
+            "the refusal is heard, and the change made meanwhile goes"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-SESSION-WRITER-NO-TIMER-RETRY) — **a refused session write is sent again by the
+    /// next storage pass**, once: the pass is the trigger, not a clock, and a pass while that
+    /// write is out, or after it landed, sends nothing.
+    ///
+    /// MUTATION: the owed flag dropped (`SessionStore::report_write` never sets
+    /// `retry_on_trigger`) — the pass hands nothing over.
+    #[test]
+    fn a_refused_session_write_is_resent_on_the_next_ear_pass() {
+        let (mut store, jobs, answer, root) = a_store_the_test_answers("resent-on-the-ear");
+        let start = Instant::now();
+        store.record(a_layout(1), start);
+        store.flush_if_due(start + SESSION_DEBOUNCE);
+        answer
+            .send(refused(1))
+            .expect("the store holds its receipts");
+        store.take_receipts(); // the turn the receipt's wake brings
+        store.flush_if_due(start + SESSION_DEBOUNCE * 4);
+        assert_eq!(documents_handed_over(&jobs), vec![1]);
+
+        store.hear_the_storage_pass();
+        assert_eq!(
+            documents_handed_over(&jobs),
+            vec![2],
+            "the pass hands the owed document over"
+        );
+        store.hear_the_storage_pass();
+        assert_eq!(
+            documents_handed_over(&jobs),
+            Vec::<u64>::new(),
+            "once: a second pass while it is out sends nothing"
+        );
+        answer
+            .send(SessionWriteReceipt {
+                generation: 2,
+                result: Ok(()),
+            })
+            .expect("the store holds its receipts");
+        store.take_receipts(); // the turn the receipt's wake brings
+        store.flush_if_due(start + SESSION_DEBOUNCE * 5);
+        store.hear_the_storage_pass();
+        assert_eq!(
+            documents_handed_over(&jobs),
+            Vec::<u64>::new(),
+            "and nothing once it landed"
+        );
+        assert!(!store.owes_a_write());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-SESSION-WRITER-NO-TIMER-RETRY) — **a refused session write is sent again by the
+    /// quit's write**, which waits for it and finds it on the disk.
+    ///
+    /// The real writer and the real `atomic_write`: the folder is not there when the autosave
+    /// hands the document over, and is there by the time the reader quits. Nothing changed in
+    /// between, so only the owed document can make the quit write.
+    ///
+    /// MUTATION: the owed flag dropped (`SessionStore::report_write` never sets
+    /// `retry_on_trigger`) — the quit owes nothing, writes nothing and answers `Ok(())` over a
+    /// file that is not there.
+    #[test]
+    fn a_refused_session_write_is_resent_at_quit() {
+        crate::test_support::on_the_window_thread_exiting();
+        let root = appdata("resent-at-quit");
+        let folder = root.join("会话 sessions");
+        let path = folder.join(SESSION_FILE_NAME);
+        let mut store = SessionStore::at(path.clone(), root.join("session.lock"));
+        store.set_save_budget(crate::lane::PATIENCE);
+        let changed = Instant::now();
+        store.record(a_layout(1), changed);
+        store.flush_if_due(changed + SESSION_DEBOUNCE);
+        let receipt = crate::lane::receive(&store.writer.receipts, "the autosave's receipt");
+        assert!(
+            receipt.result.is_err(),
+            "no folder, no file: {:?}",
+            receipt.result
+        );
+        store.apply_receipt(receipt);
         assert!(
             !store.debouncer.is_dirty(),
-            "past the bound the document stops going back on the clock"
-        );
-        let fault = store.take_fault().expect("and the reader is told");
-        assert!(
-            fault.contains(SESSION_FILE_NAME),
-            "naming the file, so it can be acted on: {fault}"
-        );
-        assert!(store.take_fault().is_none(), "once, and not once a frame");
-
-        // And a new arrangement re-arms it, because a reader who has just moved
-        // something is asking for that to be kept.
-        let mut moved = SessionV1::default();
-        moved.recent_folders.push(bt_persist::RecentFolderV1 {
-            path: r"D:\other".to_owned(),
-            opened_at: "2026-09-08T00:00:01Z".to_owned(),
-        });
-        store.record(moved, Instant::now());
-        assert!(store.debouncer.is_dirty());
-        assert!(store.flush_judged().is_err());
-        assert!(
-            store.debouncer.is_dirty(),
-            "the retrying starts again from a fresh count"
+            "owed to a trigger, not to the clock"
         );
 
+        std::fs::create_dir_all(&folder).expect("the folder comes back");
+        assert_eq!(store.flush_judged(), Ok(()), "the quit's write lands");
+        assert_eq!(
+            read_session(&path).0,
+            a_layout(1),
+            "and what it wrote is the owed document"
+        );
         retire(&mut store.writer);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-SESSION-WRITER-NO-TIMER-RETRY; `docs/M2-persistence-schema-v1.md` §5.3) — **a
+    /// failure streak is said once, a change does not start it again, and a success ends it.**
+    ///
+    /// Each refusal here answers a change the reader made. The fifth in a row owes the card's
+    /// sentence, naming the file; the refusals after it, each for a new change, owe nothing more.
+    /// A landing ends the streak, and the fifth refusal of the next one is said again.
+    ///
+    /// What the turn owes is read where the window reads it, from `SessionStore::autosave`
+    /// (the frame's turn raises it; `#[must_use]` keeps that call from dropping it).
+    ///
+    /// MUTATION: say every refusal past the bound (drop the `said` guard in
+    /// `DocumentWrites::say`) — the sixth refusal owes a second card.
+    /// MUTATION: `SessionStore::autosave` answers `None` instead of `self.take_fault()` — the
+    /// fifth refusal reaches no card.
+    /// MUTATION: a change starts the count again (the old re-arm: `self.writes.streak = 0` in
+    /// `SessionStore::record`) — the fifth refusal is never reached and nothing is said.
+    #[test]
+    fn a_failure_streak_is_said_once_and_a_success_resets_it() {
+        let (mut store, jobs, answer, root) = a_store_the_test_answers("said-once");
+        let mut now = Instant::now();
+        let mut step = 0;
+        // One change, its write, and the disk's answer to it; what the turn owes the reader.
+        let mut change_answered = |store: &mut SessionStore, result: Result<(), String>| {
+            step += 1;
+            store.record(a_layout(step), now);
+            now += SESSION_DEBOUNCE;
+            store.flush_if_due(now);
+            let generation = *documents_handed_over(&jobs)
+                .last()
+                .expect("each change is handed over");
+            answer
+                .send(SessionWriteReceipt { generation, result })
+                .expect("the store holds its receipts");
+            store.take_receipts(); // the turn the receipt's wake brings
+            now += SESSION_DEBOUNCE;
+            store.autosave(now)
+        };
+        let refusal = || Err("拒绝访问 access is denied".to_owned());
+        let sentence = crate::i18n::persisted_file_unwritable(SESSION_FILE_NAME);
+
+        for _ in 1..REFUSALS_BEFORE_TOLD {
+            assert_eq!(change_answered(&mut store, refusal()), None, "not yet");
+        }
+        assert_eq!(
+            change_answered(&mut store, refusal()),
+            Some(sentence.clone()),
+            "the fifth refusal in a row is said, naming the file"
+        );
+        for _ in 0..3 {
+            assert_eq!(
+                change_answered(&mut store, refusal()),
+                None,
+                "once per streak, whatever changed since"
+            );
+        }
+
+        assert_eq!(change_answered(&mut store, Ok(())), None, "a landing");
+        for _ in 1..REFUSALS_BEFORE_TOLD {
+            assert_eq!(change_answered(&mut store, refusal()), None);
+        }
+        assert_eq!(
+            change_answered(&mut store, refusal()),
+            Some(sentence),
+            "a new streak is said again"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-SESSION-WRITER-NO-TIMER-RETRY round 2, review blocker; T-QUIT-DOCUMENTS round 2,
+    /// blocker 1) — **a quit with no budget left gives up a document a refusal left owed**: the
+    /// way out's close hands nothing over.
+    ///
+    /// The quit tests' own pin of this records a fresh change; here the document is owed because
+    /// the autosave's write was refused and nothing changed since, so only the owed flag and the
+    /// pending slot can make the close write.
+    ///
+    /// MUTATION: leave `retry_on_trigger` set on `SessionStore::flush_for_quit`'s past-budget
+    /// road — the close's flush hands a second document over.
+    #[test]
+    fn a_quit_with_no_budget_left_gives_up_a_document_a_refusal_left_owed() {
+        crate::test_support::on_the_window_thread_exiting();
+        let (mut store, jobs, answer, root) = a_store_the_test_answers("no-budget-owed");
+        let start = Instant::now();
+        store.record(a_layout(1), start);
+        store.flush_if_due(start + SESSION_DEBOUNCE);
+        answer
+            .send(refused(1))
+            .expect("the store holds its receipts");
+        store.take_receipts(); // the turn the receipt's wake brings
+        store.flush_if_due(start + SESSION_DEBOUNCE * 2);
+        assert_eq!(documents_handed_over(&jobs), vec![1]);
+        assert!(store.owes_a_write(), "owed after the refusal");
+
+        let spent = start + SESSION_DEBOUNCE * 3;
+        let verdict = store.flush_for_quit(spent, spent);
+        assert!(
+            verdict.as_ref().is_err_and(SaveRefusal::quit_may_proceed),
+            "given up as a write whose budget ran out: {verdict:?}"
+        );
+        store.close();
+        assert_eq!(
+            documents_handed_over(&jobs),
+            Vec::<u64>::new(),
+            "the way out's close hands nothing over"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-SESSION-WRITER-NO-TIMER-RETRY round 2, nit b) — **a save after the worker ended
+    /// does not wait for the one it took**: that one will never be answered, so the next save
+    /// goes ahead and is refused at the door, and is owed like any refusal — not parked in the
+    /// pending slot for ever.
+    ///
+    /// And the quit that follows meets the same refusal, in its own words.
+    ///
+    /// MUTATION: `SessionWriter::busy` reduced to `self.in_flight().is_some()` — the change waits
+    /// in the pending slot and no refusal is booked.
+    #[test]
+    fn a_save_after_the_worker_ended_goes_ahead_and_is_refused_at_the_door() {
+        crate::test_support::on_the_window_thread_exiting();
+        let (mut store, jobs, answer, root) = a_store_the_test_answers("worker-ended");
+        let start = Instant::now();
+        store.record(a_layout(1), start);
+        store.flush_if_due(start + SESSION_DEBOUNCE);
+        assert_eq!(
+            documents_handed_over(&jobs),
+            vec![1],
+            "one write on its way"
+        );
+
+        // The worker's end, as `WorkerEnd` makes it: under the queue's lock the lane is marked
+        // down, and the queue's receiving end — which the worker owned — is gone, so a job sent
+        // to it is refused. The write it took is never answered. Its wake has not been heard
+        // yet: the frame's turn comes first.
+        {
+            let _admission = lane_lock(&store.writer.lane.shared.requests);
+            store
+                .writer
+                .lane
+                .shared
+                .up
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+        drop(jobs);
+
+        let changed = start + SESSION_DEBOUNCE * 2;
+        store.record(a_layout(2), changed);
+        store.flush_if_due(changed + SESSION_DEBOUNCE);
+        assert!(!store.send_again, "not parked in the pending slot");
+        assert_eq!(
+            store.writer.answered, None,
+            "the write the worker took is still unanswered"
+        );
+        assert!(
+            store.retry_on_trigger,
+            "the change went ahead, was refused at the door, and is owed"
+        );
+        assert_eq!(store.writes.streak, 1, "and the refusal is booked");
+
+        // The wake's turn: the receipts' channel reads closed, and the write the worker took is
+        // booked refused — the writer stopped — as the streak's second refusal.
+        drop(answer);
+        store.take_receipts();
+        assert_eq!(
+            store.writer.answered,
+            Some((1, Err(WRITER_STOPPED.to_string()))),
+            "the worker's end is the terminal of the write it took"
+        );
+        assert_eq!(store.writes.streak, 2);
+        assert_eq!(
+            store.flush_judged(),
+            Err(SaveRefusal::Refused(NO_WRITER_THREAD.to_string())),
+            "the quit hands the owed document over and meets the refusal at the door"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-SESSION-WRITER-NO-TIMER-RETRY round 3, nit 1) — **a quit with no budget left gives
+    /// up the pending slot too**: a write is on its way and a change waits behind it; the way
+    /// out's close hands neither over again.
+    ///
+    /// MUTATION: leave `send_again` set on `SessionStore::flush_for_quit`'s past-budget road
+    /// (clear only `retry_on_trigger`) — the close's flush hands the parked change over.
+    #[test]
+    fn a_quit_with_no_budget_left_gives_up_a_parked_change() {
+        crate::test_support::on_the_window_thread_exiting();
+        let (mut store, jobs, _answer, root) = a_store_the_test_answers("no-budget-parked");
+        let start = Instant::now();
+        store.record(a_layout(1), start);
+        store.flush_if_due(start + SESSION_DEBOUNCE);
+        let changed = start + SESSION_DEBOUNCE * 2;
+        store.record(a_layout(2), changed);
+        store.flush_if_due(changed + SESSION_DEBOUNCE);
+        assert_eq!(
+            documents_handed_over(&jobs),
+            vec![1],
+            "one write on its way"
+        );
+        assert!(store.send_again, "and a change parked behind it");
+
+        let spent = changed + SESSION_DEBOUNCE * 2;
+        let verdict = store.flush_for_quit(spent, spent);
+        assert!(
+            verdict.as_ref().is_err_and(SaveRefusal::quit_may_proceed),
+            "given up as a write whose budget ran out: {verdict:?}"
+        );
+        store.close();
+        assert_eq!(
+            documents_handed_over(&jobs),
+            Vec::<u64>::new(),
+            "the way out's close hands nothing over"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-SESSION-WRITER-NO-TIMER-RETRY round 4) — **an update quit's refusal that is the
+    /// fifth in a row is one card too**: the receipt for the quit's photograph is heard on the
+    /// turn its wake brings, `landing_of` hands the quit its refusal, and the quit's card says
+    /// the streak — the autosave's turn after it owes nothing.
+    ///
+    /// MUTATION: drop `self.said_by_the_quit(verdict)` from `SessionStore::landing_of` — the
+    /// autosave's turn owes the sentence as well.
+    #[test]
+    fn an_update_quits_refusal_that_is_the_fifth_in_a_row_is_one_card() {
+        let (mut store, jobs, answer, root) = a_store_the_test_answers("update-quit-one-card");
+        let mut now = Instant::now();
+        for step in 1..REFUSALS_BEFORE_TOLD {
+            store.record(a_layout(step), now);
+            now += SESSION_DEBOUNCE;
+            store.flush_if_due(now);
+            let generation = *documents_handed_over(&jobs)
+                .last()
+                .expect("each change is handed over");
+            answer
+                .send(refused(generation))
+                .expect("the store holds its receipts");
+            store.take_receipts(); // the turn the receipt's wake brings
+            now += SESSION_DEBOUNCE;
+            assert_eq!(store.autosave(now), None, "not yet");
+        }
+
+        let photograph = store
+            .hand_over_final()
+            .expect("handed over")
+            .expect("this store writes");
+        assert_eq!(documents_handed_over(&jobs), vec![photograph]);
+        answer
+            .send(refused(photograph))
+            .expect("the store holds its receipts");
+        store.take_receipts(); // the turn the receipt's wake brings
+        assert_eq!(
+            store.landing_of(photograph),
+            Some(Err(SaveRefusal::Refused(
+                "磁盘已满 the disk is full".to_owned()
+            ))),
+            "the quit hears its refusal"
+        );
+        assert_eq!(
+            store.writes.streak, REFUSALS_BEFORE_TOLD,
+            "the fifth in a row"
+        );
+        now += SESSION_DEBOUNCE;
+        assert_eq!(
+            store.autosave(now),
+            None,
+            "the quit's card said it; the autosave's turn says nothing more"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-SESSION-WRITER-NO-TIMER-RETRY round 2, nit d) — **a quit's refusal that is the
+    /// fifth in a row is one card**: the quit's own (`QuitSessionNotWritten`, on every window),
+    /// and not the autosave's sentence again on the turn after the quit is abandoned. The quit's
+    /// card is what says this streak; the next one is said as usual.
+    ///
+    /// Four refused autosaves, then the quit's judged write, which the test's disk refuses as
+    /// soon as it is handed over.
+    ///
+    /// MUTATION: drop `self.said_by_the_quit(&verdict)` from `SessionStore::flush_for_quit` —
+    /// the autosave's turn after the abandoned quit owes the sentence too.
+    #[test]
+    fn a_quits_refusal_that_is_the_fifth_in_a_row_is_one_card() {
+        crate::test_support::on_the_window_thread_exiting();
+        let (mut store, jobs, answer, root) = a_store_the_test_answers("quit-is-one-card");
+        let mut now = Instant::now();
+        for step in 1..REFUSALS_BEFORE_TOLD {
+            store.record(a_layout(step), now);
+            now += SESSION_DEBOUNCE;
+            store.flush_if_due(now);
+            let generation = *documents_handed_over(&jobs)
+                .last()
+                .expect("each change is handed over");
+            answer
+                .send(refused(generation))
+                .expect("the store holds its receipts");
+            store.take_receipts(); // the turn the receipt's wake brings
+            now += SESSION_DEBOUNCE;
+            assert_eq!(store.autosave(now), None, "not yet");
+        }
+
+        store.set_save_budget(crate::lane::PATIENCE);
+        let quits_disk = answer.clone();
+        let (verdict, jobs) = std::thread::scope(|scope| {
+            let disk = scope.spawn(move || {
+                match crate::lane::receive(&jobs, "the quit's session write") {
+                    StorageJob::Session(request) => quits_disk
+                        .send(refused(request.generation))
+                        .expect("the store holds its receipts"),
+                    _ => panic!("the quit hands a session document over"),
+                }
+                jobs
+            });
+            let verdict = store.flush_for_quit(now + crate::lane::PATIENCE, now);
+            (verdict, disk.join().expect("the test's disk"))
+        });
+        assert!(
+            verdict
+                .as_ref()
+                .is_err_and(|refusal| !refusal.quit_may_proceed()),
+            "the quit's write is refused, and the quit is abandoned: {verdict:?}"
+        );
+        assert_eq!(
+            store.writes.streak, REFUSALS_BEFORE_TOLD,
+            "the fifth in a row"
+        );
+        assert!(jobs.try_recv().is_err(), "one document for the quit");
+        now += SESSION_DEBOUNCE;
+        assert_eq!(
+            store.autosave(now),
+            None,
+            "the quit's card said it; the autosave's turn says nothing more"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6087,7 +6678,7 @@ mod receipt_wake_tests {
         );
 
         crate::lane::wait_for_a_wake(&wakes, "the worker's wake after the receipt");
-        store.take_receipts(Instant::now());
+        store.take_receipts();
         assert_eq!(
             store.writer.in_flight(),
             None,
@@ -6134,7 +6725,7 @@ mod receipt_wake_tests {
         go.send(()).expect("the worker waits at the gate");
 
         crate::lane::wait_for_a_wake(&wakes, "the worker's end");
-        store.take_receipts(Instant::now());
+        store.take_receipts();
         assert_eq!(
             store.writer.in_flight(),
             None,
@@ -6146,7 +6737,7 @@ mod receipt_wake_tests {
             "refused: the writer stopped"
         );
         assert_eq!(
-            store.landing_of(1, Instant::now()),
+            store.landing_of(1),
             Some(Err(SaveRefusal::Refused(WRITER_STOPPED.to_string())))
         );
         assert!(wakes.try_recv().is_err(), "the end woke the loop once");
@@ -6212,13 +6803,13 @@ mod receipt_wake_tests {
         quit.photographed();
         let go = hold_the_worker(&store, false);
         let generation = store
-            .hand_over_final(start)
+            .hand_over_final()
             .expect("handed over")
             .expect("this store writes");
         quit.requested(generation, start);
 
         assert_eq!(
-            store.landing_of(generation, Instant::now()),
+            store.landing_of(generation),
             None,
             "the first turn: the write is behind the held re-read"
         );
@@ -6232,7 +6823,7 @@ mod receipt_wake_tests {
         crate::lane::wait_for_a_wake(&wakes, "the re-read's own answer");
         crate::lane::wait_for_a_wake(&wakes, "the session receipt's wake");
         assert_eq!(
-            store.landing_of(generation, Instant::now()),
+            store.landing_of(generation),
             Some(Ok(())),
             "the second wake's turn finds the landing"
         );
@@ -6294,7 +6885,7 @@ mod receipt_wake_tests {
         let changed_at = Instant::now();
         store.record(a_session(), changed_at);
         store.flush_if_due(changed_at + SESSION_DEBOUNCE);
-        store.take_receipts(Instant::now());
+        store.take_receipts();
         assert_eq!(
             store.writer.in_flight(),
             Some(1),
@@ -8062,7 +8653,7 @@ mod conditional_write_tests {
         });
         let mut store = SettingsStore::at_on(path.clone(), lane);
         // The same row chosen five times: a refusal is retried by the next press,
-        // and only a changed value starts the streak again.
+        // and the streak runs until a write lands.
         for press in 0..5 {
             assert_eq!(store.store(settings("选五次 Five Times Mono")), press == 0);
             assert_eq!(
@@ -8125,6 +8716,89 @@ mod conditional_write_tests {
         assert_eq!(&*again.bytes, &bytes(&settings("我们的 Ours Mono"))[..]);
         assert!(jobs.try_recv().is_err(), "exactly once");
         drop(again);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-SESSION-WRITER-NO-TIMER-RETRY round 2, nit c; `docs/M2-persistence-schema-v1.md`
+    /// §5.3) — **a streak of changed presses is said at its fifth refusal**: a changed value
+    /// does not start the count again, only a landing ends it.
+    ///
+    /// MUTATION: start the count again on a changed press (`self.writes.streak = 0` in
+    /// `DocumentState::store`'s `changed` arm, the old `rearm`) — five changed presses are never
+    /// said.
+    #[test]
+    fn a_streak_of_changed_presses_is_said_at_the_fifth_refusal() {
+        let root = scratch("changed-presses-streak");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let mut store = SettingsStore::at_on(path.clone(), StorageLane::without_a_worker(|| {}));
+        let faces = [
+            "宋体 Song Mono",
+            "黑体 Hei Mono",
+            "楷体 Kai Mono",
+            "仿宋 FangSong Mono",
+            "圆体 Yuan Mono",
+        ];
+        for (press, face) in faces.iter().enumerate() {
+            assert!(store.store(settings(face)), "each press changes the value");
+            store.take_answers();
+            let said = store.take_fault();
+            if press + 1 < faces.len() {
+                assert_eq!(said, None, "not yet, at press {}", press + 1);
+            } else {
+                assert_eq!(
+                    said,
+                    Some(crate::i18n::persisted_file_unwritable(SETTINGS_FILE_NAME)),
+                    "the fifth refusal in a row is said, though every press changed the value"
+                );
+            }
+        }
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-SESSION-WRITER-NO-TIMER-RETRY round 2, nit c) — **a refusal said at once is said
+    /// once per streak**: a link refused on one press is a card; the same refusal on the next
+    /// press is not a second one.
+    ///
+    /// MUTATION: `DocumentWrites::refused_for_good` says every time (owe the sentence without
+    /// asking `said`) — the second press owes a second card.
+    #[test]
+    fn a_link_refused_on_every_press_is_said_once_per_streak() {
+        let root = scratch("link-said-once");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let (lane, jobs) = StorageLane::held();
+        let mut store = SettingsStore::at_on(path.clone(), lane);
+        let refuse_as_a_link = |jobs: &mpsc::Receiver<StorageJob>| {
+            let write = next_write(jobs);
+            let _ = write.answer.send(DocumentAnswer {
+                generation: write.generation,
+                version: write.version,
+                asker: write.asker,
+                outcome: Outcome::Refused {
+                    cause: Refusal::Link,
+                },
+                not_durable: None,
+                retired: Vec::new(),
+                left: None,
+            });
+        };
+
+        assert!(store.store(settings("链接 Linked Mono")));
+        refuse_as_a_link(&jobs);
+        store.settle();
+        assert_eq!(
+            store.take_fault(),
+            Some(crate::i18n::persisted_file_unwritable(SETTINGS_FILE_NAME)),
+            "said at once"
+        );
+
+        assert!(
+            !store.store(settings("链接 Linked Mono")),
+            "the same row again: owed, so sent again"
+        );
+        refuse_as_a_link(&jobs);
+        store.settle();
+        assert_eq!(store.take_fault(), None, "and not said twice in one streak");
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -50506,6 +50506,11 @@ impl Runtime<'_> {
         if documents.contains(storage_watch::Document::Pins) {
             self.app.pins_store.ask_reread();
         }
+        // **A pass is an ear event for the session too** (the side-effects contract's C5): a
+        // session document a refusal left owed is handed over once more.
+        if !documents.is_empty() {
+            self.app.session_store.hear_the_storage_pass();
+        }
         Ok(())
     }
 
@@ -67112,7 +67117,7 @@ impl FolioApp {
     /// (`Self::settle_quit`).
     fn take_document_answers(&mut self) -> Result<()> {
         if let Some(app) = self.app.as_mut() {
-            app.session_store.take_receipts(Instant::now());
+            app.session_store.take_receipts();
         }
         self.take_preview_save_answers()?;
         // **Not while a quit holds the storage worker** (T-QUIT-DOCUMENTS): its documents and
@@ -68380,7 +68385,7 @@ impl FolioApp {
             if until <= now {
                 return Some(app.session_store.flush_for_quit(until, now));
             }
-            return match app.session_store.hand_over_final(now) {
+            return match app.session_store.hand_over_final() {
                 Ok(Some(generation)) => {
                     quit.requested(generation, now);
                     None
@@ -68389,10 +68394,10 @@ impl FolioApp {
                 Err(refusal) => Some(Err(refusal)),
             };
         };
-        match app.session_store.landing_of(generation, now) {
+        match app.session_store.landing_of(generation) {
             Some(answer) => Some(answer),
             None if quit.receipt_is_overdue(now) => {
-                Some(Err(app.session_store.receipt_overdue(generation, now)))
+                Some(Err(app.session_store.receipt_overdue(generation)))
             }
             None => None,
         }
@@ -77771,7 +77776,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 28] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 29] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -77827,6 +77832,9 @@ mod platform_gate_tests {
         "tests.rs",
         // Native junction and sharing-mode fixtures, never product platform policy.
         "uninstall_tests.rs",
+        // Only the held-journal fixtures: a hold that refuses a replacing rename is a
+        // Windows fact; their platform-free halves run beside the door everywhere.
+        "update_apply_windows_tests.rs",
         // Only the symlinked-log regression fixture; the recovery road is portable.
         "update_recover.rs",
         // Only the real detached-handoff regression fixture; the handoff API is portable.
