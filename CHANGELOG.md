@@ -36,7 +36,6 @@ All notable changes to Folio are recorded here. The format follows
 - A Git page that is docked, popped out or moved to another tab while git is still working on it now gets the answer: its dimmed rows come back and a checkout it started no longer blocks the next one. <!-- zh: pending T-GIT-RECEIPTS-FOLLOW-A-MOVED-HOST -->
 - A slow checkout or other git action in one repository no longer holds up the Git pages of other repositories: their files and branches are read while it runs. <!-- zh: pending T-GIT-READS-PER-REPOSITORY -->
 - A diff or a file at a commit opened from a Git page now shows up even when that page is closed, or its tab merged into another, before git answers; if Folio's git reading has stopped, the pane says it was not loaded instead of "Loading…" for ever, and opening it again tries again. <!-- zh: pending T-GIT-DOCUMENT-GATED-BY-POOL -->
-- A failure while Folio checks your PowerShell profiles for its line no longer closes Folio, and a check that could not start when Folio opened is tried again at the next chance (after an update is confirmed, say) instead of waiting until you open the Profiles page. <!-- zh: pending T-HEADLESS-RUNTIME-SEAM -->
 - A panic in one picture or formula no longer ends Folio; that picture or formula stays as it was and is tried again after the next change in its pane. <!-- zh: pending S-8 -->
 - Saving a preview no longer holds the window while the disk writes, and a save over a file another program changed within the same second now notices it and leaves that program's text on the disk instead of writing over it. <!-- zh: pending S-6a -->
 - A video that never finishes loading now says so after ten seconds instead of showing a player that never starts, and a video that declares no length shows "No length" on its bar instead of a clock stuck at 0:00. <!-- zh: pending T-VIDEO-ENGINE-NO-DURATION -->
@@ -118,6 +117,7 @@ All notable changes to Folio are recorded here. The format follows
 - Letting go of a divider, tab or scroll thumb while a card or menu is over it now ends the drag. <!-- zh: pending -->
 - Typing with an input method (Microsoft Pinyin, say) in a program that hides the terminal's cursor and draws its own, such as pi, now shows what you are composing in its input box, with the candidate list beside it. <!-- zh: pending T-PREEDIT-ON-A-HIDDEN-CURSOR -->
 - Right after Windows starts, Folio no longer closes a moment after opening when its PowerShell 7 tabs come from the Microsoft Store: a background check of PowerShell 7 no longer runs while such a tab is starting. <!-- zh: pending T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH -->
+- A failure while Folio checks your PowerShell profiles for its line no longer closes Folio, and a check that could not start when Folio opened is tried again at the next chance (after an update is confirmed, say) instead of waiting until you open the Profiles page. <!-- zh: pending T-HEADLESS-RUNTIME-SEAM -->
 
 ### Changed
 
