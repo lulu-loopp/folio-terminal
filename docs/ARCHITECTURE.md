@@ -943,7 +943,9 @@ or one no writer took, is that request's terminal: the document is owed
 storage pass (`SessionStore::hear_the_storage_pass`, from `Runtime::advance_storage_watch`) or
 the quit's write (`SessionStore::flush_judged`). One autosave is on the writer at a time: a
 quiet window that runs out while one is on its way puts the document in the pending slot
-(`send_again`), handed over when that one is answered. The reader is told once per failure
+(`send_again`), handed over on the turn that answer's wake brings (`flush_if_due`). A write the
+worker took and will not answer — its end — counts as one refusal in the streak, so a worker's end
+with a change waiting moves the streak by two (that write, and the change refused at the door). The reader is told once per failure
 streak, at the fifth refusal in a row (`persist::REFUSALS_BEFORE_TOLD`), on the card the
 start-up announcement uses; only a landing ends the streak. The same counter serves the four
 hand-editable documents, whose changed presses no longer start it again.

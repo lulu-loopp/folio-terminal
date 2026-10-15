@@ -5921,6 +5921,61 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// RED (T-SESSION-WRITER-NO-TIMER-RETRY round 4) — **an update quit's refusal that is the
+    /// fifth in a row is one card too**: the receipt for the quit's photograph is heard on the
+    /// turn its wake brings, `landing_of` hands the quit its refusal, and the quit's card says
+    /// the streak — the autosave's turn after it owes nothing.
+    ///
+    /// MUTATION: drop `self.said_by_the_quit(verdict)` from `SessionStore::landing_of` — the
+    /// autosave's turn owes the sentence as well.
+    #[test]
+    fn an_update_quits_refusal_that_is_the_fifth_in_a_row_is_one_card() {
+        let (mut store, jobs, answer, root) = a_store_the_test_answers("update-quit-one-card");
+        let mut now = Instant::now();
+        for step in 1..REFUSALS_BEFORE_TOLD {
+            store.record(a_layout(step), now);
+            now += SESSION_DEBOUNCE;
+            store.flush_if_due(now);
+            let generation = *documents_handed_over(&jobs)
+                .last()
+                .expect("each change is handed over");
+            answer
+                .send(refused(generation))
+                .expect("the store holds its receipts");
+            store.take_receipts(); // the turn the receipt's wake brings
+            now += SESSION_DEBOUNCE;
+            assert_eq!(store.autosave(now), None, "not yet");
+        }
+
+        let photograph = store
+            .hand_over_final()
+            .expect("handed over")
+            .expect("this store writes");
+        assert_eq!(documents_handed_over(&jobs), vec![photograph]);
+        answer
+            .send(refused(photograph))
+            .expect("the store holds its receipts");
+        store.take_receipts(); // the turn the receipt's wake brings
+        assert_eq!(
+            store.landing_of(photograph),
+            Some(Err(SaveRefusal::Refused(
+                "磁盘已满 the disk is full".to_owned()
+            ))),
+            "the quit hears its refusal"
+        );
+        assert_eq!(
+            store.writes.streak, REFUSALS_BEFORE_TOLD,
+            "the fifth in a row"
+        );
+        now += SESSION_DEBOUNCE;
+        assert_eq!(
+            store.autosave(now),
+            None,
+            "the quit's card said it; the autosave's turn says nothing more"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// RED (T-SESSION-WRITER-NO-TIMER-RETRY round 2, nit d) — **a quit's refusal that is the
     /// fifth in a row is one card**: the quit's own (`QuitSessionNotWritten`, on every window),
     /// and not the autosave's sentence again on the turn after the quit is abandoned. The quit's
