@@ -4482,6 +4482,16 @@ pub enum PreviewLoad {
     /// asked, and the whole of [`crate::git`]'s fail-soft discipline is that it
     /// reaches the user unedited.
     Unavailable(String),
+    /// **A composed document whose question nobody will answer** — the git
+    /// reading lane has stopped, or would not take the question when it was
+    /// asked (T-GIT-DOCUMENT-GATED-BY-POOL).
+    ///
+    /// Not [`Self::Pending`], which would say "Loading …" for ever, and not
+    /// [`Self::Unavailable`], which is git's answer and is not asked again by a
+    /// press: this one is no answer at all, so it prints Folio's one line where
+    /// the "Loading …" line prints ([`PreviewBuffer::body_notice`]) and the next
+    /// press of the row asks again ([`PreviewBuffer::ask_composer`]).
+    Unanswered,
 }
 
 /// **Where a buffer's content comes from** — the identity every preview surface
@@ -4611,15 +4621,14 @@ impl PreviewSource {
         }
     }
 
-    /// Whether a repository composed this content.
-    pub fn is_git(&self) -> bool {
+    /// **Whether this is a document whose text git writes** — a diff, a file at
+    /// a commit, a diff between two commits: the three sources a buffer waits on
+    /// a git question for. The graph is git's too, but its body is a picture the
+    /// chrome draws, so nothing is ever asked for it.
+    pub fn is_git_document(&self) -> bool {
         match self {
-            Self::File(_) => false,
-            Self::GitDiff { .. }
-            | Self::GitShow { .. }
-            | Self::GitDiffRange { .. }
-            | Self::GitGraph { .. } => true,
-            Self::Web(_) => false,
+            Self::GitDiff { .. } | Self::GitShow { .. } | Self::GitDiffRange { .. } => true,
+            Self::File(_) | Self::GitGraph { .. } | Self::Web(_) => false,
         }
     }
 
@@ -4720,6 +4729,14 @@ pub fn git_document_empty() -> &'static str {
     crate::i18n::Text::GitDocumentEmpty.text()
 }
 
+/// What a git document says when nobody will answer its question
+/// ([`PreviewLoad::Unanswered`]): that it was not loaded, and that opening it
+/// again asks again.
+#[must_use]
+pub fn git_document_unanswered() -> &'static str {
+    crate::i18n::Text::GitDocumentUnanswered.text()
+}
+
 /// Which of a repository's copies of a file a diff is taken **against**.
 ///
 /// # Three, and not a `staged: bool`
@@ -4811,7 +4828,7 @@ pub struct PreviewBuffer {
     /// A *clone* keeps it, because a clone is the same buffer: the one place
     /// buffers are copied is a pane being duplicated onto a second surface, and
     /// two panes on one file are one document with one history.
-    incarnation: u64,
+    incarnation: BufferId,
     /// **Whether the body this revision names was typed here** (ticket T4;
     /// `docs/DESIGN.md` §7.1.3q).
     ///
@@ -6288,15 +6305,19 @@ impl PreviewBuffer {
     pub fn refusal(&self) -> Option<PreviewRefusal> {
         match self.load {
             PreviewLoad::Refused(refusal) => Some(refusal),
-            PreviewLoad::Pending | PreviewLoad::Ready | PreviewLoad::Unavailable(_) => None,
+            PreviewLoad::Pending
+            | PreviewLoad::Ready
+            | PreviewLoad::Unavailable(_)
+            | PreviewLoad::Unanswered => None,
         }
     }
 
     /// **The one line a body prints instead of itself** (G-3).
     ///
-    /// Two cases and both of them are about composed content: a repository that
-    /// would not answer, in git's own words, and a document that came back
-    /// empty. Neither is a state a *file* can be in — an empty file is a file
+    /// Three cases and all of them are about composed content: a repository that
+    /// would not answer, in git's own words; a question nobody will answer
+    /// ([`PreviewLoad::Unanswered`]), in Folio's; and a document that came back
+    /// empty. None is a state a *file* can be in — an empty file is a file
     /// with nothing in it, and printing "No changes to show" over one would be
     /// a sentence about a repository laid across a zero-byte `.gitkeep`.
     ///
@@ -6304,14 +6325,15 @@ impl PreviewBuffer {
     /// question: it is what a pane says while it is *waiting*, which a picture
     /// does too, and that lane already answers for both.
     pub fn body_notice(&self) -> Option<&str> {
-        if let PreviewLoad::Unavailable(words) = &self.load {
-            return Some(words);
+        match &self.load {
+            PreviewLoad::Unavailable(words) => return Some(words),
+            PreviewLoad::Unanswered => return Some(git_document_unanswered()),
+            PreviewLoad::Pending | PreviewLoad::Ready | PreviewLoad::Refused(_) => {}
         }
         // The graph is exempt for [`PreviewBuffer::new`]'s reason: a document
         // with no *text* is not a document with nothing in it when the thing in
         // it is a picture.
-        (self.source.is_git()
-            && !matches!(self.source, PreviewSource::GitGraph { .. })
+        (self.source.is_git_document()
             && self.load == PreviewLoad::Ready
             && self.content.as_ref().is_none_or(|body| body.is_empty()))
         .then_some(git_document_empty())
@@ -6349,6 +6371,55 @@ impl PreviewBuffer {
         self.too_large_to_edit = false;
         self.over_limit_notice = None;
         self.load = PreviewLoad::Unavailable(words);
+    }
+
+    /// **Which buffer this is** — the name a git document's question carries,
+    /// so its answer is filed into this buffer wherever it is kept by then.
+    pub const fn id(&self) -> BufferId {
+        self.incarnation
+    }
+
+    /// **This git document is to be asked for now**, if it is one that waits on
+    /// git and has no text yet: not answered ([`PreviewLoad::Pending`] — a
+    /// press while it is out asks again, because a press says "now"), or not
+    /// answered and never to be ([`PreviewLoad::Unanswered`], which goes back to
+    /// waiting). Answers the buffer's name for the question, or `None` when
+    /// there is nothing to ask: another kind of source, or a document already
+    /// answered (a diff is a snapshot; see `Runtime::open_git_document`).
+    pub fn ask_composer(&mut self) -> Option<BufferId> {
+        if !self.source.is_git_document() {
+            return None;
+        }
+        match self.load {
+            PreviewLoad::Pending | PreviewLoad::Unanswered => {
+                self.load = PreviewLoad::Pending;
+                Some(self.incarnation)
+            }
+            PreviewLoad::Ready | PreviewLoad::Refused(_) | PreviewLoad::Unavailable(_) => None,
+        }
+    }
+
+    /// **The answer to this git document's question** (G-3): the text git
+    /// wrote, read through [`composed_read`]'s decoding, or git's sentence for
+    /// why it would not ([`Self::decline`]).
+    pub fn answer_composed(&mut self, outcome: Result<HeadOutcome, String>) {
+        match outcome {
+            Ok(read) => self.accept(read),
+            Err(words) => self.decline(words),
+        }
+    }
+
+    /// **Nobody will answer this git document's question**: the lane that asks
+    /// git has stopped, or would not take the question. A document still
+    /// waiting says so in one line instead of "Loading …" for ever
+    /// ([`PreviewLoad::Unanswered`]); one that has its text, or git's refusal,
+    /// keeps it. Answers whether this buffer was settled.
+    pub fn settle_unanswered(&mut self) -> bool {
+        let waiting = self.source.is_git_document() && self.load == PreviewLoad::Pending;
+        if waiting {
+            self.load = PreviewLoad::Unanswered;
+        }
+        waiting
     }
 
     /// **The worker's answer, reconciled with the body this buffer is holding**
@@ -6933,6 +7004,35 @@ impl GlanceSlot {
             .as_mut()
             .filter(|buffer| &buffer.source == source)
     }
+
+    /// The name of the buffer kept here, if it is one that waits on git
+    /// ([`PreviewPool::git_document_ids`]).
+    pub fn git_document_id(&self) -> Option<BufferId> {
+        self.buffer
+            .as_ref()
+            .filter(|buffer| buffer.source.is_git_document())
+            .map(PreviewBuffer::id)
+    }
+
+    /// **File a git document's answer into the buffer it was asked for**, if
+    /// that is the buffer kept here ([`PreviewBuffer::answer_composed`]).
+    /// Answers whether it was.
+    pub fn answer_composed(&mut self, id: BufferId, outcome: Result<HeadOutcome, String>) -> bool {
+        match self.buffer.as_mut().filter(|buffer| buffer.id() == id) {
+            Some(buffer) => {
+                buffer.answer_composed(outcome);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// [`PreviewBuffer::settle_unanswered`] for the buffer kept here.
+    pub fn settle_unanswered(&mut self) -> bool {
+        self.buffer
+            .as_mut()
+            .is_some_and(PreviewBuffer::settle_unanswered)
+    }
 }
 
 /// One tab's shared pool of live buffers.
@@ -7123,6 +7223,44 @@ impl PreviewPool {
         self.buffers
             .iter()
             .position(|buffer| &buffer.source == source)
+    }
+
+    /// [`PreviewBuffer::ask_composer`] for this source's buffer, when this pool
+    /// holds one.
+    pub fn ask_composer(&mut self, source: &PreviewSource) -> Option<BufferId> {
+        self.get_mut(source)?.ask_composer()
+    }
+
+    /// **File a git document's answer into the buffer it was asked for**, when
+    /// this pool holds that buffer — found by its name, never by its source: a
+    /// buffer for the same document opened since an eviction is another buffer
+    /// with its own question ([`PreviewBuffer::answer_composed`]). Answers
+    /// whether it did.
+    pub fn answer_composed(&mut self, id: BufferId, outcome: Result<HeadOutcome, String>) -> bool {
+        match self.buffers.iter_mut().find(|buffer| buffer.id() == id) {
+            Some(buffer) => {
+                buffer.answer_composed(outcome);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// [`PreviewBuffer::settle_unanswered`] for every buffer in this pool.
+    /// Answers whether any was settled.
+    pub fn settle_unanswered(&mut self) -> bool {
+        self.buffers.iter_mut().fold(false, |settled, buffer| {
+            buffer.settle_unanswered() | settled
+        })
+    }
+
+    /// The names of the buffers in this pool that wait on git — the buffers
+    /// a git document's answer can be for.
+    pub fn git_document_ids(&self) -> impl Iterator<Item = BufferId> + '_ {
+        self.buffers
+            .iter()
+            .filter(|buffer| buffer.source.is_git_document())
+            .map(PreviewBuffer::id)
     }
 
     /// Every buffer in the pool, in the order the switcher lists them.
@@ -7326,10 +7464,22 @@ impl PreviewPool {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PreviewBase {
     /// Which buffer asked — see [`PreviewBuffer::incarnation`].
-    incarnation: u64,
+    incarnation: BufferId,
     /// And which body it was holding when it did.
     revision: u64,
 }
+
+/// **Which buffer this is** — [`PreviewBuffer::incarnation`], as a name the
+/// rest of the program can hold.
+///
+/// A git document's question carries the identity of the buffer that was
+/// opened for it (T-GIT-DOCUMENT-GATED-BY-POOL), because that buffer is who is
+/// waiting: not the page whose row was pressed, which may close, and not the
+/// tab whose pool it was opened in, whose pool may be merged into another tab
+/// or carried off with a pane. The buffer keeps the name wherever it moves, and
+/// a buffer opened again after an eviction is another buffer with another name.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct BufferId(u64);
 
 /// The counter behind [`PreviewBuffer::incarnation`].
 ///
@@ -7339,8 +7489,8 @@ pub struct PreviewBase {
 /// buffer a nanosecond for six hundred years would reach it.
 static PREVIEW_INCARNATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-fn next_incarnation() -> u64 {
-    PREVIEW_INCARNATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+fn next_incarnation() -> BufferId {
+    BufferId(PREVIEW_INCARNATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
 /// What is being asked about a file.
@@ -8180,7 +8330,7 @@ pub(crate) struct PreviewSaves {
 /// One save on the worker, and who is owed its answer.
 struct OwedSave {
     ticket: u64,
-    incarnation: u64,
+    incarnation: BufferId,
     body: u64,
     asked_from: crate::PreviewSurface,
     answer: mpsc::Receiver<DocumentAnswer>,
@@ -8190,7 +8340,7 @@ struct OwedSave {
 /// pressed last.
 #[derive(Debug)]
 pub(crate) struct SaveAnswer {
-    incarnation: u64,
+    incarnation: BufferId,
     asked_from: crate::PreviewSurface,
     answer: DocumentAnswer,
 }
@@ -8213,7 +8363,7 @@ impl PreviewSaves {
     /// the pane's words.
     fn submit(
         &mut self,
-        incarnation: u64,
+        incarnation: BufferId,
         body: u64,
         asked_from: crate::PreviewSurface,
         job: impl FnOnce(u64, mpsc::Sender<DocumentAnswer>) -> DocumentJob,
@@ -8236,7 +8386,7 @@ impl PreviewSaves {
 
     /// A press while `incarnation`'s save is out: its answer is said where the
     /// newest press was made.
-    fn pressed_again(&mut self, incarnation: u64, asked_from: crate::PreviewSurface) {
+    fn pressed_again(&mut self, incarnation: BufferId, asked_from: crate::PreviewSurface) {
         for owed in &mut self.owed {
             if owed.incarnation == incarnation {
                 owed.asked_from = asked_from;
@@ -9578,7 +9728,7 @@ mod tests {
     /// subject and any two questions' stamps only have to be alike.
     fn a_base() -> PreviewBase {
         PreviewBase {
-            incarnation: 0,
+            incarnation: BufferId(0),
             revision: 0,
         }
     }
@@ -9768,6 +9918,88 @@ mod tests {
             graph.view(true).chrome(),
             PreviewChrome::Graph,
             "and the markdown flip is not a question a graph has an answer to"
+        );
+    }
+
+    /// RED (T-GIT-DOCUMENT-GATED-BY-POOL) — **A git document whose question
+    /// nobody will answer says so instead of loading for ever, and a press of
+    /// its row asks again.**
+    ///
+    /// A pool holds three buffers: the diff of `说明 notes.md`, asked for and
+    /// waiting on git; a commit's reading of `src/main.rs`, asked for and
+    /// answered; and the file `笔记 notes.txt`, waiting on its disk read. The git
+    /// reading lane goes (`Runtime::settle_unanswered_git_documents`, which every
+    /// window runs while the lane is off): the waiting diff stops being
+    /// `Pending` — the pane's "Loading …" — and its one line says it was not
+    /// loaded; the answered document keeps its text, and the file's read is not
+    /// git's and keeps waiting. A press of the diff's row asks again: the same
+    /// buffer waits again, and git's answer fills it.
+    ///
+    /// MUTATION: make `PreviewBuffer::settle_unanswered` settle nothing (answer
+    /// `false` and leave the load alone) — the diff stays `Pending`, and its
+    /// pane says "Loading …" for ever.
+    #[test]
+    fn a_buffer_whose_question_was_dropped_says_so_instead_of_loading_for_ever() {
+        let root = PathBuf::from(r"C:\w\仓库 repo");
+        let diff = PreviewSource::GitDiff {
+            root: root.clone(),
+            path: "说明 notes.md".to_owned(),
+            against: GitDiffAgainst::WorkingTree,
+        };
+        let shown = PreviewSource::GitShow {
+            root,
+            hash: "deadbee".to_owned(),
+            path: "src/main.rs".to_owned(),
+        };
+        let file = PreviewSource::file(host_path(r"C:\w\笔记 notes.txt"));
+        let mut pool = PreviewPool::default();
+        pool.open(diff.clone(), "说明 notes.md".to_owned(), &[]);
+        pool.open(shown.clone(), "main.rs".to_owned(), &[]);
+        pool.open(file.clone(), "笔记 notes.txt".to_owned(), &[]);
+        let asked = pool
+            .ask_composer(&diff)
+            .expect("a diff not read is asked for");
+        let answered = pool.ask_composer(&shown).expect("so is a commit's file");
+        assert!(pool.answer_composed(answered, Ok(composed_read(b"fn main() {}\n"))));
+        assert_eq!(pool.ask_composer(&file), None, "a file is not git's to ask");
+
+        assert!(pool.settle_unanswered(), "the waiting diff is settled");
+        let settled = pool.get(&diff).expect("kept");
+        assert_eq!(settled.load, PreviewLoad::Unanswered, "no longer loading");
+        assert_eq!(
+            settled.body_notice(),
+            Some(git_document_unanswered()),
+            "its pane says it was not loaded"
+        );
+        assert_eq!(
+            pool.get(&shown).expect("kept").load,
+            PreviewLoad::Ready,
+            "an answered document keeps its text"
+        );
+        assert_eq!(
+            pool.get(&file).expect("kept").load,
+            PreviewLoad::Pending,
+            "a disk read is not git's to give up on"
+        );
+        assert!(!pool.settle_unanswered(), "nothing is left waiting on git");
+
+        assert_eq!(
+            pool.ask_composer(&diff),
+            Some(asked),
+            "a press asks again, for the same buffer"
+        );
+        assert_eq!(pool.get(&diff).expect("kept").load, PreviewLoad::Pending);
+        assert!(pool.answer_composed(asked, Ok(composed_read("+新 new line\n".as_bytes()))));
+        assert!(
+            pool.get(&diff)
+                .and_then(PreviewBuffer::text)
+                .is_some_and(|text| text.contains("+新 new line")),
+            "git's answer fills it"
+        );
+        assert_eq!(
+            pool.ask_composer(&shown),
+            None,
+            "a document already answered is a snapshot and is not asked again"
         );
     }
 
@@ -17131,7 +17363,7 @@ mod tests {
             range.repo_file(),
             Some(root.join("crates/bt-app/src/main.rs"))
         );
-        assert!(range.is_git());
+        assert!(range.is_git_document());
         assert_eq!(
             range.file_path(),
             None,
@@ -17668,7 +17900,7 @@ mod tests {
         let source = PreviewSource::Web(URL.to_owned());
         assert_eq!(source.file_path(), None);
         assert_eq!(source.repo_file(), None);
-        assert!(!source.is_git());
+        assert!(!source.is_git_document());
         assert_eq!(source.web_url(), Some(URL));
         assert_eq!(
             source.composed_lead(),
