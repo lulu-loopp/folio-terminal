@@ -296,6 +296,7 @@ impl GlyphFixture {
                 // two runs of the same fixture differ, because it blinks.
                 visible: false,
             },
+            cursor_in_view: true,
             row_map: (0..rows)
                 .map(|row| bt_viewport::FrameVisualRow {
                     top_subpixels: i64::from(row) * height_subpixels,

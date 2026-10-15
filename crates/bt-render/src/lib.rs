@@ -1285,6 +1285,14 @@ pub struct ComposedFrame {
 /// *drawn* is then the window's business, and a cluster that lands outside the window is simply not
 /// drawn. Advancing in viewport columns would put the wrap at a place the grid has no line break
 /// at, and the caret would jump the moment the text committed.
+///
+/// # Where it is drawn
+///
+/// At the terminal cursor whenever the frame draws the cursor's cell (`cursor_in_view`), whether
+/// or not the program shows the cursor: a full-screen program that hides it and draws its own
+/// caret keeps the hidden one at its input position so an IME can find it. The cursor's glyph is
+/// still drawn only when the program shows it. A cursor whose cell the frame does not draw
+/// composes nothing, and `ime_caret` is the frame's cursor.
 pub fn compose_preedit(
     frame: &ViewportFrame,
     preedit: Option<&Preedit>,
@@ -1305,7 +1313,10 @@ fn compose_preedit_inner<const TRACE: bool>(
     preedit: Option<&Preedit>,
 ) -> Result<(ComposedFrame, bool), FrameShapeError> {
     frame.validate_shape()?;
-    let Some(preedit) = preedit.filter(|preedit| !preedit.text.is_empty() && frame.cursor.visible)
+    // `cursor_in_view`, not `cursor.visible`: a program that hid the terminal cursor (DECTCEM)
+    // leaves it at its input caret for exactly this, and Windows Terminal composes there too
+    // (`Renderer::_prepareNewComposition` reads the cursor's position and never its visibility).
+    let Some(preedit) = preedit.filter(|preedit| !preedit.text.is_empty() && frame.cursor_in_view)
     else {
         return Ok((
             ComposedFrame {
@@ -1336,7 +1347,13 @@ fn compose_preedit_inner<const TRACE: bool>(
         visible: drawn.is_some(),
     };
     let written = overlay_preedit_cells::<TRACE>(&mut composed, preedit);
-    composed.cursor = ime_caret;
+    // The caret glyph moves to the composition's caret and is drawn only when the program shows
+    // the cursor; a hidden cursor stays hidden under a composition, as its caret is the IME's.
+    composed.cursor = bt_viewport::GridCursor {
+        visible: ime_caret.visible && frame.cursor.visible,
+        ..ime_caret
+    };
+    composed.cursor_in_view = ime_caret.visible;
     Ok((
         ComposedFrame {
             frame: composed,
@@ -19584,6 +19601,7 @@ mod tests {
                 column: 0,
                 visible: false,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(columns * rows),
             row_map: test_row_map(rows as u32),
             selection_spans: Vec::new(),
@@ -19837,6 +19855,7 @@ mod tests {
                 column: 0,
                 visible: false,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(columns * rows),
             row_map: test_row_map(rows as u32),
             selection_spans: Vec::new(),
@@ -20859,6 +20878,7 @@ mod tests {
                 column: 0,
                 visible: false,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(columns * rows),
             row_map: test_row_map(rows as u32),
             selection_spans: Vec::new(),
@@ -20988,6 +21008,7 @@ mod tests {
                 presentation_offset_subpixels: 0,
                 cells: vec![CapturedCell::default(); 12],
                 cursor,
+                cursor_in_view: true,
                 cell_anchors: test_cell_anchors(12),
                 row_map: test_row_map_for_metrics(3, metrics),
                 selection_spans: Vec::new(),
@@ -21036,6 +21057,7 @@ mod tests {
                 column: 1,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(8),
             row_map: vec![
                 bt_viewport::FrameVisualRow {
@@ -21143,6 +21165,7 @@ mod tests {
                 column: 0,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(6),
             row_map: test_row_map_for_metrics(2, metrics),
             selection_spans: Vec::new(),
@@ -21228,6 +21251,7 @@ mod tests {
                 column: 1,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(6),
             row_map: vec![
                 bt_viewport::FrameVisualRow {
@@ -21447,6 +21471,7 @@ mod tests {
                 column: 0,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(1),
             row_map: test_row_map(1),
             selection_spans: Vec::new(),
@@ -21490,6 +21515,7 @@ mod tests {
                 column: 0,
                 visible: true,
             },
+            cursor_in_view: true,
             selection_spans: Vec::new(),
             search_spans: Vec::new(),
             current_search_spans: Vec::new(),
@@ -22106,6 +22132,7 @@ mod tests {
                 column: 0,
                 visible: true,
             },
+            cursor_in_view: true,
             selection_spans: Vec::new(),
             search_spans: Vec::new(),
             current_search_spans: Vec::new(),
@@ -22192,6 +22219,7 @@ mod tests {
                 column: 1,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(columns * grid_rows),
             row_map: test_row_map(grid_rows as u32),
             selection_spans: vec![SelectionSpan {
@@ -22305,6 +22333,7 @@ mod tests {
                 column: 0,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(4),
             row_map: test_row_map(2),
             selection_spans: Vec::new(),
@@ -22706,6 +22735,7 @@ mod tests {
                 column: 0,
                 visible: false,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(6),
             row_map: test_row_map(3),
             selection_spans: Vec::new(),
@@ -23575,6 +23605,7 @@ mod tests {
                 column: 0,
                 visible: false,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(1),
             row_map: test_row_map(1),
             selection_spans: Vec::new(),
@@ -23687,6 +23718,7 @@ mod tests {
                 column: 2,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(16),
             row_map: test_row_map(2),
             selection_spans: Vec::new(),
@@ -23700,13 +23732,17 @@ mod tests {
             layout_key: bt_doc_layout_key(8),
             view_generation: bt_doc::ViewGeneration(1),
         };
-        for (text, visible, expected) in [
-            ("synthetic", true, true),
-            ("synthetic", false, false),
-            ("", true, false),
-            ("\u{0301}", true, false),
+        // A cursor the program hid composes where it stands (issue #42); one whose cell the frame
+        // does not draw composes nothing, shown or not.
+        for (text, visible, in_view, expected) in [
+            ("synthetic", true, true, true),
+            ("synthetic", false, true, true),
+            ("synthetic", false, false, false),
+            ("", true, true, false),
+            ("\u{0301}", true, true, false),
         ] {
             frame.cursor.visible = visible;
+            frame.cursor_in_view = in_view;
             let preedit = Preedit {
                 text: text.to_owned(),
                 cursor_byte: None,
@@ -23721,6 +23757,7 @@ mod tests {
         // A wide cluster at the final grid cell wraps outside the grid and writes nothing.
         frame.cursor.row = 1;
         frame.cursor.column = 7;
+        frame.cursor_in_view = true;
         let wide = Preedit {
             text: "\u{1f600}".to_owned(),
             cursor_byte: None,
@@ -23742,6 +23779,7 @@ mod tests {
                 column: 2,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(16),
             row_map: test_row_map(2),
             selection_spans: Vec::new(),
@@ -23779,6 +23817,206 @@ mod tests {
         );
     }
 
+    /// A pane the way `pi` leaves it while its input box has the focus: a prompt, its own
+    /// reverse-video caret drawn as a cell, and the terminal cursor moved onto that cell and hidden
+    /// (`CSI ?25l`) — or shown, for the twin. Twelve columns, three rows, the cursor at row 1,
+    /// column 2.
+    fn input_box_frame(cursor_shown: bool) -> ViewportFrame {
+        let mut cells = vec![CapturedCell::plain(""); 36];
+        cells[12] = CapturedCell::plain(">");
+        cells[13] = CapturedCell::plain(" ");
+        let mut drawn_caret = CapturedCell::plain(" ");
+        drawn_caret.style.flags.insert(CellFlags::INVERSE);
+        cells[14] = drawn_caret;
+        ViewportFrame {
+            columns: NonZeroU32::new(12).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(12),
+            grid_rows: NonZeroU32::new(3).unwrap(),
+            rows: NonZeroU32::new(3).unwrap(),
+            presentation_offset_subpixels: 0,
+            cells,
+            cursor: bt_viewport::GridCursor {
+                row: 1,
+                column: 2,
+                visible: cursor_shown,
+            },
+            cursor_in_view: true,
+            cell_anchors: test_cell_anchors(36),
+            row_map: test_row_map(3),
+            selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
+            math_blocks: Vec::new(),
+            math_failures: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(12),
+            view_generation: bt_doc::ViewGeneration(1),
+        }
+    }
+
+    fn input_box_metrics() -> CellMetrics {
+        CellMetrics {
+            cell_width_px: 8.0,
+            cell_height_px: 20.0,
+            font_size_px: 16.0,
+            padding_px: 4.0,
+            scale_factor: 1.0,
+            ascii_baseline_px: 0.0,
+            primary_advance_px: 8.0,
+            primary_cap_height_px: 10.0,
+            primary_cap_center_y_px: 5.0,
+        }
+    }
+
+    /// PIN (issue #42) — a composition is drawn at the terminal cursor when the program hid it,
+    /// and the candidate window is told the composition's caret, exactly as for a shown cursor.
+    ///
+    /// `pi` hides the terminal cursor, draws its own, and parks the hidden one at its input caret
+    /// so an IME can find it; Microsoft Pinyin's `ni'hao` then showed nothing in its box while the
+    /// candidate window sat at the box's left edge. Windows Terminal composes at the cursor's
+    /// position and never asks whether it is visible (`Renderer::_prepareNewComposition`).
+    ///
+    /// MUTATION: filter the preedit on `frame.cursor.visible` again in `compose_preedit_inner` —
+    /// red at the first assertion: the hidden frame comes back without a letter of `ni'hao`.
+    #[test]
+    fn a_composition_is_drawn_at_a_hidden_cursor() {
+        let metrics = input_box_metrics();
+        let hidden = input_box_frame(false);
+        let shown = input_box_frame(true);
+        // The reading a Chinese method shows mid-word, and a mixed one with its caret inside.
+        for (text, cursor_byte, drawn, caret_column) in [
+            ("ni'hao", None, vec!["n", "i", "'", "h", "a", "o"], 8),
+            (
+                "你好hao",
+                Some("你好".len()),
+                vec!["你", "", "好", "", "h", "a", "o"],
+                6,
+            ),
+        ] {
+            let preedit = Preedit {
+                text: text.to_owned(),
+                cursor_byte,
+            };
+            let composed = compose_preedit(&hidden, Some(&preedit)).unwrap();
+            let row = &composed.frame.cells[12..24];
+            assert_eq!(
+                row[2..2 + drawn.len()]
+                    .iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<Vec<_>>(),
+                drawn,
+                "{text}: the composition stands at the hidden cursor, over the program's own caret",
+            );
+            assert!(
+                row[2..2 + drawn.len()]
+                    .iter()
+                    .all(|cell| cell.style.flags.contains(CellFlags::UNDERLINE)),
+                "{text}: underlined as every composition is",
+            );
+            assert_eq!(
+                (row[0].text.as_str(), row[1].text.as_str()),
+                (">", " "),
+                "{text}: the prompt in front of it is the program's",
+            );
+            assert_eq!(
+                composed.ime_caret,
+                bt_viewport::GridCursor {
+                    row: 1,
+                    column: caret_column,
+                    visible: true,
+                },
+                "{text}: the IME caret is where the method put it inside the composition",
+            );
+
+            let twin = compose_preedit(&shown, Some(&preedit)).unwrap();
+            assert_eq!(
+                composed.frame.cells, twin.frame.cells,
+                "{text}: the letters are the same whether the program shows the cursor or not",
+            );
+            assert_eq!(composed.ime_caret, twin.ime_caret);
+            assert_eq!(
+                ime_cursor_area_for_metrics(metrics, &composed.frame),
+                ime_cursor_area_for_metrics(metrics, &twin.frame),
+                "{text}: and the candidate window hangs off the same caret",
+            );
+            assert_ne!(
+                ime_cursor_area_for_metrics(metrics, &composed.frame),
+                ime_cursor_area_for_metrics(metrics, &hidden),
+                "{text}: which is the composition's caret, not the box's left edge",
+            );
+
+            let (traced, written) = compose_preedit_traced(&hidden, Some(&preedit)).unwrap();
+            assert!(written, "{text}: the trace sees the letters written");
+            assert_eq!(traced, composed);
+        }
+        assert_eq!(
+            hidden.cells[14].text, " ",
+            "the terminal's own frame is untouched"
+        );
+    }
+
+    /// PIN (issue #42) — the composition moves the cursor to its own caret, and a cursor the
+    /// program hid stays hidden there: the caret inside a composition is the IME's, and a program
+    /// that hid the terminal cursor draws its own.
+    ///
+    /// MUTATION: `visible: ime_caret.visible` (the program's bit dropped) for the composed cursor
+    /// in `compose_preedit_inner` — red: a caret appears at column 7 of a pane whose program hid
+    /// it.
+    #[test]
+    fn a_hidden_cursor_glyph_stays_hidden_under_a_composition() {
+        let metrics = input_box_metrics();
+        let preedit = Preedit {
+            text: "ni'好".to_owned(),
+            cursor_byte: None,
+        };
+        let hidden = compose_preedit(&input_box_frame(false), Some(&preedit)).unwrap();
+        let shown = compose_preedit(&input_box_frame(true), Some(&preedit)).unwrap();
+        assert_eq!(
+            (hidden.frame.cursor.row, hidden.frame.cursor.column),
+            (1, 7),
+            "the cursor stands at the composition's caret",
+        );
+        assert!(!hidden.frame.cursor.visible, "and it is still hidden");
+        assert!(hidden.frame.cursor_in_view);
+        assert_eq!(shown.frame.cursor, shown.ime_caret);
+        for style in [CursorStyle::Bar, CursorStyle::Block, CursorStyle::Underline] {
+            assert!(
+                seat_caret(metrics, &hidden.frame, true, true, style).is_none(),
+                "no caret glyph under a hidden cursor's composition ({style:?})",
+            );
+            assert!(
+                seat_caret(metrics, &shown.frame, true, true, style).is_some(),
+                "while a shown cursor's composition draws one at its caret ({style:?})",
+            );
+        }
+    }
+
+    /// A cursor whose cell the frame does not draw — its row scrolled out, its column outside the
+    /// window — composes nothing, shown or hidden, and the IME is told the frame's own cursor: the
+    /// frame's `row` and `column` then name no drawn cell, and letters written there would land
+    /// in somebody else's row.
+    ///
+    /// MUTATION: drop the in-view half of the filter in `compose_preedit_inner` — red: the letters
+    /// are written into row 1 of a frame whose cursor is not on it.
+    #[test]
+    fn a_cursor_the_frame_does_not_draw_composes_nothing() {
+        let preedit = Preedit {
+            text: "ni'hao你".to_owned(),
+            cursor_byte: None,
+        };
+        for shown in [true, false] {
+            let mut frame = input_box_frame(shown);
+            frame.cursor_in_view = false;
+            frame.cursor.visible = false;
+            let composed = compose_preedit(&frame, Some(&preedit)).unwrap();
+            assert_eq!(composed.frame, frame, "shown={shown}: nothing is composed");
+            assert_eq!(composed.ime_caret, frame.cursor);
+            assert!(!compose_preedit_traced(&frame, Some(&preedit)).unwrap().1);
+        }
+    }
+
     #[test]
     fn preedit_uses_the_same_cluster_oracle_as_committed_cells() {
         let frame = ViewportFrame {
@@ -23793,6 +24031,7 @@ mod tests {
                 column: 1,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(16),
             row_map: test_row_map(2),
             selection_spans: Vec::new(),
@@ -24136,6 +24375,7 @@ mod tests {
                     column: 0,
                     visible: true,
                 },
+                cursor_in_view: true,
                 cell_anchors: test_cell_anchors(1),
                 row_map: test_row_map_for_metrics(1, metrics),
                 selection_spans: Vec::new(),
@@ -24205,6 +24445,7 @@ mod tests {
                 column: 0,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(3),
             row_map: test_row_map(1),
             selection_spans: Vec::new(),
@@ -24262,6 +24503,7 @@ mod tests {
                 column: 0,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(1),
             row_map: test_row_map_for_metrics(1, metrics),
             selection_spans: Vec::new(),
@@ -25923,6 +26165,7 @@ mod tests {
                 column: 0,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors((columns * rows) as usize),
             row_map: test_row_map_for_metrics(rows, metrics),
             selection_spans: Vec::new(),
@@ -27146,6 +27389,7 @@ mod tests {
                 column: 0,
                 visible: false,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors((columns * rows) as usize),
             row_map: test_row_map_for_metrics(rows, metrics),
             selection_spans: Vec::new(),
@@ -29690,6 +29934,7 @@ mod tests {
                 column: 0,
                 visible: false,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(cells),
             row_map: test_row_map_for_metrics(rows, metrics),
             selection_spans: Vec::new(),
@@ -31712,6 +31957,7 @@ mod tests {
                     column: 0,
                     visible: false,
                 },
+                cursor_in_view: true,
                 cell_anchors: test_cell_anchors(columns * rows),
                 row_map: test_row_map(rows as u32),
                 selection_spans: vec![bt_viewport::SelectionSpan {
@@ -34003,6 +34249,7 @@ mod tests {
                     column: 0,
                     visible: false,
                 },
+                cursor_in_view: true,
                 cell_anchors: test_cell_anchors(columns as usize),
                 row_map: test_row_map_for_metrics(1, metrics),
                 selection_spans: Vec::new(),
