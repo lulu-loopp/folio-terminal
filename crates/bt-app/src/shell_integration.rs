@@ -11090,7 +11090,9 @@ mod tests {
     /// nothing leaves a line.
     #[test]
     fn a_check_settled_beside_its_package_says_which() {
-        let pwsh = Path::new(r"C:\Users\李四\AppData\Local\Microsoft\WindowsApps\pwsh.exe");
+        // Joined, so the file name — what the edition is read from — is `pwsh.exe` on every
+        // platform.
+        let pwsh = &Path::new("李四").join("WindowsApps").join("pwsh.exe");
         assert_eq!(
             package_beside_line(pwsh, Some(&[4242, 77])).as_deref(),
             Some(
@@ -11128,7 +11130,9 @@ mod tests {
     /// held nothing else leaves a line.
     #[test]
     fn a_check_settled_beside_other_processes_says_so() {
-        let pwsh = Path::new(r"C:\Users\张三\AppData\Local\Microsoft\WindowsApps\pwsh.exe");
+        // Joined, so the file name — what the edition is read from — is `pwsh.exe` on every
+        // platform.
+        let pwsh = &Path::new("张三").join("WindowsApps").join("pwsh.exe");
         assert_eq!(
             settled_beside_line(pwsh, Some(2)).as_deref(),
             Some("Folio: the PowerShell 7 check settled with 2 other processes in its job")
