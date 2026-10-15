@@ -393,23 +393,137 @@ impl NativeMentions<'_> {
     }
 }
 
-/// **The impl blocks written inside a function's body**, each as its trait's path (when it has
-/// one) and its self type: they are no impl of the index, so the guard reads them here.
+/// **The impl blocks written inside a body** — a function's, a `const`'s or `static`'s
+/// initializer, any expression the guard parses — and the `use` leaves written there, each local
+/// name with the path it brings in. They are no impl and no `use` of the index (which records
+/// module-level ones), so the guard reads them here.
 #[derive(Default)]
-struct NestedImpls(Vec<(Option<syn::Path>, String)>);
+struct NestedImpls {
+    impls: Vec<syn::ItemImpl>,
+    uses: BTreeMap<String, Vec<String>>,
+}
+
+impl NestedImpls {
+    fn leaves(&mut self, tree: &syn::UseTree, path: &mut Vec<String>) {
+        match tree {
+            syn::UseTree::Path(step) => {
+                path.push(step.ident.to_string());
+                self.leaves(&step.tree, path);
+                path.pop();
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    self.leaves(item, path);
+                }
+            }
+            syn::UseTree::Name(name) => {
+                let mut full = path.clone();
+                full.push(name.ident.to_string());
+                self.uses.insert(name.ident.to_string(), full);
+            }
+            syn::UseTree::Rename(rename) => {
+                let mut full = path.clone();
+                full.push(rename.ident.to_string());
+                self.uses.insert(rename.rename.to_string(), full);
+            }
+            syn::UseTree::Glob(_) => {}
+        }
+    }
+}
 
 impl<'ast> Visit<'ast> for NestedImpls {
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
-        let self_type = match &*node.self_ty {
+        self.impls.push(node.clone());
+        syn::visit::visit_item_impl(self, node);
+    }
+
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        self.leaves(&node.tree, &mut Vec::new());
+    }
+}
+
+/// **The refusals of the impl blocks written inside a body**, `place` naming the item that holds
+/// it and `modules` where it is written. Refused by name, with no list row, whatever the item:
+///
+/// * an impl whose trait is a door of the seam — resolved through the body's own `use` leaves and
+///   then the module's (`use crate::m::Host;` reaching a renamed re-export of `WindowHost`), or
+///   spelled as one of the seam's traits;
+/// * an impl whose self type names a holder for the native backend: a native block is written at
+///   module level, where the native list names its methods, and one inside a body is not.
+fn nested_refusals(
+    reading: &Reading<'_>,
+    modules: &[&str],
+    place: &str,
+    nested: &NestedImpls,
+) -> Vec<String> {
+    let mut refusals = Vec::new();
+    for block in &nested.impls {
+        let self_type = match &*block.self_ty {
             syn::Type::Path(path) => segments(&path.path).join("::"),
             _ => String::from("a type that is not a path"),
         };
-        self.0.push((
-            node.trait_.as_ref().map(|(_, path, _)| path.clone()),
-            self_type,
-        ));
-        syn::visit::visit_item_impl(self, node);
+        if let Some((_, path, _)) = &block.trait_ {
+            let written = segments(path);
+            let expanded = written
+                .first()
+                .and_then(|first| nested.uses.get(first))
+                .map(|full| {
+                    full.iter()
+                        .chain(written.iter().skip(1))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                });
+            let doors: Vec<String> = modules
+                .iter()
+                .flat_map(|module| {
+                    let mut found = reading.resolver.resolve(reading.package, module, &written);
+                    if let Some(expanded) = &expanded {
+                        found.extend(reading.resolver.resolve(reading.package, module, expanded));
+                    }
+                    found
+                })
+                .filter(|id| id.package == reading.package && id.module_path == SEAM)
+                .map(|id| id.to_string())
+                .collect();
+            let named_like_a_door = written
+                .last()
+                .is_some_and(|last| reading.seam_traits.contains(last));
+            if !doors.is_empty() || named_like_a_door {
+                let door = doors.first().cloned().unwrap_or_else(|| written.join("::"));
+                refusals.push(format!(
+                    "{place} implements {door} for `{self_type}` inside its body — a door of the \
+                     seam is implemented in the seam"
+                ));
+            }
+        }
+        let generic = reading.parameters(&block.generics, modules);
+        let named = native_mentions(reading, modules, &generic, |visit| {
+            visit.visit_type(&block.self_ty);
+        });
+        let holder = match &*block.self_ty {
+            syn::Type::Path(path) => path
+                .path
+                .segments
+                .last()
+                .map(|last| last.ident.to_string())
+                .filter(|last| named.contains(last)),
+            _ => None,
+        };
+        if let Some(holder) = holder {
+            refusals.push(format!(
+                "{place} writes a block of `{holder}` for the native backend inside its body — a \
+                 native block is written at module level, where the native list names its methods"
+            ));
+        }
     }
+    refusals
+}
+
+/// The impl blocks and `use` leaves written inside whatever `visit` walks.
+fn nested_in(visit: impl FnOnce(&mut NestedImpls)) -> NestedImpls {
+    let mut nested = NestedImpls::default();
+    visit(&mut nested);
+    nested
 }
 
 /// Whether a holder's path segment is written for one of `generic` at the backend's `position`.
@@ -584,13 +698,12 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
     );
     // The methods a holder has only in a block written for the native backend: a path call to
     // one of them is native in any scope, because inference can pick nothing else for it. A path
-    // finds an inherent method before a trait's, so a native inherent method is native-only
-    // unless a generic *inherent* block has it too; a native trait impl's method, unless any
-    // generic block has it.
+    // finds an inherent method before a trait's, so a native method — inherent or a trait
+    // impl's — is native-only unless a generic *inherent* block has it too. (A generic trait
+    // impl's method of the same name is no answer: the trait may not be in scope, or be another
+    // trait; the guard errs to refusing.)
     let mut native_methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut native_trait_methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut generic_methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut generic_trait_methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for block in index.impls() {
         if !in_the_product(index, block.whole()) {
             continue;
@@ -613,16 +726,11 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
             syn::ImplItem::Fn(method) => Some(method.sig.ident.to_string()),
             _ => None,
         });
-        let target = match (
-            written_for_a_parameter(last, holders[&holder], &generic),
-            whole.trait_.is_some(),
-        ) {
-            (true, false) => &mut generic_methods,
-            (true, true) => &mut generic_trait_methods,
-            (false, false) => &mut native_methods,
-            (false, true) => &mut native_trait_methods,
-        };
-        target.entry(holder).or_default().extend(methods);
+        if !written_for_a_parameter(last, holders[&holder], &generic) {
+            native_methods.entry(holder).or_default().extend(methods);
+        } else if whole.trait_.is_none() {
+            generic_methods.entry(holder).or_default().extend(methods);
+        }
     }
     let mut native_only: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (holder, methods) in &native_methods {
@@ -631,19 +739,6 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
             methods
                 .iter()
                 .filter(|method| generic.is_none_or(|generic| !generic.contains(*method)))
-                .cloned(),
-        );
-    }
-    for (holder, methods) in &native_trait_methods {
-        let generic = generic_methods.get(holder);
-        let generic_trait = generic_trait_methods.get(holder);
-        native_only.entry(holder.clone()).or_default().extend(
-            methods
-                .iter()
-                .filter(|method| {
-                    generic.is_none_or(|generic| !generic.contains(*method))
-                        && generic_trait.is_none_or(|generic| !generic.contains(*method))
-                })
                 .cloned(),
         );
     }
@@ -807,7 +902,7 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
         let at = item.whole().start();
         // The seam itself is where the native backend meets the parameter: its `Backend` trait
         // names the holders for `Self`, and `Native`'s impl of it is the native side by definition.
-        if native_blocks.iter().any(|body| body.holds(at)) || item.module_paths().contains(&SEAM) {
+        if item.module_paths().contains(&SEAM) {
             continue;
         }
         let text = index.text(item.whole());
@@ -838,34 +933,18 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
         let owner = item
             .type_owner()
             .map_or_else(|| item.module_paths().join(", "), str::to_owned);
-        // The impl blocks written inside the body: a door of the seam implemented there is a door
-        // implemented outside the seam. (A holder's block there is a mention of the holder, read
-        // below with the rest of the body.)
-        let mut nested = NestedImpls::default();
-        nested.visit_block(&parsed.block);
-        for (path, self_type) in nested.0 {
-            let Some(path) = path else {
-                continue;
-            };
-            let written = segments(&path);
-            let doors: Vec<String> = item
-                .module_paths()
-                .iter()
-                .flat_map(|module| resolver.resolve(package, module, &written))
-                .filter(|id| id.package == package && id.module_path == SEAM)
-                .map(|id| id.to_string())
-                .collect();
-            let named_like_a_door = written
-                .last()
-                .is_some_and(|last| reading.seam_traits.contains(last));
-            if !doors.is_empty() || named_like_a_door {
-                let door = doors.first().cloned().unwrap_or_else(|| written.join("::"));
-                refusals.push(format!(
-                    "`{owner}::{}` implements {door} for `{self_type}` inside its body — a door \
-                     of the seam is implemented in the seam",
-                    item.name()
-                ));
-            }
+        // The impl blocks written inside the body — every body, a native block's methods and the
+        // listed functions included ([`nested_refusals`]).
+        let nested = nested_in(|visit| visit.visit_block(&parsed.block));
+        refusals.extend(nested_refusals(
+            &reading,
+            &item.module_paths(),
+            &format!("`{owner}::{}`", item.name()),
+            &nested,
+        ));
+        // A native block's method is judged with its block, by the list.
+        if native_blocks.iter().any(|body| body.holds(at)) {
+            continue;
         }
         let named = native_mentions(&reading, &item.module_paths(), &generic, |visit| {
             visit.visit_item_fn(&parsed)
@@ -955,10 +1034,25 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
             .path()
             .file_name()
             .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        // The modules this file is: the whole-file module records over its bytes.
+        let modules: Vec<String> = index
+            .modules()
+            .iter()
+            .filter(|module| module.span() == file.span())
+            .flat_map(|module| module.module_paths().iter().cloned())
+            .collect();
+        if modules.iter().any(|module| module == SEAM) {
+            continue;
+        }
         file_items(
             &parsed.items,
             &reading,
+            &modules,
             &mut |kind, item_name, what| match kind {
+                "nested" => refusals.push(what.replace(
+                    "{place}",
+                    &format!("the `const` or `static` `{item_name}` in {name}"),
+                )),
                 "alias" => refusals.push(format!(
                     "the type alias `{item_name}` in {name} names {what} — the window-seam guard \
                      reads holders by their own name; write the holder"
@@ -1020,7 +1114,23 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
             .items
             .retain(|member| !matches!(member, syn::TraitItem::Fn(_)));
         let modules = declared.module_paths();
-        let generic = reading.parameters(&parsed.generics, &modules);
+        // The scope its methods have: its own backend parameters, and `Self` for a backend trait.
+        let generic = trait_generics
+            .iter()
+            .find(|(body, _)| *body == declared.body())
+            .map(|(_, generic)| generic.clone())
+            .unwrap_or_default();
+        let nested = nested_in(|visit| {
+            for member in &parsed.items {
+                visit.visit_trait_item(member);
+            }
+        });
+        refusals.extend(nested_refusals(
+            &reading,
+            &modules,
+            &format!("the trait `{}::{}`", modules.join(", "), declared.name()),
+            &nested,
+        ));
         let named = native_mentions(&reading, &modules, &generic, |visit| {
             visit.visit_item_trait(&parsed);
         });
@@ -1137,6 +1247,15 @@ fn associated_items(
         }
     }
     for member in &whole.items {
+        if let syn::ImplItem::Const(declared) = member {
+            let nested = nested_in(|visit| visit.visit_expr(&declared.expr));
+            refusals.extend(nested_refusals(
+                reading,
+                &modules,
+                &format!("`{}::{}`", block.type_owner(), declared.ident),
+                &nested,
+            ));
+        }
         let (kind, name, named) = match member {
             syn::ImplItem::Type(declared) => (
                 "type",
@@ -1171,8 +1290,17 @@ fn associated_items(
 fn file_items(
     items: &[syn::Item],
     reading: &Reading<'_>,
+    modules: &[String],
     found: &mut impl FnMut(&str, &str, &str),
 ) {
+    let written: Vec<&str> = modules.iter().map(String::as_str).collect();
+    // A `const`'s or `static`'s initializer is a body: the impls written there are read as a
+    // function's are; each refusal is handed back with `{place}` for the item to fill in.
+    let nested = |item_name: &str, nested: NestedImpls, found: &mut dyn FnMut(&str, &str, &str)| {
+        for refusal in nested_refusals(reading, &written, "{place}", &nested) {
+            found("nested", item_name, &refusal);
+        }
+    };
     let none = BTreeSet::new();
     for item in items {
         match item {
@@ -1200,6 +1328,11 @@ fn file_items(
                 }
             }
             syn::Item::Const(constant) => {
+                nested(
+                    &constant.ident.to_string(),
+                    nested_in(|visit| visit.visit_expr(&constant.expr)),
+                    found,
+                );
                 let named = native_mentions(reading, &[], &none, |visit| {
                     visit.visit_item_const(constant)
                 });
@@ -1209,6 +1342,11 @@ fn file_items(
                 }
             }
             syn::Item::Static(fixed) => {
+                nested(
+                    &fixed.ident.to_string(),
+                    nested_in(|visit| visit.visit_expr(&fixed.expr)),
+                    found,
+                );
                 let named =
                     native_mentions(reading, &[], &none, |visit| visit.visit_item_static(fixed));
                 if !named.is_empty() {
@@ -1226,7 +1364,11 @@ fn file_items(
                 if let Some((_, inner)) = &module.content
                     && !test_only
                 {
-                    file_items(inner, reading, found);
+                    let inner_modules: Vec<String> = modules
+                        .iter()
+                        .map(|path| format!("{path}::{}", module.ident))
+                        .collect();
+                    file_items(inner, reading, &inner_modules, found);
                 }
             }
             _ => {}
@@ -1294,8 +1436,11 @@ fn row(kind: &str, owner: &str, name: &str) -> (String, String, String) {
 /// a `macro_rules!` body; a `use` renaming a holder, at module level and in a body; module-level
 /// type aliases of the native backend, by its type and by a generic default; a native-only method
 /// beside a generic trait impl's method of the same name (`generic_builds` stays refused); a door
-/// of the seam implemented inside a body, directly and through a renaming `use`; a native block of
-/// a holder written inside a body; and a list row nothing uses. The generic blocks (the bound written
+/// of the seam implemented inside a body, directly, through a renaming `use` and through a body's
+/// `use` of a module's renamed re-export, inside a listed native method and inside a `const`'s
+/// initializer; a native block of a holder written inside a body, and inside a listed function; a
+/// trait method's default body naming a native holder (the trait's scope is no exemption); and a
+/// list row nothing uses. The generic blocks (the bound written
 /// directly, through the prelude's glob, through a rename, in a `where` clause and through a
 /// supertrait), a holder built by inference inside a generic function, a trait method's default
 /// body written for the trait's own backend parameter and for a backend trait's `Self`, an enum's
@@ -1316,12 +1461,17 @@ fn every_road_around_the_window_seam_is_named() {
         [
             "`Indirect::sneaks_through_a_supertrait` is written for the native backend in \
              crate::runtime — the window is reached through the seam",
+            "`Runtime::create` implements window-seam crate::window_seam::WindowHost for `Made` \
+             inside its body — a door of the seam is implemented in the seam",
             "`Runtime::sneaks_past_the_seam` is written for the native backend in crate::runtime \
              — the window is reached through the seam",
             "`Runtime::takes_the_native` names Runtime for the native backend — the window is \
              reached through the seam",
             "`Shell::fmt` names Native, Shell for the native backend — the window is reached \
              through the seam",
+            "`crate::listed_rebuild` writes a block of `Runtime` for the native backend inside \
+             its body — a native block is written at module level, where the native list names \
+             its methods",
             "`crate::runtime::builds_by_a_literal` names Shell for the native backend — the \
              window is reached through the seam",
             "`crate::runtime::builds_by_inference` names Runtime for the native backend — the \
@@ -1333,12 +1483,23 @@ fn every_road_around_the_window_seam_is_named() {
              implemented in the seam",
             "`crate::runtime::hides_a_native_block` names Native, Runtime for the native backend \
              — the window is reached through the seam",
+            "`crate::runtime::hides_a_native_block` writes a block of `Runtime` for the native \
+             backend inside its body — a native block is written at module level, where the \
+             native list names its methods",
+            "`crate::runtime::hides_a_reexported_door` implements window-seam \
+             crate::window_seam::WindowHost for `Hidden` inside its body — a door of the seam is \
+             implemented in the seam",
+            "`crate::runtime::hides_a_renamed_door` implements window-seam \
+             crate::window_seam::WindowHost for `Hidden` inside its body — a door of the seam is \
+             implemented in the seam",
             "`crate::runtime::hides_a_renamed_door` names WindowHost (renamed from the seam) for \
              the native backend — the window is reached through the seam",
             "`crate::runtime::holds_an_inner_function` names Shell for the native backend — the \
              window is reached through the seam",
             "`crate::runtime::names_it_by_its_path` names Native for the native backend — the \
              window is reached through the seam",
+            "`crate::runtime::native_default` names Runtime for the native backend — the window \
+             is reached through the seam",
             "`crate::runtime::rebuild_every_window` names Runtime for the native backend — the \
              window is reached through the seam",
             "`crate::runtime::renames_a_holder_inside` names Shell for the native backend — the \
@@ -1367,6 +1528,9 @@ fn every_road_around_the_window_seam_is_named() {
              native backend without being its path — a shape the window-seam guard does not read",
             "the `const` or `static` `PLANTED` in runtime.rs names Runtime for the native \
              backend — the window is reached through the seam",
+            "the `const` or `static` `_` in runtime.rs implements window-seam \
+             crate::window_seam::WindowHost for `Made` inside its body — a door of the seam is \
+             implemented in the seam",
             "the associated const `Plain::NATIVE` in crate::runtime names Runtime for the native \
              backend — the window is reached through the seam",
             "the associated type `Shell::Item` in crate::runtime names Native, Shell for the \

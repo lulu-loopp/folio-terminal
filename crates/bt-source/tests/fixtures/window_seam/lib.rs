@@ -50,13 +50,24 @@ impl<B: Backend> Runtime<'_, B> {
 }
 
 impl Runtime<'_, Native> {
-    fn create() {}
+    // PLANTED: a door of the seam implemented inside a listed native method.
+    fn create() {
+        struct Made;
+        impl window_seam::WindowHost for Made {
+            fn request_redraw(&self) {}
+        }
+    }
 }
 
 fn generic_over<B: Backend>(_runtime: &Runtime<'_, B>) {}
 
 /// Listed: a native function over native holders.
-fn listed_rebuild(_windows: Vec<&mut Runtime<'_>>) {}
+fn listed_rebuild(_windows: Vec<&mut Runtime<'_>>) {
+    // PLANTED: a native block of a holder written inside a listed function.
+    impl Runtime<'_, Native> {
+        fn hidden_in_a_listed_function() {}
+    }
+}
 
 /// Listed: a compile-time check of a native holder.
 const _: fn(Runtime<'_>) = |Runtime { window: _ }| ();

@@ -1,4 +1,4 @@
-use crate::window_seam::WindowHost as Host;
+pub(crate) use crate::window_seam::WindowHost as Host;
 
 pub struct Stray;
 

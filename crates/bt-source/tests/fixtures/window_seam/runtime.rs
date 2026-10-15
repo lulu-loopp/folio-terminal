@@ -227,6 +227,9 @@ pub trait Hosts<B: Backend> {
     fn host(runtime: &Runtime<'_, B>) {
         let _ = runtime;
     }
+
+    // PLANTED: the trait's scope is no exemption — a default body naming a native holder.
+    fn native_default(_runtime: &Runtime<'_>) {}
 }
 
 /// Passes: a backend trait's `Self` is in scope in its method's default body.
@@ -255,5 +258,22 @@ fn hides_a_renamed_door() {
 fn hides_a_native_block() {
     impl Runtime<'_, Native> {
         fn hidden() {}
+    }
+}
+
+// PLANTED: a door of the seam implemented inside a `const`'s initializer.
+const _: () = {
+    struct Made;
+    impl WindowHost for Made {
+        fn request_redraw(&self) {}
+    }
+};
+
+// PLANTED: a door reached by a body's `use` through a module's renamed re-export.
+fn hides_a_reexported_door() {
+    use crate::elsewhere::Host;
+    struct Hidden;
+    impl Host for Hidden {
+        fn request_redraw(&self) {}
     }
 }

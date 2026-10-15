@@ -560,24 +560,27 @@ chosen by inference, read as native where no backend parameter is in scope, and
 in any scope when the path names a method the holder has only in a native block
 (`Runtime::create` inside a function generic over the backend still builds the
 native one; a path finds an inherent method before a trait's, so a native
-inherent method stays native-only beside a generic trait impl's method of the
-same name). A nested item sees none of the scope around it; a trait's own
-backend parameters, and `Self` for a backend trait, are in scope in its methods'
-default bodies. The native backend's own name (`Native`, standing first or after
-a module's name) is a native mention anywhere outside the seam. An impl's
+inherent or trait-impl method stays native-only unless a generic inherent block
+has it). A nested item sees none of the scope around it; a trait's own backend
+parameters, and `Self` for a backend trait, are in scope in its methods' default
+bodies. The native backend's own name (`Native`, standing first or after a
+module's name) is a native mention anywhere outside the seam. An impl's
 generics, trait arguments, associated types and consts, a trait's declaration
 (its generics, supertraits and associated items), and a native block's
 associated items have no row and are refused by name; so are a `use` that
 renames a holder, the native backend or the seam (at module level by name; in a
 body as a mention of the item holding it, as is a rename of anything brought
 from the seam), a module-level type alias of a holder or of the native backend
-(its type or its generics), a door of the seam implemented inside a function's
-body (a holder's block there is a mention of the holder), a holder or native
-name in a macro's tokens (an invocation's or a `macro_rules!` body's — the guard
-does not read macros), and an `impl` whose self type
-names a holder natively without being its path, shapes the guard does not read.
-Every door trait of the seam is implemented in the seam (the headless backend is
-test-only and is not read).
+(its type or its generics), and, inside any body — a function's (a native
+block's methods and the listed functions included), a `const`'s or `static`'s
+initializer, an associated const, a trait's declaration — an impl of a door of
+the seam (its trait resolved through the body's own `use` leaves, re-exports
+followed, or spelled as one of the seam's traits) or a block of a holder for the
+native backend, with no list row; a holder or native name in a macro's tokens
+(an invocation's or a `macro_rules!` body's — the guard does not read macros),
+and an `impl` whose self type names a holder natively without being its path,
+shapes the guard does not read. Every door trait of the seam is implemented in
+the seam (the headless backend is test-only and is not read).
 
 **What the guard does not hold**: the platform handle. `WindowHost::native_handle`
 and `CompositorDoor::platform_tree` hand generic code a `bt_platform` value that
