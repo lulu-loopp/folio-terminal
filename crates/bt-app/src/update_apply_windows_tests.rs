@@ -3122,6 +3122,12 @@ fn a_trial_whose_start_cannot_be_recorded_is_ended_and_rolled_back() {
 
 // ── a journal write held (T-JOURNAL-WRITE-UNDER-HOLD) ───────────────────────
 
+/// **A journal write, and the window's mark, over a file another program holds
+/// open** (T-JOURNAL-WRITE-UNDER-HOLD), with real files and a real hold
+/// (`trust_harness::hold_without_delete_sharing`, a scanner's open). The rounds
+/// are counted by what the write says on each: the hold is let go when a given
+/// round is said, so the round the write lands on is the test's, not a clock's.
+///
 /// **Windows only**: a hold that refuses a replacing rename is a Windows fact —
 /// on macOS `rename(2)` replaces an open file and `hold_without_delete_sharing`
 /// answers `Unsupported`, so there is no hold to make. What these pin that is
@@ -3131,13 +3137,6 @@ fn a_trial_whose_start_cannot_be_recorded_is_ended_and_rolled_back() {
 /// a refused removal says).
 #[cfg(windows)]
 mod held_writes {
-    //! **A journal write, and the window's mark, over a file another program holds
-    //! open** (T-JOURNAL-WRITE-UNDER-HOLD), on Windows — the one platform where a
-    //! hold refuses a replacing rename — with real files and a real hold
-    //! (`trust_harness::hold_without_delete_sharing`, a scanner's open). The rounds
-    //! are counted by what the write says on each: the hold is let go when a given
-    //! round is said, so the round the write lands on is the test's, not a clock's.
-
     use super::*;
     use bt_platform::trust_harness::hold_without_delete_sharing;
 
