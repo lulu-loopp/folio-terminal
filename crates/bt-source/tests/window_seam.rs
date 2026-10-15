@@ -376,7 +376,7 @@ impl NativeMentions<'_> {
             }
             syn::UseTree::Rename(rename) => {
                 let name = rename.ident.to_string();
-                if name == rename.rename.to_string() {
+                if rename.rename == name {
                     return;
                 }
                 if self.reading.holders.contains_key(&name)
