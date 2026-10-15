@@ -74934,8 +74934,12 @@ fn window_surface_target(
 /// layer X-1 measured. A line saying anything but `cleared=1` there is the
 /// defect this ticket exists to make impossible, stated in the log rather than
 /// left to a screenshot.
+///
+/// **The handle is asked of the host** ([`native_window`]), as every call outside the native
+/// backend's own doors asks it; `native_window_of` is the answer of `Arc<Window>`'s door, not a
+/// road of its own (`docs/ARCHITECTURE.md` §4.5).
 #[cfg(target_os = "macos")]
-fn folios_own_metal_view(window: &Window) -> Result<*mut std::ffi::c_void> {
+fn folios_own_metal_view(window: &impl WindowHost) -> Result<*mut std::ffi::c_void> {
     let native = native_window(window)?;
     let view = bt_platform::surface_view(native).map_err(|error| anyhow!(error))?;
     let cleared = bt_platform::clear_surface_layers(native).map_err(|error| anyhow!(error))?;

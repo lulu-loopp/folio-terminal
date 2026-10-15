@@ -5829,9 +5829,13 @@ mod tests {
     /// suite. The facts read here are the probe's own (`run_powershell_probe` builds the same
     /// arguments and writes the same input on every platform); the Mac gate runs them.
     ///
-    /// MUTATIONS: drop `-NoProfile` from `run_powershell_probe`'s arguments — the stand-in does not
-    /// print it; hand the input over as `.arg(input)` — it arrives among the arguments and the
-    /// standard input is empty.
+    /// The probe is built as both product callers build it: the program resolved into its command
+    /// by [`powershell_probe_command`], then handed to `run_powershell_probe` with no turn (as the
+    /// verb road asks) and no package (off Windows `bt_platform::package_family_of` names none).
+    ///
+    /// MUTATIONS: drop `-NoProfile` from the arguments `run_powershell_probe` adds to `probe` — the
+    /// stand-in does not print it; hand the input over as `probe.arg(input)` — it arrives among the
+    /// arguments and the standard input is empty.
     #[cfg(unix)]
     #[test]
     fn a_probe_asks_without_a_profile_and_feeds_its_input_on_stdin() {
@@ -5844,12 +5848,16 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let probe = powershell_probe_command(&program, &ProbeEnvironment::Inherited)
+            .expect("an absolute name is resolved as it stands");
         let output = run_powershell_probe(
+            probe,
+            None,
+            None,
             &program,
             "Write-Output $input",
             Some("输入 the text"),
             POWERSHELL_PROBE_PATIENCE,
-            &ProbeEnvironment::Inherited,
         )
         .expect("the stand-in answers");
         let _ = std::fs::remove_dir_all(&directory);
