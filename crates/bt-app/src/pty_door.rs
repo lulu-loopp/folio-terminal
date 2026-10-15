@@ -175,7 +175,12 @@ pub(crate) fn gone_place(
 /// it), the current account's environment read and the declarations derived from it, then
 /// `bt-pty`'s spawn — the folder's existence check, the pseudoconsole, the process, and the
 /// one-shot retry to the last-resort shell.
-fn bear(ctx: &WorkerCtx, spec: ShellSpec, wake: OutputWake) -> Born {
+fn bear(
+    ctx: &WorkerCtx,
+    turns: &crate::packaged_turns::PackagedTurns,
+    spec: ShellSpec,
+    wake: OutputWake,
+) -> Born {
     let ShellSpec {
         program,
         arguments,
@@ -233,40 +238,37 @@ fn bear(ctx: &WorkerCtx, spec: ShellSpec, wake: OutputWake) -> Born {
     // package runs, and no such check starts until this spawn has returned; a birth that waited
     // says so once in `diagnostics.log`.
     let package = crate::packaged_turns::package_of_birth(Path::new(&program), &before_folio);
-    let session = crate::packaged_turns::born_in_turn(
-        &crate::packaged_turns::TURNS,
-        ctx,
-        package,
-        &crate::diagnostics::note,
-        || match refresh {
-            Some(refresh) => PtySession::spawn_refreshed(
-                program,
-                &args,
-                &fallback_args,
-                &folio_environment,
-                &profile_environment,
-                refresh,
-                size,
-                wake,
-                working_directory,
-            ),
-            // No account environment to read: the shell inherits this process's, and what a launch
-            // carried is laid over it in the same place it is laid over the account's.
-            None => PtySession::spawn_shell_in(
-                program,
-                &args,
-                &fallback_args,
-                &launch_overrides
-                    .into_iter()
-                    .chain(folio_environment)
-                    .chain(profile_environment)
-                    .collect::<Vec<_>>(),
-                size,
-                wake,
-                working_directory,
-            ),
-        },
-    );
+    let session =
+        crate::packaged_turns::born_in_turn(turns, ctx, package, &crate::diagnostics::note, || {
+            match refresh {
+                Some(refresh) => PtySession::spawn_refreshed(
+                    program,
+                    &args,
+                    &fallback_args,
+                    &folio_environment,
+                    &profile_environment,
+                    refresh,
+                    size,
+                    wake,
+                    working_directory,
+                ),
+                // No account environment to read: the shell inherits this process's, and what a launch
+                // carried is laid over it in the same place it is laid over the account's.
+                None => PtySession::spawn_shell_in(
+                    program,
+                    &args,
+                    &fallback_args,
+                    &launch_overrides
+                        .into_iter()
+                        .chain(folio_environment)
+                        .chain(profile_environment)
+                        .collect::<Vec<_>>(),
+                    size,
+                    wake,
+                    working_directory,
+                ),
+            }
+        });
     Born {
         session,
         folder_gone,
@@ -279,8 +281,17 @@ fn bear(ctx: &WorkerCtx, spec: ShellSpec, wake: OutputWake) -> Born {
 /// handed too, so a pane moved to another window while it is being born is woken there. Answers at
 /// once; only a thread that cannot be started is an error here.
 pub(crate) fn request_shell(spec: ShellSpec, wake: OutputWake) -> Result<ShellBirth, PtyError> {
+    request_shell_in(&crate::packaged_turns::TURNS, spec, wake)
+}
+
+/// [`request_shell`] in `turns` — the process's, or a test's own.
+pub(crate) fn request_shell_in(
+    turns: &'static crate::packaged_turns::PackagedTurns,
+    spec: ShellSpec,
+    wake: OutputWake,
+) -> Result<ShellBirth, PtyError> {
     let reader_wake = wake.clone();
-    request(move |ctx| bear(ctx, spec, reader_wake), wake)
+    request(move |ctx| bear(ctx, turns, spec, reader_wake), wake)
 }
 
 /// **The process's shell births**: the last number given, the answers published and not yet

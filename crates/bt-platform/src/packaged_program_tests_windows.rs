@@ -210,3 +210,54 @@ fn only_a_packaged_program_s_access_denied_is_the_packaged_refusal() {
     assert!(crate::packaged_job_list_refusal(&denied, &alias));
     assert!(crate::packaged_job_list_refusal(&denied, &target));
 }
+
+/// RED (round 2, the experiment's §5 witness) — **a check of the Store PowerShell settled while
+/// another process of its package ran names that process**: a Store PowerShell the test starts
+/// outside the probe (as a pane, a Windows Terminal tab or a typed `pwsh` would be) is listed at
+/// the probe's settlement; the probe itself is not.
+///
+/// **SKIPPED — passes without asserting — on a machine with no Store PowerShell 7** (every CI
+/// runner), with its stderr line.
+///
+/// MUTATION: in `ProbeChild::read_the_settlement`, keep every running process whatever its
+/// package (drop the `package_family_of_process` filter) — the list holds processes of no
+/// package, this test executable among them.
+#[test]
+fn a_check_settled_beside_a_running_process_of_its_package_names_it() {
+    let Some((alias, _)) = store_pwsh() else {
+        skipped("a_check_settled_beside_a_running_process_of_its_package_names_it");
+        return;
+    };
+    let package = package_family_of(&alias).expect("the alias names its package");
+    let mut beside = crate::quiet_command(&alias)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Start-Sleep -Seconds 60",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("start a Store PowerShell beside the probe");
+    let beside_id = beside.id();
+    let mut command = crate::quiet_command(&alias);
+    command.args(["-NoProfile", "-NonInteractive", "-Command", "exit 0"]);
+    let mut probe = crate::spawn_probe(&mut command, crate::ProbeStdio::ANSWER)
+        .expect("the alias's probe starts");
+    probe.watch_its_settlement(Some(package));
+    let probe_id = probe.id();
+    let settled = probe.wait();
+    let listed = probe.package_beside_at_settlement().map(<[u32]>::to_vec);
+    let _ = beside.kill();
+    let _ = beside.wait();
+    assert!(settled.is_ok(), "{settled:?}");
+    let listed = listed.expect("read at the settlement");
+    assert!(listed.contains(&beside_id), "{listed:?} lacks {beside_id}");
+    assert!(!listed.contains(&probe_id), "the probe itself was listed");
+    assert!(
+        !listed.contains(&std::process::id()),
+        "a process of no package was listed"
+    );
+}

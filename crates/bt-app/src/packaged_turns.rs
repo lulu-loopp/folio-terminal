@@ -15,12 +15,25 @@
 //!
 //! **One owner, [`TURNS`], waited on only on workers.** A birth takes its turn on its
 //! `bt-pty-birth` worker ([`born_in_turn`], around `bt-pty`'s spawn), a check on the worker that
-//! asks it ([`PackagedTurns::check_turn`], from the probe's spawn to its settlement). Neither wait
-//! has a clock of its own: a birth's wait ends when the check's own patience
-//! (`bt_platform::ProbeChild::wait_within`, which ends a probe that outlives it) has settled the
-//! check; a check's ends when the birth's spawn has returned. A program in no package takes no
-//! turn and never waits. The turns are this process's: a command-line verb that asks a
-//! PowerShell from a process of its own births no pane, and is not in them.
+//! asks it ([`PackagedTurns::check_turn`], from the probe's spawn until its output is collected —
+//! the last of its handles let go). **A waiting birth goes first**: a check asked while a birth of
+//! its package waits, or is under way, waits for that birth, so a birth waits only for the checks
+//! that already held the package when it came. Neither wait has a clock of its own: each of those
+//! checks is ended by its own patience (`bt_platform::ProbeChild::wait_within`, which ends a probe
+//! that outlives it), so a birth waits at most the longest of their patiences; a check's wait ends
+//! when the births before it have spawned. A program in no package takes no turn and never waits.
+//!
+//! **What the turns do not cover** (named, not built):
+//! - **Other processes.** The turns are this process's: a command-line verb
+//!   (`--remove-shell-integration`) asking a Store PowerShell, or an update candidate during its
+//!   hand-off, is not ordered against this process's births.
+//! - **A Store PowerShell started outside a birth** while a check runs — a Windows Terminal tab, or
+//!   `pwsh` typed in a Windows PowerShell or Command Prompt pane — is not a birth and takes no turn.
+//! - **A program the package lookup does not recognise** takes no turn on either side: a symbolic
+//!   link a person made to the alias or to the package's `pwsh.exe` (it is read as the link, not
+//!   followed), and a program inside a package registered from a development folder not named for
+//!   its full name, reached by path ([`bt_platform::package_family_of`]). A `\\?\` verbatim
+//!   spelling of either is recognised.
 
 use std::path::Path;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
@@ -46,8 +59,7 @@ struct Turning {
     checks: Vec<&'static str>,
     /// How many births of it are under way.
     births: usize,
-    /// How many births of it wait for its checks — where a test sees a birth wait.
-    #[cfg(test)]
+    /// How many births of it wait for its checks: a check asked meanwhile waits for them too.
     births_waiting: usize,
     /// How many checks of it wait for its births.
     #[cfg(test)]
@@ -60,7 +72,6 @@ impl Turning {
             package,
             checks: Vec::new(),
             births: 0,
-            #[cfg(test)]
             births_waiting: 0,
             #[cfg(test)]
             checks_waiting: 0,
@@ -69,10 +80,10 @@ impl Turning {
 
     fn holds_nothing(&self) -> bool {
         #[cfg(test)]
-        if self.births_waiting > 0 || self.checks_waiting > 0 {
+        if self.checks_waiting > 0 {
             return false;
         }
-        self.checks.is_empty() && self.births == 0
+        self.checks.is_empty() && self.births == 0 && self.births_waiting == 0
     }
 }
 
@@ -118,8 +129,9 @@ impl PackagedTurns {
     }
 
     /// **A check's turn on `package`** (`worker`, the capability the thread door lent it): waits
-    /// while a birth of the package is under way, then holds the package for checks — a birth of
-    /// it waits — until the turn is dropped, which the caller does once the check has settled.
+    /// while a birth of the package is under way or waiting — a waiting birth goes first — then
+    /// holds the package for checks — a birth of it waits — until the turn is dropped, which the
+    /// caller does once the check has settled and its output is collected.
     /// `edition` names the check in the line a birth that waited for it leaves. `None` (a program
     /// in no package) takes no turn.
     pub(crate) fn check_turn(
@@ -141,7 +153,10 @@ impl PackagedTurns {
             turning(&mut state, &package).checks_waiting += 1;
             self.changed.notify_all();
         }
-        while turning(&mut state, &package).births > 0 {
+        while {
+            let turn = turning(&mut state, &package);
+            turn.births > 0 || turn.births_waiting > 0
+        } {
             state = self
                 .changed
                 .wait(state)
@@ -160,9 +175,10 @@ impl PackagedTurns {
     }
 
     /// **A birth's turn on `package`** (`worker`, its `bt-pty-birth` worker's capability): waits
-    /// while a check of the package runs, then holds the package for births — a check of it waits
-    /// — until the turn is dropped, which [`born_in_turn`] does once the spawn has returned. The
-    /// turn says how long it waited, and for which check, when it did. `None` takes no turn.
+    /// while a check of the package runs — and, while it waits, a check asked after it waits
+    /// behind it — then holds the package for births — a check of it waits — until the turn is
+    /// dropped, which [`born_in_turn`] does once the spawn has returned. The turn says how long
+    /// it waited, and for which check, when it did. `None` takes no turn.
     pub(crate) fn birth_turn(
         &self,
         worker: &WorkerCtx,
@@ -181,11 +197,8 @@ impl PackagedTurns {
         while let Some(edition) = turning(&mut state, &package).checks.first().copied() {
             if waiting.is_none() {
                 waiting = Some((std::time::Instant::now(), edition));
-                #[cfg(test)]
-                {
-                    turning(&mut state, &package).births_waiting += 1;
-                    self.changed.notify_all();
-                }
+                turning(&mut state, &package).births_waiting += 1;
+                self.changed.notify_all();
             }
             state = self
                 .changed
@@ -193,7 +206,6 @@ impl PackagedTurns {
                 .unwrap_or_else(PoisonError::into_inner);
         }
         let turn = turning(&mut state, &package);
-        #[cfg(test)]
         if waiting.is_some() {
             turn.births_waiting -= 1;
         }

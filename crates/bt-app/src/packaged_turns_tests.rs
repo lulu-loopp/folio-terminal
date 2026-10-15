@@ -138,6 +138,54 @@ fn a_check_does_not_start_while_a_birth_of_its_program_is_pending() {
     );
 }
 
+/// RED (round 2) — **a waiting birth goes first**: while a birth waits for a check that holds its
+/// package, a second check of that package asked meanwhile does not take a turn beside the first;
+/// it starts only after the birth has spawned. So a birth waits only for the checks that held the
+/// package when it came, never for a chain of later ones.
+///
+/// MUTATION: in `PackagedTurns::check_turn`, wait only while births are under way, not while one
+/// waits — the second check takes its turn at once beside the first.
+#[test]
+fn a_check_asked_while_a_birth_waits_starts_after_the_birth() {
+    let turns = turns();
+    let first = Arc::new(Hold::default());
+    first.hold();
+    let holding = scripted_check(turns, powershell(), &first);
+    receive(&holding, "the first check holding its package");
+    let spawn = Arc::new(Hold::default());
+    spawn.hold();
+    let (born, births) = mpsc::channel();
+    let in_birth = Arc::clone(&spawn);
+    on_a_worker("packaged-turns-birth", move |worker| {
+        born_in_turn(turns, worker, Some(powershell()), &|_| (), || {
+            in_birth.pass();
+            let _ = born.send(());
+        });
+    });
+    wait_until("the birth waiting for the first check", || {
+        turns.waiting(&powershell()).0 == 1
+    });
+    let (checked, checks) = mpsc::channel();
+    on_a_worker("packaged-turns-check", move |worker| {
+        let turn = turns.check_turn(worker, Some(powershell()), "PowerShell 7");
+        let _ = checked.send(());
+        drop(turn);
+    });
+    wait_until("the second check waiting behind the birth", || {
+        turns.waiting(&powershell()).1 == 1
+    });
+    first.release();
+    spawn.wait_standing("the birth in its spawn");
+    assert!(
+        checks.try_recv().is_err(),
+        "the second check started before the birth"
+    );
+    spawn.release();
+    receive(&births, "the birth's spawn returning");
+    receive(&checks, "the second check once the birth was over");
+    wait_until("the package let go", || turns.idle(&powershell()));
+}
+
 /// RED — **a birth of another program never waits**: while a check of the Store PowerShell runs,
 /// a pane of a program in no package (Windows PowerShell 5.1, `cmd.exe`: `None`) and one of
 /// another package (PowerShell 7 Preview, a family of its own) are born at once, saying nothing.
@@ -215,6 +263,7 @@ fn the_wait_is_bounded_by_the_checks_deadline() {
         let answer = crate::shell_integration::run_powershell_probe(
             command,
             Some(turn),
+            None,
             Path::new("pwsh.exe"),
             "Start-Sleep -Seconds 600; 'never'",
             None,
@@ -280,11 +329,16 @@ fn skipped(test: &str) {
     eprintln!("packaged turns test skipped={test} reason=no-store-powershell");
 }
 
-/// RED (wiring, Windows with a Store PowerShell 7) — **the product's PowerShell check takes the
-/// process's turn**: while a pane of the Store PowerShell's package is being born (held in its
-/// spawn), `check_powershell` of the Store alias waits, and runs once the birth is over.
+/// RED (wiring, Windows with a Store PowerShell 7) — **the product's PowerShell check takes its
+/// turn**: while a pane of the Store PowerShell's package is being born (held in its spawn),
+/// `check_powershell_in` of the Store alias waits, and runs once the birth is over. In turns of
+/// its own, so no other test's PowerShell can stand in the same line.
 ///
-/// MUTATION: in `check_powershell`, take the turn on no package (`check_turn(worker, None, …)`,
+/// **SKIPPED — passes without asserting — on a machine with no Store PowerShell 7** (every CI
+/// runner): it says `packaged turns test skipped=… reason=no-store-powershell` on stderr. Its
+/// proof is a run on a machine that has one (the owner's).
+///
+/// MUTATION: in `check_powershell_in`, take the turn on no package (`check_turn(worker, None, …)`,
 /// the door bypassed) — the check runs during the birth, and none is seen waiting.
 #[cfg(windows)]
 #[test]
@@ -293,13 +347,14 @@ fn a_store_powershell_check_takes_its_turn_with_a_birth_of_its_package() {
         skipped("a_store_powershell_check_takes_its_turn_with_a_birth_of_its_package");
         return;
     };
+    let turns = turns();
     let hold = Arc::new(Hold::default());
     hold.hold();
     let in_birth = Arc::clone(&hold);
     let birth_package = package.clone();
     let (born, births) = mpsc::channel();
     on_a_worker("packaged-turns-birth", move |worker| {
-        born_in_turn(&TURNS, worker, Some(birth_package), &|_| (), || {
+        born_in_turn(turns, worker, Some(birth_package), &|_| (), || {
             in_birth.pass();
             let _ = born.send(());
         });
@@ -307,7 +362,8 @@ fn a_store_powershell_check_takes_its_turn_with_a_birth_of_its_package() {
     hold.wait_standing("the birth in its spawn");
     let (checked, checks) = mpsc::channel();
     on_a_worker("packaged-turns-check", move |worker| {
-        let answer = crate::shell_integration::check_powershell(
+        let answer = crate::shell_integration::check_powershell_in(
+            turns,
             worker,
             &alias,
             "exit 0",
@@ -318,7 +374,7 @@ fn a_store_powershell_check_takes_its_turn_with_a_birth_of_its_package() {
         let _ = checked.send(answer.is_ok());
     });
     wait_until("the check waiting for the birth", || {
-        TURNS.waiting(&package).1 == 1
+        turns.waiting(&package).1 == 1
     });
     assert!(checks.try_recv().is_err(), "the check ran during the birth");
     hold.release();
@@ -326,9 +382,12 @@ fn a_store_powershell_check_takes_its_turn_with_a_birth_of_its_package() {
     assert!(receive(&checks, "the check once the birth was over"));
 }
 
-/// RED (wiring, Windows with a Store PowerShell 7) — **the product's birth takes the process's
-/// turn**: a shell of the Store alias asked through `pty_door::request_shell` while a check of its
-/// package holds the turn is not born until the check settles.
+/// RED (wiring, Windows with a Store PowerShell 7) — **the product's birth takes its turn**: a
+/// shell of the Store alias asked through `pty_door::request_shell_in` while a check of its
+/// package holds the turn is not born until the check settles. In turns of its own.
+///
+/// **SKIPPED — passes without asserting — on a machine with no Store PowerShell 7** (every CI
+/// runner): it says `packaged turns test skipped=… reason=no-store-powershell` on stderr.
 ///
 /// MUTATION: in `pty_door::bear`, call the spawn without `born_in_turn` (the door bypassed) — the
 /// shell is born while the check is held, and no birth is seen waiting.
@@ -339,15 +398,17 @@ fn a_store_powershell_pane_takes_its_turn_with_a_check_of_its_package() {
         skipped("a_store_powershell_pane_takes_its_turn_with_a_check_of_its_package");
         return;
     };
+    let turns = turns();
     let hold = Arc::new(Hold::default());
     hold.hold();
-    let holding = scripted_check(&TURNS, package.clone(), &hold);
+    let holding = scripted_check(turns, package.clone(), &hold);
     receive(&holding, "the check holding its package");
     let size = bt_pty::PtySize::cells(
         std::num::NonZeroU16::new(80).expect("columns"),
         std::num::NonZeroU16::new(24).expect("rows"),
     );
-    let mut shell = crate::pty_door::request_shell(
+    let mut shell = crate::pty_door::request_shell_in(
+        turns,
         crate::pty_door::ShellSpec {
             program: alias.into_os_string(),
             arguments: ["-NoLogo", "-NoProfile", "-Command", "exit 5"]
@@ -367,7 +428,7 @@ fn a_store_powershell_pane_takes_its_turn_with_a_check_of_its_package() {
     )
     .expect("a birth worker");
     wait_until("the shell's birth waiting for the check", || {
-        TURNS.waiting(&package).0 == 1
+        turns.waiting(&package).0 == 1
     });
     assert!(!shell.answered(), "born while the check ran");
     hold.release();

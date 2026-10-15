@@ -47,7 +47,9 @@ impl PackageFamily {
 ///   like one is not.
 ///
 /// What it does not see: a program inside a package registered from a development folder whose
-/// name is not the package's full name, reached by its path rather than through its alias.
+/// name is not the package's full name, reached by its path rather than through its alias; and a
+/// symbolic link a person made to the alias or to the package's `pwsh.exe`, which is read as the
+/// link it is, never followed. A `\\?\` verbatim spelling is compared as the plain one.
 #[cfg(windows)]
 #[must_use]
 pub fn package_family_of(program: &std::path::Path) -> Option<PackageFamily> {
@@ -73,11 +75,12 @@ mod windows_impl {
         FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
     use windows::Win32::Storage::Packaging::Appx::{
-        GetPackagePathByFullName, PackageFamilyNameFromFullName,
+        GetPackageFamilyName, GetPackagePathByFullName, PackageFamilyNameFromFullName,
     };
     use windows::Win32::System::IO::DeviceIoControl;
     use windows::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
     use windows::Win32::System::SystemServices::IO_REPARSE_TAG_APPEXECLINK;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
     use windows::core::{PCWSTR, PWSTR};
 
     /// The most a reparse point's data can be (`MAXIMUM_REPARSE_DATA_BUFFER_SIZE`).
@@ -166,6 +169,19 @@ mod windows_impl {
         })
     }
 
+    /// The family of the running process `id`, asked of its own token.
+    pub(super) fn process_family(id: u32) -> Option<PackageFamily> {
+        // SAFETY: opens a process for a limited query; the handle moves to `OwnedHandle` at once.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, id) }.ok()?;
+        // SAFETY: as above.
+        let process = unsafe { OwnedHandle::from_raw_handle(process.0) };
+        let name = two_calls(|length, out| {
+            // SAFETY: the handle is live; `out` is `None` or writable storage of `*length` units.
+            unsafe { GetPackageFamilyName(HANDLE(process.as_raw_handle()), length, out) }
+        })?;
+        Some(PackageFamily::named(&name))
+    }
+
     /// The family of a package full name, or `None` when `full_name` is no full name.
     fn family_of_full_name(full_name: &str) -> Option<PackageFamily> {
         let wide = crate::wide_with_nul(std::ffi::OsStr::new(full_name)).ok()?;
@@ -206,16 +222,26 @@ mod windows_impl {
         String::from_utf16(&units[..end]).ok()
     }
 
-    /// Whether two absolute directories are one, component by component, in Windows' case rule.
+    /// Whether two absolute directories are one, component by component, in Windows' case rule;
+    /// a `\\?\` verbatim spelling is read as the plain one.
     fn same_directory(left: &Path, right: &Path) -> bool {
         let parts = |path: &Path| -> Vec<String> {
-            path.components()
+            crate::handoff::strip_verbatim_prefix(path)
+                .components()
                 .filter(|component| !matches!(component, Component::CurDir))
                 .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
                 .collect()
         };
         parts(left) == parts(right)
     }
+}
+
+/// **The package a running process belongs to**, asked of the process itself
+/// (`GetPackageFamilyName`); `None` for a process in no package, one that has exited, and one
+/// this process may not ask.
+#[cfg(windows)]
+pub(crate) fn package_family_of_process(id: u32) -> Option<PackageFamily> {
+    windows_impl::process_family(id)
 }
 
 #[cfg(all(test, windows))]

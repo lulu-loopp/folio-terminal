@@ -4128,10 +4128,39 @@ pub(crate) fn check_powershell(
     patience: bt_platform::ProbePatience,
     environment: &ProbeEnvironment,
 ) -> Result<ProbeOutput, ParseProbeFailure> {
+    check_powershell_in(
+        &crate::packaged_turns::TURNS,
+        worker,
+        program,
+        command,
+        input,
+        patience,
+        environment,
+    )
+}
+
+/// [`check_powershell`] in `turns` — the process's, or a test's own.
+pub(crate) fn check_powershell_in(
+    turns: &crate::packaged_turns::PackagedTurns,
+    worker: &bt_platform::admission::WorkerCtx,
+    program: &Path,
+    command: &str,
+    input: Option<&str>,
+    patience: bt_platform::ProbePatience,
+    environment: &ProbeEnvironment,
+) -> Result<ProbeOutput, ParseProbeFailure> {
     let probe = powershell_probe_command(program, environment)?;
     let package = bt_platform::package_family_of(Path::new(probe.get_program()));
-    let turn = crate::packaged_turns::TURNS.check_turn(worker, package, edition_words(program));
-    run_powershell_probe(probe, Some(turn), program, command, input, patience)
+    let turn = turns.check_turn(worker, package.clone(), edition_words(program));
+    run_powershell_probe(
+        probe,
+        Some(turn),
+        package,
+        program,
+        command,
+        input,
+        patience,
+    )
 }
 
 /// **A PowerShell check asked from a command-line verb's own process**, which births no pane and
@@ -4144,7 +4173,8 @@ fn check_powershell_from_a_verb(
     environment: &ProbeEnvironment,
 ) -> Result<ProbeOutput, ParseProbeFailure> {
     let probe = powershell_probe_command(program, environment)?;
-    run_powershell_probe(probe, None, program, command, None, patience)
+    let package = bt_platform::package_family_of(Path::new(probe.get_program()));
+    run_powershell_probe(probe, None, package, program, command, None, patience)
 }
 
 /// The `diagnostics.log` line a check leaves when its job held other processes as it settled
@@ -4159,11 +4189,36 @@ fn settled_beside_line(program: &Path, others: Option<usize>) -> Option<String> 
     })
 }
 
-/// **One PowerShell probe of `program`, already resolved into `probe`**, run while `turn` holds
-/// its package; the turn is let go as soon as the probe has settled.
+/// The `diagnostics.log` line a check of a packaged PowerShell leaves when, as it settled, other
+/// processes of its package ran outside its tree (`beside`, by id): the witness of a desktop app
+/// container the check shared — a pane of that package, a Windows Terminal tab, a `pwsh` typed in
+/// another shell. Expected beside panes already running (a check that joins their container is
+/// harmless); a pane born during the check is what the turns keep out. `None` when there were
+/// none, or nothing was read.
+fn package_beside_line(program: &Path, beside: Option<&[u32]>) -> Option<String> {
+    beside.filter(|beside| !beside.is_empty()).map(|beside| {
+        format!(
+            "Folio: the {} check settled while {} other processes of its package ran ({})",
+            edition_words(program),
+            beside.len(),
+            beside
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })
+}
+
+/// **One PowerShell probe of `program`, already resolved into `probe`** (its package `package`),
+/// run while `turn` holds that package; the turn is let go once the probe has settled and its
+/// output is collected — every handle of it let go. Its settlement is read
+/// ([`bt_platform::ProbeChild::watch_its_settlement`]) and said when it held anything outside the
+/// probe's own tree.
 pub(crate) fn run_powershell_probe(
     mut probe: std::process::Command,
     turn: Option<crate::packaged_turns::CheckTurn<'_>>,
+    package: Option<bt_platform::PackageFamily>,
     program: &Path,
     command: &str,
     input: Option<&str>,
@@ -4185,6 +4240,7 @@ pub(crate) fn run_powershell_probe(
     };
     let mut child = bt_platform::spawn_probe(&mut probe, stdio)
         .map_err(|error| ParseProbeFailure::Spawn(error.to_string()))?;
+    child.watch_its_settlement(package);
     if let Some(input) = input {
         let written = child.take_stdin().map_or_else(
             || Err("the piped stdin handle was absent".to_owned()),
@@ -4205,24 +4261,17 @@ pub(crate) fn run_powershell_probe(
     }
     // **Waited for while it works** (G-SWEEP-048): the probe door's own patience, looked at every
     // 20 ms on this worker; a probe that shows no life for the quiet period, or works past the
-    // budget, is ended with everything it started. **Its turn ends with its settlement**
-    // (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH): a birth of its package waits no longer than this
-    // patience lets the probe run.
+    // budget, is ended with everything it started. **Its turn ends once its output is collected**
+    // (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH), the last of its handles let go: a birth of its
+    // package waits no longer than this patience lets the probe run.
     match child.wait_within(patience, &mut || {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }) {
-        Ok(Ok(_)) => {
-            drop(turn);
-            if let Some(line) =
-                settled_beside_line(program, child.others_at_settlement().map(<[u32]>::len))
-            {
-                crate::diagnostics::note(&line);
-            }
-        }
+        Ok(Ok(_)) => {}
         Ok(Err(overdue)) => {
-            drop(turn);
             crate::diagnostics::note(&overdue_line(program, overdue, patience));
             let output = stopped_output(child);
+            drop(turn);
             return Err(ParseProbeFailure::Overdue {
                 overdue,
                 patience,
@@ -4240,6 +4289,8 @@ pub(crate) fn run_powershell_probe(
             });
         }
     }
+    let others = child.others_at_settlement().map(<[u32]>::len);
+    let beside = child.package_beside_at_settlement().map(<[u32]>::to_vec);
     let output = child
         .wait_with_output()
         .map_err(|error| ParseProbeFailure::Wait {
@@ -4247,6 +4298,16 @@ pub(crate) fn run_powershell_probe(
             stdout: "[]".to_owned(),
             stderr: "[]".to_owned(),
         })?;
+    drop(turn);
+    for line in [
+        settled_beside_line(program, others),
+        package_beside_line(program, beside.as_deref()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        crate::diagnostics::note(&line);
+    }
     bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Settings, &output);
     if !output.status.success() {
         return Err(ParseProbeFailure::Exit {
@@ -11020,6 +11081,26 @@ mod tests {
     /// The name both PowerShells give the file, for the tests that stand one up
     /// rather than asking a shell where it is.
     const PROFILE_LEAF: &str = "Microsoft.PowerShell_profile.ps1";
+
+    /// RED (round 2) — **the witness line**: a check of a packaged PowerShell that settled while
+    /// other processes of its package ran says how many and which, naming its edition; none, or
+    /// nothing read, says nothing.
+    ///
+    /// MUTATION: say the line for an empty list (drop the `is_empty` filter) — a check beside
+    /// nothing leaves a line.
+    #[test]
+    fn a_check_settled_beside_its_package_says_which() {
+        let pwsh = Path::new(r"C:\Users\李四\AppData\Local\Microsoft\WindowsApps\pwsh.exe");
+        assert_eq!(
+            package_beside_line(pwsh, Some(&[4242, 77])).as_deref(),
+            Some(
+                "Folio: the PowerShell 7 check settled while 2 other processes of its package ran \
+                 (4242, 77)"
+            )
+        );
+        assert_eq!(package_beside_line(pwsh, Some(&[])), None);
+        assert_eq!(package_beside_line(pwsh, None), None);
+    }
 
     /// Run `body` on a worker the thread door started — where every PowerShell check is asked —
     /// and wait for it.

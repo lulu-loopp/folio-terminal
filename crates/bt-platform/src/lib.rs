@@ -3339,6 +3339,12 @@ pub struct ProbeChild {
     /// How many processes other than the immediate child the probe's job held when the child was
     /// seen to have exited, read just before the job closed ([`Self::others_at_settlement`]).
     others_at_settlement: Option<Vec<u32>>,
+    /// Whether the settlement is read ([`Self::watch_its_settlement`]), and the package whose
+    /// running processes it reads.
+    watched: Option<Option<PackageFamily>>,
+    /// The running processes of the watched package outside the probe's tree at the settlement
+    /// ([`Self::package_beside_at_settlement`]).
+    package_beside_at_settlement: Option<Vec<u32>>,
 }
 
 /// The immediate child of a probe. On Windows the probe door created it
@@ -3426,34 +3432,80 @@ impl ProbeChild {
         })
     }
 
+    /// **Read this probe's settlement** (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH): when its
+    /// immediate child is seen to have exited, before the job closes, the job's members outside
+    /// the probe's tree ([`Self::others_at_settlement`]) and, when `package` is given, the running
+    /// processes of that package outside it ([`Self::package_beside_at_settlement`]). Asked by a
+    /// PowerShell check; a probe nobody asks reads nothing at its settlement.
+    pub fn watch_its_settlement(&mut self, package: Option<PackageFamily>) {
+        self.watched = Some(package);
+    }
+
     /// **The processes outside its own tree the probe's job held when its immediate child was
     /// seen to have exited**, by id — read at that settlement, just before the job closed and
-    /// ended them (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH: the proof that closing a check's job
-    /// took nothing but the check's own tree with it). The probe's own tree is its immediate child
-    /// and every member whose parent, followed through the job's members, is that child — the
-    /// console host it was given and a descendant it left running among them; a member already
-    /// gone from the system is nobody's; anything else in the job is another's. The child's id names nobody else while the probe holds its handle,
-    /// which it does until it is reaped. `None` when it was not read: a probe ended
-    /// before its child exited ([`Self::kill`] closes the job first), a probe not yet settled, an
-    /// uncontained one, a list the kernel would not give, and off Windows, where a process group
-    /// has no such list.
+    /// ended them (the proof that closing a check's job took nothing but the check's own tree
+    /// with it). The probe's tree is its immediate child and every process whose parent, followed
+    /// up, is that child — the console host it was given and a descendant it left running among
+    /// them; a member already gone from the system is nobody's. Two miscounts are known: a
+    /// descendant whose own parent has exited (an orphan two levels down) is read as another's,
+    /// and a parent id the system has given to a new process since is followed as if it were the
+    /// old one. The immediate child's id is not one of them: the probe holds its handle until it
+    /// is reaped. `None` when it was not read: a probe nobody watched
+    /// ([`Self::watch_its_settlement`]), one ended before its child exited ([`Self::kill`] closes
+    /// the job first), one not yet settled, an uncontained one, a list the kernel would not give,
+    /// and off Windows, where a process group has no such list.
     #[must_use]
     pub fn others_at_settlement(&self) -> Option<&[u32]> {
         self.others_at_settlement.as_deref()
     }
 
-    /// The processes in the probe's job outside its own tree, while the job is held.
-    #[cfg(windows)]
-    fn others_in_job(&self) -> Option<Vec<u32>> {
-        let job = self.guard.job.as_ref()?;
-        let members = job_process_ids(job).ok()?;
-        let parents = process_parents().ok()?;
-        Some(outside_the_tree(self.leader.id, &members, &parents))
+    /// **The running processes of the watched package outside the probe's tree at its
+    /// settlement**, by id — what can see a desktop app container the probe shares with a pane
+    /// (a pane is never in the probe's job: the job list cannot). `None` when no package was
+    /// watched, under the conditions [`Self::others_at_settlement`] names, and off Windows.
+    #[must_use]
+    pub fn package_beside_at_settlement(&self) -> Option<&[u32]> {
+        self.package_beside_at_settlement.as_deref()
     }
 
+    /// The settlement's two readings, while the job is held, from one snapshot of the system's
+    /// processes — taken only when there is something to judge.
+    #[cfg(windows)]
+    fn read_the_settlement(&mut self) {
+        let Some(package) = &self.watched else {
+            return;
+        };
+        let Some(job) = self.guard.job.as_ref() else {
+            return;
+        };
+        let Ok(mut members) = job_process_ids(job) else {
+            return;
+        };
+        members.retain(|id| *id != self.leader.id);
+        if members.is_empty() && package.is_none() {
+            self.others_at_settlement = Some(members);
+            return;
+        }
+        let Ok(parents) = process_parents() else {
+            return;
+        };
+        self.others_at_settlement = Some(outside_the_tree(self.leader.id, &members, &parents));
+        if let Some(package) = package {
+            let running: Vec<u32> = parents.keys().copied().collect();
+            let beside: Vec<u32> = outside_the_tree(self.leader.id, &running, &parents)
+                .into_iter()
+                .filter(|id| {
+                    packaged_program::package_family_of_process(*id).as_ref() == Some(package)
+                })
+                .collect();
+            self.package_beside_at_settlement = Some(beside);
+        }
+    }
+
+    /// Off Windows a process group has no list to read: nothing is read, whatever was asked.
     #[cfg(not(windows))]
-    fn others_in_job(&self) -> Option<Vec<u32>> {
-        None
+    fn read_the_settlement(&mut self) {
+        let _ = &self.watched;
     }
 
     /// The one settlement road: observe the immediate child without reaping
@@ -3466,7 +3518,7 @@ impl ProbeChild {
         if !probe_leader_has_exited(&self.leader, block)? {
             return Ok(None);
         }
-        self.others_at_settlement = self.others_in_job();
+        self.read_the_settlement();
         let ended = self.guard.end();
         let status = reap_probe_leader(&self.leader, ended)?;
         self.settled = Some(status);
@@ -3605,28 +3657,30 @@ fn process_parents() -> std::io::Result<std::collections::HashMap<u32, u32>> {
     Ok(parents)
 }
 
-/// **The members of a probe's job outside the tree of `leader`**: a member is in the tree when
-/// its parent is `leader`, or another member in the tree; the rest are outside it. A member the
-/// snapshot (taken after the list) does not hold has exited since — the console host of a child
-/// that just ended — and is nobody's. `leader` itself is not listed.
+/// **The processes among `candidates` outside the tree of `leader`**: a process is in the tree
+/// when its parent is `leader`, or a process in the tree, followed up through the snapshot
+/// `parents`; one the snapshot (taken after `candidates` were read) does not hold has exited
+/// since — the console host of a child that just ended — and is nobody's. `leader` itself is
+/// not listed.
 #[cfg(windows)]
 fn outside_the_tree(
     leader: u32,
-    members: &[u32],
+    candidates: &[u32],
     parents: &std::collections::HashMap<u32, u32>,
 ) -> Vec<u32> {
     let in_tree = |mut at: u32| {
-        // Each step moves to another member, so a chain longer than the members is a cycle.
-        for _ in 0..=members.len() {
+        // Each step moves to another process the snapshot holds, so a chain longer than the
+        // snapshot is a cycle.
+        for _ in 0..=parents.len() {
             match parents.get(&at) {
                 Some(parent) if *parent == leader => return true,
-                Some(parent) if members.contains(parent) && *parent != at => at = *parent,
+                Some(parent) if parents.contains_key(parent) && *parent != at => at = *parent,
                 _ => return false,
             }
         }
         false
     };
-    members
+    candidates
         .iter()
         .copied()
         .filter(|id| *id != leader && parents.contains_key(id) && !in_tree(*id))
@@ -4656,6 +4710,8 @@ fn spawn_probe_with(
         guard: held,
         settled: None,
         others_at_settlement: None,
+        watched: None,
+        package_beside_at_settlement: None,
     };
     if let Some(error) = refused {
         // No guard holds the child: it is ended and reaped through the probe's
@@ -5028,6 +5084,8 @@ fn spawn_probe_born(
         guard,
         settled: None,
         others_at_settlement: None,
+        watched: None,
+        package_beside_at_settlement: None,
     })
 }
 
@@ -6569,12 +6627,14 @@ mod probe_child_tests {
     /// process outside its own tree names it**: an unrelated helper the test puts in the probe's
     /// job (as a container's member would be, were it nested there) is listed at the settlement,
     /// read before the close, which then ends it; the probe's own descendant left running and its
-    /// console host are its tree and are not. A probe whose job held only its tree lists none, and
-    /// one ended before its child exited is not read.
+    /// console host are its tree and are not. A probe whose job held only its tree lists none, one
+    /// ended before its child exited is not read, and one nobody watched reads nothing (round 2:
+    /// a settlement is read only for a PowerShell check, never for git's probes).
     ///
     /// MUTATION: in `ProbeChild::settle`, read the job's list after `self.guard.end()` (the job is
     /// gone, nothing is read) — the list is `None`; or answer every member but the leader from
-    /// `outside_the_tree` — the descendant is listed too.
+    /// `outside_the_tree` — the descendant is listed too; or read every settlement whether watched
+    /// or not — the unwatched probe answers a list.
     #[test]
     fn a_probe_settled_beside_another_process_names_it() {
         use windows::Win32::System::JobObjects::AssignProcessToJobObject;
@@ -6582,6 +6642,7 @@ mod probe_child_tests {
         let mut command = helper_command_for("child-exits");
         let mut child = spawn_probe(&mut command, HELPER_STDIO).expect("start contained helper");
         let _child_tree = HelperTree::of(child.id());
+        child.watch_its_settlement(None);
         // The grandchild inherits this pipe: it is kept open, so the grandchild is still running
         // when its parent exits.
         let mut output = child.take_stdout().expect("helper stdout");
@@ -6639,14 +6700,31 @@ mod probe_child_tests {
         let mut alone = helper_command_for("child-exits");
         let mut alone = spawn_probe(&mut alone, HELPER_STDIO).expect("start a lone helper");
         let _alone_tree = HelperTree::of(alone.id());
+        alone.watch_its_settlement(None);
         let mut alone_output = alone.take_stdout().expect("helper stdout");
         let _ = announced(&mut alone_output, "ready");
         let _ = alone.wait().expect("settle the lone helper");
         drop(alone_output);
         assert_eq!(alone.others_at_settlement(), Some(&[][..]));
+        assert_eq!(
+            alone.package_beside_at_settlement(),
+            None,
+            "no package watched"
+        );
+
+        let mut unwatched = helper_command_for("child-exits");
+        let mut unwatched =
+            spawn_probe(&mut unwatched, HELPER_STDIO).expect("start an unwatched helper");
+        let _unwatched_tree = HelperTree::of(unwatched.id());
+        let mut unwatched_output = unwatched.take_stdout().expect("helper stdout");
+        let _ = announced(&mut unwatched_output, "ready");
+        let _ = unwatched.wait().expect("settle the unwatched helper");
+        drop(unwatched_output);
+        assert_eq!(unwatched.others_at_settlement(), None, "nobody watched it");
 
         let mut ended = spawn_probe(&mut helper_command(), HELPER_STDIO).expect("start helper");
         let _ended_tree = HelperTree::of(ended.id());
+        ended.watch_its_settlement(None);
         let _ = ready_probe(&mut ended);
         ended.kill().expect("end the probe at its deadline");
         assert_eq!(
