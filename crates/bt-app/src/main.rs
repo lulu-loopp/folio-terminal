@@ -11976,6 +11976,17 @@ struct MathAnswers {
     lane_gone: bool,
 }
 
+/// **What the repository lanes' drain hands the windows** ([`FolioApp::drain_git_answers`]): the
+/// pages' answers and receipts, each addressed to where its cache stands; the documents' answers,
+/// each addressed to where its buffer is kept; and whether the read worker was found gone on this
+/// turn.
+#[derive(Default)]
+struct GitAnswers {
+    pages: Vec<git::GitResponse>,
+    documents: Vec<git::GitDocumentAnswer>,
+    gone: bool,
+}
+
 /// **The terminals one drain took, sorted for the windows**: an answer joins `done`; a failed
 /// request — its own failure, or the one it joined — is settled ([`settle_failure`]): an error
 /// answer joins `done`, a pane task or an animation fill joins `failed` for the window that holds
@@ -17256,6 +17267,7 @@ mod worker_answer_routing_tests {
             window: window_a(),
             host: git::GitHost::Column(leaf),
             asker: git::GitCacheId::mint(),
+            buffer: None,
             answer: git::GitAnswer::Repo {
                 dir: PathBuf::from("/repo"),
                 outcome: Ok(PathBuf::from("/repo")),
@@ -17275,6 +17287,26 @@ mod worker_answer_routing_tests {
             ..column.clone()
         };
         assert_eq!(popped_out.owner(), AnswerOwner::Window(window_a()));
+        // A document's answer belongs where its buffer is kept: a pool travels
+        // inside its tab, and the hover card is its window's.
+        let mut pool = preview::PreviewPool::default();
+        let diff = preview::PreviewSource::GitDiff {
+            root: PathBuf::from("/repo"),
+            path: "说明 notes.md".to_owned(),
+            against: preview::GitDiffAgainst::Index,
+        };
+        pool.open(diff.clone(), "说明 notes.md".to_owned(), &[]);
+        let pooled = git::GitDocumentAnswer {
+            shelf: git::Shelf::Pool(tab),
+            buffer: pool.ask_composer(&diff).expect("a diff waits on git"),
+            answer: column.answer.clone(),
+        };
+        assert_eq!(pooled.owner(), AnswerOwner::Tab(tab));
+        let glanced = git::GitDocumentAnswer {
+            shelf: git::Shelf::Glance(window_a()),
+            ..pooled.clone()
+        };
+        assert_eq!(glanced.owner(), AnswerOwner::Window(window_a()));
 
         let head = preview::PreviewResponse {
             window: window_a(),
@@ -52174,6 +52206,7 @@ impl Runtime<'_> {
                 window: self.window_id(),
                 host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
                 asker,
+                buffer: None,
                 question,
             })
         {
@@ -52208,6 +52241,7 @@ impl Runtime<'_> {
             window: self.window_id(),
             host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
             asker,
+            buffer: None,
             question,
         }) {
             self.disable_git_worker();
@@ -65314,7 +65348,8 @@ impl FolioApp {
     }
 
     /// [`Self::drain_preview_answers`] for the repository lanes — the read
-    /// worker's answers and the mutation lane's receipts, in one batch.
+    /// worker's answers and the mutation lane's receipts, in one batch, and the
+    /// answers to git documents beside it.
     ///
     /// **The receipts are taken first and filed last.** A read of a repository
     /// sends its answer before any later mutation of it can start
@@ -65324,15 +65359,21 @@ impl FolioApp {
     /// taken before a verb never lands after the verb's receipt has asked the
     /// repository again.
     ///
-    /// **Every answer is owed to the cache that asked** (`git::GitCacheId`),
+    /// **Every page's answer is owed to the cache that asked** (`git::GitCacheId`),
     /// found where it stands now among the caches the open windows hold
     /// (`git_mutation_lane::OpenPages`): a page's answer is addressed there, so a
     /// Files view docked into a column or popped out into a float while git ran
     /// still receives it. A receipt whose cache no open window holds is let go
     /// first, and ends in the lane's sink; a read answer whose cache is gone is
     /// dropped.
-    fn drain_git_answers(&mut self) -> (Vec<git::GitResponse>, bool) {
-        let mut batch = Vec::new();
+    ///
+    /// **Every document's answer is owed to the buffer opened for it**
+    /// (`preview::BufferId`), found where it is kept now — in whichever tab's pool,
+    /// or on a window's hover card — whether or not the page whose row was pressed
+    /// is still open. One whose buffer nothing keeps any more reaches the sink,
+    /// which ignores it: nobody is waiting for it.
+    fn drain_git_answers(&mut self) -> GitAnswers {
+        let mut answers = GitAnswers::default();
         let mut open = git_mutation_lane::OpenPages::default();
         for window in self.windows.values() {
             if window.leaving.is_none() {
@@ -65352,6 +65393,7 @@ impl FolioApp {
                         };
                         open.stand(graph.cache.id(), id, place);
                     }
+                    open.keep_pool(tab.id, &tab.preview_pool);
                 }
                 for win in window.float.live_windows() {
                     if let Some(files) = win.files() {
@@ -65362,10 +65404,11 @@ impl FolioApp {
                         );
                     }
                 }
+                open.keep_glance(id, &window.peek_buffer);
             }
         }
         let Some(app) = self.app.as_mut() else {
-            return (batch, false);
+            return answers;
         };
         let receipts: Vec<git::GitResponse> = app
             .git_mutations
@@ -65375,13 +65418,20 @@ impl FolioApp {
                 open.address(git_mutation_lane::receipt(terminal, request))
             })
             .collect();
-        let mut gone = false;
+        // The sink for a document whose buffer is gone (C6): nobody waits for it.
+        let mut sink = |_unkept: git::GitResponse| {};
         loop {
             match app.git_worker.responses.try_recv() {
-                Ok(response) => batch.extend(open.address(response)),
+                Ok(response) => match open.file(response, &mut sink) {
+                    Some(git_mutation_lane::Filed::Page(page)) => answers.pages.push(page),
+                    Some(git_mutation_lane::Filed::Document(document)) => {
+                        answers.documents.push(document);
+                    }
+                    None => {}
+                },
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    gone = git::disable_git_worker_state(
+                    answers.gone = git::disable_git_worker_state(
                         &mut app.git_worker_running,
                         &mut app.git_worker_notice_pending,
                     );
@@ -65389,8 +65439,8 @@ impl FolioApp {
                 }
             }
         }
-        batch.extend(receipts);
-        (batch, gone)
+        answers.pages.extend(receipts);
+        answers
     }
 
     /// [`Self::drain_preview_answers`] for the computation lane — the formulas,
@@ -69393,8 +69443,14 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             }
             AppEvent::FileIndexReady => self.apply_file_index_results(),
             AppEvent::GitReady => {
-                let (mut batch, gone) = self.drain_git_answers();
-                self.for_each_window(|runtime| runtime.apply_git_results(&mut batch, gone))
+                let mut answers = self.drain_git_answers();
+                self.for_each_window(|runtime| {
+                    runtime.apply_git_results(
+                        &mut answers.pages,
+                        &mut answers.documents,
+                        answers.gone,
+                    )
+                })
             }
             // Nothing is done here. The news has already been stamped into the
             // watcher's own mailbox by the thread that heard it; this only

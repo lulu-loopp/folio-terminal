@@ -2775,6 +2775,7 @@ impl Runtime<'_> {
                 window: self.window_id(),
                 host: git::GitHost::Float { id, tab },
                 asker,
+                buffer: None,
                 question,
             })
         {
@@ -2802,6 +2803,7 @@ impl Runtime<'_> {
             window: self.window_id(),
             host: git::GitHost::Float { id, tab },
             asker,
+            buffer: None,
             question,
         }) {
             self.disable_git_worker();
