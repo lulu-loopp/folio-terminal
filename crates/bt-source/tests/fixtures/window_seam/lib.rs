@@ -141,3 +141,32 @@ impl Twinned for &Plain {
         type Inner = Runtime<'static>;
     }
 }
+
+// PLANTED: a holder bounded through the backend chain past the resolver's hop limit.
+pub struct FarHolder<B: crate::elsewhere::Bk20>(B::Window);
+
+// PLANTED: a backend trait whose supertrait is that chain.
+pub trait FarBackend: crate::elsewhere::Bk20 {}
+
+/// A listed method of an impl whose self type is a tuple holding a lifetime.
+impl<'a> Twinned for (&'a Plain, u8) {
+    // PLANTED: a listed body, behind a tuple self type, introducing a name.
+    fn listed_on_a_tuple() {
+        type Inner = Runtime<'static>;
+    }
+}
+
+/// A first-party trait spelled as a seam trait, which is not the seam's.
+pub mod lookalike {
+    pub trait WindowHost {}
+}
+
+/// Passes: a module-level impl of the look-alike, resolved to it.
+impl lookalike::WindowHost for Plain {}
+
+/// Passes: a nested impl of the look-alike, resolved to it — the spelled-door fallback applies
+/// only when the resolver followed nothing.
+fn implements_a_lookalike() {
+    struct Hidden;
+    impl crate::lookalike::WindowHost for Hidden {}
+}

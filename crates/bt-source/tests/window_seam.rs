@@ -195,6 +195,39 @@ fn segments(path: &syn::Path) -> Vec<String> {
         .collect()
 }
 
+thread_local! {
+    /// The cutoffs the resolver reported while one judgment decided what a bound, a supertrait or
+    /// an implemented trait names — drained into that judgment's refusals (each test's judgment
+    /// runs on its own thread).
+    static CUTOFFS: std::cell::RefCell<BTreeSet<String>> = std::cell::RefCell::default();
+}
+
+/// **What `path`, written in `module`, names — and the refusal when the resolver gave up on it**:
+/// every call that *decides* something (which type parameters are backend parameters, which traits
+/// are backend traits, which types are the native backend) goes through here, so a chain past the
+/// resolver's hop limit is refused by name instead of silently deciding "no".
+fn checked(
+    resolver: &TraitResolver<'_>,
+    package: &str,
+    module: &str,
+    path: &[String],
+    what: &str,
+) -> BTreeSet<TraitId> {
+    match resolver.resolve_checked(package, module, path) {
+        Ok(found) => found,
+        Err(ResolveCutoff(found)) => {
+            CUTOFFS.with(|cutoffs| {
+                cutoffs.borrow_mut().insert(format!(
+                    "{what} `{}` in {module} chains past the resolver's hop limit — refused, \
+                     never passed",
+                    path.join("::")
+                ))
+            });
+            found
+        }
+    }
+}
+
 /// **The backend's traits**: the seam's `Backend` and every first-party trait of `package` with
 /// one of them among its supertraits, followed to a fixed point.
 fn backend_traits(index: &Index, package: &str, resolver: &TraitResolver<'_>) -> BTreeSet<TraitId> {
@@ -207,12 +240,15 @@ fn backend_traits(index: &Index, package: &str, resolver: &TraitResolver<'_>) ->
         let before = found.len();
         for declaration in index.traits() {
             for id in resolver.identities(package, declaration) {
-                if !found.contains(&id)
-                    && resolver
-                        .supertraits(&id)
-                        .iter()
-                        .any(|parent| found.contains(parent))
-                {
+                let supertraits: BTreeSet<TraitId> = resolver
+                    .declarations(&id)
+                    .iter()
+                    .flat_map(|declared| declared.supertraits())
+                    .flat_map(|path| {
+                        checked(resolver, package, &id.module_path, path, "the supertrait")
+                    })
+                    .collect();
+                if !found.contains(&id) && supertraits.iter().any(|parent| found.contains(parent)) {
                     found.insert(id);
                 }
             }
@@ -234,10 +270,15 @@ fn backend_parameters(
 ) -> BTreeSet<String> {
     let names = |bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>| {
         bounds.iter().any(|bound| match bound {
-            syn::TypeParamBound::Trait(bound) => resolver
-                .resolve(package, module, &segments(&bound.path))
-                .iter()
-                .any(|id| backends.contains(id)),
+            syn::TypeParamBound::Trait(bound) => checked(
+                resolver,
+                package,
+                module,
+                &segments(&bound.path),
+                "the bound",
+            )
+            .iter()
+            .any(|id| backends.contains(id)),
             _ => false,
         })
     };
@@ -380,10 +421,20 @@ impl Reading<'_> {
                 let settled = match path.as_slice() {
                     [single] => PRELUDE_TRAITS.contains(&single.as_str()),
                     [root, ..] => {
+                        // A dependency's name that is also a first-party module's — beside this
+                        // module, at the crate root, or in a module one of its globs opens — is
+                        // ambiguous, and not shown to be another crate's.
+                        let shadowed = self.module_paths.contains(&format!("{module}::{root}"))
+                            || self.module_paths.contains(&format!("crate::{root}"))
+                            || self.module_globs.get(module).is_some_and(|globs| {
+                                globs.iter().any(|glob| {
+                                    self.module_of(module, glob).is_some_and(|opened| {
+                                        self.module_paths.contains(&format!("{opened}::{root}"))
+                                    })
+                                })
+                            });
                         ["std", "core", "alloc"].contains(&root.as_str())
-                            || (self.dependencies.contains(root)
-                                && !self.module_paths.contains(&format!("{module}::{root}"))
-                                && !self.module_paths.contains(&format!("crate::{root}")))
+                            || (self.dependencies.contains(root) && !shadowed)
                     }
                     [] => false,
                 };
@@ -731,7 +782,7 @@ struct FileWalk<'r, 'a> {
     unread: bool,
     /// The module-level impl being walked: whether it is written for the native backend, and its
     /// self type's last segment.
-    block: Option<(bool, String)>,
+    block: Option<(bool, BTreeSet<String>)>,
     scopes: Vec<UseScope>,
     refusals: Vec<String>,
 }
@@ -1060,7 +1111,9 @@ impl FileWalk<'_, '_> {
         };
         let mut doors = BTreeSet::new();
         // A path spelled as one of the seam's traits that the resolver did not follow is a door
-        // all the same; one it did follow is named by its identity.
+        // all the same — only when it followed nothing, as at module level; one it did follow is
+        // named by its identity (a first-party trait of a seam trait's name elsewhere is that
+        // trait, not a door).
         let mut spelled = BTreeSet::new();
         for expansion in &expansions {
             let mut resolved: BTreeSet<TraitId> = BTreeSet::new();
@@ -1086,9 +1139,10 @@ impl FileWalk<'_, '_> {
                     .filter(|id| id.package == reading.package && id.module_path == SEAM)
                     .map(ToString::to_string),
             );
-            if expansion
-                .last()
-                .is_some_and(|last| reading.seam_traits.contains(last))
+            if resolved.is_empty()
+                && expansion
+                    .last()
+                    .is_some_and(|last| reading.seam_traits.contains(last))
             {
                 spelled.insert(expansion.join("::"));
             }
@@ -1167,30 +1221,15 @@ impl<'ast> Visit<'ast> for FileWalk<'_, '_> {
                 _ => false,
             };
             self.block = match node {
-                syn::Item::Impl(item) => match holder_path(item, &self.reading.holders) {
-                    Some(last) => {
+                syn::Item::Impl(item) => {
+                    let native = holder_path(item, &self.reading.holders).is_some_and(|last| {
                         let modules: Vec<&str> = self.modules.iter().map(String::as_str).collect();
                         let generic = self.reading.parameters(&item.generics, &modules);
                         let holder = last.ident.to_string();
-                        let native =
-                            !written_for_a_parameter(last, self.reading.holders[&holder], &generic);
-                        Some((native, holder))
-                    }
-                    None => {
-                        // Any shape of self type: every type path's last segment is an owner a
-                        // `function` row may name.
-                        let mut paths = Vec::new();
-                        AllTypePaths(&mut paths).visit_type(&item.self_ty);
-                        Some((
-                            false,
-                            paths
-                                .iter()
-                                .filter_map(|path| path.last().cloned())
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        ))
-                    }
-                },
+                        !written_for_a_parameter(last, self.reading.holders[&holder], &generic)
+                    });
+                    Some((native, type_names(&item.self_ty)))
+                }
                 _ => None,
             };
             self.outer = describe(node);
@@ -1218,21 +1257,12 @@ impl<'ast> Visit<'ast> for FileWalk<'_, '_> {
         if self.nesting == 0
             && let Some((native, owner)) = &self.block
         {
-            // Any listed row of this method's name whose owner — read past a reference and
-            // generics, as the index spells a non-path self type (`&Plain`) — is one of the self
-            // type's paths makes the body unread, whatever the self type's shape.
+            // Any listed row of this method's name whose owner spells the same type — the same
+            // paths' last segments, generics and lifetimes aside, whatever the shape (`&Plain`,
+            // `&'a Plain`, a tuple, a slice, `dyn Trait`) — makes the body unread.
             let method = node.sig.ident.to_string();
             let listed = self.allowed.iter().any(|(kind, row_owner, name)| {
-                let spelled = row_owner
-                    .trim_start_matches(['&', ' '])
-                    .trim_start_matches("mut ")
-                    .split('<')
-                    .next()
-                    .unwrap_or_default();
-                let spelled = spelled.rsplit("::").next().unwrap_or(spelled);
-                kind == "function"
-                    && *name == method
-                    && owner.split('\n').any(|candidate| candidate == spelled)
+                kind == "function" && *name == method && owner_names(row_owner) == *owner
             });
             self.unread = *native || listed;
             syn::visit::visit_impl_item_fn(self, node);
@@ -1438,6 +1468,7 @@ fn judge(
     allowed: &Allowed,
     dependencies: &BTreeSet<String>,
 ) -> (Vec<String>, Vec<String>) {
+    CUTOFFS.with(|cutoffs| cutoffs.borrow_mut().clear());
     let resolver = TraitResolver::new(&[(package, index)]);
     let backends = backend_traits(index, package, &resolver);
     let holders = holders_of(index, package, &resolver, &backends);
@@ -1457,7 +1488,11 @@ fn judge(
         .filter(|block| {
             in_the_product(index, block.whole())
                 && block.module_paths().contains(&SEAM)
-                && resolver.implemented(package, block).contains(&backend)
+                && block.trait_path().is_some_and(|path| {
+                    block.module_paths().into_iter().any(|module| {
+                        checked(&resolver, package, module, path, "the trait").contains(&backend)
+                    })
+                })
         })
         .map(|block| block.type_owner().to_owned())
         .collect();
@@ -2074,6 +2109,7 @@ fn judge(
         .filter(|row| !used.contains(*row))
         .map(|(kind, owner, name)| format!("{kind} {owner} {name}"))
         .collect();
+    refusals.extend(CUTOFFS.with(|cutoffs| std::mem::take(&mut *cutoffs.borrow_mut())));
     refusals.sort();
     refusals.dedup();
     (refusals, unused)
@@ -2223,6 +2259,49 @@ fn file_items(
     }
 }
 
+/// **The names a type is spelled with**: the last segment of every path in it (a trait object's
+/// bounds included), generic arguments and lifetimes aside — `&'a Plain` and `&Plain` are
+/// `{Plain}`, `(&Plain, u8)` is `{Plain, u8}`, `Runtime<'_, B>` is `{Runtime}`.
+fn type_names(written: &syn::Type) -> BTreeSet<String> {
+    struct Names(BTreeSet<String>);
+    impl<'ast> Visit<'ast> for Names {
+        fn visit_path(&mut self, node: &'ast syn::Path) {
+            if let Some(last) = node.segments.last() {
+                self.0.insert(last.ident.to_string());
+            }
+        }
+        fn visit_lifetime(&mut self, _: &'ast syn::Lifetime) {}
+    }
+    let mut names = Names(BTreeSet::new());
+    names.visit_type(written);
+    names.0
+}
+
+/// [`type_names`] for an owner as the index and the native list spell it (`&Plain`, `Runtime`):
+/// parsed as a type when it is one, else its identifiers past `::`, generics and lifetimes aside.
+fn owner_names(owner: &str) -> BTreeSet<String> {
+    if let Ok(parsed) = syn::parse_str::<syn::Type>(owner) {
+        return type_names(&parsed);
+    }
+    let mut depth = 0usize;
+    let mut kept = String::new();
+    for character in owner.chars() {
+        match character {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => kept.push(character),
+            _ => {}
+        }
+    }
+    kept.split(|character: char| {
+        !(character.is_alphanumeric() || character == '_' || character == ':' || character == '\'')
+    })
+    .filter(|token| !token.is_empty() && !token.starts_with('\''))
+    .filter_map(|token| token.rsplit("::").next().map(str::to_owned))
+    .filter(|token| !token.is_empty())
+    .collect()
+}
+
 /// Every path written in a type position, as its segments.
 struct AllTypePaths<'a>(&'a mut Vec<Vec<String>>);
 
@@ -2311,8 +2390,11 @@ fn row(kind: &str, owner: &str, name: &str) -> (String, String, String) {
 /// limit and an impl through its far end; a body `use` of a body alias, composed; a module-level
 /// impl rooted at a name that is both a dependency and a first-party module; the `paste` crate
 /// under another name; a listed trait default body and a listed method behind a reference self
-/// type, each introducing a name; and a list row nothing uses. A module-level impl of a
-/// dependency's trait passes. The generic blocks (the bound written
+/// type, each introducing a name; a listed method behind a tuple self type holding a lifetime,
+/// introducing a name; a holder bounded, and a backend trait's supertrait, through a chain of
+/// re-exports of `Backend` past the resolver's hop limit; and a list row nothing uses. A
+/// module-level impl of a dependency's trait passes, and so do a module-level and a nested impl of
+/// a first-party trait spelled as a seam trait, which the resolver follows to that trait. The generic blocks (the bound written
 /// directly, through the prelude's glob, through a rename, in a `where` clause and through a
 /// supertrait), a holder built by inference inside a generic function, a trait method's default
 /// body written for the trait's own backend parameter and for a backend trait's `Self`, an enum's
@@ -2328,6 +2410,7 @@ fn every_road_around_the_window_seam_is_named() {
         row("const", "lib.rs", "_"),
         row("function", "crate", "listed_default"),
         row("function", "&Plain", "listed_on_a_reference"),
+        row("function", "(&'a Plain, u8)", "listed_on_a_tuple"),
     ]);
     let (refusals, unused) = judge(
         &index,
@@ -2386,6 +2469,14 @@ fn every_road_around_the_window_seam_is_named() {
              the guard does not read macros",
             "`paste!` at runtime.rs:394: it builds names from pieces, which the guard cannot \
              read — refused wherever it is written",
+            "`use Bk16 as Bk17` in crate::elsewhere chains past the resolver's hop limit — \
+             refused, never passed",
+            "`use Bk17 as Bk18` in crate::elsewhere chains past the resolver's hop limit — \
+             refused, never passed",
+            "`use Bk18 as Bk19` in crate::elsewhere chains past the resolver's hop limit — \
+             refused, never passed",
+            "`use Bk19 as Bk20` in crate::elsewhere chains past the resolver's hop limit — \
+             refused, never passed",
             "`use Hop16 as Hop17` in crate::elsewhere chains past the resolver's hop limit — \
              refused, never passed",
             "`use Hop17 as Hop18` in crate::elsewhere chains past the resolver's hop limit — \
@@ -2414,6 +2505,8 @@ fn every_road_around_the_window_seam_is_named() {
              backend — the window is reached through the seam",
             "the associated type `Shell::Item` in crate::runtime names Native, Shell for the \
              native backend — the window is reached through the seam",
+            "the bound `crate::elsewhere::Bk20` in crate chains past the resolver's hop limit — \
+             refused, never passed",
             "the extern crate `self` at runtime.rs:415 — an `extern crate` is refused in product \
              files: the guard reads `use` items, not crate aliases",
             "the impl at lib.rs:102 inside `fn listed_rebuild` is a block of `Runtime` — a \
@@ -2496,6 +2589,8 @@ fn every_road_around_the_window_seam_is_named() {
              spelled as a door of the seam — a door of the seam is implemented in the seam",
             "the module `hidden` at runtime.rs:368 inside `fn hides_a_module` — a module below \
              module level is a shape the guard does not read",
+            "the supertrait `crate::elsewhere::Bk20` in crate chains past the resolver's hop \
+             limit — refused, never passed",
             "the trait `crate::runtime::Bounded` names Native, Runtime, Shell for the native \
              backend in its declaration — the window is reached through the seam",
             "the trait `crate::runtime::Keeps` names Native, Runtime, Shell for the native \
@@ -2507,6 +2602,9 @@ fn every_road_around_the_window_seam_is_named() {
              read for mentions (a native block's method, a listed function or `const`) \
              introduces no names",
             "the type `Inner` at lib.rs:141 inside `impl` — a body the guard does not read for \
+             mentions (a native block's method, a listed function or `const`) introduces no \
+             names",
+            "the type `Inner` at lib.rs:155 inside `impl` — a body the guard does not read for \
              mentions (a native block's method, a listed function or `const`) introduces no \
              names",
             "the type `crate::runtime::Counted` holds Runtime for the native backend — the \

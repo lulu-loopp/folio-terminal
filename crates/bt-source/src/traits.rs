@@ -23,8 +23,10 @@ use std::fmt;
 
 use crate::index::{ImplRecord, Index, TraitRecord};
 
-/// How many `use` and glob hops a resolution follows before it gives up — a
-/// cycle of globs (`a` opens `b`, `b` opens `a`) is legal Rust and ends here.
+/// How many `use` and glob hops a resolution follows before it gives up. A cycle (`a` opens `b`,
+/// `b` opens `a`; `use anyhow::anyhow;`) does not end here: a name already being looked up in the
+/// same module along one walk names nothing more there. A chain longer than this is a cutoff,
+/// which [`TraitResolver::resolve_checked`] reports and [`TraitResolver::resolve`] does not.
 const HOPS: usize = 16;
 
 /// **A trait's identity**: the package it is declared in, the module path of
@@ -115,7 +117,10 @@ impl<'i> TraitResolver<'i> {
 
     /// **The traits `path`, written in `module` of `package`, names** — empty
     /// for a path that names no trait of these packages (a type, a standard or
-    /// third-party trait, a name the index cannot follow).
+    /// third-party trait, a name the index cannot follow). **It swallows the
+    /// cutoff**: a path chained past [`HOPS`] answers what was found before the
+    /// limit, often nothing, with no word of it — a caller that must not pass
+    /// what it could not read asks [`Self::resolve_checked`].
     #[must_use]
     pub fn resolve(&self, package: &str, module: &str, path: &[String]) -> BTreeSet<TraitId> {
         self.resolve_checked(package, module, path)

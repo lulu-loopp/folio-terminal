@@ -23,8 +23,8 @@ use std::sync::Arc;
 
 use bt_source::{
     DiskScope, Index, ItemKind, ItemQuery, ModuleSpec, Needle, Package, Pattern, QueryFailure,
-    Scope, Search, Span, TargetId, TargetKind, TargetRoot, TraitId, TraitResolver, Universe,
-    Vendor, View, Workspace, report, universes,
+    ResolveCutoff, Scope, Search, Span, TargetId, TargetKind, TargetRoot, TraitId, TraitResolver,
+    Universe, Vendor, View, Workspace, report, universes,
 };
 use syn::parse::Parser as _;
 
@@ -1649,6 +1649,64 @@ fn path(written: &str) -> Vec<String> {
 
 fn ids(found: &BTreeSet<TraitId>) -> Vec<String> {
     found.iter().map(ToString::to_string).collect()
+}
+
+/// RED (T-HEADLESS-RUNTIME-SEAM round 10) — **a cycle among `use`s and globs names nothing more,
+/// and a chain past the resolver's hop limit says so.**
+///
+/// Two modules opening each other with globs: a trait declared on one side is found from the
+/// other, and a name neither declares is `Ok(empty)` — a cycle, not a cutoff. A name imported
+/// under its own name (`use outside::outside;`) followed by a path through it names nothing and
+/// is no cutoff either. Twenty renamed re-exports in a row are past the limit: the far end is
+/// `Err(ResolveCutoff)`, a near one resolves; `resolve` keeps answering the near one and empty
+/// for the far one, as before.
+///
+/// MUTATIONS: drop the cycle check in `TraitResolver::in_scope` — the never-declared name runs to
+/// the limit and is `Err`; never set the cutoff — the far end is `Ok(empty)`.
+#[test]
+fn the_resolver_reads_a_cycle_as_naming_nothing_more_and_refuses_past_its_limit() {
+    let index = Index::shared(&fixture_universe("traits_cycle")).expect("the fixture lowers");
+    let resolver = TraitResolver::new(&[("traits_cycle", &index)]);
+    let declared = || {
+        BTreeSet::from([TraitId {
+            package: "traits_cycle".to_owned(),
+            module_path: "crate::left".to_owned(),
+            name: "Declared".to_owned(),
+        }])
+    };
+    assert_eq!(
+        resolver.resolve_checked("traits_cycle", "crate::right", &path("Declared")),
+        Ok(declared()),
+        "a trait declared on one side of a glob cycle is found from the other"
+    );
+    assert_eq!(
+        resolver.resolve_checked("traits_cycle", "crate::right", &path("Missing")),
+        Ok(BTreeSet::new()),
+        "a name the cycle never declares names nothing, and is no cutoff"
+    );
+    assert_eq!(
+        resolver.resolve_checked("traits_cycle", "crate::named", &path("outside::Thing")),
+        Ok(BTreeSet::new()),
+        "a name imported under its own name is no cutoff"
+    );
+    assert_eq!(
+        resolver.resolve_checked("traits_cycle", "crate::chain", &path("Link3")),
+        Ok(declared()),
+        "a short chain resolves"
+    );
+    assert!(
+        matches!(
+            resolver.resolve_checked("traits_cycle", "crate::chain", &path("Link20")),
+            Err(ResolveCutoff(_))
+        ),
+        "a chain past the hop limit says so"
+    );
+    assert!(
+        resolver
+            .resolve("traits_cycle", "crate::chain", &path("Link20"))
+            .is_empty(),
+        "and `resolve` answers it as before"
+    );
 }
 
 /// RED (T-DOOR-REACH-TRAIT-OBJECTS) — **a trait is its identity, and a path

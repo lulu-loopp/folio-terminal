@@ -36,3 +36,26 @@ pub struct Far;
 impl Hop20 for Far {
     fn request_redraw(&self) {}
 }
+
+// PLANTED: a chain of renamed re-exports of the backend trait longer than the resolver follows.
+pub(crate) use crate::window_seam::Backend as Bk0;
+pub(crate) use Bk0 as Bk1;
+pub(crate) use Bk1 as Bk2;
+pub(crate) use Bk2 as Bk3;
+pub(crate) use Bk3 as Bk4;
+pub(crate) use Bk4 as Bk5;
+pub(crate) use Bk5 as Bk6;
+pub(crate) use Bk6 as Bk7;
+pub(crate) use Bk7 as Bk8;
+pub(crate) use Bk8 as Bk9;
+pub(crate) use Bk9 as Bk10;
+pub(crate) use Bk10 as Bk11;
+pub(crate) use Bk11 as Bk12;
+pub(crate) use Bk12 as Bk13;
+pub(crate) use Bk13 as Bk14;
+pub(crate) use Bk14 as Bk15;
+pub(crate) use Bk15 as Bk16;
+pub(crate) use Bk16 as Bk17;
+pub(crate) use Bk17 as Bk18;
+pub(crate) use Bk18 as Bk19;
+pub(crate) use Bk19 as Bk20;
