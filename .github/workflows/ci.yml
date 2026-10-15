@@ -364,6 +364,36 @@ jobs:
           }
           exit 0
 
+      # G1's font bound (CC-9): typst-assets' faces turned on for every target in
+      # bt-math's manifest, the shape of a browser build that would carry all
+      # seventeen. The wasm32 check must refuse it and name the fonts feature.
+      - name: the wasm font bound can actually fail
+        shell: pwsh
+        run: |
+          $file = "crates/bt-math/Cargo.toml"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            $planted = $original.Replace("typst-as-lib.workspace = true", 'typst-as-lib = { workspace = true, features = ["typst-kit-fonts", "typst-kit-embed-fonts"] }')
+            if ($planted -eq $original) { throw "the canary found no typst-as-lib line to plant on" }
+            [IO.File]::WriteAllText($file, $planted)
+            $failed = $false
+            $message = ""
+            try {
+              & ./scripts/ci/check-wasm-lib.ps1 *> $null
+            } catch {
+              $failed = $true
+              $message = $_.Exception.Message
+            }
+            if (-not $failed) { throw "the wasm32 library check accepted typst-assets' fonts in bt-math's wasm32 graph" }
+            if ($message -notmatch "wasm32-unknown-unknown graph turns on typst-assets' fonts") {
+              throw "the wasm32 library check failed for the wrong reason: $message"
+            }
+            Write-Host $message
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          exit 0
+
       # G3's five canaries. `clock-guard` reads source text, so each plant is a
       # line appended to a file and nothing is compiled but bt-source's test. A
       # qualified `std::time::Instant::now()` and a nested `use std::{time::{…}}`

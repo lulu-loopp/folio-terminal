@@ -8,11 +8,13 @@ pub use bt_doc::math::{MathFailureStage, MathRaster, MathRenderError, MathRender
 pub use bt_doc::svg::{SvgRaster, SvgRasterError};
 pub use bt_doc::{InlineRunPlacement, MathMode};
 use mitex_spec_gen::DEFAULT_SPEC;
-use typst_as_lib::{TypstEngine, typst_kit_options::TypstKitFontOptions};
+use typst_as_lib::TypstEngine;
+#[cfg(not(target_arch = "wasm32"))]
+use typst_as_lib::typst_kit_options::TypstKitFontOptions;
 use typst_layout::PagedDocument;
 use typst_library::{
     World,
-    foundations::{Array, Dict, IntoValue, Str, Value},
+    foundations::{Array, Bytes, Dict, IntoValue, Str, Value},
     layout::{Frame, FrameItem, Point, Transform},
     text::{FontBook, FontInfo, FontStyle},
 };
@@ -190,13 +192,30 @@ pub const MAX_SOURCE_BYTES: usize = 8 * 1024;
 /// no `catch_unwind` can keep one from taking the process. The thread that does that work therefore
 /// says how much stack it wants, here, where the limit that depends on it is also written.
 ///
-/// Sixteen mebibytes against [`MAX_NESTING_DEPTH`] levels is 64 KiB of headroom per level, and the
-/// five walks run one after another rather than inside one another, so each of them has the whole
-/// of it. What the pair actually has to make good is narrower than any per-frame arithmetic and is
-/// measured rather than argued: `every_recursive_shape_renders_at_the_limit_on_the_worker_stack`
-/// builds, for each shape of nesting the grammar has, the deepest formula the limit accepts, and
-/// draws it on a thread given exactly this stack.
+/// **The pair, derived from a measurement** (CC-9, 2026-10-15, x86_64 Windows). The deepest formula
+/// [`MAX_NESTING_DEPTH`] admits was rendered, for every shape of nesting the grammar has, in a child
+/// process on a thread whose stack was bisected to 16 KiB until the render no longer overflowed.
+/// The costliest shapes — a script chain after a term, an infix chain, a macro that expands to
+/// `rac` — need **1.26 MiB** in the release build, **1.20 MiB** in the test profile
+/// (`opt-level = 1`) and **3.08 MiB** unoptimised: about ten kibibytes a level at the 126 source
+/// levels that reach the 256-level tree. The renderer runs in the product on exactly one thread,
+/// the computation lane's `bt-math-worker`, which is given this stack; so the smallest stack it
+/// runs on is this one, and sixteen mebibytes is twelve times the release need and five times the
+/// unoptimised one. [`MATH_STACK_HEADROOM`] is the part of that margin the suite holds the code to.
+///
+/// **A browser build has two stacks and the pair covers one.** The glue links with
+/// `-zstack-size` equal to this number, which bounds wasm's linear-memory shadow stack; the engine's
+/// own call stack is the browser's, is not configurable and is unmeasured here. Rendering the
+/// deepest admitted formula in each browser is the browser smoke's measurement; if it overflows,
+/// the answer is a choice between typesetting in a Web Worker and a smaller wasm
+/// [`MAX_NESTING_DEPTH`] — a behaviour fork, made by the owner and not by this constant.
 pub const MATH_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
+/// **The margin the suite holds the renderer to**: the deepest formula [`MAX_NESTING_DEPTH`]
+/// admits, of every shape, completes on a quarter of [`MATH_WORKER_STACK_BYTES`]. The measured
+/// need (1.20 MiB in the test profile) is under a third of that quarter, so a change that grows the
+/// renderer's frames — an upstream bump, a new recursive walk — goes red here long before a reader's
+/// worker could overflow.
+pub const MATH_STACK_HEADROOM: usize = 4;
 pub const VERTICAL_PADDING_LOGICAL_PX: u32 = 8;
 /// CPU raster budget. Wide display math is tiled to the GPU's per-axis texture limit later, so
 /// rejecting it at an arbitrary 16K width would violate UI-UX §7.5's horizontal overflow rule.
@@ -300,36 +319,75 @@ pub struct MathEngine {
 }
 
 impl MathEngine {
+    /// **The desktop engine: typst-assets' seventeen faces, then the machine's own.**
+    ///
+    /// The embedded faces come first in the book, so [`MATH_FAMILY`] is present on every machine
+    /// Folio runs on, and the installed families stand behind them for the characters it lacks
+    /// ([`covering_families`]). Not on wasm32: a browser has no fonts to scan and a download pays
+    /// for every embedded byte, so a browser host hands its faces to [`Self::with_faces`].
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new() -> Self {
         Self::with_system_fonts(true)
     }
 
-    /// **The engine has no door onto this machine, and that is a property of how it is built.**
+    /// **An engine whose font book is exactly these faces, in this order, and nothing else** — no
+    /// embedded face and no scan of the machine, on every target.
     ///
+    /// Each entry is one font file's bytes; a collection (`.ttc`) contributes every face in it, and
+    /// bytes that hold no readable face contribute none. The bytes are shared, not copied, so a host
+    /// can hand the renderer and this engine the same `Arc`.
+    ///
+    /// What the book lacks is not papered over: a character no face here claims is refused by name
+    /// ([`MathRenderError::MissingGlyph`], or [`MathRenderError::MissingCjkGlyph`] for an
+    /// ideograph), and the formula stays as the text that was printed. Mathematics needs
+    /// [`MATH_FAMILY`] among the faces — without it every character is set in whichever face
+    /// claims it, which is a page, not typesetting.
+    pub fn with_faces<I>(faces: I) -> Self
+    where
+        I: IntoIterator<Item = std::sync::Arc<[u8]>>,
+    {
+        let fonts = faces
+            .into_iter()
+            .flat_map(|bytes| typst_library::text::Font::iter(Bytes::new(bytes)))
+            .collect::<Vec<_>>();
+        Self {
+            engine: Self::builder().fonts(fonts).build(),
+        }
+    }
+
+    /// The template and the three MiTeX specification files, which every engine is built over.
+    ///
+    /// **The engine has no door onto this machine, and that is a property of how it is built.**
     /// The only file resolver it is given is `with_static_source_file_resolver`, over exactly the
     /// three MiTeX specification files compiled into the executable. There is no filesystem
     /// resolver and no package resolver, so a Typst `read`, `image`, `include` or `import` of
     /// anything else has nowhere to resolve and fails the compile — which is why the refusals in
     /// [`convert_math`] are about *computation* rather than about reading files. A formula still
     /// may not carry code, because a loop nobody can interrupt is its own kind of harm.
+    fn builder() -> typst_as_lib::TypstTemplateEngineBuilder<typst_as_lib::TypstTemplateMainFile> {
+        TypstEngine::builder()
+            .main_file(TYPST_TEMPLATE)
+            .with_static_source_file_resolver([
+                (
+                    "specs/mod.typ",
+                    include_str!("../../../assets/mitex-specs/mod.typ"),
+                ),
+                (
+                    "specs/prelude.typ",
+                    include_str!("../../../assets/mitex-specs/prelude.typ"),
+                ),
+                (
+                    "specs/latex/standard.typ",
+                    include_str!("../../../assets/mitex-specs/latex/standard.typ"),
+                ),
+            ])
+    }
+
+    /// typst-assets' faces, and the machine's own behind them when `include_system_fonts`.
+    #[cfg(not(target_arch = "wasm32"))]
     fn with_system_fonts(include_system_fonts: bool) -> Self {
         let engine = bt_effects::file_reads::opaque(bt_effects::file_reads::Lane::Fonts, || {
-            TypstEngine::builder()
-                .main_file(TYPST_TEMPLATE)
-                .with_static_source_file_resolver([
-                    (
-                        "specs/mod.typ",
-                        include_str!("../../../assets/mitex-specs/mod.typ"),
-                    ),
-                    (
-                        "specs/prelude.typ",
-                        include_str!("../../../assets/mitex-specs/prelude.typ"),
-                    ),
-                    (
-                        "specs/latex/standard.typ",
-                        include_str!("../../../assets/mitex-specs/latex/standard.typ"),
-                    ),
-                ])
+            Self::builder()
                 .search_fonts_with(
                     TypstKitFontOptions::default()
                         .include_system_fonts(include_system_fonts)
@@ -431,6 +489,26 @@ impl MathEngine {
         let mut runs = Vec::new();
         collect_typeset_runs(&page.frame, &mut runs);
         Ok(runs)
+    }
+
+    /// The faces of this engine's font book, in the book's order: family, weight, italic.
+    #[cfg(test)]
+    fn book_faces(&self) -> Vec<(String, u16, bool)> {
+        self.engine
+            .with_world(|world| {
+                let book = world.book();
+                (0..)
+                    .map_while(|index| book.info(index))
+                    .map(|info| {
+                        (
+                            info.family.clone(),
+                            info.variant.weight.to_number(),
+                            info.variant.style != FontStyle::Normal,
+                        )
+                    })
+                    .collect()
+            })
+            .expect("a world built with no inputs")
     }
 
     /// Every installed family that claims a character of this source the math
@@ -622,6 +700,7 @@ fn covering_families(book: &FontBook, requested: &BTreeSet<char>) -> Vec<String>
     families
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Default for MathEngine {
     fn default() -> Self {
         Self::new()
@@ -658,7 +737,8 @@ fn validate_source(source: &str) -> Result<(), MathRenderError> {
 /// implementations that obey it — `vendor/mitex-parser/src/depth.rs` refuses to build a syntax tree
 /// deeper than this, and MiTeX's converter refuses to descend past it — so this crate names that
 /// constant rather than keeping a second copy of the number that could drift from it.
-/// `the_limit_and_the_worker_stack_are_one_pair` pins the pair.
+/// `the_limit_and_the_worker_stack_are_one_pair` pins the pair, and [`MATH_WORKER_STACK_BYTES`]
+/// carries the measurement it was derived from.
 pub const MAX_NESTING_DEPTH: usize = mitex::MAX_TREE_DEPTH;
 
 // The two limits the error messages of `bt_doc::math` name are the limits enforced here.
@@ -1457,22 +1537,22 @@ mod tests {
         accepts
     }
 
-    /// **This is the measurement the limit rests on, made for every shape rather than for one.**
+    /// **This is the margin the limit rests on, held for every shape rather than for one.**
     ///
-    /// There is no safe way to ask how many bytes of stack a level costs: the way to find out is to
-    /// overflow, and an overflow takes the process rather than the test. What the limit actually
-    /// has to be true of is narrower and can be measured without risking anything — that the
-    /// deepest formula it *accepts* completes on the stack the math worker runs with. So for each
-    /// shape this finds that formula, asserts one level more is refused (by the guard, which
-    /// answers before it descends, so no deep recursion happened to produce the refusal), and draws
-    /// it on a thread given exactly [`MATH_WORKER_STACK_BYTES`].
+    /// What a stack level costs is measured by overflowing, which takes a process rather than a
+    /// test, so the measurement behind [`MATH_WORKER_STACK_BYTES`] was made in child processes and
+    /// is written there. What the suite holds the code to is the margin that measurement leaves:
+    /// for each shape this finds the deepest formula the guard accepts, and draws it on a thread
+    /// given a [`MATH_STACK_HEADROOM`]th of the worker's stack. One level more is refused by the
+    /// guard, through the same `render` a reader's formula takes, with the formula's own reason —
+    /// the guard answers before it descends, so no deep recursion happened to produce the refusal.
     ///
     /// The outcome of the draw is allowed to be a refusal — a formula nested two hundred levels can
     /// exceed the raster budget, and Typst's own parser stops at a depth of its own and says so —
     /// but it is never allowed to be a panic, and the thread is never allowed not to come back.
     /// That, and not the picture, is what the limit and the stack owe each other.
     #[test]
-    fn every_recursive_shape_renders_at_the_limit_on_the_worker_stack() {
+    fn every_recursive_shape_renders_at_the_limit_on_a_quarter_of_the_worker_stack() {
         for (name, build) in shapes() {
             let deepest = deepest_accepted(build);
             assert!(
@@ -1482,8 +1562,7 @@ mod tests {
             );
             assert!(
                 deepest >= 60,
-                "{name}: the limit must admit a formula deep enough to be worth drawing, not \
-                 {deepest}"
+                "{name}: the limit must admit a formula deep enough to be worth drawing, not                  {deepest}"
             );
             // The deepest one that also fits the source budget, so `render` can be asked at all.
             let mut drawable = deepest;
@@ -1491,23 +1570,29 @@ mod tests {
                 drawable -= 1;
             }
             let source = build(drawable);
+            // One past the edge, when the budget lets it be asked: the reader's road refuses it by
+            // the nesting, not by its length.
+            let past = (drawable == deepest)
+                .then(|| build(deepest + 1))
+                .filter(|past| past.len() <= MAX_SOURCE_BYTES);
             // The conversion is the walk Folio owns, so it has to *succeed* at this depth — a
             // refusal further on is somebody's graceful limit and is reported below, but it must
             // not be what saved this run.
             let converted = convert_math(&source);
             assert!(
                 converted.is_ok(),
-                "{name}: {drawable} levels must convert, not merely escape the depth guard: \
-                 {converted:?}"
+                "{name}: {drawable} levels must convert, not merely escape the depth guard:                  {converted:?}"
             );
-            let outcome = std::thread::Builder::new()
-                .stack_size(MATH_WORKER_STACK_BYTES)
+            let (outcome, refused) = std::thread::Builder::new()
+                .stack_size(MATH_WORKER_STACK_BYTES / MATH_STACK_HEADROOM)
                 .spawn(move || {
-                    MathEngine::with_system_fonts(false)
-                        .render(&source, key())
-                        .err()
+                    let engine = MathEngine::with_system_fonts(false);
+                    (
+                        engine.render(&source, key()).err(),
+                        past.map(|past| engine.render(&past, key())),
+                    )
                 })
-                .expect("spawn a thread with the worker's stack")
+                .expect("spawn a thread with a quarter of the worker's stack")
                 .join()
                 .unwrap_or_else(|_| {
                     panic!("{name}: the deepest accepted formula must not take the thread with it")
@@ -1517,21 +1602,26 @@ mod tests {
                 !matches!(outcome, Some(MathRenderError::Aborted)),
                 "{name}: at {drawable} levels the render panicked somewhere inside itself"
             );
+            if let Some(refused) = refused {
+                assert_eq!(
+                    refused.map(|raster| raster.width_px),
+                    Err(MathRenderError::NestingTooDeep),
+                    "{name}: {} levels are refused for their nesting",
+                    deepest + 1
+                );
+            }
         }
     }
 
-    /// The limit and the stack are one decision, so they are written down together.
-    ///
-    /// Sixteen mebibytes over two hundred and fifty-six levels is 64 KiB a level, and the walks —
-    /// `mitex-parser`, MiTeX's converter, Typst's parser, its math layout, its SVG writer — run one
-    /// after another rather than inside one another, so each of them has the whole of it. The
-    /// factor is enormous on purpose: a recursive-descent frame is of the order of a hundred bytes,
-    /// and the number this test really defends is the one
-    /// `every_recursive_shape_renders_at_the_limit_on_the_worker_stack` measures.
+    /// The limit, the stack and the margin are one decision, so they are written down together; the
+    /// measurement that chose them is on [`MATH_WORKER_STACK_BYTES`], and
+    /// `every_recursive_shape_renders_at_the_limit_on_a_quarter_of_the_worker_stack` holds the
+    /// margin.
     #[test]
     fn the_limit_and_the_worker_stack_are_one_pair() {
         assert_eq!(MAX_NESTING_DEPTH, 256);
-        assert_eq!(MATH_WORKER_STACK_BYTES / MAX_NESTING_DEPTH, 64 * 1024);
+        assert_eq!(MATH_WORKER_STACK_BYTES, 16 * 1024 * 1024);
+        assert_eq!(MATH_STACK_HEADROOM, 4);
     }
 
     /// **This crate's public math data types are `bt_doc::math`'s, at the paths they always had.**
@@ -2463,6 +2553,200 @@ mod tests {
         assert!(
             TYPST_TEMPLATE.contains(&format!("({MATH_FAMILY:?},)")),
             "the template must set the equation in {MATH_FAMILY}"
+        );
+    }
+
+    /// One face: (family, weight, italic), and the bytes of its file.
+    type AssetFace = ((String, u16, bool), std::sync::Arc<[u8]>);
+
+    /// typst-assets' faces, each as (family, weight, italic) with its bytes, in the crate's order.
+    fn typst_asset_faces() -> Vec<AssetFace> {
+        typst_assets::fonts()
+            .map(|bytes| {
+                let font = typst_library::text::Font::new(Bytes::new(bytes), 0)
+                    .expect("every typst-assets file is one face");
+                let info = font.info();
+                (
+                    (
+                        info.family.clone(),
+                        info.variant.weight.to_number(),
+                        info.variant.style != FontStyle::Normal,
+                    ),
+                    std::sync::Arc::<[u8]>::from(bytes),
+                )
+            })
+            .collect()
+    }
+
+    /// The one typst-assets face of this family and weight, upright.
+    fn typst_asset_face(family: &str, weight: u16) -> std::sync::Arc<[u8]> {
+        typst_asset_faces()
+            .into_iter()
+            .find(|((face_family, face_weight, italic), _)| {
+                face_family == family && *face_weight == weight && !italic
+            })
+            .map(|(_, bytes)| bytes)
+            .unwrap_or_else(|| panic!("typst-assets carries {family} at weight {weight}"))
+    }
+
+    /// The face Typst sets mathematics in: New Computer Modern Math **Book** (weight 450), the
+    /// face its default math font resolves to — not the Regular the name suggests.
+    fn math_book_face() -> std::sync::Arc<[u8]> {
+        typst_asset_face(MATH_FAMILY, 450)
+    }
+
+    /// The formulas the policy is measured against: the README's transform, and the shapes a person
+    /// writes — operators, delimiters, environments, accents, alphabets, spacing.
+    fn coverage_corpus() -> Vec<&'static str> {
+        vec![
+            r"X_k = \sum_{n=0}^{N-1} x_n e^{-2\pi i k n/N}",
+            r"|X_k|^2",
+            r"\frac{1}{\sqrt{2\pi\sigma^2}} \exp\!\left(-\frac{(x-\mu)^2}{2\sigma^2}\right)",
+            r"\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}",
+            r"\lim_{x \to 0} \frac{\sin x}{x} = 1",
+            r"i\hbar\frac{\partial}{\partial t}\Psi=\hat{H}\Psi",
+            r"\begin{cases}x, & x \geq 0 \\ -x, & x < 0\end{cases}",
+            r"\begin{pmatrix} a & b \\ c & d \end{pmatrix}",
+            r"\begin{aligned} a &= b + c \\ d &= e - f \end{aligned}",
+            r"\langle x, y \rangle + \lfloor x \rfloor + \lceil y \rceil + \|v\|",
+            r"\mathbb{R}^n \to \mathcal{F}, \; \nabla \cdot \vec{E} = \frac{\rho}{\varepsilon_0}",
+            r"\forall x \in A, \exists y \notin B, \; A \cup B \cap C \subseteq D",
+            r"\alpha\beta\gamma\delta\Omega \le \aleph \ne \infty",
+            r"\mathbf{x} + \boldsymbol{y} + \textbf{z} + \texttt{mono} + \mathrm{d}x",
+            r"\overline{z} \cdot \underbrace{a+b}_{n} + \binom{n}{k}",
+            r"\text{if } x > 0 \quad a \, b \; c",
+        ]
+    }
+
+    /// PIN — **the desktop book is typst-assets' seventeen faces, in that crate's order, and the
+    /// machine's faces only behind them.** With the machine left out the book is exactly the
+    /// embedded set, which is what makes the math family present on every machine and the first
+    /// claimant under its own name.
+    ///
+    /// MUTATION: `include_embedded_fonts(false)` in `with_system_fonts` — the book comes back empty.
+    #[test]
+    fn the_desktop_book_is_the_typst_assets_faces() {
+        let embedded = typst_asset_faces()
+            .into_iter()
+            .map(|(face, _)| face)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            embedded.len(),
+            17,
+            "typst-assets 0.15.1 carries seventeen faces"
+        );
+        assert_eq!(MathEngine::with_system_fonts(false).book_faces(), embedded);
+    }
+
+    /// PIN — **an engine given faces has those faces and no others**: nothing embedded, nothing of
+    /// the machine's. This is the whole of a browser build's book, so a face that crept in here
+    /// would be a face a download pays for or a scan that finds nothing.
+    ///
+    /// MUTATION: `with_faces` also asks for `search_fonts_with(…include_embedded_fonts(true))` —
+    /// the seventeen embedded faces join the one handed in.
+    #[test]
+    fn an_engine_given_faces_has_exactly_those_faces() {
+        let book = MathEngine::with_faces([math_book_face()]).book_faces();
+        assert_eq!(book, vec![(MATH_FAMILY.to_owned(), 450, false)]);
+        let two =
+            MathEngine::with_faces([math_book_face(), typst_asset_face("DejaVu Sans Mono", 400)])
+                .book_faces();
+        assert_eq!(
+            two,
+            vec![
+                (MATH_FAMILY.to_owned(), 450, false),
+                ("DejaVu Sans Mono".to_owned(), 400, false),
+            ],
+            "in the order they were handed in"
+        );
+        assert_eq!(
+            MathEngine::with_faces([std::sync::Arc::<[u8]>::from(&b"not a font"[..])]).book_faces(),
+            Vec::new(),
+            "bytes with no face in them add none"
+        );
+    }
+
+    /// PIN — **New Computer Modern Math Book alone draws the corpus exactly as the desktop does.**
+    ///
+    /// This is the measurement the browser's face set rests on: every run of every formula comes
+    /// from the math family at weight 450 with no `.notdef`, and the pixels are the ones the
+    /// seventeen-face book draws — so Regular (400) and Bold (700), which carry the same name and
+    /// 2.5 MB between them, are never what Typst selects, and a book of Book is enough.
+    ///
+    /// MUTATION: hand in the Regular face instead — every formula's pixels differ.
+    #[test]
+    fn the_math_book_face_alone_draws_the_corpus_as_the_desktop_floor_does() {
+        let book_only = MathEngine::with_faces([math_book_face()]);
+        let floor = MathEngine::with_system_fonts(false);
+        for source in coverage_corpus() {
+            for mode in [MathMode::Inline, MathMode::Display] {
+                let key = MathRenderKey { mode, ..key() };
+                let runs = book_only
+                    .typeset_runs(source, key)
+                    .unwrap_or_else(|error| panic!("{source}: {error:?}"));
+                assert!(!runs.is_empty(), "{source}: something is set");
+                for run in &runs {
+                    assert_eq!(
+                        (run.family.as_str(), run.weight, run.has_notdef()),
+                        (MATH_FAMILY, 450, false),
+                        "{source}: {:?} is set in the math face, drawn",
+                        run.text
+                    );
+                }
+                let drawn = book_only.render(source, key).expect("the corpus draws");
+                let desktop = floor.render(source, key).expect("the corpus draws");
+                assert_eq!(
+                    (drawn.width_px, drawn.height_px, drawn.rgba == desktop.rgba),
+                    (desktop.width_px, desktop.height_px, true),
+                    "{source} ({mode:?}): the same pixels as the desktop floor"
+                );
+            }
+        }
+    }
+
+    /// RED GATE — **a character no face in the book can draw is refused by name, never drawn as a
+    /// box and never dropped.** The formula stays as the text the terminal printed. This is the
+    /// browser's rule for any character its faces do not carry, and the desktop's for a character
+    /// the embedded faces and the machine both lack.
+    ///
+    /// The math face carries the corpus and not CJK, Cyrillic, dingbats or emoji. The desktop
+    /// floor's other faces answer for some of those — DejaVu Sans Mono draws ☃ and Ж — which is why
+    /// the same formula is drawn on one target and refused on the other: the honest difference
+    /// between a book of one face and a book of seventeen, not a silent one.
+    ///
+    /// MUTATION: `frame_undrawn_character` answers `None` — every refused formula comes back `Ok`
+    /// with a `.notdef` box in its pixels.
+    #[test]
+    fn a_character_no_face_draws_is_refused_by_name_never_drawn_as_tofu() {
+        let book_only = MathEngine::with_faces([math_book_face()]);
+        for (source, refusal) in [
+            (r"\text{中文}", MathRenderError::MissingCjkGlyph),
+            ("中", MathRenderError::MissingCjkGlyph),
+            (r"x + \text{Привет}", MathRenderError::MissingGlyph('П')),
+            ("☃", MathRenderError::MissingGlyph('☃')),
+            (r"\text{🙂}", MathRenderError::MissingGlyph('🙂')),
+        ] {
+            assert_eq!(
+                book_only
+                    .render(source, key())
+                    .map(|raster| raster.width_px),
+                Err(refusal),
+                "{source}: refused by name with the math face alone"
+            );
+        }
+        let floor = MathEngine::with_system_fonts(false);
+        for drawn in ["☃", "Ж"] {
+            assert!(
+                floor.render(drawn, key()).is_ok(),
+                "{drawn}: the desktop floor's DejaVu Sans Mono draws it"
+            );
+        }
+        assert_eq!(
+            floor
+                .render(r"\text{🙂}", key())
+                .map(|raster| raster.width_px),
+            Err(MathRenderError::MissingGlyph('🙂')),
+            "no embedded face draws an emoji"
         );
     }
 

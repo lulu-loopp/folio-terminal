@@ -20,6 +20,15 @@
 # `bt-render` name the admission vocabulary and the file-read ledger through
 # `bt-effects` (CC-3). `bt-compose` joined with CC-6a, the ticket that created it.
 #
+# **The font bytes a browser build carries (CC-9).** `bt-math` takes typst-assets'
+# seventeen faces (9,683,068 bytes) on the desktop and none on wasm32, where the host
+# hands its faces to `MathEngine::with_faces`. There is no wasm artefact for this
+# gate to weigh, so the bound is asked of the graph that decides it: after the check,
+# `cargo tree -e normal,build,features -i typst-assets` for `bt-math` (the shipped
+# graph: a dev-dependency is not in a browser build) must show the `fonts`
+# feature on the host target (so the question can be answered at all) and must not
+# show it for wasm32. A wasm32 graph with the fonts on is refused by name.
+#
 # The target must be installed for the toolchain `rust-toolchain.toml` pins
 # (`rustup target add wasm32-unknown-unknown`); CI's toolchain action installs it
 # for the jobs that ask.
@@ -95,5 +104,31 @@ if ($missing.Count -gt 0) {
     throw "cargo check for $target passed without checking the library of: $($missing -join ', ') - a crate this gate did not check is not a crate it passed"
 }
 
-Write-Host "$target`: $($checked.Count) of $($Packages.Count) library crates checked ($($Packages -join ', ')). PASS"
+# The bound on embedded font bytes: typst-assets' `fonts` feature, asked per target.
+function Get-TypstAssetsFeatures([string[]]$targetArguments) {
+    Push-Location $repo
+    try {
+        $tree = @(& cargo tree --locked -p bt-math @targetArguments -e normal,build,features -i typst-assets --prefix none 2>&1 | ForEach-Object { "$_" })
+        $treeStatus = $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
+    if ($treeStatus -ne 0) {
+        throw ("cargo tree for bt-math's typst-assets features exited $treeStatus" + [Environment]::NewLine + (($tree | Select-Object -Last 10) -join [Environment]::NewLine))
+    }
+    return $tree
+}
+$fontsFeature = 'typst-assets feature "fonts"'
+$hostTree = Get-TypstAssetsFeatures @()
+if (-not ($hostTree | Where-Object { $_.Contains($fontsFeature) })) {
+    throw "bt-math's host graph does not turn on typst-assets' fonts, so the wasm32 question below would be answered by nothing - the desktop engine embeds them (MathEngine::new)"
+}
+$wasmTree = Get-TypstAssetsFeatures @("--target", $target)
+$wasmFonts = @($wasmTree | Where-Object { $_.Contains($fontsFeature) })
+if ($wasmFonts.Count -gt 0) {
+    throw ("bt-math's $target graph turns on typst-assets' fonts (9,683,068 bytes of faces a browser build would carry); a browser host hands its faces to MathEngine::with_faces:" +
+        [Environment]::NewLine + (($wasmTree | Select-Object -First 15) -join [Environment]::NewLine))
+}
+
+Write-Host "$target`: $($checked.Count) of $($Packages.Count) library crates checked ($($Packages -join ', ')); bt-math embeds no typst-assets face for $target. PASS"
 exit 0

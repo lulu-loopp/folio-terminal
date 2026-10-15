@@ -1406,9 +1406,11 @@ SOFTWARE.
 
 ### Assets embedded by `typst-assets` 0.15.1
 
-The `typst-as-lib` dependency is taken with `typst-kit-fonts` and
-`typst-kit-embed-fonts`, which compiles `typst-assets`' fonts and data tables
-into the executable. The crate itself is Apache-2.0 and appears in the crate
+On the desktop the `typst-as-lib` dependency is taken with `typst-kit-fonts`
+and `typst-kit-embed-fonts`, which compiles `typst-assets`' fonts and data tables
+into the executable. A `wasm32` build of `bt-math` takes neither and compiles no
+`typst-assets` face in: a browser host supplies its own faces, and the notices
+for them travel with that host. The crate itself is Apache-2.0 and appears in the crate
 listing below; the *assets* are not, and travel under six further sets of terms.
 
 Upstream states them in one `NOTICE` file, and that file is reproduced here
