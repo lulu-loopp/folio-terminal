@@ -1404,6 +1404,7 @@ mod tests {
             window: WindowId::from(1_u64),
             host: column(1),
             asker: GitCacheId::mint(),
+            buffer: None,
             question: GitQuestion::Status {
                 root: PathBuf::from(root),
             },
@@ -1416,6 +1417,7 @@ mod tests {
             window: WindowId::from(1_u64),
             host: column(1),
             asker: GitCacheId::mint(),
+            buffer: None,
             question: GitQuestion::Refs {
                 root: PathBuf::from(root),
             },

@@ -5206,36 +5206,25 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
         assert_eq!(served.len(), 2, "an answer is addressed, not broadcast");
     }
 
-    /// RED (T-GIT-DOCUMENT-GATED-BY-POOL) — **one document asked for two
-    /// buffers is two questions; asked twice for one buffer, it is one.**
-    ///
-    /// A floating Files view opens the diff of `说明 notes.md` while tab 1 is in
-    /// front and again after switching to tab 2: one asker, one question, but a
-    /// buffer in each tab's pool, and each buffer waits for its answer. Were the
-    /// second to replace the first while it waited in line, tab 1's buffer
-    /// would say "Loading …" for an answer nobody asks. The same buffer asking
-    /// twice is still coalesced.
-    ///
-    /// MUTATION: leave the buffer out of `GitRequest::same_target` — tab 1's
-    /// question is replaced, and one question is served instead of two.
-    #[test]
-    fn one_document_asked_for_two_buffers_is_two_questions() {
-        let (tx, rx) = mpsc::channel();
+    /// Two buffers waiting on the diff of `说明 notes.md`, in two tabs' pools, and
+    /// that diff asked by one floating Files view (one asker) for `buffer`.
+    fn two_buffers_one_document() -> (
+        [Option<crate::preview::BufferId>; 2],
+        impl Fn(Option<crate::preview::BufferId>) -> GitRequest,
+    ) {
         let asker = GitCacheId::mint();
-        let mut pool = crate::preview::PreviewPool::default();
-        let buffer_in = |pool: &mut crate::preview::PreviewPool| {
+        let buffer_in = || {
             let source = crate::preview::PreviewSource::GitDiff {
                 root: PathBuf::from("仓库 repo"),
                 path: "说明 notes.md".to_owned(),
                 against: crate::preview::GitDiffAgainst::WorkingTree,
             };
+            let mut pool = crate::preview::PreviewPool::default();
             pool.open(source.clone(), "说明 notes.md".to_owned(), &[]);
             pool.ask_composer(&source)
         };
-        let first = buffer_in(&mut pool);
-        let mut other_pool = crate::preview::PreviewPool::default();
-        let second = buffer_in(&mut other_pool);
-        let ask = |buffer| GitRequest {
+        let buffers = [buffer_in(), buffer_in()];
+        let ask = move |buffer| GitRequest {
             window: winit::window::WindowId::from(1_u64),
             host: GitHost::Float {
                 id: 7,
@@ -5250,17 +5239,87 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
                 renamed_from: None,
             },
         };
-        tx.send(ask(first)).unwrap();
-        tx.send(ask(second)).unwrap();
-        tx.send(ask(second)).unwrap();
+        (buffers, ask)
+    }
+
+    /// RED (T-GIT-DOCUMENT-GATED-BY-POOL) — **one document asked for two
+    /// buffers is two questions; asked twice for one buffer, it is one.**
+    ///
+    /// A floating Files view opens the diff of `说明 notes.md` while tab 1 is in
+    /// front and again after switching to tab 2: one asker, one question, but a
+    /// buffer in each tab's pool, and each buffer waits for its answer. Were the
+    /// second to replace the first while it waited in line, tab 1's buffer
+    /// would say "Loading …" for an answer nobody asks. The same buffer asking
+    /// twice is still coalesced.
+    ///
+    /// MUTATION: leave the buffer out of `GitRequest::same_target` — tab 1's
+    /// question is replaced, and one question is served instead of two.
+    #[test]
+    fn one_document_asked_for_two_buffers_is_two_questions() {
+        let ([first, second], ask) = two_buffers_one_document();
+        let (tx, rx) = mpsc::channel();
+        tx.send(GitMail::Ask(ask(first))).unwrap();
+        tx.send(GitMail::Ask(ask(second))).unwrap();
+        tx.send(GitMail::Ask(ask(second))).unwrap();
         drop(tx);
         let mut served = Vec::new();
-        run_git_worker(rx, |request| served.push(request));
+        run_git_worker(rx, &crate::git_mutation_lane::RepoTurns::new(), |request| {
+            served.push(request)
+        });
         assert_eq!(
             served,
             vec![ask(first), ask(second)],
             "each buffer's question is served; the repeat for one buffer collapses"
         );
+    }
+
+    /// RED (T-GIT-DOCUMENT-GATED-BY-POOL, stacked on T-GIT-READS-PER-REPOSITORY)
+    /// — **one document asked for two buffers while it is parked behind a verb
+    /// is two questions, both served, in the order they were asked.**
+    ///
+    /// A stage of `仓库 repo` stands in git. The floating view asks the diff for
+    /// tab 1's buffer — it is parked behind the stage — and then for tab 2's.
+    /// The second ask must not replace the parked first (a newer ask of a parked
+    /// question replaces it only for the same buffer). The stage ends just after
+    /// the worker looks at its parked line; both questions' turns have come, and
+    /// tab 1's begins first, as it was asked first.
+    ///
+    /// MUTATION: leave the buffer out of `GitRequest::same_target` — the second
+    /// ask replaces the parked first, and tab 2's question is served first and
+    /// alone.
+    #[test]
+    fn one_document_parked_for_two_buffers_is_served_for_both_in_ask_order() {
+        let ([first, second], ask) = two_buffers_one_document();
+        let turns = crate::git_mutation_lane::RepoTurns::new();
+        let (_asks, inbox) = read_inbox(&turns);
+        let hold = std::sync::Arc::new(crate::lane::Hold::default());
+        hold.hold();
+        let (lane, wakes) = standing_verbs(&turns);
+        let stage = press(&lane, &hold, stage_in("仓库 repo", "一 one.md"));
+        hold.wait_standing("the stage running");
+        let mut pending = PendingGitRequests::default();
+        pending.post(GitMail::Ask(ask(first)));
+        assert!(
+            pending.next_turn(&turns, &inbox).is_none(),
+            "tab 1's diff waits behind the stage"
+        );
+        pending.post(GitMail::Ask(ask(second)));
+        pending.swept = Some(ends_after_the_look(
+            std::sync::Arc::clone(&lane),
+            wakes,
+            std::sync::Arc::clone(&hold),
+            stage,
+        ));
+        let (request, reading) = pending
+            .next_turn(&turns, &inbox)
+            .expect("the stage has ended; tab 1's diff is not replaced");
+        assert_eq!(request, ask(first), "tab 1's buffer first, as it was asked");
+        drop(reading);
+        let (request, reading) = pending
+            .next_turn(&turns, &inbox)
+            .expect("tab 2's diff's turn has come");
+        assert_eq!(request, ask(second), "then tab 2's buffer");
+        drop(reading);
     }
 
     /// RED (T-GIT-DOCUMENT-GATED-BY-POOL round 2) — **a read worker that ends
@@ -8025,6 +8084,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
             window: winit::window::WindowId::from(1_u64),
             host: GitHost::Column(seat(1)),
             asker: GitCacheId::mint(),
+            buffer: None,
             question,
         }
     }

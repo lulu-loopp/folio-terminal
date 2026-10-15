@@ -15545,3 +15545,9 @@ Records are never evicted, so they grow with the distinct animated files one win
 **Pinned by**
 - `git::tests::a_read_worker_that_ends_settles_every_waiting_document_with_no_other_event`
 - `git_mutation_lane::tests::{a_documents_answer_fills_the_buffer_opened_for_it_even_after_its_view_closed, a_documents_answer_whose_buffer_is_gone_is_sunk}` (now on `PreviewPool::merge_from` and the `PV_BUFFER_CAP` eviction)
+
+### 2026-10-14 — A git document asked for two buffers stays two questions in the read worker's parked line too (T-GIT-DOCUMENT-GATED-BY-POOL, stacked on T-GIT-READS-PER-REPOSITORY)
+
+**Additions to the entries above.** On the read worker's line with per-repository turns, a newer ask replaces a question in line or parked only when it is the same question from the same cache for the same buffer, so one document asked for two buffers while parked behind a verb is served for both, in the order asked. The read worker's answers keep the buffer (`GitRequest::answered`) and its end still wakes the loop (`git::AnswerOut`) on the turns path.
+
+**Pinned by** `git::tests::{one_document_asked_for_two_buffers_is_two_questions, one_document_parked_for_two_buffers_is_served_for_both_in_ask_order}`.
