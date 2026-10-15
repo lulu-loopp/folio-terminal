@@ -551,17 +551,24 @@ trait. A holder named for the **native** backend — its backend argument left t
 its default or a concrete type — is refused wherever it is written (an `impl`
 of it, any other function's signature or body — the methods of a generic
 holder block and of a generic trait impl included, read with the block's
-parameter in scope — a `const` or `static`, a struct, enum or union's field)
+parameter in scope — a `const` or `static`, a struct, enum or union's fields
+or generics, a backend parameter's own default aside)
 unless `docs/plans/window-seam-native.tsv` names the place with its reason. It
 is read in type position and in expression and pattern position
-(`FolioApp::new(..)`, a struct literal, a struct pattern): there an unwritten
-backend is chosen by inference, read as native where no backend parameter is in
-scope. The native backend's own name (`Native`, standing first or after
-`crate`/`self`/`super`/`window_seam`) is a native mention anywhere outside the
-seam. An impl's trait arguments, associated types and consts, and a native
-block's associated items have no row and are refused by name; so are a type
-alias of a holder and an `impl` whose self type names a holder natively without
-being its path, shapes the guard does not read.
+(`FolioApp::new(..)`, a struct literal, a struct or tuple-struct pattern): there
+an unwritten backend is chosen by inference, read as native where no backend
+parameter is in scope, and in any scope when the path names a method the holder
+has only in a native block (`Runtime::create` inside a function generic over the
+backend still builds the native one). A nested item sees none of the scope
+around it. The native backend's own name (`Native`, standing first or after a
+module's name) is a native mention anywhere outside the seam. An impl's
+generics, trait arguments, associated types and consts, a
+trait's declaration (its generics, supertraits and associated items), and a
+native block's associated items have no row and are refused by name; so are a
+`use` that renames the native backend or the seam, a holder or native name in a
+macro's tokens (an invocation's or a `macro_rules!` body's — the guard does not
+read macros), a type alias of a holder and an `impl` whose self type names a
+holder natively without being its path, shapes the guard does not read.
 Every door trait of the seam is implemented in the seam (the headless backend is
 test-only and is not read).
 

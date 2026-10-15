@@ -33,9 +33,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use bt_source::{
-    Certainty, DiskScope, ImplRecord, Index, ItemKind, Occurrence, Span, TargetId, TargetKind,
-    TargetRoot, TraitId, TraitResolver, Universe, Vendor, report,
+    Certainty, DiskScope, ImplRecord, Index, ItemKind, MacroKind, MacroRecord, Occurrence, Span,
+    TargetId, TargetKind, TargetRoot, TraitId, TraitResolver, Universe, Vendor, report,
 };
+use proc_macro2::TokenTree;
 use syn::visit::Visit;
 
 /// The module the seam is declared in.
@@ -174,6 +175,46 @@ fn backend_parameters(
     found
 }
 
+/// The seam module's own name, as a path segment writes it.
+fn seam_name() -> &'static str {
+    SEAM.rsplit("::").next().unwrap_or(SEAM)
+}
+
+/// **What the guard reads code against**: the holders (by name, with where the backend stands
+/// among their type parameters), the native backend's own names, the methods a holder has only in
+/// a block written for the native backend, and how to find a scope's backend parameters.
+struct Reading<'a> {
+    holders: BTreeMap<String, usize>,
+    natives: BTreeSet<String>,
+    native_only: BTreeMap<String, BTreeSet<String>>,
+    resolver: &'a TraitResolver<'a>,
+    package: &'a str,
+    backends: &'a BTreeSet<TraitId>,
+}
+
+impl Reading<'_> {
+    /// The backend parameters `generics` declares, its bounds resolved in one of `modules`.
+    fn parameters(&self, generics: &syn::Generics, modules: &[&str]) -> BTreeSet<String> {
+        modules
+            .iter()
+            .flat_map(|module| {
+                backend_parameters(generics, self.resolver, self.package, module, self.backends)
+            })
+            .collect()
+    }
+
+    /// Whether `name`, the segment after `owner` (or the first, with none), is the native
+    /// backend: one of its names, standing first or as a member of a module (`crate`, `self`,
+    /// `super`, the seam, or any module that brought it in, such as `crate::runtime::windows`).
+    /// A member of a type spelled the same (`ShellProgram::Native`, an enum's variant) is not it:
+    /// a module's name is snake_case and a type's is CamelCase, which the workspace's
+    /// `-D warnings` holds.
+    fn is_native(&self, owner: Option<&str>, name: &str) -> bool {
+        self.natives.contains(name)
+            && owner.is_none_or(|owner| owner.starts_with(|first: char| first.is_ascii_lowercase()))
+    }
+}
+
 /// **Every holder named for the native backend in a stretch of code**, and every mention of the
 /// native backend itself.
 ///
@@ -181,36 +222,33 @@ fn backend_parameters(
 ///   the native backend) or is not one of `generic`.
 /// * In **expression and pattern position** — a path such as `FolioApp::new` or `Runtime::create`,
 ///   a struct literal, a struct or tuple-struct pattern — a backend argument written on the path
-///   is judged the same way; an unwritten one is chosen by inference, which the guard reads as
-///   native when no backend parameter is in scope (nothing generic is there to infer from) and as
-///   the parameter's when one is. A generic scope can reach the native backend only by naming it,
-///   and naming it is the next rule.
+///   is judged the same way; an unwritten one is chosen by inference. Inference is read as native
+///   when no backend parameter is in scope, and whatever the scope when the path names a method
+///   the holder has only in a block written for the native backend (`Runtime::create`: inference
+///   can pick nothing else for it). Otherwise it is read as the parameter's.
 /// * **The native backend's own name** (each type `crate::window_seam` implements `Backend` for)
-///   anywhere outside the seam is a native mention, in any position — standing first, or after
-///   `crate`, `self`, `super` or the seam module's name. A member of something else spelled the
-///   same (`ShellProgram::Native`, an enum's variant) is not the backend.
+///   anywhere outside the seam is a native mention, in any position, standing first or as a
+///   member of a module ([`Reading::is_native`]).
+/// * **A nested item** (a function, an impl, a type written inside a body) sees none of the scope
+///   around it — Rust gives it none — so its backend parameters are its own.
+/// * **A `use` in a body that renames** the native backend or the seam names it.
+///
+/// A macro's tokens are not visited here (`syn` does not descend into them); the macro pass of
+/// [`judge`] reads them.
 struct NativeMentions<'a> {
-    holders: &'a BTreeMap<String, usize>,
-    natives: &'a BTreeSet<String>,
-    generic: &'a BTreeSet<String>,
+    reading: &'a Reading<'a>,
+    modules: &'a [&'a str],
+    generic: BTreeSet<String>,
     found: BTreeSet<String>,
 }
 
 impl NativeMentions<'_> {
-    /// The native backend's own names in `path`: a segment spelled as one counts when it stands
-    /// first (the name in scope), or after `crate`, `self`, `super` or the seam module's own name
-    /// — never as a member of something else (`ShellProgram::Native` is an enum's variant, not
-    /// the backend).
+    /// The native backend's own names in `path`.
     fn native_names(&mut self, path: &syn::Path) {
-        let seam = SEAM.rsplit("::").next().unwrap_or(SEAM);
         let mut before: Option<String> = None;
         for segment in &path.segments {
             let name = segment.ident.to_string();
-            if self.natives.contains(&name)
-                && before
-                    .as_deref()
-                    .is_none_or(|before| ["crate", "self", "super", seam].contains(&before))
-            {
+            if self.reading.is_native(before.as_deref(), &name) {
                 self.found.insert(name.clone());
             }
             before = Some(name);
@@ -220,18 +258,25 @@ impl NativeMentions<'_> {
     /// The holders and native names a path in expression or pattern position names.
     fn judge_value_path(&mut self, path: &syn::Path) {
         self.native_names(path);
-        for segment in &path.segments {
+        let segments: Vec<&syn::PathSegment> = path.segments.iter().collect();
+        for (at, segment) in segments.iter().enumerate() {
             let name = segment.ident.to_string();
-            if let Some(&position) = self.holders.get(&name) {
-                let written = matches!(segment.arguments, syn::PathArguments::AngleBracketed(_));
-                let native = if written {
-                    !written_for_a_parameter(segment, position, self.generic)
-                } else {
-                    self.generic.is_empty()
-                };
-                if native {
-                    self.found.insert(name);
-                }
+            let Some(&position) = self.reading.holders.get(&name) else {
+                continue;
+            };
+            let native = if matches!(segment.arguments, syn::PathArguments::AngleBracketed(_)) {
+                !written_for_a_parameter(segment, position, &self.generic)
+            } else {
+                let native_only = segments.get(at + 1).is_some_and(|next| {
+                    self.reading
+                        .native_only
+                        .get(&name)
+                        .is_some_and(|methods| methods.contains(&next.ident.to_string()))
+                });
+                self.generic.is_empty() || native_only
+            };
+            if native {
+                self.found.insert(name);
             }
         }
     }
@@ -242,8 +287,8 @@ impl<'ast> Visit<'ast> for NativeMentions<'_> {
         self.native_names(&node.path);
         for segment in &node.path.segments {
             let name = segment.ident.to_string();
-            if let Some(&position) = self.holders.get(&name)
-                && !written_for_a_parameter(segment, position, self.generic)
+            if let Some(&position) = self.reading.holders.get(&name)
+                && !written_for_a_parameter(segment, position, &self.generic)
             {
                 self.found.insert(name);
             }
@@ -278,6 +323,41 @@ impl<'ast> Visit<'ast> for NativeMentions<'_> {
         }
         syn::visit::visit_pat_tuple_struct(self, node);
     }
+
+    fn visit_item(&mut self, node: &'ast syn::Item) {
+        let generics = match node {
+            syn::Item::Fn(item) => Some(&item.sig.generics),
+            syn::Item::Impl(item) => Some(&item.generics),
+            syn::Item::Struct(item) => Some(&item.generics),
+            syn::Item::Enum(item) => Some(&item.generics),
+            syn::Item::Union(item) => Some(&item.generics),
+            syn::Item::Trait(item) => Some(&item.generics),
+            syn::Item::Type(item) => Some(&item.generics),
+            _ => None,
+        };
+        let own = generics.map_or_else(BTreeSet::new, |generics| {
+            self.reading.parameters(generics, self.modules)
+        });
+        let outer = std::mem::replace(&mut self.generic, own);
+        syn::visit::visit_item(self, node);
+        self.generic = outer;
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        let own = self.reading.parameters(&node.sig.generics, self.modules);
+        let outer = self.generic.clone();
+        self.generic.extend(own);
+        syn::visit::visit_impl_item_fn(self, node);
+        self.generic = outer;
+    }
+
+    fn visit_use_rename(&mut self, node: &'ast syn::UseRename) {
+        let name = node.ident.to_string();
+        if self.reading.natives.contains(&name) || name == seam_name() {
+            self.found.insert(name);
+        }
+        syn::visit::visit_use_rename(self, node);
+    }
 }
 
 /// Whether a holder's path segment is written for one of `generic` at the backend's `position`.
@@ -306,21 +386,72 @@ fn written_for_a_parameter(
         .is_some_and(|ident| generic.contains(&ident.to_string()))
 }
 
-/// The holders `node` names for the native backend, with `generic` the backend parameters in scope.
+/// The holders and native names a stretch of code names for the native backend, written in one of
+/// `modules`, with `generic` the backend parameters in scope.
 fn native_mentions(
-    holders: &BTreeMap<String, usize>,
-    natives: &BTreeSet<String>,
+    reading: &Reading<'_>,
+    modules: &[&str],
     generic: &BTreeSet<String>,
     visit: impl FnOnce(&mut NativeMentions<'_>),
 ) -> BTreeSet<String> {
     let mut mentions = NativeMentions {
-        holders,
-        natives,
-        generic,
+        reading,
+        modules,
+        generic: generic.clone(),
         found: BTreeSet::new(),
     };
     visit(&mut mentions);
     mentions.found
+}
+
+/// The holder whose own block `parsed` is, by the last segment of its self type's path.
+fn holder_path<'p>(
+    parsed: &'p syn::ItemImpl,
+    holders: &BTreeMap<String, usize>,
+) -> Option<&'p syn::PathSegment> {
+    match &*parsed.self_ty {
+        syn::Type::Path(path) => path
+            .path
+            .segments
+            .last()
+            .filter(|last| holders.contains_key(&last.ident.to_string())),
+        _ => None,
+    }
+}
+
+/// **The holders and native names a macro's tokens name**, read lexically: every identifier that
+/// is a holder's name, and every native name standing first or as a member of a module
+/// ([`Reading::is_native`]).
+fn macro_mentions(tokens: proc_macro2::TokenStream, reading: &Reading<'_>) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    let tokens: Vec<TokenTree> = tokens.into_iter().collect();
+    for (at, token) in tokens.iter().enumerate() {
+        match token {
+            TokenTree::Group(group) => found.extend(macro_mentions(group.stream(), reading)),
+            TokenTree::Ident(ident) => {
+                let name = ident.to_string();
+                if reading.holders.contains_key(&name) {
+                    found.insert(name.clone());
+                }
+                // `owner::name`: two `:` puncts after an identifier.
+                let owner = match at.checked_sub(3).map(|start| &tokens[start..at]) {
+                    Some(
+                        [
+                            TokenTree::Ident(owner),
+                            TokenTree::Punct(a),
+                            TokenTree::Punct(b),
+                        ],
+                    ) if a.as_char() == ':' && b.as_char() == ':' => Some(owner.to_string()),
+                    _ => None,
+                };
+                if reading.is_native(owner.as_deref(), &name) {
+                    found.insert(name);
+                }
+            }
+            TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+        }
+    }
+    found
 }
 
 /// The header of an `impl` block, parsed: its generics, self type and trait.
@@ -399,6 +530,58 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
         "the seam of `{package}` implements `Backend` for no product type: the native backend \
          has no name to read"
     );
+    // The methods a holder has only in a block written for the native backend: a path call to
+    // one of them is native in any scope, because inference can pick nothing else for it.
+    let mut native_methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut generic_methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for block in index.impls() {
+        if !in_the_product(index, block.whole()) {
+            continue;
+        }
+        let parsed = impl_header(index, block);
+        let Some(last) = holder_path(&parsed, &holders) else {
+            continue;
+        };
+        let holder = last.ident.to_string();
+        let generic: BTreeSet<String> = block
+            .module_paths()
+            .iter()
+            .flat_map(|module| {
+                backend_parameters(&parsed.generics, &resolver, package, module, &backends)
+            })
+            .collect();
+        let whole: syn::ItemImpl = syn::parse_str(index.text(block.whole()))
+            .unwrap_or_else(|error| panic!("a `{holder}` block parses: {error}"));
+        let methods = whole.items.iter().filter_map(|member| match member {
+            syn::ImplItem::Fn(method) => Some(method.sig.ident.to_string()),
+            _ => None,
+        });
+        if written_for_a_parameter(last, holders[&holder], &generic) {
+            generic_methods.entry(holder).or_default().extend(methods);
+        } else {
+            native_methods.entry(holder).or_default().extend(methods);
+        }
+    }
+    let native_only = native_methods
+        .into_iter()
+        .map(|(holder, methods)| {
+            let generic = generic_methods.get(&holder);
+            let only = methods
+                .into_iter()
+                .filter(|method| generic.is_none_or(|generic| !generic.contains(method)))
+                .collect();
+            (holder, only)
+        })
+        .collect();
+    let reading = Reading {
+        holders: holders.clone(),
+        natives: natives.clone(),
+        native_only,
+        resolver: &resolver,
+        package,
+        backends: &backends,
+    };
+
     let mut refusals = Vec::new();
     let mut used: BTreeSet<(String, String, String)> = BTreeSet::new();
     let mut allow = |kind: &str, owner: &str, name: &str| {
@@ -444,18 +627,10 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
         }
 
         let owner = block.type_owner();
-        let own_path = match &*parsed.self_ty {
-            syn::Type::Path(path) => path
-                .path
-                .segments
-                .last()
-                .filter(|last| holders.contains_key(&last.ident.to_string())),
-            _ => None,
-        };
-        let Some(last) = own_path else {
+        let Some(last) = holder_path(&parsed, &holders) else {
             // Not a holder's own block: whatever it names for the native backend in its self type
             // is a shape this guard does not read.
-            let named = native_mentions(&holders, &natives, &generic, |visit| {
+            let named = native_mentions(&reading, &modules, &generic, |visit| {
                 visit.visit_type(&parsed.self_ty)
             });
             if !named.is_empty() && !seam_block {
@@ -467,13 +642,13 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
                 ));
             }
             if !seam_block {
-                associated_items(index, block, &holders, &natives, &generic, &mut refusals);
+                associated_items(index, block, &reading, &generic, &mut refusals);
             }
             continue;
         };
         if written_for_a_parameter(last, holders[&last.ident.to_string()], &generic) {
             if !seam_block {
-                associated_items(index, block, &holders, &natives, &generic, &mut refusals);
+                associated_items(index, block, &reading, &generic, &mut refusals);
             }
             continue;
         }
@@ -559,7 +734,7 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
                 generic.extend(block.iter().cloned());
             }
         }
-        let named = native_mentions(&holders, &natives, &generic, |visit| {
+        let named = native_mentions(&reading, &item.module_paths(), &generic, |visit| {
             visit.visit_item_fn(&parsed)
         });
         if named.is_empty() {
@@ -591,8 +766,8 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
         }
         let parsed: syn::Item = syn::parse_str(index.text(item.whole()))
             .unwrap_or_else(|error| panic!("the type `{}` parses: {error}", item.name()));
-        // The fields only: a holder's own declaration defaults its backend parameter to the
-        // native backend, which is the seam's design, not a field holding it.
+        // The fields and the generics: a holder's own declaration defaults its backend parameter
+        // to the native backend, which is the seam's design, not a field holding it.
         let (generics, fields): (&syn::Generics, Vec<&syn::Field>) = match &parsed {
             syn::Item::Struct(declared) => (&declared.generics, declared.fields.iter().collect()),
             syn::Item::Enum(declared) => (
@@ -608,12 +783,19 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
             }
             _ => continue,
         };
-        let generic: BTreeSet<String> = item
-            .module_paths()
-            .into_iter()
-            .flat_map(|module| backend_parameters(generics, &resolver, package, module, &backends))
-            .collect();
-        let named = native_mentions(&holders, &natives, &generic, |visit| {
+        let modules = item.module_paths();
+        let generic = reading.parameters(generics, &modules);
+        // Its generics too — bounds, `where` clause and defaults — but for a backend parameter's
+        // default, which is the seam's design.
+        let mut read_generics = generics.clone();
+        for param in read_generics.type_params_mut() {
+            if generic.contains(&param.ident.to_string()) {
+                param.eq_token = None;
+                param.default = None;
+            }
+        }
+        let named = native_mentions(&reading, &modules, &generic, |visit| {
+            visit.visit_generics(&read_generics);
             for field in fields {
                 visit.visit_field(field);
             }
@@ -645,8 +827,7 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
             .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
         file_items(
             &parsed.items,
-            &holders,
-            &natives,
+            &reading,
             &mut |kind, item_name, what| match kind {
                 "alias" => refusals.push(format!(
                     "the type alias `{item_name}` in {name} names {what} — the window-seam guard \
@@ -664,6 +845,104 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
         );
     }
 
+    // `use` items renaming the native backend or the seam module: the guard reads both by their
+    // own names. (One in a body is read by the function pass, as a mention.)
+    for declared in index.uses() {
+        if !in_the_product(index, declared.whole()) || declared.module_paths().contains(&SEAM) {
+            continue;
+        }
+        for (name, path) in declared.names() {
+            let Some(last) = path.last() else {
+                continue;
+            };
+            if (natives.contains(last) || last == seam_name()) && name != last {
+                refusals.push(format!(
+                    "`use {} as {name}` in {} renames {last} — the guard reads the native backend \
+                     and the seam by their own names",
+                    path.join("::"),
+                    declared.module_paths().join(", ")
+                ));
+            }
+        }
+    }
+
+    // Every trait's declaration but its methods (the function pass reads those): its generics,
+    // supertraits, associated consts and associated types.
+    for declared in index.traits() {
+        if !in_the_product(index, declared.whole()) || declared.module_paths().contains(&SEAM) {
+            continue;
+        }
+        let mut parsed: syn::ItemTrait = syn::parse_str(index.text(declared.whole()))
+            .unwrap_or_else(|error| panic!("the trait `{}` parses: {error}", declared.name()));
+        parsed
+            .items
+            .retain(|member| !matches!(member, syn::TraitItem::Fn(_)));
+        let modules = declared.module_paths();
+        let generic = reading.parameters(&parsed.generics, &modules);
+        let named = native_mentions(&reading, &modules, &generic, |visit| {
+            visit.visit_item_trait(&parsed);
+        });
+        if !named.is_empty() {
+            refusals.push(format!(
+                "the trait `{}::{}` names {} for the native backend in its declaration — the \
+                 window is reached through the seam",
+                modules.join(", "),
+                declared.name(),
+                named.into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        }
+    }
+
+    // Macros: `syn` does not read their tokens as code, so a holder or a native name in a macro's
+    // tokens — an invocation's or a `macro_rules!` body's — is refused by name. Read lexically,
+    // outermost macro only (an inner one's tokens are the outer one's).
+    let seam_spans: Vec<Span> = index
+        .modules()
+        .iter()
+        .filter(|module| module.module_paths().iter().any(|path| path == SEAM))
+        .map(|module| module.span())
+        .collect();
+    let product_macros: Vec<&MacroRecord> = index
+        .macros()
+        .iter()
+        .filter(|found| {
+            in_the_product(index, found.span())
+                && !seam_spans.iter().any(|seam| found.span().within(*seam))
+        })
+        .collect();
+    for found in &product_macros {
+        if product_macros
+            .iter()
+            .any(|outer| outer.span() != found.span() && found.span().within(outer.tokens()))
+        {
+            continue;
+        }
+        let tokens: proc_macro2::TokenStream = index
+            .text(found.tokens())
+            .parse()
+            .unwrap_or_else(|error| panic!("a macro's tokens lex: {error}"));
+        let named = macro_mentions(tokens, &reading);
+        if named.is_empty() {
+            continue;
+        }
+        let at = index
+            .locate(found.span().start())
+            .expect("a macro is in a file of the index");
+        let file = at
+            .file
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        let written = match found.kind() {
+            MacroKind::Definition => format!("macro_rules! {}", found.path()),
+            MacroKind::Invocation => format!("{}!", found.path()),
+        };
+        refusals.push(format!(
+            "`{written}` at {file}:{}: a macro's tokens name {} — the guard does not read macros",
+            at.line,
+            named.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+
     let unused = allowed
         .iter()
         .filter(|row| !used.contains(*row))
@@ -674,21 +953,34 @@ fn judge(index: &Index, package: &str, allowed: &Allowed) -> (Vec<String>, Vec<S
     (refusals, unused)
 }
 
-/// **An impl block's trait arguments, associated types and consts**, read with the block's backend
-/// parameters (`generic`) in scope: one naming a holder or the native backend natively is refused,
-/// by name — there is no list row for any of them. (Its functions are read by the function pass.)
+/// **An impl block's generics, trait arguments, associated types and consts**, read with the
+/// block's backend parameters (`generic`) in scope: one naming a holder or the native backend
+/// natively is refused, by name — there is no list row for any of them. (Its functions are read by
+/// the function pass.)
 fn associated_items(
     index: &Index,
     block: &ImplRecord,
-    holders: &BTreeMap<String, usize>,
-    natives: &BTreeSet<String>,
+    reading: &Reading<'_>,
     generic: &BTreeSet<String>,
     refusals: &mut Vec<String>,
 ) {
     let whole: syn::ItemImpl = syn::parse_str(index.text(block.whole()))
         .unwrap_or_else(|error| panic!("an impl block parses: {error}"));
+    let modules = block.module_paths();
+    let named = native_mentions(reading, &modules, generic, |visit| {
+        visit.visit_generics(&whole.generics);
+    });
+    if !named.is_empty() {
+        refusals.push(format!(
+            "an impl for `{}` in {} names {} for the native backend in its generics — the window \
+             is reached through the seam",
+            block.type_owner(),
+            modules.join(", "),
+            named.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
     if let Some((_, path, _)) = &whole.trait_ {
-        let named = native_mentions(holders, natives, generic, |visit| visit.visit_path(path));
+        let named = native_mentions(reading, &modules, generic, |visit| visit.visit_path(path));
         if !named.is_empty() {
             refusals.push(format!(
                 "the impl of `{}` for `{}` in {} names {} for the native backend in its trait — \
@@ -707,14 +999,14 @@ fn associated_items(
             syn::ImplItem::Type(declared) => (
                 "type",
                 declared.ident.to_string(),
-                native_mentions(holders, natives, generic, |visit| {
+                native_mentions(reading, &modules, generic, |visit| {
                     visit.visit_impl_item_type(declared);
                 }),
             ),
             syn::ImplItem::Const(declared) => (
                 "const",
                 declared.ident.to_string(),
-                native_mentions(holders, natives, generic, |visit| {
+                native_mentions(reading, &modules, generic, |visit| {
                     visit.visit_impl_item_const(declared);
                 }),
             ),
@@ -736,8 +1028,7 @@ fn associated_items(
 /// native backend, among `items` and their inline modules — a `#[cfg(test)]` module left out.
 fn file_items(
     items: &[syn::Item],
-    holders: &BTreeMap<String, usize>,
-    natives: &BTreeSet<String>,
+    reading: &Reading<'_>,
     found: &mut impl FnMut(&str, &str, &str),
 ) {
     let none = BTreeSet::new();
@@ -747,13 +1038,13 @@ fn file_items(
                 // Any holder at all: an alias written for a parameter is still a name the guard
                 // does not read.
                 let mut any = Vec::new();
-                AnyHolder(holders, &mut any).visit_type(&alias.ty);
+                AnyHolder(&reading.holders, &mut any).visit_type(&alias.ty);
                 if !any.is_empty() {
                     found("alias", &alias.ident.to_string(), &any.join(", "));
                 }
             }
             syn::Item::Const(constant) => {
-                let named = native_mentions(holders, natives, &none, |visit| {
+                let named = native_mentions(reading, &[], &none, |visit| {
                     visit.visit_item_const(constant)
                 });
                 if !named.is_empty() {
@@ -762,9 +1053,8 @@ fn file_items(
                 }
             }
             syn::Item::Static(fixed) => {
-                let named = native_mentions(holders, natives, &none, |visit| {
-                    visit.visit_item_static(fixed)
-                });
+                let named =
+                    native_mentions(reading, &[], &none, |visit| visit.visit_item_static(fixed));
                 if !named.is_empty() {
                     let names = named.into_iter().collect::<Vec<_>>().join(", ");
                     found("const", &fixed.ident.to_string(), &names);
@@ -780,7 +1070,7 @@ fn file_items(
                 if let Some((_, inner)) = &module.content
                     && !test_only
                 {
-                    file_items(inner, holders, natives, found);
+                    file_items(inner, reading, found);
                 }
             }
             _ => {}
@@ -837,9 +1127,15 @@ fn row(kind: &str, owner: &str, name: &str) -> (String, String, String) {
 /// native holders; a `const` naming one; a method of a generic holder block taking a holder whose
 /// backend defaults to the native one; a generic trait impl of a holder naming the native backend
 /// in a method's body, and another in its trait's arguments; a native holder built in expression
-/// position by inference, and one taken apart in a struct pattern; a type whose field holds a
-/// native holder; an associated const and an associated type naming one; the native backend
-/// named by its path; and a list row nothing uses. The generic blocks (the bound written
+/// position by inference, by a struct literal, and taken apart in a struct pattern and a
+/// tuple-struct pattern; a native-only method called by inference inside a function generic over
+/// the backend; an inner function of a generic function, which sees none of its scope; a type
+/// whose field holds a native holder, and one whose generic parameter defaults to one; an
+/// associated const and an associated type naming one; a trait whose associated items, and one
+/// whose supertrait and bound, name them; a holder block's own `where` clause naming one; the
+/// native backend named by its path and through a module that brought it in; `use` items
+/// renaming the native backend and the seam; a holder named in a macro invocation's tokens and in
+/// a `macro_rules!` body; and a list row nothing uses. The generic blocks (the bound written
 /// directly, through the prelude's glob, through a rename, in a `where` clause and through a
 /// supertrait), a holder built by inference inside a generic function, an enum's variant spelled
 /// as the backend, the listed native method, function and `const`, a type with no backend and a
@@ -865,26 +1161,52 @@ fn every_road_around_the_window_seam_is_named() {
              reached through the seam",
             "`Shell::fmt` names Native, Shell for the native backend — the window is reached \
              through the seam",
+            "`crate::runtime::builds_by_a_literal` names Shell for the native backend — the \
+             window is reached through the seam",
             "`crate::runtime::builds_by_inference` names Runtime for the native backend — the \
+             window is reached through the seam",
+            "`crate::runtime::generic_builds` names Runtime for the native backend — the window \
+             is reached through the seam",
+            "`crate::runtime::holds_an_inner_function` names Shell for the native backend — the \
              window is reached through the seam",
             "`crate::runtime::names_it_by_its_path` names Native for the native backend — the \
              window is reached through the seam",
             "`crate::runtime::rebuild_every_window` names Runtime for the native backend — the \
              window is reached through the seam",
+            "`crate::runtime::takes_a_pair_apart` names Pair for the native backend — the window \
+             is reached through the seam",
             "`crate::runtime::takes_apart_by_pattern` names Shell for the native backend — the \
              window is reached through the seam",
+            "`crate::runtime::through_a_module` names Native for the native backend — the window \
+             is reached through the seam",
             "`impl Default for Shell` is written for the native backend in crate::runtime — the \
              window is reached through the seam",
+            "`macro_rules! builds_one` at runtime.rs:142: a macro's tokens name Runtime — the \
+             guard does not read macros",
+            "`use crate::window_seam as ws` in crate::runtime renames window_seam — the guard \
+             reads the native backend and the seam by their own names",
+            "`use crate::window_seam::Native as N` in crate::runtime renames Native — the guard \
+             reads the native backend and the seam by their own names",
+            "`vec!` at runtime.rs:138: a macro's tokens name Runtime — the guard does not read \
+             macros",
+            "an impl for `Runtime` in crate::runtime names Native, Shell for the native backend \
+             in its generics — the window is reached through the seam",
             "an impl in crate::runtime is written for a type that names Native, Runtime for the \
              native backend without being its path — a shape the window-seam guard does not read",
-            "the `const` or `static` `PLANTED` in runtime.rs names Runtime for the native backend \
-             — the window is reached through the seam",
+            "the `const` or `static` `PLANTED` in runtime.rs names Runtime for the native \
+             backend — the window is reached through the seam",
             "the associated const `Plain::NATIVE` in crate::runtime names Runtime for the native \
              backend — the window is reached through the seam",
             "the associated type `Shell::Item` in crate::runtime names Native, Shell for the \
              native backend — the window is reached through the seam",
             "the impl of `Twin` for `Shell` in crate::runtime names Native, Shell for the native \
              backend in its trait — the window is reached through the seam",
+            "the trait `crate::runtime::Bounded` names Native, Runtime, Shell for the native \
+             backend in its declaration — the window is reached through the seam",
+            "the trait `crate::runtime::Keeps` names Native, Runtime, Shell for the native \
+             backend in its declaration — the window is reached through the seam",
+            "the type `crate::runtime::Defaulted` holds Runtime for the native backend — the \
+             window is reached through the seam",
             "the type `crate::runtime::Keeper` holds Runtime for the native backend — the window \
              is reached through the seam",
             "the type alias `NativeRuntime` in runtime.rs names Runtime — the window-seam guard \

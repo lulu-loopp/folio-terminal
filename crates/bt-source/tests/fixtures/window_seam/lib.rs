@@ -2,13 +2,14 @@
 //!
 //! ```text
 //! window_seam   the seam: `Backend`, the door `WindowHost`, the native backend and its door
-//! (root)        `Runtime` and `Shell`, which hold a backend; `Plain`, which does not
-//! runtime       the generic road (named directly, through a glob and through a rename), the
-//!               native-only road on the list, and the PLANTED native block with a method off it
+//! (root)        `Runtime`, `Shell` and `Pair`, which hold a backend; `Plain`, which does not;
+//!               `Indirect`, bound through a supertrait; the listed native method, function
+//!               and `const`; a test module's native block
+//! runtime       the generic roads (named directly, through a glob, through a rename, in a
+//!               `where` clause), the passing controls (a holder built by inference inside a
+//!               generic function, an enum's variant spelled as the backend), and every PLANTED
+//!               shape the guard refuses, each marked where it is written
 //! elsewhere     the PLANTED door implemented outside the seam
-//!               (runtime also plants: a native block of a holder bound through a supertrait, a
-//!               type alias of a holder, an impl for a reference to a native holder, a free
-//!               function over native holders, and a `const` naming one)
 //! ```
 
 mod elsewhere;
@@ -32,6 +33,9 @@ where
 pub struct Indirect<B: window_seam::ShellBackend> {
     backend: B,
 }
+
+/// A holder whose fields are a tuple's.
+pub struct Pair<B: Backend = Native>(B::Window);
 
 pub struct Plain;
 

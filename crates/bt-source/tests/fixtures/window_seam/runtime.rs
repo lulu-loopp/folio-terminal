@@ -2,7 +2,7 @@ use crate::window_seam::prelude::*;
 use crate::window_seam::Backend as Seam;
 use crate::window_seam::Native;
 use crate::window_seam::ShellBackend;
-use crate::{Indirect, Runtime, Shell};
+use crate::{Indirect, Pair, Runtime, Shell};
 
 impl<B: Backend> Runtime<'_, B> {
     fn present(&self) {
@@ -132,3 +132,66 @@ pub enum Kind {
 fn a_variant_spelled_as_the_backend() -> Kind {
     Kind::Native
 }
+
+// PLANTED: a holder named in a macro's tokens, in a body.
+fn builds_in_a_macro() -> Vec<()> {
+    vec![Runtime::create()]
+}
+
+// PLANTED: a holder named in a `macro_rules!` body.
+macro_rules! builds_one {
+    () => {
+        crate::Runtime::create()
+    };
+}
+
+// PLANTED: a native-only method called by inference inside a function generic over the backend.
+fn generic_builds<B: Backend>(_runtime: &Runtime<'_, B>) {
+    Runtime::create();
+}
+
+// PLANTED: an inner function sees none of the generic scope around it.
+fn holds_an_inner_function<B: Backend>(_runtime: &Runtime<'_, B>) {
+    fn inner() {
+        let _ = Shell::settle;
+    }
+}
+
+// PLANTED: `use` items renaming the native backend and the seam module.
+use crate::window_seam::Native as N;
+use crate::window_seam as ws;
+
+// PLANTED: the native backend named through a module that brought it in.
+fn through_a_module() {
+    let _ = crate::runtime::Native;
+}
+
+// PLANTED: a trait whose associated const and associated type name native holders.
+pub trait Keeps {
+    const KEPT: Option<Runtime<'static>>;
+    type Held: Into<Shell<Native>>;
+}
+
+// PLANTED: a trait whose supertrait and generic bound name native holders.
+pub trait Bounded<T: Into<Runtime<'static>>>: Twin<Shell<Native>> {}
+
+// PLANTED: a native holder built by a struct literal.
+fn builds_by_a_literal() {
+    let _ = Shell { window: () };
+}
+
+// PLANTED: a native holder taken apart by a tuple-struct pattern.
+fn takes_a_pair_apart() {
+    let Pair(_) = unimplemented!();
+}
+
+// PLANTED: a holder block's own `where` clause naming a native holder.
+impl<B: Backend> Runtime<'_, B>
+where
+    Shell<Native>: Clone,
+{
+    fn constrained(&self) {}
+}
+
+// PLANTED: a generic parameter's default on a type that holds no backend.
+pub struct Defaulted<T = Runtime<'static>>(T);
