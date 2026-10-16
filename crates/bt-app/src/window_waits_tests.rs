@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use bt_platform::admission::{DoorKey, Phase, doors};
 use bt_source::{
     Certainty, FileRecord, ImplRecord, Index, ItemKind, ItemQuery, ItemRecord, MacroKind,
-    Occurrence, TargetKind, TraitId, TraitResolver,
+    Occurrence, ResolveCutoff, TargetKind, TraitId, TraitResolver,
 };
 
 use super::{STATION_COUNT, Station};
@@ -1783,6 +1783,37 @@ struct Implementation {
     methods: Vec<&'static ItemRecord>,
 }
 
+/// **What a decision of this guard takes from the resolver, or its refusal**: every trait the
+/// guard decides with — the traits a product `impl` block implements ([`implemented`]), a trait's
+/// supertraits ([`World::supertraits`]), the traits a receiver's stated type or a bound names
+/// ([`Body::traits_named`]) — comes through here, and a path chained past the resolver's hop limit
+/// ([`ResolveCutoff`]) fails the guard by name instead of being read as "no trait". A cycle among
+/// `use`s and globs is no cutoff: it names nothing more.
+fn decided(
+    answer: Result<BTreeSet<TraitId>, ResolveCutoff>,
+    what: impl FnOnce() -> String,
+) -> BTreeSet<TraitId> {
+    answer.unwrap_or_else(|ResolveCutoff(_)| {
+        panic!(
+            "{} chains past the resolver's hop limit — refused, never passed",
+            what()
+        )
+    })
+}
+
+/// The first-party traits an `impl` block of `src` implements, for [`World::implementations`]
+/// ([`decided`]).
+fn implemented(resolver: &TraitResolver<'_>, src: &Src, block: &ImplRecord) -> BTreeSet<TraitId> {
+    decided(resolver.implemented_checked(src.package, block), || {
+        format!(
+            "the trait `{}` of {}'s `impl` block for `{}`",
+            block.trait_path().unwrap_or_default().join("::"),
+            src.package,
+            block.type_owner()
+        )
+    })
+}
+
 /// Words that open a parenthesis without calling anything.
 const KEYWORDS: [&str; 22] = [
     "if", "while", "match", "return", "in", "as", "for", "loop", "move", "else", "let", "mut",
@@ -1874,7 +1905,7 @@ impl World {
                 if !src.in_product(block.whole().start()) {
                     continue;
                 }
-                for id in resolver.implemented(src.package, block) {
+                for id in implemented(&resolver, src, block) {
                     let methods = src
                         .index
                         .items()
@@ -2097,6 +2128,14 @@ impl World {
 }
 
 impl World {
+    /// The first-party supertraits of `id`, each resolved where it is declared — refused by name
+    /// when one chains past the resolver's hop limit ([`decided`]).
+    fn supertraits(&self, id: &TraitId) -> BTreeSet<TraitId> {
+        decided(self.resolver.supertraits_checked(id), || {
+            format!("a supertrait of `{id}`")
+        })
+    }
+
     /// **The first-party methods a call of `method` on a value known only by the traits `stated`
     /// can run** — `None` when no first-party trait among them, or among their supertraits,
     /// declares `method` (a method of a standard or third-party trait, or of a foreign
@@ -2117,7 +2156,7 @@ impl World {
         let mut closure = stated.clone();
         let mut work: Vec<TraitId> = stated.iter().cloned().collect();
         while let Some(id) = work.pop() {
-            for supertrait in self.resolver.supertraits(&id) {
+            for supertrait in self.supertraits(&id) {
                 if closure.insert(supertrait.clone()) {
                     work.push(supertrait);
                 }
@@ -2575,7 +2614,12 @@ impl<'w> Body<'w> {
         self.record
             .module_paths()
             .into_iter()
-            .flat_map(|module| self.world.resolver.resolve(package, module, &path))
+            .flat_map(|module| {
+                decided(
+                    self.world.resolver.resolve_checked(package, module, &path),
+                    || format!("the trait path `{}` in {package} {module}", path.join("::")),
+                )
+            })
             .collect()
     }
 
@@ -9310,6 +9354,48 @@ mod trait_dispatch_source_shapes {
         }
     }
 
+    /// `Driver` under twenty-one renamed re-exports — more than the resolver follows — and a type
+    /// implementing it under the last name.
+    mod past_the_hop_limit {
+        pub use crate::update_job::Driver as Link0;
+        pub use Link0 as Link1;
+        pub use Link1 as Link2;
+        pub use Link2 as Link3;
+        pub use Link3 as Link4;
+        pub use Link4 as Link5;
+        pub use Link5 as Link6;
+        pub use Link6 as Link7;
+        pub use Link7 as Link8;
+        pub use Link8 as Link9;
+        pub use Link9 as Link10;
+        pub use Link10 as Link11;
+        pub use Link11 as Link12;
+        pub use Link12 as Link13;
+        pub use Link13 as Link14;
+        pub use Link14 as Link15;
+        pub use Link15 as Link16;
+        pub use Link16 as Link17;
+        pub use Link17 as Link18;
+        pub use Link18 as Link19;
+        pub use Link19 as Link20;
+
+        pub struct HopLimitShape;
+
+        impl Link20 for HopLimitShape {}
+    }
+
+    use past_the_hop_limit::Link20;
+
+    fn trait_shape_past_the_hop_limit(driver: &dyn Link20) {
+        let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
+    }
+
+    trait SupertraitPastTheHopLimit: Link20 {
+        fn trait_shape_supertrait_past_the_hop_limit(&self) {
+            let _ = self.prepare(unreachable!(), unreachable!(), unreachable!());
+        }
+    }
+
     fn std_trait_shape(sink: &mut dyn std::io::Write, line: &[u8]) {
         let _ = sink.write_all(line);
         let _ = sink.flush();
@@ -9560,7 +9646,7 @@ fn a_trait_is_its_identity_and_a_default_runs_only_where_it_is_not_overridden() 
         let mut closure = BTreeSet::from([id.clone()]);
         let mut work = vec![id.clone()];
         while let Some(next) = work.pop() {
-            for supertrait in world.resolver.supertraits(&next) {
+            for supertrait in world.supertraits(&next) {
                 if closure.insert(supertrait.clone()) {
                     work.push(supertrait);
                 }
@@ -9652,6 +9738,78 @@ fn a_trait_is_its_identity_and_a_default_runs_only_where_it_is_not_overridden() 
         BTreeSet::new(),
         "no product type implements `LocalDriver`"
     );
+}
+
+/// RED (T-WINDOW-WAITS-RESOLVER-CUTOFF) — **a receiver's trait chained past the resolver's hop
+/// limit is refused by name, never read as "no trait".**
+///
+/// `trait_shape_past_the_hop_limit` takes `&dyn Link20`, `Link20` being `Driver` under twenty-one
+/// renamed re-exports (the fixture module `past_the_hop_limit`). Read as "no trait", the call
+/// would fall to the untyped reading and the `Driver` implementations — a door body reached
+/// through the trait object — would go unnamed; the guard fails by name instead.
+///
+/// MUTATION: in [`decided`], answer what was found on a cutoff — the call is read as untyped,
+/// nothing is refused, and the test is red.
+#[test]
+#[should_panic(
+    expected = "the trait path `Link20` in bt-app crate::hang_watch::window_waits_tests::trait_dispatch_source_shapes chains past the resolver's hop limit — refused, never passed"
+)]
+fn a_receiver_trait_chained_past_the_hop_limit_is_refused() {
+    let world = World::new();
+    named_in_shape(&world, "trait_shape_past_the_hop_limit", "prepare");
+}
+
+/// RED (T-WINDOW-WAITS-RESOLVER-CUTOFF) — **a supertrait chained past the resolver's hop limit is
+/// refused by name, never read as "no supertrait".**
+///
+/// `SupertraitPastTheHopLimit: Link20` declares no `prepare`; its default method's
+/// `self.prepare(…)` is the supertrait's, `Driver::prepare` under twenty-one re-exports. Read as
+/// "no supertrait", no stated trait would declare `prepare` and the call would fall to the untyped
+/// reading; the guard fails by name instead.
+///
+/// MUTATION: in [`decided`], answer what was found on a cutoff — `trait_methods` finds no
+/// declaring trait, nothing is refused, and the test is red.
+#[test]
+#[should_panic(
+    expected = "a supertrait of `bt-app crate::hang_watch::window_waits_tests::trait_dispatch_source_shapes::SupertraitPastTheHopLimit` chains past the resolver's hop limit — refused, never passed"
+)]
+fn a_supertrait_chained_past_the_hop_limit_is_refused() {
+    let world = World::new();
+    named_in_shape(
+        &world,
+        "trait_shape_supertrait_past_the_hop_limit",
+        "prepare",
+    );
+}
+
+/// RED (T-WINDOW-WAITS-RESOLVER-CUTOFF) — **an `impl` block whose trait is chained past the
+/// resolver's hop limit is refused by name, never filed under no trait.**
+///
+/// `impl Link20 for HopLimitShape` implements `Driver` under twenty-one renamed re-exports. Filed
+/// under no trait ([`World::of`] files each product block through [`implemented`]), its `prepare`
+/// would be missing from every call on a `Driver`; the guard fails by name instead. The block is
+/// the `cfg(any())` fixture's, so it is handed to [`implemented`] directly.
+///
+/// MUTATION: in [`decided`], answer what was found on a cutoff — the block implements nothing,
+/// nothing is refused, and the test is red.
+#[test]
+#[should_panic(
+    expected = "the trait `Link20` of bt-app's `impl` block for `HopLimitShape` chains past the resolver's hop limit — refused, never passed"
+)]
+fn an_impl_of_a_trait_chained_past_the_hop_limit_is_refused() {
+    let world = World::new();
+    let (src, block) = world
+        .srcs
+        .iter()
+        .find_map(|src| {
+            src.index
+                .impls()
+                .iter()
+                .find(|block| block.type_owner() == "HopLimitShape")
+                .map(|block| (src, block))
+        })
+        .expect("the cfg-false fixture's `impl Link20 for HopLimitShape` is indexed");
+    implemented(&world.resolver, src, block);
 }
 
 /// RED (T-DOOR-REACH-TRAIT-OBJECTS rounds 2 and 3) — **a match's or-pattern binds nothing, and a
