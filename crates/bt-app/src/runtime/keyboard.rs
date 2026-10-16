@@ -10,9 +10,9 @@ use crate::{
     RenameClipboard, RenameExit, RenameVerdict, Runtime, Step, UserInputKind, composing_event_of,
     composition_ruling, diagnostics, file_menu_powers, git_graph, goto_tab_index, hang_watch,
     ime_caret_source, ime_commit_bytes, ime_cursor_area_of, ime_outbound, ime_owner, ime_report,
-    input, keyboard_owner_is_a_shell, keyhint, marks, menubar, paste_card_key,
-    popup_takes_the_key, preedit_caret_byte, profiles, quit, rename_key, rename_pastes, restore,
-    settings, settings_key_of, shortcuts, terminal_ime_cursor_area, toast, write_pty_input,
+    input, keyboard_owner_is_a_shell, keyhint, marks, menubar, paste_card_key, popup_takes_the_key,
+    preedit_caret_byte, profiles, quit, rename_key, rename_pastes, restore, settings,
+    settings_key_of, shortcuts, terminal_ime_cursor_area, toast, write_pty_input,
 };
 use anyhow::Result;
 use bt_layout::{Axis, SeatId};
