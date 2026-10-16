@@ -2,6 +2,8 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use super::pointer::touch::let_the_system_translate_touch;
+use crate::window_seam::Native;
+use crate::window_seam::prelude::*;
 use crate::{
     App, AppEvent, BrokerRelease, Drag, DragHandover, DragSource, FormulaSwitches, HandoverInto,
     INITIAL_HEIGHT, INITIAL_WIDTH, LaunchPlan, LeafSeed, NewWindowParts, NewWindowPlan,
@@ -34,7 +36,7 @@ use winit::dpi::LogicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::WindowId;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn give_foreground_with_retry(&self) -> Result<()> {
         crate::take_owned_keyboard_focus(&self.window.window)
     }
@@ -42,7 +44,9 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn request_window_close(&self) -> Result<()> {
         crate::request_owned_window_close(&self.window.window)
     }
+}
 
+impl Runtime<'_, Native> {
     /// **Open a second window on this application** (multiwindow slice C).
     ///
     /// The first window's door reads four files, revives a saved tree, answers a
@@ -490,7 +494,7 @@ impl Runtime<'_> {
             },
             Instant::now(),
         );
-        let mut window = new_window_runtime(NewWindowParts {
+        let mut window = new_window_runtime::<Native>(NewWindowParts {
             ime_report,
             parked_pans,
             favicons: Rc::clone(&app.favicons),
@@ -571,7 +575,9 @@ impl Runtime<'_> {
         }
         Ok((id, window))
     }
+}
 
+impl<B: Backend> Runtime<'_, B> {
     /// Everything a window owes itself between "its surface exists" and "it can
     /// be shown", shared by both doors that open one.
     ///
@@ -788,28 +794,8 @@ impl Runtime<'_> {
                 manual_name,
             } => {
                 let seats = seats::Seats::lone_terminal();
-                // The seed's own profile, never the default one — H66's contract
-                // read for a Recent row: the shell you are asking back is the
-                // shell you had, and "whatever the default is today" is a
-                // different tab wearing this one's folder.
-                // The saved id, or the fallback's when this build has no such row —
-                // `revive_plan`'s own reading, for the same reason.
-                let (profile, unknown_profile_id) = revived_profile(&profile_id);
-                let leaves = BTreeMap::from([(
-                    seats.identity(),
-                    LeafSeed {
-                        profile,
-                        // Whether the folder still stands is asked by the pane's birth
-                        // (`profiles::BirthPlace`), never this thread.
-                        cwd: Some(cwd)
-                            .filter(|cwd| !cwd.is_empty())
-                            .map(|cwd| profiles::SeedPlace::Carried(PathBuf::from(cwd))),
-                        unknown_profile_id,
-                        card_skip: 0,
-                        prefill: None,
-                        carried_environment: None,
-                    },
-                )]);
+                let leaves =
+                    BTreeMap::from([(seats.identity(), recent_term_leaf_seed(&profile_id, cwd))]);
                 (seats, manual_name, leaves, BTreeMap::new())
             }
             // A folder tab comes back as the column it was, rooted where it was
@@ -2210,5 +2196,27 @@ impl Runtime<'_> {
         self.app
             .recent
             .record(seed::Seed::Window { seeds }, Vec::new(), at);
+    }
+}
+
+/// **The shell a Recent row asks back** (the `Term` arm of `Runtime::reopen_recent`), as the
+/// seed its one pane is born from.
+///
+/// The seed's own profile, never the default one — H66's contract read for a Recent row: the
+/// shell you are asking back is the shell you had, and "whatever the default is today" is a
+/// different tab wearing this one's folder. The saved id, or the fallback's when this build has
+/// no such row — `revive_plan`'s own reading, for the same reason. Whether the folder still
+/// stands is asked by the pane's birth (`profiles::BirthPlace`), never this thread.
+pub(crate) fn recent_term_leaf_seed(profile_id: &str, cwd: String) -> LeafSeed {
+    let (profile, unknown_profile_id) = revived_profile(profile_id);
+    LeafSeed {
+        profile,
+        cwd: Some(cwd)
+            .filter(|cwd| !cwd.is_empty())
+            .map(|cwd| profiles::SeedPlace::Carried(PathBuf::from(cwd))),
+        unknown_profile_id,
+        card_skip: 0,
+        prefill: None,
+        carried_environment: None,
     }
 }

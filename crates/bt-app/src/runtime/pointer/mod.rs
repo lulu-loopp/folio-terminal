@@ -30,6 +30,7 @@ pub(crate) use router::{
     FloatFacts, Plane, PointerFacts, PointerHit, PointerScene, walk_pointer_layers,
 };
 
+use crate::window_seam::prelude::*;
 use crate::{PreviewSurface, Runtime, float, git_panel, hang_watch, risen_frame, seats};
 use anyhow::Result;
 use std::time::Instant;
@@ -105,7 +106,7 @@ pub(crate) struct PointerMemo {
     answer: Option<(PhysicalPosition<f64>, Option<PointerHit>)>,
 }
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **The one door every pointer event of a window comes through**
     /// (T-POINTER-CAPTURE cut 1). The dispatcher hands over each event
     /// [`is_pointer_event`] names; a pointer entering the window asks nothing,

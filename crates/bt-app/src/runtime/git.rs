@@ -1,6 +1,8 @@
 //! `git` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::input::Keystroke;
+use crate::window_seam::prelude::*;
 use crate::{
     Ask, Fading, FilesFocusArrival, GitMenuDraw, GitMenuState, GitOrigin, GitPromptDraw,
     GitPromptState, GitRowKey, GraphFilterMenuState, GraphView, LeafId, MarkdownCaretPaint,
@@ -19,10 +21,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
-use winit::event::{Ime, KeyEvent, MouseScrollDelta};
+use winit::event::{Ime, MouseScrollDelta};
 use winit::keyboard::{Key, NamedKey};
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **Git is somewhere else now** (T-PROGRAMS-REFRESH): a program walk found git where there
     /// was none, or found another one. Every Git page this window holds was answered about the git
     /// that was there — "not found" included — so its columns' and its floating pages' readings
@@ -845,7 +847,7 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn git_page_key(
         &mut self,
         seat: SeatId,
-        event: &KeyEvent,
+        event: &Keystroke,
     ) -> Result<bool> {
         let Some(key) = graph_key_of(&event.logical_key, self.window.modifiers) else {
             // Still the column's key: it owns the keyboard, so nothing here
@@ -3204,7 +3206,7 @@ impl Runtime<'_> {
     /// behind it to type into. What changes when the menu has become a prompt is
     /// only *what* the keys mean — there is now something to type into, and it
     /// takes every key exactly as the graph's search field does.
-    pub(in crate::runtime) fn git_menu_key(&mut self, event: &KeyEvent) -> Result<()> {
+    pub(in crate::runtime) fn git_menu_key(&mut self, event: &Keystroke) -> Result<()> {
         let modifiers = self.window.modifiers;
         if self
             .window
@@ -3436,7 +3438,7 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn graph_search_key(
         &mut self,
         surface: PreviewSurface,
-        event: &KeyEvent,
+        event: &Keystroke,
     ) -> Result<bool> {
         let modifiers = self.window.modifiers;
         let shift = modifiers.shift_key();

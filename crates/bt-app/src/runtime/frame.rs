@@ -1,6 +1,7 @@
 //! `frame` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::window_seam::prelude::*;
 use crate::{
     BrokerAim, Drag, FILES_NOTICE_DWELL, FOOT_REVEAL_FEEDBACK, Fading, FrameImageReferences,
     FrameTraces, GhostFace, HyperlinkActivation, PaneDraw, PointerTarget, PresentIntent, Runtime,
@@ -24,7 +25,7 @@ use bt_viewport::{HyperlinkHit, ViewportFrame};
 use std::time::{Duration, Instant};
 use winit::dpi::PhysicalPosition;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **What the platform draws in this window's title bar** (M3-3, owner
     /// ruling 2026-09-12).
     ///
@@ -2538,3 +2539,7 @@ impl Runtime<'_> {
         Ok(wake_deadline)
     }
 }
+
+#[cfg(test)]
+#[path = "frame_tests.rs"]
+mod tests;

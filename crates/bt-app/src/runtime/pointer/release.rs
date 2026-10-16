@@ -6,6 +6,7 @@
 //! cell route's own release, the chrome router's release ladder, the floating window's carry, the
 //! glance card's two and the settings sheet's — each of which a layer above it could pre-empt.
 
+use crate::window_seam::prelude::*;
 use crate::{
     FolioApp, MouseRoute, PressedCellTarget, Runtime, TabClick, UserInputKind, input, mouse_trace,
     protocol_mouse_button, route_forwarded_mouse_button, seats, settings,
@@ -21,7 +22,7 @@ use super::capture::{
     press_against_the_slot, release_ends_the_capture,
 };
 
-impl FolioApp {
+impl<B: Backend> FolioApp<B> {
     /// **Application-wide capture precedence** (T-POINTER-CAPTURE R-5/R-6).
     /// A button event can arrive in a window other than the capture's. Select
     /// the matching capture before the arrived window is borrowed; if its owner
@@ -114,7 +115,7 @@ impl FolioApp {
     }
 }
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **A press against the slot** (R-5): a press of the held capture's own button proves the
     /// capture stale — its release was lost — so the capture is cancelled before the press is
     /// routed, whichever window holds it. A press of another button is routed as it always was

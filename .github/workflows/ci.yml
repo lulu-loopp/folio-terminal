@@ -713,6 +713,34 @@ jobs:
           }
           exit 0
 
+      # The window seam's native list only shrinks: a planted row must go red,
+      # naming it, for the shrink rule.
+      - name: the window-seam native-list gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "docs/plans/window-seam-native.tsv"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "method`tRuntime`tplanted_probe`ta planted row`n")
+            $failed = $false
+            $said = ""
+            try {
+              & ./scripts/ci/check-window-seam-native.ps1
+            } catch {
+              $failed = $true
+              $said = "$_"
+            }
+            if (-not $failed) {
+              throw "the native list accepted a row that is not at the merge base"
+            }
+            if ($said -notmatch "only shrinks" -or $said -notmatch "planted_probe") {
+              throw "the planted row was refused for another reason: $said"
+            }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          exit 0
+
   # ── everything that is decided by reading, not by hardware ────────────────
   logic:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
@@ -959,6 +987,13 @@ jobs:
       - name: the census's unknown sites only shrink
         shell: pwsh
         run: ./scripts/ci/check-census-unknowns.ps1
+
+      # T-HEADLESS-RUNTIME-SEAM: the places bt-app names a backend holder for the
+      # native backend are listed, and the list is held to the merge base's (or
+      # its seed): no row added.
+      - name: the window seam's native list only shrinks
+        shell: pwsh
+        run: ./scripts/ci/check-window-seam-native.ps1
 
       # `check-vendor-notices.ps1` reads upstream alacritty 0.26.0 out of the
       # registry to diff it against `vendor/`, so the sources have to be there.

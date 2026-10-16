@@ -2,6 +2,8 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::computation_lane::{Asking, ComputationId};
+use crate::input::Keystroke;
+use crate::window_seam::prelude::*;
 use crate::{
     ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD, AnimationEntry, AnimationWork, AppEvent, AttentionDelivery,
     BackgroundDecode, BlockScrollPaint, ClipboardPictureAnswer, ClipboardPictureJob,
@@ -67,10 +69,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use winit::dpi::PhysicalPosition;
-use winit::event::{Ime, KeyEvent, MouseScrollDelta};
+use winit::event::{Ime, MouseScrollDelta};
 use winit::keyboard::{Key, NamedKey};
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// Prefer the live column's order, including watcher refreshes. A preview
     /// outside the tree uses the very same worker and comparator.
     fn preview_folder_listing(
@@ -769,8 +771,7 @@ impl Runtime<'_> {
     /// physical size, which is the only other fact available and is never zero.
     fn background_picture_ceiling(&self) -> (u32, u32) {
         let mut ceiling = (0_u32, 0_u32);
-        for monitor in self.window.window.available_monitors() {
-            let size = monitor.size();
+        for size in self.window.window.monitor_sizes() {
             ceiling.0 = ceiling.0.max(size.width);
             ceiling.1 = ceiling.1.max(size.height);
         }
@@ -6776,7 +6777,7 @@ impl Runtime<'_> {
     /// surface is asked — which is what "from any focus state" (mock-up
     /// 6139-6150) means when the condition is data rather than two call sites
     /// agreeing.
-    pub(in crate::runtime) fn preview_key(&mut self, event: &KeyEvent) -> Result<bool> {
+    pub(in crate::runtime) fn preview_key(&mut self, event: &Keystroke) -> Result<bool> {
         let Some(surface) = self.preview_edit_focus() else {
             return self.preview_browse_key(event);
         };
@@ -6872,7 +6873,7 @@ impl Runtime<'_> {
     ///
     /// Travel keys honour repeats and nothing else does, which is the same line
     /// the tree draws: holding an arrow is one continuous "further".
-    fn preview_browse_key(&mut self, event: &KeyEvent) -> Result<bool> {
+    fn preview_browse_key(&mut self, event: &Keystroke) -> Result<bool> {
         // **A field standing over this surface is asked before it** (§7.7 ②,
         // B69: 「search keys are the search box's」).
         //
@@ -6900,7 +6901,7 @@ impl Runtime<'_> {
                 &image.path,
                 &event.logical_key,
                 self.window.modifiers,
-                event.state.is_pressed(),
+                event.pressed,
             )
         }) {
             self.step_preview_neighbour(surface, direction)?;
@@ -6920,7 +6921,7 @@ impl Runtime<'_> {
         // when the pane does. The glance card is never that surface and never
         // takes a key — it is read-only by its own founding ruling, and a card
         // that swallowed Space would be a hover eating the shell's keys.
-        if event.state.is_pressed()
+        if event.pressed
             && !self.window.modifiers.control_key()
             && !self.window.modifiers.alt_key()
             && !self.window.modifiers.super_key()
@@ -7653,7 +7654,7 @@ impl Runtime<'_> {
         else {
             return;
         };
-        if let Err(error) = write_terminal_clipboard_text(&text) {
+        if let Err(error) = write_terminal_clipboard_text(&self.window.window, &text) {
             eprintln!("recoverable preview copy failure: {error:#}");
         }
     }
@@ -7665,7 +7666,7 @@ impl Runtime<'_> {
     /// one-line paste turns the next diff into a whole-file rewrite.
     pub(in crate::runtime) fn paste_into_preview(&mut self) -> Result<()> {
         let text = match hang_watch::during(hang_watch::Station::ClipboardRead, || {
-            bt_platform::clipboard_text()
+            self.window.window.clipboard_text()
         }) {
             Ok(text) => text,
             Err(error) => {
@@ -12116,6 +12117,7 @@ impl Runtime<'_> {
                 formulas,
                 scrollback,
                 self.app.settings_store.loaded().line_wrapping,
+                &bt_pty::SystemShellEnvironment,
             )?;
             let Some(arrived) = self.seats.stand_in_terminal(&metrics, seat) else {
                 *self.preview_panes.entry(surface) = pane;
@@ -14103,12 +14105,16 @@ impl Runtime<'_> {
     }
 }
 
+#[cfg(test)]
+#[path = "preview_tests.rs"]
+mod tests;
+
 /// **The preview's saves on the storage worker, as the application holds them**
 /// (S-6a) — written here and nowhere else: the press hands a request over
 /// ([`Runtime::save_preview_on`]), each window's buffers hear the answers owed
 /// them ([`Runtime::hear_preview_saves`]), and these two take the answers off
 /// the worker's channels and end the ones no buffer is waiting for.
-impl crate::App {
+impl<B: Backend> crate::App<B> {
     /// Every answer the storage worker has given about a preview save. Never
     /// waits.
     pub(crate) fn take_preview_save_answers(&mut self) -> Vec<preview::SaveAnswer> {

@@ -891,12 +891,12 @@ fn fixed_text_position(
     })
 }
 
-struct RuntimeMeasure<'a> {
-    gpu: &'a mut GpuContext,
-    renderer: &'a mut WindowRenderer,
+struct RuntimeMeasure<'a, G: Glass> {
+    gpu: &'a mut G::Device,
+    renderer: &'a mut G,
 }
 
-impl Measure for RuntimeMeasure<'_> {
+impl<G: Glass> Measure for RuntimeMeasure<'_, G> {
     fn width(&mut self, runs: &[bt_render::PreviewRun], font: f32, line: f32) -> f32 {
         self.renderer
             .measure_preview_paragraph_width(self.gpu, runs, font, line)
@@ -1015,7 +1015,7 @@ fn capture(old: &PreviewDocument, view: View, measure: &mut dyn Measure) -> Opti
     Some(anchor)
 }
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// Moving between image bands is also viewport work. Keep the parse, height
     /// index and prose records; resolve only the indexed image occurrences in
     /// reach. Retiring/entering images become estimates until visible again.

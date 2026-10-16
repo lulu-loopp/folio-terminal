@@ -1579,14 +1579,13 @@ impl bt_pty::ShellEnvironment for HomeIs {
 
 /// **A `profile_id` opened in a folder, closed into Recent and reopened from its row**, through
 /// the vault's own doors (`SeedVault::record`, then `SeedVault::take` as the menu's row does) and
-/// the seed `Runtime::reopen_recent` rebuilds from a `Seed::Term` (the entry's own profile through
-/// `revived_profile`, its folder carried). The pane is then born as `create_leaf_session` bears a
-/// pane with no shell behind it — the decision from the answers in hand (`birth_here`), the place
-/// from `profiles::spawn_place`, the pane from `bare_leaf` and `finish_leaf_birth` fed the probe's
-/// direct input — so no program starts and nothing reports a folder.
-///
-/// `create_leaf_session` itself is not called: it takes the window's `PtyWakeSignal`, which holds a
-/// winit `EventLoopProxy`, and an event loop is not made in a test.
+/// the seed `Runtime::reopen_recent` rebuilds from a `Seed::Term` — `recent_term_leaf_seed`, the
+/// function the product calls (the entry's own profile through `revived_profile`, its folder
+/// carried). The pane is then born by `create_leaf_session` itself, as it bears a pane with no
+/// shell behind it (the probe's direct input), in the account `account` describes — the
+/// environment it is handed — with a `PtyWakeSignal` over a headless loop's proxy, so no program
+/// starts, no event loop is made and nothing reports a folder (T-HEADLESS-RUNTIME-SEAM's
+/// additions (a), (b) and (c)).
 ///
 /// Answers the pane, and the directory its program would have been started in.
 fn reopened_from_recent(
@@ -1611,62 +1610,38 @@ fn reopened_from_recent(
     else {
         panic!("a terminal was recorded: {:?}", entry.seed);
     };
-    let (profile, unknown_profile_id) = revived_profile(&profile_id);
-    let seed = LeafSeed {
-        profile,
-        cwd: Some(cwd)
-            .filter(|cwd| !cwd.is_empty())
-            .map(|cwd| profiles::SeedPlace::Carried(PathBuf::from(cwd))),
-        unknown_profile_id,
-        card_skip: 0,
-        prefill: None,
-        carried_environment: None,
-    };
+    let seed = crate::runtime::recent_term_leaf_seed(&profile_id, cwd);
     let every_row =
         profiles::ProfilePrograms::with_only(&(0..profiles::count()).collect::<Vec<_>>());
-    let (seed, started) = birth_here(&seed, "", &every_row).expect("every row is answered");
+    let (born, started) = birth_here(&seed, "", &every_row).expect("every row is answered");
     assert_eq!(started, Started::AsAsked, "{profile_id} is born as itself");
-    let profiles::BirthPlace { place, unless_gone } = profiles::spawn_place(
-        profiles::index_of_id(&seed.profile),
-        seed.cwd.clone(),
+    let profiles::BirthPlace { place, .. } = profiles::spawn_place(
+        profiles::index_of_id(&born.profile),
+        born.cwd.clone(),
         account,
     );
-    let decision = BirthDecision {
-        started,
-        spawn_profile: seed.profile.clone(),
-        spawn_place: place.directory.clone(),
-        at_shell_home: place.at_shell_home,
-        named: place.named,
-        program: None,
-        program_kind: profiles::ShellProgram::Native,
-        unless_gone: unless_gone.map(Box::new),
-    };
-    let mut leaf = bare_leaf(
+    let wake = PtyWakeSignal::new(crate::headless::LoopEvents::default().proxy());
+    let leaf = create_leaf_session(
         LeafView {
             text_scale: TextScale::ACTUAL,
             metrics: fixture_cell_metrics(1.0, 16.0),
         },
-        GridSize {
-            columns: std::num::NonZeroU16::new(80).unwrap(),
-            rows: std::num::NonZeroU16::new(24).unwrap(),
+        bt_render::SeatViewport::whole(800, 600),
+        LeafId {
+            tab: TabId(1),
+            seat: SeatId(1),
         },
-        &decision,
+        &wake,
+        Some("π 已就绪 ready\r\n".as_bytes()),
         &seed,
-        "能力-capability".to_owned(),
-        None,
+        &every_row,
+        "",
         FormulaSwitches::from_settings(&bt_persist::SettingsV1::default()),
         NonZeroUsize::new(1_000).unwrap(),
         true,
-    );
-    finish_leaf_birth(
-        &mut leaf,
-        None,
-        &decision,
-        &seed,
-        Some("π 已就绪 ready\r\n".as_bytes()),
-        false,
+        account,
     )
-    .expect("a pane with no shell behind it is finished");
+    .expect("a pane with no shell behind it is born");
     (leaf, place.working_directory)
 }
 

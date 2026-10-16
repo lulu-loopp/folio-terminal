@@ -1,6 +1,8 @@
 //! `palette` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::input::Keystroke;
+use crate::window_seam::prelude::*;
 use crate::{
     ApplicationChange, MenuPaint, Popup, RecallFlash, Runtime, i18n, input,
     install_page_ground_color, install_theme_class_background, palette, recall_flash, shortcuts,
@@ -9,11 +11,10 @@ use anyhow::Result;
 use bt_render::{FrameSource, FrameTrigger, Travel};
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
-use winit::event::{ElementState, Ime, KeyEvent, MouseScrollDelta};
+use winit::event::{Ime, MouseScrollDelta};
 use winit::keyboard::{Key, NamedKey};
-use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **Everything a new palette costs this window**, whichever door it came
     /// through.
     ///
@@ -320,8 +321,8 @@ impl Runtime<'_> {
     /// added: Esc closes, the arrows walk, Enter runs, and everything else goes
     /// into the box. Nothing falls through — a palette that let a keystroke
     /// reach the shell behind it would be a box you cannot type a `p` into.
-    pub(in crate::runtime) fn palette_key(&mut self, event: &KeyEvent) -> Result<()> {
-        if event.state != ElementState::Pressed {
+    pub(in crate::runtime) fn palette_key(&mut self, event: &Keystroke) -> Result<()> {
+        if !event.pressed {
             return Ok(());
         }
         // **The chord that raised it puts it away**, and which chord that is
