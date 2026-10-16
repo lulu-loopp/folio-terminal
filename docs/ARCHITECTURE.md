@@ -833,7 +833,8 @@ and the headless one alike.
     `request_owned_window_close`, `summon_quake`, `show_quake_window`,
     `remember_summoned_arrangement`;
   * attention — `raise_attention`, `replace_contradicted_flash` (the taskbar flash);
-  * input facts — `ime_native_facts`, `platform_pointer_now`;
+  * input facts — `platform_pointer_now` (the input method's facts go through
+    `WindowHost::ime_facts` since T-IME-BRACKET-FACTS);
   * the present — `finish_present_attempt`, `folios_own_metal_view`;
   * web pages (the engine's host and its keyboard) — `webhost::step`, `webhost::rehost`
     (`platform_tree`), `adopt_spare_web_page`, `apply_web_outcomes`, `open_web_address_on`,

@@ -129,6 +129,10 @@ All notable changes to Folio are recorded here. The format follows
 - Folio's window no longer waits while Folio looks for installed programs: usually the shell is already running when the window first appears, but on the first start after the computer boots (or when `PATH` holds a slow network folder) the window opens first, its tab says "Terminal", and whatever you type is held until the shell starts.
 - Folio's window now appears before its shells have started, instead of waiting for each one: on a slow start a tab shows its profile's name (or "Terminal") and whatever you type is kept until the shell is ready. If a shell cannot start, Folio says why and keeps running. <!-- zh: Folio 的窗口现在会在 shell 启动前出现，不再逐个等待：启动较慢时，标签页显示配置文件名称（或「终端」），输入的内容保留到 shell 就绪。shell 无法启动时，Folio 说明原因并继续运行。 -->
 
+### Internal
+
+- The diagnostics line Folio writes when an input method breaks its own composition bracket now carries the window's input-method facts at that moment (whether the window still had its input context and the keyboard focus), read at most 32 times per window. <!-- zh: pending T-IME-BRACKET-FACTS -->
+
 ## 0.4.7-preview — 2026-10-06
 
 ### Added
