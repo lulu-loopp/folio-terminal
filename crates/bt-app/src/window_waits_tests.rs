@@ -1855,6 +1855,12 @@ impl World {
                     .collect()
             })
             .collect();
+        Self::over(srcs, &direct)
+    }
+
+    /// The world of `srcs`, each reaching itself and its `direct` first-party product
+    /// dependencies, and every package one of those re-exports.
+    fn over(srcs: Vec<Src>, direct: &[BTreeSet<usize>]) -> Self {
         let re_exports: Vec<BTreeSet<usize>> = srcs
             .iter()
             .enumerate()
@@ -9354,48 +9360,6 @@ mod trait_dispatch_source_shapes {
         }
     }
 
-    /// `Driver` under twenty-one renamed re-exports — more than the resolver follows — and a type
-    /// implementing it under the last name.
-    mod past_the_hop_limit {
-        pub use crate::update_job::Driver as Link0;
-        pub use Link0 as Link1;
-        pub use Link1 as Link2;
-        pub use Link2 as Link3;
-        pub use Link3 as Link4;
-        pub use Link4 as Link5;
-        pub use Link5 as Link6;
-        pub use Link6 as Link7;
-        pub use Link7 as Link8;
-        pub use Link8 as Link9;
-        pub use Link9 as Link10;
-        pub use Link10 as Link11;
-        pub use Link11 as Link12;
-        pub use Link12 as Link13;
-        pub use Link13 as Link14;
-        pub use Link14 as Link15;
-        pub use Link15 as Link16;
-        pub use Link16 as Link17;
-        pub use Link17 as Link18;
-        pub use Link18 as Link19;
-        pub use Link19 as Link20;
-
-        pub struct HopLimitShape;
-
-        impl Link20 for HopLimitShape {}
-    }
-
-    use past_the_hop_limit::Link20;
-
-    fn trait_shape_past_the_hop_limit(driver: &dyn Link20) {
-        let _ = driver.prepare(unreachable!(), unreachable!(), unreachable!());
-    }
-
-    trait SupertraitPastTheHopLimit: Link20 {
-        fn trait_shape_supertrait_past_the_hop_limit(&self) {
-            let _ = self.prepare(unreachable!(), unreachable!(), unreachable!());
-        }
-    }
-
     fn std_trait_shape(sink: &mut dyn std::io::Write, line: &[u8]) {
         let _ = sink.write_all(line);
         let _ = sink.flush();
@@ -9740,76 +9704,174 @@ fn a_trait_is_its_identity_and_a_default_runs_only_where_it_is_not_overridden() 
     );
 }
 
+/// The planted crate's first part: a first-party `Driver` declaring `prepare`, under twenty-one
+/// renamed re-exports in `chain` — more than the resolver follows — with the last of them in scope
+/// at the crate root.
+const PLANTED_HOP_CHAIN: &str = r#"
+pub trait Driver {
+    fn prepare(&self);
+}
+
+pub mod chain {
+    pub use crate::Driver as Link0;
+    pub use Link0 as Link1;
+    pub use Link1 as Link2;
+    pub use Link2 as Link3;
+    pub use Link3 as Link4;
+    pub use Link4 as Link5;
+    pub use Link5 as Link6;
+    pub use Link6 as Link7;
+    pub use Link7 as Link8;
+    pub use Link8 as Link9;
+    pub use Link9 as Link10;
+    pub use Link10 as Link11;
+    pub use Link11 as Link12;
+    pub use Link12 as Link13;
+    pub use Link13 as Link14;
+    pub use Link14 as Link15;
+    pub use Link15 as Link16;
+    pub use Link16 as Link17;
+    pub use Link17 as Link18;
+    pub use Link18 as Link19;
+    pub use Link19 as Link20;
+}
+
+use chain::Link20;
+"#;
+
+/// **The world of one planted library crate**, `planted`: [`PLANTED_HOP_CHAIN`] followed by
+/// `rest`, written to a scratch folder, indexed, and read as the window-waits guard reads the
+/// product's packages ([`World::over`]).
+fn planted_world(tag: &str, rest: &str) -> World {
+    let directory = bt_testpath::temp_path(tag);
+    std::fs::create_dir_all(&directory).expect("a scratch folder");
+    let root = directory.join("lib.rs");
+    std::fs::write(&root, format!("{PLANTED_HOP_CHAIN}{rest}"))
+        .expect("the planted crate is written");
+    let universe = bt_source::Universe::declare(
+        "the planted hop chain",
+        vec![bt_source::TargetRoot {
+            id: bt_source::TargetId {
+                package: "planted".to_owned(),
+                kind: TargetKind::Library,
+                name: "planted".to_owned(),
+            },
+            file: root,
+        }],
+        vec![bt_source::DiskScope::under(&directory)],
+        bt_source::Vendor::Excluded,
+    )
+    .expect("the planted crate is where it was written");
+    let index: &'static Index = Box::leak(Box::new(
+        Index::build(&universe)
+            .unwrap_or_else(|rejections| panic!("{}", bt_source::report(&rejections))),
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    World::over(
+        vec![Src {
+            package: "planted",
+            index,
+            features: Box::leak(Box::default()),
+        }],
+        &[BTreeSet::new()],
+    )
+}
+
 /// RED (T-WINDOW-WAITS-RESOLVER-CUTOFF) — **a receiver's trait chained past the resolver's hop
 /// limit is refused by name, never read as "no trait".**
 ///
-/// `trait_shape_past_the_hop_limit` takes `&dyn Link20`, `Link20` being `Driver` under twenty-one
-/// renamed re-exports (the fixture module `past_the_hop_limit`). Read as "no trait", the call
-/// would fall to the untyped reading and the `Driver` implementations — a door body reached
-/// through the trait object — would go unnamed; the guard fails by name instead.
+/// In the planted crate ([`planted_world`]) `Shape` implements `Driver` through `chain::Link3`, and
+/// `near_shape(driver: &dyn chain::Link3)` names `Shape::prepare` — the chain is followed while it
+/// is short. `far_shape(driver: &dyn Link20)` states `Driver` under twenty-one re-exports: read as
+/// "no trait", its call would fall to the untyped reading and the guard would pass a receiver it
+/// could not read; it fails by name instead.
 ///
-/// MUTATION: in [`decided`], answer what was found on a cutoff — the call is read as untyped,
-/// nothing is refused, and the test is red.
+/// MUTATION: in [`decided`], answer what was found on a cutoff — `far_shape`'s call is read, nothing
+/// is refused, and the test is red.
 #[test]
 #[should_panic(
-    expected = "the trait path `Link20` in bt-app crate::hang_watch::window_waits_tests::trait_dispatch_source_shapes chains past the resolver's hop limit — refused, never passed"
+    expected = "the trait path `Link20` in planted crate chains past the resolver's hop limit — refused, never passed"
 )]
 fn a_receiver_trait_chained_past_the_hop_limit_is_refused() {
-    let world = World::new();
-    named_in_shape(&world, "trait_shape_past_the_hop_limit", "prepare");
+    let world = planted_world(
+        "ww-cutoff-receiver",
+        "
+pub struct Shape;
+
+impl chain::Link3 for Shape {
+    fn prepare(&self) {}
+}
+
+pub fn near_shape(driver: &dyn chain::Link3) {
+    driver.prepare();
+}
+
+pub fn far_shape(driver: &dyn Link20) {
+    driver.prepare();
+}
+",
+    );
+    assert_eq!(
+        named_in_shape(&world, "near_shape", "prepare"),
+        BTreeSet::from(["planted crate::<Shape as chain::Link3>::prepare".to_owned()]),
+        "a receiver stated through a short chain names the implementation"
+    );
+    named_in_shape(&world, "far_shape", "prepare");
 }
 
 /// RED (T-WINDOW-WAITS-RESOLVER-CUTOFF) — **a supertrait chained past the resolver's hop limit is
 /// refused by name, never read as "no supertrait".**
 ///
-/// `SupertraitPastTheHopLimit: Link20` declares no `prepare`; its default method's
-/// `self.prepare(…)` is the supertrait's, `Driver::prepare` under twenty-one re-exports. Read as
-/// "no supertrait", no stated trait would declare `prepare` and the call would fall to the untyped
-/// reading; the guard fails by name instead.
+/// In the planted crate `Far: Link20` declares no `prepare`; its default method's `self.prepare()`
+/// is the supertrait's, `Driver::prepare` under twenty-one re-exports. Read as "no supertrait", no
+/// stated trait would declare `prepare` ([`World::trait_methods`]) and the call would fall to the
+/// untyped reading; the guard fails by name instead.
 ///
-/// MUTATION: in [`decided`], answer what was found on a cutoff — `trait_methods` finds no
-/// declaring trait, nothing is refused, and the test is red.
+/// MUTATION: in [`decided`], answer what was found on a cutoff — nothing is refused, and the test
+/// is red.
 #[test]
 #[should_panic(
-    expected = "a supertrait of `bt-app crate::hang_watch::window_waits_tests::trait_dispatch_source_shapes::SupertraitPastTheHopLimit` chains past the resolver's hop limit — refused, never passed"
+    expected = "a supertrait of `planted crate::Far` chains past the resolver's hop limit — refused, never passed"
 )]
 fn a_supertrait_chained_past_the_hop_limit_is_refused() {
-    let world = World::new();
-    named_in_shape(
-        &world,
-        "trait_shape_supertrait_past_the_hop_limit",
-        "prepare",
+    let world = planted_world(
+        "ww-cutoff-supertrait",
+        "
+pub trait Far: Link20 {
+    fn far_default(&self) {
+        self.prepare();
+    }
+}
+",
     );
+    named_in_shape(&world, "far_default", "prepare");
 }
 
 /// RED (T-WINDOW-WAITS-RESOLVER-CUTOFF) — **an `impl` block whose trait is chained past the
 /// resolver's hop limit is refused by name, never filed under no trait.**
 ///
-/// `impl Link20 for HopLimitShape` implements `Driver` under twenty-one renamed re-exports. Filed
-/// under no trait ([`World::of`] files each product block through [`implemented`]), its `prepare`
-/// would be missing from every call on a `Driver`; the guard fails by name instead. The block is
-/// the `cfg(any())` fixture's, so it is handed to [`implemented`] directly.
+/// In the planted crate `impl Link20 for Shape` implements `Driver` under twenty-one re-exports.
+/// Filed under no trait ([`World::over`] files each product block through [`implemented`]), its
+/// `prepare` would be missing from every call on a `Driver`; reading the crate fails by name
+/// instead.
 ///
-/// MUTATION: in [`decided`], answer what was found on a cutoff — the block implements nothing,
-/// nothing is refused, and the test is red.
+/// MUTATION: in [`decided`], answer what was found on a cutoff — the block is filed under nothing,
+/// the world is built, and the test is red.
 #[test]
 #[should_panic(
-    expected = "the trait `Link20` of bt-app's `impl` block for `HopLimitShape` chains past the resolver's hop limit — refused, never passed"
+    expected = "the trait `Link20` of planted's `impl` block for `Shape` chains past the resolver's hop limit — refused, never passed"
 )]
 fn an_impl_of_a_trait_chained_past_the_hop_limit_is_refused() {
-    let world = World::new();
-    let (src, block) = world
-        .srcs
-        .iter()
-        .find_map(|src| {
-            src.index
-                .impls()
-                .iter()
-                .find(|block| block.type_owner() == "HopLimitShape")
-                .map(|block| (src, block))
-        })
-        .expect("the cfg-false fixture's `impl Link20 for HopLimitShape` is indexed");
-    implemented(&world.resolver, src, block);
+    planted_world(
+        "ww-cutoff-impl",
+        "
+pub struct Shape;
+
+impl Link20 for Shape {
+    fn prepare(&self) {}
+}
+",
+    );
 }
 
 /// RED (T-DOOR-REACH-TRAIT-OBJECTS rounds 2 and 3) — **a match's or-pattern binds nothing, and a
