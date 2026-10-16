@@ -311,7 +311,8 @@ enum Unkept {
 /// **What the watch still owes the `unkept` mark** ([`Gate::owes_unkept_mark`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MarkAsk {
-    /// The whole durable write.
+    /// Its durable write: the whole order, or — once a refused rename kept its
+    /// flushed temporary — that temporary's rename alone.
     Write,
     /// The flush of its folder alone: its bytes are at its name.
     FolderFlush,
@@ -722,16 +723,15 @@ impl Cadence<'_> {
 }
 
 /// **The `unkept` mark's two asks of the disk** (0.4.8 E4,
-/// T-TRIAL-WATCH-REPEATS-BOUND): the whole durable write, and the last step of
-/// one alone — the flush of the folder the mark is in — owed when a write was
-/// refused at that step with its bytes already at the mark's name. In the
+/// T-TRIAL-WATCH-REPEATS-BOUND): the mark's durable write, and the last step
+/// of one alone — the flush of the folder the mark is in — owed when a write
+/// was refused at that step with its bytes already at the mark's name. In the
 /// product, [`OnDisk`]; a test counts them.
 pub(crate) trait MarkDisk {
-    /// `install_txn::durable_write` of `bytes` to `mark`.
-    ///
-    /// # Errors
-    /// The step it stopped at.
-    fn write(&self, mark: &Path, bytes: &[u8]) -> Result<(), install_txn::Failure>;
+    /// **The durable write of `bytes` to `mark`, not yet asked** — in the
+    /// product an `install_txn::DurableWrite`, which the watch keeps and asks
+    /// at each of its turns until it lands (T-UNKEPT-MARK-ONE-DURABLE-WRITE).
+    fn write<'d>(&'d self, mark: &Path, bytes: &[u8]) -> Box<dyn MarkWrite + 'd>;
 
     /// `install_txn::flush_directory_on_disk` of the folder `mark` is in.
     ///
@@ -740,12 +740,32 @@ pub(crate) trait MarkDisk {
     fn flush_folder(&self, mark: &Path) -> Result<(), install_txn::Failure>;
 }
 
+/// **One durable write of the mark, asked again until it lands**
+/// (T-UNKEPT-MARK-ONE-DURABLE-WRITE): `install_txn::DurableWrite`'s contract —
+/// a refused rename keeps the flushed temporary and the next ask is that rename
+/// alone; a write dropped before its rename landed removes its temporary.
+pub(crate) trait MarkWrite {
+    /// One ask: the whole durable order — a temporary beside the mark, the
+    /// bytes, its flush, the rename, the folder's flush — or, after a refused
+    /// rename, the kept temporary's rename, then the folder's flush.
+    ///
+    /// # Errors
+    /// The step it stopped at.
+    fn ask(&mut self) -> Result<(), install_txn::Failure>;
+}
+
+impl MarkWrite for install_txn::DurableWrite {
+    fn ask(&mut self) -> Result<(), install_txn::Failure> {
+        install_txn::DurableWrite::ask(self)
+    }
+}
+
 /// The mark asked of the disk itself, through the `install_txn` doors.
 pub(crate) struct OnDisk;
 
 impl MarkDisk for OnDisk {
-    fn write(&self, mark: &Path, bytes: &[u8]) -> Result<(), install_txn::Failure> {
-        install_txn::durable_write(mark, bytes)
+    fn write<'d>(&'d self, mark: &Path, bytes: &[u8]) -> Box<dyn MarkWrite + 'd> {
+        Box::new(install_txn::DurableWrite::new(mark, bytes))
     }
 
     fn flush_folder(&self, mark: &Path) -> Result<(), install_txn::Failure> {
@@ -753,20 +773,71 @@ impl MarkDisk for OnDisk {
     }
 }
 
+/// **Whether a refused durable write of the mark left its bytes at its name**:
+/// refused at its folder's open or flush, which come after its rename.
+fn left_at_its_name(failure: &install_txn::Failure) -> bool {
+    matches!(
+        failure.stage,
+        install_txn::Stage::OpenDirectory | install_txn::Stage::FlushDirectory
+    )
+}
+
 /// **The transaction's `unkept` mark, as the watch asks for it**: where it is
-/// (`update_txn::Home::unkept`) and the disk it is asked of.
+/// (`update_txn::Home::unkept`), the disk it is asked of, and the write the
+/// watch keeps asking while nothing of it is at its name.
 pub(crate) struct Mark<'a> {
-    pub(crate) path: &'a Path,
-    pub(crate) disk: &'a dyn MarkDisk,
+    path: &'a Path,
+    disk: &'a dyn MarkDisk,
+    /// **The mark's write, made at its first ask and asked again at each turn
+    /// until its rename lands or the transaction is decided**
+    /// (T-UNKEPT-MARK-ONE-DURABLE-WRITE): while its rename is refused it keeps
+    /// its temporary, written and flushed once, so a held turn is one rename.
+    /// The watch's own: no reader of the mark sees it — a temporary beside the
+    /// mark leaves the mark's name as empty as no write at all.
+    staged: Option<Box<dyn MarkWrite + 'a>>,
 }
 
 impl<'a> Mark<'a> {
     /// The mark at `path`, asked of the disk itself ([`OnDisk`]).
     pub(crate) const fn on_disk(path: &'a Path) -> Self {
+        Self::asked_of(path, &OnDisk)
+    }
+
+    /// The mark at `path`, asked of `disk`.
+    pub(crate) const fn asked_of(path: &'a Path, disk: &'a dyn MarkDisk) -> Self {
         Self {
             path,
-            disk: &OnDisk,
+            disk,
+            staged: None,
         }
+    }
+
+    /// **One ask of the mark's write, naming this build's version** (0.4.8 E5:
+    /// what a rollback's card names): the write kept from an earlier turn, or
+    /// one made now. Kept while nothing of it is at the mark's name; once its
+    /// rename landed — durable, or refused at its folder's open or flush — it
+    /// has nothing left to ask, and goes.
+    fn ask_write(&mut self) -> Result<(), install_txn::Failure> {
+        let (path, disk) = (self.path, self.disk);
+        let asked = self
+            .staged
+            .get_or_insert_with(|| disk.write(path, crate::version::VERSION.as_bytes()))
+            .ask();
+        if asked.as_ref().map_or_else(left_at_its_name, |()| true) {
+            self.staged = None;
+        }
+        asked
+    }
+
+    /// The flush of the folder the mark is in, alone.
+    fn flush_folder(&self) -> Result<(), install_txn::Failure> {
+        self.disk.flush_folder(self.path)
+    }
+
+    /// **The transaction is decided: the mark is asked no more.** A write
+    /// whose rename never landed goes, and its kept temporary with it.
+    fn decided(&mut self) {
+        self.staged = None;
     }
 }
 
@@ -883,7 +954,11 @@ enum Read {
 /// undecided, `unkept` is written once, naming this build's version (0.4.8
 /// E5: what a rollback's card names), asked again at each turn while it is
 /// refused, until the decision — no count and no clock: the mark is read only
-/// at or after the decision, and the card is lost without it. A write refused
+/// at or after the decision, and the card is lost without it. One write is made
+/// and kept across the turns: a refused rename keeps its temporary, written and
+/// flushed once, so each held turn is that rename alone, and the decision drops
+/// a write that never landed, with its temporary
+/// (T-UNKEPT-MARK-ONE-DURABLE-WRITE). A write refused
 /// after its rename (at its folder's open or flush) left the bytes at the
 /// mark's name: from then on only the folder's flush is asked, never the whole
 /// write again (T-TRIAL-WATCH-REPEATS-BOUND). The first refusal is said, the
@@ -893,7 +968,7 @@ enum Read {
 /// decision is final.
 pub(crate) fn watch(
     gate: &Gate,
-    (journal, mark, receipt): (&Path, Mark<'_>, &Path),
+    (journal, mut mark, receipt): (&Path, Mark<'_>, &Path),
     txn: TxnId,
     cadence: Cadence<'_>,
     told: Told<'_>,
@@ -995,7 +1070,7 @@ pub(crate) fn watch(
             // whole write, or its folder's flush alone once its bytes are at
             // its name.
             if let Some(ask) = gate.owes_unkept_mark() {
-                ask_unkept_mark(gate, &mark, ask, &mut mark_refusals, txn, say);
+                ask_unkept_mark(gate, &mut mark, ask, &mut mark_refusals, txn, say);
             }
             // U-35's reserved trial, once ready: the ordinary readiness edge, and
             // what commits is the receipt as it is on disk, under the lock.
@@ -1035,7 +1110,7 @@ pub(crate) fn watch(
                             ));
                             wake();
                         }
-                        say_mark_refusals_end(&mut mark_refusals, gate, txn, say);
+                        mark_decided(&mut mark, &mut mark_refusals, gate, txn, say);
                         if !gate.has_marked_unkept() {
                             acknowledging =
                                 Some(Instant::now() + crate::update_apply::JOURNAL_HELD_WITHIN);
@@ -1093,7 +1168,7 @@ pub(crate) fn watch(
                         ));
                         wake();
                     }
-                    say_mark_refusals_end(&mut mark_refusals, gate, txn, say);
+                    mark_decided(&mut mark, &mut mark_refusals, gate, txn, say);
                     if !gate.has_marked_unkept() {
                         acknowledging =
                             Some(Instant::now() + crate::update_apply::JOURNAL_HELD_WITHIN);
@@ -1107,7 +1182,7 @@ pub(crate) fn watch(
                     say(&format!(
                         "BT_UPDATE_TRIAL transaction {txn} ended without a commit; this run writes nothing"
                     ));
-                    say_mark_refusals_end(&mut mark_refusals, gate, txn, say);
+                    mark_decided(&mut mark, &mut mark_refusals, gate, txn, say);
                     return;
                 }
                 Read::Seen(TrialSight::Undecided) => unreadable_since = None,
@@ -1146,23 +1221,23 @@ pub(crate) fn watch(
 }
 
 /// **One ask of the `unkept` mark** (0.4.8 E4, T-TRIAL-WATCH-REPEATS-BOUND):
-/// `ask` of `mark`'s disk. Durable, it is said, with the asks it took after a
-/// refusal; refused after its rename — at its folder's open or flush — its
-/// bytes are at its name, and what is owed from then on is that flush alone.
-/// The streak's first refusal is said.
+/// `ask` of `mark` — its write, the one kept across turns while its rename is
+/// refused (T-UNKEPT-MARK-ONE-DURABLE-WRITE), or its folder's flush alone.
+/// Durable, it is said, with the asks it took after a refusal; refused after
+/// its rename — at its folder's open or flush — its bytes are at its name, and
+/// what is owed from then on is that flush alone. The streak's first refusal
+/// is said.
 fn ask_unkept_mark(
     gate: &Gate,
-    mark: &Mark<'_>,
+    mark: &mut Mark<'_>,
     ask: MarkAsk,
     refusals: &mut Streak,
     txn: TxnId,
     say: &dyn Fn(&str),
 ) {
     let asked = match ask {
-        MarkAsk::Write => mark
-            .disk
-            .write(mark.path, crate::version::VERSION.as_bytes()),
-        MarkAsk::FolderFlush => mark.disk.flush_folder(mark.path),
+        MarkAsk::Write => mark.ask_write(),
+        MarkAsk::FolderFlush => mark.flush_folder(),
     };
     match asked {
         Ok(()) => {
@@ -1179,10 +1254,7 @@ fn ask_unkept_mark(
             ));
         }
         Err(failure) => {
-            let at_its_name = matches!(
-                failure.stage,
-                install_txn::Stage::OpenDirectory | install_txn::Stage::FlushDirectory
-            );
+            let at_its_name = left_at_its_name(&failure);
             if at_its_name {
                 gate.mark_unkept(Unkept::AtItsName);
             }
@@ -1206,9 +1278,18 @@ fn ask_unkept_mark(
     }
 }
 
-/// **The mark's refusals end at the decision** — said once, when the mark was
-/// still refused: where it stands, and what that means for the card.
-fn say_mark_refusals_end(streak: &mut Streak, gate: &Gate, txn: TxnId, say: &dyn Fn(&str)) {
+/// **The decision ends the mark's asks** — its write, if its rename never
+/// landed, goes, and the temporary it kept with it
+/// (T-UNKEPT-MARK-ONE-DURABLE-WRITE); and its refusals end, said once when the
+/// mark was still refused: where it stands, and what that means for the card.
+fn mark_decided(
+    mark: &mut Mark<'_>,
+    streak: &mut Streak,
+    gate: &Gate,
+    txn: TxnId,
+    say: &dyn Fn(&str),
+) {
+    mark.decided();
     let Some((refused, last)) = streak.end() else {
         return;
     };
@@ -2370,10 +2451,7 @@ mod tests {
             gate,
             (
                 &home.journal(),
-                Mark {
-                    path: &home.unkept(TXN),
-                    disk,
-                },
+                Mark::asked_of(&home.unkept(TXN), disk),
                 &job.path,
             ),
             TXN,
@@ -2662,16 +2740,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// **The mark's disk, each ask counted** — the disk itself, and while
-    /// `refusing_its_folder_flush`, a folder that will not flush: the whole
-    /// write still puts the bytes at the mark's name (its rename is real) and
-    /// is then answered as refused at its folder's flush, and the folder's
-    /// flush alone is refused, as a device that will not flush answers.
+    /// **The mark's disk, each ask counted** — the product's write
+    /// (`install_txn::DurableWrite`, made by [`OnDisk`]) on the disk itself,
+    /// and while `refusing_its_folder_flush`, a folder that will not flush: an
+    /// ask of the write still puts the bytes at the mark's name (its rename is
+    /// real) and is then answered as refused at its folder's flush, and the
+    /// folder's flush alone is refused, as a device that will not flush
+    /// answers. `made` counts the writes made, `writes` their asks — after a
+    /// refused rename an ask is the kept temporary's rename alone — and
+    /// `flushes` the folder flushes asked alone.
     #[derive(Default)]
     struct CountedDisk {
         refusing_its_folder_flush: std::cell::Cell<bool>,
+        made: std::cell::Cell<u32>,
         writes: std::cell::Cell<u32>,
         flushes: std::cell::Cell<u32>,
+    }
+
+    /// One write [`CountedDisk`] made: the product's, its asks counted.
+    struct CountedWrite<'d> {
+        disk: &'d CountedDisk,
+        mark: PathBuf,
+        write: Box<dyn MarkWrite>,
+    }
+
+    impl MarkWrite for CountedWrite<'_> {
+        fn ask(&mut self) -> Result<(), install_txn::Failure> {
+            self.disk.writes.set(self.disk.writes.get() + 1);
+            self.write.ask()?;
+            if self.disk.refusing_its_folder_flush.get() {
+                return Err(CountedDisk::refused_at_the_folder(&self.mark));
+            }
+            Ok(())
+        }
     }
 
     impl CountedDisk {
@@ -2685,13 +2786,14 @@ mod tests {
     }
 
     impl MarkDisk for CountedDisk {
-        fn write(&self, mark: &Path, bytes: &[u8]) -> Result<(), install_txn::Failure> {
-            self.writes.set(self.writes.get() + 1);
-            OnDisk.write(mark, bytes)?;
-            if self.refusing_its_folder_flush.get() {
-                return Err(Self::refused_at_the_folder(mark));
-            }
-            Ok(())
+        fn write<'d>(&'d self, mark: &Path, bytes: &[u8]) -> Box<dyn MarkWrite + 'd> {
+            self.made.set(self.made.get() + 1);
+            let on_disk: &'static OnDisk = &OnDisk;
+            Box::new(CountedWrite {
+                disk: self,
+                mark: mark.to_path_buf(),
+                write: on_disk.write(mark, bytes),
+            })
         }
 
         fn flush_folder(&self, mark: &Path) -> Result<(), install_txn::Failure> {
@@ -2986,6 +3088,197 @@ mod tests {
         assert!(at_its_name, "the mark was at its name, unflushed");
         assert!(!home.unkept(TXN).exists(), "taken back by the commit");
         assert_eq!(gate.take_released(), vec![Writer::Settings]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The temporaries standing beside `home`'s mark of [`TXN`]: the files of
+    /// its transaction folder a durable write names `*.tmp`.
+    fn temporaries_beside_the_mark(home: &Home) -> BTreeSet<PathBuf> {
+        std::fs::read_dir(home.transaction(TXN))
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| {
+                entry.file_type().unwrap().is_file()
+                    && entry.file_name().to_string_lossy().ends_with(".tmp")
+            })
+            .map(|entry| entry.path())
+            .collect()
+    }
+
+    /// `home`'s transaction folder of [`TXN`], with a directory standing at the
+    /// mark's name: every rename of a written mark over it is refused (Windows
+    /// `MoveFileExW` will not replace a directory; macOS `rename(2)` answers
+    /// `EISDIR`) — a held rename, on every platform, until the directory goes.
+    fn mark_held_by_a_directory(home: &Home) {
+        std::fs::create_dir_all(home.unkept(TXN)).unwrap();
+    }
+
+    /// RED (T-UNKEPT-MARK-ONE-DURABLE-WRITE) — **a held `unkept` mark writes
+    /// and flushes its temporary once, and each held turn is one rename**: the
+    /// mark's rename is refused for `HELD` turns, then let go; the watch made
+    /// one write, asked it `HELD + 1` times — the first its whole order, each
+    /// later one the kept temporary's rename alone — and the same temporary
+    /// stood beside the mark at the end of every held turn, so it was written
+    /// and flushed once (`install_txn::DurableWrite` flushes a temporary when it
+    /// writes it: `bt_platform::install_txn::tests::
+    /// a_write_asked_again_after_a_refused_rename_flushes_its_file_once`). The
+    /// landed mark names this build's version, no temporary is left, and the
+    /// landing says the asks it took.
+    ///
+    /// MUTATION: in `Mark::ask_write`, make a fresh write at each ask (drop
+    /// `staged` first) — `HELD + 1` writes made, a new temporary each turn.
+    #[test]
+    fn a_held_unkept_mark_flushes_its_temporary_once_and_renames_each_turn() {
+        const HELD: u32 = 4;
+        let root = scratch("mark-held-标记");
+        let home = Home::at(root.join("home"));
+        let job = refused_receipt(&home);
+        mark_held_by_a_directory(&home);
+        let gate = Gate::new();
+        assert!(gate.defer(true, Writer::Settings));
+        let disk = CountedDisk::default();
+        let said = std::cell::RefCell::new(Vec::new());
+        let say = |line: &str| said.borrow_mut().push(line.to_owned());
+        let mut standing: Vec<BTreeSet<PathBuf>> = Vec::new();
+        let (turns, _) = watch_by_turns(
+            &gate,
+            (&home, &disk),
+            &job,
+            watchdog_asleep().every,
+            Told {
+                wake: &|| {},
+                say: &say,
+            },
+            None,
+            &mut |turn, _| {
+                standing.push(temporaries_beside_the_mark(&home));
+                if turn == HELD {
+                    std::fs::remove_dir(home.unkept(TXN)).unwrap();
+                } else if turn == HELD + 2 {
+                    rolled_back(&home);
+                }
+            },
+        );
+        assert_eq!(turns, HELD + 2);
+        assert_eq!(disk.made.get(), 1, "one write made for the whole hold");
+        assert_eq!(
+            disk.writes.get(),
+            HELD + 1,
+            "asked once a turn: the whole order, then a rename a turn until it landed"
+        );
+        let held = &standing[..HELD as usize];
+        assert!(
+            held.iter().all(|temporaries| temporaries.len() == 1),
+            "one temporary stands beside the held mark: {held:#?}"
+        );
+        assert!(
+            held.windows(2).all(|pair| pair[0] == pair[1]),
+            "the same temporary every held turn, written and flushed once: {held:#?}"
+        );
+        assert!(
+            standing[HELD as usize..].iter().all(BTreeSet::is_empty),
+            "the landing rename took it: {standing:#?}"
+        );
+        assert_eq!(
+            std::fs::read(home.unkept(TXN)).unwrap(),
+            crate::version::VERSION.as_bytes(),
+            "the rollback finds the mark"
+        );
+        assert!(temporaries_beside_the_mark(&home).is_empty());
+        let said = said.take();
+        assert_eq!(
+            lines_with(&said, "a change made in this trial is held and"),
+            1,
+            "the refusal is said once: {said:#?}"
+        );
+        assert_eq!(
+            lines_with(
+                &said,
+                &format!("at the watch's ask {} after {HELD} refused", HELD + 1)
+            ),
+            1,
+            "{said:#?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-UNKEPT-MARK-ONE-DURABLE-WRITE) — **a decided transaction drops
+    /// the mark's staged write and leaves no temporary**: the mark's rename is
+    /// refused at every turn, so its write keeps a flushed temporary beside it;
+    /// at the decision the write goes and its temporary with it — on a commit,
+    /// already at the end of the turn that read it, while the watch still has
+    /// its receipt to acknowledge; on a rollback, by the watch's end. Nothing
+    /// of the mark is at its name either way, so a commit has nothing to take
+    /// back and releases the held change.
+    ///
+    /// MUTATIONS: `install_txn::Rewrite`'s `Drop` does nothing (the temporary
+    /// outlives the watch on both roads); in `mark_decided`, drop
+    /// `mark.decided()` (the committed watch still holds it after the
+    /// decision).
+    #[test]
+    fn a_decided_transaction_drops_the_marks_staged_write_and_leaves_no_temporary() {
+        const DECIDED: u32 = 3;
+        let root = scratch("mark-dropped-标记");
+        for committed in [true, false] {
+            let road = if committed {
+                "committed"
+            } else {
+                "rolled back"
+            };
+            let home = Home::at(root.join(road));
+            let job = refused_receipt(&home);
+            mark_held_by_a_directory(&home);
+            let gate = Gate::new();
+            assert!(gate.defer(true, Writer::Pins));
+            let disk = CountedDisk::default();
+            let mut standing: Vec<BTreeSet<PathBuf>> = Vec::new();
+            let (turns, _) = watch_by_turns(
+                &gate,
+                (&home, &disk),
+                &job,
+                watchdog_asleep().every,
+                Told::to_the_log(&|| {}),
+                None,
+                &mut |turn, _| {
+                    standing.push(temporaries_beside_the_mark(&home));
+                    if turn == DECIDED {
+                        if committed {
+                            std::fs::write(home.journal(), journal_bytes(TXN, Phase::Committed))
+                                .unwrap();
+                        } else {
+                            rolled_back(&home);
+                        }
+                    }
+                },
+            );
+            assert_eq!(disk.made.get(), 1, "{road}");
+            assert!(
+                standing[..DECIDED as usize]
+                    .iter()
+                    .all(|temporaries| temporaries.len() == 1),
+                "{road}: the held write keeps its temporary until the decision: {standing:#?}"
+            );
+            if committed {
+                // The commit read, then a turn acknowledging the receipt.
+                assert_eq!(turns, DECIDED + 1, "{road}");
+                assert!(
+                    standing[DECIDED as usize].is_empty(),
+                    "{road}: dropped at the decision, not at the watch's end: {standing:#?}"
+                );
+                assert_eq!(gate.take_released(), vec![Writer::Pins], "{road}");
+            } else {
+                assert_eq!(turns, DECIDED, "{road}");
+            }
+            assert!(
+                temporaries_beside_the_mark(&home).is_empty(),
+                "{road}: no temporary outlives the watch"
+            );
+            assert!(!gate.has_marked_unkept(), "{road}");
+            assert!(
+                home.unkept(TXN).is_dir(),
+                "{road}: nothing of the mark at its name"
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

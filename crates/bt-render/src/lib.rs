@@ -15399,6 +15399,12 @@ fn selection_span_bounds_px(
     ]
 }
 
+/// The rectangle an input method is told for the terminal's caret: the frame's cursor cell, in the
+/// pane's own pixels at `metrics`, clamped into the pane.
+///
+/// It measures the cell `frame.cursor` names whether or not that cell is drawn. A cursor whose row
+/// the pane does not show names the row at the pane's edge nearest it (`ViewportFrame::cursor`), so
+/// a scrolled-away caret's candidate window opens at that edge, in the caret's column.
 pub fn ime_cursor_area_for_metrics(metrics: CellMetrics, frame: &ViewportFrame) -> ImeCursorArea {
     let [left, raw_top, right, raw_bottom] = frame_cell_bounds_px(
         metrics,
@@ -24044,6 +24050,88 @@ mod tests {
             primary_advance_px: 8.0,
             primary_cap_height_px: 10.0,
             primary_cap_center_y_px: 5.0,
+        }
+    }
+
+    /// PIN — the reader scrolled into history while the prompt is below the pane, and starts
+    /// typing pinyin: nothing is composed (the cursor's cell is not drawn), and the candidate
+    /// window is told the cell at the pane's bottom edge in the cursor's column — the edge the
+    /// prompt is beyond — never the presentation row that shares the cursor's grid row index,
+    /// which is a history line the reader is looking at. Byte-driven: the session's frame, the
+    /// compositor, and the measurement the IME road makes, in the order `runtime/frame.rs` makes
+    /// them.
+    ///
+    /// MUTATION: the frame's cursor row back to `projected_cursor_row.unwrap_or(cursor.row)` in
+    /// `bt_viewport`'s `continuous_frame` — red: the rectangle stands on presentation row 1.
+    #[test]
+    fn an_ime_caret_for_a_scrolled_away_cursor_is_not_an_unrelated_row() {
+        // One geometry: the metrics' cell is exactly as tall as the session's rows, so the
+        // pane's bottom (what the measurement clamps to) is the bottom of the frame's last row.
+        let metrics = CellMetrics {
+            cell_height_px: (bt_term::SPIKE_CELL_HEIGHT_SUBPIXELS.get() / SUBPIXELS_PER_PX) as f32,
+            ..input_box_metrics()
+        };
+        let started = std::time::Instant::now();
+        let mut session = bt_term::DualPlaneSession::new(
+            NonZeroU32::new(20).unwrap(),
+            NonZeroU32::new(4).unwrap(),
+        );
+        let mut bytes = String::new();
+        for line in 0..12 {
+            bytes.push_str(&format!("历史-{line} history\r\n"));
+        }
+        // The prompt on grid row 1, the cursor after `> 你好` (columns 0..6).
+        bytes.push_str("\x1b[2;1H\x1b[2K> 你好");
+        session.feed_at(bytes.as_bytes(), started).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let resting = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            (
+                resting.cursor.row,
+                resting.cursor.column,
+                resting.cursor_in_view
+            ),
+            (1, 6, true),
+            "fixture: at rest the cursor is drawn on row 1"
+        );
+        let preedit = Preedit {
+            text: "ni'hao你".to_owned(),
+            cursor_byte: None,
+        };
+        let last_pane_row = resting.grid_rows.get() as usize - 1;
+        for offset in [3, 6] {
+            projection.scroll_by_rows(offset);
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            assert!(
+                !frame.cursor_in_view,
+                "offset={offset}: fixture: the prompt is below the pane"
+            );
+            let composed = compose_preedit(&frame, Some(&preedit)).unwrap();
+            assert_eq!(
+                composed.frame, frame,
+                "offset={offset}: nothing is composed"
+            );
+            assert_eq!(composed.ime_caret, frame.cursor);
+            let area = ime_cursor_area_for_metrics(metrics, &composed.frame);
+            let edge = frame.row_map[last_pane_row];
+            let edge_top = metrics.padding_px + edge.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
+            assert_eq!(
+                (area.x, area.y),
+                (
+                    (metrics.padding_px + 6.0 * metrics.cell_width_px) as i32,
+                    edge_top as i32
+                ),
+                "offset={offset}: the candidate window stands at the pane's bottom edge, in the \
+                 cursor's column",
+            );
+            assert_eq!(
+                area.y + area.height as i32,
+                (metrics.padding_px + resting.grid_rows.get() as f32 * metrics.cell_height_px)
+                    as i32,
+                "offset={offset}: the edge cell ends where the pane does",
+            );
+            assert_ne!(edge.live_grid_row, Some(1));
+            projection.scroll_by_rows(-offset);
         }
     }
 
