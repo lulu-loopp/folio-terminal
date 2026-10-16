@@ -366,7 +366,8 @@ jobs:
 
       # G1's font bound (CC-9): typst-assets' faces turned on for every target in
       # bt-math's manifest, the shape of a browser build that would carry all
-      # seventeen. The wasm32 check must refuse it and name the fonts feature.
+      # seventeen. The wasm32 check asks every listed crate's graph, so it must
+      # refuse bt-math and bt-compose (whose graph holds bt-math) by name.
       - name: the wasm font bound can actually fail
         shell: pwsh
         run: |
@@ -385,7 +386,8 @@ jobs:
               $message = $_.Exception.Message
             }
             if (-not $failed) { throw "the wasm32 library check accepted typst-assets' fonts in bt-math's wasm32 graph" }
-            if ($message -notmatch "wasm32-unknown-unknown graph turns on typst-assets' fonts") {
+            if ($message -notmatch "wasm32-unknown-unknown graph of \d+ crate\(s\) turns on typst-assets' fonts" -or
+                $message -notmatch '(?m)^\s+bt-math - ' -or $message -notmatch '(?m)^\s+bt-compose - ') {
               throw "the wasm32 library check failed for the wrong reason: $message"
             }
             Write-Host $message
