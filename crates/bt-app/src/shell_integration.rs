@@ -3194,7 +3194,9 @@ pub fn powershell_profile_fallback(
 /// **An observation that could not run is `NotRun`, ahead of what the parse question heard**
 /// (T-OBSERVATION-REFUSAL-ON-THE-PAGE): the row cannot be decided without the observation, and
 /// what kept it from being decided is that the check never ran — which the row says, rather than
-/// waiting on a parse answer or naming a question that was asked.
+/// waiting on a parse answer or naming a question that was asked. Each reason is matched by
+/// name on both sides, so a reason added later is decided here, not swallowed by a wildcard; a
+/// parse question that could not run (no road files one today) is said the same way.
 ///
 /// **A line that is present is `Enabled` only when both sessions load it** ([`edition_cause`]):
 /// a line an ordinary session refuses — written by an older Folio, or by hand, before the policy
@@ -3227,11 +3229,14 @@ fn profile_fallback_from_parts(
         return PowerShellProfileFallback::Unsupported;
     }
     match (parse, observed) {
-        (_, Heard::Failed(Unanswered::NotRun)) => PowerShellProfileFallback::NotRun,
+        (_, Heard::Failed(Unanswered::NotRun)) | (Heard::Failed(Unanswered::NotRun), _) => {
+            PowerShellProfileFallback::NotRun
+        }
         (Heard::NotYet, _) | (Heard::Answer(()), Heard::NotYet) => {
             PowerShellProfileFallback::Pending
         }
-        (Heard::Failed(_), _) | (Heard::Answer(()), Heard::Failed(Unanswered::NoAnswer)) => {
+        (Heard::Failed(Unanswered::NoAnswer), _)
+        | (Heard::Answer(()), Heard::Failed(Unanswered::NoAnswer)) => {
             PowerShellProfileFallback::Undetermined
         }
         (Heard::Answer(()), Heard::Answer((cause, line_present, _))) => match cause {
@@ -5840,9 +5845,16 @@ mod tests {
     /// MUTATIONS: drop the `latch.store(false, ..)` after a refused start in
     /// `begin_startup_migration_through` — the second asking returns at the latch and only one
     /// refusal is said; say nothing in `ObservationEnds::worker_ended` — the refusals are thrown
-    /// away again.
+    /// away again; hand `spawn_profile_observation` a row from the startup (T-OBSERVATION-REFUSAL-
+    /// ON-THE-PAGE review) — its refusal is filed on a page nobody opened.
     #[test]
     fn a_refused_startup_observation_is_said_and_asked_again() {
+        // The edition no other test files, and Windows PowerShell's held in turn, so a filing
+        // numbered between `before` and `after` could only be the startup's.
+        let _turn = WINDOWS_POWERSHELL_OBSERVATIONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = next_observation();
         let gate = std::sync::Arc::new(crate::lane::Gate::default());
         let executor = crate::lane::Executor::scripted(std::sync::Arc::clone(&gate));
         let latch = std::sync::atomic::AtomicBool::new(false);
@@ -5858,8 +5870,22 @@ mod tests {
                 move |line| lines.lock().unwrap().push(line.to_owned()),
             );
         }
+        let after = next_observation();
+        let filed = PROFILE_OBSERVATIONS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .filter(|(_, (number, _))| (before..after).contains(number))
+            .map(|(edition, (number, _))| (*edition, *number))
+            .collect::<Vec<_>>();
         let said = said.lock().unwrap().clone();
         let _ = std::fs::remove_dir_all(&data);
+        assert_eq!(
+            filed,
+            Vec::new(),
+            "the startup's asking names no rows, so nothing is filed on the page"
+        );
         assert_eq!(
             said.len(),
             2,
@@ -5874,6 +5900,82 @@ mod tests {
             !latch.load(std::sync::atomic::Ordering::Acquire),
             "the latch stays open on a refused start"
         );
+    }
+
+    /// RED (T-OBSERVATION-REFUSAL-ON-THE-PAGE review) — **a worker that panicked after it started
+    /// is said once, its asked rows read could-not-run, and the window is woken once**; a run no
+    /// row asked for is said and wakes nothing. Driven end to end through the scripted executor:
+    /// `start_profile_observation` is handed a body that panics on the worker, `start_worker`
+    /// contains the panic and tells `ObservationEnds` once (`WorkerEnd::Panicked`). The wake and
+    /// the voice each hold a sender, so the test reads them until the worker's end lets the last
+    /// sender go — no clock.
+    ///
+    /// MUTATIONS: `ObservationEnds::worker_ended` returning on `Panicked` as on `Returned` —
+    /// nothing said, nothing filed, no wake; drop the `editions.is_empty()` return — the run no
+    /// row asked for wakes the window.
+    #[test]
+    fn a_panicked_observation_worker_is_said_on_the_profiles_page() {
+        let _turn = WINDOWS_POWERSHELL_OBSERVATIONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let program = Path::new("powershell.exe");
+        let edition = powershell_edition(program);
+        let row = os_words(&["-NoExit", "-File", "enter.ps1"]);
+        let executor =
+            crate::lane::Executor::scripted(std::sync::Arc::new(crate::lane::Gate::default()));
+        let run = |editions: Vec<PowerShellEdition>| {
+            let (said, lines) = std::sync::mpsc::channel::<String>();
+            let (woken, wakes) = std::sync::mpsc::channel::<()>();
+            let started = profile_runtime::start_profile_observation(
+                &executor,
+                editions,
+                move |line| said.send(line.to_owned()).unwrap(),
+                move || woken.send(()).unwrap(),
+                |_, _| panic!("the observation suite fails this worker on purpose"),
+            );
+            // Each iterator ends when the worker's end has let its sender go.
+            (
+                started,
+                lines.iter().collect::<Vec<_>>(),
+                wakes.iter().count(),
+            )
+        };
+        let (started, said, wakes) = run(vec![edition]);
+        let filed = PROFILE_OBSERVATIONS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&edition)
+            .is_some_and(|(_, heard)| matches!(heard, Heard::Failed(Unanswered::NotRun)));
+        let fallback = powershell_profile_fallback(program, &row, true);
+        PROFILE_OBSERVATIONS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&edition);
+        let (_, unasked_said, unasked_wakes) = run(Vec::new());
+        assert!(started, "the worker started, then panicked");
+        assert_eq!(said.len(), 1, "the panic is said once: {said:?}");
+        assert!(
+            said[0].contains("the observation suite fails this worker on purpose"),
+            "what is said is the worker's panic: {said:?}"
+        );
+        assert!(filed, "the asked row's edition is filed as not run");
+        assert_eq!(
+            fallback,
+            if PROFILE_PROBE_EXISTS {
+                PowerShellProfileFallback::NotRun
+            } else {
+                PowerShellProfileFallback::Unsupported
+            }
+        );
+        assert_eq!(wakes, 1, "the window is woken once to draw it");
+        assert_eq!(
+            unasked_said.len(),
+            1,
+            "a run no row asked for is still said"
+        );
+        assert_eq!(unasked_wakes, 0, "and wakes nothing: nothing was filed");
     }
 
     /// **Taken in turn by the tests that file Windows PowerShell's edition** on the process's
@@ -6023,6 +6125,7 @@ mod tests {
         for parse in [
             Heard::NotYet,
             Heard::Failed(Unanswered::NoAnswer),
+            Heard::Failed(Unanswered::NotRun),
             Heard::Answer(()),
         ] {
             assert_eq!(

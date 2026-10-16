@@ -136,11 +136,11 @@ pub fn begin_profile_observation_for(programs: &profiles::ProfilePrograms) {
 /// worker is contained and said the same way, as every lane worker's is.
 ///
 /// **And it reaches the Profiles page** (T-OBSERVATION-REFUSAL-ON-THE-PAGE): the run is numbered
-/// as it is asked, so a run that never started has a number too, and a refused start — or a
-/// worker that ended before it answered — files [`Unanswered::NotRun`] for the edition of each of
-/// `rows` it had not answered ([`publish_profile_observation_not_run`]). `rows` are the page's own
-/// rows' programs, the surface that asked; the startup's asking names none, and its refusal is
-/// said in `say` alone.
+/// as it is asked ([`start_profile_observation`]), so a run that never started has a number too,
+/// and a refused start — or a worker that ended before it answered — files
+/// [`Unanswered::NotRun`] for the edition of each of `rows` it had not answered
+/// ([`publish_profile_observation_not_run`]). `rows` are the page's own rows' programs, the
+/// surface that asked; the startup's asking names none, and its refusal is said in `say` alone.
 pub(super) fn spawn_profile_observation(
     executor: &crate::lane::Executor,
     data: PathBuf,
@@ -148,8 +148,6 @@ pub(super) fn spawn_profile_observation(
     questions: Vec<ParseQuestion>,
     say: impl Fn(&str) + Send + Sync + 'static,
 ) -> bool {
-    // Numbered as it is asked: a run that overlaps a later one never files over it.
-    let observation = next_observation();
     let mut editions = Vec::new();
     for program in &rows {
         let edition = powershell_edition(program);
@@ -157,37 +155,62 @@ pub(super) fn spawn_profile_observation(
             editions.push(edition);
         }
     }
+    start_profile_observation(
+        executor,
+        editions,
+        say,
+        || {
+            if let Some(wake) = WAKE.get() {
+                wake();
+            }
+        },
+        move |worker, observation| {
+            let environment = ProbeEnvironment::current(worker, "PowerShell profile observation");
+            let mut programs = installed_powershells(&environment);
+            for program in rows {
+                if !programs.contains(&program) {
+                    programs.push(program);
+                }
+            }
+            let report = observe_profile_lines(worker, observation, &data, &programs, &environment);
+            ask_failed_parse_questions_again(worker, questions, &environment);
+            for refusal in report.refusals() {
+                eprintln!(
+                    "BT_SHELL_PROFILE {}: {}",
+                    refusal.path.display(),
+                    refusal.reason
+                );
+            }
+            if let Some(wake) = WAKE.get() {
+                wake();
+            }
+        },
+    )
+}
+
+/// **Start one observation run**: numbered here, as it is asked — before the door is knocked on,
+/// so a start it refuses has a number to file under — and `body` handed the number on the
+/// worker. Its end is told to [`ObservationEnds`] with `editions` (the editions of the rows that
+/// asked), the voice `say` and the window's `wake`. `true` when the worker started.
+pub(super) fn start_profile_observation(
+    executor: &crate::lane::Executor,
+    editions: Vec<PowerShellEdition>,
+    say: impl Fn(&str) + Send + Sync + 'static,
+    wake: impl Fn() + Send + Sync + 'static,
+    body: impl FnOnce(&bt_platform::admission::WorkerCtx, u64) + Send + 'static,
+) -> bool {
+    // Numbered as it is asked: a run that overlaps a later one never files over it.
+    let observation = next_observation();
     executor
         .start_worker(
             "powershell-profile-observation",
             std::sync::Arc::new(ObservationEnds {
                 say: Box::new(say),
+                wake: Box::new(wake),
                 observation,
                 editions,
             }),
-            move |worker| {
-                let environment =
-                    ProbeEnvironment::current(worker, "PowerShell profile observation");
-                let mut programs = installed_powershells(&environment);
-                for program in rows {
-                    if !programs.contains(&program) {
-                        programs.push(program);
-                    }
-                }
-                let report =
-                    observe_profile_lines(worker, observation, &data, &programs, &environment);
-                ask_failed_parse_questions_again(worker, questions, &environment);
-                for refusal in report.refusals() {
-                    eprintln!(
-                        "BT_SHELL_PROFILE {}: {}",
-                        refusal.path.display(),
-                        refusal.reason
-                    );
-                }
-                if let Some(wake) = WAKE.get() {
-                    wake();
-                }
-            },
+            move |worker| body(worker, observation),
         )
         .is_ok()
 }
@@ -195,9 +218,11 @@ pub(super) fn spawn_profile_observation(
 /// **What the observation's worker says of its own end**: a start the thread door refused, or a
 /// panic the worker's containment caught — once each, in the voice it was handed, and on the
 /// Profiles page: each of `editions` the run `observation` had not answered is filed as not run,
-/// and the window woken to draw it. A body that returned says nothing.
+/// and the window woken to draw it. A body that returned says nothing; a run no row asked for
+/// (the startup's) files nothing and so wakes nothing.
 struct ObservationEnds {
     say: Box<dyn Fn(&str) + Send + Sync>,
+    wake: Box<dyn Fn() + Send + Sync>,
     observation: u64,
     editions: Vec<PowerShellEdition>,
 }
@@ -210,10 +235,11 @@ impl crate::lane::Ends for ObservationEnds {
         (self.say)(&format!(
             "the PowerShell profile observation ended: {cause}"
         ));
-        publish_profile_observation_not_run(&self.editions, self.observation);
-        if let Some(wake) = WAKE.get() {
-            wake();
+        if self.editions.is_empty() {
+            return;
         }
+        publish_profile_observation_not_run(&self.editions, self.observation);
+        (self.wake)();
     }
 }
 

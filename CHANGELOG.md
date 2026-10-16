@@ -118,7 +118,7 @@ All notable changes to Folio are recorded here. The format follows
 - Typing with an input method (Microsoft Pinyin, say) in a program that hides the terminal's cursor and draws its own, such as pi, now shows what you are composing in its input box, with the candidate list beside it. <!-- zh: pending T-PREEDIT-ON-A-HIDDEN-CURSOR -->
 - Right after Windows starts, Folio no longer closes a moment after opening when its PowerShell 7 tabs come from the Microsoft Store: a background check of PowerShell 7 no longer runs while such a tab is starting. <!-- zh: pending T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH -->
 - A failure while Folio checks your PowerShell profiles for its line no longer closes Folio, and a check that could not start when Folio opened is tried again at the next chance (after an update is confirmed, say) instead of waiting until you open the Profiles page. <!-- zh: pending T-HEADLESS-RUNTIME-SEAM -->
-- When Folio cannot start its check of a PowerShell profile while the Profiles page is open, the PowerShell rows with their own arguments now say the check could not run, instead of keeping what they said before with no word of why; opening the page again checks again. <!-- zh: pending T-OBSERVATION-REFUSAL-ON-THE-PAGE -->
+- When Folio's check of your PowerShell profiles cannot start, or stops before it finishes, while the Profiles page is open, the PowerShell rows with their own arguments now say the check could not run, instead of keeping what they said before with no word of why; opening the page again checks again. <!-- zh: pending T-OBSERVATION-REFUSAL-ON-THE-PAGE -->
 
 ### Changed
 
