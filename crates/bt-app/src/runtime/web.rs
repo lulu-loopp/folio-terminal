@@ -1,6 +1,7 @@
 //! `web` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::window_seam::prelude::*;
 use crate::{
     AppEvent, LeafId, PageKeepsake, PreviewSurface, RenameExit, Runtime, TabRename, WebHeadVerb,
     WebPlacement, a_page_is_off_the_glass, a_page_still_has_a_pane, a_page_was_replaced,
@@ -15,7 +16,7 @@ use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton};
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **The web engine, asked for on an idle turn after startup** (0.4.5 ticket 54,
     /// D-64; `docs/ARCHITECTURE.md` §5.3 row 21).
     ///
@@ -2002,15 +2003,17 @@ impl Runtime<'_> {
 /// **The page's window, as the adoption transaction's handoff door** (ticket 60, SW-3): park the
 /// spare's seat, then walk `WebSeat::rehost` from the spare's parent into this window, with
 /// `take_focus = false`.
-struct WindowHandoff<'a> {
-    to: &'a bt_platform::Compositor,
+struct WindowHandoff<'a, C: CompositorDoor> {
+    to: &'a C,
     address: webhost::SeatAddress,
     outcomes: Vec<webhost::WebOutcome>,
     /// The handoff's own word for the trace: `Moved`, `KeptSource` or `Lost`.
     answered: Option<&'static str>,
 }
 
-impl crate::web_spare::Handoff<webhost::WebSeat, bt_platform::SpareParent> for WindowHandoff<'_> {
+impl<C: CompositorDoor> crate::web_spare::Handoff<webhost::WebSeat, bt_platform::SpareParent>
+    for WindowHandoff<'_, C>
+{
     fn park(&mut self, seat: &mut webhost::WebSeat) -> Result<(), String> {
         match seat.park_for_handoff() {
             Ok(visible) => {

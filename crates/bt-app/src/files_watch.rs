@@ -79,7 +79,7 @@ use std::{
     time::Instant,
 };
 
-use winit::event_loop::EventLoopProxy;
+use crate::window_seam::LoopProxy;
 
 use crate::{
     AppEvent,
@@ -152,7 +152,7 @@ impl FilesWatch {
     /// schedule the next turn and the turn after that, for ever, over a window
     /// nobody is looking at. The clone belongs in [`listener`], once per window,
     /// and nowhere on this path.
-    pub fn sync(&mut self, wanted: &BTreeSet<PathBuf>, proxy: &EventLoopProxy<AppEvent>) -> Synced {
+    pub fn sync(&mut self, wanted: &BTreeSet<PathBuf>, proxy: &LoopProxy) -> Synced {
         self.sync_with(wanted, |news| {
             crate::watch_steward::open_ear(Depth::Shallow, listener(news, proxy))
         })
@@ -311,10 +311,7 @@ impl FilesWatch {
 /// A free function for `git_watch::subscribe`'s reason, and **the only place in
 /// this file the proxy is cloned** — once per window, when its ear opens, for
 /// the reason [`FilesWatch::sync`] states.
-fn listener(
-    news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
-    proxy: &EventLoopProxy<AppEvent>,
-) -> Listener {
+fn listener(news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>, proxy: &LoopProxy) -> Listener {
     let mailbox = Arc::clone(news);
     let proxy = proxy.clone();
     Arc::new(move |directory: &Path, _| {

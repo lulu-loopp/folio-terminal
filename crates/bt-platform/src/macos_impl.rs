@@ -1967,7 +1967,7 @@ pub fn os_ui_language() -> String {
 /// itself belongs to the event loop, and the wake `bt-app` hands in is one
 /// `EventLoopProxy::send_event` — winit's user-event channel, delivered on the
 /// window thread. That is X-4's rule for every AppKit callback in this port, and
-/// `dark_mode_changes_arrive_on_the_window_thread_through_winit` pins it.
+/// `the_appearance_callback_only_nudges_the_loop` holds it.
 ///
 /// One watch per window, as on Windows: the notification reaches every observer
 /// anyway and a duplicate wake costs one re-read on a turn that was going to
@@ -2335,6 +2335,44 @@ mod tests {
     }
 
     use super::*;
+
+    /// RED (X-4) — **the appearance's callback nudges the loop and does nothing else.** AppKit's
+    /// key-value delivery is made the way AppKit makes it — the observer's
+    /// `observeValueForKeyPath:ofObject:change:context:` — on a libtest thread, which is not the
+    /// window thread: `effectiveAppearance` reaches the wake as one
+    /// `crate::SystemNews::Preferences`, and a key path the observer was not registered for
+    /// reaches nothing. The reading of the appearance belongs to the loop's next turn
+    /// (`bt-app`'s `the_system_preference_event_re_reads_the_desktops_canvas`).
+    ///
+    /// MUTATIONS: read the appearance inside `observe_value` — the read needs the window thread,
+    /// so this delivery panics instead of nudging; drop the key-path guard — the stray key path
+    /// wakes the loop too.
+    #[test]
+    fn the_appearance_callback_only_nudges_the_loop() {
+        use std::sync::mpsc;
+        let (said, heard) = mpsc::channel();
+        let observer = SystemSettingsObserver::new(Box::new(move |news| {
+            let _ = said.send(news);
+        }));
+        for key in [ns_string!("effectiveAppearance"), ns_string!("frame")] {
+            // SAFETY: the selector the class declares, with the argument types it declares; a
+            // null change and context are what an observer registered without options is handed.
+            unsafe {
+                let _: () = msg_send![
+                    &*observer,
+                    observeValueForKeyPath: Some(key),
+                    ofObject: Option::<&AnyObject>::None,
+                    change: Option::<&NSDictionary<NSString, AnyObject>>::None,
+                    context: std::ptr::null_mut::<c_void>()
+                ];
+            }
+        }
+        assert_eq!(
+            heard.try_iter().collect::<Vec<_>>(),
+            vec![crate::SystemNews::Preferences],
+            "the appearance nudges the loop once, and nothing else does"
+        );
+    }
 
     /// **RED — the platform's run is a rectangle, and both of its numbers are
     /// this window's own** (T-MAC-LIGHTS).

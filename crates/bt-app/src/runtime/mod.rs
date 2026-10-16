@@ -33,6 +33,8 @@ mod quake;
 mod search;
 mod tabs;
 pub(crate) use tabs::owe_birth_death_fallback_resize;
+#[cfg(test)]
+pub(crate) use windows::recent_term_leaf_seed;
 mod terminal;
 mod tooltips;
 mod update_card;

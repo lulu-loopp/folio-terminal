@@ -71,13 +71,36 @@ fn script_at(data: &Path) -> PathBuf {
 /// the migration it replaced was. The observation itself only reads; the commit's release calls
 /// this again, so the conditional Settings verb appears then.
 pub fn begin_startup_migration() {
+    begin_startup_migration_through(
+        &STARTED,
+        &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
+        persist::storage_dir,
+        crate::diagnostics::note,
+    );
+}
+
+/// [`begin_startup_migration`] with its latch, the executor its worker is started by, the data
+/// root's reading and the voice a refused start is said in handed in.
+///
+/// **The latch is set by a start, not by an attempt.** A start the thread door refuses is said
+/// once and leaves the latch open, so the next asking — the commit of an update's trial, the next
+/// launch path that calls this — tries again; before, the latch was taken first and a refused
+/// start meant no startup observation until the Profiles page was opened.
+pub(crate) fn begin_startup_migration_through(
+    latch: &std::sync::atomic::AtomicBool,
+    executor: &crate::lane::Executor,
+    data: impl FnOnce() -> PathBuf,
+    say: impl Fn(&str) + Send + Sync + 'static,
+) {
     if crate::update_trial::defer(crate::update_trial::Writer::ProfileMigration) {
         return;
     }
-    if STARTED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+    if latch.swap(true, std::sync::atomic::Ordering::AcqRel) {
         return;
     }
-    spawn_profile_observation(persist::storage_dir(), Vec::new(), Vec::new());
+    if !spawn_profile_observation(executor, data(), Vec::new(), Vec::new(), say) {
+        latch.store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 
 /// Refresh the two edition facts when the Profiles page opens. This is an edge
@@ -95,41 +118,72 @@ pub fn begin_profile_observation_for(programs: &profiles::ProfilePrograms) {
         }
     }
     spawn_profile_observation(
+        &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
         persist::storage_dir(),
         resolved,
         parse_questions(profiles::table().profiles(), programs),
+        crate::diagnostics::note,
     );
 }
 
 /// **The observation's worker**: the installed PowerShells — looked up in the environment it reads,
 /// so on the worker and never on the window thread — and `rows` (the profile rows' own programs,
 /// as the program walk answered them), each observed; then the parse questions that got no answer.
-fn spawn_profile_observation(data: PathBuf, rows: Vec<PathBuf>, questions: Vec<ParseQuestion>) {
-    let _ = bt_platform::spawn_at_priority(
-        "powershell-profile-observation",
-        bt_platform::ThreadPriority::BelowNormal,
-        move |worker| {
-            let environment = ProbeEnvironment::current(worker, "PowerShell profile observation");
-            let mut programs = installed_powershells(&environment);
-            for program in rows {
-                if !programs.contains(&program) {
-                    programs.push(program);
+///
+/// Started by `executor` (the thread door, below normal, in the product), and `true` when it was.
+/// **A start the door refuses is said once**, in `say`, and answered `false` — never thrown away:
+/// the startup's latch stays open on it ([`begin_startup_migration_through`]). A panic in the
+/// worker is contained and said the same way, as every lane worker's is.
+fn spawn_profile_observation(
+    executor: &crate::lane::Executor,
+    data: PathBuf,
+    rows: Vec<PathBuf>,
+    questions: Vec<ParseQuestion>,
+    say: impl Fn(&str) + Send + Sync + 'static,
+) -> bool {
+    executor
+        .start_worker(
+            "powershell-profile-observation",
+            std::sync::Arc::new(ObservationEnds(Box::new(say))),
+            move |worker| {
+                let environment =
+                    ProbeEnvironment::current(worker, "PowerShell profile observation");
+                let mut programs = installed_powershells(&environment);
+                for program in rows {
+                    if !programs.contains(&program) {
+                        programs.push(program);
+                    }
                 }
-            }
-            let report = observe_profile_lines(worker, &data, &programs, &environment);
-            ask_failed_parse_questions_again(worker, questions, &environment);
-            for refusal in report.refusals() {
-                eprintln!(
-                    "BT_SHELL_PROFILE {}: {}",
-                    refusal.path.display(),
-                    refusal.reason
-                );
-            }
-            if let Some(wake) = WAKE.get() {
-                wake();
-            }
-        },
-    );
+                let report = observe_profile_lines(worker, &data, &programs, &environment);
+                ask_failed_parse_questions_again(worker, questions, &environment);
+                for refusal in report.refusals() {
+                    eprintln!(
+                        "BT_SHELL_PROFILE {}: {}",
+                        refusal.path.display(),
+                        refusal.reason
+                    );
+                }
+                if let Some(wake) = WAKE.get() {
+                    wake();
+                }
+            },
+        )
+        .is_ok()
+}
+
+/// **What the observation's worker says of its own end**: a start the thread door refused, or a
+/// panic the worker's containment caught — once each, in the voice it was handed. A body that
+/// returned says nothing.
+struct ObservationEnds(Box<dyn Fn(&str) + Send + Sync>);
+
+impl crate::lane::Ends for ObservationEnds {
+    fn worker_ended(&self, cause: crate::lane::WorkerEnd) {
+        if !matches!(cause, crate::lane::WorkerEnd::Returned) {
+            (self.0)(&format!(
+                "the PowerShell profile observation ended: {cause}"
+            ));
+        }
+    }
 }
 
 /// **Whether the Settings remover has anything to remove here**: a line in one of the exact

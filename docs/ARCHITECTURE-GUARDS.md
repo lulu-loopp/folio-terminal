@@ -281,6 +281,13 @@ fix the routing or regenerate with `scripts/generate-ownership-census.ps1` and
 justify each real multi-writer or unknown row; do not edit generated census rows
 as a substitute for changing the code.
 
+A limit of the reading, since the window seam (T-HEADLESS-RUNTIME-SEAM): a call
+on a backend's associated type (`B::Glass`) is resolved through the bounds its
+declaring trait gives that name, and those bounds are keyed by the bare names of
+the associated type and of the trait — not by trait identity, as the
+completions guard's `TraitResolver` keys them. Two traits declaring an
+associated type of one name would be read as one; `bt-app` has one today.
+
 ## Runtime dependency map
 
 The rule: the measured dependency graph inside `bt-app` that the field moves
@@ -532,6 +539,108 @@ Where and what to do: the raw-effect half of
 `scripts/ci/check-window-waits.ps1` enforce it. When red, use
 `spawn_at_priority` with a named worker/effect; retain a bare site only when the
 door cannot own it and record that reason in the exception ledger.
+
+## Window seam
+
+The rule: a window's own code reaches the window through `crate::window_seam`
+(T-HEADLESS-RUNTIME-SEAM, 2026-10-13; `ARCHITECTURE.md` §4.5). The types that
+hold a backend — a type parameter bounded by the seam's `Backend` or by a trait
+that has it among its supertraits — are written for that parameter, so the
+compiler sees every call that code makes to the window as a call on a seam
+trait. A holder named for the **native** backend — its backend argument left to
+its default or a concrete type — is refused wherever it is written (an `impl` of
+it, any other function's signature or body — the methods of a generic holder
+block and of a generic trait impl included, read with the block's parameter in
+scope — a `const` or `static`, a struct, enum or union's whole declaration —
+fields, generics, discriminants — a backend parameter's own default aside)
+unless `docs/plans/window-seam-native.tsv` names the place with its reason. It
+is read in type position and in expression and pattern position
+(`FolioApp::new(..)`, a struct literal, a struct or tuple-struct pattern): there
+an unwritten backend is chosen by inference, read as native where no backend
+parameter is in scope, and in any scope when the path names a method the holder
+has only in a native block (`Runtime::create` inside a function generic over the
+backend still builds the native one; a path finds an inherent method before a
+trait's, so a native inherent or trait-impl method stays native-only unless a
+generic inherent block has it). A nested item sees none of the scope around it;
+a trait's own backend parameters, and `Self` for a backend trait, are in scope
+in its methods' default bodies. The native backend's own name (`Native`,
+standing first or after a module's name) is a native mention anywhere outside
+the seam. An impl's generics, trait arguments, associated types and consts, a
+trait's declaration (its generics, supertraits and associated items), and a
+native block's associated items have no row and are refused by name; so are a
+`use` that renames a holder, the native backend or the seam (at module level by
+name; in a body as a mention of the item holding it, as is a rename of anything
+brought from the seam), a module-level type alias of a holder or of the native
+backend (its type or its generics), and an `impl` whose self type names a holder
+natively without being its path.
+
+Four general rules close what an enumeration of positions would leave open.
+**Every impl below module level is read whole, in its own scope, and no listing
+covers it:** one `syn` walk over each product file finds every `ItemImpl` that
+is not at module level — in a signature, a body, a type position, an
+initializer, a default body, wherever the syntax tree holds one — and refuses it
+by name when its trait is a door of the seam, when its self type reaches a
+holder (spelled, or through the body's `use` leaves and type aliases composed
+with each other to a fixed point, refused when they do not settle), or when
+anything in it names a holder or the native backend for the native backend (a
+method body reaching a native-only method included). **A body the guard does not
+read for mentions introduces no names:** in a native block's method, a listed
+function, method or trait default (any self-type shape: the row's owner and the
+self type name the same set of types, each path's last segment, order, prefixes,
+generics and lifetimes aside) or a listed `const`, every `use` and `type`, and
+any other item spelling a holder, is refused by name; a `mod` below module level
+is refused anywhere, and an `extern crate` anywhere in a product file. **A body
+does not alias the seam's traits or module:** a body `use` whose leaves,
+expanded through the body's own to a fixed point, pass through the seam module
+or resolve to a seam trait is refused by name. A body `use` of a re-exported
+non-trait seam item (`LoopProxy as Win`) or a body glob of a re-exporting module
+is not refused by this rule — the resolver follows traits only — and leaves no
+hole: holders and the native backend are read by name wherever they are written,
+the seam's traits under every name a module-level `use` gives them, and a body
+glob in scope refuses any nested trait impl. **Every trait impl's trait is
+resolved, or shown to be another crate's, or refused — at module level and below
+it alike:** its path is expanded through the body's `use` leaves (each block's
+own, every path per name, a `{self}` leaf under the module's name) and resolved
+with the module's resolver, whose hop limit refuses — for every decision the
+guard takes from it: a trait impl's trait, a bound that makes a type parameter a
+backend parameter, a supertrait that makes a trait a backend trait, the trait
+that makes a type the native backend (a cycle among `use`s and globs names
+nothing more, and is not a cutoff); one the resolver does not follow passes only
+when, after the module's own `use` leaves and first-party globs, it is rooted at
+`std`, `core`, `alloc` or a dependency in the package's manifest that is not
+also a first-party module's name in scope (beside the module, at the crate root,
+or in a module the module's own globs open, one level), or is a single segment
+naming a prelude trait; one spelled as a seam trait is a door — only when the
+resolver followed nothing, at module level and below it alike (one it followed
+to a first-party trait of the same name is that trait); a path that does not
+settle, any other unresolved path, and a body `use` glob in scope are refused by
+name. The seam's traits go by every name a module-level first-party `use` gives
+them, and a holder, a native name or a seam trait under any of those names in a
+macro's tokens is refused by name — the guard does not read macros; `paste!`,
+`concat_idents!` and any `use` of the `paste` crate are refused, since they
+build names from pieces. With all of these, every door of the seam the product
+implements is implemented in the seam (the headless backend is test-only and is
+not read).
+
+**What the guard does not hold**: the platform handle. `WindowHost::native_handle`
+and `CompositorDoor::platform_tree` hand generic code a `bt_platform` value that
+reaches the platform past every door — the call sites are listed in
+`ARCHITECTURE.md` §4.5, and moving them behind doors is
+T-NATIVE-HANDLE-BEHIND-THE-SEAM. A new use of either is a new crossing; say it
+there.
+
+Where and what to do: `crates/bt-source/tests/window_seam.rs`
+(`bt_app_reaches_its_window_only_through_the_seam`) reads `bt-app` by item
+identity — every bound resolved through `use` items, globs and renames by
+`TraitResolver`, the backend's position read from the holder's own parameters —
+and its fixture (`tests/fixtures/window_seam/`) plants each refusal
+(`every_road_around_the_window_seam_is_named`). The native list only shrinks:
+`scripts/ci/check-window-seam-native.ps1` refuses a row the merge base does not
+have (`gates-can-fail` plants one). When red, write the new code for the backend
+parameter and add the door it needs to the seam's trait (with its `Native` impl
+beside the others and its headless impl in `headless.rs`); never add a native
+row for code that only reads or tells the window. A row nothing writes any more
+is named too, and is taken off.
 
 ## Machine-independent paths
 

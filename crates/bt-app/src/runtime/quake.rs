@@ -1,10 +1,11 @@
 //! `quake` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::window_seam::prelude::*;
 use crate::{Runtime, native_window, persisted_window_bounds, profiles, quake, shortcuts};
 use anyhow::Result;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **Bring the summoned terminal down over whatever is on the screen**
     /// (§7.54).
     ///

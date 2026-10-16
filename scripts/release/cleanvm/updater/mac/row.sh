@@ -3,9 +3,20 @@
 # after setup.sh, one row at a time.
 #
 #   row.sh <row> [--cut all|named] [--no-clean]
+#   row.sh --capture-dry-run <app name>
+#   row.sh --capture-window <png> <app name> <pid>...
 #
 # rows: happy M1 M2 M3 M4 M5 M6 M7 M8 rollback M9cut stuck-a stuck-b
 #       M11-rolledback M11-abandoned M11-committed R-W15 R-D5 D14
+#
+# **Screenshots are of one Folio window, never of the screen** (capture_folio_window): the
+# frontmost on-screen window of a process of this folder, by its window number
+# (`screencapture -l`); with no such window the shot is refused with a line in the row's log and
+# nothing is captured. The screen of the Mac may show anything else (once, a remote-desktop
+# window with secrets on it). `--capture-dry-run <app name>` resolves the window of that owner
+# name among all processes, prints what it found or the refusal (exit 1), and never captures.
+# `--capture-window <png> <app name> <pid>...` captures as a row does: exit 1 when refused or when
+# screencapture wrote no image, and then no file is left behind.
 #
 # Each run: precondition (no Folio outside the folder; exit 3) -> Accessibility no-op (exit 4 when
 # refused; nothing is started then) -> app/ re-placed from a-pristine (a fresh ditto of A's image
@@ -31,6 +42,81 @@
 # restored from data-before/), the update LaunchAgent plist (removed), $TMPDIR/folio-<uid>/
 # (Folio's own single-instance socket). Nothing else.
 set -u
+
+# ------------------------------------------------------------------ the capture
+# CAPTURE_APP is the owner name of Folio's windows (CFBundleName, packaging/macos/Info.plist.in).
+CAPTURE_APP=Folio
+CAPTURE_DRY=0
+# folio_window <app> <pid>...: "<n> <id>", n the on-screen windows listed and id the number of
+# the frontmost (the list is front to back) layer-0 window whose owner is named <app> and whose
+# pid is one of <pid> (empty when there is none). Window numbers and owners only: no title, no
+# pixels. 17 = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements; 0 =
+# kCGNullWindowID.
+folio_window() {
+  osascript -l JavaScript -e '
+ObjC.import("CoreGraphics");
+function run(argv) {
+  var app = argv[0], pids = {}, i, w;
+  for (i = 1; i < argv.length; i++) pids[Number(argv[i])] = true;
+  var list = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo(17, 0)));
+  for (i = 0; i < list.length; i++) {
+    w = list[i];
+    if (w.kCGWindowOwnerName === app && w.kCGWindowLayer === 0 && pids[w.kCGWindowOwnerPID]) return list.length + " " + w.kCGWindowNumber;
+  }
+  return list.length + " ";
+}' "$@"
+}
+capture_folio_window() { # capture_folio_window <png> <pid>...: that window only, or a refusal line
+  local out=$1 found n id who
+  shift
+  who="pids [$*]"
+  [ $# -gt 8 ] && who="$# pids"
+  if [ $# -eq 0 ]; then
+    say "screenshot $(basename "$out") REFUSED: no process of this folder runs; nothing captured"
+    return 1
+  fi
+  found=$(folio_window "$CAPTURE_APP" "$@" 2>> "$LOG")
+  read -r n id <<< "$found"
+  if [ -z "${n:-}" ]; then
+    say "screenshot $(basename "$out") REFUSED: the window list could not be read (osascript); nothing captured"
+    return 1
+  fi
+  if [ -z "${id:-}" ]; then
+    say "screenshot $(basename "$out") REFUSED: no on-screen $CAPTURE_APP window of $who among $n windows; nothing captured"
+    return 1
+  fi
+  if [ "$CAPTURE_DRY" = 1 ]; then
+    say "dry run: window $id of $CAPTURE_APP found among $n windows; nothing captured"
+    return 0
+  fi
+  if screencapture -x -o -l "$id" "$out" 2>> "$LOG" && [ -s "$out" ]; then
+    say "screenshot $(basename "$out") (window $id)"
+  else
+    rm -f "$out"
+    say "screenshot $(basename "$out") FAILED: screencapture -l $id wrote no image; nothing captured"
+    return 1
+  fi
+}
+case "${1:-}" in
+  --capture-dry-run)
+    [ $# -eq 2 ] || { echo "row.sh --capture-dry-run <app name>"; exit 2; }
+    CAPTURE_APP=$2
+    CAPTURE_DRY=1
+    LOG=/dev/null
+    say() { printf '%s\n' "$*"; }
+    # shellcheck disable=SC2046 # one argument per pid
+    capture_folio_window dry-run.png $(ps -Ao pid=)
+    exit $? ;;
+  --capture-window)
+    [ $# -ge 4 ] || { echo "row.sh --capture-window <png> <app name> <pid>..."; exit 2; }
+    CAPTURE_OUT=$2
+    CAPTURE_APP=$3
+    shift 3
+    LOG=/dev/null
+    say() { printf '%s\n' "$*"; }
+    capture_folio_window "$CAPTURE_OUT" "$@"
+    exit $? ;;
+esac
 
 ROW="${1:-}"
 [ $# -gt 0 ] && shift
@@ -274,7 +360,8 @@ start_folio() { # start_folio <tag> [args...]: open -n -a, then the new process 
 }
 
 # ------------------------------------------------------------------ evidence
-shot() { screencapture -x "$EV/shots/$1.png" 2>> "$LOG" && say "screenshot shots/$1.png"; }
+# shellcheck disable=SC2046 # one argument per pid
+shot() { capture_folio_window "$EV/shots/$1.png" $(ours_now); }
 collect() { # collect <stage>
   local d="$EV/$1" t f
   mkdir -p "$d"
@@ -304,7 +391,8 @@ collect() { # collect <stage>
   } > "$d/processes.txt" 2>&1
   mount | grep -F "$U" > "$d/mounts.txt"
   ls -la "$(getconf DARWIN_USER_TEMP_DIR)folio-$UIDN" > "$d/single-instance-dir.txt" 2>&1
-  screencapture -x "$d/screen.png" 2>> "$LOG"
+  # shellcheck disable=SC2046 # one argument per pid
+  capture_folio_window "$d/screen.png" $(ours_now)
   say "evidence: $1/ (phase $(phase), installed $(version), processes: $(ours_now | tr '\n' ' '))"
 }
 

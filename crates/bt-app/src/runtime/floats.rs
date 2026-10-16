@@ -1,6 +1,7 @@
 //! `floats` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::window_seam::prelude::*;
 use crate::{
     CardWords, DropLanding, FileMenuState, FileMenuTarget, FileMenuTreeRow, HoverFloat, Layered,
     LeafId, MenuPaint, OwnTrigger, PAGE_SPINNER_STROKE_LOGICAL_PX, PointerTarget, PopoverTrigger,
@@ -22,7 +23,7 @@ use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 use winit::event::MouseScrollDelta;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// Rebuild chrome while leaving the overlay to a present that already owes
     /// a current-frame formula rebuild.
     pub(crate) fn refresh_chrome_without_overlay(&mut self) -> bool {
@@ -3625,7 +3626,7 @@ impl Runtime<'_> {
 }
 
 /// **The menu verb's doors are the keystroke's** ([`menubar::ClipboardDoors`]).
-impl menubar::ClipboardDoors for Runtime<'_> {
+impl<B: Backend> menubar::ClipboardDoors for Runtime<'_, B> {
     fn copy_terminal_selection(&mut self) -> Result<()> {
         self.copy_selection()
     }

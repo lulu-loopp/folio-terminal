@@ -3,6 +3,8 @@
 
 use crate::PtyTarget;
 use crate::TextStep;
+use crate::input::Keystroke;
+use crate::window_seam::prelude::*;
 use crate::{
     ImeCaretSource, ImeOwner, KeyboardOwner, LeafId, NewWindowPlan, NoticeHost, PreviewSurface,
     RenameClipboard, RenameExit, RenameVerdict, Runtime, Step, UserInputKind, composing_event_of,
@@ -10,7 +12,7 @@ use crate::{
     ime_caret_source, ime_commit_bytes, ime_cursor_area_of, ime_outbound, ime_owner, ime_report,
     input, keyboard_owner_is_a_shell, keyhint, marks, menubar, native_window, paste_card_key,
     popup_takes_the_key, preedit_caret_byte, profiles, quit, rename_key, rename_pastes, restore,
-    settings, settings_key_of, shortcuts, toast, window_ime_cursor_area, write_pty_input,
+    settings, settings_key_of, shortcuts, terminal_ime_cursor_area, toast, write_pty_input,
 };
 use anyhow::Result;
 use bt_layout::{Axis, SeatId};
@@ -18,11 +20,10 @@ use bt_render::{FrameSource, FrameTrigger, ImeCursorArea, Preedit};
 use bt_viewport::ViewportFrame;
 use std::time::Instant;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::{Ime, KeyEvent};
+use winit::event::Ime;
 use winit::keyboard::{Key, ModifiersState, NamedKey, NativeKey};
-use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **The hint card's own layer**, or nothing when no hold is being answered
     /// (§7.1.5e′).
     ///
@@ -791,10 +792,7 @@ impl Runtime<'_> {
             ImeCaretSource::TerminalCursor => grid
                 .zip(self.focused().map(|leaf| leaf.metrics))
                 .map(|(frame, metrics)| {
-                    window_ime_cursor_area(
-                        self.window.renderer.seat_viewport(),
-                        self.window.renderer.ime_cursor_area(metrics, frame),
-                    )
+                    terminal_ime_cursor_area(&self.window.renderer, metrics, frame)
                 }),
         };
         let Some(area) = area else {
@@ -817,7 +815,7 @@ impl Runtime<'_> {
     /// `→` on a heading opens its child, `←` inside one shuts it, and Esc unwinds
     /// one layer at a time rather than dismissing the whole menu from inside the
     /// child.
-    fn term_menu_key(&mut self, event: &KeyEvent) -> Result<()> {
+    fn term_menu_key(&mut self, event: &Keystroke) -> Result<()> {
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
                 if !event.repeat && !self.set_term_submenu(false)? {
@@ -902,7 +900,7 @@ impl Runtime<'_> {
     /// A seat-origin one does — and it belongs to the *caller* now that there is
     /// more than one caller. The terminal's caret is computed by the frame
     /// machinery in the seat's own coordinates and is translated by
-    /// [`window_ime_cursor_area`] where it is read (§4.1, one translation); the
+    /// [`crate::window_ime_cursor_area`] where it is read (§4.1, one translation); the
     /// preview's is measured off the pane rectangle and is already the window's.
     /// Translating here would have applied the seat's origin to a rectangle that
     /// never had one.
@@ -1032,8 +1030,8 @@ impl Runtime<'_> {
     /// line — the hint card, the dialogs, the menus, the shortcut table and the
     /// child — is written for a key a hand pressed *at this window*, and a
     /// report of a key that was already down when the window arrived is not one.
-    pub(crate) fn keyboard_input(&mut self, event: &KeyEvent, is_synthetic: bool) -> Result<()> {
-        if !input::is_a_keystroke(event.state, is_synthetic) {
+    pub(crate) fn keyboard_input(&mut self, event: &Keystroke, is_synthetic: bool) -> Result<()> {
+        if !input::is_a_keystroke(event.pressed, is_synthetic) {
             return Ok(());
         }
         // **A program that types for you is still typing** (T-REMOTE-INPUT-PACKET,
@@ -2161,7 +2159,7 @@ impl Runtime<'_> {
         self.emit_ime_observation(reason, self.ime_native_facts());
     }
 
-    pub(crate) fn observe_ime_key(&mut self, event: &KeyEvent, is_synthetic: bool) {
+    pub(crate) fn observe_ime_key(&mut self, event: &Keystroke, is_synthetic: bool) {
         if !self.window.ime_report.has_first_key() {
             self.window.ime_report.first_key(ime_report::now_ms());
             self.window
@@ -2170,7 +2168,7 @@ impl Runtime<'_> {
         }
         // Releases do not break a run of presses. No native read, clock read,
         // allocation, or logging on ordinary keys after the first one.
-        if !input::is_a_keystroke(event.state, is_synthetic)
+        if !input::is_a_keystroke(event.pressed, is_synthetic)
             || !self.window.ime_report.watching_keys()
         {
             return;

@@ -60,8 +60,8 @@ use std::sync::{Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::window_seam::LoopProxy;
 use anyhow::{Context, Result};
-use winit::event_loop::EventLoopProxy;
 use winit::window::WindowId;
 
 use crate::{AppEvent, LeafId};
@@ -4489,7 +4489,7 @@ impl GitWorker {
     /// there can start. The waiting is the line's, not the thread's
     /// ([`run_git_worker`]): another folder's questions are answered meanwhile.
     pub fn spawn(
-        proxy: EventLoopProxy<AppEvent>,
+        proxy: LoopProxy,
         turns: std::sync::Arc<crate::git_mutation_lane::RepoTurns>,
     ) -> Result<Self> {
         let (request_tx, request_rx) = read_inbox(&turns);

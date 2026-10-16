@@ -47,7 +47,7 @@ use std::{
     time::Instant,
 };
 
-use winit::event_loop::EventLoopProxy;
+use crate::window_seam::LoopProxy;
 
 use crate::{
     AppEvent,
@@ -109,7 +109,7 @@ impl DirNews {
     /// and, on macOS, a new run loop source and a wake-up of the loop. Arming is
     /// idempotent and every caller leans on that, so a clone taken per arming
     /// would be one taken per asking however many watches were opened.
-    pub fn arm(&mut self, directory: &Path, proxy: &EventLoopProxy<AppEvent>, event: AppEvent) {
+    pub fn arm(&mut self, directory: &Path, proxy: &LoopProxy, event: AppEvent) {
         self.arm_with(directory, |news| {
             let news = Arc::clone(news);
             let proxy = proxy.clone();

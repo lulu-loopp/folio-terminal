@@ -195,12 +195,6 @@ fn method_body(owner: &str, name: &str) -> &'static str {
     item_body(&bt_source::ItemQuery::method(owner, name))
 }
 
-/// The body of one method of a trait's implementation — the window's own entry
-/// points, which are not inherent methods of anything.
-fn trait_method_body(owner: &str, trait_name: &str, name: &str) -> &'static str {
-    item_body(&bt_source::ItemQuery::method(owner, name).of_trait(trait_name))
-}
-
 /// One search over the whole package, refusing loudly rather than
 /// answering a smaller question.
 fn found(needle: bt_source::Needle, view: bt_source::View) -> bt_source::Found {
@@ -244,7 +238,7 @@ fn ime_self_report_startup_and_focus_source_pin() {
             "self.window.ime_report.shown(ime_report::now_ms());"
         ))) > 0
     );
-    let focus_arm = trait_method_body("FolioApp", "ApplicationHandler", "window_event")
+    let focus_arm = method_body("FolioApp", "on_window_event")
         .split("WindowEvent::Focused(true) => {")
         .nth(1)
         .expect("the window's event road carries the focus arm");

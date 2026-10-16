@@ -444,6 +444,122 @@ pub struct MathBandFace {
     pub display: MathBlockDisplay,
 }
 
+/// [`WindowRenderer::math_band_trace`] without a renderer: the arithmetic is the frame's, the
+/// pane's metrics and its seat.
+pub fn math_band_trace_for(
+    metrics: CellMetrics,
+    seat: SeatViewport,
+    frame: &ViewportFrame,
+    named: &MathBlockAnchor,
+) -> Option<MathBandTrace> {
+    let placement = frame.math_blocks.iter().find(|placement| {
+        placement.artifact.kind == bt_viewport::RgbaArtifactKind::Math
+            && placement.toolbar_visible
+            && placement.anchor.same_block(named)
+    })?;
+    let geometry = math_block_geometry_px(metrics, seat, frame, placement)?;
+    Some(MathBandTrace {
+        seat: MathToolBoxes {
+            anchor: placement.anchor.clone(),
+            display: placement.display,
+            block: geometry.block,
+            source: geometry.eye?,
+            copy: geometry.copy?,
+        },
+        ink_right: geometry.ink[2],
+        height_subpixels: placement.clip_height_subpixels,
+        picture_opacity_milli: placement.picture_opacity_milli,
+    })
+}
+
+/// [`WindowRenderer::math_hit_test`] without a renderer: which band, and which of its marks, a
+/// point in a pane's body stands on.
+pub fn math_hit_test_for(
+    metrics: CellMetrics,
+    seat: SeatViewport,
+    frame: &ViewportFrame,
+    x: f64,
+    y: f64,
+) -> Option<MathHit> {
+    let point = [x as f32, y as f32];
+    if let Some(failure) = frame.math_failures.iter().rev().find(|failure| {
+        math_failure_geometry_px(metrics, seat, frame, failure)
+            .is_some_and(|(_, hit)| point_in_rect(point, hit))
+    }) {
+        return Some(MathHit {
+            anchor: failure.anchor.clone(),
+            target: MathHitTarget::Failure,
+        });
+    }
+    frame.math_blocks.iter().rev().find_map(|placement| {
+        if placement.artifact.kind != bt_viewport::RgbaArtifactKind::Math {
+            return None;
+        }
+        let geometry = math_block_geometry_px(metrics, seat, frame, placement)?;
+        let target = if geometry.eye.is_some_and(|rect| point_in_rect(point, rect)) {
+            MathHitTarget::ToggleSource
+        } else if geometry.copy.is_some_and(|rect| point_in_rect(point, rect)) {
+            MathHitTarget::CopyLatex
+        } else if point_in_rect(point, geometry.block) {
+            MathHitTarget::Block
+        } else {
+            return None;
+        };
+        Some(MathHit {
+            // The composite's own origin, which is its ink's left edge and never the region's:
+            // a band keeps ground around its picture and an offset measured from that ground
+            // would name the wrong run.
+            anchor: placement
+                .anchor
+                .with_run(inline_run_at(placement, geometry.ink, point[0])),
+            target,
+        })
+    })
+}
+
+/// The seat is a parameter for [`math_block_geometry_px`]'s reason (RC-2):
+/// the failure marker is a hit target too, and a hit target clamped against
+/// the focused pane is a press that lands somewhere else.
+fn math_failure_geometry_px(
+    metrics: CellMetrics,
+    seat: SeatViewport,
+    frame: &ViewportFrame,
+    placement: &bt_viewport::MathFailurePlacement,
+) -> Option<([f32; 4], [f32; 4])> {
+    if !frame.drawable_interval_overlaps(placement.top_subpixels, placement.height_subpixels) {
+        return None;
+    }
+    let pane_left = metrics.padding_px;
+    // The failed block's own pane's right edge (T-PANE-COLUMNS, R10), the grid's otherwise.
+    let pane_right = math_block_right_px(
+        metrics,
+        seat.width,
+        frame.columns,
+        placement.right_limit_columns,
+    );
+    let pane_top = metrics.padding_px;
+    let pane_bottom = seat.height as f32;
+    let raw_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
+    let raw_bottom = raw_top + placement.height_subpixels as f32 / SUBPIXELS_PER_PX as f32;
+    let top = raw_top.max(pane_top);
+    let bottom = raw_bottom.min(pane_bottom);
+    if bottom <= top || pane_right <= pane_left {
+        return None;
+    }
+    let scale = metrics.scale_factor as f32;
+    let marker_right = pane_right - scale;
+    let marker_left = (marker_right - 2.0 * scale).max(pane_left);
+    let inset = (4.0 * scale).min((bottom - top) / 3.0);
+    let marker = [marker_left, top + inset, marker_right, bottom - inset];
+    let hit = [
+        (pane_right - 14.0 * scale).max(pane_left),
+        top,
+        pane_right,
+        bottom,
+    ];
+    Some((marker, hit))
+}
+
 /// [`WindowRenderer::math_band_face`]'s arithmetic, free of the renderer for the
 /// reason [`math_block_geometry_px`] is.
 ///
@@ -453,7 +569,7 @@ pub struct MathBandFace {
 /// is a gesture that has already happened and goes on happening if the hand
 /// moves away from it. Naming the band is still the whole of the lookup, by the
 /// identity `bt_term`'s own hover sweep keys on.
-fn math_band_face_for(
+pub fn math_band_face_for(
     metrics: CellMetrics,
     seat: SeatViewport,
     frame: &ViewportFrame,
@@ -8403,24 +8519,7 @@ impl WindowRenderer {
         frame: &ViewportFrame,
         named: &MathBlockAnchor,
     ) -> Option<MathBandTrace> {
-        let placement = frame.math_blocks.iter().find(|placement| {
-            placement.artifact.kind == bt_viewport::RgbaArtifactKind::Math
-                && placement.toolbar_visible
-                && placement.anchor.same_block(named)
-        })?;
-        let geometry = math_block_geometry_px(metrics, seat, frame, placement)?;
-        Some(MathBandTrace {
-            seat: MathToolBoxes {
-                anchor: placement.anchor.clone(),
-                display: placement.display,
-                block: geometry.block,
-                source: geometry.eye?,
-                copy: geometry.copy?,
-            },
-            ink_right: geometry.ink[2],
-            height_subpixels: placement.clip_height_subpixels,
-            picture_opacity_milli: placement.picture_opacity_milli,
-        })
+        math_band_trace_for(metrics, seat, frame, named)
     }
 
     /// **The window's base metrics** — the Settings face size at this window's display scale
@@ -8532,40 +8631,7 @@ impl WindowRenderer {
         x: f64,
         y: f64,
     ) -> Option<MathHit> {
-        let point = [x as f32, y as f32];
-        if let Some(failure) = frame.math_failures.iter().rev().find(|failure| {
-            self.math_failure_geometry(metrics, seat, frame, failure)
-                .is_some_and(|(_, hit)| point_in_rect(point, hit))
-        }) {
-            return Some(MathHit {
-                anchor: failure.anchor.clone(),
-                target: MathHitTarget::Failure,
-            });
-        }
-        frame.math_blocks.iter().rev().find_map(|placement| {
-            if placement.artifact.kind != bt_viewport::RgbaArtifactKind::Math {
-                return None;
-            }
-            let geometry = self.math_block_geometry(metrics, seat, frame, placement)?;
-            let target = if geometry.eye.is_some_and(|rect| point_in_rect(point, rect)) {
-                MathHitTarget::ToggleSource
-            } else if geometry.copy.is_some_and(|rect| point_in_rect(point, rect)) {
-                MathHitTarget::CopyLatex
-            } else if point_in_rect(point, geometry.block) {
-                MathHitTarget::Block
-            } else {
-                return None;
-            };
-            Some(MathHit {
-                // The composite's own origin, which is its ink's left edge and never the region's:
-                // a band keeps ground around its picture and an offset measured from that ground
-                // would name the wrong run.
-                anchor: placement
-                    .anchor
-                    .with_run(inline_run_at(placement, geometry.ink, point[0])),
-                target,
-            })
-        })
+        math_hit_test_for(metrics, seat, frame, x, y)
     }
 
     /// What the adapter offered this window's surface and what it was
@@ -9033,27 +9099,7 @@ impl WindowRenderer {
     /// hundred columns wide would end up three hundred roundings away from where
     /// its own scroller thinks it ends.
     pub fn preview_mono_advance(&mut self, gpu: &mut GpuContext, font_size_px: f32) -> f32 {
-        const CELLS: usize = 32;
-        let sample = "M".repeat(CELLS);
-        let line_height = font_size_px * 1.4;
-        let mut buffer = Buffer::new(
-            &mut gpu.font_system,
-            Metrics::new(font_size_px, line_height),
-        );
-        buffer.set_wrap(Wrap::None);
-        buffer.set_size(None, Some(line_height));
-        buffer.set_text(
-            &sample,
-            &Attrs::new().family(Family::Monospace),
-            Shaping::Advanced,
-            None,
-        );
-        buffer.shape_until_scroll(&mut gpu.font_system, false);
-        let width = buffer
-            .layout_runs()
-            .map(|run| run.line_w)
-            .fold(0.0_f32, f32::max);
-        width / CELLS as f32
+        preview_mono_advance(&mut gpu.font_system, font_size_px)
     }
 
     /// **U8 — move the preview seat's picture to where its pane is drawn this
@@ -11843,50 +11889,6 @@ impl WindowRenderer {
             .collect()
     }
 
-    /// The seat is a parameter for [`Self::math_block_geometry`]'s reason (RC-2):
-    /// the failure marker is a hit target too, and a hit target clamped against
-    /// the focused pane is a press that lands somewhere else.
-    fn math_failure_geometry(
-        &self,
-        metrics: CellMetrics,
-        seat: SeatViewport,
-        frame: &ViewportFrame,
-        placement: &bt_viewport::MathFailurePlacement,
-    ) -> Option<([f32; 4], [f32; 4])> {
-        if !frame.drawable_interval_overlaps(placement.top_subpixels, placement.height_subpixels) {
-            return None;
-        }
-        let pane_left = metrics.padding_px;
-        // The failed block's own pane's right edge (T-PANE-COLUMNS, R10), the grid's otherwise.
-        let pane_right = math_block_right_px(
-            metrics,
-            seat.width,
-            frame.columns,
-            placement.right_limit_columns,
-        );
-        let pane_top = metrics.padding_px;
-        let pane_bottom = seat.height as f32;
-        let raw_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
-        let raw_bottom = raw_top + placement.height_subpixels as f32 / SUBPIXELS_PER_PX as f32;
-        let top = raw_top.max(pane_top);
-        let bottom = raw_bottom.min(pane_bottom);
-        if bottom <= top || pane_right <= pane_left {
-            return None;
-        }
-        let scale = metrics.scale_factor as f32;
-        let marker_right = pane_right - scale;
-        let marker_left = (marker_right - 2.0 * scale).max(pane_left);
-        let inset = (4.0 * scale).min((bottom - top) / 3.0);
-        let marker = [marker_left, top + inset, marker_right, bottom - inset];
-        let hit = [
-            (pane_right - 14.0 * scale).max(pane_left),
-            top,
-            pane_right,
-            bottom,
-        ];
-        Some((marker, hit))
-    }
-
     /// The one way a frame ends without a back buffer — and the one place that
     /// pays what such a frame still owes.
     ///
@@ -12465,8 +12467,7 @@ impl WindowRenderer {
             }
         }
         for failure in &frame.math_failures {
-            if let Some((marker, _)) =
-                self.math_failure_geometry(metrics, self.seat, frame, failure)
+            if let Some((marker, _)) = math_failure_geometry_px(metrics, self.seat, frame, failure)
             {
                 rects.push(self.pixel_rect_with_coverage(
                     marker[0],
@@ -15398,7 +15399,13 @@ fn selection_span_bounds_px(
     ]
 }
 
-fn ime_cursor_area_for_metrics(metrics: CellMetrics, frame: &ViewportFrame) -> ImeCursorArea {
+/// The rectangle an input method is told for the terminal's caret: the frame's cursor cell, in the
+/// pane's own pixels at `metrics`, clamped into the pane.
+///
+/// It measures the cell `frame.cursor` names whether or not that cell is drawn. A cursor whose row
+/// the pane does not show names the row at the pane's edge nearest it (`ViewportFrame::cursor`), so
+/// a scrolled-away caret's candidate window opens at that edge, in the caret's column.
+pub fn ime_cursor_area_for_metrics(metrics: CellMetrics, frame: &ViewportFrame) -> ImeCursorArea {
     let [left, raw_top, right, raw_bottom] = frame_cell_bounds_px(
         metrics,
         frame,
@@ -18512,6 +18519,171 @@ fn draw_video_stage(
 /// The production font environment without a device, surface or window.
 pub fn preview_measure_font_system() -> FontSystem {
     terminal_font_system()
+}
+
+/// [`WindowRenderer::preview_mono_advance`]'s measurement over any font system.
+fn preview_mono_advance(font_system: &mut FontSystem, font_size_px: f32) -> f32 {
+    const CELLS: usize = 32;
+    let sample = "M".repeat(CELLS);
+    let line_height = font_size_px * 1.4;
+    let mut buffer = Buffer::new(font_system, Metrics::new(font_size_px, line_height));
+    buffer.set_wrap(Wrap::None);
+    buffer.set_size(None, Some(line_height));
+    buffer.set_text(
+        &sample,
+        &Attrs::new().family(Family::Monospace),
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(font_system, false);
+    let width = buffer
+        .layout_runs()
+        .map(|run| run.line_w)
+        .fold(0.0_f32, f32::max);
+    width / CELLS as f32
+}
+
+/// **A window's measuring without a device, a surface or a window** — the shaping a
+/// [`WindowRenderer`] measures chrome labels, preview paragraphs and terminal cells with, the same
+/// functions over the production font environment ([`preview_measure_font_system`]) and the
+/// default CJK chain, for a stand-in window that has no swapchain to measure for.
+///
+/// **Its one caller is `bt-app`'s test-only headless backend** (T-HEADLESS-RUNTIME-SEAM), and it
+/// is compiled into the product all the same, for a reason rather than by accident: the suite that
+/// uses it is another crate's, which a `#[cfg(test)]` here does not reach, and the alternative — a
+/// cargo feature `bt-app`'s dev-dependency turns on — compiles a second `bt-render` for every
+/// test build of the workspace. What it holds is the product's own measuring, so a product build
+/// carries no logic of its own in it: a font system and the shaping functions the renderer calls.
+pub struct DeviceFreeMeasure {
+    font_system: FontSystem,
+    terminal_cjk_families: TerminalCjkFamilies,
+}
+
+impl Default for DeviceFreeMeasure {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DeviceFreeMeasure {
+    #[must_use]
+    pub fn new() -> Self {
+        let mut font_system = preview_measure_font_system();
+        let terminal_cjk_families = resolve_terminal_cjk_families("", &mut font_system);
+        Self {
+            font_system,
+            terminal_cjk_families,
+        }
+    }
+
+    /// [`WindowRenderer::measure_chrome_label`], or its monospace twin when `mono`.
+    pub fn chrome_label(
+        &mut self,
+        text: &str,
+        font_size_px: f32,
+        weight: ChromeLabelWeight,
+        letter_spacing_em: f32,
+        tabular_numerals: bool,
+        mono: bool,
+    ) -> f32 {
+        measure_chrome_label_with_cjk(
+            &mut self.font_system,
+            text,
+            font_size_px,
+            weight,
+            letter_spacing_em,
+            tabular_numerals,
+            mono,
+            &self.terminal_cjk_families,
+        )
+    }
+
+    /// [`WindowRenderer::chrome_label_advances`].
+    pub fn chrome_label_advances(
+        &mut self,
+        text: &str,
+        font_size_px: f32,
+        weight: ChromeLabelWeight,
+        letter_spacing_em: f32,
+        tabular_numerals: bool,
+    ) -> ChromeTextAdvances {
+        chrome_label_advances_with_cjk(
+            &mut self.font_system,
+            text,
+            font_size_px,
+            weight,
+            letter_spacing_em,
+            tabular_numerals,
+            false,
+            &self.terminal_cjk_families,
+        )
+    }
+
+    /// [`WindowRenderer::measure_preview_paragraph`].
+    pub fn preview_paragraph(
+        &mut self,
+        runs: &[PreviewRun],
+        width_px: f32,
+        font_size_px: f32,
+        line_height_px: f32,
+    ) -> f32 {
+        measure_preview_paragraph(
+            &mut self.font_system,
+            runs,
+            width_px,
+            font_size_px,
+            line_height_px,
+        )
+    }
+
+    /// [`WindowRenderer::measure_preview_paragraph_width`].
+    pub fn preview_paragraph_width(
+        &mut self,
+        runs: &[PreviewRun],
+        font_size_px: f32,
+        line_height_px: f32,
+    ) -> f32 {
+        measure_preview_paragraph_width(&mut self.font_system, runs, font_size_px, line_height_px)
+    }
+
+    /// [`WindowRenderer::measure_preview_run_boxes`].
+    pub fn preview_run_boxes(&mut self, paragraph: &PreviewParagraph) -> Vec<PreviewRunBox> {
+        preview_run_boxes(&mut self.font_system, paragraph)
+    }
+
+    /// [`WindowRenderer::measure_preview_hit`].
+    pub fn preview_hit(&mut self, paragraph: &PreviewParagraph, x: f32, y: f32) -> usize {
+        preview_hit(&mut self.font_system, paragraph, x, y)
+    }
+
+    /// [`WindowRenderer::measure_preview_rows`].
+    pub fn preview_rows(&mut self, paragraph: &PreviewParagraph) -> Vec<PreviewTextRow> {
+        preview_text_rows(&mut self.font_system, paragraph)
+    }
+
+    /// [`WindowRenderer::measure_preview_highlight`].
+    pub fn preview_highlight(
+        &mut self,
+        paragraph: &PreviewParagraph,
+        range: Range<usize>,
+    ) -> Vec<[f32; 4]> {
+        preview_highlight(&mut self.font_system, paragraph, range)
+    }
+
+    /// [`WindowRenderer::preview_mono_advance`].
+    pub fn preview_mono_advance(&mut self, font_size_px: f32) -> f32 {
+        preview_mono_advance(&mut self.font_system, font_size_px)
+    }
+
+    /// [`CellMetrics::measure_at`] over this font system: a terminal cell at a face size and a
+    /// display scale.
+    pub fn cell_metrics(
+        &mut self,
+        scale_factor: f64,
+        font_size_logical_px: f32,
+    ) -> Result<CellMetrics, RenderError> {
+        CellMetrics::measure_at(&mut self.font_system, scale_factor, font_size_logical_px)
+    }
 }
 
 /// CPU measurement shared by the renderer and non-GUI document probes.
@@ -21952,7 +22124,7 @@ mod tests {
     /// wrong in every split window.
     #[test]
     fn the_band_accessors_are_given_a_seat_and_never_take_one() {
-        // The last of the six is the one that does the arithmetic: it takes the
+        // The last of the five is the one that does the arithmetic: it takes the
         // seat too, so nothing below the other five can quietly reach for the
         // field again.
         for name in [
@@ -21960,7 +22132,6 @@ mod tests {
             "math_band_face",
             "math_band_trace",
             "math_hit_test",
-            "math_failure_geometry",
             "math_block_geometry",
         ] {
             // The item, not a slice of a file (P8), and a refusal rather than
@@ -21991,6 +22162,18 @@ mod tests {
                 reaches.report(source())
             );
         }
+        // The failure marker's geometry is a free function since the window seam
+        // (T-HEADLESS-RUNTIME-SEAM), so it has no field to reach for: it is handed
+        // the seat or it has none.
+        let failure = found_in(
+            needle!(Pattern::text("seat: SeatViewport")),
+            View::CodeKeepingLiterals,
+            Scope::Item(ItemQuery::function("math_failure_geometry_px")),
+        );
+        assert!(
+            !failure.is_empty(),
+            "math_failure_geometry_px does not take the band's own pane"
+        );
     }
 
     /// PIN (owner's report 2026-09-14, re-ruled 2026-09-20 by
@@ -23867,6 +24050,88 @@ mod tests {
             primary_advance_px: 8.0,
             primary_cap_height_px: 10.0,
             primary_cap_center_y_px: 5.0,
+        }
+    }
+
+    /// PIN — the reader scrolled into history while the prompt is below the pane, and starts
+    /// typing pinyin: nothing is composed (the cursor's cell is not drawn), and the candidate
+    /// window is told the cell at the pane's bottom edge in the cursor's column — the edge the
+    /// prompt is beyond — never the presentation row that shares the cursor's grid row index,
+    /// which is a history line the reader is looking at. Byte-driven: the session's frame, the
+    /// compositor, and the measurement the IME road makes, in the order `runtime/frame.rs` makes
+    /// them.
+    ///
+    /// MUTATION: the frame's cursor row back to `projected_cursor_row.unwrap_or(cursor.row)` in
+    /// `bt_viewport`'s `continuous_frame` — red: the rectangle stands on presentation row 1.
+    #[test]
+    fn an_ime_caret_for_a_scrolled_away_cursor_is_not_an_unrelated_row() {
+        // One geometry: the metrics' cell is exactly as tall as the session's rows, so the
+        // pane's bottom (what the measurement clamps to) is the bottom of the frame's last row.
+        let metrics = CellMetrics {
+            cell_height_px: (bt_term::SPIKE_CELL_HEIGHT_SUBPIXELS.get() / SUBPIXELS_PER_PX) as f32,
+            ..input_box_metrics()
+        };
+        let started = std::time::Instant::now();
+        let mut session = bt_term::DualPlaneSession::new(
+            NonZeroU32::new(20).unwrap(),
+            NonZeroU32::new(4).unwrap(),
+        );
+        let mut bytes = String::new();
+        for line in 0..12 {
+            bytes.push_str(&format!("历史-{line} history\r\n"));
+        }
+        // The prompt on grid row 1, the cursor after `> 你好` (columns 0..6).
+        bytes.push_str("\x1b[2;1H\x1b[2K> 你好");
+        session.feed_at(bytes.as_bytes(), started).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let resting = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            (
+                resting.cursor.row,
+                resting.cursor.column,
+                resting.cursor_in_view
+            ),
+            (1, 6, true),
+            "fixture: at rest the cursor is drawn on row 1"
+        );
+        let preedit = Preedit {
+            text: "ni'hao你".to_owned(),
+            cursor_byte: None,
+        };
+        let last_pane_row = resting.grid_rows.get() as usize - 1;
+        for offset in [3, 6] {
+            projection.scroll_by_rows(offset);
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            assert!(
+                !frame.cursor_in_view,
+                "offset={offset}: fixture: the prompt is below the pane"
+            );
+            let composed = compose_preedit(&frame, Some(&preedit)).unwrap();
+            assert_eq!(
+                composed.frame, frame,
+                "offset={offset}: nothing is composed"
+            );
+            assert_eq!(composed.ime_caret, frame.cursor);
+            let area = ime_cursor_area_for_metrics(metrics, &composed.frame);
+            let edge = frame.row_map[last_pane_row];
+            let edge_top = metrics.padding_px + edge.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
+            assert_eq!(
+                (area.x, area.y),
+                (
+                    (metrics.padding_px + 6.0 * metrics.cell_width_px) as i32,
+                    edge_top as i32
+                ),
+                "offset={offset}: the candidate window stands at the pane's bottom edge, in the \
+                 cursor's column",
+            );
+            assert_eq!(
+                area.y + area.height as i32,
+                (metrics.padding_px + resting.grid_rows.get() as f32 * metrics.cell_height_px)
+                    as i32,
+                "offset={offset}: the edge cell ends where the pane does",
+            );
+            assert_ne!(edge.live_grid_row, Some(1));
+            projection.scroll_by_rows(-offset);
         }
     }
 

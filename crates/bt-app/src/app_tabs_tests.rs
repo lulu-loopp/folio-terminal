@@ -1776,9 +1776,9 @@ fn every_producer_of_the_dirty_gate_goes_on_only_when_there_was_nothing_to_ask()
             "ask_before_the_verb",
             "close_pane",
             "close_tab",
+            "on_window_event",
             "run_term_menu_row",
             "the_summon_lets_the_run_end",
-            "window_event",
         ],
         "a new producer of the gate: pin it above once it goes on only on `proceeds()`"
     );

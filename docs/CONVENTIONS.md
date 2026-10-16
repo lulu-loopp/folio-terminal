@@ -272,7 +272,11 @@ A test that matches the program's own text to claim it *does* something (an orde
 worker nobody joins, a value) goes green on a rename and red on a refactor that changes nothing,
 and says nothing about what runs. Drive the behaviour through the door the product uses, with the
 machine effects handed in as stand-ins where they would touch the machine (the shell-integration
-preparation worker's `PreparationEffects` is the shape). Reading source is allowed only for a
+preparation worker's `PreparationEffects` is the shape). **A window is no reason to read source**
+(T-HEADLESS-RUNTIME-SEAM): a `Runtime` method, `FolioApp`'s event doors and the quit run on the
+test-only headless window (`crate::headless` — `HeadlessFolio` builds a `Runtime` from tab fixtures,
+`HeadlessApplication` drives `FolioApp`), and what they did to the window is read back as typed
+`WindowEffect`s and the renderer's recorded inputs. Reading source is allowed only for a
 **guard**, whose subject is how the code is written — a door census, "no X outside door Y", the
 window-waits registry, the test-shell and ownership censuses — and its doc header says it is a
 guard. Readers still bound to a file are on `docs/plans/MIGRATION-DEBT.tsv`.

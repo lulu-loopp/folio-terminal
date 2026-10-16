@@ -3,6 +3,7 @@
 
 use super::pointer::CaptureOwner;
 use crate::computation_lane::Asking;
+use crate::window_seam::prelude::*;
 use crate::{
     DragLatch, FilePeek, FilePeekPress, FilePeekSubject, FloatDrag, FloatDragKind, FloatGrasp,
     LeafId, MathWorkerRequest, PeekAsk, PeekBodyKind, PeekCacheEntry, PeekCandidate, PeekClock,
@@ -28,7 +29,7 @@ use std::time::{Duration, Instant};
 use winit::dpi::PhysicalPosition;
 use winit::event::MouseButton;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// Whether this tab has a layout worth showing, and whether now is a moment
     /// to show it (L131).
     ///
@@ -2938,3 +2939,7 @@ impl Runtime<'_> {
         file_peek::contains(head, [at.x as f32, at.y as f32]).then_some(FloatGrasp::Head)
     }
 }
+
+#[cfg(test)]
+#[path = "peek_tests.rs"]
+mod tests;

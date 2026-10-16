@@ -4,8 +4,8 @@
 //! workspace is written in. Three things live here, and all three are facts
 //! about `main` today that go red the day they stop being true:
 //!
-//! 1. **The ten duplicated conditional identities** of §2.4, *regenerated*
-//!    from the index and compared with the plan's list — so an eleventh is a red
+//! 1. **The nine duplicated conditional identities** of §2.4, *regenerated*
+//!    from the index and compared with the plan's list — so a tenth is a red
 //!    test and not a surprise in P3.
 //! 2. **The macro facts of §2.7**: four `macro_rules!` definitions in
 //!    `bt-app`, one of them constructing items — exactly the `Text` enum and
@@ -32,7 +32,7 @@ fn workspace() -> Workspace {
 }
 
 /// `bt-app`'s own `src/` — the universe §5's measurement is written about, and
-/// the one the ten and the macro facts are facts about.
+/// the one the nine and the macro facts are facts about.
 fn bt_app() -> Arc<Index> {
     let workspace = workspace();
     let package = workspace.package("bt-app").expect("bt-app");
@@ -59,15 +59,17 @@ fn bt_source() -> Arc<Index> {
     Index::shared(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
 }
 
-// ── §2.4 — the ten, regenerated ───────────────────────────────────────────
+// ── §2.4 — the nine, regenerated ──────────────────────────────────────────
 
-/// RED — **`bt-app` declares exactly ten callable identities twice**, and
+/// RED — **`bt-app` declares exactly nine callable identities twice**, and
 /// this set is computed from the index rather than copied from the plan.
 ///
 /// §2.4 counted eleven. Ticket 72 (2026-09-26) made `explorer_menu::read_state`
 /// one portable declaration — its Windows arm already asked nothing the other
-/// platforms lack — so the set shrank by that one row, which is the only way
-/// it may change without a finding.
+/// platforms lack — so the set shrank by that one row; and
+/// T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH round 4 made
+/// `shell_integration::run_profile_path_probe` one road on every platform, one row
+/// more. Shrinking by a finding is the only way it may change.
 ///
 /// "The full module path is unique" is false in this tree, and these are the
 /// rows that make it false. A query for any of them by name alone is a refusal
@@ -82,8 +84,8 @@ fn bt_source() -> Arc<Index> {
 /// is the reading §2.4 forbids in the other direction: two different things
 /// taken for one.
 ///
-/// MUTATION: add a second `#[cfg(unix)]` arm to any function in `bt-app` and an
-/// eleventh row appears here; take `#[cfg(debug_assertions)]` off
+/// MUTATION: add a second `#[cfg(unix)]` arm to any function in `bt-app` and a
+/// tenth row appears here; take `#[cfg(debug_assertions)]` off
 /// `panic_selftest_if_due`'s pair and one disappears; drop the kind from the
 /// key and the field/method pairs flood the first list.
 #[test]
@@ -139,14 +141,14 @@ fn the_identities_bt_app_declares_twice_are_the_nine() {
             "crate::wsl::<CurrentUser as Registry>::subkeys",
         ],
         "the nine of `docs/plans/bt-app-split-prep.md` §2.4 (ten until \
-         T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH round 4, eleven until ticket 72), regenerated — an eleventh is a finding about the tree, never a row added to make \
-         this green"
+         T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH round 4, eleven until ticket 72), regenerated \
+         — a tenth is a finding about the tree, never a row added to make this green"
     );
 
     // The same claim for the data the program keeps, whose identities arrived
     // with the struct and field ticket. `bt-app` declares none of them twice:
     // the day it does, the row below is a finding about the tree in exactly the
-    // way an eleventh callable would be.
+    // way a tenth callable would be.
     let data: Vec<String> = duplicated
         .keys()
         .filter(|(sort, _)| *sort != "callable")

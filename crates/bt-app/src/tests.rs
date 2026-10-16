@@ -421,8 +421,7 @@ fn a_notification_placed_before_the_first_answer_uses_the_default_and_is_re_plac
     let raise = method_body("Runtime", "raise_attention");
     assert!(raise.contains("TaskbarFlash::record("));
     assert!(raise.contains("self.window.taskbar_reading.generation"));
-    let windows =
-        item_body(&ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"));
+    let windows = item_body(&ItemQuery::method("FolioApp", "on_window_event"));
     let focused = windows
         .find("WindowEvent::Focused(true) => {")
         .map(|at| &windows[at..])

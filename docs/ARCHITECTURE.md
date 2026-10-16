@@ -790,6 +790,81 @@ does not have to find it later.
 
 Committed-trial decision acknowledgement is part of the existing self-update transaction ownership above. The trial watch owns taking back or leaving the trial mark and then durably removing its accepted health receipt; the platform holder owns waiting for that acknowledgement, re-reading the mark, and atomically recording the final `unkept` fact before retiring the transaction (and, on macOS, before deleting `H/<txn>`).
 
+### 4.5 The window seam — the road from a window's code to the window, and what still crosses it (0.4.8)
+
+**`bt-app` reaches its window through `crate::window_seam`, with one named exception: the platform
+handle** (T-HEADLESS-RUNTIME-SEAM, 2026-10-13; corrected in its round 2). `App`, `WindowRuntime`,
+`Runtime`, `FolioApp`, `NewWindowParts` and the helpers built from them hold their window through
+one type parameter, `B: window_seam::Backend`, whose associated types are the window's parts — the
+`winit` window (`WindowHost`: redraw, title, visibility, cursor, IME area, clipboard, the system
+hand-off), the GPU device (`DeviceLayer`), the renderer (`Glass`: every setter a frame is built
+from, the measuring it answers, the present), the compositor (`CompositorDoor`), the custom frame
+(`FrameDoor`), the pickers and the formula menu, the IME caret and the event loop (`LoopDoor`:
+exit, control flow, a new window). The traits keep the inherent methods' names and signatures, so a
+call site reads as it did; `bt-render` contributes the measuring that needs no device
+(`DeviceFreeMeasure`) and the hit tests as free functions over a frame. `App` itself is built in one
+place, `App::assemble`, from the parts its builder computed (`AppParts`), by the product's builder
+and the headless one alike.
+
+* **The product backend is `Native`**: `Arc<winit::Window>`, `GpuContext`, `WindowRenderer`, the
+  `bt-platform` compositor, frame, pickers and caret, and the `ActiveEventLoop`. Its trait impls are
+  the inherent methods, called through; every product call goes through the same code as before,
+  and no product code asks whether it is under test.
+* **Written for `Native` alone**, each on the native list (`docs/plans/window-seam-native.tsv`, which
+  only shrinks): `Runtime::create` (the device, the first window, its renderer and compositor) and
+  `Runtime::open_window` (a further window), which build what the parameter is then instantiated
+  with; the `winit` adapter (`impl ApplicationHandler<AppEvent> for FolioApp`), which hands each
+  event to the generic doors (`FolioApp::on_window_event`, `settle_quit` with the loop door);
+  `rebuild_every_native_surface`, the native backend's `Backend::rebuild_every_surface`; the
+  compile-time check that `Runtime` is its two layers; and `main`, the process entry, which builds
+  the native `FolioApp` the event loop runs (listed since the guard reads expression position).
+* **What still crosses the seam: the platform handle.** `WindowHost::native_handle` answers the
+  `bt_platform::NativeWindow` of a native window (and an error on a headless one), and
+  `CompositorDoor::platform_tree` the platform's composition tree a page's engine hangs in. Generic
+  code that holds one of those reaches the platform directly, past every door: the compiler sees a
+  `NativeWindow`, not a seam trait, and a headless window answers the call with an error, so the
+  branch behind it is never driven by a test. Today's uses (about forty-five call sites, through
+  `native_window(..)` or the two methods):
+  * the window's own state on the platform — `apply_acrylic`, `apply_always_on_top`,
+    `install_theme_class_background`, `apply_window_dark_mode`, `refresh_work_area`,
+    `window_is_iconic`, `window_is_hidden`, `window_is_exposed`, `window_snapshot`, `show`,
+    `glass_here`, `window_holding`, `transfer_tab`;
+  * focus and the foreground — `bring_owned_window_forward`, `take_owned_keyboard_focus`,
+    `request_owned_window_close`, `summon_quake`, `show_quake_window`,
+    `remember_summoned_arrangement`;
+  * attention — `raise_attention`, `replace_contradicted_flash` (the taskbar flash);
+  * input facts — `ime_native_facts`, `platform_pointer_now`;
+  * the present — `finish_present_attempt`, `folios_own_metal_view`;
+  * web pages (the engine's host and its keyboard) — `webhost::step`, `webhost::rehost`
+    (`platform_tree`), `adopt_spare_web_page`, `apply_web_outcomes`, `open_web_address_on`,
+    `open_web_page_on`, `settle_the_web_keyboard`, `web_find_reported`,
+    `carry_the_pages_of_moved_panes`, `dock_the_page_of`, `open_search`;
+  * a preview picture's freshness — `check_picture_freshness`;
+  * construction — `create`, `open_window`, `new_window_runtime`.
+
+  Moving each behind a door of its own is T-NATIVE-HANDLE-BEHIND-THE-SEAM; until it lands, the
+  seam's guard holds the holders and the doors, and these call sites are what it does not hold.
+* **The headless backend is test-only** (`crate::headless`, `#[cfg(test)]`): a window that records
+  what it was told as typed values (`WindowEffect`, read from a `Ledger`), a renderer that keeps the
+  frame's inputs for a test to read back and measures text with the production font environment, and
+  a loop door that records exit and control flow. `HeadlessFolio` builds a `Runtime` over it from
+  ordinary tab fixtures; `HeadlessApplication` drives `FolioApp`'s event and quit doors. It is never
+  compiled into the product.
+
+Three product seams were cut beside it, for the same reason and with no change of behaviour: a pane's
+terminal seed for a recent folder is the pure `recent_term_leaf_seed(profile_id, cwd)`;
+`create_leaf_session` and `bare_leaf` take the shell environment they spawn in
+(`&dyn bt_pty::ShellEnvironment`, the product handing `SystemShellEnvironment`); and the PTY wake a
+shell-less leaf is built with is buildable over a test's `LoopProxy`. And one behaviour was
+corrected in round 2: the startup's PowerShell profile observation is started through the lane
+`Executor`, a start the thread door refuses is said once and leaves the startup's latch open (it was
+thrown away, with the latch already taken), and a panic in it is contained as every lane worker's
+is.
+
+**Guarded** by `bt-source`'s `window_seam` test (`ARCHITECTURE-GUARDS.md`, "Window seam"): nothing
+names a backend holder for the native backend but the places the native list names, no shape the
+guard does not read is written, and every door of the seam is implemented in the seam.
+
 ## 5. Execution lanes
 
 ### 5.1 The seven lanes
@@ -1651,7 +1726,7 @@ process.
 | a shell's resize | `commit_leaf_resize` | window (row 12) | return | a `PtyError` value | coalesced per leaf; the last size is owed to a shell in birth | — | owner-thread |
 | quit's retirement wait | `pty_door::wait_for_retirements` | window (row 15) | return | the retirements still going at the deadline, one line | the whole process's count | — | owner-thread |
 | PSReadLine version and policy | `psreadline::begin_probe` | psreadline-probe | PsReadLineProbed | `Unknown` is the newest answer; a refused spawn leaves the request standing, one line; a panic in the probe is contained (`contained_panic::contain`): the probe is marked gone, one line, and the next request asks again | numbered; asks while a probe is out are answered by the next probe with no outcome of their own | the process cell | D-86, D-87, D-90 |
-| `$PROFILE` observation | `spawn_profile_observation` | powershell-profile-observation | PowerShellProfileProbed | a refused spawn is discarded; a panic ends the process under the resident hook | numbered per edition; an older observation is refused | process statics | D-86, D-87 |
+| `$PROFILE` observation | `spawn_profile_observation` | powershell-profile-observation | PowerShellProfileProbed | a refused start is said once and leaves the startup's latch open; a panic is contained by the lane executor and said | numbered per edition; an older observation is refused | process statics | D-86, D-87 |
 | the Profiles page's environment | `request_page_environment` | profiles-page-environment | PowerShellProfileProbed | `Failed` for a read that fails and for a worker that cannot start (synchronously); the consumer says each failure once and composes over Folio's own environment; a panic in the read is contained (`contained_panic::contain`, which the resident hook honours) and answers `Failed`, then the wake | numbered; a newer request completes the one out `Superseded { by }`, whose late read files nothing, and supersedes one that completed and was not yet taken: only the newest request's end is filed | the process cell, taken by the next page consumer | conforms |
 | Copilot version | `attention_copilot::begin_probe` | copilot-version-probe | CopilotProbed | a missing version is the answer; a refused spawn leaves the request standing, one line; a panic in the probe is contained (`contained_panic::contain`): the probe is marked gone, one line, and the next request asks again | numbered; asks while a probe is out are answered by the next probe with no outcome of their own | the process cell | D-86, D-87, D-90 |
 | locale reading | `locale_declaration::ask` | locale-reading | LocaleAnswered | a refused spawn or a dead reading is published as a failed reading; a panic in the reading is contained (`contained_panic::contain`) and is that failed reading, one line, then the wake | numbered; a waiting ask replaced by a newer one gets no outcome of its own | the cell; births in a closed window are gone | D-90 |
