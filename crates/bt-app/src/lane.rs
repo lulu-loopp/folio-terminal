@@ -100,12 +100,12 @@ pub(crate) enum Terminal<Id, T, E> {
         not(test),
         expect(
             dead_code,
-            reason = "S-7 T-CLIPBOARD-LANE until 2026-12-31: no lane on the seam cancels a \
-                      request yet; the contract's terminal set keeps it (C2). The storage worker \
-                      drops none at its requester's word (T-STORAGE-WORKER-ON-THE-SEAM, \
-                      2026-10-15: a quit's copy past its bound is abandoned, its asker gone, \
-                      and a worker's end is WorkerGone), so the clipboard's paste, cancelled at \
-                      its deadline or its cap (side-effects contract (c)4), is the first"
+            reason = "T-CLIPBOARD-LANE until 2026-12-31: no lane on the seam cancels a request \
+                      yet; the contract's terminal set keeps it (C2). The storage worker drops \
+                      none at its requester's word (T-STORAGE-WORKER-ON-THE-SEAM, 2026-10-15: a \
+                      quit's copy past its bound is abandoned, its asker gone, and a worker's \
+                      end is WorkerGone), so S-7's paste, cancelled at its deadline or its cap \
+                      (side-effects contract (c)4), is the first"
         )
     )]
     Cancelled,
