@@ -26,10 +26,10 @@
 
 use crate::AppEvent;
 use crate::input::ShiftedCharacter;
+use crate::window_seam::LoopProxy;
 use bt_platform::{KeyboardLayout, KeyboardLayoutShiftTable};
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
-use winit::event_loop::EventLoopProxy;
 
 /// How many miss requests may be admitted and unanswered at once. The window
 /// end counts them itself, so the request queue, of the same size, is never
@@ -103,10 +103,7 @@ impl LayoutTables {
     /// Start the worker on the layouts loaded at startup. `startup` is the
     /// platform's answer, and an empty one is the decision that there is no
     /// worker: off Windows it is always empty.
-    pub(crate) fn spawn(
-        proxy: EventLoopProxy<AppEvent>,
-        startup: Vec<KeyboardLayout>,
-    ) -> std::io::Result<Self> {
+    pub(crate) fn spawn(proxy: LoopProxy, startup: Vec<KeyboardLayout>) -> std::io::Result<Self> {
         Self::start(
             startup,
             Box::new(move || {

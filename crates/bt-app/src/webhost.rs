@@ -39,6 +39,7 @@
 //!   is yours now" under a closing one, and the model that rebuilt on both
 //!   brought back panes the person had shut.
 
+use crate::window_seam::CompositorDoor;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -2565,7 +2566,7 @@ impl WebSeat {
     /// the fact that keeps the parked page out of system hit testing.
     pub(crate) fn stand_parked(
         &mut self,
-        compositor: &bt_platform::Compositor,
+        compositor: &impl CompositorDoor,
         bounds: WebBounds,
     ) -> Result<(), String> {
         self.place(compositor, WebPresence::Hidden, Some(bounds), &[])?;
@@ -2579,7 +2580,7 @@ impl WebSeat {
     /// `presence = None` deliberately makes this a fresh `SetIsVisible(false)` even when the
     /// cache already says hidden. Parking is a lifecycle boundary, and the controller's readback
     /// — not that cache — is the fact the owner records and reports.
-    pub(crate) fn park(&mut self, compositor: &bt_platform::Compositor) -> Result<bool, String> {
+    pub(crate) fn park(&mut self, compositor: &impl CompositorDoor) -> Result<bool, String> {
         self.presence = None;
         self.place(compositor, WebPresence::Hidden, None, &[])?;
         admitted::<doors::CompositorCommit, _>(|token| compositor.commit(token))
@@ -2624,7 +2625,7 @@ impl WebSeat {
         &mut self,
         url: &str,
         minted: Mint,
-        compositor: &bt_platform::Compositor,
+        compositor: &impl CompositorDoor,
     ) -> Vec<WebOutcome> {
         self.minted = minted;
         let effect = self.machine.adopt(url, self.bounded.is_some());
@@ -2652,7 +2653,7 @@ impl WebSeat {
         &mut self,
         url: &str,
         minted: Mint,
-        compositor: &bt_platform::Compositor,
+        compositor: &impl CompositorDoor,
     ) -> Vec<WebOutcome> {
         self.minted = minted;
         let effect = self.machine.request(url);
@@ -2673,10 +2674,7 @@ impl WebSeat {
     /// flashed the seat back to ground colour and then to the same card; the
     /// card leaves where every other fact about this engine is decided — the
     /// controller callback in [`Self::digest`].
-    pub(crate) fn restart_engine(
-        &mut self,
-        compositor: &bt_platform::Compositor,
-    ) -> Vec<WebOutcome> {
+    pub(crate) fn restart_engine(&mut self, compositor: &impl CompositorDoor) -> Vec<WebOutcome> {
         let effect = self.machine.restart();
         let mut outcomes = Vec::new();
         self.apply(effect, compositor, &mut outcomes);
@@ -2687,7 +2685,7 @@ impl WebSeat {
     ///
     /// [`WebMachine::reload`] is the sentence; this is that plus the compositor
     /// the effect needs, exactly as [`Self::go`] is `request` plus it.
-    pub(crate) fn reload(&mut self, compositor: &bt_platform::Compositor) -> Vec<WebOutcome> {
+    pub(crate) fn reload(&mut self, compositor: &impl CompositorDoor) -> Vec<WebOutcome> {
         let effect = self.machine.reload();
         let mut outcomes = Vec::new();
         self.apply(effect, compositor, &mut outcomes);
@@ -2753,7 +2751,7 @@ impl WebSeat {
     }
 
     /// Read everything the engine has said and act on it.
-    pub(crate) fn drive(&mut self, compositor: &bt_platform::Compositor) -> Vec<WebOutcome> {
+    pub(crate) fn drive(&mut self, compositor: &impl CompositorDoor) -> Vec<WebOutcome> {
         let mut outcomes = std::mem::take(&mut self.owed);
         for event in self.host.drain() {
             let failed_before = self.machine.state() == WebState::Failed;
@@ -2775,7 +2773,7 @@ impl WebSeat {
     fn retire_parked(
         &mut self,
         why: &'static str,
-        compositor: &bt_platform::Compositor,
+        compositor: &impl CompositorDoor,
         outcomes: &mut Vec<WebOutcome>,
     ) {
         if self.machine.state() == WebState::Closing {
@@ -3225,7 +3223,7 @@ impl WebSeat {
     fn apply(
         &mut self,
         first: WebEffect,
-        compositor: &bt_platform::Compositor,
+        compositor: &impl CompositorDoor,
         outcomes: &mut Vec<WebOutcome>,
     ) {
         let mut effect = first;
@@ -3247,7 +3245,7 @@ impl WebSeat {
     fn step(
         &mut self,
         effect: &WebEffect,
-        compositor: &bt_platform::Compositor,
+        compositor: &impl CompositorDoor,
         outcomes: &mut Vec<WebOutcome>,
     ) -> Result<Option<WebEffect>, String> {
         match effect {
@@ -3292,7 +3290,9 @@ impl WebSeat {
                 // [`WebSeat::issue`].
                 let generation = self.machine.generation();
                 let report = hang_watch::during(hang_watch::Station::WebInstall, || {
-                    self.host.install(compositor, page, generation)
+                    compositor
+                        .platform_tree()
+                        .and_then(|tree| self.host.install(tree, page, generation))
                 })?;
                 self.guards = report.guards;
                 if !report.unapplied.is_empty() {
@@ -3639,7 +3639,7 @@ impl WebSeat {
     pub(crate) fn tick(
         &mut self,
         now: Instant,
-        compositor: &bt_platform::Compositor,
+        compositor: &impl CompositorDoor,
     ) -> Vec<WebOutcome> {
         let mut silent = self.engine_that_said_nothing(now);
         if !silent.is_empty() {
@@ -3722,7 +3722,7 @@ impl WebSeat {
     /// rectangle has ground under it right now. See [`Self::stand_on_the_floor`].
     pub(crate) fn place(
         &mut self,
-        compositor: &bt_platform::Compositor,
+        compositor: &impl CompositorDoor,
         presence: WebPresence,
         bounds: Option<WebBounds>,
         cover: &[[f32; 4]],
@@ -3790,7 +3790,7 @@ impl WebSeat {
     /// side of a pane, or the whole pane, depending on how the two rectangles
     /// lie. So both arms go through [`placement_owed`] and both arms tell the
     /// compositor.
-    fn stand_on_the_floor(&mut self, compositor: &bt_platform::Compositor) -> Result<bool, String> {
+    fn stand_on_the_floor(&mut self, compositor: &impl CompositorDoor) -> Result<bool, String> {
         if let Some(placement) = placement_owed(self.wanted, self.placed) {
             match placement {
                 // A hidden page has no rectangle to stand anything on, the
@@ -4020,8 +4020,8 @@ impl WebSeat {
     /// looking.
     pub(crate) fn rehost(
         &mut self,
-        from: &bt_platform::Compositor,
-        to: &bt_platform::Compositor,
+        from: &impl CompositorDoor,
+        to: &impl CompositorDoor,
         address: SeatAddress,
         take_focus: bool,
         outcomes: &mut Vec<WebOutcome>,
@@ -4053,28 +4053,37 @@ impl WebSeat {
         // An owner-thread door (`doors::WebRehost`): the walk and its commits are one admission.
         // A refusal is the shape `rehost` answers before its first step — nothing moved, nothing
         // to compensate — so the page stays where it was.
-        let outcome = admitted::<doors::WebRehost, _>(|token| {
-            self.host.rehost(
-                token,
-                &bt_platform::RehostSide {
-                    compositor: from,
-                    page: self.address.page,
-                    window: self.address.window,
-                },
-                &bt_platform::RehostSide {
-                    compositor: to,
-                    page: address.page,
-                    window: address.window,
-                },
-                rect,
-                visible,
-            )
-        })
-        .unwrap_or_else(|refused| bt_platform::RehostOutcome::KeptSource {
+        // Both trees are the platform's or the page cannot be walked between them: a tree that is
+        // not (the test suite's headless window) keeps the page where it is, as a refusal does.
+        let kept = |error: String| bt_platform::RehostOutcome::KeptSource {
             failed_at: bt_platform::RehostStep::Hide,
-            error: refused.to_string(),
+            error,
             compensation: bt_platform::RehostCompensation::default(),
-        });
+        };
+        let outcome = match from
+            .platform_tree()
+            .and_then(|from| Ok((from, to.platform_tree()?)))
+        {
+            Ok((from_tree, to_tree)) => admitted::<doors::WebRehost, _>(|token| {
+                self.host.rehost(
+                    token,
+                    &bt_platform::RehostSide {
+                        compositor: from_tree,
+                        page: self.address.page,
+                        window: self.address.window,
+                    },
+                    &bt_platform::RehostSide {
+                        compositor: to_tree,
+                        page: address.page,
+                        window: address.window,
+                    },
+                    rect,
+                    visible,
+                )
+            })
+            .unwrap_or_else(|refused| kept(refused.to_string())),
+            Err(error) => kept(error),
+        };
         match outcome {
             bt_platform::RehostOutcome::Moved => {
                 self.adopt(from, address);
@@ -4113,7 +4122,7 @@ impl WebSeat {
     /// The detach is best-effort and deliberately last: an empty visual left in
     /// a tree costs nothing on screen, and a page that has already arrived
     /// somewhere else must not be reported as not having moved.
-    fn adopt(&mut self, from: &bt_platform::Compositor, address: SeatAddress) {
+    fn adopt(&mut self, from: &impl CompositorDoor, address: SeatAddress) {
         let _ = from.detach_web_visual(self.address.page);
         let _ = admitted::<doors::CompositorCommit, _>(|token| from.commit(token));
         self.take_address(address);
@@ -4379,7 +4388,7 @@ impl WebSeat {
         input_ref: &str,
         engine: SearchEngineV1,
         frame: LocalFrame<'_>,
-        compositor: &bt_platform::Compositor,
+        compositor: &impl CompositorDoor,
     ) -> AddressCommit {
         let (path, page) = match judge_address(input_ref, engine, frame) {
             AddressVerdict::Draft | AddressVerdict::Refuse => return AddressCommit::Refused(None),
@@ -4627,7 +4636,7 @@ impl WebSeat {
     }
 
     /// The seat is going away: close the controller and start the wait.
-    pub(crate) fn close(&mut self, compositor: &bt_platform::Compositor) -> Vec<WebOutcome> {
+    pub(crate) fn close(&mut self, compositor: &impl CompositorDoor) -> Vec<WebOutcome> {
         if self.machine.state() == WebState::Closing {
             return Vec::new();
         }

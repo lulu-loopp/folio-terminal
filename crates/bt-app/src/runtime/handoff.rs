@@ -10,16 +10,17 @@
 //! what its answer is owed. None of them calls a `bt_platform::handoff` door itself
 //! (`no_handoff_runs_on_the_window_thread`).
 
+use crate::window_seam::prelude::*;
 use std::time::Instant;
 
 use anyhow::Result;
 
 use crate::handoff_lane::{
-    Answer, Ask, Declined, Duty, FollowUp, HandoffId, OnAccepted, RefusalWords, Reply,
+    Answer, Ask, Duty, FollowUp, HandoffId, OnAccepted, RefusalWords, Reply,
 };
-use crate::{RevealedFoot, Runtime, i18n, native_window, toast};
+use crate::{RevealedFoot, Runtime, i18n, toast};
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **Put one hand-off on the lane**, hold its request with what its answer is owed, and
     /// return at once.
     ///
@@ -29,10 +30,7 @@ impl Runtime<'_> {
     /// brings back, in the words of who refused (the side-effects contract, revision (b)3).
     pub(crate) fn hand_off(&mut self, ask: Ask) -> Result<()> {
         let Ask { handoff, duty } = ask;
-        let admitted = match native_window(&self.window.window) {
-            Ok(native) => self.app.handoff_lane.submit(native, handoff),
-            Err(error) => Err(Declined::NoWindow(format!("{error:#}"))),
-        };
+        let admitted = self.window.window.hand_off(&self.app.handoff_lane, handoff);
         match admitted {
             Ok(request) => {
                 self.window.handoffs.owe(request, duty);

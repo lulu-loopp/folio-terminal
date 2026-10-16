@@ -24,6 +24,7 @@
 //! (T-STORE-MERGE-PROFILES-PINS). What the files' values replaced is named on
 //! one card per batch of re-reads (`storage_pass`, T-STORE-NOTICE).
 
+use crate::window_seam::prelude::*;
 use std::path::Path;
 
 use anyhow::Result;
@@ -53,7 +54,7 @@ fn keybindings_for_export(
     )
 }
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **A press on one of the three doors.**
     ///
     /// Export and import only *post* a dialog: the system's own dialogs run a
@@ -103,7 +104,7 @@ impl Runtime<'_> {
             .window
             .save_picker
             .as_ref()
-            .and_then(bt_platform::SaveFilePicker::take_result)
+            .and_then(SavePickerDoor::take_result)
         else {
             return Ok(());
         };
@@ -630,8 +631,8 @@ impl Runtime<'_> {
 /// **One storage pass's merges on this window** ([`Runtime::merge_documents`]):
 /// each pass runs through this window's doors, and what each owes the screen is
 /// noted here — the window presents once, after the four passes.
-struct MergeTurn<'r, 'a> {
-    runtime: &'r mut Runtime<'a>,
+struct MergeTurn<'r, 'a, B: Backend> {
+    runtime: &'r mut Runtime<'a, B>,
     present_owed: bool,
     /// The profile table in force moved: the presentation is a whole frame.
     frame_owed: bool,
@@ -640,7 +641,7 @@ struct MergeTurn<'r, 'a> {
 /// **This window is the settings merge's** (`settings_merge::run_pass`): the
 /// store's merge steps, what is in force, each row's own door — the import's
 /// `apply_imported_setting` — and the presentation, owed to the turn.
-impl settings_merge::MergeWindow for MergeTurn<'_, '_> {
+impl<B: Backend> settings_merge::MergeWindow for MergeTurn<'_, '_, B> {
     fn merge_begin(&mut self) -> Option<settings_merge::SettingsPass> {
         self.runtime
             .app
@@ -675,7 +676,7 @@ impl settings_merge::MergeWindow for MergeTurn<'_, '_> {
 }
 
 /// `keybindings.json`'s merge, with this window as its door (T-STORE-MERGE-KEYBINDINGS).
-impl keybindings_merge::KeybindingsWindow for MergeTurn<'_, '_> {
+impl<B: Backend> keybindings_merge::KeybindingsWindow for MergeTurn<'_, '_, B> {
     fn keybindings_merge_begin(&mut self) -> Option<keybindings_merge::KeybindingsPass> {
         self.runtime
             .app
@@ -719,7 +720,7 @@ impl keybindings_merge::KeybindingsWindow for MergeTurn<'_, '_> {
 /// editor by its id, re-points no pane and raises its refusals' cards; the pin
 /// store, which the PINNED sections are derived from whenever a menu is built.
 /// What each owes the screen is noted on the turn.
-impl table_merge::TableMergeWindow for MergeTurn<'_, '_> {
+impl<B: Backend> table_merge::TableMergeWindow for MergeTurn<'_, '_, B> {
     fn table_merge_begin(&mut self, table: table_merge::Table) -> Option<table_merge::MergePass> {
         match table {
             table_merge::Table::Profiles => self.runtime.app.profiles_store.begin_merge(),
@@ -754,7 +755,7 @@ impl table_merge::TableMergeWindow for MergeTurn<'_, '_> {
 /// presentation the passes owe, the batch's notice held by the application —
 /// its card is due once none of the four stores is still reading — and the card
 /// raised here.
-impl storage_pass::StoragePassWindow for MergeTurn<'_, '_> {
+impl<B: Backend> storage_pass::StoragePassWindow for MergeTurn<'_, '_, B> {
     fn present_merges(&mut self) -> Result<()> {
         if self.present_owed {
             self.runtime.present_merged(self.frame_owed)

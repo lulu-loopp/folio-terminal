@@ -150,7 +150,7 @@ pub fn caret_line(
     format!("IME_OUT_CARET action={action} reason={reason} position={position:?}")
 }
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     pub(super) fn trace_ime_owner(&self, keyboard: KeyboardOwner) {
         if !enabled() {
             return;
@@ -256,7 +256,7 @@ impl Runtime<'_> {
         let Some(metrics) = self.focused().map(|leaf| leaf.metrics) else {
             return;
         };
-        let area = terminal_ime_cursor_area(self.window.renderer.seat_viewport(), metrics, frame);
+        let area = terminal_ime_cursor_area(&self.window.renderer, metrics, frame);
         let reason = draw_reason(
             ime_owner(self.keyboard_owner()) == ImeOwner::Shell,
             frame.cursor_in_view,

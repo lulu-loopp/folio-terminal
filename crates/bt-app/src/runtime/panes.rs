@@ -1,6 +1,7 @@
 //! `panes` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::window_seam::prelude::*;
 use crate::{
     BirthAt, BirthDue, LeafSeed, LeafView, SuccessorLanding, TextScale, births_due, born_in_tab,
     conpty_source_of, decided_birth, deliver_held_input, diagnostics, exit_diagnostics, i18n,
@@ -29,10 +30,7 @@ use crate::{
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bt_layout::{Axis, SeatId, SeatMetrics, SizePolicy};
-use bt_render::{
-    FrameSource, FrameTrigger, GpuContext, GridSize, PresentOutcome, PresentPhase, Travel,
-    WindowRenderer,
-};
+use bt_render::{FrameSource, FrameTrigger, GridSize, PresentOutcome, PresentPhase, Travel};
 use bt_viewport::horizontal::ContentColumn;
 use bt_viewport::{ViewSelection, ViewportFrame};
 use std::collections::BTreeSet;
@@ -40,9 +38,9 @@ use std::path::Path;
 use std::time::Instant;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::MouseScrollDelta;
-use winit::window::{Window, WindowId};
+use winit::window::WindowId;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **Land every birth of this window that is due** — one pass over both places a birth can
     /// sit (a pane's own, and a *Restart shell* successor's beside it) in both of its waits
     /// ([`births_due`]): T-PROGRAMS-REFRESH's rows and T-BIRTH-OFF-WINDOW's shell. Called when the
@@ -276,6 +274,7 @@ impl Runtime<'_> {
             FormulaSwitches::from_settings(self.app.settings_store.loaded()),
             scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
             self.app.settings_store.loaded().line_wrapping,
+            &bt_pty::SystemShellEnvironment,
         )?;
         // What was typed meanwhile moves to the new pane — into its own birth's queue while its
         // shell is being made, or to its shell or nowhere when it has none to wait for — ahead of
@@ -1706,6 +1705,7 @@ impl Runtime<'_> {
             formulas,
             scrollback,
             self.app.settings_store.loaded().line_wrapping,
+            &bt_pty::SystemShellEnvironment,
         )?;
         self.sessions.insert(arriving, leaf);
         debug_assert!(
@@ -5469,10 +5469,10 @@ impl Runtime<'_> {
     /// nothing new for the compositor to publish and the frame is re-filed by
     /// the caller.
     pub(in crate::runtime) fn present_seats_and_commit(
-        gpu: &mut GpuContext,
-        renderer: &mut WindowRenderer,
-        compositor: &bt_platform::Compositor,
-        window: &Window,
+        gpu: &mut B::Device,
+        renderer: &mut B::Glass,
+        compositor: &B::Compositor,
+        window: &B::Window,
         traces: FrameTraces<'_>,
         seat_frames: &[bt_render::SeatFrame<'_>],
         intent: PresentIntent,

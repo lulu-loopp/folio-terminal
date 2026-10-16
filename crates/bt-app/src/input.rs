@@ -1,10 +1,62 @@
 use bt_platform::HostPlatform;
 use bt_pty::ConPtyKind;
 use bt_term::{KeyboardProtocol, ModifyOtherKeys, SUPPORTED_KITTY_FLAGS};
-use winit::event::{ElementState, MouseButton};
+use winit::event::{ElementState, KeyEvent, MouseButton};
 use winit::keyboard::{
-    Key, KeyCode, KeyLocation, ModifiersState, NamedKey, NativeKey, PhysicalKey,
+    Key, KeyCode, KeyLocation, ModifiersState, NamedKey, NativeKey, PhysicalKey, SmolStr,
 };
+// Windows reports what a key means with Shift and what it means without, and a shortcut table
+// needs the second: `Ctrl+Shift+1` produces `!` on a US keyboard and `1` on layouts that put the
+// digit behind Shift, and the binding is meant to be the digit either way.
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+
+/// **One key event, as the window's handlers read it** (T-HEADLESS-RUNTIME-SEAM).
+///
+/// winit's `KeyEvent` can be built by winit alone — its `platform_specific` field is
+/// `pub(crate)` — so the dispatch takes from it, once, every field the handlers read and both of
+/// the answers its platform extension adds, under the names the handlers already read them by. A
+/// test hands a handler one directly; nothing is decided here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Keystroke {
+    pub(crate) physical_key: PhysicalKey,
+    pub(crate) logical_key: Key,
+    pub(crate) text: Option<SmolStr>,
+    pub(crate) location: KeyLocation,
+    /// `KeyEvent::state`, as the one question every handler asks of it: down, or up.
+    pub(crate) pressed: bool,
+    pub(crate) repeat: bool,
+    /// `KeyEventExtModifierSupplement::key_without_modifiers`.
+    pub(crate) unmodified_key: Key,
+    /// `KeyEventExtModifierSupplement::text_with_all_modifiers`.
+    pub(crate) modified_text: Option<SmolStr>,
+}
+
+impl Keystroke {
+    /// The key with no modifier applied, as winit's extension answers it.
+    pub(crate) fn key_without_modifiers(&self) -> Key {
+        self.unmodified_key.clone()
+    }
+
+    /// The text with every modifier applied, as winit's extension answers it.
+    pub(crate) fn text_with_all_modifiers(&self) -> Option<&str> {
+        self.modified_text.as_deref()
+    }
+}
+
+impl From<&KeyEvent> for Keystroke {
+    fn from(event: &KeyEvent) -> Self {
+        Self {
+            physical_key: event.physical_key,
+            logical_key: event.logical_key.clone(),
+            text: event.text.clone(),
+            location: event.location,
+            pressed: event.state.is_pressed(),
+            repeat: event.repeat,
+            unmodified_key: event.key_without_modifiers(),
+            modified_text: event.text_with_all_modifiers().map(SmolStr::new),
+        }
+    }
+}
 
 // ── The routing rule, and the one sentence it is (M1-7, probe X-3 §4) ───────
 //
@@ -726,8 +778,8 @@ pub(crate) fn is_ime_owned_key(key: &Key, modifiers: ModifiersState) -> bool {
 /// machine. What is wrong with the event is not when it arrived; it is that it
 /// was never a keystroke.
 #[must_use]
-pub(crate) fn is_a_keystroke(state: ElementState, is_synthetic: bool) -> bool {
-    state == ElementState::Pressed && !is_synthetic
+pub(crate) fn is_a_keystroke(pressed: bool, is_synthetic: bool) -> bool {
+    pressed && !is_synthetic
 }
 
 /// **The key a program that types for you meant**, for an event that carries
@@ -3108,7 +3160,7 @@ mod tests {
     fn typed_into_the_child(events: &[Event]) -> Vec<u8> {
         let mut written = Vec::new();
         for (state, is_synthetic, key, modifiers) in events {
-            if !is_a_keystroke(*state, *is_synthetic) {
+            if !is_a_keystroke(state.is_pressed(), *is_synthetic) {
                 continue;
             }
             if let Some(bytes) = legacy_bytes(key, *modifiers, false) {

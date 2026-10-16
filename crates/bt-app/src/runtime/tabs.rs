@@ -1,6 +1,8 @@
 //! `tabs` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::input::Keystroke;
+use crate::window_seam::prelude::*;
 use crate::{
     BlankPage, BlankPageReturn, Drag, DragCarry, DragHandover, DragSource, DropLanding, Fading,
     FolderPick, FormulaSwitches, HandoverInto, LeafId, MathHoverExit, MenuPaint, NewWindowPlan,
@@ -24,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 use winit::dpi::PhysicalPosition;
-use winit::event::{KeyEvent, MouseScrollDelta};
+use winit::event::MouseScrollDelta;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::WindowId;
 
@@ -171,7 +173,7 @@ pub(super) fn land_birth_death_fallback(
     }
 }
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// The `+`'s verb: a tab on the default profile, which is what the button's
     /// own tooltip promises in the mock-up (`New tab (${defaultProfile().title})`).
     ///
@@ -1520,7 +1522,7 @@ impl Runtime<'_> {
     /// any particular one, and a menu that could not be walked would be the one
     /// list in this window reachable only by a pointer. Which would be a poor
     /// joke on a menu that exists because a *gesture* was unreachable.
-    pub(in crate::runtime) fn tab_menu_key(&mut self, event: &KeyEvent) -> Result<()> {
+    pub(in crate::runtime) fn tab_menu_key(&mut self, event: &Keystroke) -> Result<()> {
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
                 // One press, one layer — §7.1.5's ladder read inside a single

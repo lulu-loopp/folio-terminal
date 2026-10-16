@@ -1,6 +1,7 @@
 //! `dpi` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::window_seam::prelude::*;
 use crate::{
     ResizeReanchor, Runtime, card_trace, dpi_snapshot, earliest_deadline,
     ensure_metrics_match_authoritative_scale, ensure_swapchain_matches_inner,
@@ -16,7 +17,7 @@ use bt_render::{FrameSource, FrameTrigger};
 use std::time::Instant;
 use winit::dpi::PhysicalSize;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// Grow (or shrink) every self-sizing float to the rows it is now showing.
     ///
     /// Returns whether anything moved. It re-runs the *placement* and not merely

@@ -1,6 +1,7 @@
 //! `attention` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::window_seam::prelude::*;
 use crate::{
     AttentionDelivery, NoticeHost, NoticeStrip, OVER_IN_PANE_TOP_FIRST, OverInPane, PointerTarget,
     PreviewSurface, Runtime, TaskbarFlash, UserInputKind, WindowRuntime, answer_attention_in,
@@ -13,7 +14,7 @@ use bt_layout::SeatId;
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// Raise a notice (user ruling, 2026-08-16).
     ///
     /// The one door. Everything that wants to say "this just happened" comes

@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::PtyTarget;
+use crate::window_seam::prelude::*;
 use crate::{
     ApplicationChange, DividerDrag, DividerGrip, Drag, DragCarry, DragLatch, DragRelease,
     DragSource, DropBatch, DropLanding, Fading, FloatDrag, FloatDragKind, FloatHeadPress,
@@ -32,7 +33,7 @@ use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta};
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// The ghost's own layer, or nothing when nothing is in the hand (J114-J116).
     ///
     /// Nothing is built for a drag whose landing is already showing itself

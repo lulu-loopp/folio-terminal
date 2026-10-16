@@ -82,6 +82,10 @@ mod glyph_trace;
 mod gpu_door;
 mod handoff_lane;
 mod hang_watch;
+/// **The headless backend** (T-HEADLESS-RUNTIME-SEAM): `App`, `WindowRuntime`, `Runtime` and
+/// `FolioApp` over doors that record what a window would have done, for the tests.
+#[cfg(test)]
+mod headless;
 mod hex_peek;
 mod highlight;
 mod host_answers;
@@ -236,6 +240,7 @@ mod webhost;
 mod webnav;
 mod websheet;
 mod window_news;
+mod window_seam;
 mod wsl;
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -250,7 +255,16 @@ use bt_persist::{
     SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1, SessionWindowV1, TabV1,
     TermLeafV1, ThemeModeV1, WindowBoundsV1,
 };
+use input::Keystroke;
 use text_scale::{TextScale, TextStep};
+use window_seam::prelude::*;
+use window_seam::{LoopProxy, Native};
+// `main`'s event-loop builder methods, at module level: `main` is on the window-seam native list,
+// and a listed body introduces no names (bt-source's `window_seam` guard).
+#[cfg(target_os = "macos")]
+use winit::platform::macos::EventLoopBuilderExtMacOS;
+#[cfg(windows)]
+use winit::platform::windows::EventLoopBuilderExtWindows;
 // Step 2a moved these two names' last non-test users into `runtime/` (the
 // `peek` and `windows` topics), which import them themselves; the root keeps
 // them for the root's test modules, which read them through `use super::*`.
@@ -270,9 +284,9 @@ use bt_render::{
     ThemeChange, Travel, WINDOW_TAB_BREATHE_MIN_OPACITY, WINDOW_TAB_BREATHE_PERIOD_MS,
     WINDOW_TAB_BREATHE_REDUCED_OPACITY, WINDOW_TAB_PIN_FADE_MS, WINDOW_TAB_PIN_REVEAL_MS,
     WINDOW_TAB_RING_INDETERMINATE_TURNS, WINDOW_TAB_RING_SPIN_PERIOD_MS,
-    WINDOW_TAB_RING_SWEEP_TRANSITION_MS, WindowRenderer, background_rgb, current_cursor_style,
-    foreground_rgb, frame_content_digest, frame_is_alternate_screen, gpu_power_request,
-    scheme_in_force, set_cursor_style, set_theme, theme_revision,
+    WINDOW_TAB_RING_SWEEP_TRANSITION_MS, background_rgb, current_cursor_style, foreground_rgb,
+    frame_content_digest, frame_is_alternate_screen, gpu_power_request, scheme_in_force,
+    set_cursor_style, set_theme, theme_revision,
 };
 use bt_term::{
     DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, ProgressState,
@@ -294,13 +308,9 @@ use winit::raw_window_handle::RawWindowHandle;
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
-    event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent},
+    event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
-    // Windows reports what a key means with Shift and what it means without, and a shortcut table
-    // needs the second: `Ctrl+Shift+1` produces `!` on a US keyboard and `1` on layouts that put
-    // the digit behind Shift, and the binding is meant to be the digit either way.
-    platform::modifier_supplement::KeyEventExtModifierSupplement,
     raw_window_handle::HasWindowHandle,
     window::{Theme as OsTheme, Window, WindowAttributes, WindowId},
 };
@@ -8998,9 +9008,9 @@ fn preview_press_opens_its_link(latch: &DragLatch) -> bool {
 /// the ground drawn round it is what a reader sees and therefore what a reader
 /// aims at, and one rectangle answering the paint, the press and the hover card
 /// is the same discipline [`markdown_image_extent`] states for a picture.
-fn measure_preview_links(
-    gpu: &mut GpuContext,
-    renderer: &mut WindowRenderer,
+fn measure_preview_links<G: Glass>(
+    gpu: &mut G::Device,
+    renderer: &mut G,
     body: &bt_render::PreviewBody,
     sites: &[PreviewLinkSite],
     scale: f32,
@@ -9123,9 +9133,9 @@ fn markdown_chip_ground(
 /// A run that wrapped is reported once per visual line, and only the first is
 /// used: an inline box is one glyph, so it cannot really be split — the second
 /// report would be the shaper describing the same indivisible thing twice.
-fn place_preview_math(
-    gpu: &mut GpuContext,
-    renderer: &mut WindowRenderer,
+fn place_preview_math<G: Glass>(
+    gpu: &mut G::Device,
+    renderer: &mut G,
     body: &mut bt_render::PreviewBody,
     sites: &[PreviewMathSite],
 ) {
@@ -13079,12 +13089,12 @@ struct TabState {
 /// nudges and one nudge say the same sentence.
 #[derive(Clone)]
 struct PtyWakeSignal {
-    proxy: EventLoopProxy<AppEvent>,
+    proxy: LoopProxy,
     raised: Arc<AtomicBool>,
 }
 
 impl PtyWakeSignal {
-    fn new(proxy: EventLoopProxy<AppEvent>) -> Self {
+    fn new(proxy: LoopProxy) -> Self {
         Self {
             proxy,
             raised: Arc::new(AtomicBool::new(false)),
@@ -13212,7 +13222,7 @@ enum Announce {
 /// files fighting over one `session.json`", which is exactly the defect slice D
 /// exists to fix; keeping the arrow out of the window is what stops it being
 /// written in the first place.
-struct App {
+struct App<B: Backend = Native> {
     ime_first_focus_seen: bool,
     /// **The device layer, one for the process** (§2.2, multiwindow slice C).
     ///
@@ -13226,7 +13236,7 @@ struct App {
     /// there was an `App` there was nowhere for it to live but the first
     /// window — which would have made every later window's device the property
     /// of whichever window happened to open first.
-    gpu: GpuContext,
+    gpu: B::Device,
     /// **Who decides what a lost device costs** (§7.1.3m ⑤′).
     ///
     /// On the application layer for the reason the device is: there is one
@@ -13280,7 +13290,7 @@ struct App {
     /// window kept for itself would hand two windows the same name for two
     /// different pictures. A number minted here is unique wherever it is read.
     animation_serials: u64,
-    event_proxy: EventLoopProxy<AppEvent>,
+    event_proxy: LoopProxy,
     /// **The OS hand-off lane** — the one thread every hand-off that leaves a window runs on
     /// (`handoff_lane`). On the application, like the workers beside it: the ids it mints have to
     /// be unique across windows, because an answer finds its window by id.
@@ -13866,6 +13876,231 @@ struct App {
     /// **The hand-over's answer**, while the quit's way out waits for it (U-21): the storage
     /// worker writes `Handoff` and starts the applier, and this thread looks on its turns.
     handoff_answer: Option<std::sync::mpsc::Receiver<update_handoff::HandedOff>>,
+    /// **How long the quit waits for the panes it told to go** — [`PANE_RETIREMENT_DEADLINE`] in
+    /// every application the product builds; an instance's own so that a test drives the quit
+    /// with the suite's patience (`lane::PATIENCE`) rather than the product's four seconds.
+    pane_retirement_deadline: std::time::Duration,
+}
+
+/// **What an [`App`] is built from**: every field its builder computes — the device, the workers it
+/// started, the stores it read, the facts it measured — by the name and type the field has on
+/// `App`. Everything else `App` holds starts the same way in every application and is written once,
+/// in [`App::assemble`], which both builders call: the product's (`Runtime::create`) and the test
+/// suite's headless one (`headless::headless_app`). A field added to `App` is added here or there,
+/// and either way both builders get it (T-HEADLESS-RUNTIME-SEAM round 2).
+struct AppParts<B: Backend> {
+    gpu: B::Device,
+    tab_ids: TabIds,
+    event_proxy: LoopProxy,
+    handoff_lane: handoff_lane::HandoffLane,
+    layout_tables: layout_tables::LayoutTables,
+    math_worker: Arc<computation_lane::ComputationLane>,
+    foreground_program_worker: foreground_program::Worker,
+    files_worker: files::FilesWorker,
+    file_index_worker: palette_index::IndexWorker,
+    preview_worker: preview::PreviewWorker,
+    git_worker: git::GitWorker,
+    acrylic_available: bool,
+    startup_started: Instant,
+    trace_startup: bool,
+    trace_resize: bool,
+    trace_layout_events: bool,
+    trace_perf: bool,
+    motion: Motion,
+    profile_programs: profiles::ProfilePrograms,
+    startup_shells: Option<StartupShells>,
+    psreadline_documents: Option<PathBuf>,
+    context_menu_installed: bool,
+    claude_hooks_installed: bool,
+    codex_notify_installed: bool,
+    copilot_hooks_installed: bool,
+    agent_config_refusals: [Option<&'static str>; 3],
+    copilot_readiness: attention_copilot::Readiness,
+    notifications: NotificationDesk,
+    session_store: persist::SessionStore,
+    settings_store: persist::SettingsStore,
+    shortcuts: shortcuts::Shortcuts,
+    keybindings_store: persist::KeybindingsStore,
+    keybindings_fault: Option<String>,
+    cli_refusals: Vec<cli::CliRefusal>,
+    cli_preview: Option<PathBuf>,
+    profiles_store: persist::ProfilesStore,
+    profiles_fault: Option<String>,
+    pins_store: pins::PinsStore,
+    pins_fault: Option<String>,
+    settings_fault: Option<String>,
+    session_fault: Option<String>,
+    recent: seed::SeedVault,
+    recent_folders: recent_folders::RecentFolders,
+    window_pictures: Vec<(WindowId, SessionWindowV1)>,
+    update_job: update_job::Job<WindowId>,
+    preview_saves: preview::PreviewSaves,
+    git_mutations: git_mutation_lane::GitMutationLane,
+}
+
+impl<B: Backend> App<B> {
+    /// **The application, from what its builder computed** — the one place `App`'s fields are
+    /// written. See [`AppParts`].
+    fn assemble(parts: AppParts<B>) -> Self {
+        let AppParts {
+            gpu,
+            tab_ids,
+            event_proxy,
+            handoff_lane,
+            layout_tables,
+            math_worker,
+            foreground_program_worker,
+            files_worker,
+            file_index_worker,
+            preview_worker,
+            git_worker,
+            acrylic_available,
+            startup_started,
+            trace_startup,
+            trace_resize,
+            trace_layout_events,
+            trace_perf,
+            motion,
+            profile_programs,
+            startup_shells,
+            psreadline_documents,
+            context_menu_installed,
+            claude_hooks_installed,
+            codex_notify_installed,
+            copilot_hooks_installed,
+            agent_config_refusals,
+            copilot_readiness,
+            notifications,
+            session_store,
+            settings_store,
+            shortcuts,
+            keybindings_store,
+            keybindings_fault,
+            cli_refusals,
+            cli_preview,
+            profiles_store,
+            profiles_fault,
+            pins_store,
+            pins_fault,
+            settings_fault,
+            session_fault,
+            recent,
+            recent_folders,
+            window_pictures,
+            update_job,
+            preview_saves,
+            git_mutations,
+        } = parts;
+        Self {
+            preview_saves,
+            git_mutations,
+            gpu,
+            tab_ids,
+            event_proxy,
+            handoff_lane,
+            layout_tables,
+            math_worker,
+            foreground_program_worker,
+            files_worker,
+            file_index_worker,
+            preview_worker,
+            git_worker,
+            acrylic_available,
+            startup_started,
+            trace_startup,
+            trace_resize,
+            trace_layout_events,
+            trace_perf,
+            motion,
+            profile_programs,
+            startup_shells,
+            psreadline_documents,
+            context_menu_installed,
+            claude_hooks_installed,
+            codex_notify_installed,
+            copilot_hooks_installed,
+            agent_config_refusals,
+            copilot_readiness,
+            notifications,
+            session_store,
+            settings_store,
+            shortcuts,
+            keybindings_store,
+            keybindings_fault,
+            cli_refusals,
+            cli_preview,
+            profiles_store,
+            profiles_fault,
+            pins_store,
+            pins_fault,
+            settings_fault,
+            session_fault,
+            recent,
+            recent_folders,
+            window_pictures,
+            update_job,
+            ime_first_focus_seen: false,
+            device_loss_pilot: DeviceLossPilot::new(),
+            favicons: Rc::new(RefCell::new(favicon::Favicons::default())),
+            favicons_changed: false,
+            animation_serials: 0,
+            git_watch: git_watch::GitWatch::default(),
+            programs_ear: programs_ear::ProgramsEar::default(),
+            index_ear: index_ear::IndexEar::default(),
+            math_worker_running: true,
+            math_worker_notice_pending: false,
+            files_worker_running: true,
+            files_worker_notice_pending: false,
+            file_indexes: palette_index::FileIndexes::default(),
+            preview_worker_running: true,
+            preview_worker_notice_pending: false,
+            git_worker_running: true,
+            git_worker_notice_pending: false,
+            scheme_watch: scheme_watch::SchemeWatch::default(),
+            storage_watch: storage_watch::StorageWatch::default(),
+            scheme_fault: None,
+            scheme_source: [None, None],
+            program_news: window_news::WindowSeats::default(),
+            psreadline_installed: None,
+            first_run_attempted: false,
+            first_run_waited_for_channel: false,
+            first_run_waited_for_agent_folders: false,
+            explorer_package_asked_by: None,
+            explorer_package_asked_place: explorer_menu::ExplorerPlace::default(),
+            explorer_package_announce: Announce::Everything,
+            agent_takeovers: Default::default(),
+            profiles_file_broken: false,
+            pins_file_broken: false,
+            settings_file_broken: false,
+            keybindings_file_broken: false,
+            merge_notice: document_request::MergeNotice::default(),
+            restore_question: Vec::new(),
+            web_warmup: web_warmup::WebWarmup::default(),
+            web_spare: web_spare::WebSpare::default(),
+            run_retiring_until: None,
+            web_pages_open: false,
+            pending_restore_windows: Vec::new(),
+            pending_restore_answer: None,
+            pending_application_change: None,
+            pending_new_windows: Vec::new(),
+            drag_broker: None,
+            pointer_capture: None,
+            pointer_capture_overlaps: Vec::new(),
+            pending_handover: None,
+            quit_requested: false,
+            quit: None,
+            windows_open: Vec::new(),
+            activated: Vec::new(),
+            window_ring: None,
+            window_ring_shown: None,
+            quake: quake::Quake::default(),
+            update_shown: update_card::Shown::default(),
+            quit_reason: quit::Reason::Asked,
+            leave_without: None,
+            handoff_answer: None,
+            pane_retirement_deadline: PANE_RETIREMENT_DEADLINE,
+        }
+    }
 }
 
 /// **The way a message from outside every window asks for a turn.**
@@ -14134,7 +14369,7 @@ impl NewWindowPlan {
 /// There is still exactly one of these. Slice C is what turns [`Runtime`]'s one
 /// field into a map keyed by `WindowId`; this slice only makes that sentence
 /// something the type system can express.
-struct WindowRuntime {
+struct WindowRuntime<B: Backend = Native> {
     ime_report: ime_report::Report,
     ime_report_due: Option<Instant>,
     /// **When this window gives up waiting for its pages to let go** (§7.35).
@@ -14154,7 +14389,7 @@ struct WindowRuntime {
     /// [`quit::PAGE_TEARDOWN_DEADLINE`], which is the same bound the quit spends
     /// and is spent here for the same reason.
     leaving: Option<Instant>,
-    renderer: WindowRenderer,
+    renderer: B::Glass,
     /// This window's ear for `WM_SETTINGCHANGE`, held only so that dropping the
     /// window takes the subclass off the HWND (§7.18).
     ///
@@ -14335,9 +14570,9 @@ struct WindowRuntime {
     /// [`input::pressed_button_of_gesture`], which is the only reader and the
     /// only writer. `false` on Windows always.
     secondary_press: bool,
-    math_context_menu: bt_platform::MathContextMenu,
+    math_context_menu: B::MathMenu,
     /// The system folder chooser behind the root menu's `Browse…` (E55).
-    folder_picker: bt_platform::FolderPicker,
+    folder_picker: B::FolderPicker,
     /// **What the answer is for**, so it knows where to land.
     ///
     /// Beside the picker rather than inside it, because the picker is a bridge
@@ -14352,13 +14587,13 @@ struct WindowRuntime {
     /// Its own bridge and not a mode on [`Self::folder_picker`]: the deferral's
     /// contract is one gesture in flight, and a wallpaper request coalesced into
     /// a pending folder request would answer the wrong row.
-    image_picker: bt_platform::ImagePicker,
+    image_picker: B::ImagePicker,
     /// The system's save dialog behind the About page's `Export…` (0.4.4 ticket
     /// 05). Its own bridge, for [`Self::image_picker`]'s reason: one gesture in
     /// flight per bridge, and the answer is a place to write, not a file to read.
     /// `None` when it could not be installed, which is not a reason for the
     /// window not to open.
-    save_picker: Option<bt_platform::SaveFilePicker>,
+    save_picker: Option<B::SavePicker>,
     /// Whether a picture chooser is out. A `bool` and not a
     /// [`FolderPick`]-shaped enum, because there is exactly one row that opens
     /// this one and the answer has nowhere else to go.
@@ -14435,7 +14670,7 @@ struct WindowRuntime {
     /// Whether this window's surface really is composited with premultiplied
     /// alpha, read off the renderer's own `alpha_report` rather than assumed.
     translucency_available: bool,
-    custom_window_frame: bt_platform::CustomWindowFrame,
+    custom_window_frame: B::Frame,
     /// This window's taskbar button, and what it was last told (Windows landing
     /// block slice 1).
     ///
@@ -14451,7 +14686,7 @@ struct WindowRuntime {
     /// [`bt_platform::Compositor::commit`] — has to happen after every present
     /// and wgpu will never do it. See [`Self::present_seats_and_commit`], which
     /// is the only place in this program that presents a frame.
-    compositor: bt_platform::Compositor,
+    compositor: B::Compositor,
     /// **This window's hosted web pages, one per seat** (web preview slice ③).
     ///
     /// Slice ① held one, and said in this comment that "slice 3 gives the page a
@@ -14626,7 +14861,7 @@ struct WindowRuntime {
     /// The edge and not the level: `SetFocus` on every frame would fight
     /// anything inside this window that wanted the keys.
     web_keyboard: Option<LeafId>,
-    window: Arc<Window>,
+    window: B::Window,
     /// The geometry changes the most recent layout commit produced (T230).
     ///
     /// An outbox, replaced whole at each commit rather than appended to, because
@@ -14927,7 +15162,7 @@ struct WindowRuntime {
     /// across two**: the next turn's head replaces it before anything reads it.
     observed_place: notify::WindowPlace,
     ime_outbound: ime_outbound::State,
-    ime_system_caret: bt_platform::ImeSystemCaret,
+    ime_system_caret: B::ImeCaret,
     pointer_position: Option<PhysicalPosition<f64>>,
     /// **Where the pointer was last seen, kept after it has gone.**
     ///
@@ -16228,7 +16463,7 @@ struct PresentIntent {
     signature: present_gate::PresentSignature,
 }
 
-impl WindowRuntime {
+impl<B: Backend> WindowRuntime<B> {
     /// **Whether a frame that did not reach the glass whole is worth asking for
     /// again**, and the place the textless run is counted.
     ///
@@ -16367,9 +16602,9 @@ fn host_screen_after(answer: Result<bool, bt_pty::PtyError>) -> bt_term::HostScr
     }
 }
 
-struct Runtime<'a> {
-    app: &'a mut App,
-    window: &'a mut WindowRuntime,
+struct Runtime<'a, B: Backend = Native> {
+    app: &'a mut App<B>,
+    window: &'a mut WindowRuntime<B>,
 }
 
 /// PIN — **the facade is two layers and nothing else.**
@@ -16541,11 +16776,11 @@ mod layer_shape_tests {
     #[test]
     fn the_device_is_the_applications_and_the_surface_is_the_windows() {
         assert!(
-            field_declaration("App", "gpu").ends_with("gpu: GpuContext"),
+            field_declaration("App", "gpu").ends_with("gpu: B::Device"),
             "one device, one atlas, one font database, for the whole process"
         );
         assert!(
-            field_declaration("WindowRuntime", "renderer").ends_with("renderer: WindowRenderer"),
+            field_declaration("WindowRuntime", "renderer").ends_with("renderer: B::Glass"),
             "a surface and the caches keyed by its pixel sizes are one window's"
         );
         assert!(
@@ -16611,6 +16846,9 @@ mod layer_shape_tests {
             // renderer move, and a `WindowRenderer` there would be the first
             // window's surface owning every later window's.
             Pattern::identifier("WindowRenderer"),
+            // And the window's glass as the window seam names it (`B::Glass`), on whatever
+            // backend the layers are written over.
+            Pattern::identifier("Glass"),
             // **Two of these are asked wider than they used to be written**
             // (§4.2 rule 3: a changed selector carries its own mutation). They
             // were `Arc<Window>` and `Vec<TabState>`, spellings of a type
@@ -19555,7 +19793,7 @@ fn exited_tabs_the_loop_may_close(
         .collect()
 }
 
-impl Deref for Runtime<'_> {
+impl<B: Backend> Deref for Runtime<'_, B> {
     type Target = TabState;
 
     fn deref(&self) -> &Self::Target {
@@ -19563,7 +19801,7 @@ impl Deref for Runtime<'_> {
     }
 }
 
-impl DerefMut for Runtime<'_> {
+impl<B: Backend> DerefMut for Runtime<'_, B> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         active_item_mut(&mut self.window.tabs, self.window.active_tab)
     }
@@ -29169,7 +29407,7 @@ fn next_attention_stop<T: Copy>(queue: &[(T, u64)], standing_on: Option<u64>) ->
 ///
 /// **An owner-thread door** (`doors::PlaceHidden`, row 13's residue), minted only in
 /// [`sample_window_place`].
-fn window_is_hidden(token: WaitToken<'_, doors::PlaceHidden>, window: &Window) -> bool {
+fn window_is_hidden(token: WaitToken<'_, doors::PlaceHidden>, window: &impl WindowHost) -> bool {
     let _ = token;
     let Ok(native) = native_window(window) else {
         return false;
@@ -29202,7 +29440,7 @@ fn window_is_hidden(token: WaitToken<'_, doors::PlaceHidden>, window: &Window) -
 /// residue): admitted where it is asked, and a refused probe keeps the answer of `previous`, the
 /// place this window last observed.
 fn sample_window_place(
-    window: &Window,
+    window: &impl WindowHost,
     focused: bool,
     previous: notify::WindowPlace,
 ) -> (notify::WindowPlace, bt_platform::TaskbarReading) {
@@ -29255,7 +29493,7 @@ fn sample_window_place(
 ///
 /// **An owner-thread door** (`doors::PlaceExposure`, row 13's residue), minted only in
 /// [`sample_window_place`].
-fn window_is_exposed(token: WaitToken<'_, doors::PlaceExposure>, window: &Window) -> bool {
+fn window_is_exposed(token: WaitToken<'_, doors::PlaceExposure>, window: &impl WindowHost) -> bool {
     let _ = token;
     let Ok(native) = native_window(window) else {
         return true;
@@ -30719,7 +30957,7 @@ impl TaskbarMirror {
     /// mirror its own sessions onto its own button with no change here — the
     /// mirror is a `WindowRuntime` field precisely so there is one per window
     /// the day `window` becomes a map.
-    fn show(&mut self, window: &Window, wanted: bt_platform::TaskbarProgress) {
+    fn show(&mut self, window: &impl WindowHost, wanted: bt_platform::TaskbarProgress) {
         let Some(sending) = self.diff(wanted) else {
             return;
         };
@@ -30768,11 +31006,11 @@ struct NotificationDesk {
     /// How the activation callback — which runs on whatever thread the platform delivers a click
     /// on — gets the loop to come round and read the queue. Held rather than taken from `App`
     /// at construction time because the desk is built lazily and the proxy is not.
-    proxy: EventLoopProxy<AppEvent>,
+    proxy: LoopProxy,
 }
 
 impl NotificationDesk {
-    fn new(proxy: EventLoopProxy<AppEvent>) -> Self {
+    fn new(proxy: LoopProxy) -> Self {
         Self {
             voice: None,
             refused: false,
@@ -40367,9 +40605,9 @@ impl FormulaSwitches {
 /// one place is what stops the two from diverging — a startup that resolved the
 /// family differently from the hot path would draw one face until the row was
 /// touched and another one after.
-fn apply_stored_terminal_font(
-    gpu: &mut GpuContext,
-    renderer: &mut WindowRenderer,
+fn apply_stored_terminal_font<G: Glass>(
+    gpu: &mut G::Device,
+    renderer: &mut G,
     settings: &bt_persist::SettingsV1,
 ) -> Result<bt_render::CellMetrics> {
     let family = settings.terminal_font_family.as_str();
@@ -40652,7 +40890,7 @@ fn adopt_program_answers(
 /// and the program walk's adopter's when the folders the files live in moved (T-FRESH-FACTS). The
 /// copilot readiness is read again with them: whether its hooks are switched off is a file in the
 /// same folder.
-fn read_the_agent_rows_again(app: &mut App) {
+fn read_the_agent_rows_again<B: Backend>(app: &mut App<B>) {
     (app.claude_hooks_installed, app.agent_config_refusals[0]) = attention_hooks::row_state();
     (app.codex_notify_installed, app.agent_config_refusals[1]) = attention_codex::row_state();
     (app.copilot_hooks_installed, app.agent_config_refusals[2]) = attention_copilot::row_state();
@@ -41185,6 +41423,7 @@ mod shell_birth_tests {
             FormulaSwitches::from_settings(&bt_persist::SettingsV1::default()),
             NonZeroUsize::new(1_000).unwrap(),
             true,
+            &bt_pty::SystemShellEnvironment,
         )
     }
 
@@ -41972,6 +42211,9 @@ fn create_leaf_session(
     // is a `settings.json` answer a new pane must be born obeying, and a pane split off a
     // neighbour that read the file for itself would be a second place for the answer to live.
     line_wrapping: bool,
+    // **The machine a shell is composed for**: its variables and its files, as the place, the
+    // command line and the paste recipient read them — the system's own in the product.
+    environment: &dyn bt_pty::ShellEnvironment,
 ) -> Result<LeafSession> {
     // **Born without a rail**: a shell that has not started has sent no mark, and
     // [`LeafSession::has_rail`] is turned on only by one (owner, 2026-09-23).
@@ -42020,9 +42262,8 @@ fn create_leaf_session(
     let locale_waits = !rows_wait
         && probe_input.is_none()
         && programs.program(spawn_profile).is_some()
-        && profiles::row_of(spawn_profile).is_some_and(|row| {
-            shell_integration::listens_for_a_locale(&bt_pty::SystemShellEnvironment, &row.env)
-        })
+        && profiles::row_of(spawn_profile)
+            .is_some_and(|row| shell_integration::listens_for_a_locale(environment, &row.env))
         && locale_declaration::at_birth() == locale_declaration::AtBirth::Waiting;
     let in_birth = rows_wait || locale_waits;
     // **The one trigger.** A user who only ever opens WSL or `pwsh` never starts
@@ -42068,7 +42309,7 @@ fn create_leaf_session(
     let profiles::BirthPlace { place, unless_gone } = profiles::spawn_place(
         profiles::index_of_id(spawn_profile),
         seed.cwd.clone(),
-        &bt_pty::SystemShellEnvironment,
+        environment,
     );
     let spawn_place = place.directory.clone();
     let wake = LeafWake::bound_to(wake);
@@ -42122,7 +42363,7 @@ fn create_leaf_session(
             &program_kind,
             &place.arguments,
             shell_integration::Scripts::installed(),
-            &bt_pty::SystemShellEnvironment,
+            environment,
         );
         // The same row composed for the place the pane opens in when its folder is gone: the
         // birth worker takes this command line and working directory instead, having asked.
@@ -42133,7 +42374,7 @@ fn create_leaf_session(
                 &program_kind,
                 &gone.place.arguments,
                 shell_integration::Scripts::installed(),
-                &bt_pty::SystemShellEnvironment,
+                environment,
             )
             .arguments,
             working_directory: gone.place.working_directory.clone(),
@@ -42220,6 +42461,7 @@ fn create_leaf_session(
         formulas,
         scrollback,
         line_wrapping,
+        environment,
     );
     match shell {
         // **Born later, standing where its shell will stand.** The place is said now, from the
@@ -42264,6 +42506,7 @@ fn bare_leaf(
     formulas: FormulaSwitches,
     scrollback: NonZeroUsize,
     line_wrapping: bool,
+    environment: &dyn bt_pty::ShellEnvironment,
 ) -> LeafSession {
     let LeafView {
         text_scale,
@@ -42313,7 +42556,7 @@ fn bare_leaf(
         paste_recipient: profiles::paste_recipient(
             profiles::index_of_id(&decision.spawn_profile),
             &decision.program_kind,
-            &bt_pty::SystemShellEnvironment,
+            environment,
         ),
         integration: profiles::row_of(&decision.spawn_profile)
             .map_or(profiles::Integration::None, |row| {
@@ -42829,7 +43072,7 @@ struct LeafView {
 
 impl LeafView {
     /// The view `text_scale` asks for, measured for `renderer`'s window.
-    fn at(gpu: &mut GpuContext, renderer: &WindowRenderer, text_scale: TextScale) -> Result<Self> {
+    fn at<G: Glass>(gpu: &mut G::Device, renderer: &G, text_scale: TextScale) -> Result<Self> {
         Ok(Self {
             text_scale,
             metrics: pane_cell_metrics(gpu, renderer, text_scale)?,
@@ -42844,9 +43087,9 @@ impl LeafView {
 ///
 /// Nothing stores its product: a Settings change, a display change and a size step each call this
 /// again, so the order they arrive in cannot matter.
-fn pane_cell_metrics(
-    gpu: &mut GpuContext,
-    renderer: &WindowRenderer,
+fn pane_cell_metrics<G: Glass>(
+    gpu: &mut G::Device,
+    renderer: &G,
     text_scale: TextScale,
 ) -> Result<bt_render::CellMetrics> {
     let effective = text_scale.effective_logical_px(gpu.terminal_font_size_logical_px());
@@ -42957,13 +43200,13 @@ fn apply_leaf_metrics(leaf: &mut LeafSession, metrics: bt_render::CellMetrics) -
 /// including its own fallback for a window too small to place anything.
 // them into a struct would move the argument list rather than shorten it.
 #[allow(clippy::too_many_arguments)]
-fn create_tab_state(
+fn create_tab_state<G: Glass>(
     id: TabId,
     seats: seats::Seats,
     // What each of this tab's terminal views is born with: 100 %, measured for this window
     // (ticket 37) — see the loop below.
     born: LeafView,
-    renderer: &WindowRenderer,
+    renderer: &G,
     render_physical: PhysicalSize<u32>,
     // The window this tab's shells are born in — see [`create_leaf_session`].
     wake: &PtyWakeSignal,
@@ -43059,6 +43302,7 @@ fn create_tab_state(
             formulas,
             scrollback,
             line_wrapping,
+            &bt_pty::SystemShellEnvironment,
         )?;
         sessions.insert(seat, leaf);
     }
@@ -44991,7 +45235,7 @@ fn drain_tab_pty(
 /// doors that open a window differ in exactly the seventeen answers below, and
 /// a field added to the window layer gets its resting value in one place
 /// instead of drifting between a launch and a `New window`.
-struct NewWindowParts {
+struct NewWindowParts<B: Backend = Native> {
     ime_report: ime_report::Report,
     /// Where this window's touch door parks the pans the system recognised —
     /// see [`WindowRuntime::parked_pans`]. Made where the door is opened,
@@ -45001,19 +45245,19 @@ struct NewWindowParts {
     /// so that a page drawn here wears what any window in the process learned
     /// about its site — see [`App::favicons`].
     favicons: Rc<RefCell<favicon::Favicons>>,
-    renderer: WindowRenderer,
+    renderer: B::Glass,
     tabs: Vec<TabState>,
     active_tab: usize,
     pty_wake: PtyWakeSignal,
     translucency_available: bool,
-    custom_window_frame: bt_platform::CustomWindowFrame,
-    compositor: bt_platform::Compositor,
-    window: Arc<Window>,
-    math_context_menu: bt_platform::MathContextMenu,
-    folder_picker: bt_platform::FolderPicker,
-    image_picker: bt_platform::ImagePicker,
-    save_picker: Option<bt_platform::SaveFilePicker>,
-    ime_system_caret: bt_platform::ImeSystemCaret,
+    custom_window_frame: B::Frame,
+    compositor: B::Compositor,
+    window: B::Window,
+    math_context_menu: B::MathMenu,
+    folder_picker: B::FolderPicker,
+    image_picker: B::ImagePicker,
+    save_picker: Option<B::SavePicker>,
+    ime_system_caret: B::ImeCaret,
     rail: seats::RailState,
     seat_viewport: LogicalRect,
     /// The tabs a restore prompt has still to ask about **in this window** —
@@ -45039,7 +45283,7 @@ struct NewWindowParts {
     motion: Motion,
     /// How this window asks the loop to re-read that preference when Windows
     /// says it has moved.
-    event_proxy: EventLoopProxy<AppEvent>,
+    event_proxy: LoopProxy,
 }
 
 /// Assemble a window's runtime from [`NewWindowParts`] and the resting value of
@@ -45061,7 +45305,7 @@ fn display_frame_rate_millihertz(window: &Window) -> Option<u32> {
         .and_then(|monitor| monitor.refresh_rate_millihertz())
 }
 
-fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
+fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> {
     let NewWindowParts {
         ime_report,
         parked_pans,
@@ -45126,7 +45370,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
     // would pace that journey to the 60 Hz fallback on a 144 Hz panel.
     let frame_clock = {
         let mut clock = pace::FrameClock::default();
-        clock.follow(display_frame_rate_millihertz(&window));
+        clock.follow(window.frame_rate_millihertz());
         clock
     };
     WindowRuntime {
@@ -45625,7 +45869,7 @@ fn forget_standing_answers<'a>(holders: impl Iterator<Item = &'a mut PreviewPane
     }
 }
 
-impl settings::geometry::PointerHost for Runtime<'_> {
+impl<B: Backend> settings::geometry::PointerHost for Runtime<'_, B> {
     fn settings_geometry(&mut self) -> Option<Arc<settings::SettingsLayout>> {
         self.settings_layout()
     }
@@ -45704,7 +45948,7 @@ impl settings::geometry::PointerHost for Runtime<'_> {
 /// something weaker: no attention endpoint means hooks cannot reach this window,
 /// no launch endpoint means a second launch opens its own, and both are where
 /// every machine was before these slices existed.
-fn open_the_data_directorys_endpoints(proxy: &EventLoopProxy<AppEvent>) {
+fn open_the_data_directorys_endpoints(proxy: &LoopProxy) {
     if !persist::is_storage_writer() {
         // The claim is already taken and held by another live Folio, which is
         // the process these names belong to. Saying so is `main`'s — the
@@ -45835,7 +46079,7 @@ mod endpoint_claim_tests {
     }
 }
 
-impl Runtime<'_> {
+impl Runtime<'_, Native> {
     /// Open the process's device layer, its `App`, and its first window.
     ///
     /// Returns the two layers rather than a `Runtime` (multiwindow slice C):
@@ -45844,7 +46088,7 @@ impl Runtime<'_> {
     /// window it belongs to.
     fn create(
         event_loop: &ActiveEventLoop,
-        proxy: EventLoopProxy<AppEvent>,
+        proxy: LoopProxy,
         startup_started: Instant,
         cli: &cli::CliRequest,
     ) -> Result<(App, WindowRuntime)> {
@@ -46704,36 +46948,19 @@ impl Runtime<'_> {
         let claude_row = attention_hooks::row_state();
         let codex_row = attention_codex::row_state();
         let copilot_row = attention_copilot::row_state();
-        let mut app = App {
-            ime_first_focus_seen: false,
+        let mut app = App::assemble(AppParts {
             gpu,
-            device_loss_pilot: DeviceLossPilot::new(),
-            favicons: Rc::new(RefCell::new(favicon::Favicons::default())),
-            favicons_changed: false,
             tab_ids,
-            animation_serials: 0,
             event_proxy: proxy.clone(),
-            git_watch: git_watch::GitWatch::default(),
-            programs_ear: programs_ear::ProgramsEar::default(),
-            index_ear: index_ear::IndexEar::default(),
             handoff_lane,
             layout_tables,
             math_worker,
             foreground_program_worker,
-            math_worker_running: true,
-            math_worker_notice_pending: false,
             files_worker,
-            files_worker_running: true,
-            files_worker_notice_pending: false,
             file_index_worker,
-            file_indexes: palette_index::FileIndexes::default(),
             preview_saves: preview::PreviewSaves::on(session_store.lane()),
             preview_worker,
-            preview_worker_running: true,
-            preview_worker_notice_pending: false,
             git_worker,
-            git_worker_running: true,
-            git_worker_notice_pending: false,
             git_mutations,
             acrylic_available,
             startup_started,
@@ -46742,26 +46969,12 @@ impl Runtime<'_> {
             trace_layout_events,
             trace_perf,
             motion: read_motion_preference(),
-            scheme_watch: scheme_watch::SchemeWatch::default(),
-            storage_watch: storage_watch::StorageWatch::default(),
-            scheme_fault: None,
-            scheme_source: [None, None],
             profile_programs,
-            program_news: window_news::WindowSeats::default(),
             startup_shells,
             psreadline_documents,
-            psreadline_installed: None,
-            first_run_attempted: false,
-            first_run_waited_for_channel: false,
-            first_run_waited_for_agent_folders: false,
             // Reads the registry once and, on a machine whose `folio.exe`
             // has moved since, writes the verb again — see the field.
             context_menu_installed: context_menu::reassert(),
-            explorer_package_asked_by: None,
-            explorer_package_asked_place: explorer_menu::ExplorerPlace::default(),
-            explorer_package_announce: Announce::Everything,
-            // Read once, and *only* read: see the field for why this one is not repaired.
-            agent_takeovers: Default::default(),
             claude_hooks_installed: claude_row.0,
             // The same, over codex's own file — see the field above's note, which holds word for
             // word for this one.
@@ -46784,15 +46997,10 @@ impl Runtime<'_> {
             cli_preview: cli_plan.preview.take(),
             profiles_store,
             profiles_fault,
-            profiles_file_broken: false,
             pins_store,
             pins_fault,
             settings_fault: settings_fault.take(),
             session_fault: session_fault.take(),
-            pins_file_broken: false,
-            settings_file_broken: false,
-            keybindings_file_broken: false,
-            merge_notice: document_request::MergeNotice::default(),
             recent,
             recent_folders,
             // **The document is assembled from these, and the first window's
@@ -46802,32 +47010,8 @@ impl Runtime<'_> {
             // — minimized, maximized — have the rectangle the file gave them to
             // fall back to before this window has measured itself once.
             window_pictures: vec![(window.id(), opening.clone())],
-            restore_question: Vec::new(),
-            web_warmup: web_warmup::WebWarmup::default(),
-            web_spare: web_spare::WebSpare::default(),
-            run_retiring_until: None,
-            web_pages_open: false,
-            pending_restore_windows: Vec::new(),
-            pending_restore_answer: None,
-            pending_application_change: None,
-            pending_new_windows: Vec::new(),
-            drag_broker: None,
-            pointer_capture: None,
-            pointer_capture_overlaps: Vec::new(),
-            pending_handover: None,
-            quit_requested: false,
-            quit: None,
-            windows_open: Vec::new(),
-            activated: Vec::new(),
-            window_ring: None,
-            window_ring_shown: None,
-            quake: quake::Quake::default(),
             update_job: the_update_job,
-            update_shown: update_card::Shown::default(),
-            quit_reason: quit::Reason::Asked,
-            leave_without: None,
-            handoff_answer: None,
-        };
+        });
         // **The rest of the file's windows, queued at the door.** A window that
         // held a pinned tab opens straight away, through the very same door
         // `Ctrl+Shift+M` goes through; a window that held none is a question, and
@@ -46878,7 +47062,7 @@ impl Runtime<'_> {
                     )
                     .collect();
         }
-        let mut window = new_window_runtime(NewWindowParts {
+        let mut window = new_window_runtime::<Native>(NewWindowParts {
             ime_report,
             parked_pans,
             favicons: Rc::clone(&app.favicons),
@@ -46924,7 +47108,10 @@ impl Runtime<'_> {
         };
         runtime.dress_new_window(native)?;
         if trace_startup {
-            let renderer_phases = runtime.window.renderer.init_timings(&runtime.app.gpu);
+            // Named as what it is: this block is the native backend's, and the timings are the
+            // native renderer's own.
+            let renderer: &bt_render::WindowRenderer = &runtime.window.renderer;
+            let renderer_phases = renderer.init_timings(&runtime.app.gpu);
             let line = StartupLine {
                 window: window_time,
                 adapter: renderer_phases.adapter,
@@ -46989,7 +47176,9 @@ impl Runtime<'_> {
         // hands back is the layers themselves.
         Ok((app, window))
     }
+}
 
+impl<B: Backend> Runtime<'_, B> {
     /// **Put something in front of this window's focused shell**, to be typed when it next has a
     /// prompt (§7.54e ⑤).
     ///
@@ -49009,7 +49198,7 @@ impl Runtime<'_> {
     /// Every edit is written straight through to the table
     /// ([`Self::write_editor_field`]), because this dialog has no commit: what
     /// you typed is what is stored, at the keystroke.
-    fn settings_field_key(&mut self, event: &KeyEvent) -> Result<bool> {
+    fn settings_field_key(&mut self, event: &Keystroke) -> Result<bool> {
         use text_field::TextMove;
         let Some(target) = self.window.settings.focus() else {
             return Ok(false);
@@ -49543,7 +49732,7 @@ impl Runtime<'_> {
     /// logical key (Q6), so what comes back is the glyph printed on the key that
     /// was pressed rather than the one Shift made of it — which is what makes
     /// the caps the panel draws afterwards the caps on the user's own board.
-    fn record_settings_key(&mut self, event: &KeyEvent) -> Result<()> {
+    fn record_settings_key(&mut self, event: &Keystroke) -> Result<()> {
         let Some(row) = self.window.settings.recording_row() else {
             return Ok(());
         };
@@ -52061,7 +52250,7 @@ fn measure_markdown_block(
     }
 }
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **The play button, rasterised, for the lane that draws over a picture**
     /// (user ruling 2026-08-27; `docs/DESIGN.md` §7.23 ⑩).
     ///
@@ -53477,7 +53666,7 @@ impl Runtime<'_> {
     /// moved is on the display it was on. A rate that cannot be believed leaves
     /// the window on the one it already had; see [`pace::FrameClock::follow`].
     fn follow_the_display(&mut self) {
-        let millihertz = display_frame_rate_millihertz(&self.window.window);
+        let millihertz = self.window.window.frame_rate_millihertz();
         if !self.window.frame_clock.follow(millihertz) {
             return;
         }
@@ -55516,7 +55705,7 @@ impl Runtime<'_> {
     }
 }
 
-impl App {
+impl<B: Backend> App<B> {
     /// **The four hand-editable documents' write generations**, in
     /// `storage_watch::Document` order — what the storage watch reads to learn
     /// that the reader asked for a document write.
@@ -57694,7 +57883,7 @@ mod hold_station_tests {
         // And the one door that must *not* be scoped: `window_event`'s own
         // station is the event, and the handler under it is what it names. It is
         // a trait method, so it is asked for as one.
-        let event = trait_method_body("FolioApp", "ApplicationHandler", "window_event");
+        let event = method_body("FolioApp", "on_window_event");
         assert!(
             event.contains("hang_watch::at(hang_watch::Station::Event);"),
             "the event's own name has left the door it is about"
@@ -57802,8 +57991,16 @@ mod hold_station_tests {
     /// foot of `window_event`.
     #[test]
     fn a_handler_that_has_returned_hands_the_thread_to_the_pump() {
-        for name in ["window_event", "user_event"] {
-            let body = trait_method_body("FolioApp", "ApplicationHandler", name);
+        for (name, body) in [
+            (
+                "on_window_event",
+                method_body("FolioApp", "on_window_event"),
+            ),
+            (
+                "user_event",
+                trait_method_body("FolioApp", "ApplicationHandler", "user_event"),
+            ),
+        ] {
             let pump = "hang_watch::at(hang_watch::Station::Pump);";
             assert_eq!(body.matches(pump).count(), 1, "{name} never names the pump");
             let after = body[first_at(body, pump) + pump.len()..].trim();
@@ -57826,7 +58023,7 @@ mod hold_station_tests {
     /// everything. That is the decay this pin is here to catch.
     #[test]
     fn every_event_kind_the_dispatcher_answers_names_its_own_handler() {
-        let dispatch = trait_method_body("FolioApp", "ApplicationHandler", "window_event");
+        let dispatch = method_body("FolioApp", "on_window_event");
         let naming = free_fn_body("window_event_station");
         let mut kinds = arms(dispatch);
         assert!(
@@ -59866,7 +60063,7 @@ mod formula_tool_seat_tests {
         let copy = method_body("Runtime", "copy_math_latex");
         assert!(
             copy.find("self.live_paste_target(target)").unwrap()
-                < copy.find("bt_platform::set_clipboard_text").unwrap()
+                < copy.find("window.set_clipboard_text").unwrap()
         );
         let validate = method_body("Runtime", "live_paste_target");
         assert!(validate.contains("tab.sessions.get(&target.seat)"));
@@ -59989,139 +60186,6 @@ mod formula_tool_seat_tests {
         assert!(
             inner.contains("wheel_view_moved.is_some()"),
             "and `skip_unchanged` is exactly that verdict's presence:\n{inner}"
-        );
-    }
-
-    /// RED — **a frame composed for any reason carries every journey that is running, and a
-    /// journey's end is never paced** (review 2026-09-18, P1).
-    ///
-    /// The gate admits an animation's own turn only when no picture has reached the glass for a
-    /// display frame. That is an economy and not a defect — a picture reached the glass a moment
-    /// ago, so the animation does not need one of its own — **provided that picture carried it**.
-    /// It did not: the band's travelling height was cached in the session by the flight's tick and
-    /// projected from there, so a neighbouring pane printing every five milliseconds composed frame
-    /// after frame from a sample the tick had left behind, and the gate refused the tick for as long
-    /// as the printing lasted. The review measured zero admissions in a thousand turns.
-    ///
-    /// Two lines answer it, and both are pinned here because both are placements rather than
-    /// values. **The carry stands at the head of the compose**, above everything that reads a
-    /// height, a layer or a quad. **The landing stands above the gate** in the flight's own
-    /// advancer: what lands is owed to the document, not to the glass, and behind the gate it was a
-    /// change of face a busy neighbour could postpone for ever.
-    ///
-    /// MUTATIONS: move the carry below the projection and the frame is built from the previous
-    /// sample; put the landing back under the gate and `settle_math_toggle` becomes unreachable
-    /// under a flood; drop `sample_math_toggle` from the carry and the one animation this window
-    /// caches is the one that freezes.
-    #[test]
-    fn a_frame_composed_for_any_reason_carries_the_journeys_and_the_landing_is_never_paced() {
-        let compose = method_body("Runtime", "publish_frame_inner");
-        let carried = compose
-            .find("self.carry_live_journeys(Instant::now());")
-            .expect("every compose carries the journeys that are running");
-        let projected = compose
-            .find("bt_compose::project(bt_compose::Pane {")
-            .expect("and the projection is what reads the band's height");
-        assert!(
-            carried < projected,
-            "a frame built before its journeys are carried is a frame built from the last tick's \
-             sample:\n{compose}"
-        );
-
-        let carry = method_body("Runtime", "carry_live_journeys");
-        assert!(
-            carry.contains("self.sample_math_toggle(now);"),
-            "the one animation this window caches is sampled on every frame:\n{carry}"
-        );
-        assert!(
-            carry
-                .find("self.sample_math_toggle(now);")
-                .unwrap_or(usize::MAX)
-                < carry.find("if !running.any() {").unwrap_or(0),
-            "a flight in hand is carried whether or not the last turn saw one:\n{carry}"
-        );
-        assert!(
-            !carry.contains("self.sync_math_tools(now)")
-                && !carry.contains("self.math_tool_placement"),
-            "the carry has no frame to hand to either formula lane:\n{carry}"
-        );
-        // **The formula rebuild moves to the present; it is not added here.**
-        // The ordinary overlay lane is refused while a formula is lit or in
-        // flight, because `redraw` will rebuild the whole stack after projection.
-        assert!(
-            carry.contains("let formula_present =")
-                && carry.contains("running.overlay && !formula_present"),
-            "a formula journey pays for its overlay once, at the present door:\n{carry}"
-        );
-        // The older chrome/overlay exclusivity remains: a chrome rebuild still
-        // ends in the overlay, so the ordinary overlay arm is an `else`.
-        assert!(
-            carry.contains("self.refresh_chrome_without_overlay();")
-                && carry.contains("self.refresh_chrome();")
-                && carry.contains("} else if running.overlay"),
-            "chrome and the ordinary overlay lane stay exclusive:\n{carry}"
-        );
-        let chrome = method_body("Runtime", "refresh_chrome_with_overlay");
-        assert!(
-            chrome.contains("include_overlay && self.refresh_overlay()"),
-            "ordinary chrome ends in the overlay while formula presents defer it:\n{chrome}"
-        );
-        // **And nothing is inferred from asking the gate** (review 2026-09-18
-        // round 2, P1). Liveness is reported once a turn from the journeys' own
-        // "am I moving" predicates — never from their deadlines, several of
-        // which also carry a wait: a tip's 380ms, a notice's life, a card's
-        // grace. Waiting is not moving, and a window that treated it as moving
-        // would rebuild its whole interface for the length of every wait.
-        let gate = method_body("Runtime", "animation_frame_is_due");
-        assert!(
-            !gate.contains("note_running"),
-            "asking the gate is a question and never evidence:\n{gate}"
-        );
-        let turning = method_body("Runtime", "turn");
-        assert!(
-            turning.contains("self.window.frame_clock.note_running(running);"),
-            "the window reports what is mid-flight once a turn:\n{turning}"
-        );
-        let report = method_body("Runtime", "running_journeys");
-        for waiting in ["tooltip_deadline", "toast_deadline", "file_peek_deadline"] {
-            assert!(
-                !report.contains(waiting),
-                "{waiting} answers a wait as well as a tween:\n{report}"
-            );
-        }
-        for moving in [
-            "is_fading(now, motion)",
-            "nudge_moving(now, motion)",
-            "is_animating(now, motion)",
-            "self.command_rails_are_moving(now)",
-            "self.math_tools_owe_frames(now)",
-        ] {
-            assert!(
-                report.contains(moving),
-                "a journey's own predicate is what says it is running: {moving}\n{report}"
-            );
-        }
-
-        let advance = method_body("Runtime", "advance_math_toggle_if_due");
-        let settles = advance
-            .find("if landed || !still_measures {")
-            .expect("a journey that has arrived is settled");
-        let gate = advance
-            .find("if !self.animation_frame_is_due() {")
-            .expect("and only a frame of its own is paced");
-        assert!(
-            settles < gate,
-            "the landing is owed to the document and waits for no display:\n{advance}"
-        );
-
-        let wake = method_body("Runtime", "math_toggle_deadline");
-        assert!(
-            wake.contains("flight.lands_at()"),
-            "and the loop is woken for that landing on its own clock:\n{wake}"
-        );
-        assert!(
-            wake.contains("frame.min(landing)"),
-            "whichever of the two comes first:\n{wake}"
         );
     }
 
@@ -62501,7 +62565,7 @@ mod quit_transaction_tests {
             .find("app.record_window(")
             .expect("the door puts this window's opening rectangle in the vault");
         let built = door
-            .find("new_window_runtime(NewWindowParts {")
+            .find("new_window_runtime::<Native>(NewWindowParts {")
             .expect("and then builds the window runtime around it");
         let photographed = door
             .find("runtime.mark_session_dirty(")
@@ -62681,37 +62745,6 @@ mod quit_transaction_tests {
         assert!(
             method_body("TabState", "retire_all_shells").contains(handed),
             "and the hand-over is what it does instead"
-        );
-    }
-
-    /// PIN (方案 ③) — **the quit judges the write, and the ordinary paths do
-    /// not have to.**
-    ///
-    /// `flush_judged` exists for exactly one caller and this is the check that it
-    /// still is that caller: the `Write` arm hands its answer to
-    /// `Quit::written`, which is where "a document that did not reach the disk
-    /// keeps the windows open" is decided (pinned in `quit.rs`).
-    ///
-    /// Red gate: swallow the result with `let _ =` and this goes red one line
-    /// before the process starts hiding windows over a file it never wrote.
-    #[test]
-    fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
-        let settle = method_body("FolioApp", "settle_quit");
-        assert!(
-            settle.contains("app.session_store.flush_for_quit(until, now)"),
-            "the quit's write is the judged one"
-        );
-        assert!(
-            settle.contains("quit.written(verdict)"),
-            "and the answer is what the transaction is told"
-        );
-        assert!(
-            settle.contains("refusal.quit_may_proceed()"),
-            "and a save that ran out of its budget is not read as one that was refused"
-        );
-        assert!(
-            settle.contains("i18n::Text::QuitSessionNotWritten"),
-            "a write that was refused is said out loud on every window"
         );
     }
 
@@ -63933,58 +63966,6 @@ mod pty_drain_budget_tests {
         );
     }
 
-    /// RED (review row R5-4) — **every pane the reader can see settles its rows and typesets what
-    /// it printed.**
-    ///
-    /// A `$$…$$` block becomes a picture in two steps and both were asked of the pane holding the
-    /// keyboard alone: the stability window that decides a row has stopped moving, and the
-    /// scheduler that turns a settled block into work for the typesetting engine. A reader who
-    /// splits a pane, runs the command on the right and clicks back into the left is looking at a
-    /// pane that will never typeset anything — the "formula in the other pane never renders"
-    /// report.
-    ///
-    /// The road that already visits the other panes is the one that projects them for the present,
-    /// so that is where the scheduling belongs; the settle belongs beside the deadline that wakes
-    /// the loop for it, and that deadline has to come from the same walk or the window sleeps
-    /// through the window it owes.
-    ///
-    /// Mutation: put `self.shell_mut()` or `self.focused()` back into either and the sibling is
-    /// back to showing its own LaTeX.
-    #[test]
-    fn every_visible_pane_settles_its_rows_and_schedules_its_own_artifacts() {
-        let deadline = method_body("Runtime", "live_stability_deadline");
-        assert!(
-            deadline.contains("leaves()"),
-            "the window wakes at the earliest settle any pane on screen owes"
-        );
-        let due = method_body("Runtime", "advance_live_math_if_due");
-        assert!(
-            due.contains("leaves_mut()"),
-            "and when it wakes, every pane of the tab on screen settles"
-        );
-        assert!(
-            due.contains("bt_compose::advance_live_stability("),
-            "each through the crate's advance, the step a live row settles at"
-        );
-        for focused_only in ["self.shell_mut()", "self.shell()", "self.focused()"] {
-            assert!(
-                !deadline.contains(focused_only) && !due.contains(focused_only),
-                "`{focused_only}` is the keyboard's pane, and a block prints in whichever pane \
-                 ran the command"
-            );
-        }
-        let redraw = method_body("Runtime", "redraw");
-        assert!(
-            redraw.contains("bt_compose::schedule("),
-            "and the pass that projects the panes nobody is typing in is the pass that schedules \
-             the artifacts it just found in them"
-        );
-        assert!(
-            redraw.contains("dispatch_tab_decoration_tasks("),
-            "scheduling work nobody dispatches is a block that stays LaTeX"
-        );
-    }
-
     /// RED (review row R5-5) — **a metric that moved re-keys every pane, not the focused one.**
     ///
     /// A DPI change, a font change, a theme swap and a language switch all hand every leaf of
@@ -64232,11 +64213,6 @@ mod textless_present_tests {
         item_body(&bt_source::ItemQuery::method(owner, name))
     }
 
-    /// The body of one method written in a `impl <trait> for <owner>` block.
-    fn trait_method_body(owner: &str, trait_name: &str, name: &str) -> &'static str {
-        item_body(&bt_source::ItemQuery::method(owner, name).of_trait(trait_name))
-    }
-
     /// PIN — **a picture that lost its characters is re-filed and asked for
     /// again, not recorded as delivered.**
     ///
@@ -64351,7 +64327,7 @@ mod textless_present_tests {
         // spelled seven times in `main.rs` and once in `hang_watch.rs`, so
         // "the next one" only means this dispatch's while the reading is the
         // item's. The needle stays in two pieces for P18 to join.
-        let dispatch = trait_method_body("FolioApp", "ApplicationHandler", "window_event");
+        let dispatch = method_body("FolioApp", "on_window_event");
         let woken = dispatch
             .find(concat!(
                 "WindowEvent::Occluded(false) => runtime.",
@@ -64643,16 +64619,16 @@ mod application_change_tests {
 /// "which window is this about" is answered by looking the id up rather than by
 /// assuming — which is what the single-window loop did, in the only way a
 /// single-window loop can.
-struct FolioApp {
+struct FolioApp<B: Backend = Native> {
     /// The application, from the moment its first window opened it.
     ///
     /// `Option` because there is no `App` before `resumed`: everything in it is
     /// read off disk or spawned, and both need an event loop to have started.
-    app: Option<App>,
+    app: Option<App<B>>,
     /// Every open window, under the id its events arrive with, in the order
     /// they opened.
-    windows: Windows<WindowId, WindowRuntime>,
-    proxy: EventLoopProxy<AppEvent>,
+    windows: Windows<WindowId, WindowRuntime<B>>,
+    proxy: LoopProxy,
     startup_started: Instant,
     /// What the process was started with, held until there is a window to honour
     /// it in. Parsed in `main` and resolved in [`Runtime::create`], because
@@ -64715,12 +64691,12 @@ impl MainMenuInputs {
 /// [`bt_render::WindowTarget::CompositionVisual`], whose whole contract is that
 /// the visual must be live at the instant the surface is made and that the
 /// `Compositor` the caller is holding is what makes it so.
-struct TheDeviceAndItsWindows<'a> {
-    gpu: &'a mut GpuContext,
-    windows: &'a mut Windows<WindowId, WindowRuntime>,
+struct TheDeviceAndItsWindows<'a, B: Backend> {
+    gpu: &'a mut B::Device,
+    windows: &'a mut Windows<WindowId, WindowRuntime<B>>,
 }
 
-impl LostDevice for TheDeviceAndItsWindows<'_> {
+impl<B: Backend> LostDevice for TheDeviceAndItsWindows<'_, B> {
     type Error = RenderError;
 
     fn is_lost(&self) -> bool {
@@ -64728,33 +64704,40 @@ impl LostDevice for TheDeviceAndItsWindows<'_> {
     }
 
     fn rebuild(&mut self) -> std::result::Result<(), RenderError> {
-        let rebuilt: Vec<RebuiltWindow<'_>> = self
-            .windows
-            .in_order_mut()
-            .into_iter()
-            .map(|window| {
-                // **Built before the renderer is borrowed**, out of a
-                // `Compositor` and a `Window` this entry goes on owning, and
-                // never stored — see [`window_surface_target`], which is the
-                // one place any platform's door is named. Its contract is what
-                // makes that the only sound arrangement: on Windows the visual
-                // has to be live at the instant the surface is made, and on
-                // macOS the view has to have been emptied of the layer the old
-                // surface left on it. Both happen in there, for all three
-                // callers, and this one is the caller they happen *for*.
-                let target = window_surface_target(&window.window, &window.compositor);
-                RebuiltWindow::OnScreen(&mut window.renderer, target)
-            })
-            .collect();
-        pollster::block_on(self.gpu.rebuild_after_device_loss(rebuilt))?;
-        note_gpu_adapter(self.gpu);
-        Ok(())
+        B::rebuild_every_surface(self.gpu, self.windows.in_order_mut())
     }
 }
 
-impl FolioApp {
+/// **Every window's swapchain, built again on the device layer** — [`Backend::rebuild_every_surface`]
+/// for the product's windows.
+fn rebuild_every_native_surface(
+    gpu: &mut GpuContext,
+    windows: Vec<&mut WindowRuntime>,
+) -> std::result::Result<(), RenderError> {
+    let rebuilt: Vec<RebuiltWindow<'_>> = windows
+        .into_iter()
+        .map(|window: &mut WindowRuntime| {
+            // **Built before the renderer is borrowed**, out of a
+            // `Compositor` and a `Window` this entry goes on owning, and
+            // never stored — see [`window_surface_target`], which is the
+            // one place any platform's door is named. Its contract is what
+            // makes that the only sound arrangement: on Windows the visual
+            // has to be live at the instant the surface is made, and on
+            // macOS the view has to have been emptied of the layer the old
+            // surface left on it. Both happen in there, for all three
+            // callers, and this one is the caller they happen *for*.
+            let target = window_surface_target(&window.window, &window.compositor);
+            RebuiltWindow::OnScreen(&mut window.renderer, target)
+        })
+        .collect();
+    pollster::block_on(gpu.rebuild_after_device_loss(rebuilt))?;
+    note_gpu_adapter(gpu);
+    Ok(())
+}
+
+impl<B: Backend> FolioApp<B> {
     fn new(
-        proxy: EventLoopProxy<AppEvent>,
+        proxy: LoopProxy,
         cli: cli::CliRequest,
         delegate: Option<bt_platform::AppDelegate>,
     ) -> Self {
@@ -64779,14 +64762,14 @@ impl FolioApp {
     /// `None` for an id that is not open, which is not a defect to guard
     /// against but a race the platform is entitled to: an event posted for a
     /// window can arrive after that window has been removed.
-    fn runtime(&mut self, id: WindowId) -> Option<Runtime<'_>> {
+    fn runtime(&mut self, id: WindowId) -> Option<Runtime<'_, B>> {
         let app = self.app.as_mut()?;
         let window = self.windows.get_mut(id)?;
         Some(Runtime { app, window })
     }
 
     /// The window at `index` in the opening order.
-    fn runtime_at(&mut self, index: usize) -> Option<Runtime<'_>> {
+    fn runtime_at(&mut self, index: usize) -> Option<Runtime<'_, B>> {
         let id = self.windows.key_at(index)?;
         self.runtime(id)
     }
@@ -64870,7 +64853,7 @@ impl FolioApp {
 
     fn for_each_window(
         &mut self,
-        mut answer: impl FnMut(&mut Runtime<'_>) -> Result<()>,
+        mut answer: impl FnMut(&mut Runtime<'_, B>) -> Result<()>,
     ) -> Result<()> {
         for index in 0..self.windows.len() {
             if let Some(mut runtime) = self.runtime_at(index)
@@ -64891,7 +64874,7 @@ impl FolioApp {
     /// moment it truly can.
     fn for_every_window_engines_included(
         &mut self,
-        mut answer: impl FnMut(&mut Runtime<'_>) -> Result<()>,
+        mut answer: impl FnMut(&mut Runtime<'_, B>) -> Result<()>,
     ) -> Result<()> {
         for index in 0..self.windows.len() {
             if let Some(mut runtime) = self.runtime_at(index) {
@@ -65912,7 +65895,7 @@ impl FolioApp {
     /// is still leaving.
     fn reap_leaving_windows(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &B::Loop,
         now: Instant,
     ) -> Result<Option<Instant>> {
         let mut done: Vec<WindowId> = Vec::new();
@@ -66260,7 +66243,7 @@ impl FolioApp {
         Ok(())
     }
 
-    fn open_pending_window(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+    fn open_pending_window(&mut self, event_loop: &B::Loop) -> Result<()> {
         let plans = match self.app.as_mut() {
             Some(app) => std::mem::take(&mut app.pending_new_windows),
             None => return Ok(()),
@@ -66282,7 +66265,7 @@ impl FolioApp {
                 return Ok(());
             };
             let opened_at = Instant::now();
-            let (id, window) = Runtime::open_window(event_loop, app, &plan, like)?;
+            let (id, window) = B::open_window(event_loop, app, &plan, like)?;
             let door = opened_at.elapsed();
             self.windows.insert(id, window);
             // **The directory names the window from the moment it exists**: the
@@ -66356,7 +66339,7 @@ impl FolioApp {
     /// spent its own foreground rights on this one before it exited — see
     /// `bt_platform::launch_pipe`'s four steps — and it is asked for through the
     /// recipe §7.54 already uses rather than a second one.
-    fn settle_launch_requests(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+    fn settle_launch_requests(&mut self, event_loop: &B::Loop) -> Result<()> {
         // **Not while a quit has fixed the document** (0.4.6 U-21, §C.3): from the photograph on
         // `launch_wire` refuses, and a request parked a moment before that is left where it is —
         // spent if the quit is abandoned, gone with the process if it is not, as a request parked
@@ -66422,7 +66405,7 @@ impl FolioApp {
     /// through here.
     fn land_one_launch_request(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &B::Loop,
         request: &launch_wire::LaunchRequest,
     ) -> Result<Option<WindowId>> {
         let target = self.app.as_ref().and_then(|app| {
@@ -66491,7 +66474,7 @@ impl FolioApp {
     /// delegate called was `app_delegate_wire::park`, which pushes and returns;
     /// this runs a turn later with AppKit's stack unwound, which is the whole of
     /// X-4's first rule.
-    fn settle_app_delegate_events(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+    fn settle_app_delegate_events(&mut self, event_loop: &B::Loop) -> Result<()> {
         for event in app_delegate_wire::take() {
             if !matches!(
                 event.kind,
@@ -66601,7 +66584,7 @@ impl FolioApp {
     ///   just opened.
     fn answer_a_menu_row(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &B::Loop,
         origin: bt_platform::AppDelegateOrigin,
         choice: bt_platform::menu::MenuChoice,
     ) -> Result<()> {
@@ -66761,10 +66744,7 @@ impl FolioApp {
     ///
     /// `None` only where a window could not be opened at all, which is the same
     /// answer [`Self::open_a_window_for_a_launch`] gives and for the same reason.
-    fn a_window_for_the_delegate(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-    ) -> Result<Option<WindowId>> {
+    fn a_window_for_the_delegate(&mut self, event_loop: &B::Loop) -> Result<Option<WindowId>> {
         let id = match self.the_window_the_reader_was_last_in() {
             Some(id) => id,
             // A request that names no place: the window opens holding the
@@ -66792,7 +66772,7 @@ impl FolioApp {
     /// One path Finder, the Dock or (M4-9) a Service handed over.
     fn open_one_path_for_the_delegate(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &B::Loop,
         path: PathBuf,
     ) -> Result<()> {
         match cli::machine_path_kind(&path) {
@@ -66862,11 +66842,7 @@ impl FolioApp {
     /// launch socket as, through the same function, for
     /// [`Self::open_one_path_for_the_delegate`]'s reason word for word: this is
     /// not somebody starting Folio, it is somebody handing Folio a place.
-    fn open_one_place_for_a_service(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        path: &Path,
-    ) -> Result<()> {
+    fn open_one_place_for_a_service(&mut self, event_loop: &B::Loop, path: &Path) -> Result<()> {
         let Some(folder) = explorer_menu::folder_for(path, cli::machine_path_kind(path)) else {
             eprintln!(
                 "{APP_NAME} was asked to open {} and there is nothing there",
@@ -67017,7 +66993,7 @@ impl FolioApp {
     /// asked for, and nothing further happens to it.
     fn open_a_window_for_a_launch(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &B::Loop,
         like: Option<WindowId>,
         request: &launch_wire::LaunchRequest,
     ) -> Result<Option<WindowId>> {
@@ -67308,7 +67284,7 @@ impl FolioApp {
     /// [`quake::Quake::reconcile`]. Three doors can move this chord (the
     /// recorder, a hand-edited `keybindings.json`, and `Restore all defaults`)
     /// and a turn that reads the table is one statement that covers all three.
-    fn settle_quake(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+    fn settle_quake(&mut self, event_loop: &B::Loop) -> Result<()> {
         let Some(app) = self.app.as_mut() else {
             return Ok(());
         };
@@ -67980,7 +67956,7 @@ impl FolioApp {
     /// Spent at the loop's two doors, exactly as the pending window is and for
     /// the same reason: it needs the `ActiveEventLoop` and every window at once,
     /// and a `Runtime` has never held either.
-    fn settle_quit(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+    fn settle_quit(&mut self, event_loop: &B::Loop) -> Result<()> {
         self.begin_quit_if_asked()?;
         loop {
             self.deliver_the_quits_update_report();
@@ -68159,8 +68135,12 @@ impl FolioApp {
                     // An owner-thread door (`doors::PaneRetirementWait`, row 15), admitted only
                     // on the way out. A refusal did not wait: the count is unknown, said so, and
                     // the quit goes on as it does when the budget runs out.
+                    let deadline = self
+                        .app
+                        .as_ref()
+                        .map_or(PANE_RETIREMENT_DEADLINE, |app| app.pane_retirement_deadline);
                     match bt_platform::admission::admitted::<doors::PaneRetirementWait, _>(
-                        |token| pty_door::wait_for_retirements(token, PANE_RETIREMENT_DEADLINE),
+                        |token| pty_door::wait_for_retirements(token, deadline),
                     ) {
                         Ok(0) => {}
                         Ok(still_going) => eprintln!(
@@ -68627,7 +68607,7 @@ impl FolioApp {
     #[cfg(not(debug_assertions))]
     fn surface_selftest_if_due(&mut self) {}
 
-    fn fail(&mut self, event_loop: &ActiveEventLoop, error: anyhow::Error) {
+    fn fail(&mut self, event_loop: &B::Loop, error: anyhow::Error) {
         if self.recovered_from_a_lost_device() {
             return;
         }
@@ -68703,7 +68683,7 @@ impl FolioApp {
         self.for_each_window(|runtime| runtime.close_window(true))
     }
 
-    fn about_to_wait_inner(&mut self, event_loop: &ActiveEventLoop) {
+    fn about_to_wait_inner(&mut self, event_loop: &B::Loop) {
         if self.app.is_none() {
             return;
         }
@@ -68920,6 +68900,468 @@ impl FolioApp {
         let wake_deadline = earliest_deadline([wake_deadline, quit_wake]);
         event_loop
             .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+    }
+
+    /// **One window event, dispatched** — `ApplicationHandler::window_event`'s whole answer,
+    /// written over the backend so a headless application can be handed an event too.
+    fn on_window_event(&mut self, event_loop: &B::Loop, window_id: WindowId, event: WindowEvent) {
+        if file_reads::is_user_input(&event) {
+            bt_platform::file_reads::input();
+        }
+        // **A gesture is a stir for the web engine's warm-up** (ticket 54): the
+        // same classifier the file-read ledger asks, so "the reader did
+        // something" is one judgement in this program and not two — and a window
+        // resized, moved or carried to another scale (ticket 60, F1), which is the
+        // reader doing something too.
+        if web_warmup::event_stirs(&event)
+            && let Some(app) = self.app.as_mut()
+        {
+            app.web_warmup.stir(Instant::now());
+        }
+        present_diagnostics::event();
+        hang_watch::at(hang_watch::Station::Event);
+        hang_watch::during(window_event_station(&event), || {
+            // **The one line the whole slice is about.** winit stamps the id of the
+            // window the event happened to; before this, the loop compared it against
+            // the only window there was and dropped anything else. Now it is a
+            // lookup, and an id that is not open is a window that has already gone.
+            if !self.windows.contains(window_id) {
+                return;
+            }
+            // **A retiring window answers nothing** (multiwindow slice E2 phase ④).
+            // It is hidden, its shells are shut and its picture is written; whatever
+            // the platform still has queued for it is about a window that is on its
+            // way out, and running a redraw or a key through it would be this process
+            // doing work on behalf of something that no longer exists.
+            if self
+                .app
+                .as_ref()
+                .and_then(|app| app.quit.as_ref())
+                .is_some_and(quit::Quit::is_retiring)
+            {
+                return;
+            }
+            // **And a window that has been closed answers nothing either** (§7.35),
+            // on the retirement's own reasoning one window down: it is off the
+            // screen, its shells are shut and its controllers have been told to go,
+            // so every message still addressed to it — a stray `WM_CLOSE`, a focus
+            // change as the window under it comes forward — is about a window the
+            // reader has already let go of.
+            if self.is_leaving(window_id) {
+                return;
+            }
+            match self.capture_before_pointer_event(window_id, &event) {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => {
+                    self.fail(event_loop, error);
+                    return;
+                }
+            }
+            let Some(mut runtime): Option<Runtime<'_, B>> =
+                hang_watch::during(hang_watch::Station::EventLookup, || self.runtime(window_id))
+            else {
+                return;
+            };
+            // **A burst of notches is spent before anything that is not a notch.**
+            // See [`WheelBurst`]: the wheel accumulates so that a run of detents
+            // costs one frame instead of one frame each, and this is the line that
+            // keeps that from being a reordering — whatever arrives next answers the
+            // window the wheel has already moved.
+            if !runtime::pointer::is_wheel_event(&event)
+                && let Err(error) = runtime.flush_wheel()
+            {
+                self.fail(event_loop, error);
+                return;
+            }
+            // **And a drop is spent before anything that is not another file of the
+            // same drop**, on the line above's own reasoning (GitHub issue #1 ②).
+            // The batch is one command line going into a shell, so an event that
+            // reaches the same shell — a keystroke, most of all — must not overtake
+            // it. It is also what makes the drop's routing honest: the pointer
+            // position the batch is hit-tested against cannot have moved between the
+            // drop and this flush, because the event that would have moved it is the
+            // event that flushes first.
+            if !matches!(event, WindowEvent::DroppedFile(_))
+                && let Err(error) = runtime.flush_dropped_files()
+            {
+                self.fail(event_loop, error);
+                return;
+            }
+            // Whether this event asked the window to shut, answered before the
+            // borrow is given back: `raise_dirty_gate` is the one gate that has to be
+            // able to *stop* the event, which is why it is asked here rather than
+            // inside the close — past that line the window is gone, and a question
+            // asked after the answer is worthless.
+            let mut shutting = false;
+            // **The handler this event is about to be given to, named before it is
+            // given** — see [`window_event_station`]. Opened here and not at the
+            // door above, so the lookup, the three gates and the wheel burst stay
+            // the event's own; handed back at the foot of the match, on
+            // [`hang_watch::enter`]'s rule, so the four application doors under it
+            // belong to the dispatch and not to the handler.
+            let result = match event {
+                // **The summoned terminal's `×` means hide, and it means it by
+                // setting the chord's own bit** (§7.54e ②, user ruling 2026-09-05:
+                // 「窗上只留一个 ×,语义 = 隐藏,和热键完全一致…合并后必须同一条代码
+                // 路径」).
+                //
+                // Not "the same behaviour" and not "a call to the same function":
+                // **the same bit**. `quake.press()` is what a `WM_HOTKEY` leaves
+                // behind, and `settle_quake` on the next turn reads it, sees the
+                // window is up, and dismisses — hiding it, handing the keyboard back
+                // to whatever it came down over. There is no second road for the two
+                // to drift apart on, which is the whole of what the ruling asks for.
+                //
+                // **The dirty gate is not raised, and that is correct rather than
+                // skipped**: gate ③ exists because a *shut* loses unsaved preview
+                // buffers, and this window is not shutting. Its tabs, its shells and
+                // its buffers are all still there a chord away. Ending the session is
+                // `exit` in the shell or `Close tab` on the tab, and both of those
+                // raise every gate they always did.
+                //
+                // **Only while it is on the screen.** A `WM_CLOSE` delivered to the
+                // hidden summon is not a reader pressing its `×` — there is no `×` to
+                // press — it is the run ending, and it closes exactly as it did.
+                WindowEvent::CloseRequested
+                    if runtime.is_quake_window() && runtime.app.quake.is_showing() =>
+                {
+                    runtime.app.quake.press();
+                    Ok(())
+                }
+                WindowEvent::CloseRequested => {
+                    // **Gate ③ (P125).** "Dirty preview buffers do not survive a shut
+                    // — plans carry paths, never content — so shutting asks, the same
+                    // honesty as closing a tab."
+                    //
+                    // **Only "nothing to ask" shuts** (ticket 58). A gate raised by
+                    // this close stands; so does one that was already up — a tab's
+                    // close still being asked about, or this same shut asked a
+                    // second time — and this request is dropped: the card is the
+                    // one surface that answers, and its answer re-runs the verb.
+                    runtime
+                        .raise_dirty_gate(restore::GateRequest::Shut)
+                        .map(|raised| shutting = raised.proceeds())
+                }
+                // **`is_synthetic` is read and not discarded** (§7.54d). It is the
+                // one bit that separates a key the reader pressed at this window
+                // from winit's report of what their hand was already holding when
+                // the window took the keyboard, and a window this program can summon
+                // *under a hand still on the chord* is a window that receives the
+                // second kind.
+                WindowEvent::KeyboardInput {
+                    event,
+                    is_synthetic,
+                    ..
+                } => {
+                    // What the handlers read of it, taken once (`input::Keystroke`).
+                    let event = input::Keystroke::from(&event);
+                    runtime.observe_ime_key(&event, is_synthetic);
+                    runtime.keyboard_input(&event, is_synthetic)
+                }
+                WindowEvent::Ime(event) => runtime.ime_input(event),
+                WindowEvent::ModifiersChanged(modifiers) => {
+                    // **The one door every modifier state in this process comes
+                    // through**, which is why Q9's ruling is applied here and
+                    // nowhere else (M1-7). With Option ruled to be text, an Option
+                    // that winit reports as `Alt` is a modifier nobody is holding —
+                    // see `input::effective_modifiers`, which says the whole of it.
+                    // **And the reported state is kept beside it**, because the
+                    // sentence above is about text and one reader is not asking
+                    // about text (§13.33 ①). Written first and from the same
+                    // argument, so the two can never be a turn apart.
+                    runtime.window.modifiers_held = modifiers.state();
+                    runtime.window.modifiers = input::effective_modifiers(
+                        modifiers.state(),
+                        runtime.app.settings_store.loaded().option_sends_alt,
+                        bt_platform::host_platform(),
+                    );
+                    // The pointing hand over a link is a statement about `Ctrl` as
+                    // much as about where the pointer is (§7.1.5g), and `Ctrl` moves
+                    // while the pointer does not. Without this the shape would only
+                    // ever catch up on the next mouse move, which is to say: after
+                    // the hand had already decided whether to press.
+                    // **And the modifier asks what a pointer move asks** (closure review B-1).
+                    // The finger below is a promise about a press, and a press on a link nobody
+                    // has asked the disk about answers nothing — so the key going down is a
+                    // gesture that meets a reference, and it asks through the same one door.
+                    runtime.ask_about_the_link_under_the_pointer();
+                    runtime.apply_pointer_cursor();
+                    // **The hint card's one input** (§7.1.5e′). winit reports the
+                    // whole modifier state on every press and release of one, so
+                    // this is the only line in the window that has to tell the card
+                    // anything about the keys — there is no hook, no second opinion
+                    // about what is down, and nothing to keep level with
+                    // `window.modifiers` because it is read from it one statement
+                    // after it is written.
+                    runtime.note_key_hint(Instant::now())
+                }
+                // **Every pointer event goes through one door** (T-POINTER-CAPTURE
+                // cut 1): the pointer module names the kinds and owns their
+                // answers, so this dispatcher reads no pointer field.
+                event if runtime::pointer::is_pointer_event(&event) => runtime.pointer_event(event),
+                // **A file let go of over this window** (GitHub issue #1 ②). One
+                // event per file and no marker between drops, so the path is
+                // written down here and the batch is spent at the turn boundary —
+                // [`Runtime::flush_dropped_files`], and [`WheelBurst`]'s reasoning
+                // one gesture over.
+                //
+                // **And the cursor is read here too, on the file that opens the
+                // batch** (release review 0.4.2 X-10): this arm runs inside the
+                // platform's delivery of the release, which is the only instant at
+                // which where the cursor is and where the file was let go of are the
+                // same point. See [`Runtime::collect_dropped_file`].
+                //
+                // `HoveredFile` and `HoveredFileCancelled` are not answered at all.
+                // They would be the drop affordance, and what an external drag
+                // should light up is a question nobody has answered. §7.1.1's
+                // 2026-09-16 revision answered it for the *internal* drag and for
+                // that one alone — an edge band that draws the split preview, a
+                // middle that writes `Paste path` on the box — and it is precisely
+                // the feedback that carries the ruling. Inventing a second set of
+                // zones here, for a gesture winit reports without a position, would
+                // be this window answering the harder half for itself.
+                WindowEvent::DroppedFile(path) => {
+                    runtime.collect_dropped_file(path);
+                    Ok(())
+                }
+                WindowEvent::Resized(size) => runtime.resized(size),
+                // **The engine is told the window moved** (§7.7 ⑩, user report
+                // 2026-08-25). The pages are drawn through DirectComposition and
+                // get no window messages of their own, so the only thing that knows
+                // where a page's own menus and dialogs belong on screen is the
+                // parent window's position — and the only way the engine learns it
+                // has changed is this call. Said on the window's own move rather
+                // than on a page's clock: a window can be dragged with nothing on
+                // the glass but a shell, and the engine still has to be right the
+                // next time a page is opened in it.
+                WindowEvent::Moved(_) => runtime.window_moved(),
+                WindowEvent::ScaleFactorChanged { .. } => runtime.scale_factor_changed(),
+                // The payload is deliberately dropped: `os_theme_changed` asks the
+                // one reader this process trusts rather than taking a second
+                // opinion off the event (§7.46 ②).
+                WindowEvent::ThemeChanged(_) => runtime.os_theme_changed().map(|_| ()),
+                WindowEvent::RedrawRequested => runtime.redraw(),
+                WindowEvent::Focused(false) => {
+                    runtime.observe_ime_focus(false);
+                    // Losing the window is a blur, and blur commits (J102). The
+                    // mock-up's editor is a real focusable element and gets this
+                    // from the DOM; here it has to be said. A press that was still
+                    // being held goes with it — the button-up will arrive to a
+                    // window that is no longer listening.
+                    let committed = runtime.finish_rename(RenameExit::Blur);
+                    // K129. Losing the window is losing the Win32 mouse capture, and
+                    // capture loss is this platform's `pointercancel`: the pointer
+                    // stream ends with no button-up to end it. It is the only such
+                    // signal winit surfaces — there is no `WM_CAPTURECHANGED` event —
+                    // and an un-torn-down drag would leave a tab floating over a strip
+                    // nobody is holding any more. Same path as Esc: never mind.
+                    // F72: the same capture loss ends a divider drag, and ends it
+                    // the same way — restoring the one ratio it had been moving.
+                    // Left holding the button over a window that is no longer
+                    // listening, the gesture was never finished, and a drag nobody
+                    // finished did not choose a ratio.
+                    let cancelled = runtime
+                        .cancel_drag()
+                        .and_then(|tab| runtime.cancel_divider_drag().map(|split| tab || split));
+                    // And a drag across a rendered page, which is holding the
+                    // span it began on until a release that will not come
+                    // (owner's ruling 2026-09-23).
+                    let cancelled = cancelled
+                        .and_then(|either| runtime.cancel_preview_text_drag().map(|()| either));
+                    runtime.drop_tab_press();
+                    runtime.drop_pane_press();
+                    runtime.drop_row_press();
+                    // P149's `window blur`: a glance is about where the pointer is,
+                    // and a window that is not listening has no pointer.
+                    runtime.hide_file_peek();
+                    // And §7.1.5e′'s: a card about the keys under your hands is a
+                    // card about a keyboard this window no longer has. `hide` and
+                    // not `spend` — nothing was pressed, so a hand that comes back
+                    // still holding `Ctrl` is answered again.
+                    runtime.window.key_hint.hide();
+                    // **And the command palette** (DESIGN.md §7.55): 失焦即收. It is
+                    // a box for aiming at something *now*, and a window the reader
+                    // has left is a window they are not aiming at — coming back to
+                    // a half-typed query over a stale list would be this product
+                    // holding a question nobody is still asking. It is the one
+                    // popup that goes here, and the difference is real: every other
+                    // one is anchored to a control the reader can see and come back
+                    // to, while this one is anchored to an intent.
+                    let _ = runtime.close_command_palette();
+                    runtime.window.tab_clicks.interrupt();
+                    // Do not cancel or synthesize anything: IMM32 may synchronously deliver a partial
+                    // Commit during this transition, and the product decision is to accept it.
+                    runtime.window.ime_active = false;
+                    runtime.window.ime_cursor.reset();
+                    hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
+                        runtime.destroy_ime_caret("window_blur")
+                    });
+                    runtime.set_cursor_focus(false, Instant::now());
+                    // **The summoned terminal goes when the keyboard does** (§7.54),
+                    // and it goes on the *next* turn: hiding a window inside the
+                    // event that says it lost the focus is asking Windows to move the
+                    // focus while it is telling you about the focus. A bit and a turn
+                    // — see `FolioApp::settle_quake`, where every other thing this
+                    // window does out of the ordinary is also spent.
+                    //
+                    // The switch is read there and not here for the same reason the
+                    // hide is: what this arm knows is that the keyboard left, which
+                    // is true whatever the row says. Only a window that is actually
+                    // on the screen leaves a bit, because a blur that arrives after
+                    // it has gone is a blur about nothing - hiding it is what moved
+                    // the focus in the first place.
+                    if runtime.is_quake_window() && runtime.app.quake.is_showing() {
+                        runtime.app.quake.note_blur();
+                    }
+                    committed.and(cancelled.map(|_| ())).and_then(|()| {
+                        runtime.publish_frame(FrameTrigger {
+                            occurred_at: Instant::now(),
+                            source: FrameSource::Expose,
+                        })
+                    })
+                }
+                WindowEvent::Focused(true) => {
+                    runtime.observe_ime_focus(true);
+                    // **A taskbar flash ends here** (`FLASHW_TIMERNOFG`: until the window comes to
+                    // the foreground; on macOS activation ends the bounce), so the record of what
+                    // it was about ends with it (ticket 62).
+                    runtime.window.taskbar_flash = None;
+                    // **R31's third invalidation moment, B: the window came back.**
+                    // Whatever happened while it was away happened in another process
+                    // — an editor saving, a `git` run in another terminal, a
+                    // checkout by a build script — and left no cwd and no marker for
+                    // this window to have noticed. Coming back is the moment a reader
+                    // looks at the page again, so it is the moment the page is
+                    // entitled to be true; it is a gesture at the window and not a
+                    // timer, which is the whole of what R31 forbids.
+                    //
+                    // On the transition and not on the event: this is asked before
+                    // `set_cursor_focus`, which is where `window_focused` is written,
+                    // so a platform that re-announced a focus this window already had
+                    // would not spend a `git status` on it. No debounce beyond that —
+                    // there is no observed flap to debounce, and a timer put in
+                    // against one would be exactly the machine this rule is about.
+                    let regained = !runtime.window.window_focused;
+                    // **The one place the visit order is written** (§7.59). On the
+                    // transition and not on the event, which is `regained`'s own
+                    // rule read one line down: a platform that re-announced a focus
+                    // this window already had must not move it up the list, because
+                    // then "most recently active" would mean "most recently
+                    // re-announced" on the machines that do that.
+                    if regained {
+                        runtime.note_this_window_was_visited();
+                    }
+                    runtime.set_cursor_focus(true, Instant::now());
+                    let reread = if regained {
+                        // And the documents whose folders no kernel would speak for
+                        // (user ruling 2026-08-29). The same sentence as the line
+                        // below it, about the same moment, for the same reason —
+                        // and it costs nothing at all on a window whose files are
+                        // all on a disk this process could subscribe to.
+                        runtime
+                            .ask_the_unwatched_preview_files()
+                            .and_then(|()| runtime.reread_git_surfaces(None))
+                    } else {
+                        Ok(())
+                    };
+                    reread.and_then(|()| {
+                        runtime.publish_frame(FrameTrigger {
+                            occurred_at: Instant::now(),
+                            source: FrameSource::Expose,
+                        })
+                    })
+                }
+                // **The window is on screen again, and this is the one turn that
+                // owes it a picture** (GitHub issue #5).
+                //
+                // It always composed and published one frame here — `publish_frame`
+                // requests exactly one redraw — and since a skip caused by occlusion
+                // stopped asking for turns of its own ([`ask_again_after`]), this is
+                // the event that pays whatever the window went dark owing. winit
+                // raises it from `windowDidChangeOcclusionState:`, off the same
+                // `NSWindowOcclusionState::Visible` bit that `wgpu-hal`'s Metal
+                // surface tests before it refuses an acquire, so the moment it
+                // arrives is exactly the moment the acquire starts succeeding.
+                //
+                // `Occluded(true)` is deliberately not handled: a window does not
+                // need to be told it has gone dark. The frame path finds out by
+                // being refused, which is the only reading that cannot be stale.
+                WindowEvent::Occluded(false) => runtime.publish_frame(FrameTrigger {
+                    occurred_at: Instant::now(),
+                    source: FrameSource::Expose,
+                }),
+                _ => Ok(()),
+            };
+            // The gate's own `Discard`, spent here rather than inside the answer: the
+            // shut belongs to the event loop, and re-requesting it means closing goes
+            // through the one door it always went through instead of a second one
+            // opened for the gate.
+            let requested = std::mem::take(&mut runtime.window.window_close_requested);
+            shutting |= requested == Some(window_id);
+            let result = if shutting {
+                result.and(hang_watch::during(hang_watch::Station::EventShut, || {
+                    self.close(window_id)
+                }))
+            } else {
+                result
+            };
+            // **And the window another window's answer closes**
+            // (T-SUMMON-DIRTY-PREVIEW): the run's end, answered in the summoned
+            // terminal, re-runs the close of the ordinary window that ends the run
+            // — through the same door, which asks again and now finds nothing.
+            let result = match requested.filter(|closing| *closing != window_id) {
+                Some(closing) => result
+                    .and(hang_watch::during(hang_watch::Station::EventShut, || {
+                        self.close(closing)
+                    })),
+                None => result,
+            };
+            // Whatever this event changed about the *application*, handed to the
+            // windows that were not this one. Before the door below, because a window
+            // opened after a settings row was pressed reads that row's stored value
+            // when it is built and would then be handed the same change twice.
+            let result = result.and_then(|()| {
+                hang_watch::during(hang_watch::Station::EventSettleApplication, || {
+                    self.settle_application_change()
+                })
+            });
+            // The prompt's one answer, if this event was it — before the door below,
+            // because accepting is one of the three things that queues a window.
+            let result = result.and_then(|()| {
+                hang_watch::during(hang_watch::Station::EventRestore, || {
+                    self.settle_restore_answer()
+                })
+            });
+            // And the door the other way round: a window this window's keyboard asked
+            // for. After the shut, because a chord cannot both close this window and
+            // open another, and asking in this order means a failure to open never
+            // leaves a window that should have been shut standing.
+            let result = result.and_then(|()| {
+                hang_watch::during(hang_watch::Station::EventOpen, || {
+                    self.open_pending_window(event_loop)
+                })
+            });
+            // And the whole application's own door, last: `Ctrl+Shift+Q` records a
+            // debt inside one window and what it starts belongs to the process.
+            // After the shut above, on that door's own reasoning — a chord cannot
+            // both close this window and quit — and after the open, so that a window
+            // queued by the same turn is in the registry before it is photographed.
+            let result = result.and_then(|()| {
+                hang_watch::during(hang_watch::Station::EventQuit, || {
+                    self.settle_quit(event_loop)
+                })
+            });
+            if let Err(error) = result {
+                self.fail(event_loop, error);
+            }
+        });
+        // **And the pump's from here until the next handler** (ticket 43). The
+        // event has been answered; what the thread does before winit hands it
+        // anything else is the platform's own loop and whatever runs on it —
+        // WebView2's callbacks and its in-process half among them. Left at
+        // `Event`, that time read as `window_event` on the 2026-09-23 report.
+        hang_watch::at(hang_watch::Station::Pump);
     }
 }
 
@@ -69870,461 +70312,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        if file_reads::is_user_input(&event) {
-            bt_platform::file_reads::input();
-        }
-        // **A gesture is a stir for the web engine's warm-up** (ticket 54): the
-        // same classifier the file-read ledger asks, so "the reader did
-        // something" is one judgement in this program and not two — and a window
-        // resized, moved or carried to another scale (ticket 60, F1), which is the
-        // reader doing something too.
-        if web_warmup::event_stirs(&event)
-            && let Some(app) = self.app.as_mut()
-        {
-            app.web_warmup.stir(Instant::now());
-        }
-        present_diagnostics::event();
-        hang_watch::at(hang_watch::Station::Event);
-        hang_watch::during(window_event_station(&event), || {
-            // **The one line the whole slice is about.** winit stamps the id of the
-            // window the event happened to; before this, the loop compared it against
-            // the only window there was and dropped anything else. Now it is a
-            // lookup, and an id that is not open is a window that has already gone.
-            if !self.windows.contains(window_id) {
-                return;
-            }
-            // **A retiring window answers nothing** (multiwindow slice E2 phase ④).
-            // It is hidden, its shells are shut and its picture is written; whatever
-            // the platform still has queued for it is about a window that is on its
-            // way out, and running a redraw or a key through it would be this process
-            // doing work on behalf of something that no longer exists.
-            if self
-                .app
-                .as_ref()
-                .and_then(|app| app.quit.as_ref())
-                .is_some_and(quit::Quit::is_retiring)
-            {
-                return;
-            }
-            // **And a window that has been closed answers nothing either** (§7.35),
-            // on the retirement's own reasoning one window down: it is off the
-            // screen, its shells are shut and its controllers have been told to go,
-            // so every message still addressed to it — a stray `WM_CLOSE`, a focus
-            // change as the window under it comes forward — is about a window the
-            // reader has already let go of.
-            if self.is_leaving(window_id) {
-                return;
-            }
-            match self.capture_before_pointer_event(window_id, &event) {
-                Ok(true) => return,
-                Ok(false) => {}
-                Err(error) => {
-                    self.fail(event_loop, error);
-                    return;
-                }
-            }
-            let Some(mut runtime) =
-                hang_watch::during(hang_watch::Station::EventLookup, || self.runtime(window_id))
-            else {
-                return;
-            };
-            // **A burst of notches is spent before anything that is not a notch.**
-            // See [`WheelBurst`]: the wheel accumulates so that a run of detents
-            // costs one frame instead of one frame each, and this is the line that
-            // keeps that from being a reordering — whatever arrives next answers the
-            // window the wheel has already moved.
-            if !runtime::pointer::is_wheel_event(&event)
-                && let Err(error) = runtime.flush_wheel()
-            {
-                self.fail(event_loop, error);
-                return;
-            }
-            // **And a drop is spent before anything that is not another file of the
-            // same drop**, on the line above's own reasoning (GitHub issue #1 ②).
-            // The batch is one command line going into a shell, so an event that
-            // reaches the same shell — a keystroke, most of all — must not overtake
-            // it. It is also what makes the drop's routing honest: the pointer
-            // position the batch is hit-tested against cannot have moved between the
-            // drop and this flush, because the event that would have moved it is the
-            // event that flushes first.
-            if !matches!(event, WindowEvent::DroppedFile(_))
-                && let Err(error) = runtime.flush_dropped_files()
-            {
-                self.fail(event_loop, error);
-                return;
-            }
-            // Whether this event asked the window to shut, answered before the
-            // borrow is given back: `raise_dirty_gate` is the one gate that has to be
-            // able to *stop* the event, which is why it is asked here rather than
-            // inside the close — past that line the window is gone, and a question
-            // asked after the answer is worthless.
-            let mut shutting = false;
-            // **The handler this event is about to be given to, named before it is
-            // given** — see [`window_event_station`]. Opened here and not at the
-            // door above, so the lookup, the three gates and the wheel burst stay
-            // the event's own; handed back at the foot of the match, on
-            // [`hang_watch::enter`]'s rule, so the four application doors under it
-            // belong to the dispatch and not to the handler.
-            let result = match event {
-                // **The summoned terminal's `×` means hide, and it means it by
-                // setting the chord's own bit** (§7.54e ②, user ruling 2026-09-05:
-                // 「窗上只留一个 ×,语义 = 隐藏,和热键完全一致…合并后必须同一条代码
-                // 路径」).
-                //
-                // Not "the same behaviour" and not "a call to the same function":
-                // **the same bit**. `quake.press()` is what a `WM_HOTKEY` leaves
-                // behind, and `settle_quake` on the next turn reads it, sees the
-                // window is up, and dismisses — hiding it, handing the keyboard back
-                // to whatever it came down over. There is no second road for the two
-                // to drift apart on, which is the whole of what the ruling asks for.
-                //
-                // **The dirty gate is not raised, and that is correct rather than
-                // skipped**: gate ③ exists because a *shut* loses unsaved preview
-                // buffers, and this window is not shutting. Its tabs, its shells and
-                // its buffers are all still there a chord away. Ending the session is
-                // `exit` in the shell or `Close tab` on the tab, and both of those
-                // raise every gate they always did.
-                //
-                // **Only while it is on the screen.** A `WM_CLOSE` delivered to the
-                // hidden summon is not a reader pressing its `×` — there is no `×` to
-                // press — it is the run ending, and it closes exactly as it did.
-                WindowEvent::CloseRequested
-                    if runtime.is_quake_window() && runtime.app.quake.is_showing() =>
-                {
-                    runtime.app.quake.press();
-                    Ok(())
-                }
-                WindowEvent::CloseRequested => {
-                    // **Gate ③ (P125).** "Dirty preview buffers do not survive a shut
-                    // — plans carry paths, never content — so shutting asks, the same
-                    // honesty as closing a tab."
-                    //
-                    // **Only "nothing to ask" shuts** (ticket 58). A gate raised by
-                    // this close stands; so does one that was already up — a tab's
-                    // close still being asked about, or this same shut asked a
-                    // second time — and this request is dropped: the card is the
-                    // one surface that answers, and its answer re-runs the verb.
-                    runtime
-                        .raise_dirty_gate(restore::GateRequest::Shut)
-                        .map(|raised| shutting = raised.proceeds())
-                }
-                // **`is_synthetic` is read and not discarded** (§7.54d). It is the
-                // one bit that separates a key the reader pressed at this window
-                // from winit's report of what their hand was already holding when
-                // the window took the keyboard, and a window this program can summon
-                // *under a hand still on the chord* is a window that receives the
-                // second kind.
-                WindowEvent::KeyboardInput {
-                    event,
-                    is_synthetic,
-                    ..
-                } => {
-                    runtime.observe_ime_key(&event, is_synthetic);
-                    runtime.keyboard_input(&event, is_synthetic)
-                }
-                WindowEvent::Ime(event) => runtime.ime_input(event),
-                WindowEvent::ModifiersChanged(modifiers) => {
-                    // **The one door every modifier state in this process comes
-                    // through**, which is why Q9's ruling is applied here and
-                    // nowhere else (M1-7). With Option ruled to be text, an Option
-                    // that winit reports as `Alt` is a modifier nobody is holding —
-                    // see `input::effective_modifiers`, which says the whole of it.
-                    // **And the reported state is kept beside it**, because the
-                    // sentence above is about text and one reader is not asking
-                    // about text (§13.33 ①). Written first and from the same
-                    // argument, so the two can never be a turn apart.
-                    runtime.window.modifiers_held = modifiers.state();
-                    runtime.window.modifiers = input::effective_modifiers(
-                        modifiers.state(),
-                        runtime.app.settings_store.loaded().option_sends_alt,
-                        bt_platform::host_platform(),
-                    );
-                    // The pointing hand over a link is a statement about `Ctrl` as
-                    // much as about where the pointer is (§7.1.5g), and `Ctrl` moves
-                    // while the pointer does not. Without this the shape would only
-                    // ever catch up on the next mouse move, which is to say: after
-                    // the hand had already decided whether to press.
-                    // **And the modifier asks what a pointer move asks** (closure review B-1).
-                    // The finger below is a promise about a press, and a press on a link nobody
-                    // has asked the disk about answers nothing — so the key going down is a
-                    // gesture that meets a reference, and it asks through the same one door.
-                    runtime.ask_about_the_link_under_the_pointer();
-                    runtime.apply_pointer_cursor();
-                    // **The hint card's one input** (§7.1.5e′). winit reports the
-                    // whole modifier state on every press and release of one, so
-                    // this is the only line in the window that has to tell the card
-                    // anything about the keys — there is no hook, no second opinion
-                    // about what is down, and nothing to keep level with
-                    // `window.modifiers` because it is read from it one statement
-                    // after it is written.
-                    runtime.note_key_hint(Instant::now())
-                }
-                // **Every pointer event goes through one door** (T-POINTER-CAPTURE
-                // cut 1): the pointer module names the kinds and owns their
-                // answers, so this dispatcher reads no pointer field.
-                event if runtime::pointer::is_pointer_event(&event) => runtime.pointer_event(event),
-                // **A file let go of over this window** (GitHub issue #1 ②). One
-                // event per file and no marker between drops, so the path is
-                // written down here and the batch is spent at the turn boundary —
-                // [`Runtime::flush_dropped_files`], and [`WheelBurst`]'s reasoning
-                // one gesture over.
-                //
-                // **And the cursor is read here too, on the file that opens the
-                // batch** (release review 0.4.2 X-10): this arm runs inside the
-                // platform's delivery of the release, which is the only instant at
-                // which where the cursor is and where the file was let go of are the
-                // same point. See [`Runtime::collect_dropped_file`].
-                //
-                // `HoveredFile` and `HoveredFileCancelled` are not answered at all.
-                // They would be the drop affordance, and what an external drag
-                // should light up is a question nobody has answered. §7.1.1's
-                // 2026-09-16 revision answered it for the *internal* drag and for
-                // that one alone — an edge band that draws the split preview, a
-                // middle that writes `Paste path` on the box — and it is precisely
-                // the feedback that carries the ruling. Inventing a second set of
-                // zones here, for a gesture winit reports without a position, would
-                // be this window answering the harder half for itself.
-                WindowEvent::DroppedFile(path) => {
-                    runtime.collect_dropped_file(path);
-                    Ok(())
-                }
-                WindowEvent::Resized(size) => runtime.resized(size),
-                // **The engine is told the window moved** (§7.7 ⑩, user report
-                // 2026-08-25). The pages are drawn through DirectComposition and
-                // get no window messages of their own, so the only thing that knows
-                // where a page's own menus and dialogs belong on screen is the
-                // parent window's position — and the only way the engine learns it
-                // has changed is this call. Said on the window's own move rather
-                // than on a page's clock: a window can be dragged with nothing on
-                // the glass but a shell, and the engine still has to be right the
-                // next time a page is opened in it.
-                WindowEvent::Moved(_) => runtime.window_moved(),
-                WindowEvent::ScaleFactorChanged { .. } => runtime.scale_factor_changed(),
-                // The payload is deliberately dropped: `os_theme_changed` asks the
-                // one reader this process trusts rather than taking a second
-                // opinion off the event (§7.46 ②).
-                WindowEvent::ThemeChanged(_) => runtime.os_theme_changed().map(|_| ()),
-                WindowEvent::RedrawRequested => runtime.redraw(),
-                WindowEvent::Focused(false) => {
-                    runtime.observe_ime_focus(false);
-                    // Losing the window is a blur, and blur commits (J102). The
-                    // mock-up's editor is a real focusable element and gets this
-                    // from the DOM; here it has to be said. A press that was still
-                    // being held goes with it — the button-up will arrive to a
-                    // window that is no longer listening.
-                    let committed = runtime.finish_rename(RenameExit::Blur);
-                    // K129. Losing the window is losing the Win32 mouse capture, and
-                    // capture loss is this platform's `pointercancel`: the pointer
-                    // stream ends with no button-up to end it. It is the only such
-                    // signal winit surfaces — there is no `WM_CAPTURECHANGED` event —
-                    // and an un-torn-down drag would leave a tab floating over a strip
-                    // nobody is holding any more. Same path as Esc: never mind.
-                    // F72: the same capture loss ends a divider drag, and ends it
-                    // the same way — restoring the one ratio it had been moving.
-                    // Left holding the button over a window that is no longer
-                    // listening, the gesture was never finished, and a drag nobody
-                    // finished did not choose a ratio.
-                    let cancelled = runtime
-                        .cancel_drag()
-                        .and_then(|tab| runtime.cancel_divider_drag().map(|split| tab || split));
-                    // And a drag across a rendered page, which is holding the
-                    // span it began on until a release that will not come
-                    // (owner's ruling 2026-09-23).
-                    let cancelled = cancelled
-                        .and_then(|either| runtime.cancel_preview_text_drag().map(|()| either));
-                    runtime.drop_tab_press();
-                    runtime.drop_pane_press();
-                    runtime.drop_row_press();
-                    // P149's `window blur`: a glance is about where the pointer is,
-                    // and a window that is not listening has no pointer.
-                    runtime.hide_file_peek();
-                    // And §7.1.5e′'s: a card about the keys under your hands is a
-                    // card about a keyboard this window no longer has. `hide` and
-                    // not `spend` — nothing was pressed, so a hand that comes back
-                    // still holding `Ctrl` is answered again.
-                    runtime.window.key_hint.hide();
-                    // **And the command palette** (DESIGN.md §7.55): 失焦即收. It is
-                    // a box for aiming at something *now*, and a window the reader
-                    // has left is a window they are not aiming at — coming back to
-                    // a half-typed query over a stale list would be this product
-                    // holding a question nobody is still asking. It is the one
-                    // popup that goes here, and the difference is real: every other
-                    // one is anchored to a control the reader can see and come back
-                    // to, while this one is anchored to an intent.
-                    let _ = runtime.close_command_palette();
-                    runtime.window.tab_clicks.interrupt();
-                    // Do not cancel or synthesize anything: IMM32 may synchronously deliver a partial
-                    // Commit during this transition, and the product decision is to accept it.
-                    runtime.window.ime_active = false;
-                    runtime.window.ime_cursor.reset();
-                    hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
-                        runtime.destroy_ime_caret("window_blur")
-                    });
-                    runtime.set_cursor_focus(false, Instant::now());
-                    // **The summoned terminal goes when the keyboard does** (§7.54),
-                    // and it goes on the *next* turn: hiding a window inside the
-                    // event that says it lost the focus is asking Windows to move the
-                    // focus while it is telling you about the focus. A bit and a turn
-                    // — see `FolioApp::settle_quake`, where every other thing this
-                    // window does out of the ordinary is also spent.
-                    //
-                    // The switch is read there and not here for the same reason the
-                    // hide is: what this arm knows is that the keyboard left, which
-                    // is true whatever the row says. Only a window that is actually
-                    // on the screen leaves a bit, because a blur that arrives after
-                    // it has gone is a blur about nothing - hiding it is what moved
-                    // the focus in the first place.
-                    if runtime.is_quake_window() && runtime.app.quake.is_showing() {
-                        runtime.app.quake.note_blur();
-                    }
-                    committed.and(cancelled.map(|_| ())).and_then(|()| {
-                        runtime.publish_frame(FrameTrigger {
-                            occurred_at: Instant::now(),
-                            source: FrameSource::Expose,
-                        })
-                    })
-                }
-                WindowEvent::Focused(true) => {
-                    runtime.observe_ime_focus(true);
-                    // **A taskbar flash ends here** (`FLASHW_TIMERNOFG`: until the window comes to
-                    // the foreground; on macOS activation ends the bounce), so the record of what
-                    // it was about ends with it (ticket 62).
-                    runtime.window.taskbar_flash = None;
-                    // **R31's third invalidation moment, B: the window came back.**
-                    // Whatever happened while it was away happened in another process
-                    // — an editor saving, a `git` run in another terminal, a
-                    // checkout by a build script — and left no cwd and no marker for
-                    // this window to have noticed. Coming back is the moment a reader
-                    // looks at the page again, so it is the moment the page is
-                    // entitled to be true; it is a gesture at the window and not a
-                    // timer, which is the whole of what R31 forbids.
-                    //
-                    // On the transition and not on the event: this is asked before
-                    // `set_cursor_focus`, which is where `window_focused` is written,
-                    // so a platform that re-announced a focus this window already had
-                    // would not spend a `git status` on it. No debounce beyond that —
-                    // there is no observed flap to debounce, and a timer put in
-                    // against one would be exactly the machine this rule is about.
-                    let regained = !runtime.window.window_focused;
-                    // **The one place the visit order is written** (§7.59). On the
-                    // transition and not on the event, which is `regained`'s own
-                    // rule read one line down: a platform that re-announced a focus
-                    // this window already had must not move it up the list, because
-                    // then "most recently active" would mean "most recently
-                    // re-announced" on the machines that do that.
-                    if regained {
-                        runtime.note_this_window_was_visited();
-                    }
-                    runtime.set_cursor_focus(true, Instant::now());
-                    let reread = if regained {
-                        // And the documents whose folders no kernel would speak for
-                        // (user ruling 2026-08-29). The same sentence as the line
-                        // below it, about the same moment, for the same reason —
-                        // and it costs nothing at all on a window whose files are
-                        // all on a disk this process could subscribe to.
-                        runtime
-                            .ask_the_unwatched_preview_files()
-                            .and_then(|()| runtime.reread_git_surfaces(None))
-                    } else {
-                        Ok(())
-                    };
-                    reread.and_then(|()| {
-                        runtime.publish_frame(FrameTrigger {
-                            occurred_at: Instant::now(),
-                            source: FrameSource::Expose,
-                        })
-                    })
-                }
-                // **The window is on screen again, and this is the one turn that
-                // owes it a picture** (GitHub issue #5).
-                //
-                // It always composed and published one frame here — `publish_frame`
-                // requests exactly one redraw — and since a skip caused by occlusion
-                // stopped asking for turns of its own ([`ask_again_after`]), this is
-                // the event that pays whatever the window went dark owing. winit
-                // raises it from `windowDidChangeOcclusionState:`, off the same
-                // `NSWindowOcclusionState::Visible` bit that `wgpu-hal`'s Metal
-                // surface tests before it refuses an acquire, so the moment it
-                // arrives is exactly the moment the acquire starts succeeding.
-                //
-                // `Occluded(true)` is deliberately not handled: a window does not
-                // need to be told it has gone dark. The frame path finds out by
-                // being refused, which is the only reading that cannot be stale.
-                WindowEvent::Occluded(false) => runtime.publish_frame(FrameTrigger {
-                    occurred_at: Instant::now(),
-                    source: FrameSource::Expose,
-                }),
-                _ => Ok(()),
-            };
-            // The gate's own `Discard`, spent here rather than inside the answer: the
-            // shut belongs to the event loop, and re-requesting it means closing goes
-            // through the one door it always went through instead of a second one
-            // opened for the gate.
-            let requested = std::mem::take(&mut runtime.window.window_close_requested);
-            shutting |= requested == Some(window_id);
-            let result = if shutting {
-                result.and(hang_watch::during(hang_watch::Station::EventShut, || {
-                    self.close(window_id)
-                }))
-            } else {
-                result
-            };
-            // **And the window another window's answer closes**
-            // (T-SUMMON-DIRTY-PREVIEW): the run's end, answered in the summoned
-            // terminal, re-runs the close of the ordinary window that ends the run
-            // — through the same door, which asks again and now finds nothing.
-            let result = match requested.filter(|closing| *closing != window_id) {
-                Some(closing) => result
-                    .and(hang_watch::during(hang_watch::Station::EventShut, || {
-                        self.close(closing)
-                    })),
-                None => result,
-            };
-            // Whatever this event changed about the *application*, handed to the
-            // windows that were not this one. Before the door below, because a window
-            // opened after a settings row was pressed reads that row's stored value
-            // when it is built and would then be handed the same change twice.
-            let result = result.and_then(|()| {
-                hang_watch::during(hang_watch::Station::EventSettleApplication, || {
-                    self.settle_application_change()
-                })
-            });
-            // The prompt's one answer, if this event was it — before the door below,
-            // because accepting is one of the three things that queues a window.
-            let result = result.and_then(|()| {
-                hang_watch::during(hang_watch::Station::EventRestore, || {
-                    self.settle_restore_answer()
-                })
-            });
-            // And the door the other way round: a window this window's keyboard asked
-            // for. After the shut, because a chord cannot both close this window and
-            // open another, and asking in this order means a failure to open never
-            // leaves a window that should have been shut standing.
-            let result = result.and_then(|()| {
-                hang_watch::during(hang_watch::Station::EventOpen, || {
-                    self.open_pending_window(event_loop)
-                })
-            });
-            // And the whole application's own door, last: `Ctrl+Shift+Q` records a
-            // debt inside one window and what it starts belongs to the process.
-            // After the shut above, on that door's own reasoning — a chord cannot
-            // both close this window and quit — and after the open, so that a window
-            // queued by the same turn is in the registry before it is photographed.
-            let result = result.and_then(|()| {
-                hang_watch::during(hang_watch::Station::EventQuit, || {
-                    self.settle_quit(event_loop)
-                })
-            });
-            if let Err(error) = result {
-                self.fail(event_loop, error);
-            }
-        });
-        // **And the pump's from here until the next handler** (ticket 43). The
-        // event has been answered; what the thread does before winit hands it
-        // anything else is the platform's own loop and whatever runs on it —
-        // WebView2's callbacks and its in-process half among them. Left at
-        // `Event`, that time read as `window_event` on the 2026-09-23 report.
-        hang_watch::at(hang_watch::Station::Pump);
+        self.on_window_event(event_loop, window_id, event);
     }
 
     /// **The pulse, the turn, and the note of where this thread is going.**
@@ -70565,9 +70553,9 @@ fn write_selection_text(
     true
 }
 
-fn write_terminal_clipboard_text(text: &str) -> Result<()> {
+fn write_terminal_clipboard_text(window: &impl WindowHost, text: &str) -> Result<()> {
     hang_watch::during(hang_watch::Station::ClipboardWrite, || {
-        bt_platform::set_clipboard_text(text)
+        window.set_clipboard_text(text)
     })
     .map_err(|error| anyhow!(error))
     .context("write terminal selection to clipboard")
@@ -72405,8 +72393,14 @@ fn ensure_metrics_match_authoritative_scale(
 /// back on Windows once `WM_NCCALCSIZE` has made the client the whole window.
 /// A window that has not been placed yet has no outer position, and an empty
 /// rectangle is what `startup_window_rect` already treats as "nothing known".
-fn dpi_snapshot(window: &Window) -> Result<DpiSnapshot> {
-    let native = native_window(window)?;
+fn dpi_snapshot(window: &impl WindowHost) -> Result<DpiSnapshot> {
+    window.dpi_snapshot()
+}
+
+/// [`WindowHost::dpi_snapshot`] for winit's window: the platform's answer, and winit's where the
+/// platform will not give one.
+fn native_dpi_snapshot(window: &Window) -> Result<DpiSnapshot> {
+    let native = native_window_of(window)?;
     let winit_scale = window.scale_factor();
     let (win32_dpi, authoritative_scale) = match bt_platform::get_dpi_for_window(native) {
         Ok(dpi) => (dpi, f64::from(dpi) / WIN32_DEFAULT_DPI),
@@ -72494,8 +72488,8 @@ fn log_dpi_snapshot(
     });
 }
 
-fn ensure_swapchain_matches_inner(
-    renderer: &WindowRenderer,
+fn ensure_swapchain_matches_inner<G: Glass>(
+    renderer: &G,
     inner_size: PhysicalSize<u32>,
 ) -> Result<()> {
     let presentation = renderer.presentation_geometry();
@@ -72670,7 +72664,12 @@ fn opening_window_attributes(title: &'static str, size: LogicalSize<f64>) -> Win
 ///
 /// Off macOS this is nothing at all, and it says so where the compiler can see
 /// it: there is no Option key on the other keyboards and `Alt` is already Alt.
-fn set_option_as_alt(window: &Window, option_sends_alt: bool) {
+fn set_option_as_alt(window: &impl WindowHost, option_sends_alt: bool) {
+    window.set_option_as_alt(option_sends_alt);
+}
+
+/// [`WindowHost::set_option_as_alt`] for winit's window.
+fn option_as_alt(window: &Window, option_sends_alt: bool) {
     #[cfg(target_os = "macos")]
     {
         use winit::platform::macos::{OptionAsAlt, WindowExtMacOS};
@@ -73926,9 +73925,7 @@ mod floated_page_tests {
         // a file — and the cut itself is what it always was. The deleted reading
         // split the whole of `main.rs`, whose separators include this very test's
         // own string literals; a body cannot contain them.
-        let door = item_body(
-            &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
-        );
+        let door = item_body(&ItemQuery::method("FolioApp", "on_window_event"));
         let arm = door
             .split("WindowEvent::CloseRequested")
             .nth(1)
@@ -74826,7 +74823,7 @@ mod background_mailbox_tests {
 /// is a defect and not a reason to refuse a theme change; and the two callers
 /// are a window opening and a person pressing a combo, neither of which has
 /// anywhere to put the error.
-fn install_page_ground_color(compositor: &bt_platform::Compositor) {
+fn install_page_ground_color(compositor: &impl CompositorDoor) {
     if let Err(error) =
         compositor.set_page_ground_color(bt_render::window_ground_premultiplied_srgb())
     {
@@ -74937,8 +74934,12 @@ fn window_surface_target(
 /// layer X-1 measured. A line saying anything but `cleared=1` there is the
 /// defect this ticket exists to make impossible, stated in the log rather than
 /// left to a screenshot.
+///
+/// **The handle is asked of the host** ([`native_window`]), as every call outside the native
+/// backend's own doors asks it; `native_window_of` is the answer of `Arc<Window>`'s door, not a
+/// road of its own (`docs/ARCHITECTURE.md` §4.5).
 #[cfg(target_os = "macos")]
-fn folios_own_metal_view(window: &Window) -> Result<*mut std::ffi::c_void> {
+fn folios_own_metal_view(window: &impl WindowHost) -> Result<*mut std::ffi::c_void> {
     let native = native_window(window)?;
     let view = bt_platform::surface_view(native).map_err(|error| anyhow!(error))?;
     let cleared = bt_platform::clear_surface_layers(native).map_err(|error| anyhow!(error))?;
@@ -74974,7 +74975,7 @@ fn stand_the_window_at(
     }
 }
 
-fn install_theme_class_background(window: &Window) {
+fn install_theme_class_background(window: &impl WindowHost) {
     let opaque = bt_render::window_ground().alpha >= 1.0;
     let installed = native_window(window).and_then(|native| {
         bt_platform::install_window_class_background(native, opaque.then(background_rgb))
@@ -75069,8 +75070,8 @@ fn resolved_theme_change(mode: ThemeModeV1, os_theme: OsTheme) -> Option<Theme> 
 /// nothing would look wrong here without it.
 ///
 /// The other half of the rope is
-/// `bt_platform::macos_window_backend_tests::dark_mode_changes_arrive_on_the_window_thread_through_winit`:
-/// the watch's callback does nothing but nudge this loop.
+/// `bt_platform`'s `macos_impl::tests::the_appearance_callback_only_nudges_the_loop`: the
+/// watch's callback does nothing but nudge this loop.
 #[cfg(test)]
 mod system_preference_wiring_tests {
     use super::run_for_volume_arrival;
@@ -75250,7 +75251,13 @@ fn session_sidebar_mode(mode: seats::RailMode) -> SessionSidebarModeV1 {
 /// The third arm is not a defect to guard against but the honest answer for a
 /// platform with no window backend written yet: an error the caller reports,
 /// on exactly the path that already reports one.
-fn native_window(window: &Window) -> Result<bt_platform::NativeWindow> {
+/// [`WindowHost::native_handle`]: the handle of whatever window the runtime is written over.
+fn native_window(window: &impl WindowHost) -> Result<bt_platform::NativeWindow> {
+    window.native_handle()
+}
+
+/// winit's window's own handle — [`WindowHost::native_handle`] for the product's window.
+fn native_window_of(window: &Window) -> Result<bt_platform::NativeWindow> {
     let handle = window
         .window_handle()
         .context("get the native window handle")?;
@@ -75267,21 +75274,21 @@ fn native_window(window: &Window) -> Result<bt_platform::NativeWindow> {
     }
 }
 
-fn take_owned_keyboard_focus(window: &Window) -> Result<()> {
+fn take_owned_keyboard_focus(window: &impl WindowHost) -> Result<()> {
     if bt_platform::hotkey::give_foreground_to(native_window(window)?) {
         Ok(())
     } else {
         Err(anyhow!("the window could not take the keyboard"))
     }
 }
-fn restore_minimized_window(window: &Window) -> Result<()> {
+fn restore_minimized_window(window: &impl WindowHost) -> Result<()> {
     if window.is_minimized() == Some(true) {
         window.set_minimized(false);
     }
     Ok(())
 }
 
-fn bring_owned_window_forward(window: &Window) -> Result<()> {
+fn bring_owned_window_forward(window: &impl WindowHost) -> Result<()> {
     restore_minimized_window(window)?;
     if bt_platform::hotkey::give_foreground_to(native_window(window)?) {
         Ok(())
@@ -75290,16 +75297,16 @@ fn bring_owned_window_forward(window: &Window) -> Result<()> {
     }
 }
 
-fn request_owned_window_close(window: &Window) -> Result<()> {
+fn request_owned_window_close(window: &impl WindowHost) -> Result<()> {
     bt_platform::request_window_close(native_window(window)?).map_err(|error| anyhow!(error))
 }
 
-fn minimize_owned_window(window: &Window) -> Result<()> {
+fn minimize_owned_window(window: &impl WindowHost) -> Result<()> {
     window.set_minimized(true);
     Ok(())
 }
 
-fn press_owned_title_bar(frame: &bt_platform::CustomWindowFrame) -> Result<(), String> {
+fn press_owned_title_bar(frame: &impl FrameDoor) -> Result<(), String> {
     frame.press_title_bar()
 }
 
@@ -75988,9 +75995,9 @@ fn solve_tree(
 /// `O(seats)`, so calling it on every resize and every frame of a divider drag
 /// is the preferred implementation rather than something to optimise away
 /// (§4.4) — one geometry beats a cached one.
-fn solve_seats(
+fn solve_seats<G: Glass>(
     seats: &seats::Seats,
-    renderer: &WindowRenderer,
+    renderer: &G,
     render_physical: PhysicalSize<u32>,
     policy: SizePolicy,
     rail: seats::RailState,
@@ -76091,14 +76098,15 @@ fn window_ime_cursor_area(seat: SeatViewport, area: ImeCursorArea) -> ImeCursorA
 }
 
 /// The terminal caret the input method is told, in the window's pixels: the composed frame's cursor
-/// cell measured at the focused pane's own `metrics` (ticket 37), carried from the seat's axis to
-/// the window's. The one measurement both the IME offer and its `IME_DRAW` trace make.
-fn terminal_ime_cursor_area(
-    seat: SeatViewport,
+/// cell measured by the glass at the focused pane's own `metrics` (ticket 37), carried from the
+/// glass's seat to the window's axis. The one measurement both the IME offer and its `IME_DRAW`
+/// trace make.
+fn terminal_ime_cursor_area<G: Glass>(
+    glass: &G,
     metrics: bt_render::CellMetrics,
     frame: &ViewportFrame,
 ) -> ImeCursorArea {
-    window_ime_cursor_area(seat, bt_render::ime_cursor_area_for_metrics(metrics, frame))
+    window_ime_cursor_area(glass.seat_viewport(), glass.ime_cursor_area(metrics, frame))
 }
 
 /// What the OS is currently doing with the window, as far as its rectangle is
@@ -77390,7 +77398,6 @@ fn main() -> Result<()> {
     });
     #[cfg(windows)]
     {
-        use winit::platform::windows::EventLoopBuilderExtWindows;
         // The summon hook is asked first; every message it lets through is
         // then dispatched between the pump timing's pair (ticket 64).
         builder.with_msg_hook(bt_platform::pump::timed_dispatch(
@@ -77416,7 +77423,6 @@ fn main() -> Result<()> {
     // library that cannot know this program has a session to write.
     #[cfg(target_os = "macos")]
     {
-        use winit::platform::macos::EventLoopBuilderExtMacOS;
         builder.with_default_menu(false);
     }
     let event_loop = match builder.build() {
@@ -77479,7 +77485,7 @@ fn main() -> Result<()> {
             }
         }
     };
-    let mut application = FolioApp::new(event_loop.create_proxy(), request, delegate);
+    let mut application = FolioApp::new(event_loop.create_proxy().into(), request, delegate);
     let outcome = event_loop
         .run_app(&mut application)
         .map_err(|error| anyhow!(error));
@@ -78373,9 +78379,7 @@ mod cross_window_drag_tests {
     /// and the layer being removed is the live one.
     #[test]
     fn a_rebuild_clears_the_old_layer_first() {
-        let rebuild = item_body(
-            &ItemQuery::method("TheDeviceAndItsWindows", "rebuild").of_trait("LostDevice"),
-        );
+        let rebuild = item_body(&ItemQuery::function("rebuild_every_native_surface"));
         assert!(
             rebuild.contains("window_surface_target(&window.window, &window.compositor)"),
             "the device-loss rebuild names a surface door of its own instead of the one \
@@ -78533,7 +78537,7 @@ mod cross_window_drag_tests {
         assert!(
             !found(
                 needle!(Pattern::text(
-                    "fn install_theme_class_background(window: &Window) {"
+                    "fn install_theme_class_background(window: &impl WindowHost) {"
                 )),
                 View::Raw
             )
@@ -79806,9 +79810,7 @@ mod palette_wiring_tests {
         // query says and the deleted reading could not — it took the first
         // `WindowEvent::Focused(false) => {` in the file, and the literal three
         // lines above is one of them.
-        let dispatch = item_body(
-            &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
-        );
+        let dispatch = item_body(&ItemQuery::method("FolioApp", "on_window_event"));
         let blur = dispatch
             .find("WindowEvent::Focused(false) => {")
             .expect("the window answers losing focus");
@@ -80240,53 +80242,6 @@ mod edit_menu_clipboard_tests {
         }
     }
 
-    /// PIN — **the four doors the Edit menu ends at are the keystroke's own**,
-    /// and the verb reaches the clipboard through none of its own.
-    ///
-    /// A second copy path would be a second answer to what a selection is worth
-    /// on the pasteboard; a second paste path would be a second place for the
-    /// sanitising, the bracketing and the multi-line policy to be decided. The
-    /// four doors named here are the four the two key handlers name. That the
-    /// menu reaches them — `menubar::run_clipboard_verb` over `Runtime`'s
-    /// `menubar::ClipboardDoors` — is driven behaviourally only up to the doors
-    /// (`a_copy_over_a_files_column_or_a_read_only_preview_takes_the_terminals_selection`);
-    /// `Runtime`'s own answer to them is unpinned, because no test builds a
-    /// `Runtime` (the D-95 class).
-    ///
-    /// MUTATION: read the pasteboard in `run_an_application_menu_verb` and
-    /// write the bytes itself — the last assertion goes red.
-    #[test]
-    fn the_edit_menus_clipboard_verbs_go_through_the_keystrokes_own_doors() {
-        let verb = method_body("Runtime", "run_an_application_menu_verb");
-        let editor = method_body("Runtime", "preview_key");
-        let ladder = ladder();
-        for (door, other, whose) in [
-            (
-                "self.copy_preview_selection()",
-                editor,
-                "the preview editor",
-            ),
-            ("self.paste_into_preview()", editor, "the preview editor"),
-            ("self.copy_selection()", ladder, "the terminal"),
-            ("self.paste_from_clipboard()", ladder, "the terminal"),
-        ] {
-            assert!(
-                other.contains(door),
-                "`{door}` is no longer what {whose} answers its own chord with"
-            );
-        }
-        for its_own in [
-            "write_terminal_clipboard_text",
-            "bt_platform::clipboard_text",
-        ] {
-            assert!(
-                !verb.contains(its_own),
-                "the Edit menu touches the pasteboard itself through `{its_own}` instead of \
-                 going through the door the keystroke uses"
-            );
-        }
-    }
-
     /// PIN — **a declined clipboard row runs on the window that has the
     /// keyboard**, through the same landing every other menu press lands at.
     ///
@@ -80517,16 +80472,15 @@ mod edit_menu_clipboard_tests {
     /// rung a field with a caret" (`ime_caret_source`), so a field added to the
     /// ladder is asked about without anyone writing it down. The settings
     /// dialog's fields ride the modal rung and are asked with its one extra fact.
-    /// The decision is the one both roads read — `keyboard_input`'s clipboard
-    /// rung and `run_an_application_menu_verb` — which the second half holds
-    /// them to, along with each upper field's own paste rung.
+    /// That the chord and Edit ▸ Paste both read this decision is driven on a
+    /// headless window by
+    /// `runtime::clipboard::tests::paste_goes_to_the_focused_field_and_never_to_the_shell_behind_it_by_either_road`.
     ///
     /// MUTATION: make `menubar::paste_seat` return `clipboard_seat(focus)`
     /// whatever the field — the find bar and the graph search rows answer
-    /// `Terminal` and go red; drop the `input::is_paste_shortcut` arm from
-    /// `git_menu_key` — the source half goes red.
+    /// `Terminal` and go red.
     #[test]
-    fn paste_goes_to_the_focused_field_and_never_to_the_shell_behind_it() {
+    fn every_field_on_the_ladder_takes_the_paste_and_the_shell_takes_only_its_own() {
         use super::{
             ImeCaretSource, ImeOwner, TextFieldSeat, ime_caret_source, text_field_holding,
         };
@@ -80607,83 +80561,6 @@ mod edit_menu_clipboard_tests {
             assert!(
                 fields_reached.contains(&field),
                 "{field:?} is never reached"
-            );
-        }
-
-        // The two roads read that one decision, and nothing else decides.
-        let ladder = ladder();
-        let rung = ladder
-            .find("menubar::paste_seat(self.clipboard_focus())")
-            .expect("the keystroke's paste asks the ladder's seat");
-        let terminal = ladder
-            .find("self.paste_from_clipboard()?;")
-            .expect("and the terminal is one of its answers");
-        assert!(
-            rung < terminal,
-            "the seat is asked before the shell is written to"
-        );
-        assert_eq!(
-            ladder.matches("self.paste_from_clipboard()").count(),
-            1,
-            "a second road to the terminal's paste in the ladder"
-        );
-        assert!(ladder.contains("self.paste_into_field(field)?;"));
-        // Edit ▸ Paste asks `menubar::paste_seat` inside `menubar::run_clipboard_verb`
-        // (the seat is pinned by `a_paste_reaches_the_terminal_only_while_the_shell_holds_the_keyboard`);
-        // `Runtime`'s call into the road is unpinned (the D-95 class).
-        let focus = method_body("Runtime", "clipboard_focus");
-        assert!(
-            focus.contains("ime_owner(self.keyboard_owner())"),
-            "the field is read off the ladder, not listed"
-        );
-        // The fields whose rungs stand above the clipboard rung take the same
-        // two chords themselves, through the same door or predicate.
-        for (handler, answer) in [
-            (
-                "git_menu_key",
-                "self.paste_into_field(TextFieldSeat::GitPrompt)?;",
-            ),
-            (
-                "settings_field_key",
-                "self.paste_into_field(TextFieldSeat::Settings)?;",
-            ),
-            (
-                "palette_key",
-                "input::is_paste_shortcut(&event.logical_key, self.window.modifiers)",
-            ),
-        ] {
-            assert!(
-                method_body("Runtime", handler).contains(answer),
-                "{handler} does not take the window's paste"
-            );
-        }
-        assert!(
-            item_body(&ItemQuery::function("rename_pastes")).contains("input::is_paste_shortcut("),
-            "the name box spells its own paste chord"
-        );
-        let door = method_body("Runtime", "paste_into_field");
-        let read = door
-            .find("bt_platform::clipboard_text()")
-            .expect("the door reads the clipboard");
-        let applied = door
-            .find("self.apply_clipboard_text_to_field(field, &text)")
-            .expect("the door applies its clipboard text");
-        assert!(
-            read < applied,
-            "the field apply step must follow the clipboard read"
-        );
-        let apply = method_body("Runtime", "apply_clipboard_text_to_field");
-        for insert in [
-            "self.search_ime(",
-            "self.graph_search_ime(",
-            "self.git_prompt_ime(",
-            "self.palette_ime(",
-            "self.rename_ime(",
-            "self.paste_into_settings_field(",
-        ] {
-            assert!(
-                apply.contains(insert),
-                "a field's paste skips its own insert: {insert}"
             );
         }
     }
@@ -80929,12 +80806,6 @@ mod summon_key_wiring_tests {
         item_body(&ItemQuery::method(owner, name))
     }
 
-    /// The body of one method of a trait's implementation — the platform's own
-    /// entry points, which are not inherent methods of anything.
-    fn trait_method_body(owner: &str, trait_name: &str, name: &str) -> &'static str {
-        item_body(&ItemQuery::method(owner, name).of_trait(trait_name))
-    }
-
     /// RED (§7.54d) — **`is_synthetic` is carried from winit's event to the
     /// gate, and the gate is the first statement in the ladder.**
     ///
@@ -80954,7 +80825,7 @@ mod summon_key_wiring_tests {
     /// terminal it calls up.
     #[test]
     fn the_synthetic_bit_reaches_the_gate_and_the_gate_stands_first() {
-        let dispatch = trait_method_body("FolioApp", "ApplicationHandler", "window_event");
+        let dispatch = method_body("FolioApp", "on_window_event");
         assert!(
             dispatch.contains("runtime.keyboard_input(&event, is_synthetic)"),
             "the dispatch arm drops the bit that says whether this was a keystroke"
@@ -80963,7 +80834,7 @@ mod summon_key_wiring_tests {
             .strip_prefix('{')
             .expect("a body is its braces and what is between them");
         let gate = ladder
-            .find("if !input::is_a_keystroke(event.state, is_synthetic) {")
+            .find("if !input::is_a_keystroke(event.pressed, is_synthetic) {")
             .expect("the ladder opens with the gate");
         let first = ladder
             .lines()
@@ -81092,109 +80963,6 @@ mod live_markdown_edit_tests {
         found.in_the_product(index).len()
     }
 
-    /// **Entering is one door and it does all five things** (T5 ①).
-    ///
-    /// The caret moves, the page's other selection model lets go (research §10
-    /// Q3: two anchors on one surface are two answers to "what is selected"), the
-    /// page starts drawing the caret's block as source, the press that was
-    /// waiting for a body is spent, and the keyboard arrives. A second entrance
-    /// that remembered four of the five would leave a surface drawing a source
-    /// block nothing can be typed into.
-    #[test]
-    fn entering_writes_all_five_things_in_one_place() {
-        let door = method_body("Runtime", "seat_preview_caret");
-        for promise in [
-            "caret.place(&content, offset, extend)",
-            "pane.select(None)",
-            "pane.enter_page()",
-            "self.preview_edit_focus = Some(surface)",
-        ] {
-            assert!(
-                door.contains(promise),
-                "entering no longer does `{promise}`"
-            );
-        }
-        assert_eq!(
-            in_product_items(&found(
-                needle!(Pattern::text("pane.enter_page()")),
-                View::Raw
-            )),
-            1,
-            "one entrance, counted here on purpose — a second is a ruling and \
-             not an edit",
-        );
-    }
-
-    /// **Leaving is one door and three gestures reach it** (T5 ③ as the owner
-    /// reversed it, 2026-09-10).
-    ///
-    /// `Esc`, a press on the page's empty ground, and this surface losing the
-    /// keyboard to a press somewhere else: all three put the source block back
-    /// into prose, and all three keep the caret. The earlier ruling had only the
-    /// first — a page that re-flowed itself every time a hand left it would move
-    /// while nobody was looking at it — and it left a reader who had clicked
-    /// away looking at one paragraph still wearing its markup.
-    ///
-    /// **Counted rather than described**, for the entrance's own reason: one
-    /// door means `md_caret = false` is written once, in the view's own door
-    /// that [`Runtime::leave_preview_page`] reaches; the door that hands a pane
-    /// a different file takes the whole view with the document. A second
-    /// spelling of it is a ruling and not an edit.
-    ///
-    /// **The ground's gesture is now spent at the release** (owner's ruling
-    /// 2026-09-21), which moves *when* it reaches this door and not which door
-    /// it reaches: the press records `Pressed::Ground` and
-    /// [`Runtime::spend_preview_press`] is what leaves.
-    ///
-    /// MUTATION ①: drop the `leave_preview_page` call from the blur check and
-    /// clicking into the terminal beside the pane leaves the block as source.
-    /// MUTATION ②: key the empty-ground arm on `placing` instead of `caret_at`
-    /// and a press on a link renders the page it is standing in.
-    #[test]
-    fn leaving_is_one_door_that_escape_the_ground_and_a_blur_all_reach() {
-        for (name, what) in [
-            ("preview_key", "`Esc`"),
-            (
-                "spend_preview_press",
-                "a press on the page's empty ground, spent at the release",
-            ),
-            (
-                "chrome_mouse_input",
-                "losing the keyboard to a press elsewhere",
-            ),
-        ] {
-            assert!(
-                method_body("Runtime", name).contains("leave_preview_page("),
-                "{what} no longer renders the page again",
-            );
-        }
-        assert!(
-            method_body("Runtime", "press_preview_text").contains("live && caret_at.is_none()"),
-            "empty ground is a press that named no byte of the file — asked of \
-             `caret_at`, because a press on a link names one and is the link's",
-        );
-        assert!(
-            method_body("Runtime", "leave_preview_buffer_in").contains(".leave_document()"),
-            "and handing this surface a different file still leaves the page: \
-             the view, and whether its caret stands on the page, go with the \
-             document",
-        );
-        assert_eq!(
-            in_product_items(&found(
-                needle!(Pattern::text("md_caret = false")),
-                View::Raw
-            )),
-            1,
-            "one door, counted here on purpose; the file swap takes the whole \
-             view with the document",
-        );
-        assert!(
-            !method_body("Runtime", "leave_preview_page").contains("pane.caret ="),
-            "and leaving keeps the caret: it is a byte offset, and the flip to \
-             the source face finds it where this left it",
-        );
-    }
-
     /// **The float gets the caret by the dispatch line it already had** (T5 ⑤,
     /// research §10 Q8, the precedent §7.31 ⑥ set).
     ///
@@ -81274,105 +81042,6 @@ mod live_markdown_edit_tests {
         );
     }
 
-    /// **One selection model on the rendered face** (T5 ④, research §10 Q3,
-    /// ruled).
-    ///
-    /// Two readers of "what is selected here" — the clipboard and the highlight —
-    /// and each of them asks the caret first and the piece model only when there
-    /// is no caret. A reader that asked the other way round would copy one range
-    /// and draw another.
-    #[test]
-    fn the_caret_answers_before_the_piece_selection_everywhere() {
-        for (name, first, second) in [
-            (
-                "preview_selected_text",
-                "self.preview_live_caret(surface)",
-                "pane.md_select().copied()?",
-            ),
-            (
-                "preview_caret_selection_places",
-                "self.preview_live_caret(surface)?",
-                "preview_provenance::place_of(",
-            ),
-        ] {
-            let text = method_body("Runtime", name);
-            let one = text
-                .find(first)
-                .unwrap_or_else(|| panic!("`Runtime::{name}` no longer asks `{first}`"));
-            let two = text
-                .find(second)
-                .unwrap_or_else(|| panic!("`Runtime::{name}` no longer reaches `{second}`"));
-            assert!(
-                one < two,
-                "`Runtime::{name}` asks the two in the wrong order"
-            );
-        }
-        assert!(
-            method_body("Runtime", "preview_selected_text").contains("caret.selected(content)"),
-            "and a caret selection copies the file's own bytes",
-        );
-    }
-
-    /// RED — **(a) a press on a rendered page changes no block's face** (owner's
-    /// report and ruling 2026-09-21, as its closure review narrowed it).
-    ///
-    /// The whole of the report, held where a machine with no screen can hold it:
-    /// the press's own body carries none of the writes that change a page's
-    /// face. It records what it would do ([`super::preview_press::Pressed`]) and
-    /// arms the gesture; the release spends the record.
-    ///
-    /// **The one press it answers where it stands is the one that changes
-    /// nothing** — inside the seat the page is already drawing from, where
-    /// putting the caret leaves every block's face as it is. That is why the
-    /// spend below is pinned *with its guard*: a spend without it is the 0.4.3
-    /// timing back again.
-    ///
-    /// RED GATE: it was red on the shipped 0.4.3 build, where the press placed
-    /// the caret itself (`place_preview_caret_on`) and widened it
-    /// (`widen_preview_caret`) — which is the paragraph that put its marks back
-    /// the instant the button went down.
-    ///
-    /// MUTATION: drop `in_the_seat &&` from the spend below and this goes red
-    /// while every value test in [`super::preview_press`] stays green, which is
-    /// the shape of this defect exactly: the rule was right and the moment was
-    /// wrong.
-    #[test]
-    fn a_press_on_a_rendered_page_changes_no_blocks_face() {
-        let press = method_body("Runtime", "press_preview_text");
-        for wrote in [
-            "self.place_preview_caret_on(",
-            "self.seat_preview_caret(",
-            "self.widen_preview_caret(",
-            "self.leave_preview_page(",
-            "want_caret_at(Some(",
-        ] {
-            assert!(
-                !press.contains(wrote),
-                "the press still does `{wrote}` itself, so the block under the \
-                 pointer changes face while the button is down",
-            );
-        }
-        assert_eq!(
-            press.matches("self.spend_preview_press(").count(),
-            1,
-            "the press spends more than the one gesture that changes nothing",
-        );
-        assert!(
-            press.contains("if in_the_seat && let Some(pressed) = pressed {"),
-            "the press's own spend is no longer guarded by the seat, so every \
-             press is answered where it stands — the 0.4.3 timing",
-        );
-        for records in [
-            "preview_press::Pressed::byte(offset, grain, shift)",
-            "preview_press::Pressed::Ground",
-        ] {
-            assert!(
-                press.contains(records),
-                "the press no longer records `{records}` for the release to spend",
-            );
-        }
-    }
-
     /// RED — **(b) and (c): the release is where a gesture is answered, and the
     /// drag takes the caret nowhere its seat does not already reach** (owner's
     /// ruling 2026-09-21 and its closure review).
@@ -81417,47 +81086,6 @@ mod live_markdown_edit_tests {
             drag.contains("drag.reached = Some(offset)"),
             "the drag no longer remembers where it got to, so a button that comes \
              up off the page collapses the selection it drew",
-        );
-    }
-
-    /// RED — **(d) a repeated press keeps its grain until the release, and (f)
-    /// a page still buying its file keeps its caret owed.**
-    ///
-    /// Both are the record carrying what the press knew: the repeat count is a
-    /// property of the press and of nothing else, and so is the byte a press on
-    /// a half-loaded page named. `md_caret_wanted` is counted rather than
-    /// described, for the entrance's own reason — it is written in exactly one
-    /// place, which is now the spend, and read in exactly one, which is
-    /// [`Runtime::settle_preview_caret`].
-    #[test]
-    fn the_grain_and_the_owed_caret_both_ride_on_the_record() {
-        let press = method_body("Runtime", "press_preview_text");
-        assert!(
-            press.contains("let grain = preview_text_grain(clicks);"),
-            "the press no longer classifies the repeat count it is recording",
-        );
-        let spend = method_body("Runtime", "spend_preview_press");
-        assert!(
-            spend.contains("self.widen_preview_caret(surface, grain)"),
-            "the release no longer grows the caret to the grain the press asked \
-             for, so a double click takes a character",
-        );
-        assert!(
-            spend.contains("want_caret_at(Some(offset))"),
-            "a press on a page still waiting for its file no longer keeps the \
-             caret it asked for",
-        );
-        assert_eq!(
-            in_product_items(&found(
-                needle!(Pattern::text("want_caret_at(Some(")),
-                View::Raw
-            )),
-            1,
-            "one place owes the caret, counted here on purpose",
-        );
-        assert!(
-            method_body("Runtime", "settle_preview_caret").contains("md_caret_wanted"),
-            "and nothing spends it when the body lands",
         );
     }
 
@@ -81716,57 +81344,6 @@ mod refused_preview_card_tests {
             "the window's card button is hit from a second reading of what is refused"
         );
     }
-
-    /// RED — **pressing it runs the verb the unknown page's button runs.**
-    ///
-    /// One door out of this window and no second launcher: the press names a
-    /// surface, the surface names a file — through the picture lane as well as
-    /// the buffer, because a picture is not a buffer — and the file goes to
-    /// `open_local_path`, which is where `bt_platform`'s own refusals live.
-    ///
-    /// RED GATE: `open_preview_externally` reached for a buffer, and a surface
-    /// showing a picture has none. A button drawn on a refused picture would
-    /// have stood over a verb that did nothing at all.
-    #[test]
-    fn pressing_the_button_on_a_refused_page_runs_the_same_verb_as_the_unknown_page() {
-        // The pane's button and the window's reach the same verb.
-        assert!(
-            method_body("Runtime", "chrome_mouse_input")
-                .contains(concat!("ChromeTarget::", "PreviewOpenButton(_) => {")),
-            "the pane's card button no longer takes a press"
-        );
-        assert!(
-            method_body("Runtime", "open_preview_externally")
-                .contains(concat!("open_preview_externally_on", "(")),
-            "the pane's button has grown a second verb of its own"
-        );
-        assert!(
-            method_body("Runtime", "press_float").contains(concat!(
-                "open_preview_externally_on(",
-                "PreviewSurface::Float(id))"
-            )),
-            "the window's card button no longer reaches the pane's verb"
-        );
-        // And that one verb names the file through both lanes.
-        let verb = method_body("Runtime", "open_preview_externally_on");
-        assert!(
-            verb.contains(concat!("preview_file_on(", "surface)"))
-                && verb.contains(concat!("open_path_in_default_app", "(")),
-            "the verb no longer asks this surface for its file, or no longer hands it over"
-        );
-        let file = method_body("Runtime", "preview_file_on");
-        assert!(
-            file.contains(concat!("preview_buffer_on(", "surface)"))
-                && file.contains(concat!("preview_picture(", "surface)")),
-            "the file question misses one of the two lanes, so one kind of card presses nothing"
-        );
-        // One launcher, and it is the door it has always been.
-        assert!(
-            method_body("Runtime", "open_path_in_default_app")
-                .contains(concat!("open_local_path", "_ask(path)")),
-            "the card's button no longer goes through this window's one door"
-        );
-    }
 }
 
 /// **Every field in this window asks whether a press is typing before it types**
@@ -81828,11 +81405,6 @@ mod field_command_tests {
     /// The body of one inherent method of `owner`.
     fn method_body(owner: &str, name: &str) -> &'static str {
         item_body(&ItemQuery::method(owner, name))
-    }
-
-    /// The body of one method of `owner`'s implementation of `trait_name`.
-    fn trait_method_body(owner: &str, trait_name: &str, name: &str) -> &'static str {
-        item_body(&ItemQuery::method(owner, name).of_trait(trait_name))
     }
 
     /// The body of one free function of this crate.
@@ -81944,7 +81516,7 @@ mod field_command_tests {
     /// composing characters the reader asked it not to.
     #[test]
     fn the_option_policy_is_applied_at_one_door() {
-        let dispatch = trait_method_body("FolioApp", "ApplicationHandler", "window_event");
+        let dispatch = method_body("FolioApp", "on_window_event");
         assert!(
             dispatch.contains(concat!("input::", "effective_modifiers(")),
             "the modifier door takes winit's answer without applying the Option ruling"
@@ -82349,7 +81921,7 @@ mod clipboard_path_tests {
         );
         let paste = method_body("Runtime", "paste_from_clipboard_into");
         let read = paste
-            .find("bt_platform::clipboard_payload()")
+            .find("self.window.window.clipboard_payload()")
             .expect("the terminal door reads the clipboard");
         let applied = paste
             .find("self.apply_clipboard_payload(target, payload)")
@@ -82569,15 +82141,13 @@ mod clipboard_path_tests {
         }
         // The arm is not an item; the item it stands in is `window_event`, which
         // `FolioApp` reaches through winit's own trait.
-        let arm = item_body(
-            &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
-        )
-        .split_once("            WindowEvent::DroppedFile(path) => {")
-        .expect("the dispatcher answers a dropped file")
-        .1
-        .split_once("            WindowEvent::Resized(size)")
-        .expect("and the arm is closed by the one after it")
-        .0;
+        let arm = item_body(&ItemQuery::method("FolioApp", "on_window_event"))
+            .split_once("            WindowEvent::DroppedFile(path) => {")
+            .expect("the dispatcher answers a dropped file")
+            .1
+            .split_once("            WindowEvent::Resized(size)")
+            .expect("and the arm is closed by the one after it")
+            .0;
         assert!(
             !arm.contains("paste"),
             "the arm collects; pasting from it would be one command line per file"
@@ -84011,9 +83581,7 @@ mod printed_path_provenance_tests {
         // The modifier's door is in the event loop rather than in a method of the window, so the
         // arm is cut out of `window_event`'s own body — which is an identity of this crate and
         // not a prefix of a file that used to run to its end.
-        let loop_body = item_body(
-            &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
-        );
+        let loop_body = item_body(&ItemQuery::method("FolioApp", "on_window_event"));
         let at = loop_body
             .find("WindowEvent::ModifiersChanged(modifiers) => {")
             .expect("the one door every modifier state comes through");
@@ -84380,37 +83948,6 @@ mod printed_path_provenance_tests {
         assert!(resolved.ends_with("docs"), "{}", resolved.display());
 
         let _ = std::fs::remove_dir_all(&directory);
-    }
-
-    /// GUARD (closure review r6, B-2; re-pointed by CC-4) — **the open door is asked about the name
-    /// `main` asked it about, and the resolved name is the doors' own transform.**
-    ///
-    /// `main`'s Windows `open_local_path` reads `names_a_program` off the *printed* spelling —
-    /// there is no `canonicalize` in that door at all. For one round the branch handed it the
-    /// resolved name instead, which is a different question about a symlink and a refusal `main`
-    /// does not make. Its subject is how `Runtime::activate_hyperlink` and
-    /// `run_path_verify_worker` are written (CONVENTIONS, "A test pins behaviour by running it").
-    ///
-    /// MUTATION: hand `bt_term::verify_path` a raw `canonicalize` in `run_path_verify_worker`
-    /// instead of `bt_platform::resolved_for_a_door`, and the last assertion goes red.
-    #[test]
-    fn the_open_door_is_handed_the_printed_name_and_the_reveal_the_resolved_one() {
-        let press = method_body("Runtime", "activate_hyperlink");
-        let open = press
-            .find("self.open_local_path_verified(&path, facts)?;")
-            .expect("the open door is handed the path as printed");
-        let reveal = press
-            .find("self.reveal_verified(&path, facts)?;")
-            .expect("and so is the reveal, which takes the resolved name off the target");
-        assert!(open < reveal, "the file arm stands before the folder arm");
-        // And the resolved name is the doors' own transform, not a second reading of it: the
-        // path-verification lane hands `bt_term::verify_path` the door's own function as its
-        // resolver (CC-4; `bt-term` names no platform function itself).
-        let door = "bt_platform::resolved_for_a_door";
-        assert!(
-            free_fn_body("run_path_verify_worker").contains(door),
-            "the worker produces the door's input with the door's own function"
-        );
     }
 
     /// RED (audit 3 C-2) — **one resolution per subject, however many readers ask.**

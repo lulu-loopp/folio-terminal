@@ -7,13 +7,14 @@
 //! here, so the step's client point reaches the rest of the program only as
 //! the pointer move and the wheel report this module makes of it.
 
+use crate::window_seam::LoopProxy;
+use crate::window_seam::prelude::*;
 use crate::{AppEvent, Runtime, diagnostics};
 use anyhow::Result;
 use std::cell::RefCell;
 use std::rc::Rc;
 use winit::dpi::PhysicalPosition;
 use winit::event::MouseScrollDelta;
-use winit::event_loop::EventLoopProxy;
 
 /// **Hand this window's touch input to the system that already knows what to do
 /// with it** (owner ruling 2026-09-21), and say so once when a finger arrives.
@@ -46,7 +47,7 @@ use winit::event_loop::EventLoopProxy;
 /// wake buys. The slot it parks in is returned, for the window runtime to own.
 pub(crate) fn let_the_system_translate_touch(
     native: bt_platform::NativeWindow,
-    proxy: &EventLoopProxy<AppEvent>,
+    proxy: &LoopProxy,
 ) -> ParkedPans {
     let parked = ParkedPans::default();
     let panned = {
@@ -106,7 +107,7 @@ pub(crate) fn pan_on_the_wheel_road(
     (pointer, wheel)
 }
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **The pans the touch door parked, put on the wheel's road** (0.4.4
     /// ticket 11).
     ///

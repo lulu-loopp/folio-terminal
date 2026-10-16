@@ -2,8 +2,8 @@
 //! `owner_door`, written in the crate root's scope rather than in the
 //! module's own, with their shared fixtures from [`crate::test_support`].
 
-use crate::test_support::{found, reader_names, source};
-use bt_source::{Pattern, View, needle};
+use crate::test_support::{found, found_in, reader_names, source};
+use bt_source::{Pattern, Scope, View, needle};
 
 /// RED (49) — **Only one function in bt-app calls a native title setter.**
 ///
@@ -31,6 +31,17 @@ fn only_one_function_in_bt_app_calls_window_set_title() {
         "{}",
         calls.report(source())
     );
-    assert_eq!(calls.len(), 4, "{}", calls.report(source()));
+    // **The window seam's mirrors are the native call's own address** (T-HEADLESS-RUNTIME-SEAM):
+    // `WindowHost::set_title` and `FrameDoor::set_title` are each declared once and implemented
+    // once for the product by the one native call they stand for — six spellings, and none of
+    // them a road of its own.
+    let seam = found_in(
+        needle!(Pattern::call("set_title")),
+        View::Identifiers,
+        Scope::Module("crate::window_seam".to_owned()),
+    )
+    .in_the_product(source());
+    assert_eq!(seam.len(), 6, "{}", seam.report(source()));
+    assert_eq!(calls.len(), 4 + seam.len(), "{}", calls.report(source()));
     assert_eq!(calls.outside_items(source()), 0);
 }

@@ -77,9 +77,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
+use crate::window_seam::LoopProxy;
 use anyhow::{Context, Result};
 use bt_platform::DirChange;
-use winit::event_loop::EventLoopProxy;
 
 use crate::AppEvent;
 
@@ -477,7 +477,7 @@ impl IndexWorker {
     /// Below-normal priority, like every other answering thread in this process:
     /// an index that arrives a moment late costs a palette one frame of "still
     /// looking", while a frame that arrives late costs the person their cursor.
-    pub fn spawn(proxy: EventLoopProxy<AppEvent>) -> Result<Self> {
+    pub fn spawn(proxy: LoopProxy) -> Result<Self> {
         let (request_tx, request_rx) = mpsc::channel::<IndexRequest>();
         let (response_tx, response_rx) = mpsc::channel::<IndexResponse>();
         bt_platform::spawn_at_priority(

@@ -10,13 +10,15 @@
 
 use bt_platform::admission::{WaitToken, doors};
 use winit::dpi::{Position, Size};
-use winit::window::{Cursor, Window};
+use winit::window::Cursor;
+
+use crate::window_seam::{FrameDoor, WindowHost};
 
 /// The native title write — row 14's residue, written only by `Runtime::flush_title`.
 pub(crate) fn set_title(
     token: WaitToken<'_, doors::TitleFlush>,
-    window: &Window,
-    frame: &bt_platform::CustomWindowFrame,
+    window: &impl WindowHost,
+    frame: &impl FrameDoor,
     title: &str,
 ) {
     let _ = token;
@@ -29,7 +31,7 @@ pub(crate) fn set_title(
 /// `Runtime::apply_ime_cursor_area`.
 pub(crate) fn set_ime_cursor_area(
     token: WaitToken<'_, doors::ImeCaretArea>,
-    window: &Window,
+    window: &impl WindowHost,
     position: Position,
     size: Size,
 ) {
@@ -38,20 +40,28 @@ pub(crate) fn set_ime_cursor_area(
 }
 
 /// `Window::focus_window` (§5.2), asked only by `Runtime::open_from_notification`.
-pub(crate) fn focus_window(token: WaitToken<'_, doors::FocusWindow>, window: &Window) {
+pub(crate) fn focus_window(token: WaitToken<'_, doors::FocusWindow>, window: &impl WindowHost) {
     let _ = token;
     window.focus_window();
 }
 
 /// `Window::set_visible` (§5.2): shown by `Runtime::put_the_window_on_the_glass`, hidden by
 /// `Runtime::hide_quake_window` and `Runtime::let_go_of_this_window`.
-pub(crate) fn set_visible(token: WaitToken<'_, doors::SetVisible>, window: &Window, visible: bool) {
+pub(crate) fn set_visible(
+    token: WaitToken<'_, doors::SetVisible>,
+    window: &impl WindowHost,
+    visible: bool,
+) {
     let _ = token;
     window.set_visible(visible);
 }
 
 /// `Window::set_cursor` (§5.2), set only by `Runtime::apply_pointer_cursor`.
-pub(crate) fn set_cursor(token: WaitToken<'_, doors::SetCursor>, window: &Window, cursor: Cursor) {
+pub(crate) fn set_cursor(
+    token: WaitToken<'_, doors::SetCursor>,
+    window: &impl WindowHost,
+    cursor: Cursor,
+) {
     let _ = token;
     window.set_cursor(cursor);
 }

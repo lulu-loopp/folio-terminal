@@ -1,12 +1,13 @@
 //! `i18n` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::window_seam::prelude::*;
 use crate::{ApplicationChange, Runtime, i18n, resolved_language};
 use anyhow::Result;
 use bt_render::{FrameSource, FrameTrigger};
 use std::time::Instant;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **The window's language, changed while the window is up** (§7.1.6c-3c).
     ///
     /// It used to be the one setting whose effect was not on screen when it was

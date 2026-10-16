@@ -1261,8 +1261,8 @@ fn a_caret_in_a_pane_reaches_winit_as_window_pixels_from_the_cell_it_stands_on()
 
 /// The keyboard road's measurement for a terminal whose prompt the reader has scrolled away
 /// from: the composed frame of a real session, measured by [`terminal_ime_cursor_area`] — the
-/// call `Runtime::offer_ime_caret` and the `IME_DRAW` trace make — at real metrics, in a seat
-/// with an origin. The input method is told the cell at the pane's bottom edge in the cursor's
+/// call `Runtime::offer_ime_caret` and the `IME_DRAW` trace make — through the headless glass
+/// (the window seam's `Glass`) at its measured metrics, in a seat with an origin. The input method is told the cell at the pane's bottom edge in the cursor's
 /// column, carried to the window's axis; never the history line on the presentation row that
 /// shares the cursor's grid row index.
 ///
@@ -1270,8 +1270,20 @@ fn a_caret_in_a_pane_reaches_winit_as_window_pixels_from_the_cell_it_stands_on()
 /// `bt_viewport`'s `continuous_frame` — the rectangle is measured on presentation row 1.
 #[test]
 fn an_ime_caret_for_a_scrolled_away_cursor_is_not_an_unrelated_row() {
-    let mut fonts = bt_render::preview_measure_font_system();
-    let metrics = bt_render::CellMetrics::measure(&mut fonts, 1.0).unwrap();
+    let mut glass = crate::headless::HeadlessGlass::new(
+        &crate::headless::HeadlessDevice::new(14.0),
+        crate::headless::Ledger::default(),
+        (1920, 1200),
+        1.0,
+    );
+    let seat = SeatViewport {
+        x: 976,
+        y: 40,
+        width: 944,
+        height: 1160,
+    };
+    glass.set_seat_viewport(seat);
+    let metrics = glass.base_metrics();
     let mut session =
         bt_term::DualPlaneSession::new(NonZeroU32::new(20).unwrap(), NonZeroU32::new(4).unwrap());
     let mut bytes = String::new();
@@ -1296,13 +1308,7 @@ fn an_ime_caret_for_a_scrolled_away_cursor_is_not_an_unrelated_row() {
         }),
     )
     .unwrap();
-    let seat = SeatViewport {
-        x: 976,
-        y: 40,
-        width: 944,
-        height: 1160,
-    };
-    let area = terminal_ime_cursor_area(seat, metrics, &composed.frame);
+    let area = terminal_ime_cursor_area(&glass, metrics, &composed.frame);
 
     let edge = frame.row_map[frame.grid_rows.get() as usize - 1];
     let edge_top =

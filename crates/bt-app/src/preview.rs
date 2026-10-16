@@ -32,9 +32,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::SystemTime;
 
+use crate::window_seam::LoopProxy;
 use anyhow::{Context, Result};
 use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
-use winit::event_loop::EventLoopProxy;
 use winit::window::WindowId;
 
 use crate::document_request::{DocumentAnswer, DocumentJob, KeptFile, Outcome, Refusal};
@@ -9033,7 +9033,7 @@ pub struct PreviewWorker {
 }
 
 impl PreviewWorker {
-    pub fn spawn(proxy: EventLoopProxy<AppEvent>) -> Result<Self> {
+    pub fn spawn(proxy: LoopProxy) -> Result<Self> {
         let (request_tx, request_rx) = mpsc::channel::<PreviewRequest>();
         let (response_tx, response_rx) = mpsc::channel::<PreviewResponse>();
         bt_platform::spawn_at_priority(

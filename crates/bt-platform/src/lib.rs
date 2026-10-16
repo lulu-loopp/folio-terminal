@@ -20878,44 +20878,14 @@ mod macos_window_backend_tests {
         );
     }
 
-    /// RED — **a dark-mode change arrives on the window thread, through
-    /// winit.**
-    ///
-    /// The rule X-4 wrote down for every AppKit callback in this port: never do
-    /// the work inside the handler, hand it to the loop. The watch's three
-    /// callbacks therefore call the wake and nothing else, and the wake
-    /// `bt-app` hands in is one `EventLoopProxy::send_event` — winit's user
-    /// event channel, delivered on the thread that owns the window. The other
-    /// half of the rope is in `bt-app`, where that event re-reads the
-    /// appearance (`the_system_preference_event_re_reads_the_desktops_canvas`).
-    ///
-    /// MUTATION: read the appearance inside `observe_value` and this names it.
+    /// GUARD (kept, T-HEADLESS-RUNTIME-SEAM round 2) — **one Objective-C class owns the
+    /// system-settings callbacks, and it has one value callback.** What the callback does is
+    /// driven on macOS (`macos_impl::tests::the_appearance_callback_only_nudges_the_loop`); that
+    /// there is no second class answering the same notifications, and no second key-value
+    /// callback beside the one driven, is a count of declarations in the source — so these two
+    /// counts, and only these, are read from it, on every platform.
     #[test]
-    fn dark_mode_changes_arrive_on_the_window_thread_through_winit() {
-        assert_eq!(
-            source_test::found(
-                Needle::new(Pattern::text(
-                    "if key_path == Some(ns_string!(\"effectiveAppearance\")) {\n                (self.ivars().0)(crate::SystemNews::Preferences);\n            }",
-                )),
-                View::CodeKeepingLiterals,
-                Scope::Module("crate::macos_impl".to_owned()),
-            )
-            .len(),
-            1,
-            "the observer does not limit itself to nudging the loop"
-        );
-        assert!(
-            !source_test::found(
-                Needle::new(Pattern::identifier(
-                    "addObserver_forKeyPath_options_context"
-                )),
-                View::Identifiers,
-                Scope::Module("crate::macos_impl".to_owned()),
-            )
-            .in_the_product(source_test::index())
-            .is_empty(),
-            "nothing is observed, so nothing can arrive"
-        );
+    fn one_class_owns_the_system_settings_callbacks_with_one_value_callback() {
         let observer_classes: Vec<_> = source_test::index()
             .macros()
             .iter()
@@ -20932,61 +20902,16 @@ mod macos_window_backend_tests {
             "one Objective-C class owns the system-settings callbacks"
         );
         let observer_class = observer_classes[0].tokens();
-        let callback = source_test::found(
+        let callbacks = source_test::found(
             Needle::new(Pattern::identifier("observe_value")),
             View::Identifiers,
             Scope::Module("crate::macos_impl".to_owned()),
-        );
-        let callbacks: Vec<_> = callback
-            .spans()
-            .into_iter()
-            .filter(|span| span.within(observer_class))
-            .collect();
-        assert_eq!(callbacks.len(), 1, "the observer has one value callback");
-        let callback = callbacks[0];
-        let tail = &source_test::index().union()[callback.end()..observer_class.end()];
-        let opening = tail.find('{').expect("the callback has a body");
-        let mut depth = 0usize;
-        let mut callback_end = None;
-        for (offset, character) in tail[opening..].char_indices() {
-            match character {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        callback_end = Some(callback.end() + opening + offset + 1);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let callback_end = callback_end.expect("the callback body closes");
-        for (pattern, forbidden) in [
-            (
-                Pattern::call("effectiveAppearance"),
-                "effectiveAppearance()",
-            ),
-            (
-                Pattern::identifier("appearance_is_light"),
-                "appearance_is_light",
-            ),
-            (Pattern::identifier("NSScreen"), "NSScreen"),
-        ] {
-            let inside_callback = source_test::found(
-                Needle::new(pattern),
-                View::Identifiers,
-                Scope::Module("crate::macos_impl".to_owned()),
-            )
-            .spans()
-            .into_iter()
-            .any(|span| span.start() >= callback.end() && span.end() <= callback_end);
-            assert!(
-                !inside_callback,
-                "the observer reads `{forbidden}` inside AppKit's own delivery instead of on the \
-                 loop's next turn"
-            );
-        }
+        )
+        .spans()
+        .into_iter()
+        .filter(|span| span.within(observer_class))
+        .count();
+        assert_eq!(callbacks, 1, "the observer has one value callback");
     }
 }
 

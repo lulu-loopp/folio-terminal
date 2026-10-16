@@ -1359,7 +1359,7 @@ fn with_the_restore_card_up_ctrl_v_pastes_nothing_into_the_shell() {
             panic!("the clipboard door does not ask who holds the keyboard:\n{door}")
         });
     let read = door
-        .find("bt_platform::clipboard_payload()")
+        .find("self.window.window.clipboard_payload()")
         .expect("the door reads the clipboard");
     let applied = door
         .find("self.apply_clipboard_payload(target,payload)")
