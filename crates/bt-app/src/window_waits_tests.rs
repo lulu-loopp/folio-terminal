@@ -9797,18 +9797,9 @@ fn a_receiver_trait_chained_past_the_hop_limit_is_refused() {
         "ww-cutoff-receiver",
         "
 pub struct Shape;
-
-impl chain::Link3 for Shape {
-    fn prepare(&self) {}
-}
-
-pub fn near_shape(driver: &dyn chain::Link3) {
-    driver.prepare();
-}
-
-pub fn far_shape(driver: &dyn Link20) {
-    driver.prepare();
-}
+impl chain::Link3 for Shape { fn prepare(&self) {} }
+pub fn near_shape(driver: &dyn chain::Link3) { driver.prepare(); }
+pub fn far_shape(driver: &dyn Link20) { driver.prepare(); }
 ",
     );
     assert_eq!(
@@ -9837,11 +9828,7 @@ fn a_supertrait_chained_past_the_hop_limit_is_refused() {
     let world = planted_world(
         "ww-cutoff-supertrait",
         "
-pub trait Far: Link20 {
-    fn far_default(&self) {
-        self.prepare();
-    }
-}
+pub trait Far: Link20 { fn far_default(&self) { self.prepare(); } }
 ",
     );
     named_in_shape(&world, "far_default", "prepare");
@@ -9866,10 +9853,7 @@ fn an_impl_of_a_trait_chained_past_the_hop_limit_is_refused() {
         "ww-cutoff-impl",
         "
 pub struct Shape;
-
-impl Link20 for Shape {
-    fn prepare(&self) {}
-}
+impl Link20 for Shape { fn prepare(&self) {} }
 ",
     );
 }
