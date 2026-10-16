@@ -2755,7 +2755,8 @@ impl PowerShellProfileFallback {
             | Self::Enabled
             | Self::NoProfile
             | Self::Unsupported
-            | Self::Constrained => None,
+            | Self::Constrained
+            | Self::NotRun => None,
         }
     }
 }
@@ -3063,14 +3064,25 @@ fn file_observation(
     true
 }
 
-/// **What has been heard from a question asked in the background**: nothing yet, a failure (the
-/// question was asked and got no answer), or the answer. A failure is not an answer about the
-/// row, and the row says so (release read m2).
+/// **What has been heard from a question asked in the background**: nothing yet, a failure, or
+/// the answer. A failure is not an answer about the row, and the row says so (release read m2);
+/// it carries why nothing was heard ([`Unanswered`]), so the row can say that too.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Heard<T> {
     NotYet,
-    Failed,
+    Failed(Unanswered),
     Answer(T),
+}
+
+/// **Why a question asked in the background was not answered.**
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Unanswered {
+    /// It was asked and got no answer: the shell did not answer in time, or the account's
+    /// environment could not be read.
+    NoAnswer,
+    /// The worker that asks it could not run — the thread door refused its start, or it ended
+    /// (a panic) before it answered (T-OBSERVATION-REFUSAL-ON-THE-PAGE). Nothing was asked.
+    NotRun,
 }
 
 /// What an uncomposable PowerShell row can honestly offer on the Profiles page.
@@ -3104,6 +3116,11 @@ pub enum PowerShellProfileFallback {
     /// asked and got no answer; the next visit to the Profiles page asks again
     /// ([`PolicyCause::Undetermined`]).
     Undetermined,
+    /// **The edition's observation could not run** ([`Unanswered::NotRun`]): the thread door
+    /// refused its worker, or the worker ended before it answered for this edition. Nothing was
+    /// asked, so nothing is claimed and nothing offered, and the row says the check could not
+    /// run; the next visit to the Profiles page asks again (T-OBSERVATION-REFUSAL-ON-THE-PAGE).
+    NotRun,
     /// This platform has no `$PROFILE` probe ([`PROFILE_PROBE_EXISTS`]), so nothing is observed
     /// and nothing is offered.
     Unsupported,
@@ -3159,7 +3176,7 @@ pub fn powershell_profile_fallback(
         parse,
         match observed {
             Heard::NotYet => Heard::NotYet,
-            Heard::Failed => Heard::Failed,
+            Heard::Failed(unanswered) => Heard::Failed(unanswered),
             Heard::Answer(observed) => Heard::Answer((
                 edition_cause(&observed, row),
                 observed.seen.carries_the_line(),
@@ -3173,6 +3190,11 @@ pub fn powershell_profile_fallback(
 /// first one lands the row is `Pending`, and on a platform with no probe it never lands, which
 /// is `Unsupported` rather than a wait. A question that was asked and got no answer — the parse
 /// probe, or the observation — is `Undetermined`, never the "not provided" of a refusal.
+///
+/// **An observation that could not run is `NotRun`, ahead of what the parse question heard**
+/// (T-OBSERVATION-REFUSAL-ON-THE-PAGE): the row cannot be decided without the observation, and
+/// what kept it from being decided is that the check never ran — which the row says, rather than
+/// waiting on a parse answer or naming a question that was asked.
 ///
 /// **A line that is present is `Enabled` only when both sessions load it** ([`edition_cause`]):
 /// a line an ordinary session refuses — written by an older Folio, or by hand, before the policy
@@ -3205,10 +3227,11 @@ fn profile_fallback_from_parts(
         return PowerShellProfileFallback::Unsupported;
     }
     match (parse, observed) {
+        (_, Heard::Failed(Unanswered::NotRun)) => PowerShellProfileFallback::NotRun,
         (Heard::NotYet, _) | (Heard::Answer(()), Heard::NotYet) => {
             PowerShellProfileFallback::Pending
         }
-        (Heard::Failed, _) | (Heard::Answer(()), Heard::Failed) => {
+        (Heard::Failed(_), _) | (Heard::Answer(()), Heard::Failed(Unanswered::NoAnswer)) => {
             PowerShellProfileFallback::Undetermined
         }
         (Heard::Answer(()), Heard::Answer((cause, line_present, _))) => match cause {
@@ -3253,8 +3276,36 @@ fn publish_profile_observation_failed(program: &Path, observation: u64) {
             .unwrap_or_else(|error| error.into_inner()),
         powershell_edition(program),
         observation,
-        Heard::Failed,
+        Heard::Failed(Unanswered::NoAnswer),
     );
+}
+
+/// **Run `observation`'s worker could not run, or ended before it answered** — filed for each of
+/// `editions` (the editions of the rows the run was asked about) as [`Unanswered::NotRun`], so
+/// the Profiles page's rows say the check could not run instead of keeping their previous state
+/// with no word of why (T-OBSERVATION-REFUSAL-ON-THE-PAGE). The page's next visit asks again.
+fn publish_profile_observation_not_run(editions: &[PowerShellEdition], observation: u64) {
+    let mut held = PROFILE_OBSERVATIONS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for edition in editions {
+        file_not_run(&mut held, *edition, observation);
+    }
+}
+
+/// **File that run `observation` did not answer for `edition`, unless an answer from it or from a
+/// newer run is held**: a worker that panicked after it published an edition's answer leaves that
+/// answer standing, and a newer run's is never replaced. Answers whether it was filed.
+fn file_not_run(held: &mut Observations, edition: PowerShellEdition, observation: u64) -> bool {
+    if held
+        .get(&edition)
+        .is_some_and(|(filed, _)| *filed >= observation)
+    {
+        return false;
+    }
+    held.insert(edition, (observation, Heard::Failed(Unanswered::NotRun)));
+    true
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -3333,7 +3384,7 @@ fn heard_parse(program: &Path, arguments: &[OsString]) -> Heard<()> {
         .get(&parse_key(program, arguments))
     {
         Some(ParseAnswer::Valid | ParseAnswer::Invalid) => Heard::Answer(()),
-        Some(ParseAnswer::Failed { .. }) => Heard::Failed,
+        Some(ParseAnswer::Failed { .. }) => Heard::Failed(Unanswered::NoAnswer),
         Some(ParseAnswer::Pending { .. }) | None => Heard::NotYet,
     }
 }
@@ -5360,7 +5411,12 @@ mod tests {
             ),
             "the older run's answer is refused"
         );
-        assert!(!file_observation(&mut held, edition, 7, Heard::Failed));
+        assert!(!file_observation(
+            &mut held,
+            edition,
+            7,
+            Heard::Failed(Unanswered::NoAnswer)
+        ));
         match &held[&edition] {
             (8, Heard::Answer(kept)) => {
                 assert_eq!(kept.path, PathBuf::from(newer));
@@ -5368,7 +5424,12 @@ mod tests {
             }
             other => panic!("run 8's answer is held, not {other:?}"),
         }
-        assert!(file_observation(&mut held, edition, 9, Heard::Failed));
+        assert!(file_observation(
+            &mut held,
+            edition,
+            9,
+            Heard::Failed(Unanswered::NoAnswer)
+        ));
 
         let directory = temp_dir("b4-overlapping-observations");
         let program = directory.join("pwsh.exe");
@@ -5812,6 +5873,175 @@ mod tests {
         assert!(
             !latch.load(std::sync::atomic::Ordering::Acquire),
             "the latch stays open on a refused start"
+        );
+    }
+
+    /// **Taken in turn by the tests that file Windows PowerShell's edition** on the process's
+    /// observations: each reads the row that edition's newest filing decides, and the suite runs
+    /// tests on parallel threads.
+    static WINDOWS_POWERSHELL_OBSERVATIONS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RED (T-OBSERVATION-REFUSAL-ON-THE-PAGE) — **an observation the Profiles page asked for and
+    /// the thread door refused is said on the page's rows, and the next open asks again.** The
+    /// page's opening asks for the edition of each of its rows; a refused start files that the
+    /// check could not run ([`Unanswered::NotRun`]), so the row says so in its own sentence
+    /// instead of keeping its previous state with no word of why. The refusal is still said once
+    /// in the voice it was handed, and the next open goes to the door again: a second refusal,
+    /// said again and filed under a newer number.
+    ///
+    /// Through the scripted executor, not the headless app: the page's opening edge
+    /// (`begin_profile_observation_for`) starts its worker at the product's thread door, and the
+    /// same edge asks the program walk and the page environment of the machine, which the headless
+    /// backend does not stand in for. What the edge hands the door is driven here as it hands it:
+    /// the rows' programs, the data root and the voice.
+    ///
+    /// MUTATIONS: drop `publish_profile_observation_not_run` from `ObservationEnds::worker_ended`
+    /// — nothing is filed and the row stays `Pending`; decide `Heard::Failed(Unanswered::NotRun)`
+    /// as `Undetermined` in `profile_fallback_from_parts` — the row names a question that was
+    /// asked; answer `CapPowerShellNotProvided` for `NotRun` in `profiles::powershell_row_text` —
+    /// the row reads as a refusal.
+    #[test]
+    fn a_refused_observation_start_is_said_on_the_profiles_page() {
+        let _turn = WINDOWS_POWERSHELL_OBSERVATIONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let program = Path::new("powershell.exe");
+        let edition = powershell_edition(program);
+        let row = os_words(&["-NoExit", "-File", "enter.ps1"]);
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        let executor = crate::lane::Executor::scripted(std::sync::Arc::clone(&gate));
+        let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let data = temp_dir("page-observation 观察");
+        let filed = || {
+            PROFILE_OBSERVATIONS
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&edition)
+                .map(|(number, heard)| {
+                    (*number, matches!(heard, Heard::Failed(Unanswered::NotRun)))
+                })
+        };
+        let mut opens = Vec::new();
+        for _ in 0..2 {
+            gate.refuse_next_start();
+            let lines = std::sync::Arc::clone(&said);
+            let started = profile_runtime::spawn_profile_observation(
+                &executor,
+                data.clone(),
+                vec![program.to_path_buf()],
+                Vec::new(),
+                move |line| lines.lock().unwrap().push(line.to_owned()),
+            );
+            let fallback = powershell_profile_fallback(program, &row, true);
+            opens.push((started, filed(), fallback));
+        }
+        PROFILE_OBSERVATIONS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&edition);
+        let said = said.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(&data);
+        assert_eq!(said.len(), 2, "each refused start is said once: {said:?}");
+        assert!(
+            said.iter()
+                .all(|line| line.contains(crate::lane::REFUSED_START)),
+            "what is said is the door's refusal: {said:?}"
+        );
+        let mut numbers = Vec::new();
+        for (started, filed, fallback) in opens {
+            assert!(!started, "the door refused the start");
+            let (number, not_run) = filed.expect("the refusal is filed for the row's edition");
+            assert!(not_run, "what is filed is that the check could not run");
+            numbers.push(number);
+            if PROFILE_PROBE_EXISTS {
+                assert_eq!(fallback, PowerShellProfileFallback::NotRun);
+                assert_eq!(
+                    crate::profiles::powershell_row_text(fallback),
+                    Some(crate::i18n::Text::CapPowerShellCheckNotRun),
+                    "the row says the check could not run"
+                );
+            } else {
+                assert_eq!(fallback, PowerShellProfileFallback::Unsupported);
+            }
+        }
+        assert!(
+            numbers[1] > numbers[0],
+            "the second open asked again, as a newer run: {numbers:?}"
+        );
+    }
+
+    /// RED (T-OBSERVATION-REFUSAL-ON-THE-PAGE) — **a run that ended without answering files only
+    /// what it did not answer.** A worker that panicked after it published one edition's answer
+    /// leaves that answer standing and files the other edition as not run; a newer run's filing
+    /// is never replaced; and a row whose observation could not run says so whatever its parse
+    /// question has heard.
+    ///
+    /// MUTATIONS: `file_not_run` refusing only a newer run (`>` for `>=`) — the run's own answer
+    /// is replaced; move the `NotRun` arm of `profile_fallback_from_parts` below the parse arms —
+    /// a row whose parse answer is still awaited reads `Pending`.
+    #[test]
+    fn a_run_that_ended_unanswered_files_only_what_it_did_not_answer() {
+        use crate::psreadline::ExecutionPolicy::{RemoteSigned, Undefined};
+        let observed = ProfileObservation {
+            full_language: true,
+            path: PathBuf::from("profile.ps1"),
+            scopes: scopes(Undefined, Undefined, Undefined, RemoteSigned, Undefined),
+            edition_says: Some(true),
+            location: ProfileLocation {
+                local_fixed: true,
+                marked: false,
+            },
+            ordinary_process: Some(Undefined),
+            seen: ProfileRevision::default(),
+        };
+        let answered = PowerShellEdition::PowerShellSeven;
+        let unanswered = PowerShellEdition::WindowsPowerShell;
+        let mut held = Observations::new();
+        assert!(file_observation(
+            &mut held,
+            answered,
+            8,
+            Heard::Answer(observed)
+        ));
+        assert!(
+            !file_not_run(&mut held, answered, 8),
+            "the run's own answer stands"
+        );
+        assert!(matches!(held[&answered], (8, Heard::Answer(_))));
+        assert!(file_not_run(&mut held, unanswered, 8));
+        assert!(matches!(
+            held[&unanswered],
+            (8, Heard::Failed(Unanswered::NotRun))
+        ));
+        assert!(
+            !file_not_run(&mut held, answered, 7),
+            "an older run never files over a newer one"
+        );
+        assert!(file_not_run(&mut held, answered, 9));
+        for parse in [
+            Heard::NotYet,
+            Heard::Failed(Unanswered::NoAnswer),
+            Heard::Answer(()),
+        ] {
+            assert_eq!(
+                profile_fallback_from_parts(
+                    true,
+                    true,
+                    false,
+                    false,
+                    parse,
+                    Heard::Failed(Unanswered::NotRun)
+                ),
+                PowerShellProfileFallback::NotRun,
+                "parse={parse:?}"
+            );
+        }
+        assert_eq!(PowerShellProfileFallback::NotRun.policy_cause(), None);
+        assert_eq!(
+            crate::settings::ProfileButton::of(PowerShellProfileFallback::NotRun),
+            None
         );
     }
 
@@ -6803,7 +7033,11 @@ mod tests {
     #[test]
     fn a_policy_changed_since_the_last_visit_flips_the_row_to_offer() {
         use crate::psreadline::ExecutionPolicy::{RemoteSigned, Restricted, Undefined};
-        // Windows PowerShell's edition, which no other test publishes for; restored after.
+        // Windows PowerShell's edition, which only the tests that take
+        // `WINDOWS_POWERSHELL_OBSERVATIONS` publish for; restored after.
+        let _turn = WINDOWS_POWERSHELL_OBSERVATIONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let program = Path::new("powershell.exe");
         let row = os_words(&["-NoExit", "-File", "enter.ps1"]);
         let observed = |current_user| ProfileObservation {
@@ -7350,12 +7584,17 @@ mod tests {
     fn a_platform_without_the_profile_probe_never_offers() {
         for observed in [
             Heard::NotYet,
-            Heard::Failed,
+            Heard::Failed(Unanswered::NoAnswer),
+            Heard::Failed(Unanswered::NotRun),
             Heard::Answer((PolicyCause::Allows, false, true)),
             Heard::Answer((PolicyCause::Allows, true, true)),
             Heard::Answer((PolicyCause::Changeable, false, true)),
         ] {
-            for parse in [Heard::Answer(()), Heard::NotYet, Heard::Failed] {
+            for parse in [
+                Heard::Answer(()),
+                Heard::NotYet,
+                Heard::Failed(Unanswered::NoAnswer),
+            ] {
                 assert_eq!(
                     profile_fallback_from_parts(false, true, false, false, parse, observed),
                     PowerShellProfileFallback::Unsupported,
@@ -7828,7 +8067,10 @@ mod tests {
             claim_parse_attempt(question.clone(), ParseAsker::Background).expect("first attempt");
         assert_eq!(heard_parse(program, &arguments), Heard::NotYet, "in flight");
         fail(first);
-        assert_eq!(heard_parse(program, &arguments), Heard::Failed);
+        assert_eq!(
+            heard_parse(program, &arguments),
+            Heard::Failed(Unanswered::NoAnswer)
+        );
         for _ in 1..PARSE_PROBE_ATTEMPT_LIMIT {
             fail(claim_parse_attempt(question.clone(), ParseAsker::Background).expect("bounded"));
         }
@@ -7847,7 +8089,14 @@ mod tests {
             "an answered question is not asked again"
         );
         assert_eq!(
-            profile_fallback_from_parts(true, true, false, false, Heard::Failed, Heard::NotYet),
+            profile_fallback_from_parts(
+                true,
+                true,
+                false,
+                false,
+                Heard::Failed(Unanswered::NoAnswer),
+                Heard::NotYet
+            ),
             PowerShellProfileFallback::Undetermined
         );
         assert_eq!(
