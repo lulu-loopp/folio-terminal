@@ -1262,9 +1262,10 @@ fn a_caret_in_a_pane_reaches_winit_as_window_pixels_from_the_cell_it_stands_on()
 /// The keyboard road's measurement for a terminal whose prompt the reader has scrolled away
 /// from: the composed frame of a real session, measured by [`terminal_ime_cursor_area`] — the
 /// call `Runtime::offer_ime_caret` and the `IME_DRAW` trace make — through the headless glass
-/// (the window seam's `Glass`) at its measured metrics, in a seat with an origin. The input method is told the cell at the pane's bottom edge in the cursor's
-/// column, carried to the window's axis; never the history line on the presentation row that
-/// shares the cursor's grid row index.
+/// (the window seam's `Glass`) at its own measured metrics, in a seat with an origin. The input
+/// method is told the cell at the pane's bottom edge in the cursor's column, carried to the
+/// window's axis; never the history line on the presentation row that shares the cursor's grid
+/// row index.
 ///
 /// Red gate: the frame's cursor row back to `projected_cursor_row.unwrap_or(cursor.row)` in
 /// `bt_viewport`'s `continuous_frame` — the rectangle is measured on presentation row 1.
