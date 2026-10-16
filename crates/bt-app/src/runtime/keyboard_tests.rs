@@ -55,7 +55,6 @@ fn a_restart_inside_a_live_composition_writes_the_windows_native_facts() {
     runtime
         .ime_input(Ime::Preedit("ni你".to_owned(), Some((5, 5))))
         .expect("a pre-edit is answered");
-    drop(runtime);
     assert_eq!(facts_read(&folio), 0, "an unbroken bracket reads no facts");
 
     let restart = folio
@@ -83,7 +82,6 @@ fn a_restart_inside_a_live_composition_writes_the_windows_native_facts() {
     runtime
         .ime_input(Ime::Disabled)
         .expect("an end is answered");
-    drop(runtime);
     assert_eq!(facts_read(&folio), 0, "a paired end reads no facts");
     folio
         .runtime()
