@@ -76,3 +76,20 @@ function Get-UpdaterRows {
     }
     return $rows
 }
+
+# **A row's result as the host reports it**, from what came back from the guest: the watcher's
+# marker (a cut row: `row=<row> phase=<phase> at=<time>`, or nothing when none was written) and
+# the lines of the watcher's log that came back in a collection. A `ROW <row> FAILED: ...` line,
+# a marker of MISSED, NOT_REACHED or FAILED, and a cut row with no marker are failures; the
+# answer is @{ Failed = <bool>; Line = <what the person running the rows reads> }.
+function Get-RowVerdict {
+    param([switch] $Cut, [AllowNull()] [string] $Marker, [string[]] $WatchLog = @())
+    $failure = @($WatchLog | Where-Object { $_ -match 'ROW \S+ FAILED: ' } | Select-Object -First 1)
+    if ($failure.Count -gt 0) { return @{ Failed = $true; Line = "watcher: $($failure[0].Trim())" } }
+    if (-not $Cut) { return @{ Failed = $false; Line = "no failure in the watcher's log" } }
+    $m = [regex]::Match([string] $Marker, 'phase=(\w+)')
+    if (-not $m.Success) { return @{ Failed = $true; Line = 'no marker came back from the guest' } }
+    $phase = $m.Groups[1].Value
+    if ($phase -in 'MISSED', 'NOT_REACHED', 'FAILED') { return @{ Failed = $true; Line = "marker: $($Marker.Trim())" } }
+    return @{ Failed = $false; Line = "reached $phase" }
+}

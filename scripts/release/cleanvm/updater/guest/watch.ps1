@@ -27,13 +27,24 @@
     exposed. Rows whose state lasts milliseconds spin without sleeping once the
     phase before them is read.
 
+    **Every wait but the row's own timeout has a named bound** (`waits.ps1`,
+    dot-sourced from beside this file, says each bound's reason): W4 waits for
+    the Run value within `$W4RunWithinMs`, the other spins for their state
+    within `$SpinWithinMs`, a killed trial for its exit within `$KillWithinMs`.
+    At a bound's end the row FAILS with what the wait last saw: the log line
+    `ROW <row> FAILED: ...`, the flushed record, and the marker
+    `phase=FAILED` (the host cuts the power on it as on any marker); the
+    watcher ends there and never runs the row on.
+
     The rows without a cut use the holds: `-HoldJournalOnRun` (W14: the journal
     opened for reading without delete or write sharing the moment the Run value
     appears), `-HoldRescueAt` (W15: the rescue copy held with no execute or
     delete sharing), `-HoldPath` (E-7, W10: a file of the install held with no
     sharing). `-KillNewInstallProcess` ends the first new folio.exe of the
     install folder after the one running at the start: the trial the applier
-    started (the rollback rows).
+    started (the rollback rows): its handle is opened when it is first seen and
+    held, so the path check, the kill and the wait for its exit are of that one
+    process.
 
     Writes, in -GuestHome: updater-watch-<Tag>.txt (the log),
     updater-journal-<Tag>.txt (every version of the journal),
@@ -64,6 +75,7 @@ $journalPath = Join-Path $H 'journal.json'
 $log = Join-Path $GuestHome "updater-watch-$Tag.txt"
 $hist = Join-Path $GuestHome "updater-journal-$Tag.txt"
 $marker = if ($Row) { Join-Path $GuestHome "updater-marker-$Row.txt" } else { $null }
+. (Join-Path $PSScriptRoot 'waits.ps1')
 
 Add-Type -TypeDefinition @'
 using System;
@@ -89,6 +101,13 @@ function Write-Flushed($path, $text) {
   $bytes = [Text.Encoding]::UTF8.GetBytes($text)
   $fs = New-Object IO.FileStream($path, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::Read)
   try { $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
+}
+# A bound ran out: the row fails with what the wait last saw, and the watcher ends.
+function Fail-Row($why) {
+  Say "ROW $(if ($Row) { $Row } else { $Tag }) FAILED: $why"
+  Write-Flushed (Join-Path $GuestHome "updater-atmarker-$Tag.txt") ((@('== watch log (row failed)') + $buf) -join "`r`n")
+  if ($marker) { Write-Flushed $marker "row=$Row phase=FAILED at=$(Now)`r`n" }
+  $script:done = $true
 }
 function Read-Journal {
   try {
@@ -169,10 +188,15 @@ function Kill-NewInstallProcess {
   foreach ($p in @(Get-Process folio -ErrorAction SilentlyContinue)) {
     if ($known.ContainsKey($p.Id)) { continue }
     $known[$p.Id] = $true
+    # The handle is opened now and held by $p: the path check, the kill and the wait below all
+    # name this process (its pid cannot be reused while the handle is open).
+    try { $null = $p.Handle } catch { Say "new folio process pid=$($p.Id) could not be opened: $($_.Exception.Message)"; continue }
     $pp = $null; try { $pp = $p.Path } catch { }
     if ($pp -eq $exePath -and (Test-Path -LiteralPath $H)) {
-      Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-      Say "new install process pid=$($p.Id) ended by the watcher (Stop-Process): the trial"
+      if (Stop-Within -Process $p -Kill { param($x) $x.Kill() }) {
+        Say "new install process pid=$($p.Id) ended by the watcher (killed; exited within $KillWithinMs ms): the trial"
+      }
+      else { Fail-Row "the trial pid=$($p.Id) was killed and is still running $KillWithinMs ms later" }
       return $true
     }
     Say "new folio process pid=$($p.Id) path=$pp (left alone)"
@@ -213,43 +237,44 @@ while ((Get-Date) -lt $deadline -and -not $done) {
 
   # W4's window (Run value written, flushed, read back; Armed not yet renamed in) is a few
   # milliseconds: once Handoff is read, spin on the Run key alone (one open key, no journal read,
-  # no sleep), freeze on the first FolioUpdate-* value, and only then read the journal.
+  # no sleep) within $W4RunWithinMs, freeze on the first FolioUpdate-* value, and only then read
+  # the journal. A change of the journal's directory entry with no Run value ends the wait (the
+  # state is gone; the loop below reads what came instead); the bound's end fails the row.
   if ($Row -eq 'W4' -and $phase -eq 'Handoff' -and $run.Count -eq 0) {
     $rk = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('SOFTWARE\Microsoft\Windows\CurrentVersion\Run')
-    $spinUntil = (Get-Date).AddSeconds(120)
-    while ((Get-Date) -lt $spinUntil) {
-      if (@($rk.GetValueNames() | Where-Object { $_ -like 'FolioUpdate-*' }).Count -gt 0) {
-        if ($Freeze) { [void](Freeze-All @()) }
-        break
-      }
-    }
-    $rk.Dispose()
+    try { $w4 = Wait-RunValue -RunKey $rk -EntrySig { Dir-Sig } }
+    finally { $rk.Dispose() }
+    if ($w4.Outcome -eq 'held' -and $Freeze) { [void](Freeze-All @()) }
+    if ($w4.Outcome -eq 'bound') { Fail-Row "no FolioUpdate-* Run value within $W4RunWithinMs ms of Handoff; last seen: $($w4.Seen)"; break }
     $text = Read-Journal; $phase = Phase-Of $text; $run = Run-Values; $lastSig = Dir-Sig
-    Say "W4 spin ended: phase=$phase run=[$($run -join ';')]"
+    Say "W4 wait ended ($($w4.Outcome) after $($w4.ElapsedMs) ms: $($w4.Seen)): phase=$phase run=[$($run -join ';')]"
   }
   if ($Row -and $spins.ContainsKey($Row) -and ($spins[$Row][0] -contains $phase)) {
     $starts = $spins[$Row][0]; $target = $spins[$Row][1]
-    $spinUntil = (Get-Date).AddSeconds(180)
+    $spinClock = [Diagnostics.Stopwatch]::StartNew()
+    $spinOut = 'bound'
     # the processes that exist now (O, the applier) are suspended first, from this list, so the
     # freeze does not wait for a process enumeration
     $pre = @(Get-Process folio -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
-    while ((Get-Date) -lt $spinUntil) {
-      if ($KillNewInstallProcess -and -not $newKilled) { $newKilled = Kill-NewInstallProcess }
+    while ($spinClock.ElapsedMilliseconds -lt $SpinWithinMs) {
+      if ($KillNewInstallProcess -and -not $newKilled) { $newKilled = Kill-NewInstallProcess; if ($done) { $spinOut = 'failed'; break } }
       if ($target -eq 'receipt') {
-        if ((Receipts).Count -gt 0) { if ($Freeze) { [void](Freeze-All $pre) }; break }
+        if ((Receipts).Count -gt 0) { if ($Freeze) { [void](Freeze-All $pre) }; $spinOut = 'target'; break }
       }
       $sg = Dir-Sig
       if ($sg -ne $lastSig) {
-        if ($sg -eq 'absent') { $lastSig = $sg; $text = $null; break }
+        if ($sg -eq 'absent') { $lastSig = $sg; $text = $null; $spinOut = 'left'; break }
         $t2 = Read-Journal
         if ($null -eq $t2) { continue }
         $lastSig = $sg; $text = $t2; $p2 = Phase-Of $t2
-        if ($p2 -eq $target) { if ($Freeze) { [void](Freeze-All $pre) }; break }
-        if (-not ($starts -contains $p2)) { break }
+        if ($p2 -eq $target) { if ($Freeze) { [void](Freeze-All $pre) }; $spinOut = 'target'; break }
+        if (-not ($starts -contains $p2)) { $spinOut = 'left'; break }
       }
     }
+    if ($spinOut -eq 'failed') { break }
     $phase = Phase-Of $text; $run = Run-Values; $rcpt = Receipts
-    Say "$Row spin ended: phase=$phase run=[$($run -join ';')] receipts=[$($rcpt -join ';')]"
+    if ($spinOut -eq 'bound') { Fail-Row "$target not seen within $SpinWithinMs ms of $($starts -join '/'); last seen: phase=$phase sig=$lastSig run=[$($run -join ';')] receipts=[$($rcpt -join ';')]"; break }
+    Say "$Row spin ended ($spinOut after $($spinClock.ElapsedMilliseconds) ms): phase=$phase run=[$($run -join ';')] receipts=[$($rcpt -join ';')]"
   }
 
   if ($Row -and (Reached $phase $run $rcpt)) {
@@ -275,7 +300,7 @@ while ((Get-Date) -lt $deadline -and -not $done) {
     $done = $true; break
   }
 
-  if ($KillNewInstallProcess -and -not $newKilled) { $newKilled = Kill-NewInstallProcess }
+  if ($KillNewInstallProcess -and -not $newKilled) { $newKilled = Kill-NewInstallProcess; if ($done) { break } }
   if ($HoldJournalOnRun -gt 0 -and -not $jhold -and $run.Count -gt 0) {
     try {
       $jhold = [IO.File]::Open($journalPath, 'Open', 'Read', 'Read')
