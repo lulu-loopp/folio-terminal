@@ -58,7 +58,7 @@ crates/bt-app/src/main.rs:63138 code sample: the indentation after an escaped li
 crates/bt-app/src/main.rs:63138 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/main.rs:63330 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/main.rs:64256 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:78766 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:78778 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/preview_live.rs:1686 table fixture: each cell padded to its column
 crates/bt-app/src/preview_select.rs:777 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/preview.rs:11332 a diff line sample: the code's indentation after the `+`/`-` sign is the input
@@ -146,5 +146,5 @@ crates/bt-term/tests/repaint_flash_oracle.rs:356 terminal screen fixture: the co
 crates/bt-term/tests/repaint_flash_oracle.rs:1268 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-transcript/src/lib.rs:2771 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-transcript/src/paths.rs:5464 terminal screen fixture: the columns are where the terminal draws them
-crates/bt-viewport/src/lib.rs:14123 terminal screen fixture: the columns are where the terminal draws them
+crates/bt-viewport/src/lib.rs:14362 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-winres/src/release_manifest.rs:641 a release manifest fixture: the file column padded before the kind column
