@@ -10,12 +10,12 @@
 
         revertToSnapshot <Snapshot>   the candidate A, installed (install-candidate.ps1)
         start nogui, wait             a guest operation, then an interactive program
-        copy in                       guest\watch.ps1, keys.ps1, collect.ps1, ui-probe.ps1
+        copy in                       guest\watch.ps1, waits.ps1, keys.ps1, collect.ps1, ui-probe.ps1
                                       into <GuestHome>\updater; the feed into C:\feed
         watch.ps1 -noWait             the row's watcher
         keys.ps1  -noWait             Folio started with --update-feed file:///C:/feed/, the card pressed
       a cut row (W1-W13):
-        wait for updater-marker-<Row>.txt
+        wait for updater-marker-<Row>.txt, copy it out (marker.txt)
         stop hard                     the virtual power cord, no ACPI, no flush
         start (no revert), wait       then, 45 s after logon: collect after-logon
         keys: a plain start           collect after-start1
@@ -23,6 +23,10 @@
       a live row:
         collect at each -CollectAt second; then the row's second plan, collect then
       stop soft
+      the row's result (rows.ps1 Get-RowVerdict): FAILED for a cut row whose marker is
+        missing or says MISSED, NOT_REACHED or FAILED, and for any row whose watcher log
+        in a collection has `ROW <row> FAILED: ...`; after the last row a table of the
+        results, and exit 1 when one failed
 
     **The drivers run with `-noWait` in a hidden console** (`vm-door.ps1`
     `Invoke-GuestScript`): the watcher used to be started without it, so the
@@ -130,6 +134,7 @@ $guestSide = Join-Path $PSScriptRoot 'guest'
 $uiProbe = Join-Path $root 'scripts\dev\ui-probe.ps1'
 $guestScripts = @(
     (Join-Path $guestSide 'watch.ps1'),
+    (Join-Path $guestSide 'waits.ps1'),
     (Join-Path $guestSide 'keys.ps1'),
     (Join-Path $guestSide 'collect.ps1'),
     $uiProbe
@@ -264,6 +269,9 @@ function Invoke-Row([hashtable] $spec) {
                 Start-Sleep -Milliseconds 500
             }
             Say "marker found=$found"
+            $markerCopy = Join-Path $evidence 'marker.txt'
+            if ($found) { Read-GuestLog "updater-marker-$name.txt" $markerCopy }
+            $markerText = if (Test-Path -LiteralPath $markerCopy) { [IO.File]::ReadAllText($markerCopy) } else { $null }
         }
         # The point of the row: an immediate virtual power-off. Whatever is durable now is what
         # the next start sees.
@@ -294,11 +302,31 @@ function Invoke-Row([hashtable] $spec) {
         }
     }
     Invoke-Vmrun -Door $door -Step 'stop' -Verb 'stop' -Arguments @('soft') -Tolerant | Out-Null
+    if (-not $planning) {
+        # What the guest saw reaches the person running the rows: the marker of a cut row, and a
+        # FAILED line of the watcher's log in any collection.
+        $watchLog = @(Get-ChildItem -LiteralPath $evidence -Recurse -File -Filter "updater-watch-$name.txt" |
+                ForEach-Object { [IO.File]::ReadAllLines($_.FullName) })
+        $verdict = if ($spec.Cut) { Get-RowVerdict -Cut -Marker $markerText -WatchLog $watchLog } else { Get-RowVerdict -WatchLog $watchLog }
+        $script:verdicts[$name] = $verdict
+        Say "row $name $(if ($verdict.Failed) { 'FAILED' } else { 'ok' }): $($verdict.Line)"
+    }
     Say "row $name done"
 }
 
+$script:verdicts = [ordered]@{}
 foreach ($name in $names) { Invoke-Row $table[$name] }
 
 Write-Host ''
 if ($planning) { Write-Host 'planning only - nothing above was run.' }
-else { Write-Host "evidence in $Results" }
+else {
+    Write-Host "evidence in $Results"
+    $failed = @($script:verdicts.Keys | Where-Object { $script:verdicts[$_].Failed })
+    foreach ($name in $script:verdicts.Keys) {
+        Write-Host ("  {0,-12} {1} {2}" -f $name, $(if ($script:verdicts[$name].Failed) { 'FAILED' } else { 'ok    ' }), $script:verdicts[$name].Line)
+    }
+    if ($failed.Count -gt 0) {
+        Write-Host "$($failed.Count) row(s) failed in the guest: $($failed -join ', ')"
+        exit 1
+    }
+}
