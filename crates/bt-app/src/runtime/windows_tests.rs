@@ -2,12 +2,13 @@
 //! (T-DISPATCHER-WRITES-INTO-DOORS): the close an exit's answer asks for is taken by the event
 //! loop through [`crate::Runtime::take_close_request`], once, on a headless window.
 
-use crate::headless::HeadlessFolio;
+use crate::headless::{HeadlessApplication, HeadlessFolio};
 use crate::test_support::{buffer_saying, host_spelling, tab_with_a_preview};
 use crate::{preview_edit, restore};
+use winit::event::WindowEvent;
 
 /// RED (T-SUMMON-DIRTY-PREVIEW) — **a close request is taken once, through the windows door**:
-/// a window whose shut was asked over an unsaved edit is answered `Discard`, which re-requests
+/// a window the OS asked to close over an unsaved edit is answered `Discard`, which re-requests
 /// its own close; the event loop's take hands that close over, and a second take finds nothing —
 /// the next event closes nothing.
 ///
@@ -29,16 +30,16 @@ fn a_close_request_is_taken_once_through_the_windows_door() {
         "the keystroke landed"
     );
     let (tab, _) = tab_with_a_preview(1, vec![buffer]);
-    let mut folio = HeadlessFolio::with_tabs("close-request-door", vec![tab], 0);
-    let mut runtime = folio.runtime();
-    let window = runtime.window_id();
+    let folio = HeadlessFolio::with_tabs("close-request-door", vec![tab], 0);
+    let mut application = HeadlessApplication::of(folio);
+    let window = application.id;
 
+    application.window_event(WindowEvent::CloseRequested);
+    let mut runtime = application.runtime();
     assert_eq!(
-        runtime
-            .raise_dirty_gate(restore::GateRequest::Shut)
-            .expect("the gate is asked"),
-        restore::GateRaise::Raised,
-        "the shut asks first"
+        runtime.window.dirty_gate.request(),
+        Some(&restore::GateRequest::Shut),
+        "the OS close asks first"
     );
     assert_eq!(
         runtime.take_close_request(),
