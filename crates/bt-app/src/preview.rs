@@ -38,6 +38,7 @@ use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
 use winit::window::WindowId;
 
 use crate::document_request::{DocumentAnswer, DocumentJob, KeptFile, Outcome, Refusal};
+use crate::persist::Reply;
 use crate::preview_provenance::{BlockOrigins, TextOrigin};
 use crate::{AppEvent, TabId};
 
@@ -8304,8 +8305,19 @@ fn refusal_said(cause: &Refusal) -> String {
         Refusal::BackupNameTaken(_) => Text::PreviewSaveNameTaken.text().to_owned(),
         Refusal::Unread(_) => Text::PreviewSaveUnread.text().to_owned(),
         Refusal::Disk(error) => error.clone(),
+        // The worker failed on this save and went on (R2): the file was not written, which is
+        // what the pane says; the failure's own words are the ledger's, in `diagnostics.log`.
+        Refusal::Failed(_) => Text::PreviewSaveNotStarted.text().to_owned(),
     }
 }
+
+/// **How many saves the preview may have outstanding on the storage worker at once**
+/// (T-STORAGE-WORKER-ON-THE-SEAM, R1): a save counts from its hand-over until its answer is
+/// taken ([`PreviewSaves::take_answers`]) — four tabs' full pools of [`PV_BUFFER_CAP`] buffers,
+/// every one dirty and saving at once. The preview's share of the storage worker's ledger
+/// (`persist::STORAGE_BOUND`), so a flood of saves never crowds a quit's session write out of
+/// the queue; a save past it is refused on its pane ([`Text::PreviewSaveTooMany`]).
+pub(crate) const PREVIEW_SAVES_OWED: usize = 4 * PV_BUFFER_CAP;
 
 /// **The preview's saves on the storage worker, each owed its answer** (S-6a).
 ///
@@ -8313,9 +8325,12 @@ fn refusal_said(cause: &Refusal) -> String {
 /// can move to another window while a save is out, so an answer is addressed
 /// to the buffer that asked (its incarnation, [`PreviewBuffer`]) and the
 /// surface that pressed, never to a window. Each request has its own answer
-/// channel, so a worker that ends before answering is heard as that request's
-/// refusal (`Refused(NoWorker)`), and the lane's wake (`DocumentsAnswered`)
-/// follows every answer. An answer whose buffer is gone — its tab or pane
+/// channel and its own identity on the lane's ledger, so a worker that ends
+/// before answering is heard as that request's refusal (`Refused(NoWorker)`), a
+/// save the worker failed on as its own (`Refused(Failed)`, R2), and the lane's
+/// wake (`DocumentsAnswered`) follows every answer. At most
+/// [`PREVIEW_SAVES_OWED`] are out at once; a save past them is refused where it
+/// is handed over. An answer whose buffer is gone — its tab or pane
 /// closed, its edits discarded — goes to the sink ([`Self::sink`]): recorded,
 /// then ignored, never dropped (C6).
 pub(crate) struct PreviewSaves {
@@ -8333,7 +8348,7 @@ struct OwedSave {
     incarnation: BufferId,
     body: u64,
     asked_from: crate::PreviewSurface,
-    answer: mpsc::Receiver<DocumentAnswer>,
+    answer: crate::persist::OnTheWorker<DocumentAnswer>,
 }
 
 /// **One answer, addressed** — to the buffer that asked and the surface that
@@ -8360,7 +8375,7 @@ impl PreviewSaves {
     /// **Hand one save over**: numbered, built by `job` with its own answer
     /// channel, admitted by the lane or refused where it is handed over (the
     /// lane starts no thread here, C1). Answers its number, or the refusal in
-    /// the pane's words.
+    /// the pane's words — past [`PREVIEW_SAVES_OWED`] saves out, the desk's own.
     fn submit(
         &mut self,
         incarnation: BufferId,
@@ -8368,18 +8383,29 @@ impl PreviewSaves {
         asked_from: crate::PreviewSurface,
         job: impl FnOnce(u64, mpsc::Sender<DocumentAnswer>) -> DocumentJob,
     ) -> Result<u64, String> {
+        if self.owed.len() >= PREVIEW_SAVES_OWED {
+            return Err(crate::i18n::Text::PreviewSaveTooMany.text().to_owned());
+        }
         self.tickets += 1;
         let ticket = self.tickets;
         let (answer, answered) = mpsc::channel();
-        if !self.lane.send_document(job(ticket, answer)) {
-            return Err(crate::i18n::Text::PreviewSaveNotStarted.text().to_owned());
-        }
+        let request =
+            self.lane
+                .send_document(job(ticket, answer))
+                .map_err(|refused| match refused {
+                    crate::persist::NotAdmitted::NoWorker => {
+                        crate::i18n::Text::PreviewSaveNotStarted.text().to_owned()
+                    }
+                    crate::persist::NotAdmitted::Full => {
+                        crate::i18n::Text::PreviewSaveTooMany.text().to_owned()
+                    }
+                })?;
         self.owed.push(OwedSave {
             ticket,
             incarnation,
             body,
             asked_from,
-            answer: answered,
+            answer: crate::persist::OnTheWorker::admitted(answered, request),
         });
         Ok(ticket)
     }
@@ -8395,15 +8421,16 @@ impl PreviewSaves {
     }
 
     /// **Every answer the worker has given**, in the order the saves were
-    /// handed over. Never waits. A save whose channel closed unanswered — the
-    /// worker ended with it — is answered here as refused, no worker.
+    /// handed over. Never waits. A save that ended unanswered — the worker
+    /// ended with it, or failed on it — is answered here as refused, in its words.
     pub(crate) fn take_answers(&mut self) -> Vec<SaveAnswer> {
         let mut answers = Vec::new();
-        self.owed.retain(|owed| {
-            let answer = match owed.answer.try_recv() {
-                Ok(answer) => answer,
-                Err(mpsc::TryRecvError::Empty) => return true,
-                Err(mpsc::TryRecvError::Disconnected) => worker_gone(owed),
+        self.owed.retain_mut(|owed| {
+            let answer = match owed.answer.hear() {
+                Reply::Answered(answer) => answer,
+                Reply::Waiting => return true,
+                Reply::Failed(words) => unanswered(owed, Refusal::Failed(words)),
+                Reply::Gone => worker_gone(owed),
             };
             answers.push(SaveAnswer {
                 incarnation: owed.incarnation,
@@ -8422,13 +8449,11 @@ impl PreviewSaves {
     pub(crate) fn settle(&mut self) -> Vec<SaveAnswer> {
         self.owed
             .drain(..)
-            .map(|owed| {
-                let answer = match owed.answer.recv_timeout(crate::lane::PATIENCE) {
-                    Ok(answer) => answer,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => worker_gone(&owed),
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        panic!("no answer about a preview save within the suite's patience")
-                    }
+            .map(|mut owed| {
+                let answer = match owed.answer.within_patience("a preview save's answer") {
+                    Reply::Answered(answer) => answer,
+                    Reply::Failed(words) => unanswered(&owed, Refusal::Failed(words)),
+                    Reply::Waiting | Reply::Gone => worker_gone(&owed),
                 };
                 SaveAnswer {
                     incarnation: owed.incarnation,
@@ -8505,13 +8530,19 @@ impl PreviewSaves {
 
 /// The answer a save is given when the worker ended with it unanswered.
 fn worker_gone(owed: &OwedSave) -> DocumentAnswer {
+    unanswered(
+        owed,
+        Refusal::NoWorker(crate::persist::STORAGE_WORKER_GONE.to_owned()),
+    )
+}
+
+/// The answer a save is given when it ended unanswered, refused for `cause`.
+fn unanswered(owed: &OwedSave, cause: Refusal) -> DocumentAnswer {
     DocumentAnswer {
         generation: owed.ticket,
         version: owed.ticket,
         asker: owed.body,
-        outcome: Outcome::Refused {
-            cause: Refusal::NoWorker(crate::persist::STORAGE_WORKER_GONE.to_owned()),
-        },
+        outcome: Outcome::Refused { cause },
         not_durable: None,
         retired: Vec::new(),
         left: None,
@@ -14786,6 +14817,61 @@ mod tests {
     ///
     /// MUTATIONS: in `request_save`, answer `Sent` when the lane refuses the
     /// request; drop the bound — the over-bound body is handed over.
+    /// RED (T-STORAGE-WORKER-ON-THE-SEAM, R1) — **the preview's desk owes at most
+    /// `PREVIEW_SAVES_OWED` saves at once; a save past them is refused on its pane, and nothing
+    /// is handed over.** Thirty-two buffers, each with an edit, are saved on a lane whose queue
+    /// the test holds unanswered: each is sent. The thirty-third is refused in the pane's words
+    /// (`Text::PreviewSaveTooMany`), stays dirty, and no thirty-third job reaches the queue. Once
+    /// the answers are taken — here, each job taken and let go unanswered — the desk owes
+    /// nothing and the same buffer's save is handed over.
+    ///
+    /// MUTATION: drop the ceiling in `PreviewSaves::submit` — the thirty-third save is sent.
+    #[test]
+    fn a_save_past_the_desks_bound_is_refused_on_its_pane() {
+        let dir = scratch("save-desk-full");
+        let pressed = crate::test_support::PRESSED_ON;
+        let (lane, jobs) = crate::persist::StorageLane::scripted();
+        let mut saves = PreviewSaves::on(lane);
+        let mut buffers: Vec<PreviewBuffer> = (0..=PREVIEW_SAVES_OWED)
+            .map(|number| {
+                let mut buffer = opened(&dir, &format!("第{number}份 copy.txt"), "原文 original\n");
+                assert!(buffer.edit_content(|content| {
+                    content.push_str("新增 added\n");
+                    true
+                }));
+                buffer
+            })
+            .collect();
+        let (last, owed) = buffers.split_last_mut().expect("thirty-three buffers");
+        for buffer in owed {
+            assert_eq!(buffer.request_save(&mut saves, pressed), SaveAsked::Sent);
+        }
+        assert_eq!(
+            last.request_save(&mut saves, pressed),
+            SaveAsked::Refused(crate::i18n::Text::PreviewSaveTooMany.text().to_owned()),
+            "the save past the desk's bound is refused on its pane"
+        );
+        assert!(last.dirty, "and its edits are still here");
+        assert_eq!(saves.out(), PREVIEW_SAVES_OWED);
+        let handed_over = std::iter::from_fn(|| jobs.next()).count();
+        // Taken and let go unanswered: the worker took each and ended without an answer.
+        assert_eq!(
+            handed_over, PREVIEW_SAVES_OWED,
+            "no save past the bound was handed over"
+        );
+        assert_eq!(
+            saves.take_answers().len(),
+            PREVIEW_SAVES_OWED,
+            "every save owed is answered"
+        );
+        assert_eq!(
+            last.request_save(&mut saves, pressed),
+            SaveAsked::Sent,
+            "a desk that owes nothing hands a save over again"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_refused_lane_says_not_saved_on_the_pane_and_keeps_dirty() {
         let dir = scratch("save-refused");
