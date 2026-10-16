@@ -3409,3 +3409,37 @@ Pinned by `bt_platform::install_txn::tests::a_temporary_removed_between_asks_is_
 hold can be made); the line a refused removal says is pinned on every platform by
 `update_apply::held_journal_tests::a_refused_removal_of_the_given_up_temporary_is_said`, and the door's own facts
 by `bt_platform::install_txn::tests` as above.
+
+### Amendment to the T-TRIAL-WATCH-REPEATS-BOUND amendment, 2026-10-15 (T-UNKEPT-MARK-ONE-DURABLE-WRITE) — a held `unkept` mark pays its flush once
+
+The T-TRIAL-WATCH-REPEATS-BOUND amendment to revision (m) states the cost of one ask of the `unkept` mark
+as the whole durable write. That
+was so while each turn called `install_txn::durable_write`: a mark whose rename was refused (another
+program holding the name, or anything at it the rename cannot replace) cost a new temporary, its file
+flush — on macOS `F_FULLFSYNC` — the refused rename and the temporary's removal, every 250 ms turn until
+the decision.
+
+**What it costs now.** The watch's `Mark` keeps one `install_txn::DurableWrite` (revision (e)'s
+amendment, T-JOURNAL-WRITE-UNDER-HOLD) from its first ask until its rename lands or the transaction is
+decided: the first held turn writes and flushes the temporary; each later held turn is one rename; the
+folder is flushed when it lands. A home that takes no new file still costs one failing create a turn,
+and a write refused at its file flush is written whole again at the next turn (nothing was kept). The
+mark's three states are unchanged — nothing at its name, its bytes at its name with the folder flush
+refused (then that flush alone is asked, as before), durable — because a temporary beside the mark is
+seen by no reader: every reader reads the mark's name, and the one listing of `H\<txn>` takes only
+receipts. The staged write is the watch's own, not the gate's.
+
+**At the decision** — the trial's own commit, a commit read, an end read — the mark is asked no more and
+a write whose rename never landed is dropped, its temporary removed with it, before the commit's
+take-back and the receipt's acknowledgement run. The removal is said by nothing: the temporary is in
+`H\<txn>\`, which the retirement of that decision removes whole. **A process that ends while its mark
+is held and its transaction undecided leaves the temporary** (`.unkept.<pid>.<n>.tmp`) in the
+transaction folder — a killed process, and an orderly exit too: the watch is a detached thread
+(`bt_platform::spawn_at_priority`), which the process's exit does not join, so the watch's `Mark`
+is never dropped and its write's `Drop` never runs. The temporary stays there, read by nobody, until
+the retirement removes the folder whole (or the uninstall, the home). The repetition, its bound, its lines and the
+`# completions` row `trial watch` (its cost cell restated) are otherwise unchanged.
+
+Pinned by `update_trial::tests::{a_held_unkept_mark_flushes_its_temporary_once_and_renames_each_turn,
+a_decided_transaction_drops_the_marks_staged_write_and_leaves_no_temporary}`, which hold the mark's
+rename with a directory at its name — refused on Windows and on macOS alike — through the product's write.
