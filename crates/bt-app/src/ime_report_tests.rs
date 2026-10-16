@@ -358,32 +358,170 @@ fn ime_self_report_reads_native_facts_once_per_interval_within_a_focus() {
 fn ime_self_report_names_a_restart_inside_a_live_composition_and_an_unpaired_end() {
     let mut report = focused();
     // An ordinary composition says nothing.
-    assert_eq!(report.pairing(ImeKind::Enabled, 0), None);
-    assert_eq!(report.pairing(ImeKind::Preedit, 5), None);
-    assert_eq!(report.pairing(ImeKind::Preedit, 0), None);
-    assert_eq!(report.pairing(ImeKind::Commit, 0), None);
-    assert_eq!(report.pairing(ImeKind::Disabled, 0), None);
+    assert_eq!(
+        report.pairing(ImeKind::Enabled, 0, NativeFacts::default),
+        None
+    );
+    assert_eq!(
+        report.pairing(ImeKind::Preedit, 5, NativeFacts::default),
+        None
+    );
+    assert_eq!(
+        report.pairing(ImeKind::Preedit, 0, NativeFacts::default),
+        None
+    );
+    assert_eq!(
+        report.pairing(ImeKind::Commit, 0, NativeFacts::default),
+        None
+    );
+    assert_eq!(
+        report.pairing(ImeKind::Disabled, 0, NativeFacts::default),
+        None
+    );
     // The incident's shape: a second start while five bytes are live, then the
     // teardown, then an end nobody opened.
-    assert_eq!(report.pairing(ImeKind::Enabled, 0), None);
-    assert_eq!(report.pairing(ImeKind::Preedit, 5), None);
+    assert_eq!(
+        report.pairing(ImeKind::Enabled, 0, NativeFacts::default),
+        None
+    );
+    assert_eq!(
+        report.pairing(ImeKind::Preedit, 5, NativeFacts::default),
+        None
+    );
     let restart = report
-        .pairing(ImeKind::Enabled, 0)
+        .pairing(ImeKind::Enabled, 0, NativeFacts::default)
         .expect("a restart is named");
     assert!(restart.contains("shape=restarted-inside-a-live-composition"));
     assert!(restart.contains("live_preedit_bytes=5"));
-    assert_eq!(report.pairing(ImeKind::Preedit, 1), None);
-    assert_eq!(report.pairing(ImeKind::Preedit, 0), None);
-    assert_eq!(report.pairing(ImeKind::Commit, 0), None);
-    assert_eq!(report.pairing(ImeKind::Disabled, 0), None);
+    assert_eq!(
+        report.pairing(ImeKind::Preedit, 1, NativeFacts::default),
+        None
+    );
+    assert_eq!(
+        report.pairing(ImeKind::Preedit, 0, NativeFacts::default),
+        None
+    );
+    assert_eq!(
+        report.pairing(ImeKind::Commit, 0, NativeFacts::default),
+        None
+    );
+    assert_eq!(
+        report.pairing(ImeKind::Disabled, 0, NativeFacts::default),
+        None
+    );
     let unpaired = report
-        .pairing(ImeKind::Disabled, 0)
+        .pairing(ImeKind::Disabled, 0, NativeFacts::default)
         .expect("an unpaired end is named");
     assert!(unpaired.contains("shape=ended-without-a-start"));
     // Bounded for the life of the window.
     let mut lines = 2;
     for _ in 0..100 {
-        lines += usize::from(report.pairing(ImeKind::Disabled, 0).is_some());
+        lines += usize::from(
+            report
+                .pairing(ImeKind::Disabled, 0, NativeFacts::default)
+                .is_some(),
+        );
     }
     assert_eq!(lines, usize::from(PAIRING_LINES_MAX));
+}
+
+/// The facts a broken bracket was handed, as the 2026-10-08 reading (i) of shape B
+/// would show them: the keyboard focus on this window, no input context, a
+/// Chinese layout.
+fn context_lost() -> NativeFacts {
+    NativeFacts {
+        hwnd: Some(0x1234),
+        focused_hwnd: Some(0x1234),
+        focus_matches: Some(true),
+        context: Some(false),
+        imm_is_ime: Some(true),
+        hkl_low: Some(2052),
+        tsf_profile_type: Some(1),
+        ..NativeFacts::default()
+    }
+}
+
+/// T-IME-BRACKET-FACTS (F4 design note §5.1): **a broken bracket's line ends
+/// with the window's native facts at the break**, so the next occurrence says
+/// from the log alone whether the window kept its input context when the
+/// method restarted. Both shapes carry them; a composition of Chinese and
+/// mixed-script pre-edit (`你好` is six bytes, `ni你` five) is what was live.
+///
+/// MUTATION: drop ` native={facts:?}` from `Report::pairing`'s line — red.
+#[test]
+fn a_broken_bracket_line_carries_the_native_facts_it_was_handed() {
+    let facts = context_lost();
+    let mut report = focused();
+    assert_eq!(report.pairing(ImeKind::Enabled, 0, || facts), None);
+    assert_eq!(
+        report.pairing(ImeKind::Preedit, "你好".len(), || facts),
+        None
+    );
+    assert_eq!(
+        report.pairing(ImeKind::Preedit, "ni你".len(), || facts),
+        None
+    );
+    let restart = report
+        .pairing(ImeKind::Enabled, 0, || facts)
+        .expect("a restart is named");
+    assert!(
+        restart.contains("shape=restarted-inside-a-live-composition live_preedit_bytes=5 "),
+        "{restart}"
+    );
+    assert!(
+        restart.ends_with(&format!(" native={facts:?}")),
+        "the restart's line ends with the facts it was handed: {restart}"
+    );
+    assert!(restart.contains("context: Some(false)"), "{restart}");
+    assert!(restart.contains("focus_matches: Some(true)"), "{restart}");
+    assert!(restart.contains("hkl_low: Some(2052)"), "{restart}");
+    assert_eq!(report.pairing(ImeKind::Commit, 0, || facts), None);
+    assert_eq!(report.pairing(ImeKind::Disabled, 0, || facts), None);
+    let unpaired = report
+        .pairing(ImeKind::Disabled, 0, || facts)
+        .expect("an unpaired end is named");
+    assert!(unpaired.contains("shape=ended-without-a-start"));
+    assert!(
+        unpaired.ends_with(&format!(" native={facts:?}")),
+        "the unpaired end's line ends with the facts it was handed: {unpaired}"
+    );
+}
+
+/// The facts are read only for a line that will be written: an event that
+/// breaks nothing reads none, each of the first [`PAIRING_LINES_MAX`] breaks of
+/// a window reads them once, and the break after the cap reads nothing and
+/// writes nothing. That is the whole of the reading's cost — one native
+/// snapshot per written line, at most [`PAIRING_LINES_MAX`] per window.
+///
+/// MUTATION: call `facts()` in `Report::pairing` before the cap's check (or
+/// before the shape is known) — the 33rd break, or an ordinary event, reads
+/// the facts — red.
+#[test]
+fn the_break_past_the_cap_reads_no_facts_and_writes_no_line() {
+    let reads = std::cell::Cell::new(0_u32);
+    let read = || {
+        reads.set(reads.get() + 1);
+        context_lost()
+    };
+    let mut report = focused();
+    // An ordinary composition breaks nothing and reads nothing.
+    for (kind, bytes) in [
+        (ImeKind::Enabled, 0),
+        (ImeKind::Preedit, "你".len()),
+        (ImeKind::Commit, 0),
+        (ImeKind::Disabled, 0),
+    ] {
+        assert_eq!(report.pairing(kind, bytes, read), None);
+    }
+    assert_eq!(reads.get(), 0);
+    for written in 1..=u32::from(PAIRING_LINES_MAX) {
+        assert!(report.pairing(ImeKind::Disabled, 0, read).is_some());
+        assert_eq!(reads.get(), written);
+    }
+    assert_eq!(report.pairing(ImeKind::Disabled, 0, read), None);
+    assert_eq!(
+        reads.get(),
+        u32::from(PAIRING_LINES_MAX),
+        "the break past the cap read the window's facts"
+    );
 }

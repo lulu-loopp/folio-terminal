@@ -10,7 +10,7 @@
 //! machine: the stores are at a test's own scratch paths, the pickers answer what the test
 //! scripts, the window has no native handle and its compositor no platform tree.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU32;
 use std::ops::Range;
@@ -34,6 +34,7 @@ use winit::dpi::{PhysicalPosition, PhysicalSize, Position, Size};
 use winit::event_loop::ControlFlow;
 use winit::window::{Cursor, WindowId};
 
+use crate::ime_report::NativeFacts;
 use crate::window_seam::{
     Backend, CompositorDoor, DeviceLayer, FolderPickerDoor, FrameDoor, Glass, ImagePickerDoor,
     ImeCaretDoor, LoopDoor, LoopProxy, MathMenuDoor, SavePickerDoor, WindowHost,
@@ -64,6 +65,8 @@ pub(crate) enum WindowEffect {
     ImeArea([i32; 4]),
     /// macOS's Option key told to send Alt, or not.
     OptionAsAlt(bool),
+    /// The window's input-method facts read (`WindowHost::ime_facts`).
+    ImeFactsRead,
     /// Text put on the clipboard.
     ClipboardWritten(String),
     /// A hand-off to the system: a file opened, a path revealed, an address handed over.
@@ -215,6 +218,9 @@ pub(crate) struct HeadlessWindow {
     pub(crate) ledger: Ledger,
     /// What the clipboard holds, as this window's doors read and write it.
     pub(crate) clipboard: RefCell<Option<String>>,
+    /// What the window's input-method facts door answers: whatever the test scripted, default
+    /// facts (every field `None`) until it does.
+    pub(crate) ime_facts: Cell<NativeFacts>,
 }
 
 impl WindowHost for HeadlessWindow {
@@ -281,6 +287,10 @@ impl WindowHost for HeadlessWindow {
     }
     fn native_handle(&self) -> anyhow::Result<bt_platform::NativeWindow> {
         Err(anyhow::anyhow!("a headless window has no native handle"))
+    }
+    fn ime_facts(&self) -> NativeFacts {
+        self.ledger.record(WindowEffect::ImeFactsRead);
+        self.ime_facts.get()
     }
     fn set_option_as_alt(&self, option_sends_alt: bool) {
         self.ledger
@@ -1052,6 +1062,7 @@ impl HeadlessParts {
                 focused: true,
                 ledger: ledger.clone(),
                 clipboard: RefCell::new(None),
+                ime_facts: Cell::new(NativeFacts::default()),
             },
             glass: HeadlessGlass::new(device, ledger.clone(), size, scale),
             compositor: HeadlessCompositor {
