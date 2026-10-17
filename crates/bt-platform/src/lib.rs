@@ -21826,43 +21826,33 @@ mod watch_contract_tests {
     /// The hazard this arm is shaped around: `FSEventStreamInvalidate` from a
     /// thread other than the scheduling one races the callback it is trying to
     /// stop. The shape that makes it impossible is structural rather than
-    /// careful — `DirWatch` holds no stream pointer, so neither its door nor its
-    /// `drop` has anything to invalidate: the door (`retire_within`, T-DROP-DOORS)
-    /// signals a run loop source and joins within its bound, and a drop without the
-    /// door signals and lets the thread go.
+    /// careful — `DirWatch` holds no stream pointer, so `drop` has nothing to
+    /// invalidate; it signals a run loop source. Since T-DROP-DOORS the drop waits
+    /// for nothing (the join is the door's, `retire_within`, which the macOS door
+    /// tests hold by behaviour).
     ///
-    /// MUTATION: put an `FSEventStreamStop` in `Drop::drop` or in `retire_within`
-    /// and this names it.
+    /// MUTATION: put an `FSEventStreamStop` in `Drop::drop` and this names it.
     #[test]
     fn the_owner_never_touches_the_stream() {
-        let drop_body = source_test::body(
+        let body = source_test::body(
             &ItemQuery::method("DirWatch", "drop")
                 .of_trait("Drop")
                 .in_module("crate::macos_watch"),
         );
-        let door_body = source_test::body(
-            &ItemQuery::method("DirWatch", "retire_within").in_module("crate::macos_watch"),
-        );
-        for body in [&drop_body, &door_body] {
-            for call in [
-                "FSEventStreamStop(",
-                "FSEventStreamInvalidate(",
-                "FSEventStreamRelease(",
-            ] {
-                assert!(
-                    !body.contains(call),
-                    "the owner calls `{call}` from its own thread, which races the callback:\n{body}"
-                );
-            }
+        for call in [
+            "FSEventStreamStop(",
+            "FSEventStreamInvalidate(",
+            "FSEventStreamRelease(",
+        ] {
+            assert!(
+                !body.contains(call),
+                "`drop` calls `{call}` from the owner's thread, which races the callback:\n{body}"
+            );
         }
         assert!(
-            door_body.contains("self.stopper.signal()") && door_body.contains("thread.join()"),
-            "the door is signal-and-join, or the cancellation is a flag somebody notices later:\n\
-             {door_body}"
-        );
-        assert!(
-            drop_body.contains("self.stopper.signal()") && !drop_body.contains("thread.join()"),
-            "a drop without the door signals and waits for nothing:\n{drop_body}"
+            body.contains("self.stopper.signal()"),
+            "`drop` signals the watcher's run loop, or the cancellation is a flag somebody \
+             notices later:\n{body}"
         );
         let watcher =
             source_test::body(&ItemQuery::function("watch_loop").in_module("crate::macos_watch"));
