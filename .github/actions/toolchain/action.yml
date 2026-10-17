@@ -64,12 +64,14 @@ runs:
     # **The cache key names the compiler the build uses, and only that one.**
     # rust-cache hashes `rustc -vV` of every toolchain `rustup toolchain list`
     # prints into the key's prefix, the part with no fallback, and the runner
-    # image brings a `stable` of its own that nothing here compiles with. As
-    # the image's stable moved from 1.98.1 to 1.99.0 (runners from 2026-10-15
-    # on) every job's key changed with it and every restore said "No cache
-    # found"; the
-    # cold `logic` job then ran past its budget, a cancelled job saves no cache,
-    # and `main` stayed cold for two days (T-CI-LOGIC-JOB-BUDGET). With the
+    # image brings a `stable` of its own that nothing here compiles with. The
+    # image's stable 1.99.0 (in place of 1.98.1) rolled out across runners from
+    # 2026-10-15: run 38671015245 (02:26) was already on 1.99.0 while
+    # 38691455267 and 38693259445 (06:16, 06:34) were still warm on 1.98.1. On
+    # a 1.99.0 runner every job's key changed and every restore said "No cache
+    # found"; the cold `logic` job then ran past its budget, a cancelled job
+    # saves no cache, and `main`'s `logic` runs on those runners stayed cold
+    # for two days (T-CI-LOGIC-JOB-BUDGET). With the
     # pinned channel the only toolchain left, the key moves when
     # `rust-toolchain.toml` moves and not when the image does. The pinned
     # channel becomes the default first, so a cargo started outside the

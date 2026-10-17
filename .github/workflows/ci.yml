@@ -721,11 +721,13 @@ jobs:
     # the two post steps, over runs 38671015245 38714746975 38719369282
     # 38720519586 38726741790 38835150475 38835297300 38837089117 38842728496
     # 39004900090 (attempt 1): 57.0-75.8 min, max 75.8. Headroom 1.36 =
-    # the slowest cold `test` step over the fastest (47.8 / 35.1 min): the
-    # spread of runner speed already seen, applied once more beyond the
+    # the slowest cold `test` step over the fastest (47.8 / 35.1 min): an
+    # observed spread, cause unknown (the fast ones were mostly branch
+    # dispatches, the slow ones main pushes), applied once more beyond the
     # slowest. 75.8 x 1.36 = 103.1, so 104. The warm-cache max over the ten
-    # green runs on `main` before the image moved (38436781373 to
-    # 38691455267) is 44.5. Re-derive with the same rule when the cold max
+    # green warm runs on `main` (38436781373 to 38691455267; the image's new
+    # stable rolled out across runners from 2026-10-15, so the first cold run,
+    # 38671015245, falls inside that span) is 44.5. Re-derive with the same rule when the cold max
     # passes 104 / 1.36 = 76 min. The licensing gates are their own job
     # (`licensing`), so a slow suite cannot cancel them.
     timeout-minutes: 104
@@ -998,7 +1000,10 @@ jobs:
   # (0.4 of downloads inside `logic`'s clippy step and 0.4 of its fetch step,
   # which is what a job with no build fetches), cargo-about built from source
   # 3.2, the gates 2.9 (run 38708586878), the cache save 1.7, the
-  # checkout's post 0.2 - is 11.3 min; x 1.36 = 15.4, so 16.
+  # checkout's post 0.2 - is 11.3 min; x 1.36 = 15.4, so 16. Not yet in it:
+  # the toolchain step's uninstall of the image's own toolchain, new with this
+  # job; the branch's first CI run is what confirms the job stays well
+  # under 16.
   licensing:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
