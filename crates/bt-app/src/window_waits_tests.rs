@@ -1788,14 +1788,16 @@ struct Implementation {
 /// supertraits ([`World::supertraits`]), the traits a receiver's stated type or a bound names
 /// ([`Body::traits_named`]) — comes through here, and a path chained past the resolver's hop limit
 /// ([`ResolveCutoff`]) fails the guard by name instead of being read as "no trait". A cycle among
-/// `use`s and globs is no cutoff: it names nothing more.
+/// `use`s and globs is no cutoff: it names nothing more. The refusal says the remedy: a shorter
+/// re-export chain, or a larger hop limit in bt-source, raised with its reason.
 fn decided(
     answer: Result<BTreeSet<TraitId>, ResolveCutoff>,
     what: impl FnOnce() -> String,
 ) -> BTreeSet<TraitId> {
     answer.unwrap_or_else(|ResolveCutoff(_)| {
         panic!(
-            "{} chains past the resolver's hop limit — refused, never passed",
+            "{} chains past the resolver's hop limit — refused, never passed: shorten the \
+             re-export chain, or raise `HOPS` in bt-source's `traits.rs` with its reason",
             what()
         )
     })
@@ -9739,12 +9741,23 @@ pub mod chain {
 use chain::Link20;
 "#;
 
+/// A planted crate's scratch folder, removed when dropped — after the crate is indexed, or on the
+/// way out of a panic in writing or indexing it. A refused removal leaves the scratch behind.
+struct PlantedFolder(PathBuf);
+
+impl Drop for PlantedFolder {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// **The world of one planted library crate**, `planted`: [`PLANTED_HOP_CHAIN`] followed by
 /// `rest`, written to a scratch folder, indexed, and read as the window-waits guard reads the
 /// product's packages ([`World::over`]).
 fn planted_world(tag: &str, rest: &str) -> World {
-    let directory = bt_testpath::temp_path(tag);
-    std::fs::create_dir_all(&directory).expect("a scratch folder");
+    let folder = PlantedFolder(bt_testpath::temp_path(tag));
+    let directory = &folder.0;
+    std::fs::create_dir_all(directory).expect("a scratch folder");
     let root = directory.join("lib.rs");
     std::fs::write(&root, format!("{PLANTED_HOP_CHAIN}{rest}"))
         .expect("the planted crate is written");
@@ -9758,7 +9771,7 @@ fn planted_world(tag: &str, rest: &str) -> World {
             },
             file: root,
         }],
-        vec![bt_source::DiskScope::under(&directory)],
+        vec![bt_source::DiskScope::under(directory)],
         bt_source::Vendor::Excluded,
     )
     .expect("the planted crate is where it was written");
@@ -9766,7 +9779,7 @@ fn planted_world(tag: &str, rest: &str) -> World {
         Index::build(&universe)
             .unwrap_or_else(|rejections| panic!("{}", bt_source::report(&rejections))),
     ));
-    let _ = std::fs::remove_dir_all(&directory);
+    drop(folder);
     World::over(
         vec![Src {
             package: "planted",
@@ -9790,7 +9803,7 @@ fn planted_world(tag: &str, rest: &str) -> World {
 /// is refused, and the test is red.
 #[test]
 #[should_panic(
-    expected = "the trait path `Link20` in planted crate chains past the resolver's hop limit — refused, never passed"
+    expected = "the trait path `Link20` in planted crate chains past the resolver's hop limit — refused, never passed: shorten the re-export chain, or raise `HOPS` in bt-source's `traits.rs` with its reason"
 )]
 fn a_receiver_trait_chained_past_the_hop_limit_is_refused() {
     let world = planted_world(
@@ -9813,23 +9826,34 @@ pub fn far_shape(driver: &dyn Link20) { driver.prepare(); }
 /// RED (T-WINDOW-WAITS-RESOLVER-CUTOFF) — **a supertrait chained past the resolver's hop limit is
 /// refused by name, never read as "no supertrait".**
 ///
-/// In the planted crate `Far: Link20` declares no `prepare`; its default method's `self.prepare()`
-/// is the supertrait's, `Driver::prepare` under twenty-one re-exports. Read as "no supertrait", no
-/// stated trait would declare `prepare` ([`World::trait_methods`]) and the call would fall to the
-/// untyped reading; the guard fails by name instead.
+/// In the planted crate `Near: chain::Link3` reaches `Driver` within the limit: its default
+/// method's `self.prepare()` names `Shape`'s `prepare` (`Shape` implements `Near` and, through
+/// `chain::Link3`, `Driver`). `Far: Link20` declares no `prepare`; its default method's
+/// `self.prepare()` is the supertrait's, `Driver::prepare` under twenty-one re-exports. Read as "no
+/// supertrait", no stated trait would declare `prepare` ([`World::trait_methods`]) and the call
+/// would fall to the untyped reading; the guard fails by name instead.
 ///
 /// MUTATION: in [`decided`], answer what was found on a cutoff — nothing is refused, and the test
 /// is red.
 #[test]
 #[should_panic(
-    expected = "a supertrait of `planted crate::Far` chains past the resolver's hop limit — refused, never passed"
+    expected = "a supertrait of `planted crate::Far` chains past the resolver's hop limit — refused, never passed: shorten the re-export chain, or raise `HOPS` in bt-source's `traits.rs` with its reason"
 )]
 fn a_supertrait_chained_past_the_hop_limit_is_refused() {
     let world = planted_world(
         "ww-cutoff-supertrait",
         "
+pub struct Shape;
+impl chain::Link3 for Shape { fn prepare(&self) {} }
+pub trait Near: chain::Link3 { fn near_default(&self) { self.prepare(); } }
+impl Near for Shape {}
 pub trait Far: Link20 { fn far_default(&self) { self.prepare(); } }
 ",
+    );
+    assert_eq!(
+        named_in_shape(&world, "near_default", "prepare"),
+        BTreeSet::from(["planted crate::<Shape as chain::Link3>::prepare".to_owned()]),
+        "a supertrait reached through a short chain names the implementation"
     );
     named_in_shape(&world, "far_default", "prepare");
 }
@@ -9837,7 +9861,9 @@ pub trait Far: Link20 { fn far_default(&self) { self.prepare(); } }
 /// RED (T-WINDOW-WAITS-RESOLVER-CUTOFF) — **an `impl` block whose trait is chained past the
 /// resolver's hop limit is refused by name, never filed under no trait.**
 ///
-/// In the planted crate `impl Link20 for Shape` implements `Driver` under twenty-one re-exports.
+/// A first planted crate's `impl chain::Link3 for Near` is filed under `Driver` — a chain within
+/// the limit is followed. In a second, `impl Link20 for Shape` implements `Driver` under twenty-one
+/// re-exports.
 /// Filed under no trait ([`World::over`] files each product block through [`implemented`]), its
 /// `prepare` would be missing from every call on a `Driver`; reading the crate fails by name
 /// instead.
@@ -9846,9 +9872,26 @@ pub trait Far: Link20 { fn far_default(&self) { self.prepare(); } }
 /// the world is built, and the test is red.
 #[test]
 #[should_panic(
-    expected = "the trait `Link20` of planted's `impl` block for `Shape` chains past the resolver's hop limit — refused, never passed"
+    expected = "the trait `Link20` of planted's `impl` block for `Shape` chains past the resolver's hop limit — refused, never passed: shorten the re-export chain, or raise `HOPS` in bt-source's `traits.rs` with its reason"
 )]
 fn an_impl_of_a_trait_chained_past_the_hop_limit_is_refused() {
+    let near = planted_world(
+        "ww-cutoff-impl-near",
+        "
+pub struct Near;
+impl chain::Link3 for Near { fn prepare(&self) {} }
+",
+    );
+    let driver = TraitId {
+        package: "planted".to_owned(),
+        module_path: "crate".to_owned(),
+        name: "Driver".to_owned(),
+    };
+    assert_eq!(
+        implementations_of(&near, &driver, "prepare"),
+        BTreeSet::from(["planted crate::<Near as chain::Link3>::prepare".to_owned()]),
+        "an `impl` through a short chain is filed under the trait at its end"
+    );
     planted_world(
         "ww-cutoff-impl",
         "
