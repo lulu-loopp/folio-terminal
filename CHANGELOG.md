@@ -25,6 +25,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- When a pane's shell does not tell Folio which folder it is in (a shell without Folio's integration), the folder button, Ctrl+Shift+B and the folder choosers now open in the folder the shell's process is in, not the one the pane was opened in. When that cannot be read either, the files card and column open in your home folder and their foot says "Folder unknown". <!-- zh: pending T-CWD-FROM-PROCESS -->
 - When Folio cannot save your window layout (a full disk, a folder that became read-only), it tells you once and stops trying again every couple of seconds; it tries again at your next change and when you quit. <!-- zh: pending T-SESSION-WRITER-NO-TIMER-RETRY -->
 - A picture that could not be loaded is no longer read again and again while the window holds many other pictures. <!-- zh: pending T-PEEK-CACHE-QUESTION-RECORDS -->
 - A GIF caught while it was being written plays once the write finishes. <!-- zh: pending T-ANIMATION-RECORDS-BOUND -->

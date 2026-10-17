@@ -11743,7 +11743,15 @@ mod tests {
         );
         pane.set_spawn_directory(place.directory.clone());
         let card = |pane: &bt_term::DualPlaneSession| {
-            PathBuf::from(crate::files_root_of(Some(pane), &environment))
+            // The pane's report ladder alone: this test's subject is the report and the folder
+            // the pane was opened in, so no shell process is handed to the read.
+            let folder = crate::pane_folder::pane_folder(
+                pane,
+                None,
+                &crate::pane_folder::ProcessFolderMemo::default(),
+                &crate::pane_folder::SystemProcessFolders,
+            );
+            PathBuf::from(crate::files_root_of(Some(folder), &environment).root)
         };
         assert_ne!(home, fixed);
         assert_eq!(
@@ -11864,6 +11872,99 @@ mod tests {
             )
             .unwrap()
         });
+    }
+
+    /// Feed `leaf`'s shell output to its session until what it has written holds `marker`, the
+    /// patience counted from the shell's last byte rather than from the start (CONVENTIONS §三:
+    /// a slow machine delivers the same bytes further apart).
+    #[cfg(windows)]
+    fn feed_leaf_until(leaf: &mut crate::LeafSession, marker: &str) {
+        const SILENCE: std::time::Duration = std::time::Duration::from_secs(60);
+        let mut seen = Vec::new();
+        let mut last_byte = std::time::Instant::now();
+        while !String::from_utf8_lossy(&seen).contains(marker) {
+            assert!(
+                last_byte.elapsed() < SILENCE,
+                "{marker:?}: the shell fell silent for {SILENCE:?} before writing it; output was \
+                 {:?}",
+                String::from_utf8_lossy(&seen)
+            );
+            let chunk = leaf.pty.as_ref().expect("the pane's shell").read_output();
+            if chunk.is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+            last_byte = std::time::Instant::now();
+            leaf.session.feed(&chunk).unwrap();
+            seen.extend(chunk);
+        }
+    }
+
+    /// RED (T-CWD-FROM-PROCESS) — **a Command Prompt pane with no integration stands where its
+    /// process stands**: `cmd.exe` with a plain `PROMPT` (`$P$G`, no OSC 7), started in a folder
+    /// whose name is not ASCII, read through the pane's own road (`LeafSession::folder`, the
+    /// shell's pid and its output count off the real pseudoconsole) at the first prompt and again
+    /// after `cd` into a subfolder. The pane never reports a folder.
+    ///
+    /// MUTATIONS (observed red): `LeafSession::folder` hands the ladder no shell (`None`) — at the
+    /// first prompt the pane answers `Opened`, the folder it was opened in, not its process; the
+    /// memo keyed by the shell alone (output not counted) — after `cd` the first read, the
+    /// starting folder, is answered again.
+    #[cfg(windows)]
+    #[test]
+    fn a_silent_command_prompt_panes_folder_follows_its_process() {
+        let hygiene = bt_pty::test_shell::Hygiene::new();
+        let start = hygiene.root().join("起点 start");
+        let moved = start.join("moved-here");
+        std::fs::create_dir_all(&moved).unwrap();
+        let cmd = bt_platform::program_on_path(Path::new("cmd.exe")).expect("cmd.exe");
+        let shell = bt_pty::test_shell::TestShell::spawn_shell_in(
+            hygiene,
+            cmd,
+            &[],
+            &|| last_resort_arguments(false),
+            &[(OsString::from(CMD_PROMPT), OsString::from("$P$G"))],
+            bt_pty::PtySize::cells(
+                std::num::NonZeroU16::new(160).unwrap(),
+                std::num::NonZeroU16::new(30).unwrap(),
+            ),
+            Some(start.clone()),
+        )
+        .unwrap();
+        let (pty, hygiene) = shell.into_session();
+        let mut leaf = crate::test_support::leaf_saying("");
+        leaf.session.set_spawn_directory(Some(start.clone()));
+        leaf.pty = Some(pty);
+        let door = crate::pane_folder::SystemProcessFolders;
+
+        feed_leaf_until(&mut leaf, "start>");
+        match leaf.folder(&door) {
+            crate::pane_folder::PaneFolder::Process(folder) => assert!(
+                bt_platform::same_file(&folder, &start),
+                "at the first prompt the process stands in {folder:?}, not {start:?}"
+            ),
+            other => panic!("at the first prompt: {other:?}"),
+        }
+
+        leaf.pty
+            .as_ref()
+            .unwrap()
+            .write(b"cd moved-here\r")
+            .unwrap();
+        feed_leaf_until(&mut leaf, "moved-here>");
+        assert_eq!(leaf.session.working_directory(), None, "no report was made");
+        match leaf.folder(&door) {
+            crate::pane_folder::PaneFolder::Process(folder) => assert!(
+                bt_platform::same_file(&folder, &moved),
+                "after cd the process stands in {folder:?}, not {moved:?}"
+            ),
+            other => panic!("after cd: {other:?}"),
+        }
+        let mut pty = leaf.pty.take().unwrap();
+        pty.write(b"exit\r").unwrap();
+        pty.shutdown().unwrap();
+        drop(pty);
+        drop(hygiene);
     }
 
     /// A headless window to deliver a `$PROFILE` answer to, and the voice a worker's end is said

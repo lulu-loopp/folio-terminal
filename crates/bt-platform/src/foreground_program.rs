@@ -65,7 +65,7 @@ pub fn write_console_members(_worker: &WorkerCtx, shell_pid: u32) -> bool {
     imp::write_console_members(shell_pid)
 }
 
-fn canonical_image(image: &str) -> String {
+pub(crate) fn canonical_image(image: &str) -> String {
     let leaf = image.rsplit(['/', '\\']).next().unwrap_or(image);
     let lower = leaf.to_ascii_lowercase();
     lower
@@ -74,7 +74,7 @@ fn canonical_image(image: &str) -> String {
         .to_owned()
 }
 
-fn crosses_remote_boundary(image: &str) -> bool {
+pub(crate) fn crosses_remote_boundary(image: &str) -> bool {
     matches!(image, "ssh" | "wsl" | "wslhost" | "wslservice" | "wslrelay")
 }
 

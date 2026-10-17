@@ -127,6 +127,7 @@ mod packaged_turns;
 mod palette;
 mod palette_index;
 mod pane_content;
+mod pane_folder;
 mod pdf;
 mod peek_strip;
 mod persist;
@@ -2727,6 +2728,8 @@ fn reroot_files_state(state: &mut seats::FilesLeafState, root: &str) -> bool {
         return false;
     }
     state.root = root.to_owned();
+    // A root someone chose is a folder they named, not the home folder standing in for one.
+    state.folder_unknown = false;
     // A `/src` left open under the old root is not the `/src` of the new one.
     // Honouring it would unfold whatever happens to be called that, which is a
     // tree opening itself at a folder you have never seen.
@@ -12246,6 +12249,10 @@ struct LeafSession {
     /// every pane not being restarted.
     successor: Option<Box<LeafSession>>,
     foreground_program_cadence: foreground_program::Cadence,
+    /// **This shell's last process folder read** (T-CWD-FROM-PROCESS), and the moment it was made
+    /// at — read on an ask when the shell has reported no folder, and asked again only after the
+    /// shell has written something. See [`pane_folder`].
+    process_folder: pane_folder::ProcessFolderMemo,
     /// **Which shell this is, told apart from the one that stood here before**
     /// (review X-1).
     ///
@@ -20084,6 +20091,9 @@ impl TabState {
                         // with nothing to say it had been.
                         foot_path: String::new(),
                         foot_revealed: false,
+                        // Filled by the caller with the path, for the path's reason.
+                        foot_notice: String::new(),
+                        foot_notice_width: 0.0,
                     },
                     view.wanted,
                 ),
@@ -20697,6 +20707,23 @@ impl LeafSession {
     /// ladder that answers "what is this tab called".
     fn standing_in(&self) -> Option<&Path> {
         self.session.reference_directory()
+    }
+
+    /// **The folder a door that opens a folder from this pane opens** (T-CWD-FROM-PROCESS): the
+    /// shell's report, else its process's folder, else — with no process yet — where the pane
+    /// was opened ([`pane_folder::pane_folder`]'s ladder). Read on the ask; the process is asked
+    /// again only once the shell has written something since the last read, or its exit has been
+    /// seen.
+    fn folder(&self, door: &dyn pane_folder::ProcessFolders) -> pane_folder::PaneFolder {
+        let shell = self.pty.as_ref().and_then(|pty| {
+            pty.shell_process_id()
+                .map(|shell| pane_folder::ShellMoment {
+                    shell,
+                    output: pty.output_bytes_received(),
+                    exited: self.shell_exit_age.is_some(),
+                })
+        });
+        pane_folder::pane_folder(&self.session, shell, &self.process_folder, door)
     }
 
     /// Everything the name stack reads off this shell, for deciding whether the
@@ -38068,6 +38095,9 @@ fn revive_plan(
                     git_sel: None,
                     // The fifth fact, and durable like `view` above it (T9).
                     git_remotes_open: leaf.remotes_open,
+                    // Not durable: a restored root is the root it was left on, a folder
+                    // somebody had (see the field).
+                    folder_unknown: false,
                 },
             )
         })
@@ -42555,6 +42585,7 @@ fn bare_leaf(
         birth_death_kept: false,
         spawn_fallback: None,
         foreground_program_cadence: foreground_program::Cadence::default(),
+        process_folder: pane_folder::ProcessFolderMemo::default(),
         paste_recipient: profiles::paste_recipient(
             profiles::index_of_id(&decision.spawn_profile),
             &decision.program_kind,
@@ -52721,7 +52752,10 @@ impl<B: Backend> Runtime<'_, B> {
             .terminals()
             .iter()
             .filter_map(|seat| tab.sessions.get(seat))
-            .filter_map(|leaf: &LeafSession| leaf.session.standing_folder())
+            .filter_map(|leaf: &LeafSession| {
+                leaf.folder(&pane_folder::SystemProcessFolders)
+                    .into_folder()
+            })
             .map(|cwd| cwd.display().to_string())
             .collect();
         let home = profiles::home_directory(&bt_pty::SystemShellEnvironment)
@@ -53395,7 +53429,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// the cwd of the terminal the trigger belongs to *at summon time*, and the
     /// float then stays there. A tree that re-roots itself as you `cd` is, in
     /// this design's own words, 整个生态独立判定最惊吓的行为.
-    fn trigger_root(&self, trigger: float::FloatTrigger) -> String {
+    fn trigger_root(&self, trigger: float::FloatTrigger) -> FilesRoot {
         // **A reference names its own folder**, so it does not go through the
         // cwd below at all: the two buttons speak for a *terminal* and borrow
         // the place that terminal is standing in, while this one speaks for a
@@ -53410,7 +53444,7 @@ impl<B: Backend> Runtime<'_, B> {
                 ..
             }) = self.terminal_reference_at(leaf.seat, cell)
         {
-            return path.display().to_string();
+            return FilesRoot::known(path.display().to_string());
         }
         let seat = match trigger {
             float::FloatTrigger::Tab(id) => self
@@ -53429,7 +53463,7 @@ impl<B: Backend> Runtime<'_, B> {
         };
         files_root_of(
             seat.and_then(|(tab, seat)| tab.sessions.get(&seat))
-                .map(|leaf| &leaf.session),
+                .map(|leaf| leaf.folder(&pane_folder::SystemProcessFolders)),
             &bt_pty::SystemShellEnvironment,
         )
     }
@@ -54774,8 +54808,8 @@ impl<B: Backend> Runtime<'_, B> {
                     .terminal_name(*seat)
                     .unwrap_or_else(|| tab.display_title());
                 let hint = leaf
-                    .session
-                    .standing_folder()
+                    .folder(&pane_folder::SystemProcessFolders)
+                    .folder()
                     .map(|cwd| cwd.display().to_string())
                     .or_else(|| {
                         leaf.program
@@ -72182,25 +72216,56 @@ fn session_title(
         })
 }
 
-/// **The folder a files card or a files column taken from a pane is rooted at** (issue #28): the
-/// folder the pane is standing in ([`DualPlaneSession::standing_folder`] — its shell's last report,
-/// else the folder it was opened in), and the account's home only for a pane that has neither.
+/// **The folder a files card or a files column taken from a pane is rooted at** (issue #28,
+/// T-CWD-FROM-PROCESS): the folder the pane is standing in ([`LeafSession::folder`] — its shell's
+/// last report, else its shell process's folder, else the folder it was opened in), and the
+/// account's home only when none of those can be said — which the root carries, so the card and
+/// the column say "Folder unknown" rather than showing a home folder as the pane's.
 ///
 /// One reader for both doors, the folder button's card ([`Runtime::trigger_root`]) and
-/// `Ctrl+Shift+B` ([`Runtime::files_root_for_new_pane`]). The report alone is not enough: a pane
-/// opened in a profile's fixed folder has none until its shell's first prompt, and none for its
-/// whole life when the shell does not report, while its own tab is already named after the folder
-/// it stands in.
+/// `Ctrl+Shift+B` ([`Runtime::files_root_for_new_pane`]). `None` is no pane to ask.
 fn files_root_of(
-    session: Option<&DualPlaneSession>,
+    folder: Option<pane_folder::PaneFolder>,
     environment: &dyn bt_pty::ShellEnvironment,
-) -> String {
-    session
-        .and_then(DualPlaneSession::standing_folder)
-        .map(Path::to_path_buf)
-        .or_else(|| profiles::home_directory(environment))
-        .map(|folder| folder.display().to_string())
-        .unwrap_or_default()
+) -> FilesRoot {
+    match folder.and_then(pane_folder::PaneFolder::into_folder) {
+        Some(folder) => FilesRoot::known(folder.display().to_string()),
+        None => FilesRoot {
+            root: profiles::home_directory(environment)
+                .map(|home| home.display().to_string())
+                .unwrap_or_default(),
+            folder_unknown: true,
+        },
+    }
+}
+
+/// **What a files foot hangs on its right hand for `state`'s root**: "Folder unknown" while the
+/// root is the account's home standing in for a pane's folder nobody could say
+/// ([`seats::FilesLeafState::folder_unknown`]), else nothing — a tree has no other standing fact.
+fn folder_foot_notice(state: &seats::FilesLeafState) -> &'static str {
+    if state.folder_unknown {
+        i18n::Text::FilesFolderUnknown.text()
+    } else {
+        ""
+    }
+}
+
+/// Where a files card or column opens, and whether that is the account's home standing in for a
+/// folder nobody could say ([`files_root_of`]).
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FilesRoot {
+    root: String,
+    folder_unknown: bool,
+}
+
+impl FilesRoot {
+    /// A folder the caller knows — a printed folder, a pane's own.
+    fn known(root: String) -> Self {
+        Self {
+            root,
+            folder_unknown: false,
+        }
+    }
 }
 
 /// The folder layer on its own: the working directory as one reader writes it,
