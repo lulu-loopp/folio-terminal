@@ -8,7 +8,8 @@
 //! `WindowRenderer` measures with — and keeps what a frame was handed (its preview bodies, its
 //! chrome, its overlay) so a test can read the frame's inputs back. Nothing here reaches the
 //! machine: the stores are at a test's own scratch paths, the pickers answer what the test
-//! scripts, the window has no native handle and its compositor no platform tree.
+//! scripts, the window's questions to the system answer the stand-ins of [`PlatformAnswers`]
+//! (a test scripts them), and its compositor is no tree a page's engine could hang in.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -37,7 +38,8 @@ use winit::window::{Cursor, WindowId};
 use crate::ime_report::NativeFacts;
 use crate::window_seam::{
     Backend, CompositorDoor, DeviceLayer, FolderPickerDoor, FrameDoor, Glass, ImagePickerDoor,
-    ImeCaretDoor, LoopDoor, LoopProxy, MathMenuDoor, SavePickerDoor, WindowHost,
+    ImeCaretDoor, LoopDoor, LoopProxy, MathMenuDoor, PageTree, SavePickerDoor, TaskbarDoor,
+    WindowHost,
 };
 use crate::{App, AppEvent, TabState, WindowRuntime};
 
@@ -67,6 +69,37 @@ pub(crate) enum WindowEffect {
     OptionAsAlt(bool),
     /// The window's input-method facts read (`WindowHost::ime_facts`).
     ImeFactsRead,
+    /// A line the window's runtime said in `diagnostics.log` (`WindowHost::note`), as it would
+    /// have been written — at most [`NOTES_KEPT`] of them between two takes of the ledger.
+    Noted(String),
+    /// The system's blur behind the ground, on or off (`WindowHost::set_backdrop`).
+    Backdrop(bool),
+    /// The window told to stay above other windows, or not (`WindowHost::set_topmost`).
+    Topmost(bool),
+    /// The frame's dark plate, or its light one (`WindowHost::set_dark_mode`).
+    DarkMode(bool),
+    /// The window stood at an outer rectangle (`WindowHost::stand_at`).
+    StoodAt(bt_platform::WindowRect),
+    /// The colour painted before the first frame, or none (`WindowHost::set_class_background`).
+    ClassBackground(Option<[u8; 3]>),
+    /// The keyboard and the foreground given to the window (`WindowHost::take_foreground`).
+    ForegroundTaken,
+    /// The keyboard focus taken back from a child (`WindowHost::take_keyboard_focus`).
+    KeyboardFocusTaken,
+    /// The window asked to close (`WindowHost::request_close`).
+    CloseRequested,
+    /// The taskbar button flashed (`WindowHost::flash`).
+    Flashed,
+    /// The taskbar button's flash stopped (`WindowHost::stop_flashing`).
+    FlashStopped,
+    /// The taskbar button told a progress (`TaskbarDoor::set_progress`).
+    TaskbarProgress(bt_platform::TaskbarProgress),
+    /// The system's preference broadcasts asked for (`WindowHost::watch_system_settings`).
+    SystemSettingsWatched,
+    /// The system's end-of-session question asked for (`WindowHost::watch_session_end`).
+    SessionEndWatched,
+    /// A page's place in the window asked for, for the web engine (`WindowHost::page_address`).
+    PageAddressed(bt_platform::PageVisual),
     /// Text put on the clipboard.
     ClipboardWritten(String),
     /// A hand-off to the system: a file opened, a path revealed, an address handed over.
@@ -129,19 +162,75 @@ pub(crate) enum WindowEffect {
     WindowOpened,
 }
 
+/// **How many `diagnostics.log` lines a ledger keeps between two takes** (T-DIAGNOSTICS-TEST-SINK).
+/// A line past them is counted ([`Ledger::notes_beyond_the_cap`]) and not kept, so a road a test
+/// drives through a long run of events does not grow the ledger by a line per event, and a plain
+/// [`Ledger::take`] after one refuses with the count rather than hand back a shorter record. A
+/// test's bound, not a product budget and not derived from one: 32 mirrors the input method's
+/// bound on a window's bracket lines (`ime_report::PAIRING_LINES_MAX`); the product's own bounds
+/// on a road's lines are the road's.
+pub(crate) const NOTES_KEPT: usize = 32;
+
 /// **A window's effects, in the order its doors were knocked on.** One per headless window,
 /// shared by its stand-ins.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Ledger(Rc<RefCell<Vec<WindowEffect>>>);
+pub(crate) struct Ledger(Rc<RefCell<Entries>>);
+
+/// What a [`Ledger`] holds: the effects, and the `diagnostics.log` lines counted past
+/// [`NOTES_KEPT`] since the last take.
+#[derive(Debug, Default)]
+struct Entries {
+    effects: Vec<WindowEffect>,
+    notes_kept: usize,
+    notes_beyond_the_cap: usize,
+}
 
 impl Ledger {
     fn record(&self, effect: WindowEffect) {
-        self.0.borrow_mut().push(effect);
+        self.0.borrow_mut().effects.push(effect);
+    }
+
+    /// A line said in `diagnostics.log`: kept as [`WindowEffect::Noted`] while fewer than
+    /// [`NOTES_KEPT`] are held, counted after.
+    fn note(&self, line: &str) {
+        let mut entries = self.0.borrow_mut();
+        if entries.notes_kept < NOTES_KEPT {
+            entries.notes_kept += 1;
+            entries.effects.push(WindowEffect::Noted(line.to_owned()));
+        } else {
+            entries.notes_beyond_the_cap += 1;
+        }
     }
 
     /// Everything recorded so far, emptied.
+    ///
+    /// # Panics
+    ///
+    /// When a line was said past [`NOTES_KEPT`] since the last take: what a test reads back would
+    /// be missing lines the road said, so it fails loudly with the count rather than pass on a
+    /// shorter record. The cap's own test reads the count first ([`Self::take_with_the_count`]).
     pub(crate) fn take(&self) -> Vec<WindowEffect> {
-        std::mem::take(&mut self.0.borrow_mut())
+        let beyond = self.notes_beyond_the_cap();
+        assert!(
+            beyond == 0,
+            "{beyond} diagnostics.log line(s) were said past the ledger's {NOTES_KEPT} and not \
+             kept; take the ledger more often"
+        );
+        self.take_with_the_count().0
+    }
+
+    /// Everything recorded so far, emptied, and how many lines were said past the cap — which the
+    /// take empties too.
+    fn take_with_the_count(&self) -> (Vec<WindowEffect>, usize) {
+        let mut entries = self.0.borrow_mut();
+        entries.notes_kept = 0;
+        let beyond = std::mem::take(&mut entries.notes_beyond_the_cap);
+        (std::mem::take(&mut entries.effects), beyond)
+    }
+
+    /// How many `diagnostics.log` lines were said past [`NOTES_KEPT`] since the last take.
+    pub(crate) fn notes_beyond_the_cap(&self) -> usize {
+        self.0.borrow().notes_beyond_the_cap
     }
 }
 
@@ -221,6 +310,76 @@ pub(crate) struct HeadlessWindow {
     /// What the window's input-method facts door answers: whatever the test scripted, default
     /// facts (every field `None`) until it does.
     pub(crate) ime_facts: Cell<NativeFacts>,
+    /// What the window's questions to the system answer: [`PlatformAnswers::default`] until a
+    /// test scripts them.
+    pub(crate) answers: Cell<PlatformAnswers>,
+}
+
+/// **What a headless window's questions to the system answer** — the documented stand-ins, one
+/// per question, each a field a test may script to drive the branch behind it.
+///
+/// **A recorder, by design, not a window without a handle.** The read defaults are the product's
+/// answers about a window whose handle cannot be got — on the screen and uncovered, no rectangle,
+/// no glass, no pointer, no present facts, not the foreground's holder — so a test that scripts
+/// nothing drives the branches such a window drives. The instructions are not: where the product
+/// with no handle is refused (`take_foreground` answers `false`, every `Result` door an `Err`),
+/// the headless window records the instruction and lets it through (`takes_the_foreground`
+/// defaults to `true`, every other instruction answers `Ok`), so the code after an instruction is
+/// driven too; a test that wants the refusal scripts it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PlatformAnswers {
+    /// `WindowHost::is_minimized`, winit's own reading: `Some(false)`.
+    pub(crate) minimized: Option<bool>,
+    /// `WindowHost::is_iconic`: `false`.
+    pub(crate) iconic: bool,
+    /// `WindowHost::is_cloaked`: `false`.
+    pub(crate) cloaked: bool,
+    /// `WindowHost::is_exposed`: `true`.
+    pub(crate) exposed: bool,
+    /// `WindowHost::outer_rect`: `None`.
+    pub(crate) outer_rect: Option<bt_platform::WindowRect>,
+    /// `WindowHost::work_area`: `None`.
+    pub(crate) work_area: Option<bt_platform::WindowRect>,
+    /// `WindowHost::glass_at`, at every point: `GlassHere::Unknown`.
+    pub(crate) glass: crate::GlassHere,
+    /// `WindowHost::pointer_in_window`: `None`.
+    pub(crate) pointer: Option<(i32, i32)>,
+    /// `WindowHost::holds_the_foreground`, for every holder: `false`.
+    pub(crate) holds_the_foreground: bool,
+    /// `WindowHost::take_foreground`: `true`, the system lets it.
+    pub(crate) takes_the_foreground: bool,
+    /// `WindowHost::present_facts`: every fact unread.
+    pub(crate) present_facts: bt_platform::NativePresentFacts,
+}
+
+impl Default for PlatformAnswers {
+    fn default() -> Self {
+        Self {
+            minimized: Some(false),
+            iconic: false,
+            cloaked: false,
+            exposed: true,
+            outer_rect: None,
+            work_area: None,
+            glass: crate::GlassHere::Unknown,
+            pointer: None,
+            holds_the_foreground: false,
+            takes_the_foreground: true,
+            present_facts: bt_platform::NativePresentFacts::default(),
+        }
+    }
+}
+
+/// **A headless window's taskbar button**: each progress it is told, recorded.
+pub(crate) struct HeadlessTaskbar {
+    ledger: Ledger,
+}
+
+impl TaskbarDoor for HeadlessTaskbar {
+    fn set_progress(&self, progress: bt_platform::TaskbarProgress) -> Result<(), String> {
+        self.ledger.record(WindowEffect::TaskbarProgress(progress));
+        Ok(())
+    }
 }
 
 impl WindowHost for HeadlessWindow {
@@ -246,7 +405,7 @@ impl WindowHost for HeadlessWindow {
         false
     }
     fn is_minimized(&self) -> Option<bool> {
-        Some(false)
+        self.answers.get().minimized
     }
     fn has_focus(&self) -> bool {
         self.focused
@@ -285,12 +444,107 @@ impl WindowHost for HeadlessWindow {
     fn frame_rate_millihertz(&self) -> Option<u32> {
         None
     }
-    fn native_handle(&self) -> anyhow::Result<bt_platform::NativeWindow> {
-        Err(anyhow::anyhow!("a headless window has no native handle"))
+    fn is_iconic(&self) -> bool {
+        self.answers.get().iconic
+    }
+    fn is_cloaked(&self) -> bool {
+        self.answers.get().cloaked
+    }
+    fn is_exposed(&self) -> bool {
+        self.answers.get().exposed
+    }
+    fn outer_rect(&self) -> Option<bt_platform::WindowRect> {
+        self.answers.get().outer_rect
+    }
+    fn work_area(&self) -> Option<bt_platform::WindowRect> {
+        self.answers.get().work_area
+    }
+    fn stand_at(&self, rect: bt_platform::WindowRect) -> Result<(), String> {
+        self.ledger.record(WindowEffect::StoodAt(rect));
+        Ok(())
+    }
+    fn glass_at(&self, _x: i32, _y: i32) -> crate::GlassHere {
+        self.answers.get().glass
+    }
+    fn pointer_in_window(&self) -> Option<(i32, i32)> {
+        self.answers.get().pointer
+    }
+    fn present_facts(&self) -> bt_platform::NativePresentFacts {
+        self.answers.get().present_facts
+    }
+    fn holds_the_foreground(&self, _holder: bt_platform::hotkey::Foreground) -> bool {
+        self.answers.get().holds_the_foreground
+    }
+    fn set_backdrop(&self, acrylic: bool) -> Result<(), String> {
+        self.ledger.record(WindowEffect::Backdrop(acrylic));
+        Ok(())
+    }
+    fn set_topmost(&self, topmost: bool) -> Result<(), String> {
+        self.ledger.record(WindowEffect::Topmost(topmost));
+        Ok(())
+    }
+    fn set_dark_mode(&self, dark: bool) -> Result<(), String> {
+        self.ledger.record(WindowEffect::DarkMode(dark));
+        Ok(())
+    }
+    fn set_class_background(&self, rgb: Option<[u8; 3]>) -> Result<(), String> {
+        self.ledger.record(WindowEffect::ClassBackground(rgb));
+        Ok(())
+    }
+    fn take_foreground(&self) -> bool {
+        self.ledger.record(WindowEffect::ForegroundTaken);
+        self.answers.get().takes_the_foreground
+    }
+    fn take_keyboard_focus(&self) -> Result<(), String> {
+        self.ledger.record(WindowEffect::KeyboardFocusTaken);
+        Ok(())
+    }
+    fn request_close(&self) -> Result<(), String> {
+        self.ledger.record(WindowEffect::CloseRequested);
+        Ok(())
+    }
+    fn flash(&self) {
+        self.ledger.record(WindowEffect::Flashed);
+    }
+    fn stop_flashing(&self) {
+        self.ledger.record(WindowEffect::FlashStopped);
+    }
+    type Taskbar = HeadlessTaskbar;
+    fn taskbar(&self) -> Result<HeadlessTaskbar, String> {
+        Ok(HeadlessTaskbar {
+            ledger: self.ledger.clone(),
+        })
+    }
+    fn watch_system_settings(
+        &self,
+        _wake: Box<dyn Fn(bt_platform::SystemNews)>,
+    ) -> Option<bt_platform::SystemSettingsWatch> {
+        self.ledger.record(WindowEffect::SystemSettingsWatched);
+        None
+    }
+    fn watch_session_end(
+        &self,
+        _hear: Box<dyn Fn(bt_platform::session_end::SessionEnd)>,
+        _reason: Box<dyn Fn() -> String>,
+    ) -> Option<bt_platform::session_end::SessionEndWatch> {
+        self.ledger.record(WindowEffect::SessionEndWatched);
+        None
+    }
+    /// **A headless window hosts no web engine**: the place is recorded, and the answer is the
+    /// refusal a page's open takes when there is no engine to open it in.
+    fn page_address(
+        &self,
+        page: bt_platform::PageVisual,
+    ) -> Result<crate::webhost::SeatAddress, String> {
+        self.ledger.record(WindowEffect::PageAddressed(page));
+        Err("a headless window hosts no web engine".to_owned())
     }
     fn ime_facts(&self) -> NativeFacts {
         self.ledger.record(WindowEffect::ImeFactsRead);
         self.ime_facts.get()
+    }
+    fn note(&self, line: &str) {
+        self.ledger.note(line);
     }
     fn set_option_as_alt(&self, option_sends_alt: bool) {
         self.ledger
@@ -895,7 +1149,7 @@ impl CompositorDoor for HeadlessCompositor {
         self.ledger.record(WindowEffect::Committed);
         Ok(())
     }
-    fn platform_tree(&self) -> Result<&bt_platform::Compositor, String> {
+    fn page_tree(&self) -> Result<PageTree<'_>, String> {
         Err("a headless window's tree hosts no page engine".to_owned())
     }
 }
@@ -1063,6 +1317,7 @@ impl HeadlessParts {
                 ledger: ledger.clone(),
                 clipboard: RefCell::new(None),
                 ime_facts: Cell::new(NativeFacts::default()),
+                answers: Cell::new(PlatformAnswers::default()),
             },
             glass: HeadlessGlass::new(device, ledger.clone(), size, scale),
             compositor: HeadlessCompositor {
@@ -1506,10 +1761,6 @@ mod tests {
         let window = &parts.window;
         assert_eq!(window.id(), WindowId::from(7));
         assert_eq!(window.inner_size(), PhysicalSize::new(640, 480));
-        assert!(
-            window.native_handle().is_err(),
-            "a headless window has no handle"
-        );
         window.request_redraw();
         window.set_title("标题 title");
         window.set_visible(true);
@@ -1522,6 +1773,50 @@ mod tests {
             PhysicalSize::new(3, 18).into(),
         );
         window.set_option_as_alt(true);
+        window.note("诊断 a line, said as it is written");
+        // The window's questions to the system answer the documented stand-ins, and record
+        // nothing; its instructions record what they were told.
+        assert!(!window.is_iconic() && !window.is_cloaked() && window.is_exposed());
+        assert_eq!((window.outer_rect(), window.work_area()), (None, None));
+        assert_eq!(window.glass_at(3, 4), crate::GlassHere::Unknown);
+        assert_eq!(window.pointer_in_window(), None);
+        assert_eq!(
+            window.present_facts(),
+            bt_platform::NativePresentFacts::default()
+        );
+        let rect = bt_platform::WindowRect {
+            left: 10,
+            top: 20,
+            right: 650,
+            bottom: 500,
+        };
+        window.stand_at(rect).expect("recorded");
+        window.set_backdrop(true).expect("recorded");
+        window.set_topmost(true).expect("recorded");
+        window.set_dark_mode(false).expect("recorded");
+        window
+            .set_class_background(Some([1, 2, 3]))
+            .expect("recorded");
+        assert!(window.take_foreground(), "the system lets it");
+        window.take_keyboard_focus().expect("recorded");
+        window.request_close().expect("recorded");
+        window.flash();
+        window.stop_flashing();
+        window
+            .taskbar()
+            .expect("a headless window has a button")
+            .set_progress(bt_platform::TaskbarProgress::CLEARED)
+            .expect("recorded");
+        assert!(window.watch_system_settings(Box::new(|_| {})).is_none());
+        assert!(
+            window
+                .watch_session_end(Box::new(|_| {}), Box::new(String::new))
+                .is_none()
+        );
+        assert!(
+            window.page_address(page).is_err(),
+            "a headless window hosts no web engine, and says so"
+        );
         window
             .set_clipboard_text("剪贴 clip")
             .expect("the headless clipboard takes text");
@@ -1579,8 +1874,8 @@ mod tests {
             .expect("admitted")
             .expect("recorded");
         assert!(
-            compositor.platform_tree().is_err(),
-            "and it is no platform tree a page's engine could hang in"
+            compositor.page_tree().is_err(),
+            "and it is no tree a page's engine could hang in"
         );
 
         let frame = &parts.frame;
@@ -1638,6 +1933,26 @@ mod tests {
                 WindowEffect::Cursor(Cursor::Icon(CursorIcon::Text)),
                 WindowEffect::ImeArea([10, 20, 3, 18]),
                 WindowEffect::OptionAsAlt(true),
+                WindowEffect::Noted("诊断 a line, said as it is written".to_owned()),
+                WindowEffect::StoodAt(bt_platform::WindowRect {
+                    left: 10,
+                    top: 20,
+                    right: 650,
+                    bottom: 500,
+                }),
+                WindowEffect::Backdrop(true),
+                WindowEffect::Topmost(true),
+                WindowEffect::DarkMode(false),
+                WindowEffect::ClassBackground(Some([1, 2, 3])),
+                WindowEffect::ForegroundTaken,
+                WindowEffect::KeyboardFocusTaken,
+                WindowEffect::CloseRequested,
+                WindowEffect::Flashed,
+                WindowEffect::FlashStopped,
+                WindowEffect::TaskbarProgress(bt_platform::TaskbarProgress::CLEARED),
+                WindowEffect::SystemSettingsWatched,
+                WindowEffect::SessionEndWatched,
+                WindowEffect::PageAddressed(page),
                 WindowEffect::ClipboardWritten("剪贴 clip".to_owned()),
                 WindowEffect::HandedOff(bt_platform::Handoff::Reveal(folder.clone())),
                 WindowEffect::Presented {
@@ -1675,6 +1990,56 @@ mod tests {
         assert!(
             matches!(sent.as_slice(), [AppEvent::PtyOutput]),
             "the loop's one wake: {sent:?}"
+        );
+    }
+
+    /// RED (T-DIAGNOSTICS-TEST-SINK) — **the window's `diagnostics.log` door keeps the exact text
+    /// of every line up to its cap, and counts the rest**: [`NOTES_KEPT`] lines are kept in the
+    /// order said, byte for byte (a line of several scripts, a line with a tab); the one past them
+    /// is counted and not kept; a plain take refuses, loudly, rather than hand back a record
+    /// missing a line; a take with the count empties both, and the next line is kept again.
+    ///
+    /// MUTATION: keep every line (no cap) — the ledger holds one line too many and counts none;
+    /// record a line trimmed or reformatted — the kept text differs; let `take` pass with lines
+    /// past the cap — the refusal does not come.
+    #[test]
+    fn the_window_keeps_the_lines_it_is_told_up_to_its_cap_and_counts_the_rest() {
+        crate::test_support::on_the_window_thread();
+        let ledger = Ledger::default();
+        let device = HeadlessDevice::new(14.0);
+        let parts = HeadlessParts::new(&device, 8, (640, 480), 1.0, &ledger);
+        let said: Vec<String> = (0..=NOTES_KEPT)
+            .map(|line| format!("Folio: 第{line}行 line	{line} — said "))
+            .collect();
+        for line in &said {
+            parts.window.note(line);
+        }
+        assert_eq!(
+            ledger.notes_beyond_the_cap(),
+            1,
+            "the line past the cap is counted"
+        );
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ledger.take()));
+        assert!(
+            refused.is_err(),
+            "a take with a line past the cap fails loudly, and leaves the ledger as it was"
+        );
+        let kept: Vec<WindowEffect> = said[..NOTES_KEPT]
+            .iter()
+            .cloned()
+            .map(WindowEffect::Noted)
+            .collect();
+        assert_eq!(
+            ledger.take_with_the_count(),
+            (kept, 1),
+            "the first {NOTES_KEPT}, as they were said, and the one past them counted"
+        );
+        assert_eq!(ledger.notes_beyond_the_cap(), 0, "a take empties the count");
+        parts.window.note("after the take");
+        assert_eq!(
+            ledger.take(),
+            vec![WindowEffect::Noted("after the take".to_owned())],
+            "the cap is per take"
         );
     }
 

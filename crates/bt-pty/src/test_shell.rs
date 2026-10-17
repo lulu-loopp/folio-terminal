@@ -1067,6 +1067,21 @@ impl Hygiene {
     }
 }
 
+impl Drop for TestShell {
+    /// **A test's shell is taken apart where the test stands**, before its directory goes: the
+    /// session's own `Drop` waits for nothing (T-DROP-DOORS, D-81), and a test may wait — so the
+    /// teardown the product hands to `retire_session` runs here, on the test's thread, and the
+    /// child is reaped before [`Hygiene`] removes the folder it may still be writing into. A shell
+    /// given away by [`TestShell::into_session`] is its new holder's to end.
+    fn drop(&mut self) {
+        if let Some(session) = self.session.as_mut() {
+            let _ = session.take_apart();
+        }
+        self.session.take();
+        self.hygiene.take();
+    }
+}
+
 impl Drop for Hygiene {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
@@ -1254,12 +1269,12 @@ fn same_file_location(left: &Path, right: &Path) -> bool {
 /// history refusal, [`Self::reply`] is a terminal's answer to a query and does
 /// not, and everything else a test asks of the session is forwarded.
 pub struct TestShell {
-    // Declared first, so the child is ended before the directory it may still be
-    // writing into is removed.
-    session: PtySession,
+    // Ended first (this type's `Drop`), so the child is reaped before the directory it may still
+    // be writing into is removed. Both are `Some` until `into_session` gives them away.
+    session: Option<PtySession>,
     gate: Gate,
     program: OsString,
-    hygiene: Hygiene,
+    hygiene: Option<Hygiene>,
 }
 
 /// A process-starting door with the one `spawn` it makes per attempt handed in.
@@ -1320,6 +1335,31 @@ impl TestShell {
         size: PtySize,
         working_directory: Option<PathBuf>,
     ) -> Result<Self, PtyError> {
+        Self::spawn_shell_in_waking(
+            hygiene,
+            program,
+            arguments,
+            fallback_arguments,
+            environment,
+            size,
+            working_directory,
+            quiet(),
+        )
+    }
+
+    /// [`Self::spawn_shell_in`] with the wake the session's reader calls after each chunk it
+    /// queues — what a test waits on instead of polling the ring on a clock.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_shell_in_waking(
+        hygiene: Hygiene,
+        program: impl Into<OsString>,
+        arguments: &[OsString],
+        fallback_arguments: &dyn Fn() -> Vec<OsString>,
+        environment: &[(OsString, OsString)],
+        size: PtySize,
+        working_directory: Option<PathBuf>,
+        wake: OutputWake,
+    ) -> Result<Self, PtyError> {
         let program = program.into();
         Self::through(
             hygiene,
@@ -1330,7 +1370,7 @@ impl TestShell {
                     fallback_arguments,
                     environment,
                     size,
-                    quiet(),
+                    wake,
                     working_directory,
                     spawn,
                 )
@@ -1349,10 +1389,10 @@ impl TestShell {
         })?;
         let (gate, program) = started.expect("a door that answered a session spawned one");
         Ok(Self {
-            session,
+            session: Some(session),
             gate,
             program,
-            hygiene,
+            hygiene: Some(hygiene),
         })
     }
 
@@ -1365,7 +1405,9 @@ impl TestShell {
     /// The directory standing in for the account.
     #[must_use]
     pub fn hygiene(&self) -> &Hygiene {
-        &self.hygiene
+        self.hygiene
+            .as_ref()
+            .expect("a test shell holds its hygiene until it gives it away")
     }
 
     /// **Type** `bytes` into the shell — once its history refusal is
@@ -1378,21 +1420,21 @@ impl TestShell {
     /// typed, and the message says which.
     pub fn write(&mut self, bytes: &[u8]) -> Result<(), PtyError> {
         self.establish();
-        self.session.write(bytes)
+        self.held().write(bytes)
     }
 
     /// A terminal's **answer** to something the child asked — a cursor report,
     /// a colour report — which the child may be waiting on before it can reach
     /// the point where its history refusal is established. Never typing.
     pub fn reply(&self, bytes: &[u8]) -> Result<(), PtyError> {
-        self.session.write(bytes)
+        self.held().write(bytes)
     }
 
     /// The session itself, for a product function that takes one — under the
     /// same condition as [`Self::write`], because whoever holds it can type.
     pub fn session_mut(&mut self) -> &mut PtySession {
         self.establish();
-        &mut self.session
+        self.held_mut()
     }
 
     /// **The session itself, given away** — for a test whose subject takes a [`PtySession`] by
@@ -1401,7 +1443,28 @@ impl TestShell {
     /// be dropped after the session, so the child is ended before its directory is removed.
     pub fn into_session(mut self) -> (PtySession, Hygiene) {
         self.establish();
-        (self.session, self.hygiene)
+        (
+            self.session
+                .take()
+                .expect("a test shell holds its session until it gives it away"),
+            self.hygiene
+                .take()
+                .expect("a test shell holds its hygiene until it gives it away"),
+        )
+    }
+
+    /// The session, held until [`Self::into_session`] gives it away.
+    fn held(&self) -> &PtySession {
+        self.session
+            .as_ref()
+            .expect("a test shell holds its session until it gives it away")
+    }
+
+    /// [`Self::held`], to change.
+    fn held_mut(&mut self) -> &mut PtySession {
+        self.session
+            .as_mut()
+            .expect("a test shell holds its session until it gives it away")
     }
 
     fn establish(&mut self) {
@@ -1439,7 +1502,7 @@ impl TestShell {
                     reason.trim_start_matches('\u{feff}').trim()
                 );
             }
-            match self.session.try_wait() {
+            match self.session.as_mut().map_or(Ok(None), PtySession::try_wait) {
                 Ok(Some(status)) => panic!(
                     "{program} ended ({status:?}) before it said its history saving was off, so \
                      nothing was typed into it"
@@ -1481,7 +1544,7 @@ impl TestShell {
                 }
             }
         };
-        let child = match self.session.try_wait() {
+        let child = match self.held_mut().try_wait() {
             Ok(Some(status)) if status.exit_code() == REFUSED_EXIT_CODE => {
                 format!("ended with exit code {REFUSED_EXIT_CODE}, the history refusal's own")
             }
@@ -1489,7 +1552,7 @@ impl TestShell {
             Ok(None) => "is still running".to_owned(),
             Err(error) => format!("cannot be asked whether it is running ({error})"),
         };
-        let facts = match std::fs::read_to_string(self.hygiene.facts_file()) {
+        let facts = match std::fs::read_to_string(self.hygiene().facts_file()) {
             Ok(facts) => format!(
                 "reported {}",
                 facts
@@ -1512,54 +1575,54 @@ impl TestShell {
     }
 
     pub fn read_output(&self) -> Vec<u8> {
-        self.session.read_output()
+        self.held().read_output()
     }
 
     pub fn output_is_drained(&self) -> bool {
-        self.session.output_is_drained()
+        self.held().output_is_drained()
     }
 
     pub fn resize(&self, size: PtySize) -> Result<(), PtyError> {
-        self.session.resize(size)
+        self.held().resize(size)
     }
 
     pub fn size(&self) -> Result<PtySize, PtyError> {
-        self.session.size()
+        self.held().size()
     }
 
     pub fn clear_host_buffer(&self, keep_cursor_row: bool) -> Result<bool, PtyError> {
-        self.session.clear_host_buffer(keep_cursor_row)
+        self.held().clear_host_buffer(keep_cursor_row)
     }
 
     pub fn ring_stats(&self) -> RingStats {
-        self.session.ring_stats()
+        self.held().ring_stats()
     }
 
     #[must_use]
     pub fn child_id(&self) -> Option<u32> {
-        self.session.child_id()
+        self.held().child_id()
     }
 
     pub fn try_wait(&mut self) -> Result<Option<ExitStatus>, PtyError> {
-        self.session.try_wait()
+        self.held_mut().try_wait()
     }
 
     pub fn shutdown(&mut self) -> Result<Option<ExitStatus>, PtyError> {
-        self.session.shutdown()
+        self.held_mut().shutdown()
     }
 
     pub fn take_shell_fallback(&mut self) -> Option<ShellFallback> {
-        self.session.take_shell_fallback()
+        self.held_mut().take_shell_fallback()
     }
 
     #[must_use]
     pub fn conpty_kind(&self) -> crate::ConPtyKind {
-        self.session.conpty_kind()
+        self.held().conpty_kind()
     }
 
     #[must_use]
     pub fn inbox_conpty_reason(&self) -> Option<String> {
-        self.session.inbox_conpty_reason()
+        self.held().inbox_conpty_reason()
     }
 }
 

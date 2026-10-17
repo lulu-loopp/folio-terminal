@@ -769,10 +769,15 @@ impl Retirements {
 /// already out of its window's map by then — that is the caller's half of this, and it is what
 /// makes the hand-over safe: nothing on the window thread can reach a session that is being
 /// taken apart, because nothing on the window thread still has it.
+///
+/// **This is the door a shell is taken apart through** (T-DROP-DOORS, D-81): *a shell is taken
+/// apart only through `retire_within`, never by a drop on the window thread.* Every road that
+/// ends a pane in `bt-app` takes the session out of its leaf and hands it here; the session's
+/// `Drop` waits for nothing.
 pub fn retire_session(session: PtySession) {
     retire_within(RETIREMENT_BUDGET, move || {
         let mut session = session;
-        if let Err(error) = session.shutdown() {
+        if let Err(error) = session.take_apart() {
             eprintln!("a closing pane's child did not go quietly: {error}");
         }
     });
@@ -781,11 +786,12 @@ pub fn retire_session(session: PtySession) {
 /// The hand-over itself, as a function of what to run rather than of a session, so that "the
 /// window thread does not wait for this" can be tested with an ordinary closure and no PTY.
 ///
-/// A thread that will not start is the one case this cannot honour, and the teardown then runs
-/// here: `spawn` drops the closure it could not take, which drops the session inside it, and
-/// [`PtySession`]'s `Drop` *is* `shutdown`. So the close costs what it used to cost rather than
-/// leaking a child nobody can see — which [`PtySession::shutdown`]'s own callers already call
-/// the one outcome worse than a slow close.
+/// A thread that will not start is the one case this cannot honour, and nothing waits for the
+/// teardown then either: `spawn` drops the closure it could not take, which drops the session
+/// inside it, and [`PtySession`]'s `Drop` does only the part of a teardown that needs no wait —
+/// the child killed, the rings closed, the threads let go, the pseudoconsole left to the end of
+/// the process — and says so once. A child nobody can see is not left running; a close that
+/// would wait on a host is not made on the caller's thread.
 fn retire_within(budget: Duration, teardown: impl FnOnce() + Send + 'static) {
     let outstanding = retirements();
     outstanding.begin();
@@ -1837,6 +1843,13 @@ impl ShellProcessId {
     pub const fn get(self) -> u32 {
         self.0
     }
+
+    /// An address for a test whose door is scripted and never reaches a process.
+    #[cfg(any(test, feature = "test-shell"))]
+    #[must_use]
+    pub const fn for_test(pid: u32) -> Self {
+        Self(pid)
+    }
 }
 
 /// What happened, for the window to say it in its own words.
@@ -2664,6 +2677,48 @@ impl PtySession {
         now.saturating_duration_since(self.born_at)
     }
 
+    /// **The whole teardown, on the thread [`retire_session`] hands it to**: the input recording
+    /// finished (one line and two `sync_data`), then [`Self::shutdown`] (a bounded reap, a bounded
+    /// join). The waiting body of the session's door, and of a test shell's end
+    /// (`test_shell::TestShell`); after it the session's `Drop` finds nothing left and says
+    /// nothing.
+    pub(crate) fn take_apart(&mut self) -> Result<Option<ExitStatus>, PtyError> {
+        if let Some(dump) = self.input_dump.take() {
+            let mut dump = dump
+                .into_inner()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Err(error) = dump.finish() {
+                eprintln!("BT_PTY_INPUT_DUMP finish failed: {error}");
+            }
+        }
+        self.shutdown()
+    }
+
+    /// **The part of a teardown that needs no wait**, for a session dropped without its door:
+    /// the input ring closed and the writer let go, the child killed without a reap, the output
+    /// ring closed, the reader let go, and the pseudoconsole **not** closed — `ClosePseudoConsole`
+    /// returns only when the host has let go, which is a wait — but left, with the unfinished input
+    /// recording, to the end of the process. Answers whether anything was left to let go.
+    fn let_go(&mut self) -> bool {
+        let held = self.child.is_some()
+            || self.master.is_some()
+            || self.reader.is_some()
+            || self.writer.is_some()
+            || self.input_dump.is_some();
+        self.input.close();
+        self.writer.take();
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+        }
+        self.output.close();
+        self.reader.take();
+        if let Some(master) = self.master.take() {
+            std::mem::forget(master);
+        }
+        self.input_dump.take();
+        held
+    }
+
     pub fn shutdown(&mut self) -> Result<Option<ExitStatus>, PtyError> {
         // Closing the input ring releases the writer thread: it discards whatever is still queued
         // and drops the pipe handle on its way out, which is exactly what taking the writer used
@@ -2758,17 +2813,56 @@ impl PtySession {
 }
 
 impl Drop for PtySession {
+    /// Waits for nothing. After [`retire_session`] — or a [`PtySession::shutdown`] that took
+    /// everything apart — there is nothing left; otherwise the part that needs no wait is done
+    /// ([`PtySession::let_go`]) and the drop says so once.
     fn drop(&mut self) {
-        if let Some(dump) = self.input_dump.take() {
-            let mut dump = dump
-                .into_inner()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Err(error) = dump.finish() {
-                eprintln!("BT_PTY_INPUT_DUMP finish failed: {error}");
-            }
+        if self.let_go() {
+            door_skipped(
+                "a pane's shell (`PtySession`)",
+                "`retire_session`",
+                "its child was killed without a reap, its threads let go, and its pseudoconsole \
+                 and recording are left to the end of the process",
+            );
         }
-        let _ = self.shutdown();
     }
+}
+
+thread_local! {
+    /// The drops on this thread that found their door uncalled ([`door_skipped`]).
+    static DOORS_SKIPPED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Where a skipped door is said: the application's diagnostics, once it installs its road
+/// ([`say_skipped_doors_through`]).
+static SKIPPED_DOOR_ROAD: OnceLock<fn(&str)> = OnceLock::new();
+
+/// **Where this crate's skipped-door line goes from here on** — the same installed-sink shape as
+/// `bt_platform::door_skipped::install`, which this crate cannot name (it has no edge to
+/// `bt-platform`). `bt-app`'s `main` installs `diagnostics::note`, so the line never takes the
+/// console's `Stderr` lock on the window thread — a refused `pty-retirement` thread drops its
+/// session on the caller, which can be the window thread (X-7). Installed once; a second install
+/// is ignored.
+pub fn say_skipped_doors_through(say: fn(&str)) {
+    let _ = SKIPPED_DOOR_ROAD.set(say);
+}
+
+/// **Say once that `what` was dropped without `door`, and what that leaves behind**, through the
+/// installed road ([`say_skipped_doors_through`]) — standard error only before one is installed
+/// (a test, a probe) — and count it on the dropping thread. Never a wait.
+fn door_skipped(what: &str, door: &str, left: &str) {
+    let _ = DOORS_SKIPPED.try_with(|skipped| skipped.set(skipped.get() + 1));
+    let line = format!("{what} was dropped without {door}, and did not wait: {left}");
+    match SKIPPED_DOOR_ROAD.get() {
+        Some(say) => say(&line),
+        None => eprintln!("{line}"),
+    }
+}
+
+/// How many values dropped on this thread found their door uncalled.
+#[cfg(test)]
+fn doors_skipped_on_this_thread() -> u64 {
+    DOORS_SKIPPED.try_with(std::cell::Cell::get).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -4025,7 +4119,8 @@ mod tests {
                     .is_ok()
             );
         }
-        drop(session);
+        let mut session = session;
+        session.take_apart().unwrap();
         assert!(
             std::fs::read_to_string(pty_dump_chunks_path(&path))
                 .unwrap()
@@ -5116,6 +5211,151 @@ mod tests {
             said.contains("the PTY reader panicked"),
             "the carried panic says what panicked: {said}"
         );
+    }
+
+    /// **A child that counts what is asked of it**: every `try_wait` (a reap's question) and every
+    /// `kill`. It has ended once it has been killed, as a real child ends at a `TerminateProcess`.
+    #[derive(Clone, Debug, Default)]
+    struct CountedChild {
+        asked: Arc<std::sync::atomic::AtomicUsize>,
+        killed: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl portable_pty::ChildKiller for CountedChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.killed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+
+    impl portable_pty::Child for CountedChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+            self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok((self.killed.load(std::sync::atomic::Ordering::SeqCst) > 0)
+                .then(|| ExitStatus::with_exit_code(1)))
+        }
+
+        fn wait(&mut self) -> std::io::Result<ExitStatus> {
+            Err(std::io::Error::other("a counted child is never waited on"))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    /// A session holding only `child`: no pseudoconsole, no threads.
+    fn a_session_of(child: CountedChild) -> PtySession {
+        PtySession {
+            master: None,
+            child: Some(Box::new(child)),
+            born_at: Instant::now(),
+            exited: None,
+            output: Arc::new(OutputRing::new(NonZeroUsize::new(32).unwrap())),
+            input: Arc::new(InputRing::new(NonZeroUsize::new(32).unwrap())),
+            reader: None,
+            writer: None,
+            conpty_source: conpty_source(),
+            dump: None,
+            input_dump: None,
+            shell_fallback: None,
+            birth_fallback: None,
+        }
+    }
+
+    /// What a thread of its own did with `body`, within this suite's patience (ten seconds): its
+    /// answer and the skipped doors it said.
+    fn alone<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -> (T, u64) {
+        let (said, heard) = mpsc::channel();
+        std::thread::spawn(move || {
+            let answer = body();
+            let _ = said.send((answer, doors_skipped_on_this_thread()));
+        });
+        heard
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the thread answered within the suite's patience")
+    }
+
+    /// RED (T-DROP-DOORS, D-81) — **a shell dropped without its door reaps nothing, and says so
+    /// once.**
+    ///
+    /// The child is a counting stand-in that has not ended: a drop that took the session apart
+    /// would ask it (the reap's `try_wait`) until it answered or `CHILD_EXIT_BUDGET` ran out. The
+    /// drop kills it — no wait — asks it nothing, and says its skipped door once.
+    ///
+    /// MUTATION: put `let _ = self.shutdown();` back in `Drop` and the child is asked; take the
+    /// saying out and the count is zero.
+    #[test]
+    fn a_shell_dropped_without_its_door_reaps_nothing_and_says_so_once() {
+        let child = CountedChild::default();
+        let session = a_session_of(child.clone());
+        let ((), skipped) = alone(move || drop(session));
+        assert_eq!(
+            child.asked.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the drop reaped: it asked the child whether it had ended"
+        );
+        assert_eq!(
+            child.killed.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the drop kills the child, which needs no wait"
+        );
+        assert_eq!(skipped, 1, "the drop says its skipped door once");
+    }
+
+    /// RED (T-DROP-DOORS, D-81) — **the door's body takes the shell apart — a reap — and the drop
+    /// after it says nothing.**
+    ///
+    /// MUTATION: skip `shutdown` in `take_apart` and the child is never asked and the drop says a
+    /// skipped door.
+    #[test]
+    fn the_door_takes_a_shell_apart_and_its_drop_then_says_nothing() {
+        let child = CountedChild::default();
+        let session = a_session_of(child.clone());
+        let (ended, skipped) = alone(move || {
+            let mut session = session;
+            let ended = session.take_apart().map(|status| status.is_some());
+            drop(session);
+            ended
+        });
+        assert!(matches!(ended, Ok(true)), "the reap found the child ended");
+        assert!(child.asked.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        assert_eq!(child.killed.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            skipped, 0,
+            "a shell taken apart through its door says nothing at its drop"
+        );
+    }
+
+    /// RED (T-DROP-DOORS, D-81) — **`retire_session` is the road: it takes the shell apart — a
+    /// reap — on its own thread.**
+    ///
+    /// MUTATION: make `retire_session` drop the session instead of taking it apart and the child is
+    /// killed but never asked.
+    #[test]
+    fn retiring_a_shell_reaps_it_on_a_thread_of_its_own() {
+        let child = CountedChild::default();
+        let ((), _) = alone({
+            let child = child.clone();
+            move || retire_session(a_session_of(child))
+        });
+        let asked = Arc::clone(&child.asked);
+        let ((), _) = alone(move || {
+            while asked.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                std::thread::yield_now();
+            }
+        });
+        assert_eq!(child.killed.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// RED (T-PANE-CLOSE-OFF-THREAD) — **closing a pane does not cost the window thread the

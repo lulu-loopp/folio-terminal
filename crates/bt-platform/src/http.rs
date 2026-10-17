@@ -523,9 +523,18 @@ const CLOSE_WAIT: Duration = Duration::from_secs(5);
 
 /// **An asynchronous request handle, with its callback and its context.**
 ///
-/// Dropping it closes the handle — the documented way to stop an in-flight
-/// asynchronous request — and waits for `HANDLE_CLOSING`, so no callback for
-/// it runs after the download has returned.
+/// Closed through its own bounded door, [`Request::close_within`] (T-DROP-DOORS,
+/// D-82): *a download's request is closed through its own bounded door, not by
+/// its drop.* The door closes the handle — the documented way to stop an
+/// in-flight asynchronous request — and waits, up to its bound, for
+/// `HANDLE_CLOSING`, so no callback for it runs after the download has
+/// returned. [`download_from`], its one owner, calls it on every road out,
+/// error or not.
+///
+/// The `Drop` waits for nothing. One that finds the door was never called
+/// closes the handle and returns at once, saying so once: the context's count
+/// stays with the handle, and the callback gives it back at `HANDLE_CLOSING`
+/// whenever that comes, so a late callback still finds its [`Shared`] alive.
 struct Request {
     handle: *mut c_void,
     shared: Arc<Shared>,
@@ -583,18 +592,22 @@ impl Request {
             context,
         })
     }
-}
 
-impl Drop for Request {
-    fn drop(&mut self) {
-        // SAFETY: a live handle, closed once.
-        let _ = unsafe { WinHttpCloseHandle(self.handle) };
+    /// **The door: close the handle and wait, up to `bound`, for WinHTTP to say
+    /// it is gone.** Answers whether it did. Past the bound the handle's count
+    /// is left to WinHTTP, which gives it back at `HANDLE_CLOSING`: a leak of one
+    /// buffer until then, never a use after free.
+    fn close_within(mut self, bound: Duration) -> bool {
+        let handle = std::mem::replace(&mut self.handle, std::ptr::null_mut());
+        // SAFETY: a live handle, closed once: the door takes it out of `self`,
+        // so the drop that follows finds nothing to close.
+        let _ = unsafe { WinHttpCloseHandle(handle) };
         let started = Instant::now();
         let mut signals = self.shared.locked();
         while !signals.closed {
-            let left = CLOSE_WAIT.saturating_sub(started.elapsed());
+            let left = bound.saturating_sub(started.elapsed());
             if left.is_zero() {
-                return;
+                return false;
             }
             let (next, _) = self
                 .shared
@@ -603,6 +616,24 @@ impl Drop for Request {
                 .expect("the download's signals are not held across a panic");
             signals = next;
         }
+        true
+    }
+}
+
+impl Drop for Request {
+    /// Waits for nothing. After [`Request::close_within`] there is nothing left;
+    /// without it, the handle is closed and let go of, and the drop says so once.
+    fn drop(&mut self) {
+        if self.handle.is_null() {
+            return;
+        }
+        // SAFETY: a live handle, closed once.
+        let _ = unsafe { WinHttpCloseHandle(self.handle) };
+        crate::door_skipped::say(
+            "a download's request (`http::Request`)",
+            "its close door",
+            "its handle was closed and its closing callback is WinHTTP's to deliver",
+        );
     }
 }
 
@@ -660,11 +691,8 @@ fn download_from(
     target: &Target<'_>,
     request: &HttpsDownload<'_>,
 ) -> Result<Downloaded, DownloadError> {
-    let monitor: &DownloadMonitor = request.monitor;
     let mut deadlines = Deadlines::start(request.idle_timeout, request.floor);
     let connect = |why: String| DownloadError::at(DownloadStage::Connect, why);
-    let headers = |why: String| DownloadError::at(DownloadStage::Headers, why);
-    let body = |why: String| DownloadError::at(DownloadStage::Body, why);
 
     let agent = wide(request.user_agent);
     let host = wide(target.host);
@@ -716,22 +744,42 @@ fn download_from(
             request.path
         )));
     }
-    // Declared after `session` and `connection`, so it is dropped — closed,
-    // and waited for — before either of them.
+    // Declared after `session` and `connection`, so it is closed — and waited
+    // for, through its door — before either of them is dropped. Every road out
+    // of the exchange, an error's included, comes back here to close it.
     let exchange = Request::arm(handle)?;
+    let transferred = transfer(&exchange, request, &mut deadlines);
+    let _ = exchange.close_within(CLOSE_WAIT);
+    let (partial, announced) = transferred?;
+    partial.finish(announced)
+}
+
+/// **The request's half of a download**: send it, read the status and the
+/// length, and stream the body into its partial file. Every way out returns
+/// here to [`download_from`], which closes the request through its door; an
+/// error drops the partial file first, which takes its temporary name away.
+fn transfer(
+    exchange: &Request,
+    request: &HttpsDownload<'_>,
+    deadlines: &mut Deadlines,
+) -> Result<(Partial, Option<u64>), DownloadError> {
+    let monitor: &DownloadMonitor = request.monitor;
+    let connect = |why: String| DownloadError::at(DownloadStage::Connect, why);
+    let headers = |why: String| DownloadError::at(DownloadStage::Headers, why);
+    let body = |why: String| DownloadError::at(DownloadStage::Body, why);
     let shared = Arc::clone(&exchange.shared);
 
     deadlines.check(DownloadStage::Connect, monitor)?;
     unsafe { WinHttpSendRequest(exchange.handle, None, None, 0, 0, exchange.context) }
         .map_err(|error| connect(format!("WinHttpSendRequest: {error}")))?;
-    match shared.wait(DownloadStage::Connect, &mut deadlines, monitor)? {
+    match shared.wait(DownloadStage::Connect, deadlines, monitor)? {
         Completion::Sent => {}
         other => return Err(unexpected(DownloadStage::Connect, other)),
     }
 
     unsafe { WinHttpReceiveResponse(exchange.handle, std::ptr::null_mut()) }
         .map_err(|error| headers(format!("WinHttpReceiveResponse: {error}")))?;
-    match shared.wait(DownloadStage::Headers, &mut deadlines, monitor)? {
+    match shared.wait(DownloadStage::Headers, deadlines, monitor)? {
         Completion::Headers => {}
         other => return Err(unexpected(DownloadStage::Headers, other)),
     }
@@ -765,7 +813,7 @@ fn download_from(
         // out-pointer is null, as the documentation requires.
         unsafe { WinHttpQueryDataAvailable(exchange.handle, std::ptr::null_mut()) }
             .map_err(|error| body(format!("WinHttpQueryDataAvailable: {error}")))?;
-        let available = match shared.wait(DownloadStage::Body, &mut deadlines, monitor)? {
+        let available = match shared.wait(DownloadStage::Body, deadlines, monitor)? {
             Completion::Available(available) => available,
             other => return Err(unexpected(DownloadStage::Body, other)),
         };
@@ -785,7 +833,7 @@ fn download_from(
             )
         }
         .map_err(|error| body(format!("WinHttpReadData: {error}")))?;
-        let read = match shared.wait(DownloadStage::Body, &mut deadlines, monitor)? {
+        let read = match shared.wait(DownloadStage::Body, deadlines, monitor)? {
             Completion::Read(read) => read,
             other => return Err(unexpected(DownloadStage::Body, other)),
         };
@@ -799,8 +847,7 @@ fn download_from(
         partial.accept(chunk)?;
         deadlines.check(DownloadStage::Body, monitor)?;
     }
-    drop(exchange);
-    partial.finish(announced)
+    Ok((partial, announced))
 }
 
 #[cfg(test)]
@@ -1219,4 +1266,129 @@ mod tests {
         assert!(took < Duration::from_secs(2), "{took:?}");
         assert!(entries(&directory).is_empty());
     }
+
+    /// A session, a connection and an armed request to a loopback port nobody
+    /// is asked anything on: the request is never sent, so closing it is the
+    /// whole of what WinHTTP has to do with it.
+    fn an_unsent_request() -> (super::Handle, super::Handle, super::Request) {
+        a_request_to(9)
+    }
+
+    /// [`an_unsent_request`], to `port`.
+    fn a_request_to(port: u16) -> (super::Handle, super::Handle, super::Request) {
+        let agent = super::wide("Folio");
+        let host = super::wide("127.0.0.1");
+        let verb = super::wide("GET");
+        let path = super::wide("/");
+        // SAFETY: a fresh asynchronous session, as the product opens one.
+        let session = super::Handle(unsafe {
+            super::WinHttpOpen(
+                super::PCWSTR(agent.as_ptr()),
+                super::WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                super::PCWSTR::null(),
+                super::PCWSTR::null(),
+                super::WINHTTP_FLAG_ASYNC,
+            )
+        });
+        assert!(!session.0.is_null(), "a session");
+        // SAFETY: a live session and a NUL-terminated host.
+        let connection = super::Handle(unsafe {
+            super::WinHttpConnect(session.0, super::PCWSTR(host.as_ptr()), port, 0)
+        });
+        assert!(!connection.0.is_null(), "a connection");
+        // SAFETY: a live connection and NUL-terminated strings.
+        let handle = unsafe {
+            super::WinHttpOpenRequest(
+                connection.0,
+                super::PCWSTR(verb.as_ptr()),
+                super::PCWSTR(path.as_ptr()),
+                super::PCWSTR::null(),
+                super::PCWSTR::null(),
+                std::ptr::null(),
+                super::WINHTTP_OPEN_REQUEST_FLAGS(0),
+            )
+        };
+        assert!(!handle.is_null(), "a request handle");
+        let request = super::Request::arm(handle).expect("the request takes its callback");
+        (session, connection, request)
+    }
+
+    /// RED (T-DROP-DOORS, D-82) — **the door closes a request in flight and
+    /// waits for WinHTTP to say the handle is gone, and the drop after it says
+    /// nothing.**
+    ///
+    /// The request is on the wire and the server is holding it, so the close
+    /// cancels a call outstanding and `HANDLE_CLOSING` arrives on a WinHTTP
+    /// thread after it — an unsent request's arrives inside the close itself,
+    /// which no door needs to wait for.
+    ///
+    /// MUTATION: return from `close_within` right after the close and `closed`
+    /// is not yet set when it answers; leave the handle in `self` and the drop
+    /// after the door closes it a second time and says a skipped door.
+    #[test]
+    fn the_close_door_waits_for_the_closing_callback() {
+        let (asked, heard) = std::sync::mpsc::channel();
+        let port = serve(1, move |_| {
+            let _ = asked.send(());
+            vec![Step::Pause(Duration::from_secs(40))]
+        });
+        let (session, connection, request) = a_request_to(port);
+        // SAFETY: a live, armed request; its context is the one `arm` gave it.
+        unsafe { super::WinHttpSendRequest(request.handle, None, None, 0, 0, request.context) }
+            .expect("the request goes out");
+        crate::door_skipped::received(&heard, "the server holding the request");
+        let shared = Arc::clone(&request.shared);
+        let closed = request.close_within(super::CLOSE_WAIT);
+        assert!(closed, "the door saw `HANDLE_CLOSING` within its bound");
+        assert!(shared.locked().closed, "and the callback had said so");
+        assert_eq!(
+            crate::door_skipped::skipped_on_this_thread(),
+            0,
+            "a request closed through its door has nothing to say at its drop"
+        );
+        drop((connection, session));
+    }
+
+    /// RED (T-DROP-DOORS, D-82) — **a request dropped without its door waits for
+    /// nothing, and says so once.**
+    ///
+    /// The value dropped carries a real handle, armed with its own context, and
+    /// a second `Shared` whose lock this test holds for the whole of the drop: a
+    /// drop that waited for the closing callback would take that lock and stand
+    /// until the test let go, and the test lets go only after the drop has
+    /// answered. The real context's count goes back at `HANDLE_CLOSING`, on
+    /// WinHTTP's own time.
+    ///
+    /// MUTATION: put the wait back in `Drop` (the old body: close, then wait on
+    /// `self.shared` up to `CLOSE_WAIT`) and the drop's thread does not answer
+    /// within the suite's patience; take the saying out and the count is zero.
+    #[test]
+    fn a_request_dropped_without_its_door_waits_for_nothing_and_says_so_once() {
+        let (session, connection, mut armed) = an_unsent_request();
+        let held = Arc::new(super::Shared::new());
+        let stand_in = super::Request {
+            handle: std::mem::replace(&mut armed.handle, std::ptr::null_mut()),
+            shared: Arc::clone(&held),
+            context: armed.context,
+        };
+        drop(armed);
+        let guard = held.locked();
+        let skipped = crate::door_skipped::dropped_alone(
+            SendRequest { _request: stand_in },
+            "a request's drop while its signals are held",
+        );
+        drop(guard);
+        assert_eq!(skipped, 1, "the drop says its skipped door once");
+        drop((connection, session));
+    }
+
+    /// A request handed to a thread of its own, for the drop above: the handle is
+    /// a WinHTTP handle, which any thread may close.
+    struct SendRequest {
+        _request: super::Request,
+    }
+
+    // SAFETY: the only thing the receiving thread does with the value is drop
+    // it, which closes the handle — a call WinHTTP takes from any thread.
+    unsafe impl Send for SendRequest {}
 }

@@ -659,12 +659,30 @@ build names from pieces. With all of these, every door of the seam the product
 implements is implemented in the seam (the headless backend is test-only and is
 not read).
 
-**What the guard does not hold**: the platform handle. `WindowHost::native_handle`
-and `CompositorDoor::platform_tree` hand generic code a `bt_platform` value that
-reaches the platform past every door — the call sites are listed in
-`ARCHITECTURE.md` §4.5, and moving them behind doors is
-T-NATIVE-HANDLE-BEHIND-THE-SEAM. A new use of either is a new crossing; say it
-there.
+**The platform handle stays behind the doors** (T-NATIVE-HANDLE-BEHIND-THE-SEAM,
+RULE C): code written for the window — an item with a backend parameter in
+scope, or whose generics, `where` clause or `impl Trait` (or `dyn`) arguments
+are bounded by a seam trait: a function over `&impl WindowHost`, a generic
+holder block's method, a trait's default body, a holder's declaration — names
+neither `bt_platform::NativeWindow` nor `bt_platform::Compositor`, in its
+signature, its body or a macro's tokens in it, and no door trait of the seam
+names either in its declaration. What is followed: a name, to what it stands for,
+through the body's `use` leaves, the module's own (renames included), child
+modules, `crate`/`self`/`super` paths and the module's globs (a glob of
+`bt_platform` opens both names), to a fixed point within the walk's hop limit; a
+cycle names nothing more. What is refused, by name, wherever it is written: a
+name that does not settle within the hop limit; a type alias or an associated
+type naming either handle (the walk does not follow aliases, as Rules A and B do
+not); and a module-level macro — an invocation or a `macro_rules!` body — whose
+tokens spell either (a module-level macro is no item's, so it is read as code
+written for the window). Code written for no window — the web engine's
+host, a lane's executor, the platform's own glue — may name them: no door hands
+it a handle. The seam's own two sealed values, `webhost::SeatAddress` (the
+window's handle, read only by the engine) and `window_seam::PageTree` (the tree,
+walked only by the seam), are how a page reaches its window. When red, add the
+door the code needs to `WindowHost` (or `CompositorDoor`), with the
+`bt-platform` call in the native impl and a recorded `WindowEffect` (or a
+documented stand-in answer in `headless::PlatformAnswers`) in the headless one.
 
 **The startup order is a shared function, not native code** (T-STARTUP-ORDER-SHARED):
 `crate::startup::begin` (the removal verbs, the command line, the hand-over) and
@@ -690,6 +708,42 @@ parameter and add the door it needs to the seam's trait (with its `Native` impl
 beside the others and its headless impl in `headless.rs`); never add a native
 row for code that only reads or tells the window. A row nothing writes any more
 is named too, and is taken off.
+
+## Runtime voice
+
+The rule: a `Runtime` method says its `diagnostics.log` line through the window it
+has in hand, `WindowHost::note` (T-DIAGNOSTICS-TEST-SINK, 2026-10-17). The door's
+native arm is `diagnostics::note` — the resident log and a console run's trace
+queue, both process-wide and unreadable by a test — and the headless window keeps
+the exact text on its ledger (`WindowEffect::Noted`, at most `headless::NOTES_KEPT`
+lines between two takes — a test's bound mirroring `ime_report::PAIRING_LINES_MAX`,
+not derived from it — the rest counted by `Ledger::notes_beyond_the_cap`, and a
+plain `Ledger::take` after one refuses with the count rather than hand back a
+shorter record), so a headless test asserts the line the road wrote, not the line a builder would have
+written. A road a headless test drives says its line through the door; the roads
+no headless test drives yet keep their direct lines, each a row with its reason,
+and the list only shrinks.
+
+Where and what to do: `crates/bt-source/tests/runtime_voice.rs`
+(`bt_app_runtime_roads_say_their_lines_through_the_window`) reads every product
+`impl` block of `Runtime` through `bt-source` and counts each mention of
+`diagnostics::note` by the item holding it — a call, or the voice handed on as a
+value (a helper's `say`, a body's `use`) — against
+`docs/plans/runtime-voice-direct-lines.tsv` (road, shape, count, reason), both ways (an unlisted line, a count above its row, and a row whose
+road says fewer or none are refused). What it cannot read is refused by its line,
+never passed: a bare `note` in a runtime road that is neither that path's tail nor
+a method after `.` (a name a `use`, a renamed module or a local gives it), and a
+`use` anywhere in the package that names the voice or opens its module by a glob.
+Not read, as limits: a free function a runtime method calls that says a line of
+its own, a stored closure or function pointer holding the voice, and the other
+backend holders (`FolioApp`, `App`), which have no window in hand. Its fixture
+(`tests/fixtures/runtime_voice/`) plants each refusal
+(`every_direct_line_in_a_runtime_road_is_named`). When red, say the line through
+`self.window.window.note(..)` and read it back in the road's headless test; a row
+whose road moved to the door is taken off in the same change. Across commits
+`scripts/ci/check-runtime-voice.ps1` holds the list to the merge base's (or its
+seed): a row the base does not carry, or a count that grew, is refused by identity
+(`gates-can-fail` plants a row). A row is never added for a new line.
 
 ## Machine-independent paths
 

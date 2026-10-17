@@ -898,6 +898,9 @@ text_entries! {
     FilesPermissionDenied,
     FilesNotFound,
     FilesUnreadable,
+    /// The foot's right hand when a files card or column opened on the home folder because the
+    /// pane's folder could not be read (T-CWD-FROM-PROCESS). Never cut.
+    FilesFolderUnknown,
     /// **Length-sensitive**: the foot clips this from the left with
     /// `ellipsized_left`, so the tail is the half that survives.
     FilesRevealed,
@@ -1955,6 +1958,12 @@ text_entries! {
     GateDelete,
     GateClear,
     GateTitleUnsaved,
+    /// The line a close's question adds when it is put at the end of its wait for
+    /// a save that is still on its way to the disk (S-6b).
+    GateSaveStillOnItsWay,
+    /// The title of a close's question when what it would lose is only saves
+    /// that have not reached the disk, over buffers with no unsaved edits (S-6b).
+    GateTitleSaveNotLanded,
     /// It says *changes*, not *unsaved changes*: the file on disk is saved, and
     /// what is about to go is the difference between it and what git has.
     GateTitleGitDiscard,
@@ -3863,6 +3872,11 @@ impl Text {
             Self::FilesPermissionDenied => pick(lang, "Permission denied", "没有权限"),
             Self::FilesNotFound => pick(lang, "Folder not found", "文件夹不存在"),
             Self::FilesUnreadable => pick(lang, "Could not read folder", "无法读取文件夹"),
+            Self::FilesFolderUnknown => pick(
+                lang,
+                "Folder unknown",
+                "Folder unknown", // zh: pending T-CWD-FROM-PROCESS
+            ),
             // "File Explorer" is a Windows product and has a Chinese name of its
             // own; using the English one here would send the reader looking for
             // something their Start menu does not have.
@@ -4883,6 +4897,16 @@ impl Text {
             Self::GateDelete => pick(lang, "Delete", "删除"),
             Self::GateClear => pick(lang, "Clear", "清除"),
             Self::GateTitleUnsaved => pick(lang, "Discard unsaved changes?", "放弃未保存的改动？"),
+            Self::GateSaveStillOnItsWay => pick(
+                lang,
+                "A save is still on its way to the disk.",
+                "A save is still on its way to the disk.", // zh: pending T-CLOSE-GATE-WAITS
+            ),
+            Self::GateTitleSaveNotLanded => pick(
+                lang,
+                "A save has not reached the disk. Close anyway?",
+                "A save has not reached the disk. Close anyway?", // zh: pending T-CLOSE-GATE-WAITS
+            ),
             Self::GateTitleGitDiscard => pick(lang, "Discard changes?", "放弃改动？"),
             Self::GateTitleGitDelete => pick(lang, "Delete this file?", "删除这个文件？"),
             Self::GateTitleGitDeleteBranch => pick(lang, "Delete this branch?", "删除这个分支？"),
@@ -6605,6 +6629,10 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // zh: pending T-CWD-FROM-PROCESS — the foot of a files card or column opened on the home
+        // folder because the pane's folder could not be read.
+        (Self::FilesFolderUnknown, HostPlatform::Windows),
+        (Self::FilesFolderUnknown, HostPlatform::MacOs),
         // zh: pending T-PROFILE-INSTALL-REFUSED-START — a change whose worker would not start, or
         // stopped before it finished.
         (Self::ChangeNotStarted, HostPlatform::Windows),
@@ -6642,6 +6670,14 @@ impl Text {
         (Self::PreviewSaveUnlanded, HostPlatform::MacOs),
         (Self::PreviewSaveTooMany, HostPlatform::Windows),
         (Self::PreviewSaveTooMany, HostPlatform::MacOs),
+        // zh: pending T-CLOSE-GATE-WAITS — the line a close's question adds when its wait for a
+        // save on its way ran out.
+        (Self::GateSaveStillOnItsWay, HostPlatform::Windows),
+        (Self::GateSaveStillOnItsWay, HostPlatform::MacOs),
+        // zh: pending T-CLOSE-GATE-WAITS — the title of a close's question over saves that have
+        // not landed, with no unsaved edits.
+        (Self::GateTitleSaveNotLanded, HostPlatform::Windows),
+        (Self::GateTitleSaveNotLanded, HostPlatform::MacOs),
         // zh: pending T-SHELL-BIRTH-DEATH — the face of a shell that ended at birth.
         (Self::ShellBirthDeath, HostPlatform::Windows),
         (Self::ShellBirthDeath, HostPlatform::MacOs),
