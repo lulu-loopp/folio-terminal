@@ -157,6 +157,12 @@ a member of the workspace. Every difference from upstream is listed in
 `vendor/conpty/` holds the two ConPTY files that ship in the release archive —
 `conpty.dll` and `OpenConsole.exe`.
 
+`vendor/psreadline/` holds Microsoft's PSReadLine 2.4.5 exactly as the
+PowerShell Gallery publishes it (`PSReadLine.2.4.5.nupkg`, pinned by SHA-256 in
+its README and checked by `scripts/ci/check-psreadline-artefact.ps1`), and its
+licence. The build takes five of its entries into the Windows executable; it is
+never unpacked by hand and never modified.
+
 `scripts/check-vendor-notices.ps1` refuses a copied-in dependency that has lost
 its licence text.
 
@@ -179,8 +185,9 @@ optional.
 Nine directories at the root, and every one of them is what its name says:
 
 - `assets/` — files the build reads and the executable carries: the application
-  icon, the emoji font, the colour schemes, the PSReadLine module Folio repairs,
-  the MiTeX specification the formula engine imports, and the README's boards.
+  icon, the emoji font, the colour schemes, the manifest of the PSReadLine that
+  Windows PowerShell panes load, the MiTeX specification the formula engine
+  imports, and the README's boards.
 - `crates/` — the product, cut into compilation units. `bt-app` is the window.
 - `docs/` — the design record, the plans behind each block of work, the spike
   reports, the screenshots the README shows, and the prototypes in `docs/design/`.

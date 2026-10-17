@@ -128,7 +128,14 @@ PSModulePath = <FolioModules> ; [<Documents>\WindowsPowerShell\Modules ;] <V>
 | nothing about PSReadLine | Folio's 2.4.5 |
 | `Set-PSReadLineOption …`, `Set-PSReadLineKeyHandler …` | Folio's 2.4.5, configured by the profile, because the host imported Folio's before the profile ran |
 | `Import-Module PSReadLine` (by name, no version) | a no-op: the module of that name is loaded. Measured harmless in the outer pane (B, "user types `Import-Module PSReadLine`", prefix kept). |
-| an explicit other version (`-RequiredVersion`, `-MinimumVersion` above 2.4.5, a path, or `Remove-Module` and re-import) | **the account's explicit choice, and its consequence.** A second PSReadLine is loaded beside Folio's, which breaks editing the way the spike's "restored" row broke (`ReadLine` overload error at every prompt, C/D marks lost). It breaks the same way in any host whose preloaded version differs from the one the profile demands. Folio does not detect it, does not repair it, and does not refuse the pane. The person's road is the Shell integration switch, which gives them the account's editor again. This row is a measurement the build owes (§5.1), not a measured fact. |
+| an explicit other version (`-RequiredVersion`, `-MinimumVersion` above 2.4.5, a path, or `Remove-Module` and re-import) | **the account's explicit choice, and its consequence** — measured by the build (2026-10-17, `a_profile_that_demands_another_psreadline_version_is_measured`, a real 5.1 pane): `Import-Module PSReadLine -RequiredVersion 2.0.0` alone leaves **two** modules loaded (Folio's 2.4.5 and 2.0.0); `Remove-Module PSReadLine` then the same import leaves only 2.0.0. In both, the prompt draws and commands run (no `ReadLine` overload error), and the pane **loses the command marks**: the prompt's `A` and `B` are still written, a command's `C` and `D` are not. Folio does not detect it, does not repair it, and does not refuse the pane. The person's road is the Shell integration switch, which gives them the account's editor again. |
+
+**Corrections the build measured (2026-10-17).**
+
+- **The loader's guard autoloaded 2.0.0.** The guard asked `Get-Command PSConsoleHostReadLine`; with Folio's 2.4.5 already loaded and the function not yet defined, that lookup autoloaded the in-box 2.0.0 as a second module (`Get-Module PSReadLine` answered `2.4.5 2.0.0`, count 2). The guard now asks `Test-Path Function:PSConsoleHostReadLine`, which looks the function up without autoloading anything; the loader is otherwise unchanged.
+- **The machine value is compared expanded.** A fresh logon's `PSModulePath` reads `%ProgramFiles%\WindowsPowerShell\Modules;…` unexpanded from the registry block, and 5.1 compares the value it is handed with the machine's after expansion. The composer therefore expands environment references over the pane's own environment on both sides before deciding whether `<Documents>` is added (`bt_platform::environment::machine_variable` reads the machine value expanded).
+- **A live artefact is kept whole.** A running 5.1 maps the module's assembly; deleting it is refused (`os error 5`). The launch's prune deletes each version's assembly first and keeps the whole artefact when that is refused; after the shell ends the next launch removes it.
+- **A nested `pwsh` 7.6** finds its own `WindowsApps\…\Modules\PSReadLine` first.
 
 **The prefix stays in the pane's environment** (spike conclusion B, disposition (i)). Removing it after the load was measured to make any later by-name import or command lookup pull 2.0.0 in as a second module, which breaks the pane. Keeping it costs a nested `powershell.exe` typed in the pane its line editor (§2.1, F). A nested pwsh 7 is unaffected: it puts its own three folders first (measured).
 
@@ -291,7 +298,7 @@ No step needs a window.
 
 ## 8. What this note did not measure, and who does
 
-- **An explicit other version demanded by a profile** (§2.3, last row of the table): the build measures it in §5.1 and corrects the table before merging.
+- **An explicit other version demanded by a profile** (§2.3, last row of the table): measured by the build on 2026-10-17 and written into the table.
 - **Application-control refusal of the DLL** (WDAC, AppLocker, Smart App Control): §5.4's VM rows.
 - **The 2.4.5 package's exact entries, sizes and signatures**: step 1 records them. Two things suggest the layout: the fork, which mirrors upstream 2.4.x (five binaries, three script files, `Changes.txt`, `License.txt`), and the spike's `Save-PSResource` copy of 2.4.5 (Q7, "Microsoft-signed, no Mark-of-the-Web"). pwsh 7.6's in-box 2.4.5 DLL is netstandard2.0 with no public key ("What the DLLs are built for").
 - **pwsh 7 under AllSigned**: the host's own publisher prompt arrives before any Folio code runs. That is unchanged by this ticket and outside it.

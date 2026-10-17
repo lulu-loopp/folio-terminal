@@ -298,6 +298,48 @@ Test-Case 'test_batch_member_refuses_each_shape_cmd_cannot_read' {
     if (@(Test-BatchMember -Name 'LICENSE-MIT' -Bytes $utf8.GetBytes("a`nb")).Count) { throw 'a document was judged as a batch file' }
 }
 
+# The members of an archive that are a PowerShell module's or name PSReadLine.
+function Get-PsReadLineMembers {
+    param([string] $Archive)
+    $zip = [IO.Compression.ZipFile]::OpenRead($Archive)
+    try {
+        return @($zip.Entries | Where-Object {
+                $_.FullName -notmatch '/$' -and
+                ($_.FullName -match '(?i)psreadline' -or $_.Name -match '(?i)\.(psd1|psm1|ps1xml)$')
+            } | ForEach-Object { $_.FullName })
+    }
+    finally { $zip.Dispose() }
+}
+
+# RED (T-INTEGRATION-INJECT-2-BUILD) — **the archive carries no PSReadLine
+# member: Folio's PSReadLine travels inside `folio.exe`** and is written to the
+# local data folder by the pane's birth worker, so the release ships no module
+# file of its own and nothing an installer could lay into Documents. The
+# executable is read for the module manifest's GUID, which is the embedded
+# module's own; and a copy of the archive with a module file planted in it is
+# found, so the probe can see what it looks for.
+#
+# MUTATION: give `archive-members.txt` a `PSReadLine.psd1 packaging` line (with
+# the file under `packaging/`) and the first assertion names it; make
+# `Get-PsReadLineMembers` match nothing and the planted member is not found.
+Test-Case 'the_archive_holds_no_psreadline_member_and_folio_exe_holds_the_module' {
+    if ($goodArchive.Count -ne 1) { throw "package.ps1 left $($goodArchive.Count) archives: $($good.Text)" }
+    $found = @(Get-PsReadLineMembers -Archive $goodArchive[0].FullName)
+    if ($found.Count) { throw "the archive carries PSReadLine members: $($found -join ', ')" }
+    $guid = [Text.Encoding]::ASCII.GetBytes('5714753b-2afd-4492-a5fd-01d9e2cff8b5')
+    $exe = [IO.File]::ReadAllBytes((Join-Path $bin 'folio.exe'))
+    $text = [Text.Encoding]::ASCII.GetString($exe)
+    if ($text.IndexOf([Text.Encoding]::ASCII.GetString($guid), [StringComparison]::Ordinal) -lt 0) {
+        throw 'folio.exe does not carry the PSReadLine manifest (its GUID is not in the executable)'
+    }
+    $planted = New-ChangedArchive -Archive $goodArchive[0].FullName -Name 'planted-module.zip' -Change {
+        param($zip, $rootFolder)
+        Set-ZipEntryText -Zip $zip -FullName "$rootFolder/PSReadLine/2.4.5/PSReadLine.psd1" -Text '@{}'
+    }
+    $seen = @(Get-PsReadLineMembers -Archive $planted)
+    if ($seen.Count -ne 1 -or $seen[0] -notmatch 'PSReadLine\.psd1$') { throw "the planted member was not found: $($seen -join ', ')" }
+}
+
 Test-Case 'package refuses a member missing from where the list says it is' {
     $documents = Join-Path $scratch 'documents-short'
     [IO.Directory]::CreateDirectory($documents) | Out-Null

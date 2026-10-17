@@ -204,6 +204,16 @@ and the `folio.exe` the `launch` row starts, for `bt-platform`'s ignored
 | --- | --- | --- | --- | --- |
 | `BT_PASTE_CRT_CONSUMER` | absolute path to the separately compiled `paste_paths_crt.exe` fixture | Set by the developer or acceptance coordinator when explicitly running the ignored Windows direct-CRT test. Names the consumer that receives the encoder's literal through the quiet process door; the test checks its captured argument count and UTF-16 units. | No file is written by this switch; consumer output is captured through pipes. | not set; the test is ignored by default and fails if explicitly run without this value |
 
+**Folio's local-data root for its PSReadLine has no variable.** The pane's module is
+written under `%LOCALAPPDATA%\Folio\psmodules\` (`shell_integration::local_data_root`),
+and no `BT_` name moves that root, in a test build or any other (it follows
+`LOCALAPPDATA`, which the `update_trial` child tests above point inside their own folder): the
+writer, the prune and the module-path composer take the root as an argument
+(`shell_integration::install_psreadline_module_at`, `prune_psreadline_artefacts`,
+`compose_module_path`), and their tests hand in a folder of their own. The real-shell
+tests in `shell_integration_psreadline_tests.rs` write into their test shell's own scratch root the same way.
+The earlier Folio's copy in Documents is moved by `BT_PSREADLINE_DOCUMENTS` (§1).
+
 ## 3. `BT_` names in the source that are not environment variables
 
 Listed so that the check described at the top of this file can tell them apart

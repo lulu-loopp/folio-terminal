@@ -727,7 +727,8 @@ design-note T5, not this ticket.
 Entry added 2026-09-23 (0.4.4 ticket 02; owner's ruling 2026-09-23: "the card
 is modal and answers only Enter, the Join key and Esc"): **the multi-line paste
 card is a modal rung.** In `Runtime::keyboard_input` it stands directly under the
-PSReadLine invitation and above the settings dialog, and it returns for every
+first-run card (under the PSReadLine invitation until that card retired on
+2026-10-17) and above the settings dialog, and it returns for every
 key; `paste_card_key` is the whole of what it answers. In `KeyboardOwner` it is
 part of `menu_or_dialog`, so `is_modal` is true while it is up and a composition
 resolves to `ImeOwner::Modal`.
@@ -1526,49 +1527,52 @@ registration is always rewritten". The 2026-09-26 entry replaces "the first-run
 card's Explorer row arrives off".
 
 ### 38. PSReadLine — `folded`
-**Rule.** Folio ships and installs its own patched copy of the module, because
-the stock version on Windows PowerShell 5.1 anchors the edit line to the
-pre-resize width, which makes Folio's own resize-anchor chord a no-op. The probe
-(`psreadline::run_probe`, its result in `PROBE`) reads the highest installed
-version and the effective execution policy **out of process**; the module is
-written only into the Documents modules directory that the system names; and
-`install_checked` is the one writer — a leaf is Folio's by bytes or by its
-version stamp, anything else is foreign and both verbs go dark. **Every switch
-outcome must be spoken** — installed, or a refusal with its reason — never
-silence.
-**From.** §7.1.6c-3b *the PSReadLine invitation: the probe, the trigger table,
-byte-identical removal, and the patched version pinned to the integration
-script*; §7.47 *a switch that will not move must say why: a new machine's
-execution policy is restricted, and that window said nothing from beginning to
-end*; trailing entry 2026-09-20 *Folio installs its module only where the place
-is empty or its own*; trailing entry 2026-09-21 *Folio's own writers wait their
-turn for the marks record*.
-**Overrides.** §7.47 replaces the silently refusing switch. The 2026-09-20
-occupancy entry replaces row-level checks with `install_checked`.
-**The debt this rule carries, from the entry's own admission.**
-`Runtime::apply_psreadline` and the three agent-hook rows — four press handlers — still take the marks lock **on
-the window thread**, deliberately, because each already reads and writes those
-files synchronously there. Moving them onto workers is named as a 0.4.4 ticket
-and **no ticket id has been issued**. See `docs/ARCHITECTURE.md` §5.3 rows 2–4.
-Since 2026-09-23 such a press waits behind one of our own workers' I/O for as
-long as that I/O takes, instead of failing after two seconds; that wait is
-bounded by our own finite writes and is paid off by the same move.
-**Upgrade (ruled 2026-09-21, implemented 2026-09-24 by ticket 56).** Owner's
-verbal ruling of 2026-09-21, written down on 2026-09-22 (multi-line paste design
-note, "Owner rulings" 6): **option A.** Folio's own older copy of the module is
-replaced on upgrade **without asking** — at launch, before the first window, by
-`psreadline::upgrade_recorded` on the first install's road (`install_recorded`),
-with one `diagnostics.log` line and no card; a failed write keeps the older
-stamp (the stamp DLL is written last) and the next launch tries again. "Folio's
-own" is decided by `psreadline::upgrade_decision`: the DLL carries Folio's `-bt.`
-stamp, the stamp is older than `PATCHED_BUILD` (`psreadline::Build::predates`),
-and Folio recorded the install (the marks record's root, or `settings.json`'s
-invitation at `Installed`). **A copy Folio did not install is never touched**
-(no Folio stamp, or no record), nor is a newer or equal Folio build. **A first
-install is always invited**, never performed silently. The launch's lock on the
-marks record sits beside the debt above (`docs/plans/structural-debt.md` D-34).
-The same ruling's other two parts ("strips become notifications", the
-multi-line paste question's rules) are not this row's and are not folded here.
+**Rule.** A Windows PowerShell 5.1 pane runs **Folio's own copy of Microsoft's
+signed PSReadLine 2.4.5**, because the 2.0.0 that Windows ships anchors the edit
+line to the pre-resize width, which makes Folio's resize-anchor chord a no-op.
+The copy is the PowerShell Gallery's package, vendored unmodified and pinned by
+SHA-256 (`vendor/psreadline/`, held by `scripts/ci/check-psreadline-artefact.ps1`);
+the build takes its four assemblies and its licence, beside Folio's own
+binary-only manifest (`assets/psreadline/PSReadLine.psd1`, which is what lets it
+load under every execution policy), into the Windows executable. **The pane's
+birth worker writes it**, to `%LOCALAPPDATA%\Folio\psmodules\<artefact>\PSReadLine\2.4.5\`
+(the artefact is the package hash's first twelve hex), only where the files are
+not already there byte for byte; a failed write is said once in
+`diagnostics.log` and the next birth tries again; a launch prunes other builds'
+artefacts and keeps whole one a running shell still holds. **The module path is
+the pane's alone**: `PSModulePath` is composed with Folio's folder first, then
+what 5.1 would have had (Documents only where the account's value is unset or the
+machine's), and declared on that pane for its lifetime — only where the
+integration loader is composed, the program is not `pwsh`, and the edition was
+not observed in Constrained Language Mode. A `pwsh` started inside it keeps its
+own. **Folio's copy always wins in Folio's 5.1 panes** (owner ruling Q2): the
+loader imports it by its path, and a profile that imports PSReadLine by name
+gets the one already loaded. A profile that demands another version by number
+gets that version (measured 2026-10-17: the prompt and commands work, and the
+pane loses OSC 133 `C`/`D`) — the profile's choice, not repaired. **Nothing is
+written to Documents, `$PROFILE`, the account's environment or the marks
+record, and nothing asks**: there is no Settings row, no probe and no invitation
+(Q3). **The copy an earlier Folio wrote into Documents** (the fork,
+`2.4.6-bt.*`) stays where it is (Q4); it is Folio's by its nine SHA-256 hashes
+or an older `-bt.` stamp and by nothing weaker. While one is there the Terminal
+page offers its removal, observed once per launch on a worker and removed on
+another, each press answered to the window that pressed; the uninstall removes
+it (row 41).
+**From.** trailing entry 2026-10-17 *Folio's own PSReadLine in every Windows
+PowerShell pane* (T-INTEGRATION-INJECT-2-BUILD; design note
+`docs/plans/design/integration-inject-2-2026-10-15.md`, owner rulings Q1–Q4 of
+2026-10-15). What the fork's rulings said about recognising Folio's own copy —
+§7.1.6c-3b's byte-identical removal, the trailing entry 2026-09-20 *Folio
+installs its module only where the place is empty or its own* — survives in the
+legacy copy's identity rule.
+**Overrides.** The 2026-10-17 entry replaces the row's former rule whole: the
+patched fork and its Documents installer (`install_checked`), the
+out-of-process probe, the Terminal page's switch and the invitation (§7.1.6c-3b),
+§7.47's spoken refusals for that switch, which has nothing left to refuse, and
+the launch-time upgrade (ruled 2026-09-21, ticket 56, option A). The debt this
+row carried — `Runtime::apply_psreadline` holding the marks lock on the window
+thread (`docs/ARCHITECTURE.md` §5.3 rows 3 and 4) — is repaid by the removal;
+row 2 keeps the agent-hook presses.
 
 ### 39. Single instance and the launch pipe — `not yet folded`
 Entries: §7.59 *a second launch is no longer a second process: it hands its one
@@ -1589,7 +1593,8 @@ Entries: the attention plan's endpoint section; §7.51; §13.37.
 
 ### 41. The uninstall doors — `folded`
 **Rule.** Folio must undo classes of thing outside its own folder — edits to
-other programs' files (agent hooks and the patched module), the `$PROFILE` line
+other programs' files (agent hooks and the patched module an earlier Folio wrote
+into Documents), the `$PROFILE` line
 (written again since T-INTEGRATION-INJECT-4 by the one-click fallback, §4) with the
 file, folders and one copy its write recorded,
 system registrations (the Explorer verb, the sparse package, the toast identity),
@@ -1643,7 +1648,8 @@ marker with `uninstall_hook: true`, and its `pre_uninstall` runs the door on
 the door's exit 2; the cask's `postflight` writes it with `uninstall_hook:
 false`, since Homebrew runs uninstall steps on every upgrade, and the door runs
 from `zap` only (ticket U-2). **And every such mark keeps a
-format the previous version also reads** — the PSReadLine module install, the
+format the previous version also reads** — the PSReadLine copy an earlier Folio
+installed (read and removed, never written, since 2026-10-17), the
 Explorer registration, the toast identity, the PowerShell profile line and the
 agent hooks — so an update's rollback leaves nothing the old build cannot repair
 on its next start; presses that write them during an update's trial are neither
