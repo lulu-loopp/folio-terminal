@@ -38,12 +38,23 @@
 //!   window asks again only after letting the older read go (the file changed under it), and the
 //!   window files an answer only under the identity its record awaits, so the answer of an older
 //!   ask that was already running is never filed either (`AnimationCache::awaits`,
-//!   `peek_awaits`). On the scale share a newer request for
-//!   the same picture on the same pane and surface ([`crate::ScaleWorkerRequest::same_target`])
-//!   that waits behind one not yet started **supersedes** it when it asks for another size
-//!   (`Superseded { by }`) and **joins** it when it asks for the same size (`Joined { with }`) —
-//!   revision (b)4. A superseded or joined terminal reaches its asker's bookkeeping and nothing
-//!   on screen (owner ruling Q4): the newer request's answer, or the one it joined, is what lands.
+//!   `peek_awaits`). On the scale share a newer request for the same picture **from the same
+//!   asker** ([`crate::ScaleWorkerRequest::same_target`]) that waits behind one not yet started
+//!   **supersedes** it when it asks for another size (`Superseded { by }`) and **joins** it when
+//!   it asks for the same size (`Joined { with }`) — revision (b)4. A superseded or joined
+//!   terminal reaches its asker's bookkeeping and nothing on screen (owner ruling Q4): the newer
+//!   request's answer, or the one it joined, is what lands.
+//!
+//!   **The address names the asker down to the slot that takes the answer**
+//!   (T-SCALE-ADDRESS-PER-ASKER; CONVENTIONS「共享队列上的地址必须一路唯一到取答案的那一层」),
+//!   because a joined terminal carries no answer of its own and a superseded one none at all: two
+//!   askers under one address would leave one of them waiting for good. The leaf names the pane
+//!   or the tab's focused shell; below it the purpose ([`crate::ScalePurpose`]) names a pane's
+//!   printed picture by its occurrence, a glance by its surface ([`crate::PeekSurface`]), a
+//!   preview's picture by its own number ([`crate::PictureAsker`], carried home on the answer),
+//!   and a page's picture by its size, which is how the window's raster cache files it. So a
+//!   newer size displaces only its own asker's older one, which that asker has already stopped
+//!   awaiting, and a join answers one asker once.
 //!   A supersession is announced by a wake, and the drain takes a superseded terminal at once —
 //!   past the drain mark, since it carries no answer — so it leaves the bound while the run before
 //!   it is still out.
@@ -439,8 +450,8 @@ impl ComputationLane {
         )
     }
 
-    /// **Ask for one resample** (C1). A request for the same picture on the same pane and surface
-    /// as one waiting supersedes it, or joins it when it asks for the same size.
+    /// **Ask for one resample** (C1). A request for the same picture from the same asker as one
+    /// waiting supersedes it, or joins it when it asks for the same size.
     #[expect(
         clippy::result_large_err,
         reason = "permanent: a refused request is handed back by value to the surface that asked, \
@@ -758,6 +769,9 @@ pub(crate) mod contract_adapter {
         said: Arc<AtomicUsize>,
         running: bool,
         notice_pending: bool,
+        /// The one picture every resample the adapter asks stands in for: the suite's targets are
+        /// the leaves the requests are asked under, so the asker below the leaf is held fixed.
+        picture: crate::PictureAsker,
     }
 
     /// The one window the adapter's tabs stand in.
@@ -853,6 +867,7 @@ pub(crate) mod contract_adapter {
             said,
             running: true,
             notice_pending: false,
+            picture: crate::PictureAsker::mint(),
         })
     }
 
@@ -890,6 +905,7 @@ pub(crate) mod contract_adapter {
                 Share::Scale => {
                     let request = ScaleWorkerRequest::Preview {
                         leaf,
+                        asker: self.picture,
                         task: crate::test_support::scale_task(&content_of(question), 8),
                     };
                     let door = move |ctx: &WorkerCtx| -> Door<ScaleWorkerRequest> {
@@ -933,7 +949,7 @@ pub(crate) mod contract_adapter {
     fn question_of(result: &MathWorkerResult) -> Option<u64> {
         match &result.completion {
             DecorationWorkerCompletion::InlineImage { task, .. } => Some(task.occurrence_id),
-            DecorationWorkerCompletion::PreviewScaledImage { scaled } => {
+            DecorationWorkerCompletion::PreviewScaledImage { scaled, .. } => {
                 question_of_content(&scaled.content_key)
             }
             DecorationWorkerCompletion::VerifiedPath { path, .. } => question_of_path(path),
@@ -1359,8 +1375,11 @@ mod tests {
     #[test]
     fn a_resize_drag_runs_the_size_it_ends_at_and_the_sizes_it_passed_say_superseded() {
         let (mut lane, gate) = gated();
+        // One picture, dragged through its widths.
+        let picture = crate::PictureAsker::mint();
         let preview = |width| ScaleWorkerRequest::Preview {
             leaf: probe_leaf(),
+            asker: picture,
             task: scale_task("截图 same-path.png", width),
         };
         gate.hold();
@@ -1384,7 +1403,7 @@ mod tests {
         gate.release();
         let width =
             |terminal: ComputationTerminal| match answer(terminal).expect("an answer").completion {
-                DecorationWorkerCompletion::PreviewScaledImage { scaled }
+                DecorationWorkerCompletion::PreviewScaledImage { scaled, .. }
                 | DecorationWorkerCompletion::PeekScaledImage { scaled, .. } => scaled.width_px,
                 _ => panic!("a resample's answer"),
             };
@@ -1828,8 +1847,10 @@ mod tests {
     fn a_superseded_resample_leaves_the_bound_while_the_run_before_it_is_out() {
         let (mut lane, gate) = gated();
         gate.hold();
+        let picture = crate::PictureAsker::mint();
         let preview = |width| ScaleWorkerRequest::Preview {
             leaf: probe_leaf(),
+            asker: picture,
             task: scale_task("截图 drag.png", width),
         };
         let running = lane.lane.scale(preview(1)).ok().expect("admitted");
