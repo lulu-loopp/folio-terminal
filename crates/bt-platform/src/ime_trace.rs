@@ -1,18 +1,21 @@
 //! Opt-in IME diagnostics. The application owns the file and its writer queue.
+//!
+//! **On only when the program's entry installs a sink** (T-DIAGNOSTIC-DOORS-AT-THE-ENTRY): the
+//! entry reads `BT_IME_TRACE` once and installs one when it names a file; this crate reads no
+//! environment variable, so a test binary that installs nothing traces nothing.
 use std::sync::OnceLock;
 
-static ENABLED: OnceLock<bool> = OnceLock::new();
 static SINK: OnceLock<fn(String)> = OnceLock::new();
 
+/// Whether the trace is on: whether a sink was installed.
 pub fn enabled() -> bool {
-    *ENABLED.get_or_init(|| std::env::var_os("BT_IME_TRACE").is_some_and(|v| !v.is_empty()))
+    SINK.get().is_some()
 }
 
-/// Install before constructing windows. No platform code opens a second file.
+/// Turn the trace on, into `sink`. Called by the entry when `BT_IME_TRACE` names a file, before
+/// constructing windows, and by nothing else. No platform code opens a second file.
 pub fn install(sink: fn(String)) {
-    if enabled() {
-        let _ = SINK.set(sink);
-    }
+    let _ = SINK.set(sink);
 }
 
 pub fn line(message: impl FnOnce() -> String) {

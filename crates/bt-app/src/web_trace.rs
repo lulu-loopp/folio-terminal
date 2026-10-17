@@ -84,7 +84,7 @@ use crate::trace::Gate;
 pub use crate::trace::{Trace, emit};
 
 static GATE: Gate = Gate::new(
-    "BT_WEB_TRACE",
+    |files| files.web.as_deref(),
     "# BT_WEB_TRACE_V1 elapsed_ms event field=value…",
 );
 

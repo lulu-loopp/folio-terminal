@@ -84,8 +84,8 @@ use std::{
 use portable_pty::ExitStatus;
 
 use crate::{
-    OutputWake, PtyCommand, PtyError, PtySession, PtySize, RingStats, ShellEnvironment,
-    ShellFallback, SystemShellEnvironment, upsert_environment,
+    OutputWake, PtyCommand, PtyError, PtyRecording, PtySession, PtySize, RingStats,
+    ShellEnvironment, ShellFallback, SystemShellEnvironment, upsert_environment,
 };
 
 /// Where a test's PowerShell startup script wants the history refusal, when not
@@ -1295,15 +1295,32 @@ impl TestShell {
         Self::spawn_default_with(size, &SystemShellEnvironment)
     }
 
+    /// [`Self::spawn_default`], its streams recorded as `recording` asks — a test that wants a
+    /// recording names files of its own; every other test shell records nothing.
+    pub fn spawn_default_recorded(
+        size: PtySize,
+        recording: &PtyRecording,
+    ) -> Result<Self, PtyError> {
+        Self::spawn_default_resolved(size, &SystemShellEnvironment, recording)
+    }
+
     /// [`Self::spawn_default`] with the resolution's environment handed in.
     pub(crate) fn spawn_default_with(
         size: PtySize,
         environment: &dyn ShellEnvironment,
     ) -> Result<Self, PtyError> {
+        Self::spawn_default_resolved(size, environment, &PtyRecording::none())
+    }
+
+    fn spawn_default_resolved(
+        size: PtySize,
+        environment: &dyn ShellEnvironment,
+        recording: &PtyRecording,
+    ) -> Result<Self, PtyError> {
         Self::through(
             Hygiene::new(),
             Box::new(move |spawn| {
-                PtySession::spawn_default_with(size, quiet(), None, environment, spawn)
+                PtySession::spawn_default_with(size, quiet(), None, environment, recording, spawn)
             }),
         )
     }
@@ -1332,6 +1349,7 @@ impl TestShell {
                     size,
                     quiet(),
                     working_directory,
+                    &PtyRecording::none(),
                     spawn,
                 )
             }),

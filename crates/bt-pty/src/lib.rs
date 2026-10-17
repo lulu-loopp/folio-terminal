@@ -268,6 +268,51 @@ const PTY_DUMP_ENV: &str = "BT_PTY_DUMP";
 /// anything typed at a password prompt; for a diagnosis you run yourself, never to be shared unread.
 const PTY_INPUT_DUMP_ENV: &str = "BT_PTY_INPUT_DUMP";
 
+/// **Which of a pane's two streams are recorded, and where** — the request a spawn is handed, never
+/// a variable this crate reads (T-DIAGNOSTIC-DOORS-AT-THE-ENTRY).
+///
+/// `BT_PTY_DUMP` and `BT_PTY_INPUT_DUMP` are read once, by the program's entry, and the answer
+/// travels down to [`PtySession::spawn`] on the [`PtyCommand`] as one of these. A library that read
+/// them at the moment of use honoured them in every binary that reached a real pane — a test binary
+/// as readily as the product — so a shell that had the switch set for a diagnosis recorded every
+/// test's pane into the diagnosis's file. [`PtyRecording::none`] is what every caller that was not
+/// asked for a recording passes; a test that wants one names a file of its own.
+///
+/// The paths are taken as given: the entry has already said which values mean "off" (set but empty
+/// is off), and a path here is a recording asked for. The output path is the run's first
+/// recording's and later ones take `<path>.2`, `<path>.3`; the input path is recorded to
+/// `<path>.in`, `<path>.in.2`, … beside it.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PtyRecording {
+    output: Option<PathBuf>,
+    input: Option<PathBuf>,
+}
+
+impl PtyRecording {
+    /// Record nothing — the answer for every pane nobody asked to record.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            output: None,
+            input: None,
+        }
+    }
+
+    /// Record the received bytes to `output` and the queued input to `input`, either of them
+    /// `None` for a stream that is not recorded. **Recording input records keystrokes, including
+    /// anything typed at a password prompt.**
+    #[must_use]
+    pub const fn new(output: Option<PathBuf>, input: Option<PathBuf>) -> Self {
+        Self { output, input }
+    }
+
+    /// Whether this asks for no recording at all.
+    #[must_use]
+    pub const fn is_none(&self) -> bool {
+        self.output.is_none() && self.input.is_none()
+    }
+}
+
 /// The name this terminal announces itself under, in `TERM_PROGRAM`.
 ///
 /// **Public because it is half of a handshake, not a private label.** The value
@@ -348,12 +393,12 @@ const PTY_DUMP_PUBLISH_INTERVAL: Duration = Duration::from_millis(200);
 static PTY_DUMP_RECORDINGS: AtomicU64 = AtomicU64::new(0);
 
 impl PtyDump {
-    /// This pane's recordings, as `BT_PTY_DUMP` and `BT_PTY_INPUT_DUMP` ask for them; a recording
-    /// that cannot be opened is said on standard error and left out (G-SWEEP-048).
-    fn from_environment() -> (Option<Self>, Option<Self>) {
+    /// This pane's recordings, as its spawn's [`PtyRecording`] asks for them; a recording that
+    /// cannot be opened is said on standard error and left out (G-SWEEP-048).
+    fn for_request(recording: &PtyRecording) -> (Option<Self>, Option<Self>) {
         Self::from_paths(
-            pty_dump_path(std::env::var_os(PTY_DUMP_ENV)),
-            pty_dump_path(std::env::var_os(PTY_INPUT_DUMP_ENV)),
+            recording.output.clone(),
+            recording.input.clone(),
             || (Instant::now(), unix_millis()),
             &mut |line| eprintln!("{line}"),
         )
@@ -566,27 +611,6 @@ fn unix_millis() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_millis())
         .unwrap_or_default()
-}
-
-/// What `BT_PTY_DUMP` names, if it names anything.
-///
-/// **An empty value is off, and this is the same word every other diagnostic
-/// variable in this program uses** (user ruling 2026-08-25). `BT_MOUSE_TRACE`,
-/// `BT_ATTENTION_TRACE`, `BT_GIT_TRACE` and `BT_PERF_TRACE` all read an empty
-/// string as "not set"; this one alone used to hand the empty string on as a
-/// path, and a truncating create against `""` fails, so `BT_PTY_DUMP=` did not
-/// turn recording off — it stopped the pane from starting at all. That is the
-/// shape a shell leaves behind when it clears a variable rather than removing
-/// it (`$env:BT_PTY_DUMP = ""`, a `.env` line with nothing after the `=`, a
-/// script that unsets by assigning empty), so the failure landed on exactly the
-/// people who thought they had switched the diagnostic off.
-///
-/// Whitespace is *not* trimmed: a value of `" "` is a real, if strange, relative
-/// filename on Windows' rules as this crate is entitled to read them, and a
-/// diagnostic that silently reinterprets the path it was given is the same
-/// class of surprise in the other direction.
-fn pty_dump_path(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
-    value.filter(|value| !value.is_empty()).map(PathBuf::from)
 }
 
 /// Which file this process's `ordinal`-th recording writes to.
@@ -991,6 +1015,8 @@ pub struct PtyCommand {
     /// every program that reads argv, which is all of them but a command
     /// interpreter.
     interpreter_line: Option<OsString>,
+    /// Which of this child's streams are recorded ([`PtyRecording`]); none unless the caller asks.
+    recording: PtyRecording,
 }
 
 impl PtyCommand {
@@ -1004,7 +1030,16 @@ impl PtyCommand {
             environment_refresh: None,
             declare_color_support: false,
             interpreter_line: None,
+            recording: PtyRecording::none(),
         }
+    }
+
+    /// Record this child's streams as `recording` asks — the one way a pane is recorded. A command
+    /// nobody calls this on records nothing, whatever the process's environment says.
+    #[must_use]
+    pub fn recorded(mut self, recording: PtyRecording) -> Self {
+        self.recording = recording;
+        self
     }
 
     pub fn arg(mut self, argument: impl Into<OsString>) -> Self {
@@ -2094,8 +2129,22 @@ impl PtySession {
     /// arm, because `BT_SHELL` exists to pick *which* PowerShell-family build runs rather than to
     /// swap in an unrelated shell; off Windows it is empty for every arm, because a shell whose
     /// standard input is a terminal is already interactive.
-    pub fn spawn_default(size: PtySize, wake: OutputWake) -> Result<Self, PtyError> {
-        Self::spawn_default_with(size, wake, None, &SystemShellEnvironment, Self::spawn)
+    ///
+    /// `recording` is which of the pane's streams are recorded ([`PtyRecording::none`] for a pane
+    /// nobody asked to record).
+    pub fn spawn_default(
+        size: PtySize,
+        wake: OutputWake,
+        recording: &PtyRecording,
+    ) -> Result<Self, PtyError> {
+        Self::spawn_default_with(
+            size,
+            wake,
+            None,
+            &SystemShellEnvironment,
+            recording,
+            Self::spawn,
+        )
     }
 
     /// [`spawn_default`](Self::spawn_default), started in `working_directory`
@@ -2110,12 +2159,14 @@ impl PtySession {
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
+        recording: &PtyRecording,
     ) -> Result<Self, PtyError> {
         Self::spawn_default_with(
             size,
             wake,
             working_directory,
             &SystemShellEnvironment,
+            recording,
             Self::spawn,
         )
     }
@@ -2149,6 +2200,10 @@ impl PtySession {
     /// start, but an argument the caller adds to *every* PowerShell it starts belongs to the retry
     /// too. The birth worker asks once and retains the resulting command when the first shell
     /// starts, because that same command is the pane's one fallback if the child dies at birth.
+    ///
+    /// `recording` is which of the pane's streams are recorded, the retry's included
+    /// ([`PtyRecording::none`] for a pane nobody asked to record).
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_shell_in(
         program: impl Into<OsString>,
         args: &[OsString],
@@ -2157,6 +2212,7 @@ impl PtySession {
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
+        recording: &PtyRecording,
     ) -> Result<Self, PtyError> {
         Self::spawn_shell_in_with(
             program,
@@ -2166,6 +2222,7 @@ impl PtySession {
             size,
             wake,
             working_directory,
+            recording,
             Self::spawn,
         )
     }
@@ -2182,6 +2239,7 @@ impl PtySession {
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
+        recording: &PtyRecording,
         spawn: impl FnMut(PtyCommand, PtySize, OutputWake) -> Result<Self, PtyError>,
     ) -> Result<Self, PtyError> {
         let program = program.into();
@@ -2195,6 +2253,7 @@ impl PtySession {
             size,
             wake,
             working_directory,
+            recording,
             fall_back,
             spawn,
         )
@@ -2215,6 +2274,7 @@ impl PtySession {
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
+        recording: &PtyRecording,
     ) -> Result<Self, PtyError> {
         let program = program.into();
         let fall_back = (!program_is_the_last_resort_shell(&program)).then_some(fallback_args);
@@ -2227,6 +2287,7 @@ impl PtySession {
             size,
             wake,
             working_directory,
+            recording,
             fall_back,
         )
     }
@@ -2241,6 +2302,7 @@ impl PtySession {
         wake: OutputWake,
         working_directory: Option<PathBuf>,
         environment: &dyn ShellEnvironment,
+        recording: &PtyRecording,
         spawn: impl FnMut(PtyCommand, PtySize, OutputWake) -> Result<Self, PtyError>,
     ) -> Result<Self, PtyError> {
         let resolved = resolve_default_shell(environment);
@@ -2257,6 +2319,7 @@ impl PtySession {
             size,
             wake,
             working_directory,
+            recording,
             shell_spawn_failure_should_fall_back(resolved.choice)
                 .then_some(&last_resort_arguments as &dyn Fn() -> Vec<OsString>),
             spawn,
@@ -2279,6 +2342,7 @@ impl PtySession {
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
+        recording: &PtyRecording,
         fall_back: Option<&dyn Fn() -> Vec<OsString>>,
     ) -> Result<Self, PtyError> {
         Self::spawn_interactive_with(
@@ -2290,6 +2354,7 @@ impl PtySession {
             size,
             wake,
             working_directory,
+            recording,
             fall_back,
             Self::spawn,
         )
@@ -2307,6 +2372,8 @@ impl PtySession {
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
+        // Which streams are recorded: the first attempt's and the retry's alike.
+        recording: &PtyRecording,
         // The retry's complete argument list when a failure is recoverable, `None` when it is not.
         fall_back: Option<&dyn Fn() -> Vec<OsString>>,
         mut spawn: impl FnMut(PtyCommand, PtySize, OutputWake) -> Result<Self, PtyError>,
@@ -2337,7 +2404,8 @@ impl PtySession {
         };
         let command = command
             .layered(folio_environment, profile_environment)
-            .working_directory(working_directory.clone());
+            .working_directory(working_directory.clone())
+            .recorded(recording.clone());
         let command = match environment_refresh.clone() {
             Some(refresh) => command.refresh_environment(refresh),
             None => command,
@@ -2345,7 +2413,8 @@ impl PtySession {
         match (spawn(command, size, wake.clone()), fall_back) {
             (Ok(mut session), Some(fallback_args)) => {
                 let fallback = PtyCommand::last_resort_shell(&fallback_args())
-                    .working_directory(working_directory);
+                    .working_directory(working_directory)
+                    .recorded(recording.clone());
                 let fallback = match environment_refresh {
                     Some(refresh) => fallback.refresh_environment(refresh),
                     None => fallback,
@@ -2360,7 +2429,8 @@ impl PtySession {
             (Ok(session), None) => Ok(session),
             (Err(spawn_error), Some(fallback_args)) => {
                 let fallback = PtyCommand::last_resort_shell(&fallback_args())
-                    .working_directory(working_directory);
+                    .working_directory(working_directory)
+                    .recorded(recording.clone());
                 let fallback = match environment_refresh {
                     Some(refresh) => fallback.refresh_environment(refresh),
                     None => fallback,
@@ -2394,8 +2464,11 @@ impl PtySession {
         self.birth_fallback.is_some()
     }
 
+    /// Start `command` in a pseudoconsole of `size`. Its streams are recorded exactly as its
+    /// [`PtyCommand::recorded`] request says, and not at all without one: this crate reads no
+    /// environment variable to decide (T-DIAGNOSTIC-DOORS-AT-THE-ENTRY).
     pub fn spawn(command: PtyCommand, size: PtySize, wake: OutputWake) -> Result<Self, PtyError> {
-        let (dump, input_dump) = PtyDump::from_environment();
+        let (dump, input_dump) = PtyDump::for_request(&command.recording);
         let dump = dump.map(|dump| Arc::new(Mutex::new(dump)));
         let input_dump = input_dump.map(Mutex::new);
         let conpty_source = conpty_source();
@@ -3556,7 +3629,7 @@ mod tests {
     /// autoload its own `Microsoft.PowerShell.Utility`. The build script unpacks the sidecar in
     /// Rust now and starts no shell at all (`docs/DESIGN.md`, 2026-09-26).
     fn declare_probe_module_path(command: PtyCommand) -> PtyCommand {
-        // Set-but-empty is unset ([`pty_dump_path`]'s rule): declaring
+        // Set-but-empty is unset (the rule every `BT_` door is read with): declaring
         // `PSModulePath=` would hand the child a module path that finds nothing,
         // which is a stronger statement than the one a cleared variable makes.
         match std::env::var("BT_PSREADLINE_MODULE_PATH") {
@@ -3896,7 +3969,6 @@ mod tests {
         );
         assert!(output.is_none());
         assert!(input.is_none());
-        assert!(pty_dump_path(Some(std::ffi::OsString::new())).is_none());
     }
 
     /// RED (mutation: a recording that cannot be opened fails the pane's spawn, the 0.4.7 road —
@@ -4117,34 +4189,6 @@ mod tests {
         assert_eq!(pty_dump_session_path(&base, 7), beside(".8"));
     }
 
-    /// Clearing a diagnostic variable turns the diagnostic off, and never takes the pane with it.
-    ///
-    /// `BT_PTY_DUMP=` used to be handed on as a path; `File::create("")` fails, and the failure was
-    /// spent on the spawn rather than on the recording — so a value that reads as "off" everywhere
-    /// else in this program was the one value that stopped a shell from starting.
-    #[test]
-    fn an_emptied_dump_variable_is_off_and_not_a_nameless_file() {
-        use std::ffi::OsString;
-
-        assert_eq!(pty_dump_path(None), None, "unset is off");
-        assert_eq!(
-            pty_dump_path(Some(OsString::new())),
-            None,
-            "and emptied is off too — the same word BT_MOUSE_TRACE reads"
-        );
-        let named = std::env::temp_dir().join("bt-pty-dump-named.vt");
-        assert_eq!(
-            pty_dump_path(Some(named.as_os_str().to_os_string())),
-            Some(named),
-            "a named file is still that file, byte for byte"
-        );
-        assert_eq!(
-            pty_dump_path(Some(OsString::from(" "))),
-            Some(PathBuf::from(" ")),
-            "and a value that is only strange is not a value that is empty"
-        );
-    }
-
     /// The defect this is here for: `BT_PTY_DUMP` is one path, every `PtySession::spawn` opened it
     /// with a truncating create, and so the moment a run's second pane started, the first pane's
     /// recording was cut to nothing under a reader that went on writing past the hole.
@@ -4182,6 +4226,125 @@ mod tests {
             std::fs::remove_file(pty_dump_chunks_path(&path)).unwrap();
             std::fs::remove_file(path).unwrap();
         }
+    }
+
+    /// The marker a recording test sets on the copy of this test binary that starts its panes: the
+    /// folder that test owns. Only that test's child half reads it.
+    const RECORDING_TEST_CHILD: &str = "BT_PTY_RECORDING_TEST_CHILD";
+
+    /// Run `selector` — the calling test — again in a copy of this binary of its own, with
+    /// `BT_PTY_DUMP` and `BT_PTY_INPUT_DUMP` **set** to files in `folder`, the way a shell that a
+    /// diagnosis left them in would hand them on; the child half is told `folder` through
+    /// [`RECORDING_TEST_CHILD`]. A process of its own because the environment is the process's, a
+    /// test may not write it (`set_var` races every other test of the binary), and the recording
+    /// ordinal is the process's too, so the child's first recording is its ordinal 0.
+    fn in_a_child_with_the_dump_variables_set(selector: &str, folder: &Path) {
+        let listing = bt_platform::quiet_command(std::env::current_exe().unwrap())
+            .args(["--exact", selector, "--list"])
+            .output()
+            .expect("the harness can list its own tests");
+        let listed = String::from_utf8_lossy(&listing.stdout);
+        let named: Vec<&str> = listed
+            .lines()
+            .filter_map(|line| line.trim_end().strip_suffix(": test"))
+            .collect();
+        assert_eq!(
+            named,
+            [selector],
+            "the child selector names one test: {listed}"
+        );
+        let child = bt_platform::quiet_command(std::env::current_exe().unwrap())
+            .args(["--exact", selector, "--nocapture", "--test-threads=1"])
+            .env(PTY_DUMP_ENV, folder.join("environment-output.vt"))
+            .env(PTY_INPUT_DUMP_ENV, folder.join("environment-input.vt"))
+            .env(RECORDING_TEST_CHILD, folder)
+            .output()
+            .expect("the child half starts");
+        assert!(
+            child.status.success(),
+            "the child half failed: {}\n{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+    }
+
+    /// Every file in `folder`, by name, sorted.
+    fn files_in(folder: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// RED (T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; before it, `PtySession::spawn` read `BT_PTY_DUMP`
+    /// and `BT_PTY_INPUT_DUMP` itself and this child left `environment-output.vt`,
+    /// `environment-output.vt.chunks`, `environment-input.vt.in` and its `.chunks` in the folder)
+    /// — **a real pane nobody asked to record records nothing, whatever the environment says.**
+    /// The child starts a real shell with both variables set to files of this test's folder and
+    /// no request; the folder stays empty.
+    #[test]
+    fn a_real_pane_nobody_asked_to_record_records_nothing_whatever_the_environment_says() {
+        const SELECTOR: &str = "tests::a_real_pane_nobody_asked_to_record_records_nothing_whatever_the_environment_says";
+        if let Some(folder) = std::env::var_os(RECORDING_TEST_CHILD) {
+            assert!(Path::new(&folder).is_dir());
+            let mut shell = TestShell::spawn_default(size(40, 8)).expect("a real shell");
+            shell.shutdown().expect("the shell shuts down");
+            return;
+        }
+        let folder = bt_testpath::temp_path("bt-pty-unasked");
+        std::fs::create_dir_all(&folder).unwrap();
+        in_a_child_with_the_dump_variables_set(SELECTOR, &folder);
+        assert_eq!(files_in(&folder), Vec::<String>::new());
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    /// RED (mutation: drop `.recorded(recording.clone())` from `spawn_interactive_with`'s first
+    /// attempt, or have `PtySession::spawn` open its dumps from `PtyRecording::none()` — the
+    /// folder holds no `asked.vt`) — **a real pane asked to record records to the files it was
+    /// handed, a second one beside the first as `.2`, and the environment's files stay absent.**
+    /// The naming (`pty_dump_session_path`) and the manifest are the ones a recording always had.
+    #[test]
+    fn a_real_pane_asked_to_record_records_to_its_own_files_and_the_second_takes_dot_two() {
+        const SELECTOR: &str = "tests::a_real_pane_asked_to_record_records_to_its_own_files_and_the_second_takes_dot_two";
+        if let Some(folder) = std::env::var_os(RECORDING_TEST_CHILD) {
+            let folder = PathBuf::from(folder);
+            let recording = PtyRecording::new(
+                Some(folder.join("asked.vt")),
+                Some(folder.join("asked-input.vt")),
+            );
+            for _ in 0..2 {
+                let mut shell = TestShell::spawn_default_recorded(size(40, 8), &recording)
+                    .expect("a real shell");
+                shell.shutdown().expect("the shell shuts down");
+            }
+            return;
+        }
+        let folder = bt_testpath::temp_path("bt-pty-asked");
+        std::fs::create_dir_all(&folder).unwrap();
+        in_a_child_with_the_dump_variables_set(SELECTOR, &folder);
+        assert_eq!(
+            files_in(&folder),
+            [
+                "asked-input.vt.in",
+                "asked-input.vt.in.2",
+                "asked-input.vt.in.2.chunks",
+                "asked-input.vt.in.chunks",
+                "asked.vt",
+                "asked.vt.2",
+                "asked.vt.2.chunks",
+                "asked.vt.chunks",
+            ]
+        );
+        for (manifest, ordinal) in [("asked.vt.chunks", 0), ("asked.vt.2.chunks", 1)] {
+            let manifest = std::fs::read_to_string(folder.join(manifest)).unwrap();
+            assert!(
+                manifest.contains(&format!("# SESSION ordinal={ordinal} ")),
+                "{manifest}"
+            );
+        }
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     /// A recording that caught nothing is a legal outcome — a pane nobody typed in, a shell that
@@ -5257,6 +5420,10 @@ mod tests {
             OsString::from("folio 'load'"),
         ];
         let mut attempts = Vec::new();
+        let recording = PtyRecording::new(
+            Some(PathBuf::from("asked-output")),
+            Some(PathBuf::from("asked-input")),
+        );
         let result = PtySession::spawn_interactive_with(
             OsString::from("missing-shell.exe"),
             &[OsString::from("--own")],
@@ -5266,6 +5433,7 @@ mod tests {
             PtySize::cells(NonZeroU16::new(80).unwrap(), NonZeroU16::new(24).unwrap()),
             Arc::new(|| {}),
             None,
+            &recording,
             Some(&|| fallback_args.to_vec()),
             |command, _, _| {
                 attempts.push(command);
@@ -5279,6 +5447,12 @@ mod tests {
         assert_eq!(attempts[1].program, OsString::from(LAST_RESORT_SHELL));
         assert_eq!(attempts[1].arguments, fallback_args);
         assert!(attempts[1].environment.is_empty());
+        // The request travels with the pane, to the retry as well as the first attempt.
+        assert!(
+            attempts
+                .iter()
+                .all(|attempt| attempt.recording == recording)
+        );
 
         // A failure the caller says is not recoverable is not retried at all.
         let mut tries = 0;
@@ -5291,6 +5465,7 @@ mod tests {
             PtySize::cells(NonZeroU16::new(80).unwrap(), NonZeroU16::new(24).unwrap()),
             Arc::new(|| {}),
             None,
+            &PtyRecording::none(),
             None,
             |_, _, _| {
                 tries += 1;
@@ -5332,6 +5507,7 @@ mod tests {
                 PtySize::cells(NonZeroU16::new(80).unwrap(), NonZeroU16::new(24).unwrap()),
                 Arc::new(|| {}),
                 None,
+                &PtyRecording::none(),
                 None,
                 |command, _, _| {
                     spawned.push(command);
