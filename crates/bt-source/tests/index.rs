@@ -1709,6 +1709,76 @@ fn the_resolver_reads_a_cycle_as_naming_nothing_more_and_refuses_past_its_limit(
     );
 }
 
+/// RED (T-WINDOW-WAITS-RESOLVER-CUTOFF) — **a supertrait or an `impl` block's trait chained
+/// past the resolver's hop limit is a cutoff the checked API says, and the silent one swallows.**
+///
+/// `Near: Link3` names `Declared` through four renamed re-exports; `Far: Link20 + Link3` is cut off
+/// at `Link20`, and `supertraits_checked` answers `Err` carrying the `Declared` it found through
+/// `Link3`. `impl Link3 for Thing` implements `Declared`; `impl Link20 for Thing` is `Err` with
+/// nothing found. `supertraits` and `implemented` answer what was found, as before.
+///
+/// MUTATION: in `TraitResolver::resolve_all`, never set `cut` — `Far`'s supertraits and the
+/// `Link20` block are `Ok`.
+#[test]
+fn supertraits_and_impls_chained_past_the_limit_are_refused_by_the_checked_api() {
+    let index = Index::shared(&fixture_universe("traits_cycle")).expect("the fixture lowers");
+    let resolver = TraitResolver::new(&[("traits_cycle", &index)]);
+    let declared = || {
+        BTreeSet::from([TraitId {
+            package: "traits_cycle".to_owned(),
+            module_path: "crate::left".to_owned(),
+            name: "Declared".to_owned(),
+        }])
+    };
+    let far = |name: &str| TraitId {
+        package: "traits_cycle".to_owned(),
+        module_path: "crate::far".to_owned(),
+        name: name.to_owned(),
+    };
+    assert_eq!(
+        resolver.supertraits_checked(&far("Near")),
+        Ok(declared()),
+        "a supertrait a short chain names resolves"
+    );
+    assert_eq!(
+        resolver.supertraits_checked(&far("Far")),
+        Err(ResolveCutoff(declared())),
+        "a supertrait past the hop limit says so, carrying the one found beside it"
+    );
+    assert_eq!(
+        resolver.supertraits(&far("Far")),
+        declared(),
+        "and `supertraits` answers what was found, as before"
+    );
+    let block = |link: &str| {
+        index
+            .impls()
+            .iter()
+            .find(|block| {
+                block
+                    .trait_path()
+                    .is_some_and(|path| path.last().is_some_and(|last| last == link))
+            })
+            .unwrap_or_else(|| panic!("the fixture implements `{link}`"))
+    };
+    assert_eq!(
+        resolver.implemented_checked("traits_cycle", block("Link3")),
+        Ok(declared()),
+        "an `impl` of a short chain implements the trait at its end"
+    );
+    assert_eq!(
+        resolver.implemented_checked("traits_cycle", block("Link20")),
+        Err(ResolveCutoff(BTreeSet::new())),
+        "an `impl` of a chain past the hop limit says so"
+    );
+    assert!(
+        resolver
+            .implemented("traits_cycle", block("Link20"))
+            .is_empty(),
+        "and `implemented` answers it as before"
+    );
+}
+
 /// RED (T-DOOR-REACH-TRAIT-OBJECTS) — **a trait is its identity, and a path
 /// names the trait the compiler would take it to name.**
 ///

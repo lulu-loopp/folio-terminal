@@ -216,6 +216,22 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(())
     }
 
+    /// **The window lost the keyboard** — the keyboard's door for the blur, the
+    /// one place outside this module's own events that its two window facts are
+    /// written.
+    ///
+    /// The key-hint card is hidden and not spent: nothing was pressed, so a hand
+    /// that comes back still holding `Ctrl` is answered again. Nothing is drawn
+    /// here; the blur's own frame carries the card's going.
+    ///
+    /// The input method's context is no longer this window's. Nothing is
+    /// cancelled or synthesized: IMM32 may synchronously deliver a partial
+    /// commit during this transition, and the product decision is to accept it.
+    pub(crate) fn blurred(&mut self) {
+        self.window.key_hint.hide();
+        self.window.ime_active = false;
+    }
+
     /// **Everything a shortcut verb does to the process**, whichever door it
     /// came through.
     ///
