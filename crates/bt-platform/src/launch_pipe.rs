@@ -197,7 +197,7 @@ pub struct Decision<T> {
 }
 
 /// **The endpoint.** Live from the moment [`LaunchPipe::start`] returns, closed by
-/// [`LaunchPipe::retire`] — its door (T-DROP-DOORS, D-79): *an endpoint is retired through an
+/// [`LaunchPipe::retire_within`] — its door (T-DROP-DOORS, D-79): *an endpoint is retired through an
 /// explicit door, not by its drop.*
 ///
 /// The product's endpoint lives in a `static` for the process's life and is never retired; the
@@ -205,15 +205,18 @@ pub struct Decision<T> {
 /// door was not called waits for nothing: it tells the listener to stop, lets the thread go, leaves
 /// the stop event to the end of the process (the listener may still be waiting on it) and says so
 /// once ([`crate::door_skipped`]).
-#[must_use = "an endpoint is retired through `LaunchPipe::retire`, never by its drop"]
+#[must_use = "an endpoint is retired through `LaunchPipe::retire_within`, never by its drop"]
 pub struct LaunchPipe {
     name: String,
     stop: SendHandle,
     listener: Option<JoinHandle<()>>,
+    /// The listener's first word, and then its end: the sender is the listener's body's, so the
+    /// receiver hears `Disconnected` once the listener has left (the door's bounded wait).
+    said: mpsc::Receiver<io::Result<()>>,
 }
 
 // SAFETY: the only raw handle in this value is the stop event. Setting an event is thread-safe by
-// contract and is the only thing done with it before `retire`, which runs once on the sole owner
+// contract and is the only thing done with it before `retire_within`, which runs once on the sole owner
 // and joins the listener before closing it (a drop without it never closes it).
 unsafe impl Sync for LaunchPipe {}
 
@@ -287,14 +290,15 @@ impl LaunchPipe {
             )?
         };
         // The listener is running and shares the event, so the guard's job is over: from here the
-        // handle is closed by whichever of the three arms below is taken, and by `retire` on the
+        // handle is closed by whichever of the three arms below is taken, and by `retire_within` on the
         // arm that hands the endpoint back.
         let stop = SendHandle(stop.into_raw());
-        match first_word.recv_timeout(Duration::from_secs(5)) {
+        match crate::listener_says_within(&first_word, Duration::from_secs(5)) {
             Ok(Ok(())) => Ok(Self {
                 name,
                 stop,
                 listener: Some(listener),
+                said: first_word,
             }),
             Ok(Err(error)) => {
                 let _ = listener.join();
@@ -325,22 +329,32 @@ impl LaunchPipe {
         &self.name
     }
 
-    /// **The door: stop listening, wait for the listener to leave, and close the stop event.**
+    /// **The door: stop listening, wait — up to `bound` — for the listener to leave, and close the
+    /// stop event.** Answers whether it left in time.
     ///
-    /// The one road on which this endpoint waits. The listener leaves at its next wait, which the
-    /// stop event ends — after the conversation it is in, if any, has reached its end or one of
-    /// its step deadlines, and `decide` or `commit` has returned. That is the whole of the bound:
-    /// the join is the listener's own last step, which this door does not shorten. Called on
-    /// whatever thread owns the endpoint; nothing in the product does (its endpoint is a
+    /// The one road on which this endpoint waits, and its wait is bounded by the caller: the
+    /// listener leaves at its next wait, which the stop event ends — after the client it is serving
+    /// has had its frame or its deadline, and after the caller's own closure has returned, which no
+    /// bound written here could cover. So the door waits on the listener's end (the sender its body
+    /// holds goes with it) for `bound`, and a listener still standing past it is let go with the
+    /// stop event, which the process's end closes — never a handle closed under the listener.
+    /// Called on whatever thread owns the endpoint; nothing in the product does (its endpoint is a
     /// `static`).
-    pub fn retire(mut self) {
+    pub fn retire_within(mut self, bound: Duration) -> bool {
         self.stop_listening();
-        if let Some(listener) = self.listener.take() {
-            let _ = listener.join();
-        }
-        // SAFETY: the only other user of this handle has been joined.
-        unsafe {
-            let _ = CloseHandle(self.stop.0);
+        let Some(listener) = self.listener.take() else {
+            return true;
+        };
+        match crate::listener_says_within(&self.said, bound) {
+            Err(RecvTimeoutError::Disconnected) => {
+                let _ = listener.join();
+                // SAFETY: the only other user of this handle has been joined.
+                unsafe {
+                    let _ = CloseHandle(self.stop.0);
+                }
+                true
+            }
+            Ok(_) | Err(RecvTimeoutError::Timeout) => false,
         }
     }
 
@@ -355,7 +369,7 @@ impl LaunchPipe {
 }
 
 impl Drop for LaunchPipe {
-    /// Waits for nothing. After [`LaunchPipe::retire`] there is nothing left to do; without it,
+    /// Waits for nothing. After [`LaunchPipe::retire_within`] there is nothing left to do; without it,
     /// the listener is told to stop and let go of, and the drop says so once.
     fn drop(&mut self) {
         if let Some(listener) = self.listener.take() {
@@ -1254,7 +1268,7 @@ mod tests {
     /// hold let go once that thread is on its way into the door. When the door returns, `decide`
     /// has returned and the name answers nobody.
     ///
-    /// MUTATION: let the listener go in `retire` instead of joining it and the door returns while
+    /// MUTATION: let the listener go in `retire_within` instead of joining it and the door returns while
     /// `decide` still stands — `left` reads false (unless the release overtakes the door, which the
     /// order below makes the rare case).
     #[test]
@@ -1266,7 +1280,10 @@ mod tests {
         let leaving = std::sync::Arc::clone(&left);
         std::thread::spawn(move || {
             let _ = going.send(());
-            pipe.retire();
+            assert!(
+                pipe.retire_within(crate::door_skipped::PATIENCE),
+                "the listener left"
+            );
             let _ = retired.send((
                 leaving.load(std::sync::atomic::Ordering::SeqCst),
                 crate::door_skipped::skipped_on_this_thread(),
@@ -1298,5 +1315,26 @@ mod tests {
         let skipped = crate::door_skipped::dropped_alone(pipe, "a drop while the listener is held");
         assert_eq!(skipped, 1, "the drop says its skipped door once");
         let _ = release.send(());
+    }
+
+    /// RED (T-DROP-DOORS, D-79, the review's bound) — **the door's wait ends at its bound**: a
+    /// listener held inside the caller's closure has not left within no time at all, and the door
+    /// answers so and lets it go.
+    ///
+    /// MUTATION: join the listener in `retire_within` without the bounded wait and the door's
+    /// thread does not answer within the suite's patience.
+    #[test]
+    fn the_door_lets_a_listener_go_past_its_bound() {
+        let (endpoint, release, _left) = a_held_endpoint(line!());
+        let (answered, heard) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = answered.send(endpoint.retire_within(Duration::ZERO));
+        });
+        let left = crate::door_skipped::received(&heard, "the door with no time at all");
+        assert!(
+            !left,
+            "a listener held in its closure has not left within no time at all"
+        );
+        drop(release);
     }
 }

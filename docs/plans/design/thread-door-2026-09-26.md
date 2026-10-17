@@ -6228,7 +6228,7 @@ has no edge to `bt-platform`, says it to standard error in its own voice).
 | TD-1 | `DirWatch` (Windows) | `retire_within(self, &WorkerCtx, DIR_WATCH_RETIRE_BUDGET)` — the stop, a bounded wait through `wait::sleep_within`, the join, then the three handles; the watch steward, on its worker | `SetEvent`, the thread let go with its handles, said once | **retired** (D-40) |
 | TD-2 | `DirWatch` (macOS) | the same door — the stop source signalled, the bounded wait, the join; the steward | the signal, the thread let go, said once | **retired** (D-40) |
 | TD-3 | `trace_sink::Shutdown` | `flush_through_its_door(self)` — the one `TraceFlush` admission; `fn main`'s tail and its build-error return | said once | **retired** (D-78) |
-| TD-4, TD-5 | `AttentionPipe` (Windows, Unix) | `retire(self)` — stop, join, close the event or unlink the name; any owner (the product's lives in a static) | the stop, the listener let go, said once | **retired** (D-79) |
+| TD-4, TD-5 | `AttentionPipe` (Windows, Unix) | `retire_within(self, bound)` — stop, wait for the listener's end within the caller's bound, join, close the event or unlink the name; any owner (the product's lives in a static) | the stop, the listener let go, said once | **retired** (D-79) |
 | TD-6, TD-7 | `LaunchPipe` (Windows, Unix) | the same | the same | **retired** (D-79) |
 | TD-8, TD-9 | `video::engine::Engine`, `macos_player::Engine` | `shutdown(&mut self)` — now a request that waits for nothing (`Shutdown` sent, the thread let go); the seats, on every close road | the same request, said once | **retired** (D-80) |
 | TD-10, TD-11 | `VideoSeat`, `VideoSeats` | `VideoSeat::shutdown`, `VideoSeats::shutdown_all` — every road that ends a window (`Runtime::let_go_of_this_window`) | no `Drop` | **retired** (D-80) |
@@ -6253,22 +6253,24 @@ needs that ruling), or the way out's media waits move to a worker.
 **The census.** No spawn site is added or removed. The bare-site inventory shrinks by the drops'
 joins (both `DirWatch` arms, both engines' `shutdown` poll and join); the moved effects keep their
 counts (the endpoints' `SetEvent`/`CloseHandle`/`join` and `libc::write`/`close` now under
-`retire`, `stop_listening` and `hang_up`; WinHTTP's `wait_timeout` under `close_within`); the
+`retire_within`, `stop_listening` and `hang_up`, and Windows' two first-word receives now one
+`listener_says_within`; WinHTTP's `wait_timeout` under `close_within`); the
 `# effects` section gains `DirWatch::retire_within` on each arm (`worker-door-body`, reached from
 the watch steward's row through the steward's `Held` trait) and `video::shutdown_media_session`
 (`owner-door-body`, `MediaQuiet`).
 
-**Two limits, stated (the review of 2026-10-17).** *The endpoints' door is an accepted unbounded
-door with no product caller.* `AttentionPipe::retire` and `LaunchPipe::retire` (TD-4…TD-7) join
-the listener without a bound of their own: the listener leaves at its next wait, after the client
-it serves has had its frame or its `READ_DEADLINE` / step deadline, **and** after the caller's
-`deliver`, `decide` or `commit` closure has returned — and those closures are the caller's, with
-no patience this module can name, so no bound written here would be honest. A bounded form would
-also need a wait of its own (a poll's sleep or a receive), which the bare-site inventory refuses
-as growth, and a `WorkerCtx` door, which the completions ledger refuses without a product caller.
-Nothing in the product calls the door (the endpoints live in statics for the process's life); it
-is the road for tests and for any owner that comes later, which would bring the bound with it.
-*The watch steward never ends in the product.* Its worker runs for the process's life, so the
-watches it still holds when the process leaves go with the process and are not retired; a drop
-of them (and its one line each) happens only on an unwind of the steward, which the resident
-panic hook turns into the process's end before any drop runs.
+**Two amendments (the review of 2026-10-17).** *The endpoints' door is bounded.* It is
+`retire_within(self, bound) -> bool` (TD-4…TD-7): it stops the listener and waits on the
+listener's end — the sender the listener's body holds goes with it, so the door hears
+`Disconnected` — for at most `bound`, then joins a thread that has finished; a listener still
+standing past the bound is let go (on Windows with its stop event, which the process's end
+closes). A fixed bound written in the module could not be honest, since the listener leaves only
+after the caller's own `deliver`, `decide` or `commit` closure has returned; so the caller names
+it, and the door keeps it. The wait is the one bounded receive both endpoints make,
+`listener_says_within` at the crate root, which Windows' `start` already made for the listener's
+first word (§5.3 row 24) — one site where there were two, and none added. Nothing in the product
+calls the door (the endpoints live in statics). *The watch steward never ends in the product.*
+Its worker runs for the process's life, so the watches it still holds when the process leaves go
+with the process and are not retired; a drop of them (and its one line each) happens only on an
+unwind of the steward, which the resident panic hook turns into the process's end before any drop
+runs.

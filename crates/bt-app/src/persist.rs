@@ -5759,7 +5759,7 @@ pub(crate) mod tests {
         );
 
         if let Some(Ok(endpoint)) = endpoint {
-            endpoint.retire();
+            let _ = endpoint.retire_within(crate::lane::PATIENCE);
         }
         drop(resident);
         let _ = std::fs::remove_dir_all(&root);

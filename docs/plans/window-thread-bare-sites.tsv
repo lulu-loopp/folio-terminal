@@ -115,6 +115,7 @@ bt-platform	-	crate::macos_update::points_under	std::fs::canonicalize	1
 bt-platform	-	crate::macos_update::run_at	std::thread::sleep	1
 bt-platform	-	crate::macos_update::verify_clone	std::fs::canonicalize	1
 bt-platform	[all(windows, target_arch = "x86_64")]	crate::hang::capture_thread_stack	windows::Win32::Foundation::CloseHandle	1
+bt-platform	[any(windows, unix)]	crate::listener_says_within	std::sync::mpsc::Receiver::recv_timeout	1
 bt-platform	[not(windows)]	crate::file_replace::replace_file_preserving	std::fs::File::sync_all	1
 bt-platform	[not(windows)]	crate::file_replace::replace_file_preserving	std::fs::rename	1
 bt-platform	[not(windows)] [target_os = "macos"]	crate::video::macos_player::Engine::wait_for_metadata	std::thread::sleep	1
@@ -134,21 +135,20 @@ bt-platform	[target_os = "macos"]	crate::macos_files::recycle	std::fs::metadata	
 bt-platform	[target_os = "macos"]	crate::macos_identity::arm::run	std::thread::sleep	1
 bt-platform	[unix]	crate::attention_pipe::AttentionPipe::hang_up	libc::close	1
 bt-platform	[unix]	crate::attention_pipe::AttentionPipe::hang_up	libc::write	1
-bt-platform	[unix]	crate::attention_pipe::AttentionPipe::retire	std::thread::JoinHandle::join	1
+bt-platform	[unix]	crate::attention_pipe::AttentionPipe::retire_within	std::thread::JoinHandle::join	1
 bt-platform	[unix]	crate::attention_pipe::AttentionPipe::start	libc::close	2
 bt-platform	[unix]	crate::attention_pipe::listen	libc::close	1
 bt-platform	[unix]	crate::file_replace::carry_metadata	std::fs::metadata	1
 bt-platform	[unix]	crate::install_evidence::imp::owner_of	std::fs::metadata	1
 bt-platform	[unix]	crate::launch_pipe::LaunchPipe::hang_up	libc::close	1
 bt-platform	[unix]	crate::launch_pipe::LaunchPipe::hang_up	libc::write	1
-bt-platform	[unix]	crate::launch_pipe::LaunchPipe::retire	std::thread::JoinHandle::join	1
+bt-platform	[unix]	crate::launch_pipe::LaunchPipe::retire_within	std::thread::JoinHandle::join	1
 bt-platform	[unix]	crate::launch_pipe::LaunchPipe::start	libc::close	2
 bt-platform	[unix]	crate::launch_pipe::listen	libc::close	1
 bt-platform	[windows]	crate::attention_pipe::<Overlapped as Drop>::drop	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::attention_pipe::<OwnedHandle as Drop>::drop	windows::Win32::Foundation::CloseHandle	1
-bt-platform	[windows]	crate::attention_pipe::AttentionPipe::retire	std::thread::JoinHandle::join	1
-bt-platform	[windows]	crate::attention_pipe::AttentionPipe::retire	windows::Win32::Foundation::CloseHandle	1
-bt-platform	[windows]	crate::attention_pipe::AttentionPipe::start	std::sync::mpsc::Receiver::recv_timeout	1
+bt-platform	[windows]	crate::attention_pipe::AttentionPipe::retire_within	std::thread::JoinHandle::join	1
+bt-platform	[windows]	crate::attention_pipe::AttentionPipe::retire_within	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::attention_pipe::AttentionPipe::start	std::thread::JoinHandle::join	2
 bt-platform	[windows]	crate::attention_pipe::AttentionPipe::start	windows::Win32::Foundation::CloseHandle	2
 bt-platform	[windows]	crate::attention_pipe::AttentionPipe::start	windows::Win32::System::Threading::SetEvent	1
@@ -162,9 +162,8 @@ bt-platform	[windows]	crate::install_evidence::imp::current_account	windows::Win
 bt-platform	[windows]	crate::instance::<DataDirectoryClaim as Drop>::drop	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::instance::try_claim_data_directory	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::launch_pipe::Instance::arm_connect	windows::Win32::System::Threading::SetEvent	1
-bt-platform	[windows]	crate::launch_pipe::LaunchPipe::retire	std::thread::JoinHandle::join	1
-bt-platform	[windows]	crate::launch_pipe::LaunchPipe::retire	windows::Win32::Foundation::CloseHandle	1
-bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start	std::sync::mpsc::Receiver::recv_timeout	1
+bt-platform	[windows]	crate::launch_pipe::LaunchPipe::retire_within	std::thread::JoinHandle::join	1
+bt-platform	[windows]	crate::launch_pipe::LaunchPipe::retire_within	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start	std::thread::JoinHandle::join	2
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start	windows::Win32::Foundation::CloseHandle	2
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start	windows::Win32::System::Threading::SetEvent	1

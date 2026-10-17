@@ -1358,7 +1358,7 @@ empty: no `Drop` in the product may reach the vocabulary. The thirteen that did 
 `DirWatch` on both platforms, `trace_sink::Shutdown`, `AttentionPipe` and
 `LaunchPipe` on both platforms, the two video engines, `VideoSeat`, `VideoSeats`,
 `PtySession` and WinHTTP's `http::Request` (D-40, D-78…D-82) — are retired
-through explicit doors their owners call (`retire_within`, `retire`,
+through explicit doors their owners call (`retire_within`,
 `close_within`, `shutdown`, `retire_session`, `flush_through_its_door`), and a
 `Drop` that finds its door uncalled waits for nothing and says so once
 (`bt_platform::door_skipped`); a `Drop` that names a wait, or calls a door or a

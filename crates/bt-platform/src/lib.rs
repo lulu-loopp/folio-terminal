@@ -9284,6 +9284,19 @@ pub mod install_flip;
 /// per-thread count every door-owning value's `Drop` uses when its owner never called the door.
 pub mod door_skipped;
 
+/// **One word from an endpoint's listener — or its end — within `bound`**: the one bounded receive
+/// the two endpoints make, on every arm that has one (T-DROP-DOORS, D-79). Windows' `start`
+/// waits on it for the listener's first word (§5.3 row 24); every arm's `retire_within` waits on it
+/// for the listener's end, which is the receiver hearing `Disconnected` once the sender the
+/// listener's body holds has gone with it.
+#[cfg(any(windows, unix))]
+pub(crate) fn listener_says_within<T>(
+    said: &std::sync::mpsc::Receiver<T>,
+    bound: std::time::Duration,
+) -> Result<T, std::sync::mpsc::RecvTimeoutError> {
+    said.recv_timeout(bound)
+}
+
 /// **How long a directory watch's retirement waits for its watcher thread to leave**
 /// (`DirWatch::retire_within`, T-DROP-DOORS D-40), on the worker that holds the watch. The
 /// thread's ending is a stop it is already waiting on — microseconds on every ordinary

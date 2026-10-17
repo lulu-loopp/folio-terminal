@@ -147,7 +147,7 @@ pub fn endpoint_for(directory: &Path) -> Option<String> {
 }
 
 /// **The endpoint.** Live from the moment [`LaunchPipe::start`] returns, closed
-/// by [`LaunchPipe::retire`] — its door (T-DROP-DOORS, D-79): *an endpoint is
+/// by [`LaunchPipe::retire_within`] — its door (T-DROP-DOORS, D-79): *an endpoint is
 /// retired through an explicit door, not by its drop.*
 ///
 /// The product's endpoint lives in a `static` for the process's life and is
@@ -155,7 +155,7 @@ pub fn endpoint_for(directory: &Path) -> Option<String> {
 /// anything later). A drop that finds the door was not called waits for
 /// nothing: it hangs up the stop pipe, takes the name down, lets the listener
 /// go and says so once ([`crate::door_skipped`]).
-#[must_use = "an endpoint is retired through `LaunchPipe::retire`, never by its drop"]
+#[must_use = "an endpoint is retired through `LaunchPipe::retire_within`, never by its drop"]
 pub struct LaunchPipe {
     name: String,
     path: PathBuf,
@@ -163,6 +163,9 @@ pub struct LaunchPipe {
     /// module's `SetEvent`, and the only way to wake a thread parked in `poll`.
     stop: RawFd,
     listener: Option<JoinHandle<()>>,
+    /// The listener's end: its body holds the sender, so this hears `Disconnected`
+    /// once the listener has left (the door's bounded wait).
+    ended: std::sync::mpsc::Receiver<()>,
 }
 
 impl LaunchPipe {
@@ -222,6 +225,8 @@ impl LaunchPipe {
         // this is the second of two locks on the same gate rather than the
         // only one.
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        // The listener's end, heard by the door: the sender goes with the listener's body.
+        let (alive, ended) = std::sync::mpsc::channel::<()>();
         let (wake, stop) = match self_pipe() {
             Ok(pair) => pair,
             Err(error) => {
@@ -233,6 +238,7 @@ impl LaunchPipe {
             "folio-launch-endpoint",
             crate::ThreadPriority::Normal,
             move |_ctx| {
+                let _alive = alive;
                 listen(&listener, wake, &decide, &commit);
             },
         );
@@ -242,6 +248,7 @@ impl LaunchPipe {
                 path,
                 stop,
                 listener: Some(listener),
+                ended,
             }),
             Err(error) => {
                 // SAFETY: nothing else ever had either descriptor — the thread
@@ -262,21 +269,29 @@ impl LaunchPipe {
         &self.name
     }
 
-    /// **The door: stop listening, wait for the listener to leave, and take the
-    /// name down.**
+    /// **The door: stop listening, wait — up to `bound` — for the listener to leave,
+    /// and take the name down.** Answers whether it left in time.
     ///
-    /// The one road on which this endpoint waits. The listener leaves at its
-    /// next `poll`, which the hung-up stop pipe ends — after the conversation it
-    /// is in, if any, has reached its end or one of its `STEP_DEADLINE`s, and
-    /// `decide` or `commit` has returned. That is the whole of the bound: the
-    /// join is the listener's own last step, which this door does not shorten.
-    /// Called on whatever thread owns the endpoint; nothing in the product does
-    /// (its endpoint is a `static`).
-    pub fn retire(mut self) {
+    /// The one road on which this endpoint waits, and its wait is bounded by the
+    /// caller: the listener leaves at its next `poll`, which the hung-up stop pipe
+    /// ends — after the client it is serving has had its frame or its deadline,
+    /// and after the caller's own closure has returned, which no bound written
+    /// here could cover. So the door waits on the listener's end (the sender its
+    /// body holds goes with it) for `bound`, and a listener still standing past
+    /// it is let go. Called on whatever thread owns the endpoint; nothing in the
+    /// product does (its endpoint is a `static`).
+    pub fn retire_within(mut self, bound: std::time::Duration) -> bool {
         self.hang_up();
-        if let Some(listener) = self.listener.take() {
-            let _ = listener.join();
-        }
+        let left = match self.listener.take() {
+            Some(listener) => match crate::listener_says_within(&self.ended, bound) {
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = listener.join();
+                    true
+                }
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
+            },
+            None => true,
+        };
         // **The name goes with the listener**, wherever the listener is owned
         // by something that retires it. In the product it is not: `bt-app`
         // parks the endpoint in a `OnceLock` static, and a static is never
@@ -287,6 +302,7 @@ impl LaunchPipe {
         // answer, which is why the general answer is under the lock and not
         // here.
         let _ = std::fs::remove_file(&self.path);
+        left
     }
 
     /// One byte into the stop pipe and its write end closed: the listener's
@@ -304,7 +320,7 @@ impl LaunchPipe {
 }
 
 impl Drop for LaunchPipe {
-    /// Waits for nothing. After [`LaunchPipe::retire`] there is nothing left to
+    /// Waits for nothing. After [`LaunchPipe::retire_within`] there is nothing left to
     /// do; without it, the stop pipe is hung up, the name taken down and the
     /// listener let go of, and the drop says so once.
     fn drop(&mut self) {
@@ -1025,7 +1041,10 @@ mod tests {
         let runtime = std::fs::metadata(path.parent().expect("it lives in the runtime directory"))
             .expect("and that directory is there");
         assert_eq!(runtime.permissions().mode() & 0o777, 0o700);
-        endpoint.retire();
+        assert!(
+            endpoint.retire_within(crate::door_skipped::PATIENCE),
+            "the listener left"
+        );
         assert!(
             !path.exists(),
             "a clean quit left its door standing: {}",
@@ -1319,7 +1338,7 @@ mod tests {
     /// its own, and the hold let go once that thread is on its way into the
     /// door. When the door returns, `decide` has returned and the name is gone.
     ///
-    /// MUTATION: let the listener go in `retire` instead of joining it and the
+    /// MUTATION: let the listener go in `retire_within` instead of joining it and the
     /// door returns while `decide` still stands — `left` reads false (unless the
     /// release overtakes the door, which the order below makes the rare case).
     #[test]
@@ -1332,7 +1351,10 @@ mod tests {
         let leaving = std::sync::Arc::clone(&left);
         std::thread::spawn(move || {
             let _ = going.send(());
-            endpoint.retire();
+            assert!(
+                endpoint.retire_within(crate::door_skipped::PATIENCE),
+                "the listener left"
+            );
             let _ = retired.send((
                 leaving.load(std::sync::atomic::Ordering::SeqCst),
                 crate::door_skipped::skipped_on_this_thread(),
@@ -1365,5 +1387,27 @@ mod tests {
             crate::door_skipped::dropped_alone(endpoint, "a drop while the listener is held");
         assert_eq!(skipped, 1, "the drop says its skipped door once");
         let _ = release.send(());
+    }
+
+    /// RED (T-DROP-DOORS, D-79, the review's bound) — **the door's wait ends at its bound**: a
+    /// listener held inside the caller's closure has not left within no time at all, and the door
+    /// answers so and lets it go.
+    ///
+    /// MUTATION: join the listener in `retire_within` without the bounded wait and the door's
+    /// thread does not answer within the suite's patience.
+    #[test]
+    fn the_door_lets_a_listener_go_past_its_bound() {
+        let directory = scratch(line!());
+        let (endpoint, release, _left) = a_held_endpoint(&directory);
+        let (answered, heard) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = answered.send(endpoint.retire_within(Duration::ZERO));
+        });
+        let left = crate::door_skipped::received(&heard, "the door with no time at all");
+        assert!(
+            !left,
+            "a listener held in its closure has not left within no time at all"
+        );
+        drop(release);
     }
 }

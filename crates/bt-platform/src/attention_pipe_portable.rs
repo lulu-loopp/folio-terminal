@@ -84,7 +84,8 @@ impl AttentionPipe {
     }
 
     /// The door the real arms retire their endpoint through (T-DROP-DOORS). Unreachable.
-    pub fn retire(self) {
+    pub fn retire_within(self, bound: std::time::Duration) -> bool {
+        let _ = bound;
         match self._never {}
     }
 }
