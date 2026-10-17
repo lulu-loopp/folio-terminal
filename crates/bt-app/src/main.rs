@@ -154,6 +154,11 @@ mod profiles_merge;
 mod programs_ear;
 mod programs_lane;
 mod psreadline;
+// The build script's PSReadLine package reader and its pins (T-INTEGRATION-INJECT-2-BUILD),
+// compiled here only so its tests run: `build.rs` reaches the same file by `#[path]`, and what
+// ships is the table it generates (`psreadline::MODULE_FILES`).
+#[cfg(test)]
+mod psreadline_artefact;
 mod pty_door;
 mod quake;
 mod quit;

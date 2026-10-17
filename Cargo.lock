@@ -461,7 +461,6 @@ dependencies = [
  "bt-transcript",
  "bt-viewport",
  "bt-winres",
- "miniz_oxide",
  "nix",
  "portable-pty",
  "thiserror 2.0.18",
@@ -562,6 +561,9 @@ dependencies = [
 [[package]]
 name = "bt-winres"
 version = "0.4.7"
+dependencies = [
+ "miniz_oxide",
+]
 
 [[package]]
 name = "bt-workbench"

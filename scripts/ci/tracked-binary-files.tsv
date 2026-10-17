@@ -174,4 +174,5 @@ tests/corpus/shell-dollars.btcr	binary format contains NUL bytes
 tests/corpus/tui-redraw.btcr	binary format contains NUL bytes
 vendor/conpty/Microsoft.Windows.Console.ConPTY.1.24.260512001.nupkg	binary format contains NUL bytes
 vendor/conpty/Microsoft.Windows.Console.ConPTY.1.25.260710002-preview.nupkg	binary format contains NUL bytes
+vendor/psreadline/PSReadLine.2.4.5.nupkg	binary format contains NUL bytes
 vendor/vte/tests/demo.vte	binary format contains NUL bytes
