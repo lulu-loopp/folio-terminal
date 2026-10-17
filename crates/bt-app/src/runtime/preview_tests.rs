@@ -1220,21 +1220,23 @@ fn a_set_aside_peek_answer_changes_nothing_on_the_window() {
 /// home in one drain, the verification first: it leaves the read's record alone
 /// (`remember_decode`), so the read's answer is the awaited one — the pane is told the picture's
 /// size, the page's picture generation ticks, the flyout asks for its resample, the card's overlay
-/// is rebuilt and asks for its picture, and a redraw is asked. What each resample does when it
-/// lands is the scale lane's completion and not this one's.
+/// is rebuilt and asks for its picture, and a redraw is asked. **And both resamples are answered**
+/// (T-PEEK-SCALE-ADDRESS-BY-SURFACE): asked while the scale share is busy, so both wait together,
+/// neither supersedes the other, and each lands on its own surface — the flyout holds its picture
+/// at its own size and the card its own.
 ///
-/// MUTATION: drop `remember_decode`'s `Pending` guard — the verification's pixels are filed over
-/// the record, the read's answer is set aside, and no surface is told.
+/// MUTATIONS: drop `remember_decode`'s `Pending` guard — the verification's pixels are filed over
+/// the record, the read's answer is set aside, and no surface is told; give both peek surfaces one
+/// purpose in `ScaleWorkerRequest::purpose` — the card's request supersedes the flyout's.
 #[test]
 fn an_awaited_peek_answer_after_a_terminals_decode_tells_every_waiting_surface() {
     let (mut folio, mut lane, gate, shell, [pane, page]) =
         two_panes_on_a_watched_lane("peek-awaited");
     let file = scratch_png_named("等着 awaited");
     let _written = crate::test_support::ScratchFile(file.clone());
-    // Large enough that the card's box and the flyout's are two sizes. The two resamples are still
-    // one target to the scale share (`ScaleWorkerRequest::same_target`: leaf, purpose and content
-    // key), so the newer may supersede the older; this test asks only that each is asked
-    // (T-PEEK-SCALE-ADDRESS-BY-SURFACE).
+    // Large enough that the card's box and the flyout's are two sizes. Over one file, from one
+    // tab's focused shell, the two resamples differ only by the surface that asks
+    // (`ScaleWorkerRequest::same_target`).
     std::fs::write(&file, png_bytes(600, 300)).expect("a scratch file this test owns");
 
     // The shell's verification of the printed path is on the worker when the surfaces ask.
@@ -1293,6 +1295,14 @@ fn an_awaited_peek_answer_after_a_terminals_decode_tells_every_waiting_surface()
     );
     folio.ledger.take();
 
+    // The scale share is busy across the take, so every resample the take asks waits behind it.
+    gate.hold();
+    let entered = gate.entered();
+    let busy = a_busy_resample(&lane, leaf);
+    assert!(
+        gate.wait_entered(entered + 1),
+        "the busy resample reaches the worker"
+    );
     the_window_takes(&mut folio, vec![first, second]);
     let picture = folio.window.tabs[0]
         .preview_panes
@@ -1323,5 +1333,187 @@ fn an_awaited_peek_answer_after_a_terminals_decode_tells_every_waiting_surface()
     assert!(
         effects.contains(&WindowEffect::Redraw),
         "and a redraw is asked: {effects:?}"
+    );
+
+    let flyout = folio
+        .window
+        .peek_thumbnail_pending
+        .clone()
+        .expect("the flyout's question");
+    assert_ne!(
+        Some(&flyout),
+        folio.window.peek_card_pending.as_ref(),
+        "the fixture's own precondition: the card and the flyout ask two sizes"
+    );
+    gate.release();
+    let resamples = every_resample_but(&mut lane, busy);
+    assert!(
+        !resamples.iter().any(|(_, _, terminal, _)| matches!(
+            terminal,
+            crate::lane::Terminal::Superseded { .. }
+        )),
+        "neither surface's resample supersedes the other's"
+    );
+    the_window_takes(&mut folio, resamples);
+    assert!(
+        folio.window.peek_thumbnail_pending.is_none()
+            && folio
+                .window
+                .peek_thumbnail
+                .as_ref()
+                .is_some_and(|thumbnail| thumbnail.matches(&flyout)),
+        "the flyout holds its picture at its own size"
+    );
+    assert!(
+        folio.window.peek_card_pending.is_none() && folio.window.peek_picture.is_some(),
+        "and the card holds its own"
+    );
+}
+
+/// **A resample put on the scale share ahead of the window's own**, under `leaf`: held by the
+/// lane's gate, it keeps the worker busy while the requests the window asks next wait together.
+fn a_busy_resample(
+    lane: &crate::computation_lane::fixtures::Watched,
+    leaf: crate::ShellAddress,
+) -> ComputationId {
+    lane.lane
+        .scale(crate::ScaleWorkerRequest::Preview {
+            leaf,
+            task: crate::test_support::scale_task("忙着 busy.png", 8),
+        })
+        .ok()
+        .expect("the busy resample is admitted")
+}
+
+/// Every terminal the scale share ends until it holds nothing, but `busy`'s.
+fn every_resample_but(
+    lane: &mut crate::computation_lane::fixtures::Watched,
+    busy: ComputationId,
+) -> Vec<crate::computation_lane::Ended> {
+    lane.every_ended(
+        crate::computation_lane::Share::Scale,
+        crate::computation_lane::fixtures::nobody,
+    )
+    .into_iter()
+    .filter(|(_, id, ..)| *id != busy)
+    .collect()
+}
+
+/// RED (T-PEEK-SCALE-ADDRESS-BY-SURFACE) — **the flyout is not left blank by a card over the same
+/// file**: the flyout asks its resample while the scale share is busy, the pointer leaves its span
+/// (the flyout comes down and its question stays out), a files-column row over the same file
+/// raises the glance card, and the card asks its own resample behind the flyout's. Both land; the
+/// next hover over the terminal's reference shows the flyout at once, from the picture its own
+/// answer filed, and asks nothing again.
+///
+/// MUTATION: give both peek surfaces one purpose in `ScaleWorkerRequest::purpose` — the card's
+/// request supersedes the flyout's, and the next hover finds the flyout's question still out and
+/// shows nothing.
+#[test]
+fn a_card_over_the_flyouts_file_leaves_the_flyout_its_own_answer() {
+    let (mut folio, mut lane, gate, shell, _panes) = two_panes_on_a_watched_lane("peek-by-surface");
+    let file = scratch_png_named("各问各的 by surface");
+    let _written = crate::test_support::ScratchFile(file.clone());
+    std::fs::write(&file, png_bytes(600, 300)).expect("a scratch file this test owns");
+    let hover = crate::PeekCandidate {
+        subject: crate::PeekSubject::from_path(file.clone()),
+        seat: shell,
+        pointer: PhysicalPosition::new(40.0, 40.0),
+    };
+
+    // The flyout settles over the reference and reads the file.
+    folio.window.peek_hover.active = Some(hover.clone());
+    folio
+        .runtime()
+        .show_or_request_peek(&hover, true)
+        .expect("the settled hover is answered");
+    assert!(
+        read_awaited(&folio, &file).is_some(),
+        "the fixture's own precondition: the flyout reads the file"
+    );
+    let read = lane.next_ended(
+        crate::computation_lane::Share::Decoration,
+        crate::computation_lane::fixtures::nobody,
+    );
+
+    // The scale share is busy when the read lands, so the flyout's resample waits.
+    gate.hold();
+    let entered = gate.entered();
+    let leaf = folio.runtime().focused_shell_address();
+    let busy = a_busy_resample(&lane, leaf);
+    assert!(
+        gate.wait_entered(entered + 1),
+        "the busy resample reaches the worker"
+    );
+    the_window_takes(&mut folio, vec![read]);
+    let flyout = folio
+        .window
+        .peek_thumbnail_pending
+        .clone()
+        .expect("the flyout asks its resample");
+
+    // The pointer leaves the reference: the flyout comes down, and its question stays out.
+    let now = Instant::now();
+    assert!(
+        folio
+            .window
+            .peek_hover
+            .observe(None, PhysicalPosition::new(400.0, 400.0), now),
+        "the fixture's own precondition: leaving the span hides the flyout"
+    );
+    folio
+        .runtime()
+        .present_peek_overlay(None)
+        .expect("the flyout comes down");
+
+    // A files-column row over the same file raises the card, which asks its own resample.
+    folio.window.file_peek = Some(crate::test_support::card_over(
+        crate::RowHost::Column(shell),
+        &file,
+        crate::PeekClock::Settling(now),
+    ));
+    folio
+        .runtime()
+        .advance_file_peek(now)
+        .expect("the card comes up");
+    assert!(
+        folio.window.peek_card_pending.is_some(),
+        "the fixture's own precondition: the card asks its resample while the flyout's waits"
+    );
+
+    gate.release();
+    let resamples = every_resample_but(&mut lane, busy);
+    the_window_takes(&mut folio, resamples);
+    assert!(
+        folio.window.peek_card_pending.is_none() && folio.window.peek_picture.is_some(),
+        "the card holds its picture"
+    );
+
+    // The next hover over the terminal's reference.
+    folio.window.peek_hover.active = Some(hover.clone());
+    folio
+        .runtime()
+        .show_or_request_peek(&hover, true)
+        .expect("the next hover is answered");
+    assert!(
+        folio.window.renderer.peek_overlay.is_some(),
+        "the next hover shows the flyout"
+    );
+    assert!(
+        folio.window.peek_thumbnail_pending.is_none()
+            && folio
+                .window
+                .peek_thumbnail
+                .as_ref()
+                .is_some_and(|thumbnail| thumbnail.matches(&flyout)),
+        "from the picture its own answer filed"
+    );
+    assert_eq!(
+        folio
+            .app
+            .math_worker
+            .held(crate::computation_lane::Share::Scale),
+        0,
+        "and asks nothing again"
     );
 }

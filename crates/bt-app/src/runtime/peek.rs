@@ -8,12 +8,12 @@ use crate::{
     DragLatch, FilePeek, FilePeekPress, FilePeekSubject, FloatDrag, FloatDragKind, FloatGrasp,
     LeafId, MathWorkerRequest, PeekAsk, PeekBodyKind, PeekCacheEntry, PeekCandidate, PeekClock,
     PeekFacts, PeekFootPress, PeekPageOutcome, PeekPageRaster, PeekPageSlot, PeekSubject,
-    PeekThumbnail, PeekThumbnailTarget, PreviewPane, PreviewSurface, ReferenceCard, RowHost,
-    Runtime, ScaleWorkerRequest, ScrollThumbState, ShellAddress, facts_of_a_file_the_user_chose,
-    file_peek, file_peek_promotion, files, float, git, git_document_question, git_panel,
-    hang_watch, i18n, input, mark_opacity, marks, peek_body_kind, peek_foot_press,
-    peek_page_texture_key, peek_reads_the_file, peek_scale_task, peek_strip, preview,
-    preview_body_bar, profiles, ring_arc, risen_frame, scroll_bar_layer, seats,
+    PeekSurface, PeekThumbnail, PeekThumbnailTarget, PreviewPane, PreviewSurface, ReferenceCard,
+    RowHost, Runtime, ScaleWorkerRequest, ScrollThumbState, ShellAddress,
+    facts_of_a_file_the_user_chose, file_peek, file_peek_promotion, files, float, git,
+    git_document_question, git_panel, hang_watch, i18n, input, mark_opacity, marks, peek_body_kind,
+    peek_foot_press, peek_page_texture_key, peek_reads_the_file, peek_scale_task, peek_strip,
+    preview, preview_body_bar, profiles, ring_arc, risen_frame, scroll_bar_layer, seats,
     session_is_breathing, tooltip, wait_pulse,
 };
 use anyhow::Context;
@@ -1240,7 +1240,13 @@ impl<B: Backend> Runtime<'_, B> {
             .app
             .math_worker
             .scale(ScaleWorkerRequest::Peek {
+                // The card's own surface, so it never stands in for the flyout's question over the
+                // same file. The leaf is the focused shell's rather than the card's host: the card
+                // is one per window and a floating tree's row has no seat, and what the leaf
+                // decides on the way home — the window that owns the answer, the tab it lands in —
+                // is the same for every seat of this tab.
                 leaf: self.focused_shell_address(),
+                surface: PeekSurface::Card,
                 task: peek_scale_task(&target, rgba, native_width, native_height),
             })
             .is_ok_or_unstarted()
@@ -2783,6 +2789,7 @@ impl<B: Backend> Runtime<'_, B> {
                         seat: candidate.seat,
                     },
                 },
+                surface: PeekSurface::Flyout,
                 task: peek_scale_task(&target, native_rgba, native_width_px, native_height_px),
             })
             .is_ok_or_unstarted()
@@ -2881,11 +2888,21 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(())
     }
 
-    /// Take delivery of the flyout's display-sized raster. Only the question still outstanding is
-    /// answered here: an earlier size arriving after the viewport moved on leaves the newer request
-    /// in flight rather than asking for it twice.
+    /// Take delivery of a peek resample, on the surface that asked for it ([`PeekSurface`]). Only
+    /// the question still outstanding is answered here: an earlier size arriving after the viewport
+    /// moved on leaves the newer request in flight rather than asking for it twice.
+    ///
+    /// **Two hovers ask down this one lane**, the terminal's inline-image flyout and the file
+    /// tree's glance card, because the question is identical — one content key at one display size
+    /// — and the answer is the same pixels. They ask as two surfaces, and each answer comes home to
+    /// the surface it was asked for: its slot is filled, and its pending question cleared only by
+    /// its own answer. The day both want the same picture they ask twice, once each, and each is
+    /// answered (T-PEEK-SCALE-ADDRESS-BY-SURFACE): until then they were one address on the scale
+    /// share, and whichever asked second superseded the other, whose slot waited on for an answer
+    /// that was never coming.
     pub(in crate::runtime) fn complete_peek_scale(
         &mut self,
+        surface: PeekSurface,
         scaled: bt_term::ScaledInlineImage,
     ) -> Result<()> {
         let delivered: PeekThumbnailTarget = (
@@ -2893,31 +2910,30 @@ impl<B: Backend> Runtime<'_, B> {
             scaled.width_px,
             scaled.height_px,
         );
-        // **Two hovers ask down this one lane.** The terminal's inline-image
-        // flyout is one; the file tree's glance card is the other, and it asks
-        // here rather than through a fourth worker verb because the question is
-        // identical — one content key at one display size — and the answer is the
-        // same pixels. Which of them asked is the target tuple, which each of
-        // them recorded before sending. The card is checked first and returns:
-        // on the day both want the same picture at the same size the flyout will
-        // simply find its slot cold and ask again, which costs one resample of an
-        // image already decoded.
-        if self.window.peek_card_pending.as_ref() == Some(&delivered) {
-            self.window.peek_card_pending = None;
-            self.window.peek_picture = Some(PeekThumbnail::from_scaled(scaled));
-            // The card is chrome, and a picture that lands while it is up owes
-            // the frame that shows it.
-            if self.refresh_overlay() {
-                self.present_chrome_change()?;
+        match surface {
+            PeekSurface::Card => {
+                let awaited = self.window.peek_card_pending.as_ref() == Some(&delivered);
+                if awaited {
+                    self.window.peek_card_pending = None;
+                }
+                self.window.peek_picture = Some(PeekThumbnail::from_scaled(scaled));
+                // The card is chrome, and the picture it was waiting for owes the frame that
+                // shows it.
+                if awaited && self.refresh_overlay() {
+                    self.present_chrome_change()?;
+                }
             }
-            return Ok(());
-        }
-        if self.window.peek_thumbnail_pending.as_ref() == Some(&delivered) {
-            self.window.peek_thumbnail_pending = None;
-        }
-        self.window.peek_thumbnail = Some(PeekThumbnail::from_scaled(scaled));
-        if let Some(active) = self.window.peek_hover.active.clone() {
-            self.show_or_request_peek(&active, false)?;
+            PeekSurface::Flyout => {
+                if self.window.peek_thumbnail_pending.as_ref() == Some(&delivered) {
+                    self.window.peek_thumbnail_pending = None;
+                }
+                self.window.peek_thumbnail = Some(PeekThumbnail::from_scaled(scaled));
+                // A flyout that came down while this was in flight shows it on its next hover,
+                // which finds it in hand ([`Self::show_or_request_peek`]).
+                if let Some(active) = self.window.peek_hover.active.clone() {
+                    self.show_or_request_peek(&active, false)?;
+                }
+            }
         }
         Ok(())
     }
