@@ -45,7 +45,7 @@ per-seat 重启用的 cwd 是**最后一次 OSC 7 上报**，不是去读那个�
 
 | 项 | 来源 | 细节 |
 |---|---|---|
-| **cwd** | 最后一次可信 OSC 7 上报 | 无上报则该 seat 的初始 cwd；再退 `HOME`。**不承诺读活进程的真实 cwd**（`docs/DESIGN.md` §7.1.4 原文）——这是"最后已知"，不是"当前"，即使旧进程在被杀死前一刻确实 `cd` 去了别处，只要它没再发一条 OSC 7，重启就看不见那次 `cd` |
+| **cwd** | 最后一次可信 OSC 7 上报 | 无上报则该 seat 的初始 cwd；再退 `HOME`。**不承诺读活进程的真实 cwd**（`docs/DESIGN.md` §7.1.4 原文）——这是"最后已知"，不是"当前"，即使旧进程在被杀死前一刻确实 `cd` 去了别处，只要它没再发一条 OSC 7，重启就看不见那次 `cd`。**（2026-10-17，T-CWD-FROM-PROCESS，取代上一句的「不承诺读活进程」）**：没有可信 OSC 7 时，先读 shell 进程自己的当前目录（Windows 读 PEB，macOS 读 `proc_pidinfo`），读得到就用它——重启看得见那次未上报的 `cd`；读不到（无权限、已退出、ssh/wsl 桥）才照旧退回初始 cwd、再退 `HOME`。Split with、Duplicate pane、Duplicate tab 与此同一读法（`docs/DESIGN.md` 2026-10-17 条目） |
 | **profile / 可执行路径** | 该 seat 创建时敲定的 `profile_id`（`docs/M2-persistence-schema-v1.md` §3.3：v1 取值是启动时实际使用的 shell 可执行路径） | 重启用的是**这个 seat 自己的** profile_id，不是"当前默认 profile"；同一 seat 反复重启永远用同一个可执行文件（除非 §3「shell 可执行文件缺失」的降级触发） |
 | **手动名** | 用户设置的 `manual_name` | 原样保留，重启不清空、不改写 |
 | **在布局树中的座位** | 二叉树结构（`docs/DESIGN.md` §7.1.1） | 重启只换叶子内容的运行时状态，**不触碰树形状**；pin 归属、tab 归属、pane 在树中的位置全部不变——这不是"重建一棵新树再放回原位"，是同一棵树的同一个叶子换了个运行时 handle |

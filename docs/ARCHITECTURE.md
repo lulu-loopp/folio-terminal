@@ -813,10 +813,11 @@ does not have to find it later.
 
 Committed-trial decision acknowledgement is part of the existing self-update transaction ownership above. The trial watch owns taking back or leaving the trial mark and then durably removing its accepted health receipt; the platform holder owns waiting for that acknowledgement, re-reading the mark, and atomically recording the final `unkept` fact before retiring the transaction (and, on macOS, before deleting `H/<txn>`).
 
-### 4.5 The window seam — the road from a window's code to the window, and what still crosses it (0.4.8)
+### 4.5 The window seam — the road from a window's code to the window (0.4.8)
 
-**`bt-app` reaches its window through `crate::window_seam`, with one named exception: the platform
-handle** (T-HEADLESS-RUNTIME-SEAM, 2026-10-13; corrected in its round 2). `App`, `WindowRuntime`,
+**`bt-app` reaches its window through `crate::window_seam`, the platform handle included**
+(T-HEADLESS-RUNTIME-SEAM, 2026-10-13; the handle behind the doors since
+T-NATIVE-HANDLE-BEHIND-THE-SEAM, 2026-10-17). `App`, `WindowRuntime`,
 `Runtime`, `FolioApp`, `NewWindowParts` and the helpers built from them hold their window through
 one type parameter, `B: window_seam::Backend`, whose associated types are the window's parts — the
 `winit` window (`WindowHost`: redraw, title, visibility, cursor, IME area, clipboard, the system
@@ -857,33 +858,36 @@ and the headless one alike.
   `Runtime::create`. The native list is unchanged by it: what `Runtime::create` still writes for
   `Native` — the window and its renderer, and the `App` and `WindowRuntime` assembled from them —
   is native.
-* **What still crosses the seam: the platform handle.** `WindowHost::native_handle` answers the
-  `bt_platform::NativeWindow` of a native window (and an error on a headless one), and
-  `CompositorDoor::platform_tree` the platform's composition tree a page's engine hangs in. Generic
-  code that holds one of those reaches the platform directly, past every door: the compiler sees a
-  `NativeWindow`, not a seam trait, and a headless window answers the call with an error, so the
-  branch behind it is never driven by a test. Today's uses (about forty-five call sites, through
-  `native_window(..)` or the two methods):
-  * the window's own state on the platform — `apply_acrylic`, `apply_always_on_top`,
-    `install_theme_class_background`, `apply_window_dark_mode`, `refresh_work_area`,
-    `window_is_iconic`, `window_is_hidden`, `window_is_exposed`, `window_snapshot`, `show`,
-    `glass_here`, `window_holding`, `transfer_tab`;
-  * focus and the foreground — `bring_owned_window_forward`, `take_owned_keyboard_focus`,
-    `request_owned_window_close`, `summon_quake`, `show_quake_window`,
-    `remember_summoned_arrangement`;
-  * attention — `raise_attention`, `replace_contradicted_flash` (the taskbar flash);
-  * input facts — `platform_pointer_now` (the input method's facts go through
-    `WindowHost::ime_facts` since T-IME-BRACKET-FACTS);
-  * the present — `finish_present_attempt`, `folios_own_metal_view`;
-  * web pages (the engine's host and its keyboard) — `webhost::step`, `webhost::rehost`
-    (`platform_tree`), `adopt_spare_web_page`, `apply_web_outcomes`, `open_web_address_on`,
-    `open_web_page_on`, `settle_the_web_keyboard`, `web_find_reported`,
-    `carry_the_pages_of_moved_panes`, `dock_the_page_of`, `open_search`;
-  * a preview picture's freshness — `check_picture_freshness`;
-  * construction — `create`, `open_window`, `new_window_runtime`.
+* **The platform handle stays behind the doors** (T-NATIVE-HANDLE-BEHIND-THE-SEAM, 2026-10-17).
+  No door hands generic code a `bt_platform::NativeWindow` or a `bt_platform::Compositor`: every
+  question and instruction the runtime puts to the system about its window is a door of its own,
+  grouped by what it does, and the native backend's doors make the same `bt-platform` call the
+  call site used to make with the handle:
+  * the window's place on the desktop (read) — `WindowHost::{is_iconic, is_cloaked, is_exposed,
+    outer_rect, work_area, glass_at, pointer_in_window, present_facts, holds_the_foreground}`;
+  * its dress and its standing (told) — `set_backdrop`, `set_topmost`, `set_dark_mode`,
+    `set_class_background`, `stand_at`;
+  * the keyboard and the foreground — `take_foreground`, `take_keyboard_focus`, `request_close`;
+  * attention — `flash`, `stop_flashing`; the taskbar button — `taskbar` (a `TaskbarDoor`);
+  * the system's news, heard from a window's birth — `watch_system_settings`, `watch_session_end`;
+  * a page's place for the web engine — `WindowHost::page_address` (the window's handle sealed in
+    `webhost::SeatAddress`, which only the engine reads) and `CompositorDoor::page_tree` (the tree
+    sealed in `window_seam::PageTree`, whose two walks — the install and the rehost — are the
+    seam's own).
 
-  Moving each behind a door of its own is T-NATIVE-HANDLE-BEHIND-THE-SEAM; until it lands, the
-  seam's guard holds the holders and the doors, and these call sites are what it does not hold.
+  The headless window is a recorder: it records each instruction as a typed `WindowEffect` with
+  its arguments and lets it through (where the product with no handle would be refused), and
+  answers each question with a documented stand-in a test can script (`headless::PlatformAnswers`;
+  the read defaults are the product's answers about a window whose handle cannot be got). The web
+  engine is the one group a headless window cannot carry through: it hosts no engine, so
+  `page_address` is recorded and refused, and its tree is no page tree. The handle itself is read
+  by `native_window_of` only, and that is called from native code only: the native backend's doors
+  in `window_seam`; `native_dpi_snapshot` (the native `WindowHost::dpi_snapshot`);
+  `folios_own_metal_view` (macOS, the surface target the constructors and the device-loss rebuild
+  choose); and the two native constructors (`Runtime::create`, `Runtime::open_window`), which
+  hand it to what they install on the window (the clipboard's owner, the custom frame, the touch
+  translation, the composition tree, the outer rectangle) — on the native list already. The seam's guard holds it: code written for the
+  window names neither type, and no door of the seam does (RULE C, `ARCHITECTURE-GUARDS.md`).
 * **The headless backend is test-only** (`crate::headless`, `#[cfg(test)]`): a window that records
   what it was told as typed values (`WindowEffect`, read from a `Ledger`), a renderer that keeps the
   frame's inputs for a test to read back and measures text with the production font environment, and
@@ -1834,6 +1838,7 @@ process.
 | the update hand-off at quit | `FolioApp::hand_the_update_over` | session-writer | DocumentsAnswered | read on the turn the answer's wake brings (`update_handoff::look`), the loop asked back on the clock only at the bound (`Quit::deadline`); overdue past `HANDOFF_DEADLINE`, one line; each job runs inside `lane::task` on the lane's ledger (`persist::StorageLane`, on the completion seam), and a panic in it (`contained_panic::contain`, which the resident hook honours) is that request's `Failed`, said once by the ledger, and the worker goes on: its answer's channel closes unanswered, and the hand-over is over on the wake's turn as an overdue one is (no applier known, one line naming the failure, read from the request's terminal; the window's mark decides); the worker's own end (a panic outside every job) drops what is queued, then the ledger ends every request still owed `WorkerGone` and wakes the loop, and a hand-over it dropped is over on that turn the same way; a later request is refused at the door | one per quit | dropped when the quit ends | conforms |
 | a document's save | `PreviewBuffer::write_now_for_quit` | window (row 20) | return | the quit's and the stop's preview save (S-6c moves it): `SaveOutcome::{Conflict, Failed}` to the quit's report, which keeps the window, or on a stop a copy in the `recovered` folder; a conflict is decided by the file's bytes against the buffer's disk revision (`document_request::precondition`), and a buffer whose save is still on the storage worker is not written over (`Failed`) | — | — | row 20 |
 | preview save | `PreviewBuffer::request_save` | session-writer | DocumentsAnswered | a hand-over refused at the door — no worker serves the lane, or a body over `bt_persist::MAX_DOCUMENT_BYTES` — is a synchronous refusal said on the pane; a worker that ends with the request unanswered closes its answer channel, heard as `Refused(NoWorker)`, after its end has woken the loop; a crossing writer is `Moved` (nothing written) or `Conflict` (the `Restore` policy put their bytes back), the conflict said on the pane and their bytes the buffer's disk revision, which no quit's or stop's writer writes over until a press answers it; a refusal says why in the language table's words (a volume that cannot exchange is written the plain way instead, one switch, ruled 2026-10-15, and the first such landing on each drive is said on the pane); dirty stays on each, and nothing is sent again until the person presses save (C5); each job runs inside `lane::task` on the lane's ledger (`persist::StorageLane`, on the completion seam), and a panic in it (`contained_panic::contain`, which the resident hook honours) is that request's `Failed`, said once by the ledger, and the worker goes on: the save is heard `Refused(Failed)`, and the pane says the file could not be written; the worker's own end (a panic outside every job) drops what is queued, then the ledger ends every request still owed `WorkerGone`, says so once and wakes the loop; a later request is refused at the door; past `preview::PREVIEW_SAVES_OWED` saves out, a save is refused at the preview's own desk, in the pane's words, before it reaches the ledger (`persist::STORAGE_BOUND`) | one write on the worker per buffer; a press meanwhile is the pending slot: the newest body is sent once a landing of the older one has been processed, and dropped with a conflict or a refusal, which only the next press answers; a landing for an older body moves the disk revision and is not a terminal for the newer body, which is a request of its own; nothing joins | a buffer that is gone (its tab, its pane or its edits): the answer's routing finds no buffer waiting for it and `PreviewSaves::sink` records it, then ignores it | conforms |
+| a close waiting for its saves | `close_wait_over` | session-writer | DocumentsAnswered | a pane's, a tab's or a window's close whose every buffer it would lose something of has a save on the storage worker — a dirty one a save of its body, a clean one whose save has not landed any save of it — waits instead of asking, held by the window's gate (`restore::CloseWait`) and looked at on each turn (`Runtime::settle_close_wait`), never waited for on the thread, and not decided while a quit is under way or in a leaving window, whose bounds are left out of the loop's wake-up (the ended tabs' waits still run during a quit, adding no wake-up); its bound, `restore::CLOSE_WAITS_FOR_A_SAVE` (= `persist::SESSION_SAVE_BUDGET`, 3 s), is read on the turn and joins the loop's wake-up; every save landed: the close is re-run from the top, which closes when nothing is left to lose and asks when a buffer clean at the ask had its save land over a body undone since (that body is in no file); a save refused, failed on (`Refused(Failed)`) or left unanswered by the worker's end (`Refused(NoWorker)`): the pane says why, once, and the re-run close asks; a conflict: the close is withdrawn and the pane says the conflict; past the bound: the question as it always was, with one line saying a save is still on its way (`Text::GateSaveStillOnItsWay`); a shut answered `Save all` sends every dirty buffer's save the same way and goes only when all have landed and nothing a close would lose is left (else the shut is re-run and asks), the window's card naming the ones that did not; a clean buffer whose save did not land is asked about in true words (`Text::GateTitleSaveNotLanded`); a tab whose shells all exited waits the same way in the loop's cleanup (`ExitedTabWaits`), closes once its saves have landed, and at the bound closes with its pool let go if only clean buffers' saves are left (a dirty one stands), the late answer reaching the sink, which says a save that did not land once in `diagnostics.log` | an edit (or a Reload) of a buffer the close waits for withdraws it, once: nothing is asked, and the next close asks again; a pane's close whose tab is no longer in front, or a tab's close whose tab has gone, is withdrawn; while a close waits the gate is busy, and a second close or question is dropped (ticket 58) | the saves' answers reach their buffers as every save's do; one whose buffer was discarded at the bound's question goes to `PreviewSaves::sink`, recorded and then ignored (C6) | conforms |
 | a preview file's rename | `Runtime::rename_preview_file` | window (row 20) | return | a toast | — | — | row 20 |
 | a files row's rename | `Runtime::rename_files_row` | window (row 20) | return | a toast | — | — | row 20 |
 | a hand-editable document's write | `DocumentState::send_owed` | session-writer | DocumentsAnswered | `Refused { cause }`: a link or a volume that cannot exchange is a card at once, a disk's refusal a card at the fifth in a row; the door admits a request only while the worker is up, decided under the queue's lock (it starts no thread), and completes one no worker takes as refused and wakes the loop; the worker's end takes the same lock to mark the lane down and drop what is queued, each such request answered as refused, and wakes the loop after; a refused write is sent once more by the next press or ear pass, never on a clock; each job runs inside `lane::task` on the lane's ledger (`persist::StorageLane`, on the completion seam), and a panic in it (`contained_panic::contain`, which the resident hook honours) is that request's `Failed`, said once by the ledger, and the worker goes on: the write is heard `Refused(Failed)`, a refusal of the streak; the worker's own end (a panic outside every job) drops what is queued, then the ledger ends every request still owed `WorkerGone`, says so once and wakes the loop; a later request is refused at the door | one write in flight per document; a press meanwhile moves `desired`, the pending slot, sent after the answer; every answer is processed in worker order, a generation gating only visible effects; a `Conflict` — and, for a document sent `Merge`, any file stored for its merge — holds the document, and no write is sent until the merge folds it in (`settings.json`'s and `keybindings.json`'s on the same `DocumentsAnswered` turn, `Runtime::merge_documents`); a re-read while held moves the revision and the merge's file bytes and never releases the hold | the store, which the application holds for the process's life | conforms |

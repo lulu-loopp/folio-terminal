@@ -127,6 +127,7 @@ mod packaged_turns;
 mod palette;
 mod palette_index;
 mod pane_content;
+mod pane_folder;
 mod pdf;
 mod peek_strip;
 mod persist;
@@ -2789,6 +2790,8 @@ fn reroot_files_state(state: &mut seats::FilesLeafState, root: &str) -> bool {
         return false;
     }
     state.root = root.to_owned();
+    // A root someone chose is a folder they named, not the home folder standing in for one.
+    state.folder_unknown = false;
     // A `/src` left open under the old root is not the `/src` of the new one.
     // Honouring it would unfold whatever happens to be called that, which is a
     // tree opening itself at a folder you have never seen.
@@ -10206,13 +10209,15 @@ fn cli_leaf_seed(plan: &cli::CliPlan) -> LeafSeed {
 ///   what "同一 seat 反复重启永远用同一个可执行文件" asks for; reading
 ///   `settings.default_profile` here would turn a Git Bash pane into a
 ///   PowerShell the first time somebody changed that setting.
-/// * **The directory is §1.1's ladder**: the last trusted OSC 7 report, else
-///   the seat's initial cwd — [`LeafSession::place_for_a_new_shell`], read by
-///   the caller. The contract is explicit that this is 「最后已知」 and not
-///   「当前」: a `cd` the old shell performed without announcing it is a `cd`
-///   the restart cannot see. Until 2026-10-04 only the first rung was read, so
-///   a pane opened in a chosen folder whose shell never reported restarted at
-///   its profile's default instead of where it was born.
+/// * **The directory is where the pane stands**, read by the caller through
+///   [`LeafSession::seed_place_for_a_new_shell`]: the last trusted OSC 7 report,
+///   else the shell process's current folder, else the seat's initial cwd.
+///   Since T-CWD-FROM-PROCESS (2026-10-17) a `cd` the old shell performed
+///   without announcing it *is* seen when its process can be read — that
+///   supersedes §1.1's 「最后已知」 and not 「当前」 for this verb; a process
+///   that cannot be read leaves the old ladder. Until 2026-10-04 only the first
+///   rung was read, so a pane opened in a chosen folder whose shell never
+///   reported restarted at its profile's default instead of where it was born.
 /// * **No folder at all is an absence, not a fallback.** `None` (a pane whose
 ///   spawn could name no place, or one put down at its shell's own `~`) reaches
 ///   `profiles::spawn_place`, which answers it with the profile's own starting
@@ -12317,6 +12322,10 @@ struct LeafSession {
     /// every pane not being restarted.
     successor: Option<Box<LeafSession>>,
     foreground_program_cadence: foreground_program::Cadence,
+    /// **This shell's last process folder read** (T-CWD-FROM-PROCESS), and the moment it was made
+    /// at — read on an ask when the shell has reported no folder, and asked again only after the
+    /// shell has written something. See [`pane_folder`].
+    process_folder: pane_folder::ProcessFolderMemo,
     /// **Which shell this is, told apart from the one that stood here before**
     /// (review X-1).
     ///
@@ -14745,7 +14754,7 @@ struct WindowRuntime<B: Backend = Native> {
     /// On the window and not on `App` for the reason every other Win32 bridge
     /// here is: a button belongs to an HWND, and a second window would need a
     /// second of these, not a share of this one.
-    taskbar: TaskbarMirror,
+    taskbar: TaskbarMirror<<B::Window as WindowHost>::Taskbar>,
     /// The DirectComposition tree this window's picture is published through
     /// (multiwindow slice A2 / web-preview slice 1).
     ///
@@ -16079,9 +16088,17 @@ struct WindowRuntime<B: Backend = Native> {
     pane_head_clicks: MultiClicks<SeatId>,
     /// Which files column has its root menu up (E53-E61).
     root_menu: profiles::RootMenu,
+    /// **The shells' folders the open root menu offers**, read once as it opened
+    /// (`Runtime::shell_folders_for_the_root_menu`, T-CWD-FROM-PROCESS) and replaced at its next
+    /// opening; read only while it is open. The menu is laid out every frame it is up, and a
+    /// pane's folder is read on an ask.
+    root_menu_shell_folders: Vec<String>,
     /// The dirty-buffer gate, when one of the three doors has stopped to ask
     /// (P123-P125).
     dirty_gate: restore::DirtyGate,
+    /// **The ended tabs whose close waits for saves on their way** (S-6b), kept
+    /// by the loop's cleanup (`Runtime::reap_exited_tabs`).
+    exited_tab_waits: ExitedTabWaits,
     /// The PSReadLine invitation, when the probe has found a shell that would
     /// benefit (§7.1.6c-3b).
     psreadline_invite: psreadline::Invite,
@@ -19419,43 +19436,25 @@ fn dirty_gate_names(
     // of the three, because a reader looking at a card does not know which
     // question raised it and a name that carries its room in one card and
     // not in another is two cards.
+    // **And a clean buffer whose save has not landed** (S-6b, the coordinator's
+    // ruling on R1): the close would leave nobody to say how that save ended.
     let one_tab = |tab: &TabState| {
         let where_ = tab.display_title();
         tab.preview_pool
-            .dirty_names(None)
+            .close_names()
             .map(|name| unsaved_line(name, &where_))
             .collect::<Vec<_>>()
     };
     match request {
-        // **Only the tab's LAST preview pane.** "The pool outlives any ONE
-        // pane — only the LAST preview pane's close would strand it" (P123),
-        // so closing one of two asks nothing at all.
-        restore::GateRequest::ClosePane(seat) => {
-            let tab = active_item(tabs, active_tab);
-            let previews = tab
-                .seats
-                .tree()
-                .seats_in_order()
-                .into_iter()
-                .filter(|found| found.kind == bt_layout::SeatKind::Preview)
-                .count();
-            let closing_a_preview = tab
-                .seats
-                .tree()
-                .find_seat(*seat)
-                .is_some_and(|found| found.kind == bt_layout::SeatKind::Preview);
-            if closing_this_pane_strands_the_pool(closing_a_preview, previews) {
-                one_tab(tab)
-            } else {
-                Vec::new()
-            }
-        }
-        restore::GateRequest::CloseTab(index) => tabs.get(*index).map(one_tab).unwrap_or_default(),
-        // The run's end, asked in the summoned terminal, loses what its shut
-        // would: every tab's dirty buffers.
-        restore::GateRequest::Shut | restore::GateRequest::ShutWithTheRun(_) => {
-            tabs.iter().flat_map(one_tab).collect()
-        }
+        // The pane's tab, the tab, or every tab: the pools the close would lose.
+        restore::GateRequest::ClosePane(_)
+        | restore::GateRequest::CloseTab(_)
+        | restore::GateRequest::Shut
+        | restore::GateRequest::ShutWithTheRun(_) => tabs_a_close_loses(tabs, active_tab, request)
+            .into_iter()
+            .flatten()
+            .flat_map(one_tab)
+            .collect(),
         // A discard names one file, and it is never empty — which matters,
         // because `raise_dirty_gate` treats an empty list as "there is
         // nothing to ask about" and lets the verb through. There is always
@@ -19490,12 +19489,79 @@ fn dirty_gate_names(
     }
 }
 
+/// **The tabs whose pools one close would lose** — `None` for a request that is
+/// not a close of a pane, a tab or a window.
+fn tabs_a_close_loses<'t>(
+    tabs: &'t [TabState],
+    active_tab: usize,
+    request: &restore::GateRequest,
+) -> Option<Vec<&'t TabState>> {
+    match request {
+        // **Only the tab's LAST preview pane.** "The pool outlives any ONE
+        // pane — only the LAST preview pane's close would strand it" (P123),
+        // so closing one of two asks nothing at all.
+        restore::GateRequest::ClosePane(seat) => {
+            let tab = active_item(tabs, active_tab);
+            let previews = tab
+                .seats
+                .tree()
+                .seats_in_order()
+                .into_iter()
+                .filter(|found| found.kind == bt_layout::SeatKind::Preview)
+                .count();
+            let closing_a_preview = tab
+                .seats
+                .tree()
+                .find_seat(*seat)
+                .is_some_and(|found| found.kind == bt_layout::SeatKind::Preview);
+            Some(
+                if closing_this_pane_strands_the_pool(closing_a_preview, previews) {
+                    vec![tab]
+                } else {
+                    Vec::new()
+                },
+            )
+        }
+        restore::GateRequest::CloseTab(index) => Some(tabs.get(*index).into_iter().collect()),
+        // The run's end, asked in the summoned terminal, loses what its shut
+        // would: every tab's dirty buffers.
+        restore::GateRequest::Shut | restore::GateRequest::ShutWithTheRun(_) => {
+            Some(tabs.iter().collect())
+        }
+        _ => None,
+    }
+}
+
+/// **The title of the question a gate puts over these tabs** — the request's own
+/// ([`restore::GateRequest::title`]), but for a close that would lose no edits,
+/// only saves that have not landed (S-6b): its words are then that, since
+/// "discard unsaved changes" would not be true of a clean buffer.
+fn gate_title_over(
+    tabs: &[TabState],
+    active_tab: usize,
+    request: &restore::GateRequest,
+) -> &'static str {
+    match tabs_a_close_loses(tabs, active_tab, request) {
+        Some(losing)
+            if !losing
+                .iter()
+                .any(|tab| tab.preview_pool.a_close_loses_edits()) =>
+        {
+            restore::gate_save_not_landed_title()
+        }
+        _ => request.title(),
+    }
+}
+
 /// **Put `request` to a window's gate over that window's tabs** (ticket 58) —
 /// the whole of [`Runtime::raise_dirty_gate`] except the repaint.
 ///
 /// What the request would lose is read off the tabs, and the gate answers with
-/// it: [`restore::GateRaise::Busy`] while another question is up (its request
-/// kept), [`restore::GateRaise::NothingToAsk`] when nothing is at risk, and
+/// it: [`restore::GateRaise::Busy`] while another question is up or a close
+/// waits (its request kept), [`restore::GateRaise::NothingToAsk`] when nothing
+/// is at risk, [`restore::GateRaise::Waiting`] when the request is a close and
+/// a save of every dirty buffer it would lose is already on its way — the close
+/// waits for their answers instead of asking ([`close_wait_over`], S-6b) — and
 /// otherwise [`restore::GateRaise::Raised`] with the gate now holding this one.
 fn raise_dirty_gate_over(
     gate: &mut restore::DirtyGate,
@@ -19504,7 +19570,63 @@ fn raise_dirty_gate_over(
     request: restore::GateRequest,
 ) -> restore::GateRaise {
     let at_risk = dirty_gate_names(tabs, active_tab, &request);
+    if gate.verdict(&at_risk) == restore::GateRaise::Raised
+        && let Some(wait) = close_wait_over(tabs, active_tab, &request, Instant::now())
+    {
+        gate.wait(wait);
+        return restore::GateRaise::Waiting;
+    }
     gate.raise(request, &at_risk)
+}
+
+/// **The wait a close is held in, when everything it would lose is on its way to
+/// the disk** (S-6b) — `None` when the request is not a close, or one dirty
+/// buffer it would lose has no save of its body on the way
+/// ([`preview::PreviewPool::saves_a_close_awaits`]): that close asks now, as it
+/// always did. The wait names the tab a pane's or a tab's close is about by its
+/// identity, and ends [`restore::CLOSE_WAITS_FOR_A_SAVE`] after `now`.
+fn close_wait_over(
+    tabs: &[TabState],
+    active_tab: usize,
+    request: &restore::GateRequest,
+    now: Instant,
+) -> Option<restore::CloseWait> {
+    let mut awaited = Vec::new();
+    for tab in tabs_a_close_loses(tabs, active_tab, request)? {
+        awaited.extend(tab.preview_pool.saves_a_close_awaits()?);
+    }
+    let tab = match request {
+        restore::GateRequest::ClosePane(_) => Some(active_item(tabs, active_tab).id),
+        restore::GateRequest::CloseTab(index) => tabs.get(*index).map(|tab| tab.id),
+        _ => None,
+    };
+    Some(restore::CloseWait {
+        request: request.clone(),
+        tab,
+        awaited,
+        until: now + restore::CLOSE_WAITS_FOR_A_SAVE,
+        saving: false,
+    })
+}
+
+/// **What has become of every buffer a close waits for**, by name, read off the
+/// window's tabs (S-6b): a buffer no pool here holds any more — its tab gone, or
+/// discarded — loses nothing, and is read as saved.
+fn what_a_close_wait_found(
+    tabs: &[TabState],
+    wait: &restore::CloseWait,
+) -> Vec<(String, preview::AtTheClose)> {
+    wait.awaited
+        .iter()
+        .map(|awaited| {
+            tabs.iter()
+                .find_map(|tab| tab.preview_pool.at_the_close(*awaited))
+                .map_or_else(
+                    || (String::new(), preview::AtTheClose::Saved),
+                    |(name, found)| (name.to_owned(), found),
+                )
+        })
+        .collect()
 }
 
 /// **Keep every dirty preview buffer of these tabs before a stop that cannot ask**
@@ -19816,8 +19938,9 @@ fn keep_owed_documents_over(
 /// to re-run — `closes`, the window itself for a shut and the run's last ordinary
 /// window for [`restore::GateRequest::ShutWithTheRun`] — or `None` when nothing
 /// closes. The whole of [`Runtime::answer_exit`] but the write, which `Save all`
-/// has already made through [`Runtime::quit_save`] (`saved_all`: whether all of
-/// it landed).
+/// hands to the storage worker and waits for across turns (S-6b): its answer is
+/// spent here once the saves have answered (`Runtime::settle_close_wait`;
+/// `saved_all`: whether all of them landed).
 ///
 /// `Cancel` touches nothing and closes nothing. `Save all` closes only when every
 /// write landed ([`quit::Quit::saved`]'s rule one surface down). `Discard` drops
@@ -19866,6 +19989,86 @@ fn exited_tabs_the_loop_may_close(
             gate.verdict(&at_risk).proceeds()
         })
         .collect()
+}
+
+/// **The ended tabs whose close waits for saves on their way** (S-6b, the
+/// coordinator's ruling on R1): a tab whose shells have all exited, which the
+/// loop would close but for saves still on the storage worker, is not torn down
+/// until they land — then it has nothing to ask and closes as any ended tab does
+/// — or until its wait's bound ([`restore::CLOSE_WAITS_FOR_A_SAVE`] from the first
+/// turn it was found waiting). No question can be asked of a tab that closes
+/// itself, so at the bound a tab that waits only for clean buffers' saves closes
+/// with its pool let go: each late answer reaches the sink, which says a save
+/// that did not land once in `diagnostics.log`. A tab still waiting for a dirty
+/// body's save at the bound stands, as an ended tab with unsaved edits always
+/// has: whether those go is the reader's turn. A tab whose close loses something
+/// no save is on its way for — a save that did not land, a conflict — stands
+/// too, its pane saying why.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ExitedTabWaits {
+    /// Each waiting tab's bound; `None` once the bound has passed and the tab
+    /// stands.
+    until: BTreeMap<TabId, Option<Instant>>,
+}
+
+impl ExitedTabWaits {
+    /// **The ended tabs whose wait ran out, to be closed now with their pools
+    /// let go** — of `ended`, those not already `closing` — and every other wait
+    /// brought level with the tabs as they stand at `now`. Nothing moves while
+    /// a question is up or a close waits on the gate (ticket 58).
+    fn ran_out(
+        &mut self,
+        gate: &restore::DirtyGate,
+        tabs: &[TabState],
+        active_tab: usize,
+        ended: &[usize],
+        closing: &[usize],
+        now: Instant,
+    ) -> Vec<usize> {
+        if gate.is_busy() {
+            return Vec::new();
+        }
+        let mut ran_out = Vec::new();
+        let mut until = BTreeMap::new();
+        for &index in ended.iter().filter(|index| !closing.contains(index)) {
+            let Some(tab) = tabs.get(index) else {
+                continue;
+            };
+            let Some(wait) = close_wait_over(
+                tabs,
+                active_tab,
+                &restore::GateRequest::CloseTab(index),
+                now,
+            ) else {
+                continue;
+            };
+            match self.until.get(&tab.id).copied().unwrap_or(Some(wait.until)) {
+                Some(bound) if now >= bound => {
+                    if wait.awaited.iter().any(|awaited| awaited.was_dirty()) {
+                        until.insert(tab.id, None);
+                    } else {
+                        ran_out.push(index);
+                    }
+                }
+                standing => {
+                    until.insert(tab.id, standing);
+                }
+            }
+        }
+        self.until = until;
+        ran_out
+    }
+
+    /// When the loop must come back to end a wait, if one is still to end after
+    /// `now` — a bound, never a look: each landing wakes the loop itself.
+    fn next_after(&self, now: Instant) -> Option<Instant> {
+        self.until
+            .values()
+            .flatten()
+            .copied()
+            .filter(|bound| *bound > now)
+            .min()
+    }
 }
 
 impl<B: Backend> Deref for Runtime<'_, B> {
@@ -20157,6 +20360,9 @@ impl TabState {
                         // with nothing to say it had been.
                         foot_path: String::new(),
                         foot_revealed: false,
+                        // Filled by the caller with the path, for the path's reason.
+                        foot_notice: String::new(),
+                        foot_notice_width: 0.0,
                     },
                     view.wanted,
                 ),
@@ -20612,8 +20818,9 @@ impl LeafSession {
     /// folder…` or split off into a folder, whose shell never reported, is started again in that
     /// folder rather than at its profile's default.
     ///
-    /// The session save (`TabState::term_leaf`) writes this same ladder, so a restored pane and a
-    /// Recent row stand where a restart would.
+    /// The session save (`TabState::term_leaf`) writes this ladder. The verbs that start a shell
+    /// read [`Self::place_where_the_pane_stands`], which puts the shell process's folder between
+    /// the two rungs (T-CWD-FROM-PROCESS): a save is no person's ask, so it reads no process.
     ///
     /// A WSL pane put down at its shell's own home holds the mark `~` as its place and hands `~`
     /// on; `profiles::place_for` reads a place equal to the profile's home mark as the shell's
@@ -20627,21 +20834,61 @@ impl LeafSession {
             .or_else(|| self.spawn_place.clone())
     }
 
-    /// **What the `+` and a picker row carry from this pane**: its reported folder, always
-    /// **carried** — a new tab beside a pane keeps the profile's starting rule whatever the pane
-    /// was born in (coordinator's ruling 2026-10-05). Only the verbs that start a shell *in this
-    /// pane's place* read [`Self::seed_place_for_a_new_shell`].
-    fn place_for_a_new_tab_beside(&self) -> Option<profiles::SeedPlace> {
-        self.session
-            .working_directory()
-            .map(|cwd| profiles::SeedPlace::Carried(cwd.to_path_buf()))
+    /// **Where this pane stands for a verb that starts a shell from it** (T-CWD-FROM-PROCESS):
+    /// [`Self::folder`]'s answer when it is the shell's report or its process's folder — read
+    /// once, for this one action — and otherwise what [`Self::place_for_a_new_shell`] answered
+    /// before: the folder the shell was put down in. An unknown folder says nothing new here; the
+    /// verb starts where it always did.
+    fn place_where_the_pane_stands(
+        &self,
+        door: &dyn pane_folder::ProcessFolders,
+    ) -> Option<PathBuf> {
+        match self.folder(door) {
+            pane_folder::PaneFolder::Reported(folder)
+            | pane_folder::PaneFolder::Process(folder) => Some(folder),
+            pane_folder::PaneFolder::Opened(_) | pane_folder::PaneFolder::Unknown(_) => {
+                self.place_for_a_new_shell()
+            }
+        }
     }
 
-    /// [`Self::place_for_a_new_shell`] with the kind a spawn weighs it by: **named** for a pane
-    /// born in a named folder ([`Self::born_named`]), **carried** otherwise. Restart shell,
+    /// **What the `+` and a picker row carry from this pane**: where it stands — its reported
+    /// folder, else its shell process's folder — always **carried**: a new tab beside a pane keeps
+    /// the profile's starting rule whatever the pane was born in (coordinator's ruling
+    /// 2026-10-05), and a pane whose folder nobody can say carries none, as one that never
+    /// reported always did. Only the verbs that start a shell *in this pane's place* read
+    /// [`Self::seed_place_for_a_new_shell`].
+    fn place_for_a_new_tab_beside(&self) -> Option<profiles::SeedPlace> {
+        self.place_for_a_new_tab_beside_through(&pane_folder::SystemProcessFolders)
+    }
+
+    /// [`Self::place_for_a_new_tab_beside`], its process read through `door`.
+    fn place_for_a_new_tab_beside_through(
+        &self,
+        door: &dyn pane_folder::ProcessFolders,
+    ) -> Option<profiles::SeedPlace> {
+        match self.folder(door) {
+            pane_folder::PaneFolder::Reported(folder)
+            | pane_folder::PaneFolder::Process(folder) => {
+                Some(profiles::SeedPlace::Carried(folder))
+            }
+            pane_folder::PaneFolder::Opened(_) | pane_folder::PaneFolder::Unknown(_) => None,
+        }
+    }
+
+    /// [`Self::place_where_the_pane_stands`] with the kind a spawn weighs it by: **named** for a
+    /// pane born in a named folder ([`Self::born_named`]), **carried** otherwise. Restart shell,
     /// Duplicate tab, Duplicate pane and the splits read this; `profiles::place_for` decides.
     fn seed_place_for_a_new_shell(&self) -> Option<profiles::SeedPlace> {
-        self.place_for_a_new_shell().map(|path| {
+        self.seed_place_for_a_new_shell_through(&pane_folder::SystemProcessFolders)
+    }
+
+    /// [`Self::seed_place_for_a_new_shell`], its process read through `door`.
+    fn seed_place_for_a_new_shell_through(
+        &self,
+        door: &dyn pane_folder::ProcessFolders,
+    ) -> Option<profiles::SeedPlace> {
+        self.place_where_the_pane_stands(door).map(|path| {
             if self.born_named {
                 profiles::SeedPlace::Named(path)
             } else {
@@ -20770,6 +21017,23 @@ impl LeafSession {
     /// ladder that answers "what is this tab called".
     fn standing_in(&self) -> Option<&Path> {
         self.session.reference_directory()
+    }
+
+    /// **The folder a door that opens a folder from this pane opens** (T-CWD-FROM-PROCESS): the
+    /// shell's report, else its process's folder, else — with no process yet — where the pane
+    /// was opened ([`pane_folder::pane_folder`]'s ladder). Read on the ask; the process is asked
+    /// again only once the shell has written something since the last read, or its exit has been
+    /// seen.
+    fn folder(&self, door: &dyn pane_folder::ProcessFolders) -> pane_folder::PaneFolder {
+        let shell = self.pty.as_ref().and_then(|pty| {
+            pty.shell_process_id()
+                .map(|shell| pane_folder::ShellMoment {
+                    shell,
+                    output: pty.output_bytes_received(),
+                    exited: self.shell_exit_age.is_some(),
+                })
+        });
+        pane_folder::pane_folder(&self.session, shell, &self.process_folder, door)
     }
 
     /// Everything the name stack reads off this shell, for deciding whether the
@@ -29488,10 +29752,7 @@ fn next_attention_stop<T: Copy>(queue: &[(T, u64)], standing_on: Option<u64>) ->
 /// [`sample_window_place`].
 fn window_is_hidden(token: WaitToken<'_, doors::PlaceHidden>, window: &impl WindowHost) -> bool {
     let _ = token;
-    let Ok(native) = native_window(window) else {
-        return false;
-    };
-    bt_platform::is_window_minimized(native) || bt_platform::is_window_cloaked(native)
+    window.is_iconic() || window.is_cloaked()
 }
 
 /// **Ask the desktop where this window is, on the turn that is about to decide what the reader is
@@ -29574,10 +29835,7 @@ fn sample_window_place(
 /// [`sample_window_place`].
 fn window_is_exposed(token: WaitToken<'_, doors::PlaceExposure>, window: &impl WindowHost) -> bool {
     let _ = token;
-    let Ok(native) = native_window(window) else {
-        return true;
-    };
-    bt_platform::window_is_exposed(native)
+    window.is_exposed()
 }
 
 /// The pane a tab's `Awaiting` is about: **the oldest place it holds.**
@@ -30991,9 +31249,9 @@ fn window_taskbar_progress(
 /// progress. That is what makes the COM object **lazy**: a window that never
 /// sees an `OSC 9;4` never creates one, because the first reading is equal to
 /// the one already on screen.
-struct TaskbarMirror {
+struct TaskbarMirror<T> {
     /// Created on the first reading that is not `CLEARED`, and never before.
-    button: Option<bt_platform::Taskbar>,
+    button: Option<T>,
     /// What the button has been told. Not `Option`: see above.
     told: bt_platform::TaskbarProgress,
     /// Set once the shell has refused, so a machine with no taskbar to talk to
@@ -31003,7 +31261,7 @@ struct TaskbarMirror {
     refused: bool,
 }
 
-impl Default for TaskbarMirror {
+impl<T> Default for TaskbarMirror<T> {
     fn default() -> Self {
         Self {
             button: None,
@@ -31013,7 +31271,7 @@ impl Default for TaskbarMirror {
     }
 }
 
-impl TaskbarMirror {
+impl<T: TaskbarDoor> TaskbarMirror<T> {
     /// What the button has to be told for it to say `wanted`, or `None` when it
     /// already says it.
     ///
@@ -31036,7 +31294,11 @@ impl TaskbarMirror {
     /// mirror its own sessions onto its own button with no change here — the
     /// mirror is a `WindowRuntime` field precisely so there is one per window
     /// the day `window` becomes a map.
-    fn show(&mut self, window: &impl WindowHost, wanted: bt_platform::TaskbarProgress) {
+    fn show(
+        &mut self,
+        window: &impl WindowHost<Taskbar = T>,
+        wanted: bt_platform::TaskbarProgress,
+    ) {
         let Some(sending) = self.diff(wanted) else {
             return;
         };
@@ -31044,10 +31306,7 @@ impl TaskbarMirror {
             return;
         }
         if self.button.is_none() {
-            let built = native_window(window)
-                .map_err(|error| error.to_string())
-                .and_then(bt_platform::Taskbar::new);
-            match built {
+            match window.taskbar() {
                 Ok(button) => self.button = Some(button),
                 Err(error) => {
                     eprintln!("taskbar progress unavailable: {error}");
@@ -31492,7 +31751,7 @@ mod taskbar_progress_tests {
     /// `explorer.exe`. The recorder is what a shell would have received.
     #[test]
     fn only_a_changed_reading_reaches_the_shell() {
-        let mut mirror = TaskbarMirror::default();
+        let mut mirror = TaskbarMirror::<bt_platform::Taskbar>::default();
         let mut sent = Vec::new();
         for wanted in [
             // A window that has never seen a progress report must not create a
@@ -31533,7 +31792,7 @@ mod taskbar_progress_tests {
         // And the colour alone is a change even when the number is not: the two
         // `Error` readings above differ from `normal(31)` only in state, and the
         // gate has to notice the state.
-        let mut mirror = TaskbarMirror::default();
+        let mut mirror = TaskbarMirror::<bt_platform::Taskbar>::default();
         assert!(mirror.diff(normal(31)).is_some());
         assert!(
             mirror
@@ -38145,6 +38404,9 @@ fn revive_plan(
                     git_sel: None,
                     // The fifth fact, and durable like `view` above it (T9).
                     git_remotes_open: leaf.remotes_open,
+                    // Not durable: a restored root is the root it was left on, a folder
+                    // somebody had (see the field).
+                    folder_unknown: false,
                 },
             )
         })
@@ -42632,6 +42894,7 @@ fn bare_leaf(
         birth_death_kept: false,
         spawn_fallback: None,
         foreground_program_cadence: foreground_program::Cadence::default(),
+        process_folder: pane_folder::ProcessFolderMemo::default(),
         paste_recipient: profiles::paste_recipient(
             profiles::index_of_id(&decision.spawn_profile),
             &decision.program_kind,
@@ -45417,32 +45680,26 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
     // that was going to happen. Best-effort, like the taskbar's own subclass — a
     // window that cannot install it keeps exactly the behaviour this window had
     // before there was one.
-    let system_settings_watch = native_window(&window).ok().and_then(|native| {
+    let system_settings_watch = {
         let proxy = event_proxy.clone();
-        bt_platform::SystemSettingsWatch::install(
-            native,
-            Box::new(move |news| {
-                let _ = proxy.send_event(AppEvent::of_system_news(news));
-            }),
-        )
-        .ok()
-    });
+        window.watch_system_settings(Box::new(move |news| {
+            let _ = proxy.send_event(AppEvent::of_system_news(news));
+        }))
+    };
     // **The window's ear for the system ending the session** (B-ENDSESSION). The procedure the
     // system sends the question to holds the document and parks the news; the wake brings the
     // turn that writes it. One per window because the question is sent to every top-level window,
     // and one answer is as good as another: the hold is set once and the write is idempotent.
-    let session_end_watch = native_window(&window).ok().and_then(|native| {
+    let session_end_watch = {
         let proxy = event_proxy.clone();
-        bt_platform::session_end::SessionEndWatch::install(
-            native,
+        window.watch_session_end(
             Box::new(move |end| {
                 session_end::hear(end);
                 let _ = proxy.send_event(AppEvent::SessionEnding);
             }),
             Box::new(|| i18n::Text::ShutdownSavingLayout.text().to_owned()),
         )
-        .ok()
-    });
+    };
     // **A window is born knowing its display's rate**, before it has drawn
     // anything: the first journey a reader starts can be in the first second,
     // and a window that had to wait for a move or a scale change to find out
@@ -45700,7 +45957,9 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         preview_crumb_clicks: MultiClicks::default(),
         pane_head_clicks: MultiClicks::default(),
         root_menu: profiles::RootMenu::default(),
+        root_menu_shell_folders: Vec::new(),
         dirty_gate: restore::DirtyGate::default(),
+        exited_tab_waits: ExitedTabWaits::default(),
         psreadline_invite: psreadline::Invite::default(),
         paste_card_hover: None,
         update_card: update_card::Card::default(),
@@ -46167,7 +46426,7 @@ struct OpenedWindow {
     // unassembled, everything built on the window — the renderer and the device, the composition
     // tree, the pickers, the menu, the caret and the frame, each of which lets go of the window
     // handle when it drops — goes before the window itself, as the locals they were went in
-    // reverse. The window, its handle and its placement drop last.
+    // reverse. The window and its placement drop last.
     /// When the panes' phase began, for the startup trace.
     phase_started: Instant,
     pty_wake: PtyWakeSignal,
@@ -46188,7 +46447,6 @@ struct OpenedWindow {
     platform_chrome: bt_platform::PlatformChrome,
     parked_pans: runtime::pointer::touch::ParkedPans,
     custom_window_frame: bt_platform::CustomWindowFrame,
-    native: bt_platform::NativeWindow,
     ime_report: ime_report::Report,
     window: Arc<Window>,
     restored: Option<RestoredPlacement>,
@@ -46664,7 +46922,7 @@ impl Runtime<'_, Native> {
                     // reader who turned the row on does not watch their first `⌥a` compose
                     // an `å` before the setting is read.
                     set_option_as_alt(&window, settings_store.loaded().option_sends_alt);
-                    let native = native_window(&window)?;
+                    let native = native_window_of(&window)?;
                     // **The clipboard's owner window, told once here and never carried by a
                     // caller again** (M1-9). `OpenClipboard` wants a window and
                     // `NSPasteboard` does not, so the handle used to be a parameter on a
@@ -46876,7 +47134,6 @@ impl Runtime<'_, Native> {
                         restored,
                         window,
                         ime_report,
-                        native,
                         custom_window_frame,
                         parked_pans,
                         platform_chrome,
@@ -47069,7 +47326,6 @@ impl Runtime<'_, Native> {
             restored,
             window,
             ime_report,
-            native,
             custom_window_frame,
             parked_pans,
             platform_chrome,
@@ -47353,7 +47609,7 @@ impl Runtime<'_, Native> {
             app: &mut app,
             window: &mut window,
         };
-        runtime.dress_new_window(native)?;
+        runtime.dress_new_window()?;
         if trace_startup {
             // Named as what it is: this block is the native backend's, and the timings are the
             // native renderer's own.
@@ -50419,8 +50675,7 @@ impl<B: Backend> Runtime<'_, B> {
         if !self.app.acrylic_available {
             return Ok(false);
         }
-        let native = native_window(&self.window.window)?;
-        if let Err(error) = bt_platform::set_system_backdrop(native, enabled) {
+        if let Err(error) = self.window.window.set_backdrop(enabled) {
             eprintln!("recoverable system backdrop failure: {error}");
             return Ok(false);
         }
@@ -50439,7 +50694,6 @@ impl<B: Backend> Runtime<'_, B> {
     /// activates: switching the row on while another window has the keyboard
     /// must not steal it.
     fn apply_always_on_top(&mut self, enabled: bool) -> Result<bool> {
-        let native = native_window(&self.window.window)?;
         // **The one window the row does not reach** (§7.54). The preference is
         // still written — it is the application's, and every other window of this
         // process wears it — but the summoned terminal's own posture is not a
@@ -50448,7 +50702,7 @@ impl<B: Backend> Runtime<'_, B> {
         // arrives. Said here rather than by greying the row, because the row is
         // true of the program and this is one window declining to be its example.
         if !self.is_quake_window()
-            && let Err(error) = bt_platform::set_window_topmost(native, enabled)
+            && let Err(error) = self.window.window.set_topmost(enabled)
         {
             eprintln!("recoverable always-on-top failure: {error}");
             return Ok(false);
@@ -52952,23 +53206,37 @@ impl<B: Backend> Runtime<'_, B> {
 
     // ── P143-P150: the glance card ──────────────────────────────────────────
 
-    /// The places this column could be pointed at (E54).
+    /// **The folders the root menu offers as "a terminal is here"**, read once as it opens
+    /// (T-CWD-FROM-PROCESS): every terminal pane of the tab in front of you, each through
+    /// [`LeafSession::folder`] — its report, else its shell process's folder, else where it was
+    /// opened.
     ///
-    /// The shells' folders are read here rather than in `profiles` because that
-    /// is where the sessions are: red line L1's argument, one layer up. Every
-    /// pane of the tab in front of you gets a say, not only the focused one —
-    /// "a terminal is here" is true of all of them, and the whole point of the
-    /// list is to name the places you are already standing.
-    fn root_choices(&self, seat: SeatId) -> Vec<profiles::RootChoice> {
+    /// The shells' folders are read here rather than in `profiles` because that is where the
+    /// sessions are: red line L1's argument, one layer up. Every pane of the tab in front of you
+    /// gets a say, not only the focused one — "a terminal is here" is true of all of them, and the
+    /// whole point of the list is to name the places you are already standing.
+    fn shell_folders_for_the_root_menu(
+        &self,
+        door: &dyn pane_folder::ProcessFolders,
+    ) -> Vec<String> {
         let tab = &self.window.tabs[self.window.active_tab];
-        let cwds: Vec<String> = tab
-            .seats
+        tab.seats
             .terminals()
             .iter()
             .filter_map(|seat| tab.sessions.get(seat))
-            .filter_map(|leaf: &LeafSession| leaf.session.standing_folder())
+            .filter_map(|leaf: &LeafSession| leaf.folder(door).into_folder())
             .map(|cwd| cwd.display().to_string())
-            .collect();
+            .collect()
+    }
+
+    /// The places this column could be pointed at (E54): its own root, the home folder, the
+    /// shells' folders the menu took as it opened ([`Self::shell_folders_for_the_root_menu`]) and
+    /// the remembered folders, the kept ones first.
+    fn root_choices(&self, seat: SeatId) -> Vec<profiles::RootChoice> {
+        let tab = &self.window.tabs[self.window.active_tab];
+        // Taken when the menu opened ([`Self::shell_folders_for_the_root_menu`]): the menu is
+        // laid out every frame it is up, and a pane's folder is read on an ask, not per frame.
+        let cwds = &self.window.root_menu_shell_folders;
         let home = profiles::home_directory(&bt_pty::SystemShellEnvironment)
             .map(|home| home.display().to_string());
         // The remembered folders come from the application and not from this
@@ -52977,7 +53245,7 @@ impl<B: Backend> Runtime<'_, B> {
         let found = profiles::root_choices(
             &tab.files_state(seat).root,
             home.as_deref(),
-            &cwds,
+            cwds,
             self.app.recent_folders.entries(),
         );
         // **What the user said to keep goes on top** (user ruling 2026-08-19).
@@ -53640,7 +53908,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// the cwd of the terminal the trigger belongs to *at summon time*, and the
     /// float then stays there. A tree that re-roots itself as you `cd` is, in
     /// this design's own words, 整个生态独立判定最惊吓的行为.
-    fn trigger_root(&self, trigger: float::FloatTrigger) -> String {
+    fn trigger_root(&self, trigger: float::FloatTrigger) -> FilesRoot {
         // **A reference names its own folder**, so it does not go through the
         // cwd below at all: the two buttons speak for a *terminal* and borrow
         // the place that terminal is standing in, while this one speaks for a
@@ -53655,7 +53923,7 @@ impl<B: Backend> Runtime<'_, B> {
                 ..
             }) = self.terminal_reference_at(leaf.seat, cell)
         {
-            return path.display().to_string();
+            return FilesRoot::known(path.display().to_string());
         }
         let seat = match trigger {
             float::FloatTrigger::Tab(id) => self
@@ -53674,7 +53942,7 @@ impl<B: Backend> Runtime<'_, B> {
         };
         files_root_of(
             seat.and_then(|(tab, seat)| tab.sessions.get(&seat))
-                .map(|leaf| &leaf.session),
+                .map(|leaf| leaf.folder(&pane_folder::SystemProcessFolders)),
             &bt_pty::SystemShellEnvironment,
         )
     }
@@ -54348,14 +54616,9 @@ impl<B: Backend> Runtime<'_, B> {
         let Some((x, y)) = self.to_screen(position) else {
             return GlassHere::Unknown;
         };
-        let Ok(mine) = native_window(&self.window.window) else {
-            return GlassHere::Unknown;
-        };
-        match bt_platform::top_level_window_at(x.round() as i32, y.round() as i32) {
-            Some(under) if under == mine => GlassHere::Ours,
-            Some(_) => GlassHere::Theirs,
-            None => GlassHere::Unknown,
-        }
+        self.window
+            .window
+            .glass_at(x.round() as i32, y.round() as i32)
     }
 
     /// **Open the broker for a payload that is allowed to leave this window**
@@ -55019,8 +55282,8 @@ impl<B: Backend> Runtime<'_, B> {
                     .terminal_name(*seat)
                     .unwrap_or_else(|| tab.display_title());
                 let hint = leaf
-                    .session
-                    .standing_folder()
+                    .folder(&pane_folder::SystemProcessFolders)
+                    .folder()
                     .map(|cwd| cwd.display().to_string())
                     .or_else(|| {
                         leaf.program
@@ -56938,22 +57201,10 @@ mod launch_landing_tests {
             "a tab opens and the window it opened in stays behind whatever the \
              reader was looking at:\n{landing}"
         );
+        // What raising does to the window — restored, then given the foreground — is
+        // `runtime::windows::tests::a_raised_window_is_restored_before_it_takes_the_foreground`.
         let raise = method_body("FolioApp", "raise_for_a_launch");
         assert!(raise.contains("bring_owned_window_forward(&runtime.window.window)"));
-        let forward = item_body(&ItemQuery::function("bring_owned_window_forward"));
-        let restore = forward
-            .find("restore_minimized_window(window)?")
-            .unwrap_or(usize::MAX);
-        let front = forward
-            .find("give_foreground_to(native_window(window)?)")
-            .unwrap_or(0);
-        assert!(
-            restore < front,
-            "an iconified window is asked to the front before it is restored, \
-             which on some configurations is a click answered twice and seen \
-             never:\n{forward}"
-        );
-        assert!(forward.contains("give_foreground_to(native_window(window)?)"));
     }
 
     /// **RED (U-36) — every launch the wire carries tells the update job what
@@ -58184,7 +58435,7 @@ mod hold_station_tests {
                 "WebVisual",
                 "compositor.attach_web_visual(",
             ),
-            ("WebSeat", "step", "WebInstall", "self.host.install("),
+            ("WebSeat", "step", "WebInstall", "tree.install("),
             ("WebSeat", "step", "WebFloor", "self.stand_on_the_floor("),
             ("WebSeat", "step", "WebNavigate", "self.host.navigate("),
         ] {
@@ -65238,13 +65489,6 @@ impl<B: Backend> FolioApp<B> {
                 into,
             )));
         }
-        let target_window = {
-            let target = self
-                .windows
-                .get_mut(into)
-                .expect("checked open one line above");
-            native_window(&target.window)?
-        };
         let Some((source, target)) = self.windows.two_mut(from, into) else {
             // `from != into`, both were open a statement ago, and nothing between
             // here and there can close a window.
@@ -65282,10 +65526,29 @@ impl<B: Backend> FolioApp<B> {
             .copied()
             .filter(|leaf| hosted_in_source.contains(leaf))
             .collect();
+        // **Each page's place on both sides, asked before anything moves**: the page's own name in
+        // the target window and, for the way home, in the source. A window that cannot name a place
+        // refuses the move here, where nothing has been touched.
+        let addressed: Vec<(LeafId, webhost::SeatAddress, webhost::SeatAddress)> = carrying
+            .iter()
+            .map(|leaf| {
+                // The tab travels whole and keeps its id, so the page's name in the target
+                // window is the name it already had.
+                let page = bt_platform::PageVisual {
+                    tab: leaf.tab.0,
+                    seat: leaf.seat.0,
+                };
+                Ok((
+                    *leaf,
+                    target.window.page_address(page)?,
+                    source.window.page_address(page)?,
+                ))
+            })
+            .collect::<Result<_, String>>()
+            .map_err(|error| anyhow!(error))?;
         let mut moved: Vec<(LeafId, webhost::RehostReport)> = Vec::new();
         let mut outcomes = Vec::new();
         let mut refused = None;
-        let source_window = native_window(&source.window)?;
         let front = source.tabs[index].seats.identity();
         // Two disjoint fields of one window, borrowed apart, because the page
         // being handed over and the tree it is being handed out of are both the
@@ -65295,22 +65558,15 @@ impl<B: Backend> FolioApp<B> {
             compositor: source_compositor,
             ..
         } = &mut *source;
-        for leaf in carrying {
+        let mut homes: Vec<webhost::SeatAddress> = Vec::new();
+        for &(leaf, there, home) in &addressed {
             let Some(page) = source_web.get_mut(&leaf) else {
                 continue;
             };
             let report = page.rehost(
                 source_compositor,
                 &target.compositor,
-                webhost::SeatAddress {
-                    // The tab travels whole and keeps its id, so the page's name
-                    // in the target window is the name it already had.
-                    page: bt_platform::PageVisual {
-                        tab: leaf.tab.0,
-                        seat: leaf.seat.0,
-                    },
-                    window: target_window,
-                },
+                there,
                 // **The keyboard goes with the tab**, and only for the pane the
                 // tab is standing on: a page in a background pane of a moved tab
                 // has not been pointed at by anybody.
@@ -65322,7 +65578,10 @@ impl<B: Backend> FolioApp<B> {
                     refused = Some(TransferRefusal::PageKept(leaf.seat, why));
                     break;
                 }
-                report => moved.push((leaf, report)),
+                report => {
+                    moved.push((leaf, report));
+                    homes.push(home);
+                }
             }
         }
         if let Some(refusal) = refused {
@@ -65334,18 +65593,12 @@ impl<B: Backend> FolioApp<B> {
             // and there is nothing further to do about it here: the tab is not
             // moving, and a page that ends up rebuilding rebuilds on the window
             // its tab is still in, which is where this puts its address.
-            for (leaf, _) in moved.iter().rev() {
+            for ((leaf, _), home) in moved.iter().zip(&homes).rev() {
                 if let Some(page) = source_web.get_mut(leaf) {
                     let _ = page.rehost(
                         &target.compositor,
                         source_compositor,
-                        webhost::SeatAddress {
-                            page: bt_platform::PageVisual {
-                                tab: leaf.tab.0,
-                                seat: leaf.seat.0,
-                            },
-                            window: source_window,
-                        },
+                        *home,
                         false,
                         &mut outcomes,
                     );
@@ -67397,6 +67650,75 @@ impl<B: Backend> FolioApp<B> {
         first_error.map_or(Ok(()), Err)
     }
 
+    /// **Every window's close that waits for its saves, looked at** (S-6b) — once
+    /// a turn, which the saves' answers wake (`AppEvent::DocumentsAnswered`, heard
+    /// by the buffers first: [`Self::take_preview_save_answers`]) and the waits'
+    /// bound ends (`restore::DirtyGate::waits_until`, in the turn's wake-up).
+    ///
+    /// Each window decides its own (`Runtime::settle_close_wait`); a pane's or a
+    /// tab's close is re-run there. The two closes that are the loop's are re-run
+    /// here, from the top, through the doors they always came through: a
+    /// window's shut as the OS close it was (`WindowEvent::CloseRequested`, which
+    /// puts the gate again and now finds nothing to ask — or asks), the run's end
+    /// as the close of the ordinary window that ends it (`Self::close`, which
+    /// asks the summoned terminal again). A close a `Save all` wait re-requested
+    /// is taken as the dispatcher takes one.
+    /// **When the loop must come back to end a close's wait** (S-6b): the soonest bound of a
+    /// close waiting on a gate, or of an ended tab waiting for its saves, after `now`. A leaving
+    /// window's waits are not decided (`Self::settle_close_waits` skips it), and no close's wait
+    /// is decided while a quit is under way, so neither joins the wake-up: their bounds would be
+    /// a wake-up in the past on every turn. The answers themselves wake the loop.
+    fn close_waits_wake(&self, now: Instant) -> Option<Instant> {
+        if self.app.as_ref().is_some_and(|app| app.quit.is_some()) {
+            return None;
+        }
+        self.windows
+            .values()
+            .filter(|window| window.leaving.is_none())
+            .flat_map(|window| {
+                [
+                    window.dirty_gate.waits_until(),
+                    window.exited_tab_waits.next_after(now),
+                ]
+            })
+            .flatten()
+            .min()
+    }
+
+    fn settle_close_waits(&mut self, event_loop: &B::Loop, now: Instant) -> Result<()> {
+        // **Not while a quit is under way** (round 3): the quit's card is the one question,
+        // and a wait decided under it would close a pane or a tab mid-quit, or put the gate's
+        // question beneath the card. The waits stand; a quit that is cancelled leaves them to
+        // be looked at on the next turn, and one that goes on takes their windows with it.
+        if self.app.as_ref().is_some_and(|app| app.quit.is_some()) {
+            return Ok(());
+        }
+        for index in 0..self.windows.len() {
+            let Some(id) = self.windows.key_at(index) else {
+                continue;
+            };
+            let Some(mut runtime) = self.runtime_at(index) else {
+                continue;
+            };
+            if runtime.window.leaving.is_some() {
+                continue;
+            }
+            let after = runtime.settle_close_wait(now)?;
+            let requested = runtime.take_close_request();
+            match after {
+                runtime::AfterTheWait::Nothing => {}
+                runtime::AfterTheWait::Shut => {
+                    self.on_window_event(event_loop, id, WindowEvent::CloseRequested);
+                }
+                runtime::AfterTheWait::EndTheRunWith(closing) => self.close(closing)?,
+            }
+            if let Some(closing) = requested {
+                self.close(closing)?;
+            }
+        }
+        Ok(())
+    }
+
     fn announce_recovered_edits(&mut self) -> Result<()> {
         let Some(announcement) = recovered::take() else {
             return Ok(());
@@ -67607,7 +67929,8 @@ impl<B: Backend> FolioApp<B> {
             return Ok(());
         };
         runtime.show_quake_window()?;
-        let native = native_window(&runtime.window.window).ok();
+        let ours =
+            previous.is_some_and(|before| runtime.window.window.holds_the_foreground(before));
         if let Some(app) = self.app.as_mut() {
             // The window this one came down over is not remembered when it *is*
             // this one: a summon pressed while the window already had the
@@ -67619,8 +67942,7 @@ impl<B: Backend> FolioApp<B> {
             // the holder is an application, this same case is refused one step
             // earlier by `foreground_holder` answering `None` for ourselves, and
             // `Foreground::is_window` says so.
-            let previous =
-                previous.filter(|before| !native.is_some_and(|window| before.is_window(window)));
+            let previous = previous.filter(|_| !ours);
             app.quake.shown_over(previous);
         }
         if let Some(runtime) = self.runtime(id)
@@ -67741,12 +68063,13 @@ impl<B: Backend> FolioApp<B> {
         Ok(())
     }
 
-    /// **Which window this HWND is** (multiwindow slice F2).
+    /// **Which window owns the glass at this screen point** (multiwindow slice F2): the one that
+    /// answers it is its own ([`WindowHost::glass_at`]).
     ///
     /// [`Self::owner_of`]'s shape and its reason: linear over a handful of
     /// windows, on a lane that runs while a hand is actually crossing a boundary,
     /// and no second table to be kept in step with the first.
-    fn window_holding(&mut self, native: bt_platform::NativeWindow) -> Option<WindowId> {
+    fn window_at(&mut self, x: i32, y: i32) -> Option<WindowId> {
         (0..self.windows.len()).find_map(|index| {
             let id = self.windows.key_at(index)?;
             let window = self.windows.get_mut(id)?;
@@ -67755,7 +68078,7 @@ impl<B: Backend> FolioApp<B> {
             if window.leaving.is_some() {
                 return None;
             }
-            (native_window(&window.window).ok() == Some(native)).then_some(id)
+            (window.window.glass_at(x, y) == GlassHere::Ours).then_some(id)
         })
     }
 
@@ -67844,9 +68167,7 @@ impl<B: Backend> FolioApp<B> {
         {
             broker.cargo_pane = cargo_pane.clone();
         }
-        let under =
-            bt_platform::top_level_window_at(pointer.0.round() as i32, pointer.1.round() as i32)
-                .and_then(|native| self.window_holding(native));
+        let under = self.window_at(pointer.0.round() as i32, pointer.1.round() as i32);
         let aim = match under {
             Some(window) if window == source => BrokerAim::Home,
             Some(window) => {
@@ -69012,8 +69333,11 @@ impl<B: Backend> FolioApp<B> {
         if let Some(app) = self.app.as_mut() {
             app.web_pages_open = pages_open;
         }
+        // **A close waiting for its saves, first** (S-6b): what it closes is settled
+        // by the rest of this turn, as an event's close is.
         if let Err(error) = self
-            .settle_window_ring()
+            .settle_close_waits(event_loop, Instant::now())
+            .and_then(|()| self.settle_window_ring())
             .and_then(|()| self.settle_update_card())
             .and_then(|()| self.settle_application_change())
             .and_then(|()| self.settle_restore_answer())
@@ -69144,7 +69468,10 @@ impl<B: Backend> FolioApp<B> {
             .as_ref()
             .and_then(|app| app.quit.as_ref())
             .and_then(quit::Quit::deadline);
-        let wake_deadline = earliest_deadline([wake_deadline, quit_wake]);
+        // **And every close's bound, while it waits for its saves** (S-6b): the answers
+        // wake the loop themselves; the clock is only the bound.
+        let close_wake = self.close_waits_wake(now);
+        let wake_deadline = earliest_deadline([wake_deadline, quit_wake, close_wake]);
         event_loop
             .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
@@ -72427,25 +72754,56 @@ fn session_title(
         })
 }
 
-/// **The folder a files card or a files column taken from a pane is rooted at** (issue #28): the
-/// folder the pane is standing in ([`DualPlaneSession::standing_folder`] — its shell's last report,
-/// else the folder it was opened in), and the account's home only for a pane that has neither.
+/// **The folder a files card or a files column taken from a pane is rooted at** (issue #28,
+/// T-CWD-FROM-PROCESS): the folder the pane is standing in ([`LeafSession::folder`] — its shell's
+/// last report, else its shell process's folder, else the folder it was opened in), and the
+/// account's home only when none of those can be said — which the root carries, so the card and
+/// the column say "Folder unknown" rather than showing a home folder as the pane's.
 ///
 /// One reader for both doors, the folder button's card ([`Runtime::trigger_root`]) and
-/// `Ctrl+Shift+B` ([`Runtime::files_root_for_new_pane`]). The report alone is not enough: a pane
-/// opened in a profile's fixed folder has none until its shell's first prompt, and none for its
-/// whole life when the shell does not report, while its own tab is already named after the folder
-/// it stands in.
+/// `Ctrl+Shift+B` ([`Runtime::files_root_for_new_pane`]). `None` is no pane to ask.
 fn files_root_of(
-    session: Option<&DualPlaneSession>,
+    folder: Option<pane_folder::PaneFolder>,
     environment: &dyn bt_pty::ShellEnvironment,
-) -> String {
-    session
-        .and_then(DualPlaneSession::standing_folder)
-        .map(Path::to_path_buf)
-        .or_else(|| profiles::home_directory(environment))
-        .map(|folder| folder.display().to_string())
-        .unwrap_or_default()
+) -> FilesRoot {
+    match folder.and_then(pane_folder::PaneFolder::into_folder) {
+        Some(folder) => FilesRoot::known(folder.display().to_string()),
+        None => FilesRoot {
+            root: profiles::home_directory(environment)
+                .map(|home| home.display().to_string())
+                .unwrap_or_default(),
+            folder_unknown: true,
+        },
+    }
+}
+
+/// **What a files foot hangs on its right hand for `state`'s root**: "Folder unknown" while the
+/// root is the account's home standing in for a pane's folder nobody could say
+/// ([`seats::FilesLeafState::folder_unknown`]), else nothing — a tree has no other standing fact.
+fn folder_foot_notice(state: &seats::FilesLeafState) -> &'static str {
+    if state.folder_unknown {
+        i18n::Text::FilesFolderUnknown.text()
+    } else {
+        ""
+    }
+}
+
+/// Where a files card or column opens, and whether that is the account's home standing in for a
+/// folder nobody could say ([`files_root_of`]).
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FilesRoot {
+    root: String,
+    folder_unknown: bool,
+}
+
+impl FilesRoot {
+    /// A folder the caller knows — a printed folder, a pane's own.
+    fn known(root: String) -> Self {
+        Self {
+            root,
+            folder_unknown: false,
+        }
+    }
 }
 
 /// The folder layer on its own: the working directory as one reader writes it,
@@ -73879,7 +74237,7 @@ mod floated_page_tests {
         // not allowed to overrule.
         assert!(
             summon.contains("self.app.quake.placement(&screen, settings)")
-                && summon.contains("stand_window_at("),
+                && summon.contains("self.window.window.stand_at(rect)"),
             "a summon does not state its own rectangle, or states it the one way \
              that a dpi seam is allowed to overrule:\n{summon}"
         );
@@ -73892,7 +74250,7 @@ mod floated_page_tests {
              another dpi lands at the ratio of the two:\n{summon}"
         );
         assert!(
-            summon.contains("set_window_topmost(native, true)"),
+            summon.contains("self.window.window.set_topmost(true)"),
             "the posture is not re-stated, so a window that has been hidden and \
              shown again may arrive behind what it was called over:\n{summon}"
         );
@@ -73939,7 +74297,7 @@ mod floated_page_tests {
         // Spelled in two halves because it was written before `needle!`, which
         // now records where the needle was written and excludes that
         // construction; the assembly is belt and braces until P18 unpicks it.
-        let dressed = concat!("dress_new_window", "(native)?;");
+        let dressed = concat!("dress_new_window", "()?;");
         assert_eq!(
             found(needle!(Pattern::text(dressed)), View::Raw).len(),
             2,
@@ -74047,11 +74405,8 @@ mod floated_page_tests {
             runtime_focus.contains("crate::take_owned_keyboard_focus(&self.window.window)"),
             "the runtime focus helper does not use its owned-window path: {runtime_focus}"
         );
-        let foreground = item_body(&ItemQuery::function("take_owned_keyboard_focus"));
-        assert!(
-            foreground.contains("bt_platform::hotkey::give_foreground_to(native_window(window)?)"),
-            "the foreground helper no longer uses the platform foreground door: {foreground}"
-        );
+        // That the helper gives the window the foreground through its door is
+        // `runtime::windows::tests::the_keyboard_is_taken_through_the_foreground_door`.
 
         let down = method_body("FolioApp", "dismiss_quake");
         let hide = down
@@ -75157,12 +75512,11 @@ fn window_surface_target(
 /// defect this ticket exists to make impossible, stated in the log rather than
 /// left to a screenshot.
 ///
-/// **The handle is asked of the host** ([`native_window`]), as every call outside the native
-/// backend's own doors asks it; `native_window_of` is the answer of `Arc<Window>`'s door, not a
-/// road of its own (`docs/ARCHITECTURE.md` §4.5).
+/// **Native construction**: the surface target is chosen for winit's own window, by the two
+/// constructors and the device-loss rebuild, so the handle is winit's ([`native_window_of`]).
 #[cfg(target_os = "macos")]
-fn folios_own_metal_view(window: &impl WindowHost) -> Result<*mut std::ffi::c_void> {
-    let native = native_window(window)?;
+fn folios_own_metal_view(window: &Window) -> Result<*mut std::ffi::c_void> {
+    let native = native_window_of(window)?;
     let view = bt_platform::surface_view(native).map_err(|error| anyhow!(error))?;
     let cleared = bt_platform::clear_surface_layers(native).map_err(|error| anyhow!(error))?;
     if cleared > 0 {
@@ -75199,12 +75553,8 @@ fn stand_the_window_at(
 
 fn install_theme_class_background(window: &impl WindowHost) {
     let opaque = bt_render::window_ground().alpha >= 1.0;
-    let installed = native_window(window).and_then(|native| {
-        bt_platform::install_window_class_background(native, opaque.then(background_rgb))
-            .map_err(|error| anyhow!(error))
-    });
-    if let Err(error) = installed {
-        eprintln!("BT_WINDOW backing colour: {error:#}");
+    if let Err(error) = window.set_class_background(opaque.then(background_rgb)) {
+        eprintln!("BT_WINDOW backing colour: {error}");
     }
 }
 
@@ -75455,8 +75805,11 @@ fn session_sidebar_mode(mode: seats::RailMode) -> SessionSidebarModeV1 {
 /// **The native window behind a winit window, named without naming a
 /// platform** (M1-1).
 ///
-/// The hinge of the whole startup path: fifty call sites reach
-/// `bt-platform` through this one function, and until M1-1 it answered an
+/// The hinge of the whole startup path: the native backend's doors
+/// (`window_seam`'s `impl WindowHost for Arc<Window>`) and the two native
+/// constructors reach `bt-platform` through this one function, and no door
+/// hands what it answers to the runtime (`docs/ARCHITECTURE.md` §4.5). Until
+/// M1-1 it answered an
 /// `HWND` or nothing at all — `RawWindowHandle::Win32` was the only arm, so on
 /// macOS, where `window_handle()` answers `RawWindowHandle::AppKit`, it refused
 /// every window this process could ever open
@@ -75473,12 +75826,6 @@ fn session_sidebar_mode(mode: seats::RailMode) -> SessionSidebarModeV1 {
 /// The third arm is not a defect to guard against but the honest answer for a
 /// platform with no window backend written yet: an error the caller reports,
 /// on exactly the path that already reports one.
-/// [`WindowHost::native_handle`]: the handle of whatever window the runtime is written over.
-fn native_window(window: &impl WindowHost) -> Result<bt_platform::NativeWindow> {
-    window.native_handle()
-}
-
-/// winit's window's own handle — [`WindowHost::native_handle`] for the product's window.
 fn native_window_of(window: &Window) -> Result<bt_platform::NativeWindow> {
     let handle = window
         .window_handle()
@@ -75497,7 +75844,7 @@ fn native_window_of(window: &Window) -> Result<bt_platform::NativeWindow> {
 }
 
 fn take_owned_keyboard_focus(window: &impl WindowHost) -> Result<()> {
-    if bt_platform::hotkey::give_foreground_to(native_window(window)?) {
+    if window.take_foreground() {
         Ok(())
     } else {
         Err(anyhow!("the window could not take the keyboard"))
@@ -75512,7 +75859,7 @@ fn restore_minimized_window(window: &impl WindowHost) -> Result<()> {
 
 fn bring_owned_window_forward(window: &impl WindowHost) -> Result<()> {
     restore_minimized_window(window)?;
-    if bt_platform::hotkey::give_foreground_to(native_window(window)?) {
+    if window.take_foreground() {
         Ok(())
     } else {
         Err(anyhow!("the window could not take the keyboard"))
@@ -75520,7 +75867,7 @@ fn bring_owned_window_forward(window: &impl WindowHost) -> Result<()> {
 }
 
 fn request_owned_window_close(window: &impl WindowHost) -> Result<()> {
-    bt_platform::request_window_close(native_window(window)?).map_err(|error| anyhow!(error))
+    window.request_close().map_err(|error| anyhow!(error))
 }
 
 fn minimize_owned_window(window: &impl WindowHost) -> Result<()> {
@@ -82403,7 +82750,7 @@ mod clipboard_path_tests {
                 "and it is addressed — tab, seat and shell — as it arrives (X-1)",
             ),
             (
-                ".and_then(bt_platform::pointer_position_in_window)",
+                "bt_platform::pointer_position_in_window(native)",
                 "and there is one door onto the platform's cursor in this window",
             ),
             (

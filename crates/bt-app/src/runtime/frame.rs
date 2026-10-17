@@ -9,7 +9,7 @@ use crate::{
     advance_periodic_deadline, apply_hover_marks, attention_ledger_deadline, chrome_over,
     chrome_tick_reuses_picture, dispatch_tab_decoration_tasks, earliest_named_deadline, files,
     foreground_program_deadline, git, hang_watch, hyperlink_activation, ime_outbound,
-    mark_leaf_painted, math_copy_window, native_window, present_diagnostics, present_gate, preview,
+    mark_leaf_painted, math_copy_window, present_diagnostics, present_gate, preview,
     pty_drain_says_nothing_new, pty_frame_is_unchanged, sample_window_place, seats, settings,
     settling, startup_poll_delay, take_math_worker_notice, toast, trace_sink,
     trace_unchanged_present, update, webhost,
@@ -977,10 +977,7 @@ impl<B: Backend> Runtime<'_, B> {
         state.attempted(&attempt);
         if self.app.trace_perf {
             hang_watch::during(hang_watch::Station::DiagnosticWrite, || {
-                let native = native_window(&self.window.window)
-                    .ok()
-                    .map(bt_platform::native_present_facts)
-                    .unwrap_or_default();
+                let native = self.window.window.present_facts();
                 trace_sink::stderr_line(
                     attempt.line(
                         native,
@@ -2535,7 +2532,7 @@ impl<B: Backend> Runtime<'_, B> {
             ));
         }
         let wake_deadline = wake.map(|(_, at)| at);
-        self.reap_exited_tabs()?;
+        self.reap_exited_tabs(now)?;
         Ok(wake_deadline)
     }
 }

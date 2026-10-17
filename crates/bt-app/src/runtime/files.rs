@@ -490,7 +490,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// only something to report.
     pub(in crate::runtime) fn seat_a_files_column(
         &mut self,
-        root: String,
+        root: crate::FilesRoot,
     ) -> Result<Option<SeatId>> {
         let metrics = self.seat_metrics();
         let Some(seat) = self.seats.add_files_pane(&metrics, None) else {
@@ -499,7 +499,8 @@ impl<B: Backend> Runtime<'_, B> {
         self.files.insert(
             seat,
             seats::FilesLeafState {
-                root,
+                root: root.root,
+                folder_unknown: root.folder_unknown,
                 ..seats::FilesLeafState::default()
             },
         );
@@ -759,7 +760,7 @@ impl<B: Backend> Runtime<'_, B> {
                 self.reroot_files_column(seat, &root)?;
                 self.mouse_trace(|| format!("show_folder_in_files_column leave=rerooted {seat:?}"));
             }
-            None => match self.seat_a_files_column(root.clone())? {
+            None => match self.seat_a_files_column(crate::FilesRoot::known(root.clone()))? {
                 Some(seat) => {
                     // The other door of the two, and the same gesture behind it:
                     // a reader pointed at a folder and got it. The re-rooting
@@ -787,11 +788,11 @@ impl<B: Backend> Runtime<'_, B> {
     /// one reader the folder button's card shares. Read through `sessions` by id
     /// rather than through the `Deref`, so this is answerable on a tab whose
     /// keyboard is somewhere unexpected.
-    fn files_root_for_new_pane(&self) -> String {
+    fn files_root_for_new_pane(&self) -> crate::FilesRoot {
         crate::files_root_of(
             self.sessions
                 .get(&self.focused_leaf)
-                .map(|leaf| &leaf.session),
+                .map(|leaf| leaf.folder(&crate::pane_folder::SystemProcessFolders)),
             &bt_pty::SystemShellEnvironment,
         )
     }
@@ -1090,7 +1091,8 @@ impl<B: Backend> Runtime<'_, B> {
                 shown == RevealedFoot::Column(*seat)
                     && now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK
             });
-            let root = self.window.tabs[active].files_state(*seat).root;
+            let state = self.window.tabs[active].files_state(*seat);
+            let root = state.root.clone();
             // An unrooted column has no path and nothing to reveal, so its strip
             // is a hairline and nothing else — the mock-up's foot with an empty
             // `${files.root}` in it.
@@ -1103,7 +1105,6 @@ impl<B: Backend> Runtime<'_, B> {
                 continue;
             };
             let path_box = seats::files_pane_geometry(rect, scale, segmented).foot_path;
-            let room = path_box[2] - path_box[0];
             // **The strip trades one phrase for the other over ninety
             // milliseconds** (the animation slice's second half). The receipt's
             // 1300ms hold is untouched — `revealed` above is the same clock it
@@ -1118,13 +1119,28 @@ impl<B: Backend> Runtime<'_, B> {
             tree.foot_dissolved = dissolved;
             // A receipt is a sentence, not a path; only the root is spelled the
             // way the rail above it spells one (§13.40).
-            let text = match said.as_deref() {
-                Some(said) => std::borrow::Cow::Borrowed(said),
-                None => home_shortened_path(&root),
-            };
+            let text = home_shortened_path(&root);
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
-            tree.foot_path = settings::ellipsized_left(&text, room, font, &mut measure);
+            // A folder nobody could say is said on the right hand, and the path gives up the
+            // width (`seats::dress_foot`, the rule every foot with a standing fact keeps; a
+            // receipt owns the strip alone).
+            let words: seats::FootWords = seats::dress_foot(
+                seats::FootDress {
+                    run: path_box,
+                    lead: &text,
+                    flash: said.as_deref(),
+                    notice: crate::folder_foot_notice(&state),
+                    cut: seats::LeadCut::Front,
+                    font_px: font,
+                    gap_px: seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX * scale,
+                    dissolved,
+                },
+                &mut measure,
+            );
+            tree.foot_path = words.lead;
+            tree.foot_notice = words.notice;
+            tree.foot_notice_width = words.notice_width;
         }
     }
 
@@ -2113,9 +2129,14 @@ impl<B: Backend> Runtime<'_, B> {
         let (geometry, _) = self.float_geometry_of(id)?;
         let scale = self.window.renderer.scale_factor() as f32;
         let motion = self.app.motion;
-        let (mode, root) = {
+        let (mode, root, notice) = {
             let win = self.window.float.drawn().find(|win| win.epoch == id)?;
-            (win.mode, win.files()?.files.root.clone())
+            let files = &win.files()?.files;
+            (
+                win.mode,
+                files.root.clone(),
+                crate::folder_foot_notice(files),
+            )
         };
         let palette = bt_render::chrome_palette();
         let mut quads = Vec::new();
@@ -2194,6 +2215,8 @@ impl<B: Backend> Runtime<'_, B> {
                     // and nothing here reads them.
                     foot_path: String::new(),
                     foot_revealed: false,
+                    foot_notice: String::new(),
+                    foot_notice_width: 0.0,
                 }
             };
             let hovered_row = match hover {
@@ -2244,11 +2267,8 @@ impl<B: Backend> Runtime<'_, B> {
         let revealed = said.is_some();
         // The torn-out tree's foot is the docked column's foot in a window of
         // its own, so it spells a root the same way (§13.40).
-        let root = match said.as_deref() {
-            Some(said) => std::borrow::Cow::Borrowed(said),
-            None => home_shortened_path(&root),
-        };
-        let (name, path) = {
+        let root = home_shortened_path(&root);
+        let (name, words): (String, seats::FootWords) = {
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
             (
@@ -2259,11 +2279,19 @@ impl<B: Backend> Runtime<'_, B> {
                     &mut measure,
                 ),
                 // B23: the foot is cut from the front, because the end of a path
-                // is the part that answers "where am I".
-                settings::ellipsized_left(
-                    &root,
-                    geometry.foot_path[2] - geometry.foot_path[0],
-                    foot_font,
+                // is the part that answers "where am I" — and gives up the width a
+                // folder nobody could say takes on its right hand.
+                seats::dress_foot(
+                    seats::FootDress {
+                        run: geometry.foot_path,
+                        lead: &root,
+                        flash: said.as_deref(),
+                        notice,
+                        cut: seats::LeadCut::Front,
+                        font_px: foot_font,
+                        gap_px: seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX * scale,
+                        dissolved: foot_dissolved,
+                    },
                     &mut measure,
                 ),
             )
@@ -2278,12 +2306,13 @@ impl<B: Backend> Runtime<'_, B> {
                 // pane will land.
                 mark: marks::ChromeMark::Folder,
                 title: &name,
-                path: &path,
+                path: &words.lead,
                 // A folder is not a buffer: there is no head read to be
-                // truncated and no save to refuse, so this foot's right hand is
-                // empty by construction rather than by this frame's luck.
-                notice: "",
-                notice_width: 0.0,
+                // truncated and no save to refuse. The one standing fact a tree
+                // can have is that its root is the home folder standing in for a
+                // folder nobody could say (`crate::folder_foot_notice`).
+                notice: &words.notice,
+                notice_width: words.notice_width,
                 dock_label: float_dock_label(),
                 dock_mark: marks::ChromeMark::DockLeft,
                 hover,

@@ -17,6 +17,8 @@ pub mod environment;
 /// The process-wide file-read ledger, `bt-effects`' (re-exported whole).
 pub use bt_effects::file_reads;
 pub mod foreground_program;
+/// The folder a process is standing in, read from outside it (T-CWD-FROM-PROCESS).
+pub mod process_folder;
 
 /// **The thread door** — one definition, in [`admission`], for every platform: a named thread in
 /// its band whose body is lent a [`admission::WorkerCtx`]. Re-exported here, where every caller

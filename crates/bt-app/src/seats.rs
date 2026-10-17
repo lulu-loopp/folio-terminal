@@ -10636,9 +10636,9 @@ pub fn build_chrome_for_tabs(
                         // the head's reason: a foot printing the file a *sibling*
                         // pane is showing is the same lie one strip lower.
                         SeatKind::Preview => preview_foot(placement.id),
-                        // A folder has no standing fact to state: truncation and
-                        // a save's refusal are both about a *buffer*, and a tree
-                        // holds none.
+                        // Truncation and a save's refusal are both about a
+                        // *buffer*, and a tree holds none; its one standing fact is
+                        // a root nobody could say (`FilesTreeContent::foot_notice`).
                         _ => files_tree.map(|tree| FootStrip {
                             path: tree.foot_path.as_str(),
                             // A band fills its strip and never hugs its text,
@@ -10647,8 +10647,8 @@ pub fn build_chrome_for_tabs(
                             path_width: 0.0,
                             revealed: tree.foot_revealed,
                             dissolved: tree.foot_dissolved,
-                            notice: "",
-                            notice_width: 0.0,
+                            notice: tree.foot_notice.as_str(),
+                            notice_width: tree.foot_notice_width,
                             web: false,
                             favicon: None,
                         }),
@@ -17418,6 +17418,11 @@ pub struct FilesTreeContent {
     /// clock is, and a painter that worked one of them out for itself would be a
     /// painter that can disagree with the words it was handed.
     pub foot_dissolved: f32,
+    /// The standing fact on the foot's right hand — "Folder unknown" for a root that is the home
+    /// folder standing in for a folder nobody could say (`crate::folder_foot_notice`), or empty —
+    /// with the width it draws, measured beside the renderer ([`dress_foot`]).
+    pub foot_notice: String,
+    pub foot_notice_width: f32,
 }
 
 /// **The open name editor, as one tree row has to draw it** (0.3).
@@ -22499,6 +22504,14 @@ pub struct FilesLeafState {
     /// more remote branches than local ones, and a column 240 pixels wide that
     /// opened on other people's work would be answering a question nobody asked.
     pub git_remotes_open: bool,
+    /// **Whether this root is the account's home standing in for a folder nobody could say**
+    /// (T-CWD-FROM-PROCESS): the pane it was opened from had reported no folder and its shell's
+    /// process could not be read (`crate::files_root_of`). The foot says "Folder unknown" while
+    /// it holds; choosing a root clears it (`crate::reroot_files_state`).
+    ///
+    /// Not on [`bt_persist::FilesLeafV1`]: it is a fact about how this root was arrived at in
+    /// this run, and a restored column's root is the root it was left on.
+    pub folder_unknown: bool,
 }
 
 impl Seats {
@@ -30581,6 +30594,8 @@ mod tests {
             focus_ring: false,
             foot_path: String::new(),
             foot_revealed: false,
+            foot_notice: String::new(),
+            foot_notice_width: 0.0,
         }
     }
 

@@ -16,59 +16,59 @@
 # through a listed door). A message with a run in it is a lost line continuation
 # and is repaired, never listed: end the line with `\` (`docs/CONVENTIONS.md` §五).
 #
-crates/bt-app/examples/video-probe.rs:398 the probe's caption: its fields spaced apart on purpose
+crates/bt-app/examples/video-probe.rs:389 the probe's caption: its fields spaced apart on purpose
 crates/bt-app/src/app_mouse_tests.rs:1547 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/clipboard_picture.rs:890 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/file_reads_source_tests.rs:632 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/focus_thumb.rs:3456 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/hang_watch.rs:3260 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
-crates/bt-app/src/hang_watch.rs:3264 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
-crates/bt-app/src/hang_watch.rs:3267 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
+crates/bt-app/src/hang_watch.rs:3254 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
+crates/bt-app/src/hang_watch.rs:3255 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
+crates/bt-app/src/hang_watch.rs:3258 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
 crates/bt-app/src/hang_watch.rs:3261 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
-crates/bt-app/src/hang_watch.rs:3276 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
-crates/bt-app/src/hang_watch.rs:3285 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
-crates/bt-app/src/hang_watch.rs:3294 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
-crates/bt-app/src/hang_watch.rs:3297 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
-crates/bt-app/src/hang_watch.rs:3302 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
-crates/bt-app/src/hang_watch.rs:3312 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
+crates/bt-app/src/hang_watch.rs:3270 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
+crates/bt-app/src/hang_watch.rs:3279 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
+crates/bt-app/src/hang_watch.rs:3288 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
+crates/bt-app/src/hang_watch.rs:3291 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
+crates/bt-app/src/hang_watch.rs:3296 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
+crates/bt-app/src/hang_watch.rs:3300 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
 crates/bt-app/src/hang_watch.rs:3306 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
-crates/bt-app/src/hang_watch.rs:3315 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
-crates/bt-app/src/hang_watch.rs:3347 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
-crates/bt-app/src/hang_watch.rs:4916 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
-crates/bt-app/src/hang_watch.rs:4921 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
-crates/bt-app/src/hang_watch.rs:4925 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
+crates/bt-app/src/hang_watch.rs:3309 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
+crates/bt-app/src/hang_watch.rs:3341 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
+crates/bt-app/src/hang_watch.rs:4910 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
+crates/bt-app/src/hang_watch.rs:4913 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
+crates/bt-app/src/hang_watch.rs:4915 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
 crates/bt-app/src/hang_watch.rs:4919 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
-crates/bt-app/src/hang_watch.rs:4930 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
-crates/bt-app/src/hang_watch.rs:4959 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
-crates/bt-app/src/hang_watch.rs:4969 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
+crates/bt-app/src/hang_watch.rs:4924 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
+crates/bt-app/src/hang_watch.rs:4953 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
+crates/bt-app/src/hang_watch.rs:4957 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
 crates/bt-app/src/hang_watch.rs:4963 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
-crates/bt-app/src/hang_watch.rs:4998 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
-crates/bt-app/src/hang_watch.rs:5001 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
+crates/bt-app/src/hang_watch.rs:4992 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
+crates/bt-app/src/hang_watch.rs:4995 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
 crates/bt-app/src/highlight.rs:721 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/highlight.rs:779 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/i18n.rs:8389 the command-line usage text: option descriptions aligned in one column
-crates/bt-app/src/i18n.rs:8406 the command-line usage text: option descriptions aligned in one column
+crates/bt-app/src/i18n.rs:8425 the command-line usage text: option descriptions aligned in one column
+crates/bt-app/src/i18n.rs:8442 the command-line usage text: option descriptions aligned in one column
 crates/bt-app/src/install_channel.rs:1442 a Scoop manifest sample: JSON indentation after an escaped line break
 crates/bt-app/src/install_channel.rs:1898 the Homebrew cask's own key alignment, as the cask writes it
-crates/bt-app/src/main.rs:34415 the chrome dump's tag column: `quad` padded to the width of the other tags
-crates/bt-app/src/main.rs:34529 the chrome dump's tag column: `quad` padded to the width of the other tags
-crates/bt-app/src/main.rs:60335 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:62934 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:63383 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:63383 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:63575 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:64501 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:79059 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:34674 the chrome dump's tag column: `quad` padded to the width of the other tags
+crates/bt-app/src/main.rs:34788 the chrome dump's tag column: `quad` padded to the width of the other tags
+crates/bt-app/src/main.rs:60586 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:63185 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:63634 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:63634 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:63826 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:64752 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:79395 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/preview_live.rs:1686 table fixture: each cell padded to its column
 crates/bt-app/src/preview_select.rs:777 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/preview.rs:11450 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:11451 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:11454 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:11455 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:12769 tab expansion's expected columns
-crates/bt-app/src/preview.rs:12772 tab expansion's expected columns
-crates/bt-app/src/preview.rs:18341 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/preview.rs:18368 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/preview.rs:11682 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:11683 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:11686 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:11687 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:13001 tab expansion's expected columns
+crates/bt-app/src/preview.rs:13004 tab expansion's expected columns
+crates/bt-app/src/preview.rs:18573 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/preview.rs:18600 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/profiles.rs:27206 the spacing between the arguments is the input under test
 crates/bt-app/src/psreadline.rs:2894 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/psreadline.rs:3401 a help-text sample: the indentation after an escaped line break is the text's own
@@ -109,17 +109,17 @@ crates/bt-detect/tests/strand_lines.rs:44 terminal screen fixture: the columns a
 crates/bt-detect/tests/strand_lines.rs:49 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-detect/tests/strand_lines.rs:54 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-detect/tests/strand_lines.rs:59 terminal screen fixture: the columns are where the terminal draws them
-crates/bt-platform/src/lib.rs:20722 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-platform/src/lib.rs:20774 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-platform/src/lib.rs:21177 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-platform/src/lib.rs:21489 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-platform/src/lib.rs:21873 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-platform/src/lib.rs:22079 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-platform/src/lib.rs:20654 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-platform/src/lib.rs:20706 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-platform/src/lib.rs:21109 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-platform/src/lib.rs:21421 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-platform/src/lib.rs:21803 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-platform/src/lib.rs:22009 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-platform/src/macos_update_mount_tests.rs:13 recorded `hdiutil` output: its columns as the tool prints them
 crates/bt-platform/src/macos_update_mount_tests.rs:26 recorded `hdiutil` output: its columns as the tool prints them
 crates/bt-platform/src/macos_update_mount_tests.rs:141 recorded `hdiutil` output: its columns as the tool prints them
 crates/bt-platform/tests/macos_services.rs:230 the probe's listing: each path indented under the line that counts them
-crates/bt-pty/src/lib.rs:4065 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-pty/src/lib.rs:3985 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/src/declarations.rs:665 the spacing inside the predicate is the input under test
 crates/bt-source/src/declarations.rs:666 the spacing inside the predicate is the input under test
 crates/bt-source/src/manifest.rs:616 a manifest fixture: a trailing comment set off by spaces

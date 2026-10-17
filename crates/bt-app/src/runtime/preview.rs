@@ -34,26 +34,26 @@ use crate::{
     image_meta_sentence, image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_scale,
     image_zoom_settles, image_zoom_toggled, ime_owner, input, markdown_empty_page_offset,
     markdown_prose_composition, markdown_prose_paragraphs, markdown_runs, markdown_source_cell,
-    markdown_source_offset_at, marks, measure_preview_links, native_window, notice,
-    owe_sharpened_rasters, page_address_hand_off, page_destination, page_foot_flash,
-    page_foot_lead, page_source_file, peek_scale_task, picture_channel_owner, picture_errand,
-    picture_files_of, pictures_awaited_by, pictures_need_handing_over, place_preview_math,
-    preedit_caret_byte, present_diagnostics, preview, preview_block_bar_at, preview_block_wheel,
-    preview_body_bar, preview_caret_prose, preview_caret_row, preview_copies_on_select,
-    preview_document_height, preview_document_key, preview_document_max_scroll, preview_edit,
-    preview_edit_bands, preview_image_placement, preview_link_activation,
-    preview_link_answers_a_press, preview_live, preview_open_externally_label, preview_open_lane,
-    preview_opened_label, preview_page_browser_hand_off, preview_press,
-    preview_press_opens_its_link, preview_provenance, preview_rail_tip_text, preview_select,
-    preview_selection_bands, preview_tab_index_among, preview_text, preview_text_box_at,
-    preview_text_boxes, preview_text_grain, preview_trace, preview_viewport, preview_watch,
-    preview_wide_blocks, preview_wrap, preview_wrap_columns, profiles, resolve_document_pictures,
-    revealable_preview_file, scroll_bar_layer, scrollback_quota, seats, settings, settle_attention,
-    shown_address, source_opens_as_a_page, step_preview_caret_by_row, strip_animation_tick_is_due,
-    surface_pixels, surface_subject_of, surface_takes_image_zoom, switcher_rows, tab_owes_frame,
-    tab_trailing_targets, table_block, text_field, tick_owes_a_present, toast, tooltip, trace_sink,
-    video_frame_texture_key, video_seat, video_still_destination, viewport_of_rect, visible_range,
-    webhost, webnav, wheel_points_sideways, window_taskbar_progress, write_terminal_clipboard_text,
+    markdown_source_offset_at, marks, measure_preview_links, notice, owe_sharpened_rasters,
+    page_address_hand_off, page_destination, page_foot_flash, page_foot_lead, page_source_file,
+    peek_scale_task, picture_channel_owner, picture_errand, picture_files_of, pictures_awaited_by,
+    pictures_need_handing_over, place_preview_math, preedit_caret_byte, present_diagnostics,
+    preview, preview_block_bar_at, preview_block_wheel, preview_body_bar, preview_caret_prose,
+    preview_caret_row, preview_copies_on_select, preview_document_height, preview_document_key,
+    preview_document_max_scroll, preview_edit, preview_edit_bands, preview_image_placement,
+    preview_link_activation, preview_link_answers_a_press, preview_live,
+    preview_open_externally_label, preview_open_lane, preview_opened_label,
+    preview_page_browser_hand_off, preview_press, preview_press_opens_its_link, preview_provenance,
+    preview_rail_tip_text, preview_select, preview_selection_bands, preview_tab_index_among,
+    preview_text, preview_text_box_at, preview_text_boxes, preview_text_grain, preview_trace,
+    preview_viewport, preview_watch, preview_wide_blocks, preview_wrap, preview_wrap_columns,
+    profiles, resolve_document_pictures, revealable_preview_file, scroll_bar_layer,
+    scrollback_quota, seats, settings, settle_attention, shown_address, source_opens_as_a_page,
+    step_preview_caret_by_row, strip_animation_tick_is_due, surface_pixels, surface_subject_of,
+    surface_takes_image_zoom, switcher_rows, tab_owes_frame, tab_trailing_targets, table_block,
+    text_field, tick_owes_a_present, toast, tooltip, trace_sink, video_frame_texture_key,
+    video_seat, video_still_destination, viewport_of_rect, visible_range, webhost, webnav,
+    wheel_points_sideways, window_taskbar_progress, write_terminal_clipboard_text,
 };
 use crate::{LeafView, TextScale};
 use anyhow::Context;
@@ -7807,6 +7807,29 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 
+    /// **Every dirty buffer of this window's tabs handed to the storage worker,
+    /// for a shut answered `Save all`** (S-6b): each as a press on it would hand
+    /// it ([`preview::PreviewPool::save_for_a_shut`]) — the window thread writes
+    /// nothing — its answer said on the pane of its tab that shows its file, and
+    /// a refusal at the hand-over said there now. A buffer no pane of its tab
+    /// shows is said on no surface: if it does not land, the window's card names
+    /// it (`Runtime::settle_close_wait`).
+    pub(in crate::runtime) fn save_every_dirty_preview(&mut self) {
+        let refused = self.app.preview_saves.save_a_window_for_a_shut(self.window);
+        let now = Instant::now();
+        for (surface, source, why) in refused {
+            let still_shows_it = self
+                .preview_buffer_on(surface)
+                .is_some_and(|buffer| buffer.source() == &source);
+            if still_shows_it {
+                self.preview_pane_mut(surface).say(Some((
+                    preview::save_notice(preview::SaveOutcome::Failed(why)),
+                    now,
+                )));
+            }
+        }
+    }
+
     /// **The storage worker's answers about preview saves, heard by this
     /// window's buffers** (S-6a): each answer goes to the buffer that asked, if
     /// one of this window's tabs holds it ([`preview::PreviewSaves::deliver`]),
@@ -13906,10 +13929,7 @@ impl<B: Backend> Runtime<'_, B> {
             hang_watch::during(hang_watch::Station::DiagnosticWrite, || {
                 // Native observations are taken only once a line is due. The
                 // attention heuristic never decides visibility for this diagnostic.
-                let native = native_window(&self.window.window)
-                    .ok()
-                    .map(bt_platform::native_present_facts)
-                    .unwrap_or_default();
+                let native = self.window.window.present_facts();
                 let text = state.line(
                     u64::from(self.window.window.id()),
                     now,
@@ -14122,6 +14142,48 @@ impl<B: Backend> Runtime<'_, B> {
 #[cfg(test)]
 #[path = "preview_tests.rs"]
 mod tests;
+
+/// **A shut's `Save all`, done by the two owners of what it touches** (S-6b round 3): the desk
+/// hands itself to the window ([`preview::PreviewSaves::save_a_window_for_a_shut`]), and the
+/// window walks its own tabs ([`WindowRuntime::save_every_dirty_preview`]) — so neither the
+/// application's desk nor the window's tabs is lent out of its owner.
+impl preview::PreviewSaves {
+    /// **Every dirty buffer of `window` handed to this desk, for a shut answered `Save all`**:
+    /// the refusals made at the hand-over, each with the surface to say it on.
+    fn save_a_window_for_a_shut<B: Backend>(
+        &mut self,
+        window: &mut WindowRuntime<B>,
+    ) -> Vec<(PreviewSurface, preview::PreviewSource, String)> {
+        window.save_every_dirty_preview(self)
+    }
+}
+
+impl<B: Backend> WindowRuntime<B> {
+    /// **This window's tabs, each one's dirty buffers handed to `saves`** as a press on each
+    /// would hand it ([`preview::PreviewPool::save_for_a_shut`]); a buffer is said on the pane
+    /// of its tab that shows its file, or on no surface. Answers the refusals made at the
+    /// hand-over.
+    fn save_every_dirty_preview(
+        &mut self,
+        saves: &mut preview::PreviewSaves,
+    ) -> Vec<(PreviewSurface, preview::PreviewSource, String)> {
+        let mut refused = Vec::new();
+        for tab in self.tabs.iter_mut() {
+            let shown: Vec<(PreviewSurface, preview::PreviewSource)> = tab
+                .preview_panes
+                .iter()
+                .filter_map(|(surface, pane)| pane.source().map(|source| (surface, source.clone())))
+                .collect();
+            refused.extend(tab.preview_pool.save_for_a_shut(saves, |source| {
+                shown
+                    .iter()
+                    .find(|(_, showing)| showing == source)
+                    .map_or(PreviewSurface::Peek, |(surface, _)| *surface)
+            }));
+        }
+        refused
+    }
+}
 
 /// **The preview's saves on the storage worker, as the application holds them**
 /// (S-6a) — written here and nowhere else: the press hands a request over
