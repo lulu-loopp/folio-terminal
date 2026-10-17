@@ -12093,19 +12093,18 @@ mod tests {
     ) -> (Vec<ProfileInstallOutcome>, Vec<String>) {
         let window = winit::window::WindowId::from(41_u64);
         let (said, lines) = std::sync::mpsc::channel::<String>();
-        let started = profile_runtime::start_click(
-            &crate::lane::Executor::scripted(std::sync::Arc::new(crate::lane::Gate::default())),
-            "powershell-profile-click-suite",
+        let (filed, ends) = profile_runtime::click_answer(
+            window,
             "the click suite's worker",
             move |line| said.send(line.to_owned()).unwrap(),
-            window,
             unfinished,
-            move |_, filed| {
+        );
+        crate::lane::Executor::scripted(std::sync::Arc::new(crate::lane::Gate::default()))
+            .start_worker("powershell-profile-click-suite", ends, move |_| {
                 filed.file(answer);
                 panic!("the click suite fails this worker after it answered, on purpose");
-            },
-        );
-        assert!(started, "the worker started");
+            })
+            .expect("the worker started");
         let said = lines.iter().collect::<Vec<_>>();
         let answers = take_profile_installs();
         let owed = profile_installs_for(&answers, window).cloned().collect();

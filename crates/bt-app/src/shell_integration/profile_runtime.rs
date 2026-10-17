@@ -722,33 +722,29 @@ impl ClickAnswer {
     }
 }
 
-/// **Start one click's worker** (Enable or Undo) by `executor`, named `name`, its end said as
-/// `what` in `say`; `true` when it started. `body` files the click's answer through the
-/// [`ClickAnswer`] it is lent; a start the door refused, or a body that ended in a panic before it
-/// filed one, is answered by `unfinished` with [`unfinished_change`]'s sentence.
-pub(super) fn start_click(
-    executor: &crate::lane::Executor,
-    name: &'static str,
+/// **One click's answer and the end that answers it when the worker does not** (Enable or
+/// Undo): the worker files the click's answer through the [`ClickAnswer`]; a start the door
+/// refused, or a body that ended in a panic before it filed one, is said as `what` in `say` and
+/// answered by `unfinished` with [`unfinished_change`]'s sentence. The worker is started with the
+/// end by its caller, under the thread's own name.
+pub(super) fn click_answer(
+    window: winit::window::WindowId,
     what: &'static str,
     say: impl Fn(&str) + Send + Sync + 'static,
-    window: winit::window::WindowId,
     unfinished: fn(String) -> ProfileInstallOutcome,
-    body: impl FnOnce(&bt_platform::admission::WorkerCtx, &ClickAnswer) + Send + 'static,
-) -> bool {
+) -> (
+    std::sync::Arc<ClickAnswer>,
+    std::sync::Arc<impl crate::lane::Ends + 'static>,
+) {
     let answer = std::sync::Arc::new(ClickAnswer {
         window,
         filed: std::sync::atomic::AtomicBool::new(false),
     });
     let ended = std::sync::Arc::clone(&answer);
-    executor
-        .start_worker(
-            name,
-            crate::lane::Answered::new(what, say, move |end| {
-                ended.file(unfinished(unfinished_change(end).text().to_owned()));
-            }),
-            move |worker| body(worker, &answer),
-        )
-        .is_ok()
+    let ends = crate::lane::Answered::new(what, say, move |end| {
+        ended.file(unfinished(unfinished_change(end).text().to_owned()));
+    });
+    (answer, ends)
 }
 
 /// **Undo of one click**: the click's edit taken back, then what its write brought into existence
@@ -816,28 +812,31 @@ pub(crate) fn start_profile_install(
     seen: Option<ProfileRevision>,
     window: winit::window::WindowId,
 ) -> bool {
-    start_click(
-        executor,
-        "powershell-profile-install",
+    let (answer, ends) = click_answer(
+        window,
         "the PowerShell profile install",
         say,
-        window,
         ProfileInstallOutcome::Refused,
-        move |worker, answer| match install_for_program(worker, &program, &arguments, seen.as_ref())
-        {
-            Ok((edit, written)) => {
-                answer.file(match edit {
-                    Some(edit) => ProfileInstallOutcome::Installed {
-                        program: program.clone(),
-                        edit,
-                    },
-                    None => ProfileInstallOutcome::Present,
-                });
-                written.publish(&program);
-            }
-            Err(error) => answer.file(ProfileInstallOutcome::Refused(error.to_string())),
-        },
-    )
+    );
+    executor
+        .start_worker(
+            "powershell-profile-install",
+            ends,
+            move |worker| match install_for_program(worker, &program, &arguments, seen.as_ref()) {
+                Ok((edit, written)) => {
+                    answer.file(match edit {
+                        Some(edit) => ProfileInstallOutcome::Installed {
+                            program: program.clone(),
+                            edit,
+                        },
+                        None => ProfileInstallOutcome::Present,
+                    });
+                    written.publish(&program);
+                }
+                Err(error) => answer.file(ProfileInstallOutcome::Refused(error.to_string())),
+            },
+        )
+        .is_ok()
 }
 
 /// **Undo of one click, for the window `window`**: started at the thread door, below normal, and
@@ -868,14 +867,14 @@ pub(crate) fn start_profile_install_undo(
     edit: ProfileEdit,
     window: winit::window::WindowId,
 ) -> bool {
-    start_click(
-        executor,
-        "powershell-profile-install-undo",
+    let (answer, ends) = click_answer(
+        window,
         "the PowerShell profile Undo",
         say,
-        window,
         ProfileInstallOutcome::UndoRefused,
-        move |worker, answer| {
+    );
+    executor
+        .start_worker("powershell-profile-install-undo", ends, move |worker| {
             let data = persist::storage_dir();
             match undo_profile_install(&edit, &data) {
                 // Answered before the observation that follows it: the Undo is done, and a
@@ -897,8 +896,8 @@ pub(crate) fn start_profile_install_undo(
                 }
                 Err(error) => answer.file(ProfileInstallOutcome::UndoRefused(error.to_string())),
             }
-        },
-    )
+        })
+        .is_ok()
 }
 
 /// **The answers addressed to `window`**, oldest first — what the window owed them delivers; an
