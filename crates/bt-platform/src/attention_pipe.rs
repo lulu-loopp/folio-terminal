@@ -578,7 +578,8 @@ impl Drop for AttentionPipe {
             crate::door_skipped::say(
                 "the attention endpoint (`AttentionPipe`)",
                 "its retire door",
-                "its listener was told to stop and let go of, and its stop event is the                  process's to close",
+                "its listener was told to stop and let go of, and its stop event is the \
+                 process's to close",
             );
         }
     }
