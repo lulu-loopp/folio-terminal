@@ -4733,13 +4733,11 @@ const JOIN_WITHIN: &str = "bt-pty crate::join_within";
 /// `thiserror`'s `#[from]` on `PtyError::Io`: a first-party `From` no byte holds, so an edge
 /// with no body to read.
 const PTY_ERROR_FROM: &str = "bt-pty crate::PtyError::from (generated)";
-const REQUEST: &str = "bt-platform crate::http::<Request as Drop>::drop [windows]";
-const SHARED_LOCKED: &str = "bt-platform crate::http::Shared::locked [windows]";
 /// **The exception table** (revision (e)3 as corrected by (f)2, (g), and (n)): the `Drop`s that may
 /// reach the vocabulary, each owed a repayment in `docs/plans/structural-debt.md`. A row leaves
 /// when its repayment lands (T-DROP-DOORS): the wait moves to the value's named door, its `Drop`
 /// keeps only what needs no wait, and the check below then holds that `Drop` like any other.
-const EXCEPTIONS: [Exception; 8] = [
+const EXCEPTIONS: [Exception; 7] = [
     Exception {
         row: "DirWatch (Windows)",
         drop: DIRWATCH_WINDOWS,
@@ -4768,14 +4766,10 @@ const EXCEPTIONS: [Exception; 8] = [
         row: "PtySession",
         drop: PTY,
     },
-    Exception {
-        row: "http::Request (Windows)",
-        drop: REQUEST,
-    },
 ];
 
 /// **Every pinned body**, walked from the exceptions: nothing a listed `Drop` reaches is exempt.
-const PINNED: [Pinned; 25] = [
+const PINNED: [Pinned; 23] = [
     Pinned {
         body: DIRWATCH_WINDOWS,
         edges: &[&[CLOSE_WINDOWS], &[CLOSE_WINDOWS], &[CLOSE_WINDOWS]],
@@ -4923,18 +4917,6 @@ const PINNED: [Pinned; 25] = [
         body: JOIN_WITHIN,
         edges: &[],
         effects: &[("JoinHandle::join", 1), ("thread::sleep", 1)],
-        leaves: &[],
-    },
-    Pinned {
-        body: REQUEST,
-        edges: &[&[SHARED_LOCKED]],
-        effects: &[("Condvar::wait_timeout", 1)],
-        leaves: &[],
-    },
-    Pinned {
-        body: SHARED_LOCKED,
-        edges: &[],
-        effects: &[],
         leaves: &[],
     },
 ];
