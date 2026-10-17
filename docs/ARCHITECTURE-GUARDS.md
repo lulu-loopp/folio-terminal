@@ -640,7 +640,7 @@ there.
 
 **The startup order is a shared function, not native code** (T-STARTUP-ORDER-SHARED):
 `crate::startup::begin` (the removal verbs, the command line, the hand-over) and
-`crate::startup::open_first_window` (the startup migration, the script's
+`crate::startup::resume` (the startup migration, the script's
 preparation, the window, the PowerShell questions, the first tab) are generic
 over the steps they are handed, and name no holder. `main` and `Runtime::create`
 hand them their steps as closures written in their own bodies, which is why the

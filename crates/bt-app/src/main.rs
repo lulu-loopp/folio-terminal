@@ -46501,11 +46501,11 @@ impl Runtime<'_, Native> {
         {
             eprintln!("{}", replacement.log_line());
         }
-        // **The first window, in `startup::open_first_window`'s order**: the startup migration and
+        // **The first window, in `startup::resume`'s order**: the startup migration and
         // the script's preparation, the window, the PowerShell questions, the first tab. What the
         // steps share is the program walk's answers, adopted by the window's title and by the
         // questions, and read by the first tab.
-        let (opened, first) = startup::open_first_window(
+        let (opened, first) = startup::resume(
             &mut profile_programs,
             startup::FirstWindow {
                 migration: shell_integration::begin_startup_migration,
@@ -77349,7 +77349,7 @@ fn main() -> Result<()> {
                 }
             }
         },
-        hand_over: |request: cli::CliRequest| {
+        claim: |request: cli::CliRequest| {
             // **This thread owns the window from here** (`bt_platform::admission`, ARCHITECTURE §5.1):
             // the role every owner-thread door is admitted on, in the phase `Starting` until the loop's
             // first turn. Below the six argv doors, whose processes never have a window, and above the

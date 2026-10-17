@@ -3,9 +3,9 @@
 //!
 //! A start is split in two by the event loop, and so is this order. [`begin`] is the process's
 //! half, which `fn main` calls before there is a loop: the removal verbs, the command line, the
-//! hand-over. [`open_first_window`] is the first window's half, which `Runtime::create` calls on
-//! the loop's first resume: the startup migration and the script's preparation before the
-//! window, the window, the PowerShell questions before the first tab, the first tab. The window's
+//! hand-over. [`resume`] is the first window's half, which `Runtime::create` calls when the loop
+//! first resumes: the startup migration and the script's preparation before the window, the
+//! window, the PowerShell questions before the first tab, the first tab. The window's
 //! half needs the running loop the process's half builds, so nothing can call it first.
 //!
 //! What each step does is the caller's, handed in as the step: the product's are the bodies
@@ -14,16 +14,16 @@
 //! the steps' order reads, and the one thing the product cannot do differently.
 
 /// **The process's steps, in the fields' order**: what [`begin`] is handed.
-pub(crate) struct FrontDoor<Removal, Parse, HandOver> {
+pub(crate) struct FrontDoor<Removal, Parse, Claim> {
     /// A removal verb answered (`--remove-shell-integration`, `--remove-explorer-menu`): its
     /// process leaves here, having opened nothing, written no settings and handed nothing over.
     pub(crate) removal: Removal,
     /// The command line read: a rescue door's line answered, every other line parsed, and a
     /// refusal answered on the console it was typed at.
     pub(crate) parse: Parse,
-    /// The parsed request handed to a Folio that already holds the data directory, or kept: what
-    /// comes back is what this process carries into its own run.
-    pub(crate) hand_over: HandOver,
+    /// The hand-over: the data directory's claim taken, or the parsed request handed to the Folio
+    /// that holds it and this process gone. What comes back is what it carries into its own run.
+    pub(crate) claim: Claim,
 }
 
 /// **The process's half of a start**: the removal verbs, then the command line, then the
@@ -37,10 +37,10 @@ pub(crate) fn begin<Request, Resident>(
 ) -> Resident {
     (door.removal)();
     let request = (door.parse)();
-    (door.hand_over)(request)
+    (door.claim)(request)
 }
 
-/// **The first window's steps, in the fields' order**: what [`open_first_window`] is handed.
+/// **The first window's steps, in the fields' order**: what [`resume`] is handed.
 pub(crate) struct FirstWindow<Migration, Script, Window, Questions, FirstTab> {
     /// The startup's observation of an older Folio line in a `$PROFILE`
     /// (`shell_integration::begin_startup_migration`), started on a worker nobody waits for.
@@ -64,9 +64,9 @@ pub(crate) struct FirstWindow<Migration, Script, Window, Questions, FirstTab> {
 /// they do is done by the time a PowerShell is born, or that birth prepares the script itself.
 /// The questions are asked before the first tab because a PowerShell row's pane composes its
 /// command line from the answer, and a question asked after the birth is one the birth could not
-/// have found answered. `answers` is what the steps share: the program walk's answers, which the
+/// have found answered in time. `answers` is what the steps share: the program walk's answers, which the
 /// window and the questions adopt and the first tab is born from.
-pub(crate) fn open_first_window<Answers, Window, Tabs, Error>(
+pub(crate) fn resume<Answers, Window, Tabs, Error>(
     answers: &mut Answers,
     steps: FirstWindow<
         impl FnOnce(),
@@ -99,13 +99,13 @@ mod tests {
 
     /// RED (T-STARTUP-ORDER-SHARED) — **a start runs its eight steps in one order**: a removal
     /// verb, the command line, the hand-over, the startup migration, the script's preparation, the
-    /// window, the PowerShell questions, the first tab — through `begin` and `open_first_window`,
+    /// window, the PowerShell questions, the first tab — through `begin` and `resume`,
     /// the functions `main` and `Runtime::create` call, with the headless start's stand-ins. The
     /// hand-over is handed what the parse read.
     ///
     /// MUTATIONS: swap the removal and the parse in `begin` — the command line is read before a
     /// removal verb is answered; swap the script's preparation and the window in
-    /// `open_first_window` — the window opens before the script is being prepared.
+    /// `resume` — the window opens before the script is being prepared.
     #[test]
     fn the_startup_steps_run_in_their_order() {
         let argv = r"folio --cwd D:\项目 --profile pwsh";
@@ -131,7 +131,7 @@ mod tests {
     /// window is titled and another before the questions; the questions are asked about both, and
     /// the first tab, made after them, is made from exactly those.
     ///
-    /// MUTATION: make the first tab before the questions in `open_first_window` — the first tab
+    /// MUTATION: make the first tab before the questions in `resume` — the first tab
     /// comes first, and it is made from the one answer the window adopted, never asked about the
     /// Windows PowerShell row it would be born without an answer for.
     #[test]

@@ -845,7 +845,7 @@ and the headless one alike.
   2026-10-17). The steps a launch takes before its first window has a tab are written once, in two
   generic functions every start goes through: `startup::begin`, which `main` calls before there is
   a loop — a removal verb (`--remove-shell-integration`, `--remove-explorer-menu`), the command
-  line (a rescue door's line, else the parse), the hand-over — and `startup::open_first_window`,
+  line (a rescue door's line, else the parse), the hand-over — and `startup::resume`,
   which `Runtime::create` calls on the loop's first resume — the startup migration and the script's
   preparation, the window, the PowerShell questions, the first tab. The split is the event loop's:
   the window's half runs on the loop the process's half builds. What each step does is handed in

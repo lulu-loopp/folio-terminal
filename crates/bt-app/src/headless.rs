@@ -1389,7 +1389,7 @@ pub(crate) fn key_down(
 }
 
 /// **One step of a start**, as the headless start records it (T-STARTUP-ORDER-SHARED): the
-/// steps `startup::begin` and `startup::open_first_window` take, each named once.
+/// steps `startup::begin` and `startup::resume` take, each named once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StartupStep {
     /// A removal verb answered.
@@ -1424,7 +1424,7 @@ pub(crate) struct HeadlessStart {
 }
 
 /// **A start with no process to leave and no window to open**: `startup::begin` and then, as the
-/// loop's first resume does, `startup::open_first_window`, each step a stand-in that records
+/// loop's first resume does, `startup::resume`, each step a stand-in that records
 /// itself. The command line is `argv`; the program walk answers `walk` one batch per look, as
 /// `programs_lane::take` hands over whatever has landed since the last — one look when the
 /// window is titled, one when the questions are asked.
@@ -1441,14 +1441,14 @@ pub(crate) fn start(argv: &str, walk: Vec<Vec<String>>) -> HeadlessStart {
             step(StartupStep::CommandLine);
             argv.to_owned()
         },
-        hand_over: |request: String| {
+        claim: |request: String| {
             step(StartupStep::HandOver);
             ran.borrow_mut().handed_over = Some(request.clone());
             request
         },
     });
     let mut answers = Vec::new();
-    let opened = crate::startup::open_first_window(
+    let opened = crate::startup::resume(
         &mut answers,
         crate::startup::FirstWindow {
             migration: || step(StartupStep::StartupMigration),
