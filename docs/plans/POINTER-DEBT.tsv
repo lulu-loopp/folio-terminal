@@ -288,9 +288,6 @@ crate::runtime::mouse::Runtime::mouse_input	N-B
 crate::runtime::mouse::Runtime::mouse_input	N-B
 crate::runtime::mouse::Runtime::mouse_input	N-B
 crate::runtime::mouse::Runtime::mouse_input	N-B
-crate::runtime::mouse::Runtime::mouse_input	N-B
-crate::runtime::mouse::Runtime::mouse_input	N-B
-crate::runtime::mouse::Runtime::mouse_input	N-P
 crate::runtime::mouse::Runtime::mouse_input	N-P
 crate::runtime::mouse::Runtime::mouse_input	N-P
 crate::runtime::mouse::Runtime::mouse_input	N-P
