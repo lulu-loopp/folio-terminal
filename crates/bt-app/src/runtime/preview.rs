@@ -10754,9 +10754,9 @@ impl<B: Backend> Runtime<'_, B> {
             self.hide_preview_picture(surface);
             return None;
         };
-        let Some(path) = self
+        let Some((path, asker)) = self
             .preview_picture(surface)
-            .map(|picture| picture.path.clone())
+            .map(|picture| (picture.path.clone(), picture.asker))
         else {
             self.hide_preview_picture(surface);
             return None;
@@ -11064,7 +11064,12 @@ impl<B: Backend> Runtime<'_, B> {
         }
         let task = peek_scale_task(&target, rgba, native_width, native_height);
         match self.app.math_worker.scale(ScaleWorkerRequest::Preview {
+            // The leaf is the focused shell's — a float has no seat, and what the leaf decides on
+            // the way home, the window and the tab that own the answer, is this tab's either way —
+            // so the picture's own number is what makes a second pane over the same file a second
+            // question, which neither displaces nor joins this one (T-SCALE-ADDRESS-PER-ASKER).
             leaf: self.focused_shell_address(),
+            asker,
             task,
         }) {
             // Asked — or its thread not started, which marks it asked too: a refit to a new size
@@ -13632,8 +13637,13 @@ impl<B: Backend> Runtime<'_, B> {
     /// later refit answer "already asked", so the picture never came back at
     /// all. The target tuple travels with the pane because it lives on it, which
     /// is why looking the asker up by it is a routing that a move cannot break.
+    ///
+    /// **And by the picture's own number** ([`crate::PictureAsker`]), which the answer carries
+    /// home: two panes over one picture at one size asked two questions, and each answer goes to
+    /// the picture that asked it (T-SCALE-ADDRESS-PER-ASKER).
     pub(in crate::runtime) fn complete_preview_scale(
         &mut self,
+        asker: crate::PictureAsker,
         scaled: bt_term::ScaledInlineImage,
     ) -> Result<()> {
         let delivered: PeekThumbnailTarget = (
@@ -13649,7 +13659,7 @@ impl<B: Backend> Runtime<'_, B> {
             .window
             .tabs
             .iter()
-            .find_map(|tab| tab.preview_panes.awaiting_scale(&delivered))
+            .find_map(|tab| tab.preview_panes.awaiting_scale(asker, &delivered))
         else {
             return Ok(());
         };
