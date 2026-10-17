@@ -39,7 +39,7 @@ pub const MODULE: &str = "PSReadLine";
 pub const VERSION: &str = "2.4.5";
 
 /// Folio's own manifest for the module, by its name in the module directory. Its bytes are
-/// `assets/psreadline/PSReadLine.psd1`; `build.rs` names that file in the generated table.
+/// `assets/psreadline/PSReadLine.psd1`; `build.rs` writes them into the module container, last.
 pub const MANIFEST: &str = "PSReadLine.psd1";
 
 /// **The artefact's name on disk**: the first twelve hex digits of [`PACKAGE_SHA256`]. Folio's
