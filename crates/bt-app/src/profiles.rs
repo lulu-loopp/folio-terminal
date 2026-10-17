@@ -4385,36 +4385,14 @@ pub fn capability_text_for_launch(
     program: Option<&Path>,
     powershell_integration: bool,
 ) -> crate::i18n::Text {
-    if door_of(profile, kind) == Integration::PowerShellOptIn {
-        let fallback =
-            power_shell_profile_fallback_for_launch(profile, program, powershell_integration);
-        if let Some(sentence) = fallback
-            .policy_cause()
-            .and_then(crate::shell_integration::PolicyCause::sentence)
-        {
-            return sentence;
-        }
-        match fallback {
-            crate::shell_integration::PowerShellProfileFallback::NotNeeded => {}
-            crate::shell_integration::PowerShellProfileFallback::Enabled => {
-                return crate::i18n::Text::CapPowerShellViaProfile;
-            }
-            crate::shell_integration::PowerShellProfileFallback::Constrained => {
-                return crate::i18n::Text::CapPowerShellConstrained;
-            }
-            crate::shell_integration::PowerShellProfileFallback::PolicyChangeable
-            | crate::shell_integration::PowerShellProfileFallback::PolicyManaged
-            | crate::shell_integration::PowerShellProfileFallback::PolicyProcess
-            | crate::shell_integration::PowerShellProfileFallback::PolicyLocation
-            | crate::shell_integration::PowerShellProfileFallback::Unreadable
-            | crate::shell_integration::PowerShellProfileFallback::Undetermined
-            | crate::shell_integration::PowerShellProfileFallback::Pending
-            | crate::shell_integration::PowerShellProfileFallback::Offer
-            | crate::shell_integration::PowerShellProfileFallback::NoProfile
-            | crate::shell_integration::PowerShellProfileFallback::Unsupported => {
-                return crate::i18n::Text::CapPowerShellNotProvided;
-            }
-        }
+    if door_of(profile, kind) == Integration::PowerShellOptIn
+        && let Some(sentence) = powershell_row_text(power_shell_profile_fallback_for_launch(
+            profile,
+            program,
+            powershell_integration,
+        ))
+    {
+        return sentence;
     }
     capability_of_parts(
         door_of(profile, kind),
@@ -4422,6 +4400,38 @@ pub fn capability_text_for_launch(
         crate::shell_integration::declares_hyperlinks(profile),
         false,
     )
+}
+
+/// **What a PowerShell opt-in row says for `fallback`**, the state its edition's observation and
+/// its own arguments decide; `None` when the argv carries the integration and the row says what
+/// its door gives ([`capability_of_parts`]).
+#[must_use]
+pub(crate) fn powershell_row_text(
+    fallback: crate::shell_integration::PowerShellProfileFallback,
+) -> Option<crate::i18n::Text> {
+    use crate::shell_integration::PowerShellProfileFallback as Fallback;
+    if let Some(sentence) = fallback
+        .policy_cause()
+        .and_then(crate::shell_integration::PolicyCause::sentence)
+    {
+        return Some(sentence);
+    }
+    match fallback {
+        Fallback::NotNeeded => None,
+        Fallback::Enabled => Some(crate::i18n::Text::CapPowerShellViaProfile),
+        Fallback::Constrained => Some(crate::i18n::Text::CapPowerShellConstrained),
+        Fallback::NotRun => Some(crate::i18n::Text::CapPowerShellCheckNotRun),
+        Fallback::PolicyChangeable
+        | Fallback::PolicyManaged
+        | Fallback::PolicyProcess
+        | Fallback::PolicyLocation
+        | Fallback::Unreadable
+        | Fallback::Undetermined
+        | Fallback::Pending
+        | Fallback::Offer
+        | Fallback::NoProfile
+        | Fallback::Unsupported => Some(crate::i18n::Text::CapPowerShellNotProvided),
+    }
 }
 
 fn power_shell_profile_fallback_for_launch(

@@ -10,9 +10,9 @@ use crate::{
     RenameClipboard, RenameExit, RenameVerdict, Runtime, Step, UserInputKind, composing_event_of,
     composition_ruling, diagnostics, file_menu_powers, git_graph, goto_tab_index, hang_watch,
     ime_caret_source, ime_commit_bytes, ime_cursor_area_of, ime_outbound, ime_owner, ime_report,
-    input, keyboard_owner_is_a_shell, keyhint, marks, menubar, native_window, paste_card_key,
-    popup_takes_the_key, preedit_caret_byte, profiles, quit, rename_key, rename_pastes, restore,
-    settings, settings_key_of, shortcuts, terminal_ime_cursor_area, toast, write_pty_input,
+    input, keyboard_owner_is_a_shell, keyhint, marks, menubar, paste_card_key, popup_takes_the_key,
+    preedit_caret_byte, profiles, quit, rename_key, rename_pastes, restore, settings,
+    settings_key_of, shortcuts, terminal_ime_cursor_area, toast, write_pty_input,
 };
 use anyhow::Result;
 use bt_layout::{Axis, SeatId};
@@ -214,6 +214,22 @@ impl<B: Backend> Runtime<'_, B> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// **The window lost the keyboard** — the keyboard's door for the blur, the
+    /// one place outside this module's own events that its two window facts are
+    /// written.
+    ///
+    /// The key-hint card is hidden and not spent: nothing was pressed, so a hand
+    /// that comes back still holding `Ctrl` is answered again. Nothing is drawn
+    /// here; the blur's own frame carries the card's going.
+    ///
+    /// The input method's context is no longer this window's. Nothing is
+    /// cancelled or synthesized: IMM32 may synchronously deliver a partial
+    /// commit during this transition, and the product decision is to accept it.
+    pub(crate) fn blurred(&mut self) {
+        self.window.key_hint.hide();
+        self.window.ime_active = false;
     }
 
     /// **Everything a shortcut verb does to the process**, whichever door it
@@ -2135,13 +2151,6 @@ impl<B: Backend> Runtime<'_, B> {
             || self.window.palette.is_some()
     }
 
-    fn ime_native_facts(&self) -> ime_report::NativeFacts {
-        native_window(&self.window.window)
-            .ok()
-            .map(bt_platform::ime_observation::snapshot)
-            .unwrap_or_default()
-    }
-
     fn emit_ime_observation(&self, reason: &str, facts: ime_report::NativeFacts) {
         let line = self.window.ime_report.line(
             reason,
@@ -2156,7 +2165,7 @@ impl<B: Backend> Runtime<'_, B> {
     }
 
     pub(crate) fn write_ime_observation(&self, reason: &str) {
-        self.emit_ime_observation(reason, self.ime_native_facts());
+        self.emit_ime_observation(reason, ime_native_facts(&self.window.window));
     }
 
     pub(crate) fn observe_ime_key(&mut self, event: &Keystroke, is_synthetic: bool) {
@@ -2185,11 +2194,29 @@ impl<B: Backend> Runtime<'_, B> {
             // Only the threshold candidate refreshes native facts, and no
             // oftener than the report's own interval. In particular an
             // English-mode reading at focus is not reused.
-            let facts = self.ime_native_facts();
+            let facts = ime_native_facts(&self.window.window);
             if self.window.ime_report.confirm(facts) {
                 self.emit_ime_observation("plain-text", facts);
             }
         }
+    }
+
+    /// **The "composition bracket is broken" line this event writes**, or none:
+    /// [`ime_report::Report::pairing`]'s line with the window it was seen on.
+    /// The window's native facts are read through [`ime_native_facts`] only when
+    /// a line will be written, at most [`ime_report::PAIRING_LINES_MAX`] times
+    /// in the life of the window.
+    pub(crate) fn ime_bracket_line(
+        &mut self,
+        kind: ime_report::ImeKind,
+        preedit_bytes: usize,
+    ) -> Option<String> {
+        let window = &self.window.window;
+        let line = self
+            .window
+            .ime_report
+            .pairing(kind, preedit_bytes, || ime_native_facts(window))?;
+        Some(format!("{line} window={:?}", window.id()))
     }
 
     /// A composition event, routed by [`ime_owner`].
@@ -2211,8 +2238,7 @@ impl<B: Backend> Runtime<'_, B> {
             Ime::Preedit(text, _) => text.len(),
             _ => 0,
         };
-        if let Some(line) = self.window.ime_report.pairing(kind, preedit_bytes) {
-            let line = format!("{line} window={:?}", self.window.window.id());
+        if let Some(line) = self.ime_bracket_line(kind, preedit_bytes) {
             diagnostics::note(&line);
             ime_report::TRACE.line(|| line);
         }
@@ -2417,3 +2443,21 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 }
+
+/// **The window's input-method facts, as the platform reads them now** — through
+/// the window seam's facts door ([`WindowHost::ime_facts`]), so a headless window
+/// answers what its test scripted and a native one reads the system.
+///
+/// **One named reading for every caller** — the bracket line (`ime_bracket_line`),
+/// the `IME observation` line (`write_ime_observation`) and the plain-text probe
+/// (`observe_ime_key`) — kept as a function of its own because it is the mutation
+/// point `runtime::keyboard::tests::a_restart_inside_a_live_composition_writes_the_windows_native_facts`
+/// names: a reading that goes round the door here answers default facts on a
+/// headless window, and that test goes red.
+fn ime_native_facts(window: &impl WindowHost) -> ime_report::NativeFacts {
+    window.ime_facts()
+}
+
+#[cfg(test)]
+#[path = "keyboard_tests.rs"]
+mod tests;

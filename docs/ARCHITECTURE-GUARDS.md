@@ -338,7 +338,12 @@ a path call `Trait::m` / `D::m` with `D: Trait`) into that trait's implementatio
 reached only through a trait object (the update job's `driver.prepare`) needs no list line. A
 trait is its identity — package, module path and name, resolved through `use` items, globs and
 re-exports by `bt_source::TraitResolver` — so two traits of one name (the macOS and the
-Windows `PreparePoint`) are never followed together. What is followed: the method of every
+Windows `PreparePoint`) are never followed together. Every trait the guard decides with — the traits a
+product `impl` block implements, a trait's supertraits, the traits a receiver's stated type or
+a bound names — comes from the resolver's checked API (`resolve_checked`,
+`supertraits_checked`, `implemented_checked`): a path chained past the resolver's hop limit
+fails the guard by name ("… chains past the resolver's hop limit — refused, never passed"),
+never read as "no trait" (a cycle among `use`s and globs names nothing more, and is no cutoff). What is followed: the method of every
 product `impl` of the trait, on every platform arm; the trait's default body, only for an
 impl that does not override it (or when there is no impl); and the trait's first-party
 supertraits, whose impls count only for types implementing the stated trait. The answer is the
