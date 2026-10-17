@@ -11,8 +11,8 @@ use crate::{
     float_git_page_shown, float_graph_hover, git, git_answer_notice, git_document_answer,
     git_document_question, git_full_path, git_graph, git_panel, git_roots_on_glass,
     git_surfaces_the_kernel_moved, git_surfaces_wanting_reread, graph_key_of, i18n, input,
-    markdown_gap_paragraph, marks, native_window, preview, profiles, restore, seats, settling,
-    text_field, toast, web_thumb,
+    markdown_gap_paragraph, marks, preview, profiles, restore, seats, settling, text_field, toast,
+    web_thumb,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -74,10 +74,8 @@ impl<B: Backend> Runtime<'_, B> {
     /// page the keyboard, and taking it away from them once per match count
     /// would be this window arguing with a click.
     pub(in crate::runtime) fn web_find_reported(&mut self, count: i32, active: i32) -> Result<()> {
-        if self.window.search.is_focused()
-            && let Ok(native) = native_window(&self.window.window)
-        {
-            let _ = bt_platform::take_keyboard_focus(native);
+        if self.window.search.is_focused() {
+            let _ = self.window.window.take_keyboard_focus();
         }
         if !self.window.search.report_engine_matches(count, active) {
             return Ok(());

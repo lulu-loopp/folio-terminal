@@ -6,8 +6,8 @@ use crate::{
     AttentionDelivery, NoticeHost, NoticeStrip, OVER_IN_PANE_TOP_FIRST, OverInPane, PointerTarget,
     PreviewSurface, Runtime, TaskbarFlash, UserInputKind, WindowRuntime, answer_attention_in,
     attention, attention_trace, emit_attention_lines, float, i18n, marks, merge_notice_card,
-    native_window, next_attention_stop, notice, notify, profiles, quit,
-    raise_cancelled_quit_card_on, seats, taskbar_lane, toast,
+    next_attention_stop, notice, notify, profiles, quit, raise_cancelled_quit_card_on, seats,
+    taskbar_lane, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -854,10 +854,8 @@ impl<B: Backend> Runtime<'_, B> {
                 }
             }
         }
-        if !flashes.is_empty()
-            && let Ok(native) = native_window(&self.window.window)
-        {
-            bt_platform::flash_window(native);
+        if !flashes.is_empty() {
+            self.window.window.flash();
             // **Kept with the number of the taskbar answer it was decided on** (ticket 62), so a
             // newer answer that says the bar hides itself can take it back.
             TaskbarFlash::record(
@@ -902,9 +900,7 @@ impl<B: Backend> Runtime<'_, B> {
         else {
             return Ok(());
         };
-        if let Ok(native) = native_window(&self.window.window) {
-            bt_platform::stop_flashing_window(native);
-        }
+        self.window.window.stop_flashing();
         self.observe_window_place();
         let place = self.window.observed_place;
         let window = &*self.window;

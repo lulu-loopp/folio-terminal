@@ -37,6 +37,13 @@ use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 use winit::event::WindowEvent;
 
+/// **Where the pointer is now, in a native window's own physical pixels** — the system's reading
+/// behind the native backend's `WindowHost::pointer_in_window` door, read here where every
+/// pointer read belongs; `None` where the platform will not say.
+pub(crate) fn pointer_in_native_window(native: bt_platform::NativeWindow) -> Option<(i32, i32)> {
+    bt_platform::pointer_position_in_window(native)
+}
+
 /// **Whether a window event is a pointer event** — the dispatcher's one
 /// question about the pointer, answered here so that it names no pointer kind
 /// of its own.

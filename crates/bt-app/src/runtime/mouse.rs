@@ -14,14 +14,13 @@ use crate::{
     a_right_press_is_on_the_pane_menus_head, answered_once, button_router_position, crumb_segments,
     drain_whole_units, files, files_row_activation, first_run, float, float_grasp, float_sizing_of,
     formula_tools, glass_allows_a_drop, hang_watch, image_zoom_notch, input, landing_for_aim,
-    live_viewport_mouse_hit, marks, mouse_trace, native_window, over_home_ground, palette,
-    platform_pointer_of, pointer_cursor, press_after_blur, press_files_node, press_pins_a_peek,
-    press_reaches_no_grid, press_spends_itself_closing, pressed_row_identity, profiles,
-    protocol_mouse_button, recoverable_wheel_scroll_amount, release_verdict, restore,
-    right_press_raises_terminal_menu, risen_frame, route_forwarded_mouse_button,
-    route_forwarded_mouse_motion, seats, settings, settling, toast, tooltip, update, upright_wheel,
-    web_page_cursor, websheet, wheel_axis, wheel_points_sideways, wheel_route, wheel_zoom_notches,
-    write_pty_input,
+    live_viewport_mouse_hit, marks, mouse_trace, over_home_ground, palette, platform_pointer_of,
+    pointer_cursor, press_after_blur, press_files_node, press_pins_a_peek, press_reaches_no_grid,
+    press_spends_itself_closing, pressed_row_identity, profiles, protocol_mouse_button,
+    recoverable_wheel_scroll_amount, release_verdict, restore, right_press_raises_terminal_menu,
+    risen_frame, route_forwarded_mouse_button, route_forwarded_mouse_motion, seats, settings,
+    settling, toast, tooltip, update, upright_wheel, web_page_cursor, websheet, wheel_axis,
+    wheel_points_sideways, wheel_route, wheel_zoom_notches, write_pty_input,
 };
 use crate::{TextSizeAim, TextStep, wheel_steps_text_size};
 use anyhow::Context;
@@ -5485,11 +5484,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// this drop landed, and a routing built on either would be a guess wearing
     /// a measurement's clothes.
     pub(in crate::runtime) fn platform_pointer_now(&self) -> Option<PhysicalPosition<f64>> {
-        platform_pointer_of(
-            native_window(&self.window.window)
-                .ok()
-                .and_then(bt_platform::pointer_position_in_window),
-        )
+        platform_pointer_of(self.window.window.pointer_in_window())
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {

@@ -631,12 +631,24 @@ build names from pieces. With all of these, every door of the seam the product
 implements is implemented in the seam (the headless backend is test-only and is
 not read).
 
-**What the guard does not hold**: the platform handle. `WindowHost::native_handle`
-and `CompositorDoor::platform_tree` hand generic code a `bt_platform` value that
-reaches the platform past every door — the call sites are listed in
-`ARCHITECTURE.md` §4.5, and moving them behind doors is
-T-NATIVE-HANDLE-BEHIND-THE-SEAM. A new use of either is a new crossing; say it
-there.
+**The platform handle stays behind the doors** (T-NATIVE-HANDLE-BEHIND-THE-SEAM,
+RULE C): code written for the window — an item with a backend parameter in
+scope, or whose generics, `where` clause or `impl Trait` (or `dyn`) arguments
+are bounded by a seam trait: a function over `&impl WindowHost`, a generic
+holder block's method, a trait's default body, a holder's declaration — names
+neither `bt_platform::NativeWindow` nor `bt_platform::Compositor`, in its
+signature, its body or a macro's tokens in it, and no door trait of the seam
+names either in its declaration. A name is followed to what it stands for through
+the body's `use` leaves, the module's own, `crate`/`self`/`super` paths and the
+module's globs (a glob of `bt_platform` opens both names) to a fixed point; one
+that does not settle is refused. Code written for no window — the web engine's
+host, a lane's executor, the platform's own glue — may name them: no door hands
+it a handle. The seam's own two sealed values, `webhost::SeatAddress` (the
+window's handle, read only by the engine) and `window_seam::PageTree` (the tree,
+walked only by the seam), are how a page reaches its window. When red, add the
+door the code needs to `WindowHost` (or `CompositorDoor`), with the
+`bt-platform` call in the native impl and a recorded `WindowEffect` (or a
+documented stand-in answer in `headless::PlatformAnswers`) in the headless one.
 
 **The startup order is a shared function, not native code** (T-STARTUP-ORDER-SHARED):
 `crate::startup::begin` (the removal verbs, the command line, the hand-over) and

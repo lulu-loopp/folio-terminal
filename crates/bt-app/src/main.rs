@@ -14707,7 +14707,7 @@ struct WindowRuntime<B: Backend = Native> {
     /// On the window and not on `App` for the reason every other Win32 bridge
     /// here is: a button belongs to an HWND, and a second window would need a
     /// second of these, not a share of this one.
-    taskbar: TaskbarMirror,
+    taskbar: TaskbarMirror<<B::Window as WindowHost>::Taskbar>,
     /// The DirectComposition tree this window's picture is published through
     /// (multiwindow slice A2 / web-preview slice 1).
     ///
@@ -29446,10 +29446,7 @@ fn next_attention_stop<T: Copy>(queue: &[(T, u64)], standing_on: Option<u64>) ->
 /// [`sample_window_place`].
 fn window_is_hidden(token: WaitToken<'_, doors::PlaceHidden>, window: &impl WindowHost) -> bool {
     let _ = token;
-    let Ok(native) = native_window(window) else {
-        return false;
-    };
-    bt_platform::is_window_minimized(native) || bt_platform::is_window_cloaked(native)
+    window.is_iconic() || window.is_cloaked()
 }
 
 /// **Ask the desktop where this window is, on the turn that is about to decide what the reader is
@@ -29532,10 +29529,7 @@ fn sample_window_place(
 /// [`sample_window_place`].
 fn window_is_exposed(token: WaitToken<'_, doors::PlaceExposure>, window: &impl WindowHost) -> bool {
     let _ = token;
-    let Ok(native) = native_window(window) else {
-        return true;
-    };
-    bt_platform::window_is_exposed(native)
+    window.is_exposed()
 }
 
 /// The pane a tab's `Awaiting` is about: **the oldest place it holds.**
@@ -30949,9 +30943,9 @@ fn window_taskbar_progress(
 /// progress. That is what makes the COM object **lazy**: a window that never
 /// sees an `OSC 9;4` never creates one, because the first reading is equal to
 /// the one already on screen.
-struct TaskbarMirror {
+struct TaskbarMirror<T> {
     /// Created on the first reading that is not `CLEARED`, and never before.
-    button: Option<bt_platform::Taskbar>,
+    button: Option<T>,
     /// What the button has been told. Not `Option`: see above.
     told: bt_platform::TaskbarProgress,
     /// Set once the shell has refused, so a machine with no taskbar to talk to
@@ -30961,7 +30955,7 @@ struct TaskbarMirror {
     refused: bool,
 }
 
-impl Default for TaskbarMirror {
+impl<T> Default for TaskbarMirror<T> {
     fn default() -> Self {
         Self {
             button: None,
@@ -30971,7 +30965,7 @@ impl Default for TaskbarMirror {
     }
 }
 
-impl TaskbarMirror {
+impl<T: TaskbarDoor> TaskbarMirror<T> {
     /// What the button has to be told for it to say `wanted`, or `None` when it
     /// already says it.
     ///
@@ -30994,7 +30988,11 @@ impl TaskbarMirror {
     /// mirror its own sessions onto its own button with no change here — the
     /// mirror is a `WindowRuntime` field precisely so there is one per window
     /// the day `window` becomes a map.
-    fn show(&mut self, window: &impl WindowHost, wanted: bt_platform::TaskbarProgress) {
+    fn show(
+        &mut self,
+        window: &impl WindowHost<Taskbar = T>,
+        wanted: bt_platform::TaskbarProgress,
+    ) {
         let Some(sending) = self.diff(wanted) else {
             return;
         };
@@ -31002,10 +31000,7 @@ impl TaskbarMirror {
             return;
         }
         if self.button.is_none() {
-            let built = native_window(window)
-                .map_err(|error| error.to_string())
-                .and_then(bt_platform::Taskbar::new);
-            match built {
+            match window.taskbar() {
                 Ok(button) => self.button = Some(button),
                 Err(error) => {
                     eprintln!("taskbar progress unavailable: {error}");
@@ -31450,7 +31445,7 @@ mod taskbar_progress_tests {
     /// `explorer.exe`. The recorder is what a shell would have received.
     #[test]
     fn only_a_changed_reading_reaches_the_shell() {
-        let mut mirror = TaskbarMirror::default();
+        let mut mirror = TaskbarMirror::<bt_platform::Taskbar>::default();
         let mut sent = Vec::new();
         for wanted in [
             // A window that has never seen a progress report must not create a
@@ -31491,7 +31486,7 @@ mod taskbar_progress_tests {
         // And the colour alone is a change even when the number is not: the two
         // `Error` readings above differ from `normal(31)` only in state, and the
         // gate has to notice the state.
-        let mut mirror = TaskbarMirror::default();
+        let mut mirror = TaskbarMirror::<bt_platform::Taskbar>::default();
         assert!(mirror.diff(normal(31)).is_some());
         assert!(
             mirror
@@ -45375,32 +45370,26 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
     // that was going to happen. Best-effort, like the taskbar's own subclass — a
     // window that cannot install it keeps exactly the behaviour this window had
     // before there was one.
-    let system_settings_watch = native_window(&window).ok().and_then(|native| {
+    let system_settings_watch = {
         let proxy = event_proxy.clone();
-        bt_platform::SystemSettingsWatch::install(
-            native,
-            Box::new(move |news| {
-                let _ = proxy.send_event(AppEvent::of_system_news(news));
-            }),
-        )
-        .ok()
-    });
+        window.watch_system_settings(Box::new(move |news| {
+            let _ = proxy.send_event(AppEvent::of_system_news(news));
+        }))
+    };
     // **The window's ear for the system ending the session** (B-ENDSESSION). The procedure the
     // system sends the question to holds the document and parks the news; the wake brings the
     // turn that writes it. One per window because the question is sent to every top-level window,
     // and one answer is as good as another: the hold is set once and the write is idempotent.
-    let session_end_watch = native_window(&window).ok().and_then(|native| {
+    let session_end_watch = {
         let proxy = event_proxy.clone();
-        bt_platform::session_end::SessionEndWatch::install(
-            native,
+        window.watch_session_end(
             Box::new(move |end| {
                 session_end::hear(end);
                 let _ = proxy.send_event(AppEvent::SessionEnding);
             }),
             Box::new(|| i18n::Text::ShutdownSavingLayout.text().to_owned()),
         )
-        .ok()
-    });
+    };
     // **A window is born knowing its display's rate**, before it has drawn
     // anything: the first journey a reader starts can be in the first second,
     // and a window that had to wait for a move or a scale change to find out
@@ -46125,7 +46114,7 @@ struct OpenedWindow {
     // unassembled, everything built on the window — the renderer and the device, the composition
     // tree, the pickers, the menu, the caret and the frame, each of which lets go of the window
     // handle when it drops — goes before the window itself, as the locals they were went in
-    // reverse. The window, its handle and its placement drop last.
+    // reverse. The window and its placement drop last.
     /// When the panes' phase began, for the startup trace.
     phase_started: Instant,
     pty_wake: PtyWakeSignal,
@@ -46146,7 +46135,6 @@ struct OpenedWindow {
     platform_chrome: bt_platform::PlatformChrome,
     parked_pans: runtime::pointer::touch::ParkedPans,
     custom_window_frame: bt_platform::CustomWindowFrame,
-    native: bt_platform::NativeWindow,
     ime_report: ime_report::Report,
     window: Arc<Window>,
     restored: Option<RestoredPlacement>,
@@ -46622,7 +46610,7 @@ impl Runtime<'_, Native> {
                     // reader who turned the row on does not watch their first `⌥a` compose
                     // an `å` before the setting is read.
                     set_option_as_alt(&window, settings_store.loaded().option_sends_alt);
-                    let native = native_window(&window)?;
+                    let native = native_window_of(&window)?;
                     // **The clipboard's owner window, told once here and never carried by a
                     // caller again** (M1-9). `OpenClipboard` wants a window and
                     // `NSPasteboard` does not, so the handle used to be a parameter on a
@@ -46834,7 +46822,6 @@ impl Runtime<'_, Native> {
                         restored,
                         window,
                         ime_report,
-                        native,
                         custom_window_frame,
                         parked_pans,
                         platform_chrome,
@@ -47027,7 +47014,6 @@ impl Runtime<'_, Native> {
             restored,
             window,
             ime_report,
-            native,
             custom_window_frame,
             parked_pans,
             platform_chrome,
@@ -47311,7 +47297,7 @@ impl Runtime<'_, Native> {
             app: &mut app,
             window: &mut window,
         };
-        runtime.dress_new_window(native)?;
+        runtime.dress_new_window()?;
         if trace_startup {
             // Named as what it is: this block is the native backend's, and the timings are the
             // native renderer's own.
@@ -50377,8 +50363,7 @@ impl<B: Backend> Runtime<'_, B> {
         if !self.app.acrylic_available {
             return Ok(false);
         }
-        let native = native_window(&self.window.window)?;
-        if let Err(error) = bt_platform::set_system_backdrop(native, enabled) {
+        if let Err(error) = self.window.window.set_backdrop(enabled) {
             eprintln!("recoverable system backdrop failure: {error}");
             return Ok(false);
         }
@@ -50397,7 +50382,6 @@ impl<B: Backend> Runtime<'_, B> {
     /// activates: switching the row on while another window has the keyboard
     /// must not steal it.
     fn apply_always_on_top(&mut self, enabled: bool) -> Result<bool> {
-        let native = native_window(&self.window.window)?;
         // **The one window the row does not reach** (§7.54). The preference is
         // still written — it is the application's, and every other window of this
         // process wears it — but the summoned terminal's own posture is not a
@@ -50406,7 +50390,7 @@ impl<B: Backend> Runtime<'_, B> {
         // arrives. Said here rather than by greying the row, because the row is
         // true of the program and this is one window declining to be its example.
         if !self.is_quake_window()
-            && let Err(error) = bt_platform::set_window_topmost(native, enabled)
+            && let Err(error) = self.window.window.set_topmost(enabled)
         {
             eprintln!("recoverable always-on-top failure: {error}");
             return Ok(false);
@@ -54306,14 +54290,9 @@ impl<B: Backend> Runtime<'_, B> {
         let Some((x, y)) = self.to_screen(position) else {
             return GlassHere::Unknown;
         };
-        let Ok(mine) = native_window(&self.window.window) else {
-            return GlassHere::Unknown;
-        };
-        match bt_platform::top_level_window_at(x.round() as i32, y.round() as i32) {
-            Some(under) if under == mine => GlassHere::Ours,
-            Some(_) => GlassHere::Theirs,
-            None => GlassHere::Unknown,
-        }
+        self.window
+            .window
+            .glass_at(x.round() as i32, y.round() as i32)
     }
 
     /// **Open the broker for a payload that is allowed to leave this window**
@@ -56896,22 +56875,10 @@ mod launch_landing_tests {
             "a tab opens and the window it opened in stays behind whatever the \
              reader was looking at:\n{landing}"
         );
+        // What raising does to the window — restored, then given the foreground — is
+        // `runtime::windows::tests::a_raised_window_is_restored_before_it_takes_the_foreground`.
         let raise = method_body("FolioApp", "raise_for_a_launch");
         assert!(raise.contains("bring_owned_window_forward(&runtime.window.window)"));
-        let forward = item_body(&ItemQuery::function("bring_owned_window_forward"));
-        let restore = forward
-            .find("restore_minimized_window(window)?")
-            .unwrap_or(usize::MAX);
-        let front = forward
-            .find("give_foreground_to(native_window(window)?)")
-            .unwrap_or(0);
-        assert!(
-            restore < front,
-            "an iconified window is asked to the front before it is restored, \
-             which on some configurations is a click answered twice and seen \
-             never:\n{forward}"
-        );
-        assert!(forward.contains("give_foreground_to(native_window(window)?)"));
     }
 
     /// **RED (U-36) — every launch the wire carries tells the update job what
@@ -58142,7 +58109,7 @@ mod hold_station_tests {
                 "WebVisual",
                 "compositor.attach_web_visual(",
             ),
-            ("WebSeat", "step", "WebInstall", "self.host.install("),
+            ("WebSeat", "step", "WebInstall", "tree.install(&mutself.host,"),
             ("WebSeat", "step", "WebFloor", "self.stand_on_the_floor("),
             ("WebSeat", "step", "WebNavigate", "self.host.navigate("),
         ] {
@@ -65196,13 +65163,6 @@ impl<B: Backend> FolioApp<B> {
                 into,
             )));
         }
-        let target_window = {
-            let target = self
-                .windows
-                .get_mut(into)
-                .expect("checked open one line above");
-            native_window(&target.window)?
-        };
         let Some((source, target)) = self.windows.two_mut(from, into) else {
             // `from != into`, both were open a statement ago, and nothing between
             // here and there can close a window.
@@ -65240,10 +65200,29 @@ impl<B: Backend> FolioApp<B> {
             .copied()
             .filter(|leaf| hosted_in_source.contains(leaf))
             .collect();
+        // **Each page's place on both sides, asked before anything moves**: the page's own name in
+        // the target window and, for the way home, in the source. A window that cannot name a place
+        // refuses the move here, where nothing has been touched.
+        let addressed: Vec<(LeafId, webhost::SeatAddress, webhost::SeatAddress)> = carrying
+            .iter()
+            .map(|leaf| {
+                // The tab travels whole and keeps its id, so the page's name in the target
+                // window is the name it already had.
+                let page = bt_platform::PageVisual {
+                    tab: leaf.tab.0,
+                    seat: leaf.seat.0,
+                };
+                Ok((
+                    *leaf,
+                    target.window.page_address(page)?,
+                    source.window.page_address(page)?,
+                ))
+            })
+            .collect::<Result<_, String>>()
+            .map_err(|error| anyhow!(error))?;
         let mut moved: Vec<(LeafId, webhost::RehostReport)> = Vec::new();
         let mut outcomes = Vec::new();
         let mut refused = None;
-        let source_window = native_window(&source.window)?;
         let front = source.tabs[index].seats.identity();
         // Two disjoint fields of one window, borrowed apart, because the page
         // being handed over and the tree it is being handed out of are both the
@@ -65253,22 +65232,15 @@ impl<B: Backend> FolioApp<B> {
             compositor: source_compositor,
             ..
         } = &mut *source;
-        for leaf in carrying {
+        let mut homes: Vec<webhost::SeatAddress> = Vec::new();
+        for &(leaf, there, home) in &addressed {
             let Some(page) = source_web.get_mut(&leaf) else {
                 continue;
             };
             let report = page.rehost(
                 source_compositor,
                 &target.compositor,
-                webhost::SeatAddress {
-                    // The tab travels whole and keeps its id, so the page's name
-                    // in the target window is the name it already had.
-                    page: bt_platform::PageVisual {
-                        tab: leaf.tab.0,
-                        seat: leaf.seat.0,
-                    },
-                    window: target_window,
-                },
+                there,
                 // **The keyboard goes with the tab**, and only for the pane the
                 // tab is standing on: a page in a background pane of a moved tab
                 // has not been pointed at by anybody.
@@ -65280,7 +65252,10 @@ impl<B: Backend> FolioApp<B> {
                     refused = Some(TransferRefusal::PageKept(leaf.seat, why));
                     break;
                 }
-                report => moved.push((leaf, report)),
+                report => {
+                    moved.push((leaf, report));
+                    homes.push(home);
+                }
             }
         }
         if let Some(refusal) = refused {
@@ -65292,18 +65267,12 @@ impl<B: Backend> FolioApp<B> {
             // and there is nothing further to do about it here: the tab is not
             // moving, and a page that ends up rebuilding rebuilds on the window
             // its tab is still in, which is where this puts its address.
-            for (leaf, _) in moved.iter().rev() {
+            for ((leaf, _), home) in moved.iter().zip(&homes).rev() {
                 if let Some(page) = source_web.get_mut(leaf) {
                     let _ = page.rehost(
                         &target.compositor,
                         source_compositor,
-                        webhost::SeatAddress {
-                            page: bt_platform::PageVisual {
-                                tab: leaf.tab.0,
-                                seat: leaf.seat.0,
-                            },
-                            window: source_window,
-                        },
+                        *home,
                         false,
                         &mut outcomes,
                     );
@@ -67565,7 +67534,8 @@ impl<B: Backend> FolioApp<B> {
             return Ok(());
         };
         runtime.show_quake_window()?;
-        let native = native_window(&runtime.window.window).ok();
+        let ours =
+            previous.is_some_and(|before| runtime.window.window.holds_the_foreground(before));
         if let Some(app) = self.app.as_mut() {
             // The window this one came down over is not remembered when it *is*
             // this one: a summon pressed while the window already had the
@@ -67577,8 +67547,7 @@ impl<B: Backend> FolioApp<B> {
             // the holder is an application, this same case is refused one step
             // earlier by `foreground_holder` answering `None` for ourselves, and
             // `Foreground::is_window` says so.
-            let previous =
-                previous.filter(|before| !native.is_some_and(|window| before.is_window(window)));
+            let previous = previous.filter(|_| !ours);
             app.quake.shown_over(previous);
         }
         if let Some(runtime) = self.runtime(id)
@@ -67699,12 +67668,13 @@ impl<B: Backend> FolioApp<B> {
         Ok(())
     }
 
-    /// **Which window this HWND is** (multiwindow slice F2).
+    /// **Which window owns the glass at this screen point** (multiwindow slice F2): the one that
+    /// answers it is its own ([`WindowHost::glass_at`]).
     ///
     /// [`Self::owner_of`]'s shape and its reason: linear over a handful of
     /// windows, on a lane that runs while a hand is actually crossing a boundary,
     /// and no second table to be kept in step with the first.
-    fn window_holding(&mut self, native: bt_platform::NativeWindow) -> Option<WindowId> {
+    fn window_at(&mut self, x: i32, y: i32) -> Option<WindowId> {
         (0..self.windows.len()).find_map(|index| {
             let id = self.windows.key_at(index)?;
             let window = self.windows.get_mut(id)?;
@@ -67713,7 +67683,7 @@ impl<B: Backend> FolioApp<B> {
             if window.leaving.is_some() {
                 return None;
             }
-            (native_window(&window.window).ok() == Some(native)).then_some(id)
+            (window.window.glass_at(x, y) == GlassHere::Ours).then_some(id)
         })
     }
 
@@ -67802,9 +67772,7 @@ impl<B: Backend> FolioApp<B> {
         {
             broker.cargo_pane = cargo_pane.clone();
         }
-        let under =
-            bt_platform::top_level_window_at(pointer.0.round() as i32, pointer.1.round() as i32)
-                .and_then(|native| self.window_holding(native));
+        let under = self.window_at(pointer.0.round() as i32, pointer.1.round() as i32);
         let aim = match under {
             Some(window) if window == source => BrokerAim::Home,
             Some(window) => {
@@ -73837,7 +73805,7 @@ mod floated_page_tests {
         // not allowed to overrule.
         assert!(
             summon.contains("self.app.quake.placement(&screen, settings)")
-                && summon.contains("stand_window_at("),
+                && summon.contains("self.window.window.stand_at(rect)"),
             "a summon does not state its own rectangle, or states it the one way \
              that a dpi seam is allowed to overrule:\n{summon}"
         );
@@ -73850,7 +73818,7 @@ mod floated_page_tests {
              another dpi lands at the ratio of the two:\n{summon}"
         );
         assert!(
-            summon.contains("set_window_topmost(native, true)"),
+            summon.contains("self.window.window.set_topmost(true)"),
             "the posture is not re-stated, so a window that has been hidden and \
              shown again may arrive behind what it was called over:\n{summon}"
         );
@@ -73897,7 +73865,7 @@ mod floated_page_tests {
         // Spelled in two halves because it was written before `needle!`, which
         // now records where the needle was written and excludes that
         // construction; the assembly is belt and braces until P18 unpicks it.
-        let dressed = concat!("dress_new_window", "(native)?;");
+        let dressed = concat!("dress_new_window", "()?;");
         assert_eq!(
             found(needle!(Pattern::text(dressed)), View::Raw).len(),
             2,
@@ -74005,11 +73973,8 @@ mod floated_page_tests {
             runtime_focus.contains("crate::take_owned_keyboard_focus(&self.window.window)"),
             "the runtime focus helper does not use its owned-window path: {runtime_focus}"
         );
-        let foreground = item_body(&ItemQuery::function("take_owned_keyboard_focus"));
-        assert!(
-            foreground.contains("bt_platform::hotkey::give_foreground_to(native_window(window)?)"),
-            "the foreground helper no longer uses the platform foreground door: {foreground}"
-        );
+        // That the helper gives the window the foreground through its door is
+        // `runtime::windows::tests::the_keyboard_is_taken_through_the_foreground_door`.
 
         let down = method_body("FolioApp", "dismiss_quake");
         let hide = down
@@ -75115,12 +75080,11 @@ fn window_surface_target(
 /// defect this ticket exists to make impossible, stated in the log rather than
 /// left to a screenshot.
 ///
-/// **The handle is asked of the host** ([`native_window`]), as every call outside the native
-/// backend's own doors asks it; `native_window_of` is the answer of `Arc<Window>`'s door, not a
-/// road of its own (`docs/ARCHITECTURE.md` §4.5).
+/// **Native construction**: the surface target is chosen for winit's own window, by the two
+/// constructors and the device-loss rebuild, so the handle is winit's ([`native_window_of`]).
 #[cfg(target_os = "macos")]
-fn folios_own_metal_view(window: &impl WindowHost) -> Result<*mut std::ffi::c_void> {
-    let native = native_window(window)?;
+fn folios_own_metal_view(window: &Window) -> Result<*mut std::ffi::c_void> {
+    let native = native_window_of(window)?;
     let view = bt_platform::surface_view(native).map_err(|error| anyhow!(error))?;
     let cleared = bt_platform::clear_surface_layers(native).map_err(|error| anyhow!(error))?;
     if cleared > 0 {
@@ -75157,12 +75121,8 @@ fn stand_the_window_at(
 
 fn install_theme_class_background(window: &impl WindowHost) {
     let opaque = bt_render::window_ground().alpha >= 1.0;
-    let installed = native_window(window).and_then(|native| {
-        bt_platform::install_window_class_background(native, opaque.then(background_rgb))
-            .map_err(|error| anyhow!(error))
-    });
-    if let Err(error) = installed {
-        eprintln!("BT_WINDOW backing colour: {error:#}");
+    if let Err(error) = window.set_class_background(opaque.then(background_rgb)) {
+        eprintln!("BT_WINDOW backing colour: {error}");
     }
 }
 
@@ -75413,8 +75373,11 @@ fn session_sidebar_mode(mode: seats::RailMode) -> SessionSidebarModeV1 {
 /// **The native window behind a winit window, named without naming a
 /// platform** (M1-1).
 ///
-/// The hinge of the whole startup path: fifty call sites reach
-/// `bt-platform` through this one function, and until M1-1 it answered an
+/// The hinge of the whole startup path: the native backend's doors
+/// (`window_seam`'s `impl WindowHost for Arc<Window>`) and the two native
+/// constructors reach `bt-platform` through this one function, and no door
+/// hands what it answers to the runtime (`docs/ARCHITECTURE.md` §4.5). Until
+/// M1-1 it answered an
 /// `HWND` or nothing at all — `RawWindowHandle::Win32` was the only arm, so on
 /// macOS, where `window_handle()` answers `RawWindowHandle::AppKit`, it refused
 /// every window this process could ever open
@@ -75431,12 +75394,6 @@ fn session_sidebar_mode(mode: seats::RailMode) -> SessionSidebarModeV1 {
 /// The third arm is not a defect to guard against but the honest answer for a
 /// platform with no window backend written yet: an error the caller reports,
 /// on exactly the path that already reports one.
-/// [`WindowHost::native_handle`]: the handle of whatever window the runtime is written over.
-fn native_window(window: &impl WindowHost) -> Result<bt_platform::NativeWindow> {
-    window.native_handle()
-}
-
-/// winit's window's own handle — [`WindowHost::native_handle`] for the product's window.
 fn native_window_of(window: &Window) -> Result<bt_platform::NativeWindow> {
     let handle = window
         .window_handle()
@@ -75455,7 +75412,7 @@ fn native_window_of(window: &Window) -> Result<bt_platform::NativeWindow> {
 }
 
 fn take_owned_keyboard_focus(window: &impl WindowHost) -> Result<()> {
-    if bt_platform::hotkey::give_foreground_to(native_window(window)?) {
+    if window.take_foreground() {
         Ok(())
     } else {
         Err(anyhow!("the window could not take the keyboard"))
@@ -75470,7 +75427,7 @@ fn restore_minimized_window(window: &impl WindowHost) -> Result<()> {
 
 fn bring_owned_window_forward(window: &impl WindowHost) -> Result<()> {
     restore_minimized_window(window)?;
-    if bt_platform::hotkey::give_foreground_to(native_window(window)?) {
+    if window.take_foreground() {
         Ok(())
     } else {
         Err(anyhow!("the window could not take the keyboard"))
@@ -75478,7 +75435,7 @@ fn bring_owned_window_forward(window: &impl WindowHost) -> Result<()> {
 }
 
 fn request_owned_window_close(window: &impl WindowHost) -> Result<()> {
-    bt_platform::request_window_close(native_window(window)?).map_err(|error| anyhow!(error))
+    window.request_close().map_err(|error| anyhow!(error))
 }
 
 fn minimize_owned_window(window: &impl WindowHost) -> Result<()> {

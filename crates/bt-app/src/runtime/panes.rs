@@ -18,14 +18,13 @@ use crate::{
     auto_split_axis, card_trace, clamp_into_body, closing_this_pane_closes_the_tab, cmdrail,
     column_notch, create_leaf_session, divider_drag_still_holds_its_pointer, end_leaves_of,
     file_menu_powers, files, float, float_dock_label, glyph_trace, hang_watch, host_screen_after,
-    leaf_resize_plan, marks, mouse_trace, native_window, notice, notify,
-    pages_that_move_with_their_panes, palette, pane_fade_veil_layers, panel_opacity,
-    persisted_pane_count, picture_channel_owner, popup_owner, present_diagnostics,
-    presentation_physical_size, preview, preview_image_placement, preview_trace, profiles,
-    rail_change_strands_its_popups, rail_is_searching, rail_overlay_layer, rail_zone_wants_open,
-    restated_scroll, restore, restore_row_seed, risen_frame, row_verb, schedule_leaf_grid_change,
-    scrollback_quota, seats, size_authority_for_rectangle, solve_seats, solve_tree, trace_sink,
-    trace_unchanged_present, video_seat, webhost,
+    leaf_resize_plan, marks, mouse_trace, notice, notify, pages_that_move_with_their_panes,
+    palette, pane_fade_veil_layers, panel_opacity, persisted_pane_count, picture_channel_owner,
+    popup_owner, present_diagnostics, presentation_physical_size, preview, preview_image_placement,
+    preview_trace, profiles, rail_change_strands_its_popups, rail_is_searching, rail_overlay_layer,
+    rail_zone_wants_open, restated_scroll, restore, restore_row_seed, risen_frame, row_verb,
+    schedule_leaf_grid_change, scrollback_quota, seats, size_authority_for_rectangle, solve_seats,
+    solve_tree, trace_sink, trace_unchanged_present, video_seat, webhost,
 };
 use anyhow::Context;
 use anyhow::{Result, anyhow};
@@ -3198,18 +3197,15 @@ impl<B: Backend> Runtime<'_, B> {
         let PreviewSurface::Seat(landed) = landing else {
             return;
         };
-        let address = webhost::SeatAddress {
-            page: bt_platform::PageVisual {
-                tab: landed.tab.0,
-                seat: landed.seat.0,
-            },
-            window: match native_window(&self.window.window) {
-                Ok(native) => native,
-                Err(error) => {
-                    eprintln!("BT_WEB {error}");
-                    return;
-                }
-            },
+        let address = match self.window.window.page_address(bt_platform::PageVisual {
+            tab: landed.tab.0,
+            seat: landed.seat.0,
+        }) {
+            Ok(address) => address,
+            Err(error) => {
+                eprintln!("BT_WEB {error}");
+                return;
+            }
         };
         // **A seat that already holds a page keeps it.** `preview_landing_surface`
         // picks a preview seat, and a preview seat can itself be a page; moving
@@ -4786,7 +4782,6 @@ impl<B: Backend> Runtime<'_, B> {
         if travelling.is_empty() {
             return Ok(());
         }
-        let native = native_window(&self.window.window)?;
         let carried: Vec<(LeafId, webhost::WebSeat)> = travelling
             .iter()
             .filter_map(|(was, now)| {
@@ -4800,16 +4795,18 @@ impl<B: Backend> Runtime<'_, B> {
             .collect();
         for (now, mut page) in carried {
             let mut outcomes = Vec::new();
+            let address = self
+                .window
+                .window
+                .page_address(bt_platform::PageVisual {
+                    tab: now.tab.0,
+                    seat: now.seat.0,
+                })
+                .map_err(|error| anyhow!(error))?;
             let report = page.rehost(
                 &self.window.compositor,
                 &self.window.compositor,
-                webhost::SeatAddress {
-                    page: bt_platform::PageVisual {
-                        tab: now.tab.0,
-                        seat: now.seat.0,
-                    },
-                    window: native,
-                },
+                address,
                 false,
                 &mut outcomes,
             );

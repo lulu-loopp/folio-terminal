@@ -12,7 +12,7 @@ use crate::{
     dpi_snapshot, dwm_dark_mode_owed, end_leaves_of, ensure_metrics_match_authoritative_scale,
     ensure_swapchain_matches_inner, first_term_leaf, float, focus_leaf_index, git, hang_watch,
     i18n, ime_outbound, ime_report, install_page_ground_color, install_theme_class_background,
-    marks, mouse_trace, native_window, new_window_runtime, notify, opening_window_attributes,
+    marks, mouse_trace, new_window_runtime, notify, opening_window_attributes,
     persisted_preview_pages, persisted_window_bounds, plan_launch, presentation_physical_size,
     preview, preview_source_of_recent, profiles, quit, rail_state_for, recorded_window_placement,
     render_sidebar_mode, render_tab_layout, restore, restore_row_seed, restore_window_placement,
@@ -136,7 +136,7 @@ impl Runtime<'_, Native> {
         // window that opened before or after it was changed is still a window of
         // this program.
         set_option_as_alt(&window, app.settings_store.loaded().option_sends_alt);
-        let native = native_window(&window)?;
+        let native = crate::native_window_of(&window)?;
         // A second window is a second owner the clipboard may go through — see
         // the first constructor's note.
         bt_platform::register_clipboard_owner(native);
@@ -537,7 +537,7 @@ impl Runtime<'_, Native> {
             app,
             window: &mut window,
         };
-        runtime.dress_new_window(native)?;
+        runtime.dress_new_window()?;
         // The seed above with this window's tabs written into it, taken here rather than left to
         // the caller so that no turn of the loop can find a paragraph with nothing in it. The
         // fallback it reads is the seed, which is what makes a maximized window's first snapshot
@@ -585,7 +585,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// application, and that is exactly why they are said once *per window*:
     /// §2.4's third rule — the setting changes every window, but the sentence
     /// said to DWM is one window's.
-    pub(crate) fn dress_new_window(&mut self, native: bt_platform::NativeWindow) -> Result<()> {
+    pub(crate) fn dress_new_window(&mut self) -> Result<()> {
         self.refresh_work_area();
         // **The window's ground, before the first frame** (§7.1.6c-4b). The
         // clear carries the ground's alpha, so a window that put this on after
@@ -606,7 +606,7 @@ impl<B: Backend> Runtime<'_, B> {
         // — so the row does not get a vote on this one window. Every other window
         // reads the row, exactly as it always did.
         if (self.is_quake_window() || self.app.settings_store.loaded().always_on_top)
-            && let Err(error) = bt_platform::set_window_topmost(native, true)
+            && let Err(error) = self.window.window.set_topmost(true)
         {
             eprintln!("recoverable always-on-top failure: {error}");
         }
@@ -616,7 +616,7 @@ impl<B: Backend> Runtime<'_, B> {
         self.apply_window_dark_mode()?;
         if self.app.acrylic_available
             && self.app.settings_store.loaded().acrylic
-            && let Err(error) = bt_platform::set_system_backdrop(native, true)
+            && let Err(error) = self.window.window.set_backdrop(true)
         {
             eprintln!("recoverable system backdrop failure: {error}");
         }
@@ -1123,10 +1123,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// succeeded is a different state with a different answer — no minimum at
     /// all, rather than a guess that could lock the user's window.
     pub(in crate::runtime) fn refresh_work_area(&mut self) {
-        let Ok(native) = native_window(&self.window.window) else {
-            return;
-        };
-        let Ok(rect) = bt_platform::get_work_area(native) else {
+        let Some(rect) = self.window.window.work_area() else {
             return;
         };
         let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
@@ -1189,8 +1186,7 @@ impl<B: Backend> Runtime<'_, B> {
         let is_quake = self.is_quake_window();
         let previous = self.app.window_picture(self.window.window.id());
         let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
-        let native = native_window(&self.window.window).ok();
-        let posture = if native.is_some_and(bt_platform::is_window_minimized) {
+        let posture = if self.window.window.is_iconic() {
             WindowPosture::Minimized
         } else if self.window.window.is_maximized() {
             WindowPosture::Maximized
@@ -1204,9 +1200,9 @@ impl<B: Backend> Runtime<'_, B> {
         // Measured only while the window is normal, because that is the only
         // posture whose rectangle is the user's; `recorded_window_placement`
         // states what the other two record instead.
-        let measured = native
-            .filter(|_| posture == WindowPosture::Normal)
-            .and_then(|native| bt_platform::get_window_rect(native).ok())
+        let measured = (posture == WindowPosture::Normal)
+            .then(|| self.window.window.outer_rect())
+            .flatten()
             .map(|rect| persisted_window_bounds(rect, scale));
         // What this window last said about itself, which is what the two
         // postures that have no rectangle of their own fall back to. A window
@@ -1359,9 +1355,8 @@ impl<B: Backend> Runtime<'_, B> {
         else {
             return Ok(());
         };
-        let native = native_window(&self.window.window)?;
         self.window.dwm_dark_mode = Some(dark);
-        if let Err(error) = bt_platform::set_window_dark_mode(native, dark) {
+        if let Err(error) = self.window.window.set_dark_mode(dark) {
             eprintln!("recoverable dark-mode failure: {error}");
         }
         Ok(())
@@ -1912,9 +1907,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// Whether this window is iconic — Win32's own answer, and the same one
     /// [`Runtime::window_snapshot`] asks before it believes a rectangle.
     pub(in crate::runtime) fn window_is_iconic(&self) -> bool {
-        let iconic = native_window(&self.window.window)
-            .ok()
-            .is_some_and(bt_platform::is_window_minimized);
+        let iconic = self.window.window.is_iconic();
         self.window.diagnostic_minimized.set(iconic);
         iconic
     }
