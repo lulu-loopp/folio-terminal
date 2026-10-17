@@ -25,7 +25,6 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
-- When a pane's shell does not tell Folio which folder it is in (a shell without Folio's integration), the folder button, Ctrl+Shift+B and the folder choosers now open in the folder the shell's process is in, not the one the pane was opened in. When that cannot be read either, the files card and column open in your home folder and their foot says "Folder unknown". <!-- zh: pending T-CWD-FROM-PROCESS -->
 - When Folio cannot save your window layout (a full disk, a folder that became read-only), it tells you once and stops trying again every couple of seconds; it tries again at your next change and when you quit. <!-- zh: pending T-SESSION-WRITER-NO-TIMER-RETRY -->
 - A picture that could not be loaded is no longer read again and again while the window holds many other pictures. <!-- zh: pending T-PEEK-CACHE-QUESTION-RECORDS -->
 - A GIF caught while it was being written plays once the write finishes. <!-- zh: pending T-ANIMATION-RECORDS-BOUND -->
@@ -123,6 +122,7 @@ All notable changes to Folio are recorded here. The format follows
 - When Folio's check of your PowerShell profiles cannot start, or stops before it finishes, while the Profiles page is open, the PowerShell rows with their own arguments now say the check could not run, instead of keeping what they said before with no word of why; opening the page again checks again. <!-- zh: pending T-OBSERVATION-REFUSAL-ON-THE-PAGE -->
 - If Folio fails unexpectedly while saving one file, that file's save says so and the others go on being saved; before, saving stopped for the rest of the run. A preview save made while 32 others are still on their way to the disk says so on its pane and keeps your edits. <!-- zh: pending T-STORAGE-WORKER-ON-THE-SEAM -->
 - When Folio cannot start adding its line to your PowerShell profile or taking it back out (Undo or the Settings removal), the window now says so in a card instead of doing nothing; the same click tries again. When Folio cannot start switching its Explorer first-page entry on or off, or its launch check of that entry, Folio no longer closes: the switch says so in a card, and the card blames Windows only when Windows refused. <!-- zh: pending T-PROFILE-INSTALL-REFUSED-START -->
+- When a pane's shell does not tell Folio which folder it is in (a shell without Folio's integration), the folder button, Ctrl+Shift+B, the folder choosers, Split with, Duplicate pane, Duplicate tab, Restart shell and a new tab beside the pane now use the folder the shell's process is in, not the one the pane was opened in. When that cannot be read either, those that started in the pane's opening folder still do, and the files card and column open in your home folder with "Folder unknown" on their foot. <!-- zh: pending T-CWD-FROM-PROCESS -->
 
 ### Changed
 

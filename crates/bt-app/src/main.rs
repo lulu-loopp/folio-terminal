@@ -16018,6 +16018,11 @@ struct WindowRuntime<B: Backend = Native> {
     pane_head_clicks: MultiClicks<SeatId>,
     /// Which files column has its root menu up (E53-E61).
     root_menu: profiles::RootMenu,
+    /// **The shells' folders the open root menu offers**, read once as it opened
+    /// (`Runtime::shell_folders_for_the_root_menu`, T-CWD-FROM-PROCESS) and replaced at its next
+    /// opening; read only while it is open. The menu is laid out every frame it is up, and a
+    /// pane's folder is read on an ask.
+    root_menu_shell_folders: Vec<String>,
     /// The dirty-buffer gate, when one of the three doors has stopped to ask
     /// (P123-P125).
     dirty_gate: restore::DirtyGate,
@@ -20549,8 +20554,9 @@ impl LeafSession {
     /// folder…` or split off into a folder, whose shell never reported, is started again in that
     /// folder rather than at its profile's default.
     ///
-    /// The session save (`TabState::term_leaf`) writes this same ladder, so a restored pane and a
-    /// Recent row stand where a restart would.
+    /// The session save (`TabState::term_leaf`) writes this ladder. The verbs that start a shell
+    /// read [`Self::place_where_the_pane_stands`], which puts the shell process's folder between
+    /// the two rungs (T-CWD-FROM-PROCESS): a save is no person's ask, so it reads no process.
     ///
     /// A WSL pane put down at its shell's own home holds the mark `~` as its place and hands `~`
     /// on; `profiles::place_for` reads a place equal to the profile's home mark as the shell's
@@ -20564,21 +20570,61 @@ impl LeafSession {
             .or_else(|| self.spawn_place.clone())
     }
 
-    /// **What the `+` and a picker row carry from this pane**: its reported folder, always
-    /// **carried** — a new tab beside a pane keeps the profile's starting rule whatever the pane
-    /// was born in (coordinator's ruling 2026-10-05). Only the verbs that start a shell *in this
-    /// pane's place* read [`Self::seed_place_for_a_new_shell`].
-    fn place_for_a_new_tab_beside(&self) -> Option<profiles::SeedPlace> {
-        self.session
-            .working_directory()
-            .map(|cwd| profiles::SeedPlace::Carried(cwd.to_path_buf()))
+    /// **Where this pane stands for a verb that starts a shell from it** (T-CWD-FROM-PROCESS):
+    /// [`Self::folder`]'s answer when it is the shell's report or its process's folder — read
+    /// once, for this one action — and otherwise what [`Self::place_for_a_new_shell`] answered
+    /// before: the folder the shell was put down in. An unknown folder says nothing new here; the
+    /// verb starts where it always did.
+    fn place_where_the_pane_stands(
+        &self,
+        door: &dyn pane_folder::ProcessFolders,
+    ) -> Option<PathBuf> {
+        match self.folder(door) {
+            pane_folder::PaneFolder::Reported(folder)
+            | pane_folder::PaneFolder::Process(folder) => Some(folder),
+            pane_folder::PaneFolder::Opened(_) | pane_folder::PaneFolder::Unknown(_) => {
+                self.place_for_a_new_shell()
+            }
+        }
     }
 
-    /// [`Self::place_for_a_new_shell`] with the kind a spawn weighs it by: **named** for a pane
-    /// born in a named folder ([`Self::born_named`]), **carried** otherwise. Restart shell,
+    /// **What the `+` and a picker row carry from this pane**: where it stands — its reported
+    /// folder, else its shell process's folder — always **carried**: a new tab beside a pane keeps
+    /// the profile's starting rule whatever the pane was born in (coordinator's ruling
+    /// 2026-10-05), and a pane whose folder nobody can say carries none, as one that never
+    /// reported always did. Only the verbs that start a shell *in this pane's place* read
+    /// [`Self::seed_place_for_a_new_shell`].
+    fn place_for_a_new_tab_beside(&self) -> Option<profiles::SeedPlace> {
+        self.place_for_a_new_tab_beside_through(&pane_folder::SystemProcessFolders)
+    }
+
+    /// [`Self::place_for_a_new_tab_beside`], its process read through `door`.
+    fn place_for_a_new_tab_beside_through(
+        &self,
+        door: &dyn pane_folder::ProcessFolders,
+    ) -> Option<profiles::SeedPlace> {
+        match self.folder(door) {
+            pane_folder::PaneFolder::Reported(folder)
+            | pane_folder::PaneFolder::Process(folder) => {
+                Some(profiles::SeedPlace::Carried(folder))
+            }
+            pane_folder::PaneFolder::Opened(_) | pane_folder::PaneFolder::Unknown(_) => None,
+        }
+    }
+
+    /// [`Self::place_where_the_pane_stands`] with the kind a spawn weighs it by: **named** for a
+    /// pane born in a named folder ([`Self::born_named`]), **carried** otherwise. Restart shell,
     /// Duplicate tab, Duplicate pane and the splits read this; `profiles::place_for` decides.
     fn seed_place_for_a_new_shell(&self) -> Option<profiles::SeedPlace> {
-        self.place_for_a_new_shell().map(|path| {
+        self.seed_place_for_a_new_shell_through(&pane_folder::SystemProcessFolders)
+    }
+
+    /// [`Self::seed_place_for_a_new_shell`], its process read through `door`.
+    fn seed_place_for_a_new_shell_through(
+        &self,
+        door: &dyn pane_folder::ProcessFolders,
+    ) -> Option<profiles::SeedPlace> {
+        self.place_where_the_pane_stands(door).map(|path| {
             if self.born_named {
                 profiles::SeedPlace::Named(path)
             } else {
@@ -45654,6 +45700,7 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         preview_crumb_clicks: MultiClicks::default(),
         pane_head_clicks: MultiClicks::default(),
         root_menu: profiles::RootMenu::default(),
+        root_menu_shell_folders: Vec::new(),
         dirty_gate: restore::DirtyGate::default(),
         psreadline_invite: psreadline::Invite::default(),
         paste_card_hover: None,
@@ -52745,19 +52792,29 @@ impl<B: Backend> Runtime<'_, B> {
     /// pane of the tab in front of you gets a say, not only the focused one —
     /// "a terminal is here" is true of all of them, and the whole point of the
     /// list is to name the places you are already standing.
-    fn root_choices(&self, seat: SeatId) -> Vec<profiles::RootChoice> {
+    /// **The folders the root menu offers as "a terminal is here"**, read once as it opens
+    /// (T-CWD-FROM-PROCESS): every terminal pane of the tab in front of you, each through
+    /// [`LeafSession::folder`] — its report, else its shell process's folder, else where it was
+    /// opened.
+    fn shell_folders_for_the_root_menu(
+        &self,
+        door: &dyn pane_folder::ProcessFolders,
+    ) -> Vec<String> {
         let tab = &self.window.tabs[self.window.active_tab];
-        let cwds: Vec<String> = tab
-            .seats
+        tab.seats
             .terminals()
             .iter()
             .filter_map(|seat| tab.sessions.get(seat))
-            .filter_map(|leaf: &LeafSession| {
-                leaf.folder(&pane_folder::SystemProcessFolders)
-                    .into_folder()
-            })
+            .filter_map(|leaf: &LeafSession| leaf.folder(door).into_folder())
             .map(|cwd| cwd.display().to_string())
-            .collect();
+            .collect()
+    }
+
+    fn root_choices(&self, seat: SeatId) -> Vec<profiles::RootChoice> {
+        let tab = &self.window.tabs[self.window.active_tab];
+        // Taken when the menu opened ([`Self::shell_folders_for_the_root_menu`]): the menu is
+        // laid out every frame it is up, and a pane's folder is read on an ask, not per frame.
+        let cwds = &self.window.root_menu_shell_folders;
         let home = profiles::home_directory(&bt_pty::SystemShellEnvironment)
             .map(|home| home.display().to_string());
         // The remembered folders come from the application and not from this
@@ -52766,7 +52823,7 @@ impl<B: Backend> Runtime<'_, B> {
         let found = profiles::root_choices(
             &tab.files_state(seat).root,
             home.as_deref(),
-            &cwds,
+            cwds,
             self.app.recent_folders.entries(),
         );
         // **What the user said to keep goes on top** (user ruling 2026-08-19).

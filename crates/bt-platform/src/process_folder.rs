@@ -6,14 +6,15 @@
 //! the injection, a program that is not a shell). It answers the folder or a named refusal; it
 //! never guesses one.
 //!
-//! * **Windows**: one `OpenProcess` for `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ`, one
-//!   `NtQueryInformationProcess`, then three `ReadProcessMemory` reads — the PEB's
-//!   `ProcessParameters` pointer, `RTL_USER_PROCESS_PARAMETERS.CurrentDirectory.DosPath`, and the
-//!   path's characters. A 32-bit process on a 64-bit Windows (WOW64) keeps its current directory
+//! * **Windows**: one `OpenProcess` for `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ`, and
+//!   on that one handle `QueryFullProcessImageNameW` (the bridge check), `NtQueryInformationProcess`
+//!   (`ProcessWow64Information`, then `ProcessBasicInformation`), and three `ReadProcessMemory`
+//!   reads — the PEB's `ProcessParameters` pointer,
+//!   `RTL_USER_PROCESS_PARAMETERS.CurrentDirectory.DosPath`, and the path's characters. A 32-bit process on a 64-bit Windows (WOW64) keeps its current directory
 //!   in its own 32-bit PEB, which `ProcessWow64Information` locates; it is read with the 32-bit
 //!   layout rather than refused.
-//! * **macOS**: one `proc_pidinfo(PROC_PIDVNODEPATHINFO)`, whose `pvi_cdir` is the path of the
-//!   process's current-directory vnode.
+//! * **macOS**: `proc_pidpath` (the bridge check), then one `proc_pidinfo(PROC_PIDVNODEPATHINFO)`,
+//!   whose `pvi_cdir` is the path of the process's current-directory vnode.
 //!
 //! The call is bounded by the calls it makes: nothing here waits on another thread or process, so
 //! it may be asked on the window thread when a person asks for the folder.
@@ -207,12 +208,15 @@ mod imp {
             NtQueryInformationProcess, ProcessBasicInformation, ProcessWow64Information,
         },
         Win32::{
-            Foundation::{ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, HANDLE, STILL_ACTIVE},
+            Foundation::{
+                ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, HANDLE,
+                STILL_ACTIVE,
+            },
             System::{
                 Diagnostics::Debug::ReadProcessMemory,
                 Threading::{
-                    GetExitCodeProcess, OpenProcess, PROCESS_BASIC_INFORMATION,
-                    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+                    GetExitCodeProcess, OpenProcess, PROCESS_BASIC_INFORMATION, PROCESS_NAME_WIN32,
+                    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ, QueryFullProcessImageNameW,
                 },
             },
         },
@@ -240,6 +244,45 @@ mod imp {
             // writable for the call.
             let asked = unsafe { GetExitCodeProcess(self.handle(), &raw mut code) };
             asked.is_ok() && code != STILL_ACTIVE.0.cast_unsigned()
+        }
+
+        /// **Which executable this process is running**, asked of the handle already held — the
+        /// one open the read makes. The buffer starts at a path's usual length and doubles while
+        /// the answer does not fit, up to the longest path Windows names (32,767 units); any other
+        /// failure is no answer, and the bridge check then has nothing to refuse on.
+        fn image(&self) -> Option<PathBuf> {
+            use std::os::windows::ffi::OsStringExt;
+            const LONGEST: usize = 32_768;
+            let mut room = 260usize;
+            loop {
+                let mut buffer = vec![0u16; room];
+                let mut length = u32::try_from(room).ok()?;
+                // SAFETY: the handle is live for `self` and has query access; the buffer and the
+                // length outlive the call, which writes at most `length` units and stores the count.
+                let asked = unsafe {
+                    QueryFullProcessImageNameW(
+                        self.handle(),
+                        PROCESS_NAME_WIN32,
+                        windows::core::PWSTR(buffer.as_mut_ptr()),
+                        &raw mut length,
+                    )
+                };
+                match asked {
+                    Ok(()) => {
+                        let length = usize::try_from(length).ok()?;
+                        return Some(PathBuf::from(std::ffi::OsString::from_wide(
+                            buffer.get(..length)?,
+                        )));
+                    }
+                    Err(error)
+                        if error.code() == ERROR_INSUFFICIENT_BUFFER.to_hresult()
+                            && room < LONGEST =>
+                    {
+                        room = (room * 2).min(LONGEST);
+                    }
+                    Err(_) => return None,
+                }
+            }
         }
 
         /// One query of `class` into a value of `T`'s size.
@@ -308,7 +351,7 @@ mod imp {
         };
         // SAFETY: the handle was opened above and is owned by this value alone.
         let process = Process(unsafe { OwnedHandle::from_raw_handle(handle.0) });
-        if let Some(image) = crate::process_image_path(pid)
+        if let Some(image) = process.image()
             && super::is_far_side(&image)
         {
             return Err(FolderRefusal::FarSide);
@@ -599,6 +642,19 @@ mod tests {
         }
     }
 
+    /// A scratch folder this test made, removed when the test's scope ends — a red included, so a
+    /// failed run leaves no copy of the test executable behind. Declared before the processes
+    /// that stand in it, so they end first.
+    #[cfg(any(windows, target_os = "macos"))]
+    struct Scratch(std::path::PathBuf);
+
+    #[cfg(any(windows, target_os = "macos"))]
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// `program` (this test executable, or a copy of it under another name) standing in `folder`,
     /// once it has said it is up.
     #[cfg(any(windows, target_os = "macos"))]
@@ -644,6 +700,7 @@ mod tests {
         let root = bt_testpath::temp_path("process-folder");
         let folder = root.join("工作 folder");
         std::fs::create_dir_all(&folder).expect("create the folder");
+        let _scratch = Scratch(root.clone());
         let helper = standing_helper(&std::env::current_exe().unwrap(), &folder);
         let read = current_directory(helper.0.id());
         drop(helper);
@@ -652,7 +709,6 @@ mod tests {
             crate::same_file(&read, &folder),
             "read {read:?}, started in {folder:?}"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// RED (real process, Windows) — **a 32-bit process is read from its own PEB**: WOW64's
@@ -677,6 +733,7 @@ mod tests {
         let root = bt_testpath::temp_path("process-folder-wow64");
         let sub = root.join("sub");
         std::fs::create_dir_all(&sub).expect("create the folders");
+        let _scratch = Scratch(root.clone());
         let mut child = crate::quiet_command(&wow64)
             .args(["/d", "/q", "/k", "prompt", "$G$_"])
             .current_dir(&root)
@@ -713,7 +770,6 @@ mod tests {
             crate::same_file(&read, &sub),
             "read {read:?}, moved to {sub:?}"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// RED (real process) — **a process that has ended is `Exited`**: on Windows its id is still
@@ -727,6 +783,7 @@ mod tests {
     fn a_process_that_has_ended_is_exited() {
         let folder = bt_testpath::temp_path("process-folder-ended");
         std::fs::create_dir_all(&folder).expect("create the folder");
+        let _scratch = Scratch(folder.clone());
         let mut helper = standing_helper(&std::env::current_exe().unwrap(), &folder);
         drop(helper.0.stdin.take());
         // Its exit status is not the subject: its standard output is already closed, so its
@@ -735,7 +792,6 @@ mod tests {
         let read = current_directory(helper.0.id());
         drop(helper);
         assert_eq!(read, Err(FolderRefusal::Exited));
-        let _ = std::fs::remove_dir_all(&folder);
     }
 
     /// RED (real process) — **a process this account may not read is `NoAccess`**: the System
@@ -760,13 +816,13 @@ mod tests {
     fn a_bridge_process_is_the_far_side() {
         let folder = bt_testpath::temp_path("process-folder-bridge");
         std::fs::create_dir_all(&folder).expect("create the folder");
+        let _scratch = Scratch(folder.clone());
         let ssh = folder.join(if cfg!(windows) { "ssh.exe" } else { "ssh" });
         std::fs::copy(std::env::current_exe().unwrap(), &ssh).expect("copy the test executable");
         let helper = standing_helper(&ssh, &folder);
         let read = current_directory(helper.0.id());
         drop(helper);
         assert_eq!(read, Err(FolderRefusal::FarSide));
-        let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[test]

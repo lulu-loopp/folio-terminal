@@ -11874,42 +11874,50 @@ mod tests {
         });
     }
 
-    /// Feed `leaf`'s shell output to its session until what it has written holds `marker`, the
-    /// patience counted from the shell's last byte rather than from the start (CONVENTIONS §三:
-    /// a slow machine delivers the same bytes further apart).
+    /// Feed `leaf`'s shell output to its session until what it has written holds `marker`, waiting
+    /// between reads on the session's own output wake (`wakes`, from
+    /// `TestShell::spawn_shell_in_waking`) within the lane suite's patience for each — a slow
+    /// machine delivers the same bytes further apart, and a shell that falls silent fails by name.
     #[cfg(windows)]
-    fn feed_leaf_until(leaf: &mut crate::LeafSession, marker: &str) {
-        const SILENCE: std::time::Duration = std::time::Duration::from_secs(60);
+    fn feed_leaf_until(
+        leaf: &mut crate::LeafSession,
+        wakes: &std::sync::mpsc::Receiver<()>,
+        marker: &str,
+    ) {
         let mut seen = Vec::new();
-        let mut last_byte = std::time::Instant::now();
         while !String::from_utf8_lossy(&seen).contains(marker) {
-            assert!(
-                last_byte.elapsed() < SILENCE,
-                "{marker:?}: the shell fell silent for {SILENCE:?} before writing it; output was \
-                 {:?}",
-                String::from_utf8_lossy(&seen)
-            );
             let chunk = leaf.pty.as_ref().expect("the pane's shell").read_output();
             if chunk.is_empty() {
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                crate::lane::wait_for_a_wake(
+                    wakes,
+                    &format!(
+                        "the shell's output holding {marker:?}; it had written {:?}",
+                        String::from_utf8_lossy(&seen)
+                    ),
+                );
                 continue;
             }
-            last_byte = std::time::Instant::now();
             leaf.session.feed(&chunk).unwrap();
             seen.extend(chunk);
         }
     }
 
     /// RED (T-CWD-FROM-PROCESS) — **a Command Prompt pane with no integration stands where its
-    /// process stands**: `cmd.exe` with a plain `PROMPT` (`$P$G`, no OSC 7), started in a folder
-    /// whose name is not ASCII, read through the pane's own road (`LeafSession::folder`, the
-    /// shell's pid and its output count off the real pseudoconsole) at the first prompt and again
-    /// after `cd` into a subfolder. The pane never reports a folder.
+    /// process stands, and the verbs that start a shell from it start there**: `cmd.exe` with a
+    /// plain `PROMPT` (`$P$G`, no OSC 7), started in a folder whose name is not ASCII, read through
+    /// the pane's own road (`LeafSession::folder`, the shell's pid and its output count off the
+    /// real pseudoconsole) at the first prompt and again after `cd` into a subfolder. The pane
+    /// never reports a folder. After the `cd`, the place Split with, Duplicate pane, Duplicate tab
+    /// and Restart shell start a shell in (`seed_place_for_a_new_shell`, the one reader each of
+    /// them calls) and the one a new tab beside carries (`place_for_a_new_tab_beside`) are the
+    /// subfolder.
     ///
     /// MUTATIONS (observed red): `LeafSession::folder` hands the ladder no shell (`None`) — at the
     /// first prompt the pane answers `Opened`, the folder it was opened in, not its process; the
     /// memo keyed by the shell alone (output not counted) — after `cd` the first read, the
-    /// starting folder, is answered again.
+    /// starting folder, is answered again; `place_where_the_pane_stands` reading the old ladder
+    /// (`place_for_a_new_shell`) — the verbs start in the starting folder; the old
+    /// `place_for_a_new_tab_beside` (report only) — the new tab carries nothing.
     #[cfg(windows)]
     #[test]
     fn a_silent_command_prompt_panes_folder_follows_its_process() {
@@ -11918,7 +11926,9 @@ mod tests {
         let moved = start.join("moved-here");
         std::fs::create_dir_all(&moved).unwrap();
         let cmd = bt_platform::program_on_path(Path::new("cmd.exe")).expect("cmd.exe");
-        let shell = bt_pty::test_shell::TestShell::spawn_shell_in(
+        let (woke, wakes) = crate::lane::wake_channel();
+        let woke = std::sync::Mutex::new(woke);
+        let shell = bt_pty::test_shell::TestShell::spawn_shell_in_waking(
             hygiene,
             cmd,
             &[],
@@ -11929,15 +11939,22 @@ mod tests {
                 std::num::NonZeroU16::new(30).unwrap(),
             ),
             Some(start.clone()),
+            std::sync::Arc::new(move || {
+                let woke = woke
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                woke();
+            }),
         )
         .unwrap();
         let (pty, hygiene) = shell.into_session();
         let mut leaf = crate::test_support::leaf_saying("");
         leaf.session.set_spawn_directory(Some(start.clone()));
+        leaf.spawn_place = Some(start.clone());
         leaf.pty = Some(pty);
         let door = crate::pane_folder::SystemProcessFolders;
 
-        feed_leaf_until(&mut leaf, "start>");
+        feed_leaf_until(&mut leaf, &wakes, "start>");
         match leaf.folder(&door) {
             crate::pane_folder::PaneFolder::Process(folder) => assert!(
                 bt_platform::same_file(&folder, &start),
@@ -11951,14 +11968,53 @@ mod tests {
             .unwrap()
             .write(b"cd moved-here\r")
             .unwrap();
-        feed_leaf_until(&mut leaf, "moved-here>");
+        feed_leaf_until(&mut leaf, &wakes, "moved-here>");
         assert_eq!(leaf.session.working_directory(), None, "no report was made");
+
+        // **A folder nobody can say keeps today's behaviour**: with the process refusing, the
+        // verbs start where the pane was opened and a new tab beside carries nothing.
+        struct Refusing;
+        impl crate::pane_folder::ProcessFolders for Refusing {
+            fn current_directory(
+                &self,
+                _shell: bt_pty::ShellProcessId,
+            ) -> Result<PathBuf, bt_platform::process_folder::FolderRefusal> {
+                Err(bt_platform::process_folder::FolderRefusal::NoAccess)
+            }
+        }
+        assert_eq!(
+            leaf.seed_place_for_a_new_shell_through(&Refusing),
+            Some(profiles::SeedPlace::Carried(start.clone())),
+            "an unknown folder: a shell is started where the pane was opened, as before"
+        );
+        assert_eq!(
+            leaf.place_for_a_new_tab_beside_through(&Refusing),
+            None,
+            "an unknown folder: a new tab beside carries nothing, as before"
+        );
+        // That refusal is this moment's read; one more prompt is a new moment for the real door.
+        leaf.pty.as_ref().unwrap().write(b"\r").unwrap();
+        feed_leaf_until(&mut leaf, &wakes, "moved-here>");
         match leaf.folder(&door) {
             crate::pane_folder::PaneFolder::Process(folder) => assert!(
                 bt_platform::same_file(&folder, &moved),
                 "after cd the process stands in {folder:?}, not {moved:?}"
             ),
             other => panic!("after cd: {other:?}"),
+        }
+        match leaf.seed_place_for_a_new_shell() {
+            Some(profiles::SeedPlace::Carried(folder)) => assert!(
+                bt_platform::same_file(&folder, &moved),
+                "after cd a split, a duplicate or a restart starts in {folder:?}, not {moved:?}"
+            ),
+            other => panic!("after cd, the place a shell is started in: {other:?}"),
+        }
+        match leaf.place_for_a_new_tab_beside() {
+            Some(profiles::SeedPlace::Carried(folder)) => assert!(
+                bt_platform::same_file(&folder, &moved),
+                "after cd a new tab beside carries {folder:?}, not {moved:?}"
+            ),
+            other => panic!("after cd, what a new tab beside carries: {other:?}"),
         }
         let mut pty = leaf.pty.take().unwrap();
         pty.write(b"exit\r").unwrap();
