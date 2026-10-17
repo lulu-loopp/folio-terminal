@@ -1786,7 +1786,7 @@ mod tests {
             |_| panic!("a launch that was taken says nothing"),
             |why| panic!("the hand-over gave up: {why}"),
         );
-        drop(endpoint);
+        endpoint.retire();
         assert_eq!(left, Some(0), "the running Folio took the launch");
         let request = landed
             .try_recv()
@@ -2847,7 +2847,7 @@ mod tests {
                 writeln!(out, "D3 SERVING").unwrap();
                 out.flush().unwrap();
                 let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut Vec::new());
-                drop(endpoint);
+                endpoint.retire();
                 for line in heard.lock().unwrap().iter() {
                     writeln!(out, "D3 HEARD {line}").unwrap();
                 }
