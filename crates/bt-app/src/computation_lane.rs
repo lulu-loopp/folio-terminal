@@ -649,6 +649,27 @@ pub(crate) mod fixtures {
             }
         }
 
+        /// **Every terminal `share` ends until it holds nothing**, drained as the window thread
+        /// drains, each wake awaited within the lane suite's patience, in the order taken.
+        pub(crate) fn every_ended(
+            &mut self,
+            share: Share,
+            gone: impl Fn(AnswerOwner) -> bool,
+        ) -> Vec<Ended> {
+            loop {
+                let ended = self.lane.ended(&gone);
+                self.taken.extend(ended);
+                if self.lane.held(share) == 0 {
+                    let (of_share, rest) = std::mem::take(&mut self.taken)
+                        .into_iter()
+                        .partition(|(of, ..)| *of == share);
+                    self.taken = rest;
+                    return of_share;
+                }
+                lane::wait_for_a_wake(&self.wakes, "a computation lane's terminal");
+            }
+        }
+
         /// The terminals the sink has taken.
         pub(crate) fn sunk(&self) -> Vec<Sunk> {
             locked(&self.sunk).clone()
@@ -1181,6 +1202,7 @@ mod tests {
         let (mut lane, gate) = gated();
         let resample = || ScaleWorkerRequest::Peek {
             leaf: probe_leaf(),
+            surface: crate::PeekSurface::Flyout,
             task: scale_task("截图 shot.png", 8),
         };
         let printed = || PathWorkerRequest {
@@ -1354,6 +1376,7 @@ mod tests {
             .lane
             .scale(ScaleWorkerRequest::Peek {
                 leaf: probe_leaf(),
+                surface: crate::PeekSurface::Card,
                 task: scale_task("截图 same-path.png", 17),
             })
             .ok()
@@ -1362,7 +1385,7 @@ mod tests {
         let width =
             |terminal: ComputationTerminal| match answer(terminal).expect("an answer").completion {
                 DecorationWorkerCompletion::PreviewScaledImage { scaled }
-                | DecorationWorkerCompletion::PeekScaledImage { scaled } => scaled.width_px,
+                | DecorationWorkerCompletion::PeekScaledImage { scaled, .. } => scaled.width_px,
                 _ => panic!("a resample's answer"),
             };
         assert_eq!(width(lane.terminal(Share::Scale, first, nobody)), 1);
