@@ -182,3 +182,37 @@ tracked, then runs `cargo clippy -p bt-lint-probe --all-targets --
 --force-warn clippy::disallowed_methods` and requires one report per vocabulary
 entry assigned to the runner's platform. `bt-lint-probe` is on `logic`'s fmt
 line.
+
+## Job budgets (T-CI-LOGIC-JOB-BUDGET, 2026-10-17)
+
+A job's `timeout-minutes` is derived, and the derivation sits in a comment
+above the line with the runs it came from: the largest total seen with a cold
+cache (nothing restored, everything compiled), times the spread already seen
+(the slowest cold `test` step over the fastest, 47.8 / 35.1 min = 1.36; cause
+unknown: the fast ones were mostly branch dispatches, the slow ones main
+pushes), rounded up. When the cold total nears the budget divided by 1.36, the
+number is derived again from new runs, not raised by hand.
+
+| job | cold max | budget |
+|---|---|---|
+| `logic` | 75.8 min | 104 |
+| `logic`'s `test` step | 47.8 min | 65 |
+| `licensing` | 11.3 min (sum of step maxima; the toolchain step's uninstall not yet measured) | 16 |
+
+The `test` step carries a budget of its own below the job's, so a run past it
+fails on that step with a line naming the budget instead of being cancelled
+without a reason wherever the job's clock stopped. The licensing gates
+(`check-notices.ps1`, `check-machine-paths.ps1`, `check-doc-words.ps1`,
+`check-vendor-notices.ps1`, with `cargo fetch` and the pinned `cargo-about`
+before them) are the `licensing` job rather than the tail of `logic`: none of
+them reads a build, and as the tail they were what a slow suite cancelled.
+
+The cold regime is the one that sets the budget because a cache-key change
+puts every run in it: rust-cache hashes every installed toolchain into the
+key's prefix, and as the runner image's own `stable` 1.99.0 (in place of
+1.98.1) rolled out across runners from 2026-10-15 (38671015245 already on it at
+02:26; 38691455267 and 38693259445 still warm on 1.98.1 at 06:16 and 06:34), no
+key matched on the new runners, the cold `logic` ran past its old 75 minutes,
+and a cancelled job saves no cache, so `main`'s runs there stayed cold. The toolchain action
+now removes every toolchain but the pinned one before the cache step, so the key
+follows `rust-toolchain.toml` and not the image.
