@@ -2137,11 +2137,13 @@ impl document_request::Volume for NoExchangeDrive {
         _target: &std::path::Path,
     ) -> Result<bt_platform::Displaced, bt_platform::ExchangeRefusal> {
         let answer = std::io::Error::from_raw_os_error(50);
-        Err(if bt_platform::volume_cannot_replace(answer.raw_os_error()) {
-            bt_platform::ExchangeRefusal::ExchangeUnavailable(answer)
-        } else {
-            bt_platform::ExchangeRefusal::Failed(answer)
-        })
+        Err(
+            if bt_platform::volume_cannot_replace(answer.raw_os_error()) {
+                bt_platform::ExchangeRefusal::ExchangeUnavailable(answer)
+            } else {
+                bt_platform::ExchangeRefusal::Failed(answer)
+            },
+        )
     }
 
     fn drive(&self, _file: &std::path::Path) -> document_request::Drive {

@@ -8840,7 +8840,11 @@ mod conditional_write_tests {
         store.settle();
 
         assert_eq!(file_bytes(&path), base, "nothing was written");
-        assert_eq!(names_in(&root), [SETTINGS_FILE_NAME], "nothing is left beside it");
+        assert_eq!(
+            names_in(&root),
+            [SETTINGS_FILE_NAME],
+            "nothing is left beside it"
+        );
         assert_eq!(
             store.take_fault(),
             Some(crate::i18n::persisted_file_unwritable(SETTINGS_FILE_NAME)),

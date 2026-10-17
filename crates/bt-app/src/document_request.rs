@@ -553,13 +553,9 @@ fn exchange(
         },
         Err(ExchangeRefusal::ExchangeUnavailable(error)) => match job.no_exchange {
             NoExchange::Refuse => refused(Refusal::ExchangeUnavailable(error.to_string())),
-            NoExchange::PlainWriter => plainly(
-                worker,
-                job,
-                expected,
-                temp,
-                Some(volume.drive(&job.which)),
-            ),
+            NoExchange::PlainWriter => {
+                plainly(worker, job, expected, temp, Some(volume.drive(&job.which)))
+            }
         },
         Err(ExchangeRefusal::BackupNameTaken(path)) => refused(Refusal::BackupNameTaken(path)),
         Err(ExchangeRefusal::Failed(error)) => refused(Refusal::Disk(error.to_string())),
@@ -582,7 +578,8 @@ fn plainly(
     ordinary_on: Option<Drive>,
 ) -> Served {
     let _ = std::fs::remove_file(temp);
-    if let Some(answer) = unless_it_holds(bt_persist::read_stable(worker, &job.which), Some(expected))
+    if let Some(answer) =
+        unless_it_holds(bt_persist::read_stable(worker, &job.which), Some(expected))
     {
         return answer;
     }
