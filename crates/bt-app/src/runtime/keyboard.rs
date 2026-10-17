@@ -2431,6 +2431,13 @@ impl<B: Backend> Runtime<'_, B> {
 /// **The window's input-method facts, as the platform reads them now** — through
 /// the window seam's facts door ([`WindowHost::ime_facts`]), so a headless window
 /// answers what its test scripted and a native one reads the system.
+///
+/// **One named reading for every caller** — the bracket line (`ime_bracket_line`),
+/// the `IME observation` line (`write_ime_observation`) and the plain-text probe
+/// (`observe_ime_key`) — kept as a function of its own because it is the mutation
+/// point `runtime::keyboard::tests::a_restart_inside_a_live_composition_writes_the_windows_native_facts`
+/// names: a reading that goes round the door here answers default facts on a
+/// headless window, and that test goes red.
 fn ime_native_facts(window: &impl WindowHost) -> ime_report::NativeFacts {
     window.ime_facts()
 }
