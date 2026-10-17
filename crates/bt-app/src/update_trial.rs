@@ -168,6 +168,14 @@ pub(crate) enum Writer {
     /// The launch's replacement of Folio's own older PSReadLine and its stamp
     /// (`psreadline::upgrade_recorded`, ticket 56).
     PsReadLineUpgrade,
+    /// Folio's PSReadLine module a Windows PowerShell pane loads, in the local
+    /// data folder, and the launch's removal of the artefacts other builds left
+    /// (`shell_integration::psreadline_module_for_birth`,
+    /// T-INTEGRATION-INJECT-2-BUILD). Held back, a trial names the durable copy
+    /// only when it already holds this build's bytes and otherwise writes its own
+    /// under the system temporary directory, and removes nothing; the release
+    /// prepares the durable copy on a worker.
+    PsReadLineModule,
     /// The launch probe's repair and renewal of the Explorer package
     /// registration (`explorer_menu::begin_probe`; the gate is asked in
     /// `explorer_menu::probe_at_start`, U-25).
@@ -199,6 +207,7 @@ impl Writer {
             | Writer::ZshScripts
             | Writer::PowerShellScript
             | Writer::PsReadLineUpgrade
+            | Writer::PsReadLineModule
             | Writer::ExplorerRepair
             | Writer::ToastIdentity
             | Writer::RecoveredAnnouncement => false,
@@ -207,7 +216,7 @@ impl Writer {
 
     /// Every writer, in release order.
     #[cfg(test)]
-    pub(crate) const ALL: [Writer; 17] = [
+    pub(crate) const ALL: [Writer; 18] = [
         Writer::DataFolderMove,
         Writer::DataFolder,
         Writer::RefusedCopies,
@@ -222,6 +231,7 @@ impl Writer {
         Writer::ZshScripts,
         Writer::PowerShellScript,
         Writer::PsReadLineUpgrade,
+        Writer::PsReadLineModule,
         Writer::ExplorerRepair,
         Writer::ToastIdentity,
         Writer::RecoveredAnnouncement,

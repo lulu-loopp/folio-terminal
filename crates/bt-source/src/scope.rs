@@ -241,7 +241,9 @@ impl FileScoped {
                  subject; CI's YAML"
             }
             Self::ThePsReadLineArtefactGate => {
-                "a PSReadLine pin is written in three files and the gate holds their text to the                  package: the build script's table, as written, is one of the three; a                  PowerShell gate in a job that builds nothing"
+                "a PSReadLine pin is written in three files and the gate holds their text to the \
+                 package: the build script's table, as written, is one of the three; a \
+                 PowerShell gate in a job that builds nothing"
             }
         }
     }

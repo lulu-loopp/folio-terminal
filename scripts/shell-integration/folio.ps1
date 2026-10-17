@@ -264,13 +264,13 @@ $Global:__FolioShellIntegration = @{
 # which clears the visible viewport, so unsupported/unproven versions consume the same chord as a
 # no-op rather than leaking it into the input buffer.
 $psReadLineVersion = $psReadLineModule.Version
-# A PSReadLine that derives its edit anchor from the prompt's own cell width — the
-# Folio fork, 2.4.6-bt.anchorfix and later — keeps its coordinates true across
-# every resize (the `%=` quotient loss upstream never fixed, probed 2026-08-13), so the
-# reflection repair below is dead weight there. The no-op branch still consumes the
-# chord, exactly as it does for unproven versions, so it cannot leak into the buffer.
-$psReadLineSelfAnchors = $psReadLineVersion -ge [version]'2.4.6'
-if (-not $psReadLineSelfAnchors -and $psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
+# Every 2.4.x gets the repair (T-INTEGRATION-INJECT-2-BUILD): Microsoft's 2.4.5, the editor of
+# pwsh 7 and of Folio's Windows PowerShell 5.1 panes alike, derives its anchor from a cell count
+# taken before the resize, and this handler is what puts it right. A version gate on a number
+# (the retired `-ge 2.4.6`, which meant "Folio's fork" while saying "a version") would hand the
+# chord's no-op to a future upstream 2.4.6 that kept the defect. A version outside the proven
+# shape takes the no-op branch below and the chord is consumed, never leaked into the buffer.
+if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
     Set-PSReadLineKeyHandler -Chord 'Ctrl+Alt+Shift+F12' -ScriptBlock {
         param($key, $arg)
         $historyNavigation = & $Global:__FolioShellIntegration.HistoryNavigationCapture

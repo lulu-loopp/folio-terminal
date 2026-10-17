@@ -19496,6 +19496,9 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         }
         // On a worker: the window thread waits for no disk here either.
         Writer::PowerShellScript => shell_integration::begin_powershell_script_preparation(),
+        // The same worker: the durable module is a birth's to write, and the artefacts the old
+        // build left are removed now that nothing of the old build is running.
+        Writer::PsReadLineModule => shell_integration::begin_powershell_script_preparation(),
         Writer::PsReadLineUpgrade => {
             if let Some(documents) = psreadline::documents_directory()
                 && let Some(replacement) = psreadline::upgrade_recorded(
@@ -22001,8 +22004,10 @@ fn coalesce_pty_resize_on_grid_change(
 ///
 /// The user's 2026-08-06 ruling turned it off on sight — freezing the reflow and cropping the old
 /// width read worse than the artefact it prevented — kept the machine as a policy bit at `false`,
-/// and ordered the root cause fixed instead. That fix shipped: the patched PSReadLine re-anchors
-/// itself, and `scripts/shell-integration/folio.ps1` needs no reflection repair at ≥ 2.4.6. The
+/// and ordered the root cause fixed instead. That fix shipped, as the patched PSReadLine that
+/// re-anchored itself; since T-INTEGRATION-INJECT-2-BUILD the root cause is repaired on Microsoft's
+/// own 2.4.5 — every pane's, Windows PowerShell's included — by `folio.ps1`'s reflection repair on
+/// the resize chord. The
 /// same ruling ends 「修好后扣留政策位永久退役」, and this is that retirement. A bit nailed to
 /// `false` in front of a state machine nothing can reach is not an option the product has; it is a
 /// second reading of the resize path that no test of the shipping one covers.
@@ -77804,7 +77809,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 29] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 30] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -77853,6 +77858,9 @@ mod platform_gate_tests {
         "psreadline.rs",
         // Which shells can be integrated with here.
         "shell_integration.rs",
+        // Windows-only test fixtures: real Windows PowerShell 5.1 panes running Folio's
+        // PSReadLine through a real ConPTY, beside the composition's every-platform tests.
+        "shell_integration_psreadline_tests.rs",
         // Native invalid-name, Windows spelling and direct CRT test fixtures only;
         // the pure encoders stay here as paste-paths design section 5 specifies.
         "shell_literal.rs",

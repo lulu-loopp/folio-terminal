@@ -187,7 +187,7 @@ fn bear(
         powershell_integration,
         environment_derivation,
         mut folio_environment,
-        profile_environment,
+        mut profile_environment,
         carried_environment,
         size,
         working_directory,
@@ -199,11 +199,12 @@ fn bear(
         Some(gone) => (gone.arguments, gone.working_directory),
         None => (arguments, working_directory),
     };
-    let args = shell_integration::compose_powershell_birth(
+    let composed = shell_integration::compose_powershell_birth_loading(
         std::path::Path::new(&program),
         &arguments,
         powershell_integration,
     );
+    let args = composed.arguments;
     let fallback_args = || shell_integration::last_resort_arguments(powershell_integration);
     let inherited: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     // **A carried environment this system cannot give a shell refuses the birth** (F-SWEEP-2-048
@@ -232,6 +233,17 @@ fn bear(
         &before_folio,
         &mut folio_environment,
         &profile_environment,
+    );
+    // **Folio's PSReadLine, for a Windows PowerShell pane that got the loader**
+    // (T-INTEGRATION-INJECT-2-BUILD): the module written if need be — disk work, here on the birth
+    // worker — and its directory put first on the pane's own module path, after the row's layer.
+    shell_integration::declare_psreadline_module(
+        Path::new(&program),
+        composed.loads,
+        &before_folio,
+        &folio_environment,
+        &mut profile_environment,
+        shell_integration::ModulePathFacts::of_this_machine,
     );
     // **In its package's turn** (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH): a shell whose program
     // is a packaged app's (PowerShell 7 from the Store) is not started while a check of the same
