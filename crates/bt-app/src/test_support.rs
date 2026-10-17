@@ -2949,6 +2949,40 @@ pub(crate) fn scratch_png_named(tag: &str) -> PathBuf {
     directory.join(format!("{}.png", bt_testpath::unique_name(tag)))
 }
 
+/// **A scratch file a test wrote, removed when the test lets go of it** — on a red as on a green.
+pub(crate) struct ScratchFile(pub(crate) PathBuf);
+
+impl Drop for ScratchFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// A glance card over `file`, raised from a row of `host`, on `clock`, naming the file by its own
+/// name.
+pub(crate) fn card_over(host: RowHost, file: &Path, clock: PeekClock) -> FilePeek {
+    FilePeek {
+        host,
+        source: preview::PreviewSource::file(file.display().to_string()),
+        key: file.display().to_string(),
+        name: file
+            .file_name()
+            .expect("the card's file has a name")
+            .to_string_lossy()
+            .into_owned(),
+        rect: [10.0, 10.0, 200.0, 30.0],
+        clock,
+        frame: None,
+        body: None,
+        head: None,
+        foot: None,
+        foot_lit: false,
+        column: None,
+        closing_at: None,
+        dwell: None,
+    }
+}
+
 /// A real folder with a real file in it, for the glance-foot tests: the path
 /// the card holds is a path on this disk, not a spelling made up for the test.
 pub(crate) fn glance_fixture(name: &str) -> (PathBuf, PathBuf) {

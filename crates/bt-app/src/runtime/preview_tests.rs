@@ -1136,6 +1136,7 @@ fn a_set_aside_peek_answer_changes_nothing_on_the_window() {
             let (mut folio, mut lane, _gate, _shell, [pane, page]) =
                 two_panes_on_a_watched_lane("peek-set-aside");
             let file = scratch_png_named(name).with_extension(extension);
+            let _written = crate::test_support::ScratchFile(file.clone());
             std::fs::write(&file, &older_bytes).expect("a scratch file this test owns");
             a_picture_on(&mut folio, pane, &file);
             if extension == "png" {
@@ -1208,33 +1209,7 @@ fn a_set_aside_peek_answer_changes_nothing_on_the_window() {
                     "{case}: the recording's facts are the newer read's"
                 );
             }
-            std::fs::remove_file(&file).expect("the scratch file this test wrote");
         }
-    }
-}
-
-/// A glance card over `file`, raised from a row of the shell at `shell`, its intent maturing at
-/// `due`.
-fn a_card_over(shell: bt_layout::SeatId, file: &Path, due: Instant) -> crate::FilePeek {
-    crate::FilePeek {
-        host: crate::RowHost::Terminal(shell),
-        source: preview::PreviewSource::file(file.display().to_string()),
-        key: file.display().to_string(),
-        name: file
-            .file_name()
-            .expect("the picture has a name")
-            .to_string_lossy()
-            .into_owned(),
-        rect: [10.0, 10.0, 200.0, 30.0],
-        clock: crate::PeekClock::Settling(due),
-        frame: None,
-        body: None,
-        head: None,
-        foot: None,
-        foot_lit: false,
-        column: None,
-        closing_at: None,
-        dwell: None,
     }
 }
 
@@ -1255,8 +1230,11 @@ fn an_awaited_peek_answer_after_a_terminals_decode_tells_every_waiting_surface()
     let (mut folio, mut lane, gate, shell, [pane, page]) =
         two_panes_on_a_watched_lane("peek-awaited");
     let file = scratch_png_named("等着 awaited");
-    // Large enough that the card's box and the flyout's are two sizes, so each asks a resample of
-    // its own.
+    let _written = crate::test_support::ScratchFile(file.clone());
+    // Large enough that the card's box and the flyout's are two sizes. The two resamples are still
+    // one target to the scale share (`ScaleWorkerRequest::same_target`: leaf, purpose and content
+    // key), so the newer may supersede the older; this test asks only that each is asked
+    // (T-PEEK-SCALE-ADDRESS-BY-SURFACE).
     std::fs::write(&file, png_bytes(600, 300)).expect("a scratch file this test owns");
 
     // The shell's verification of the printed path is on the worker when the surfaces ask.
@@ -1282,7 +1260,11 @@ fn an_awaited_peek_answer_after_a_terminals_decode_tells_every_waiting_surface()
         pointer: PhysicalPosition::new(40.0, 40.0),
     });
     let now = Instant::now();
-    folio.window.file_peek = Some(a_card_over(shell, &file, now));
+    folio.window.file_peek = Some(crate::test_support::card_over(
+        crate::RowHost::Terminal(shell),
+        &file,
+        crate::PeekClock::Settling(now),
+    ));
     folio
         .runtime()
         .advance_file_peek(now)
@@ -1305,6 +1287,10 @@ fn an_awaited_peek_answer_after_a_terminals_decode_tells_every_waiting_surface()
     );
     let generation = folio.window.markdown_pictures.generation;
     let builds = folio.window.renderer.overlay_builds;
+    assert!(
+        folio.window.peek_thumbnail_pending.is_none() && folio.window.peek_card_pending.is_none(),
+        "the fixture's own precondition: neither the flyout nor the card has asked a resample"
+    );
     folio.ledger.take();
 
     the_window_takes(&mut folio, vec![first, second]);
@@ -1338,6 +1324,4 @@ fn an_awaited_peek_answer_after_a_terminals_decode_tells_every_waiting_surface()
         effects.contains(&WindowEffect::Redraw),
         "and a redraw is asked: {effects:?}"
     );
-
-    std::fs::remove_file(&file).expect("the scratch file this test wrote");
 }
