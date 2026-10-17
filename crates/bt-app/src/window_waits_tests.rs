@@ -4699,56 +4699,15 @@ struct Exception {
     drop: &'static str,
 }
 
-const DIRWATCH_WINDOWS: &str =
-    "bt-platform crate::windows_impl::<DirWatch as Drop>::drop [windows]";
-const CLOSE_WINDOWS: &str = "bt-platform crate::windows_impl::close [windows]";
-const DIRWATCH_MACOS: &str =
-    "bt-platform crate::macos_watch::<DirWatch as Drop>::drop [target_os = \"macos\"]";
-const STOPPER_SIGNAL: &str =
-    "bt-platform crate::macos_watch::Stopper::signal [target_os = \"macos\"]";
 const PTY_SHUTDOWN: &str = "bt-pty crate::PtySession::shutdown";
 /// **The exception table** (revision (e)3 as corrected by (f)2, (g), and (n)): the `Drop`s that may
 /// reach the vocabulary, each owed a repayment in `docs/plans/structural-debt.md`. A row leaves
 /// when its repayment lands (T-DROP-DOORS): the wait moves to the value's named door, its `Drop`
 /// keeps only what needs no wait, and the check below then holds that `Drop` like any other.
-const EXCEPTIONS: [Exception; 2] = [
-    Exception {
-        row: "DirWatch (Windows)",
-        drop: DIRWATCH_WINDOWS,
-    },
-    Exception {
-        row: "DirWatch (macOS)",
-        drop: DIRWATCH_MACOS,
-    },
-];
+const EXCEPTIONS: [Exception; 0] = [];
 
 /// **Every pinned body**, walked from the exceptions: nothing a listed `Drop` reaches is exempt.
-const PINNED: [Pinned; 4] = [
-    Pinned {
-        body: DIRWATCH_WINDOWS,
-        edges: &[&[CLOSE_WINDOWS], &[CLOSE_WINDOWS], &[CLOSE_WINDOWS]],
-        effects: &[("SetEvent", 1), ("JoinHandle::join", 1)],
-        leaves: &["take"],
-    },
-    Pinned {
-        body: CLOSE_WINDOWS,
-        edges: &[],
-        effects: &[("CloseHandle", 1)],
-        leaves: &[],
-    },
-    Pinned {
-        body: DIRWATCH_MACOS,
-        edges: &[&[STOPPER_SIGNAL]],
-        effects: &[("JoinHandle::join", 1)],
-        leaves: &["take"],
-    },
-    Pinned {
-        body: STOPPER_SIGNAL,
-        edges: &[],
-        effects: &[],
-        leaves: &["signal"],
-    },
-];
+const PINNED: [Pinned; 0] = [];
 
 /// The exception rows whose chain reaches `body`, for a failure's message.
 fn rows_reaching(body: &str) -> Vec<&'static str> {
