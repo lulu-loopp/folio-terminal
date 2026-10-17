@@ -216,3 +216,62 @@ key matched on the new runners, the cold `logic` ran past its old 75 minutes,
 and a cancelled job saves no cache, so `main`'s runs there stayed cold. The toolchain action
 now removes every toolchain but the pinned one before the cache step, so the key
 follows `rust-toolchain.toml` and not the image.
+
+## Cache store (T-CI-CACHE-STORE-BUDGET, 2026-10-17)
+
+GitHub keeps 10 GB of caches per repository; past that it evicts the entries
+read least recently, and an entry nobody reads for seven days goes anyway. A
+run restores what its own ref saved or what the default branch saved, never a
+sibling branch's: an entry saved by a branch dispatch, a pull request or a tag
+is readable by that ref alone. rust-cache keys an entry
+`v0-rust-<job>-<os>-<arch>-<environment hash>-<dependency hash>` and restores
+by the key without the dependency hash when the full key is missing, taking the
+newest entry with that prefix; before saving it removes the workspace's own
+crates from `target/`, so an entry is the compiled dependencies and the
+registry files they came from (`licensing`, which compiles nothing into
+`target/`, saves 0.14 GB, the most the registry part of any entry can be).
+
+The store on 2026-10-17 (`gh cache list`), 9.97 GB in 11 entries:
+
+| job | ref | size (GB) | state |
+|---|---|---|---|
+| `logic` | `main` | 1.82 | current |
+| `core-macos` | `main` | 1.02 | current |
+| `smoke` | `main` | 0.92 | current |
+| `gpu` | `main` | 0.76 | current |
+| `core-linux` | `main` | 0.50 | current |
+| `gates-can-fail` | `main` | 0.41 | current |
+| `conpty` | `main` | 0.38 | current |
+| `wasm-lib-check` | `main` | 0.38 | current |
+| `licensing` | `main` | 0.14 | current |
+| `logic` | `main` | 1.82 | superseded (the previous `Cargo.lock`) |
+| `logic` | a branch | 1.82 | readable by that branch only |
+
+Over the 58 `ci.yml` runs of 2026-10-15..17 branch runs saved 157 entries
+(113.7 GB) and `main` 37 (25.0 GB); the branch entries were read back by their
+own branch 18 times. After the toolchain pin, 12 of `main`'s 90 job runs found
+no entry although `main` had saved that job's entry under the same prefix
+minutes to an hour earlier: branch bursts had evicted it.
+
+The rule: **only `main` saves** (`save-if` in `.github/actions/toolchain`);
+every other run restores `main`'s entry and saves nothing. The store then
+holds `main`'s set, S = 6.34 GB, and superseded entries, which nothing reads
+and which are therefore evicted first. The bound that keeps `main` warm is
+S + the largest entry <= 10 GB (today 6.34 + 1.82 = 8.16): one job whose key
+moved re-saves without evicting a sibling. A dependency change moves every key
+at once and needs 2 S = 12.67 GB for a moment; up to 2 S - 10 = 2.67 GB of the
+outgoing set can be evicted before the incoming set is saved, so a second
+`main` run started within the hour after such a landing can find some jobs
+cold. When S + the largest entry passes 10 GB, the job sizes are measured
+again and the set is made smaller before anything else is cached. A branch
+whose `Cargo.lock` matches `main`'s restores the full key; one that changed it
+restores `main`'s entry by prefix and compiles its difference on every
+dispatch (before this rule only its first dispatch did).
+
+Not taken: `cache-targets: false` (an entry would be the registry alone, about
+0.14 GB, and every job would compile its dependencies cold: `logic` 61.9 min
+p50 against 43.9 restored); one `shared-key` for several jobs (rust-cache
+saves only when the full key was missing, so the first job to finish would
+write the shared entry with its own artefacts and the others would never add
+theirs); a workflow deleting branch entries (with branches no longer saving
+there is nothing to delete after the last such entry ages out).
