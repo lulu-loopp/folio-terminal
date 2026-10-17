@@ -1301,6 +1301,10 @@ text_entries! {
     /// A question the row depends on (the parse answer, the edition's observation) got no
     /// answer; the next visit to the Profiles page asks again (release read m2).
     CapPowerShellUndetermined,
+    /// The edition's observation could not run — its worker's start was refused, or it ended
+    /// before it answered — so the row claims nothing; the next visit to the Profiles page asks
+    /// again (T-OBSERVATION-REFUSAL-ON-THE-PAGE).
+    CapPowerShellCheckNotRun,
     /// The edition runs `-Command` text in Constrained Language Mode, where the loader does
     /// nothing: the row claims nothing and offers nothing (T-PROBE-NO-CACHED-FAILURE).
     CapPowerShellConstrained,
@@ -4278,6 +4282,11 @@ impl Text {
                 "PowerShell integration could not be determined for these arguments. Folio asks again when this page opens.",
                 "自定义启动参数，PowerShell 整合状态未知。再次打开此页时重新检测。",
             ),
+            Self::CapPowerShellCheckNotRun => pick(
+                lang,
+                "PowerShell integration could not be determined for these arguments: the check could not run. Folio asks again when this page opens.",
+                "PowerShell integration could not be determined for these arguments: the check could not run. Folio asks again when this page opens.", // zh: pending T-OBSERVATION-REFUSAL-ON-THE-PAGE
+            ),
             Self::CapPowerShellConstrained => pick(
                 lang,
                 "PowerShell integration is not provided: this PowerShell runs in Constrained Language Mode.",
@@ -6558,6 +6567,10 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // zh: pending T-OBSERVATION-REFUSAL-ON-THE-PAGE — the Profiles row of an edition whose
+        // `$PROFILE` check could not run.
+        (Self::CapPowerShellCheckNotRun, HostPlatform::Windows),
+        (Self::CapPowerShellCheckNotRun, HostPlatform::MacOs),
         // zh: pending S-6a — the two clauses a preview save that never reached the disk is
         // "not saved" for.
         (Self::PreviewSaveNotStarted, HostPlatform::Windows),

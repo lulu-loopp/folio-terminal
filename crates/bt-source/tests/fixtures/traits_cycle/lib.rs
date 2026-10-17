@@ -1,10 +1,12 @@
 //! **The resolver's cycles and its hop limit** — the fixture of
-//! `the_resolver_reads_a_cycle_as_naming_nothing_more_and_refuses_past_its_limit`.
+//! `the_resolver_reads_a_cycle_as_naming_nothing_more_and_refuses_past_its_limit` and
+//! `supertraits_and_impls_chained_past_the_limit_are_refused_by_the_checked_api`.
 //!
 //! ```text
 //! left, right   each opens the other with a glob; `left` declares `Declared`
 //! named         imports `outside::outside`, a name under its own name
 //! chain         `Link0` … `Link20`, each a renamed re-export of the one before
+//! far           `Near: Link3`, `Far: Link20 + Link3`, and `Thing` implementing each link
 //! ```
 
 mod left {
@@ -43,4 +45,16 @@ mod chain {
     pub use Link17 as Link18;
     pub use Link18 as Link19;
     pub use Link19 as Link20;
+}
+
+mod far {
+    pub trait Near: crate::chain::Link3 {}
+
+    pub trait Far: crate::chain::Link20 + crate::chain::Link3 {}
+
+    pub struct Thing;
+
+    impl crate::chain::Link3 for Thing {}
+
+    impl crate::chain::Link20 for Thing {}
 }
