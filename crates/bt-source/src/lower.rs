@@ -35,10 +35,10 @@ use syn::spanned::Spanned;
 
 use crate::declarations::{Compilation, cfg_predicates};
 use crate::index::{
-    CommentKind, CommentRecord, ConditionalVariant, DeclarationPath, FileRecord, ImplRecord, Index,
-    ItemKind, ItemRecord, LiteralRecord, LiteralValue, MacroKind, MacroRecord, MacroShape,
-    ModuleRecord, ModuleShape, Span, TokenKind, TokenRecord, TraitRecord, UnsupportedMacroShape,
-    UseRecord,
+    AliasRecord, CommentKind, CommentRecord, ConditionalVariant, DeclarationPath, FileRecord,
+    ImplRecord, Index, ItemKind, ItemRecord, LiteralRecord, LiteralValue, MacroKind, MacroRecord,
+    MacroShape, ModuleRecord, ModuleShape, Span, TokenKind, TokenRecord, TraitRecord,
+    UnsupportedMacroShape, UseRecord,
 };
 use crate::reject::Rejection;
 use crate::universe::Universe;
@@ -72,6 +72,7 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
     let mut impls = Vec::new();
     let mut traits = Vec::new();
     let mut uses = Vec::new();
+    let mut aliases = Vec::new();
     let mut modules = Vec::new();
     let mut macros = Vec::new();
     let mut shapes = Vec::new();
@@ -188,6 +189,7 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
                     impls: &mut impls,
                     traits: &mut traits,
                     uses: &mut uses,
+                    aliases: &mut aliases,
                     modules: &mut modules,
                 };
                 // The stack opens empty and unconditional: what stands *outside*
@@ -220,6 +222,8 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
     traits.sort_by_key(|declaration| (declaration.whole().start(), declaration.whole().end()));
     uses.shrink_to_fit();
     uses.sort_by_key(|used| (used.whole().start(), used.whole().end()));
+    aliases.shrink_to_fit();
+    aliases.sort_by_key(|alias| (alias.whole().start(), alias.whole().end()));
     macros.shrink_to_fit();
     macros.sort_by_key(|record| (record.tokens.start(), record.tokens.end()));
     shapes.shrink_to_fit();
@@ -237,6 +241,7 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
         impls,
         traits,
         uses,
+        aliases,
         modules,
         tokens,
         literals,
@@ -796,6 +801,7 @@ struct Parsed<'a> {
     impls: &'a mut Vec<ImplRecord>,
     traits: &'a mut Vec<TraitRecord>,
     uses: &'a mut Vec<UseRecord>,
+    aliases: &'a mut Vec<AliasRecord>,
     modules: &'a mut Vec<ModuleRecord>,
 }
 
@@ -1098,6 +1104,25 @@ impl Parsed<'_> {
                         );
                     }
                     predicates.truncate(depth);
+                }
+                syn::Item::Type(alias) => {
+                    let (own, compilation) = cfg_predicates(&alias.attrs, self.text);
+                    let opens = start_of(
+                        &alias.attrs,
+                        Some(&alias.vis),
+                        alias.type_token.span.byte_range().start,
+                    );
+                    let mut standing = predicates.clone();
+                    standing.extend(own);
+                    self.aliases.push(AliasRecord {
+                        declared: self.declarations_for(module),
+                        name: alias.ident.to_string(),
+                        variant: ConditionalVariant {
+                            predicates: standing,
+                            compilation: gate.and(compilation),
+                        },
+                        whole: self.span(opens..alias.semi_token.span.byte_range().end),
+                    });
                 }
                 syn::Item::Use(used) => {
                     let (own, compilation) = cfg_predicates(&used.attrs, self.text);
@@ -1701,6 +1726,7 @@ mod tests {
         let mut impls = Vec::new();
         let mut traits = Vec::new();
         let mut uses = Vec::new();
+        let mut aliases = Vec::new();
         let mut modules = Vec::new();
         let parsed = Parsed {
             text,
@@ -1711,6 +1737,7 @@ mod tests {
             impls: &mut impls,
             traits: &mut traits,
             uses: &mut uses,
+            aliases: &mut aliases,
             modules: &mut modules,
         };
         let owner = parsed.type_owner(&block.self_ty);

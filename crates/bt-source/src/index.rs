@@ -742,6 +742,48 @@ impl UseRecord {
     }
 }
 
+/// **One type alias written directly in a module** — `type A<T> = B<T>;` — and the bytes it is
+/// written in (T-BT-SOURCE-CALL-GRAPH): what [`crate::call_graph`] follows a type written through
+/// an alias with, read as an item and never found by its keyword. An associated type of a trait
+/// or an `impl` block is no alias, and neither is one written inside a function body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AliasRecord {
+    pub(crate) declared: Vec<DeclarationPath>,
+    pub(crate) name: String,
+    pub(crate) variant: ConditionalVariant,
+    pub(crate) whole: Span,
+}
+
+impl AliasRecord {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The module paths the alias is written in, one per declaration path that reaches its file
+    /// (inline ancestry included).
+    #[must_use]
+    pub fn module_paths(&self) -> Vec<&str> {
+        self.declared
+            .iter()
+            .map(|path| path.module_path.as_str())
+            .collect()
+    }
+
+    /// The arm the alias stands on, as it is written in its file.
+    #[must_use]
+    pub const fn variant(&self) -> &ConditionalVariant {
+        &self.variant
+    }
+
+    /// The whole item: its attributes, the `type` keyword, the name, the generics, the target and
+    /// the semicolon.
+    #[must_use]
+    pub const fn whole(&self) -> Span {
+        self.whole
+    }
+}
+
 /// What kind of name a token carries.
 ///
 /// Only the identifier view's tokens are kept. A punctuation mark and a
@@ -927,8 +969,9 @@ impl ModuleRecord {
 /// **Not a confidence.** `Resolved` says the bytes are in a position the parser
 /// structured; `Candidate` says they are inside a macro's token tree, where the
 /// same tokens may be pasted into an item, dropped, or turned into something
-/// else entirely. Name *resolution* is not claimed by either: no query in this
-/// crate resolves a path to a definition.
+/// else entirely. Name *resolution* is not claimed by either: resolving a path
+/// to its definition is [`crate::call_graph`]'s (T-BT-SOURCE-CALL-GRAPH), which
+/// reads the items' parse, and a macro's token tree is an unresolved edge there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Certainty {
     Resolved,
@@ -1042,6 +1085,7 @@ pub struct Index {
     pub(crate) impls: Vec<ImplRecord>,
     pub(crate) traits: Vec<TraitRecord>,
     pub(crate) uses: Vec<UseRecord>,
+    pub(crate) aliases: Vec<AliasRecord>,
     pub(crate) modules: Vec<ModuleRecord>,
     pub(crate) tokens: Vec<TokenRecord>,
     pub(crate) literals: Vec<LiteralRecord>,
@@ -1064,6 +1108,7 @@ impl fmt::Debug for Index {
             .field("impls", &self.impls.len())
             .field("traits", &self.traits.len())
             .field("uses", &self.uses.len())
+            .field("aliases", &self.aliases.len())
             .field("tokens", &self.tokens.len())
             .field("literals", &self.literals.len())
             .field("comments", &self.comments.len())
@@ -1161,6 +1206,12 @@ impl Index {
     #[must_use]
     pub fn uses(&self) -> &[UseRecord] {
         &self.uses
+    }
+
+    /// Every type alias written directly in a module ([`AliasRecord`]), in union order.
+    #[must_use]
+    pub fn aliases(&self) -> &[AliasRecord] {
+        &self.aliases
     }
 
     /// Every identifier-view token, in union order.
@@ -1339,6 +1390,12 @@ impl Index {
             total += used.globs.capacity() * size_of::<Vec<String>>();
             total += used.globs.iter().map(path_bytes).sum::<usize>();
             total += predicate_bytes(&used.variant);
+        }
+        total += self.aliases.capacity() * size_of::<AliasRecord>();
+        for alias in &self.aliases {
+            total += declared_bytes(&alias.declared);
+            total += alias.name.capacity();
+            total += predicate_bytes(&alias.variant);
         }
         total += self.modules.capacity() * size_of::<ModuleRecord>();
         for module in &self.modules {

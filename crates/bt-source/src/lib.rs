@@ -133,6 +133,16 @@
 //!   never as a spelling: what `crates/bt-source/tests/contained_panic.rs` asks of each call that
 //!   is handed a closure.
 //!
+//! What T-BT-SOURCE-CALL-GRAPH adds (S-2a of the side-effects contract, revision (c)2):
+//!
+//! * [`call_graph`] — **a resolved call graph over a program's packages**: every call site of a
+//!   body turned into its edges ([`call_graph::Resolver::resolve_callees`]) — to the items it can
+//!   run, placed through the module tree by identity and with receivers typed by the census's
+//!   steps; to a foreign callee as a boundary; or to an unresolved edge with its kind and site —
+//!   and a walk ([`call_graph::CallGraph::walk`]) that stops at declared boundary items and
+//!   carries every unresolved edge with the path that reached it. Its module doc is the grammar
+//!   and the kinds. [`AliasRecord`] joins the index for it: type aliases are items, not tokens.
+//!
 //! **The reading is `cfg`-blind on purpose.** Every declaration is followed
 //! whatever stands on it, and the host platform never selects: a file reached
 //! only under `cfg(windows)` is enumerated on macOS too, because a guard that
@@ -141,6 +151,7 @@
 //! three-valued, and it decides [`Compilation`] and nothing else.
 
 mod cache;
+pub mod call_graph;
 mod census;
 mod declarations;
 mod dep_map;
@@ -164,10 +175,10 @@ pub use declarations::{Compilation, DeclarationStep, ModuleBody, ReachedModule};
 pub use dep_map::{DependencyMap, Door, FieldUse, MEASURED_AT, TopicEdge, Unclassified};
 pub use enumerate::{Enumeration, FileFacts, FileOwner, FileSetDiff, Unreached, enumerate};
 pub use index::{
-    Certainty, CommentKind, CommentRecord, ConditionalVariant, DeclarationPath, FileRecord,
-    ImplRecord, Index, ItemIdentity, ItemKind, ItemRecord, LiteralRecord, LiteralValue, Location,
-    MacroKind, MacroRecord, MacroShape, ModuleRecord, ModuleShape, Span, TokenKind, TokenRecord,
-    TraitRecord, UnsupportedMacroShape, UseRecord,
+    AliasRecord, Certainty, CommentKind, CommentRecord, ConditionalVariant, DeclarationPath,
+    FileRecord, ImplRecord, Index, ItemIdentity, ItemKind, ItemRecord, LiteralRecord, LiteralValue,
+    Location, MacroKind, MacroRecord, MacroShape, ModuleRecord, ModuleShape, Span, TokenKind,
+    TokenRecord, TraitRecord, UnsupportedMacroShape, UseRecord,
 };
 pub use manifest::{Package, TargetId, TargetKind, TargetRoot, Workspace};
 pub use paths::{is_inside, normalized};
