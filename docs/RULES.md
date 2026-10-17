@@ -384,8 +384,9 @@ carry the paste rules.
 (owner's rulings 2026-09-22 and 2026-09-23; `DESIGN.md` trailing entry
 2026-09-23 *A multi-line paste into a shell that would run it line by line waits
 on a card in the middle of the window*). One rule, `paste_road`, asked once per
-paste by `stage_paste` from `Runtime::deliver_paste`, where all four paste doors
-converge: the card is raised when the `multiline_paste_ask` setting is on, the
+paste by `stage_paste` from `Runtime::deliver_paste`, where every paste gesture
+converges — the clipboard's road and the road of paths in hand (`docs/ARCHITECTURE.md`
+§7.2.3): the card is raised when the `multiline_paste_ask` setting is on, the
 payload was the clipboard's own text, the pane has not set `?2004`, and
 `input::pasted_line_count` is more than one (a single trailing separator does not
 count). **PowerShell asks nothing** (ruling 2026-09-22; `DESIGN.md` trailing
@@ -940,8 +941,10 @@ the login-session named pipe with a per-user socket on macOS.
 
 ### 30. Notifications and the asking/telling surfaces — `folded`, and the family rule is `nowhere written`
 **Rule.** The one written rule in this family is the attention lane's reach rule
-(row 29): at most one of the in-window marks, a taskbar flash — once per turn
-however many panes spoke, and **absent entirely on a desktop whose taskbar
+(row 29): at most one of the in-window marks, a taskbar flash — once per raise
+(`Runtime::raise_attention`, which the drain, the animation tick, the endpoint's
+wake and a contradicted flash's replacement each call) however many panes spoke in
+it (corrected 2026-10-17, T-CHAINS-72: it read "once per turn"), and **absent entirely on a desktop whose taskbar
 auto-hides** — or a desktop message, with the notification setting gating only
 the desktop arm. **Nothing maps a message kind to a surface kind.** Fifteen
 surface types exist before menus and inline fields, eighteen to twenty-one with
@@ -1918,12 +1921,27 @@ entries above are still unfolded):
    inside the message pump winit turns. WKWebView's delegates are main-thread only.
    So the host's event queue is a single-thread queue, not a channel, and nothing
    about a callback is cross-thread.
-2. **A callback only queues an event and asks for a turn.** It pushes a `WebEvent`
-   and wakes the loop with `AppEvent::WebPageSpoke`, which carries nothing; the
-   next turn drives every window's seats (`WebSeat::drive`), a closing window's
-   included, and decides what the event means there. The one exception is a chord
-   this window owns, taken back synchronously in the accelerator callback, which
-   runs before the page sees the key.
+2. **A callback answers the engine only what cannot be answered later, and queues
+   the rest.** WebView2's arguments (`SetCancel`, `SetResponse`, `SetState`,
+   `SetHandled`) and WebKit's decision handlers must be settled before the callback
+   returns, so these are decided inside it, from the policy the caller handed the
+   host at `WebHost::new` (the navigation gate and the request gate) or from a fixed
+   answer: `NavigationStarting` asks the navigation gate and proceeds, cancels, or
+   cancels and navigates to the rewritten target (WebKit:
+   `decidePolicyForNavigationAction:` for the main frame); `FrameNavigationStarting`
+   asks the request gate and cancels a refused subframe; `WebResourceRequested` asks
+   the request gate, returns with nothing queued when allowed, and answers an empty
+   403 when refused; `NewWindowRequested` is marked handled, so the engine opens no
+   window of its own; `DownloadStarting` is cancelled; `PermissionRequested` is
+   denied (WebKit: each capability's handler answers `Deny`) and
+   `LaunchingExternalUriScheme` cancelled, both with nothing queued; a chord this
+   window owns is taken back in `AcceleratorKeyPressed`, which runs before the page
+   sees the key; and `MoveFocusRequested` is marked handled. **Every event that is
+   queued ends in `Shared::push`**, which pushes a `WebEvent` and wakes the loop with
+   `AppEvent::WebPageSpoke`, which carries nothing; what it means for the pane — the
+   refused request's notice, the new pane, the download's hand-off — is decided on
+   the next turn by `WebSeat::drive`, which drives every window's seats, a closing
+   window's included.
 3. **Nothing in the host blocks, and a callback may arrive for a pane that has
    gone.** Creation is asynchronous — the pump is winit's and a nested one would run
    the application re-entrantly — and a callback cannot be cancelled, so the

@@ -1139,8 +1139,9 @@ struct PasteTarget {
 /// **Which road one prepared paste takes into one pane** (0.4.4 tickets 02 and 03).
 ///
 /// The answer of [`paste_road`], which is the **one** place the window decides whether a paste
-/// asks: all four paste doors reach it through `Runtime::deliver_paste`, and nothing else in the
-/// tree asks the question (the design note's §1, "four doors, one road").
+/// asks: every paste gesture reaches it through `Runtime::deliver_paste` — the clipboard's road
+/// and the road of paths in hand both end there — and nothing else in the tree asks the question
+/// (the design note's §1, "four doors, one road", written when there were four gestures).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PasteRoad {
     /// Today's bytes, now: [`paste_text`], bracketed if the program asked for it.

@@ -7564,12 +7564,13 @@ pub enum PreviewWant {
 /// the answer belongs to the buffer, and which pane happens to be showing it
 /// when the disk answers is none of the worker's business.
 ///
-/// **And by the window the tab is in** (user report, 2026-08-23). A `TabId` is
-/// minted by a counter that starts again in every window, so `TabId(1)` names a
-/// tab in each of them at once; an answer carrying only the tab is an answer any
-/// window can mistake for its own. The pair is what is unique, and it is the
-/// same sentence [`crate::LeafId`] says one level down about a seat inside a
-/// tab.
+/// **The window it was asked from rides along, and decides nothing** (F1b). On
+/// 2026-08-23 a `TabId` came off a counter that started again in every window,
+/// so the window had to be carried to make the address unique. Since F1b a
+/// `TabId` is numbered once for the whole process and never reused
+/// (`crate::TabIds`), so the tab alone is the address: an answer is claimed by
+/// the window the tab stands in *now* ([`PreviewResponse::owner`]), which after a
+/// tear-out is not the window that asked.
 ///
 /// **Addressed by [`PreviewSource`] rather than by a path** for the reason the
 /// buffer is: the answer has to find its way back to one entry of a pool keyed
@@ -7601,9 +7602,10 @@ impl PreviewRequest {
     /// and then refused on arrival, which is a trip to a disk for an answer
     /// nothing can use.
     ///
-    /// **And the window is part of it**: two windows asking the same thing about
-    /// the same file of their own `TabId(1)` are two questions, and one answer
-    /// standing in for both leaves one of them waiting for ever.
+    /// **The window is part of it as well**, though since F1b it can never tell
+    /// two questions apart that the tab does not: a `TabId` is unique across the
+    /// process (`crate::TabIds`), so two windows never ask about one tab's file
+    /// under the same number.
     fn same_target(&self, other: &Self) -> bool {
         self.window == other.window
             && self.tab == other.tab
@@ -7615,7 +7617,8 @@ impl PreviewRequest {
 /// What the worker found.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewResponse {
-    /// The window the asking tab was in — see [`PreviewRequest::window`].
+    /// The window the asking tab was in when it asked; it routes nothing — see
+    /// [`PreviewRequest`] and [`Self::owner`].
     pub window: WindowId,
     pub tab: TabId,
     pub source: PreviewSource,

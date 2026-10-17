@@ -2026,14 +2026,17 @@ list**, and the ticket that moves a hop edits its row.
 
 **Every table here is read by a guard** (T-CHAINS-72;
 `crates/bt-source/tests/chains.rs`, `docs/ARCHITECTURE-GUARDS.md`
-"Cross-crate chains"). In a table with a `crate` and an `entry` column, each
-backticked name in the `entry` and `carries` cells resolves to a product item of
-the row's crate: `item` at the crate's root, `module::item` in the module it is
-declared in, `Type::member` (a method, a field or a variant, its impl anywhere in
-the crate), `module::Type::member`, and any of them after a package segment
-(`bt_platform::…`), which names that package instead. Any other shape between
-backticks in those two cells is refused by row; the `hop` and `lane` cells are
-prose.
+"Cross-crate chains"). A table has a `crate` and an `entry` column, its second
+line is the separator, and it has rows. Every backticked span in a cell other
+than `crate` is a code name that resolves to a product item — `item` at the
+row's crate's root, `module::item` in the module it is declared in,
+`Type::member` (a method, a field or a variant, its impl anywhere in the crate),
+`module::Type::member`, and any of them after a package segment
+(`bt_platform::…`), which names that package instead — or a thread name
+(lowercase words joined by hyphens) that a string literal in first-party product
+code spells. The `entry` cell names at least one. Anything else between
+backticks — a macro-made door, a constant, a ticket, a gesture — is written
+outside them; a span the guard cannot read is refused by row.
 
 ### 7.1 The printed path — recognition to hand-off
 
@@ -2042,10 +2045,10 @@ A bare absolute path a program printed in the terminal, made clickable.
 | hop | crate | entry | carries | lane |
 |---|---|---|---|---|
 | recognition | `bt-transcript` | `paths::detect_absolute_path_candidates`, `paths::may_read_unasked`; an agent's image placeholder ([Image #k]) through `paths::image_placeholder_ranges` against the pane's learned `paths::ImagePlaceholderTargets` (T-IMAGE-N) | `paths::PrintedPathCandidate` | the feed, synchronously |
-| verdict | `bt-term` | `session::verify_path`, `DualPlaneSession::ask_about_reprinted_path` / `DualPlaneSession::re_ask_about_link_target`, the ledger `DualPlaneSession::path_verdicts`; beside it the table `DualPlaneSession::image_placeholders`, learned by `DualPlaneSession::learn_image_placeholders_from_fresh_rows` from OSC 8 labels | `session::PathVerdict` | asked on `bt-path-verify-worker` (`bt-app`'s `run_path_verify_worker`); the ledger and the table are per pane and bounded |
+| verdict | `bt-term` | `session::verify_path`, `DualPlaneSession::ask_about_reprinted_path` / `DualPlaneSession::re_ask_about_link_target`, the ledger `DualPlaneSession::path_verdicts`; beside it the table `DualPlaneSession::image_placeholders`, learned by `DualPlaneSession::learn_image_placeholders_from_fresh_rows` from OSC 8 labels | `session::PathVerdict` | asked on `bt-path-verify-worker` (bt-app's `bt_app::run_path_verify_worker`); the ledger and the table are per pane and bounded |
 | projection | `bt-viewport` | `implicit_hyperlinks`, `mark_osc_8_dotted`, `ViewportFrame::hyperlink_at` | `bt_transcript::CellHyperlink`, `HyperlinkHit` | window thread, at frame build |
-| activation | `bt-app` | `Runtime::activate_hyperlink`, `hyperlink_activation` → `reference_activation` (the one table; a previewed document's links read it too, through `preview_link_activation`), `verified_target_of` | `bt_platform::handoff::VerifiedTarget` | window thread, from `mouse_input` |
-| hand-off | `bt-platform` | `handoff::resolved_for_a_door`; `ShellThread::hand_over`, which runs the door's private verbs — on Windows `handoff::windows_handoff::open_local_path_verified`, a share on another machine under Ctrl through `handoff::windows_handoff::open_local_path` (no ledger — a share is never asked about), any other scheme through `handoff::windows_handoff::shell_execute`; their macOS twins in the macOS module beside it | the OS's acceptance or a `handoff::HandOffRefusal` | the OS hand-off lane (`bt-app::handoff_lane`, thread `bt-os-handoff`), answered through `AppEvent::HandoffAnswered` |
+| activation | `bt-app` | `Runtime::activate_hyperlink`, `hyperlink_activation` → `reference_activation` (the one table; a previewed document's links read it too, through `preview_link_activation`), `verified_target_of` | `bt_platform::handoff::VerifiedTarget` | window thread, from `Runtime::mouse_input` |
+| hand-off | `bt-platform` | `handoff::resolved_for_a_door`; `ShellThread::hand_over`, which runs the door's private verbs — on Windows `handoff::windows_handoff::open_local_path_verified`, a share on another machine under Ctrl through `handoff::windows_handoff::open_local_path` (no ledger — a share is never asked about), any other scheme through `handoff::windows_handoff::shell_execute`; their macOS twins in the macOS module beside it | the OS's acceptance or a `handoff::HandOffRefusal` | the OS hand-off lane (`bt_app::handoff_lane::HandoffLane`, thread `bt-os-handoff`), answered through `bt_app::AppEvent::HandoffAnswered` |
 
 The chain **should remain layered** — five crates are not five excessive
 dependencies. Its defect is the absence of one current contract covering
@@ -2083,16 +2086,16 @@ then a mark.
 
 | hop | crate | entry | carries | lane |
 |---|---|---|---|---|
-| escape sequence (weak tier) | `bt-term` | `inline_image::parse_request_attention` → `AdapterEvent::AttentionRequest` → `lifecycle::classify` → `DualPlaneSession::apply_attention_request` | `session::AttentionRequest`; the level `SessionStatus::attention_request` | window thread, inside the feed (`Runtime::drain_pty`) |
+| escape sequence (weak tier) | `bt-term` | `inline_image::parse_request_attention` → `AdapterEvent::AttentionRequest` → `lifecycle::classify` → `DualPlaneSession::apply_attention_request` | `session::AttentionRequest`; the level `SessionStatus::attention_request` | window thread, inside the feed (`bt_app::Runtime::drain_pty`) |
 | level to edge | `bt-app` | `deliver_osc_attention` (from `Runtime::drain_pty`) and `settle_attention` (from `Runtime::advance_strip_animation`), each through `bt_workbench::attention::AttentionLedger::weak_edge` | `AttentionDelivery` | window thread |
-| the verb (`folio attention <family>:<event>`) | `bt-app` | `cli::attention` → `attention_wire::run_verb` → `bt_platform::attention_pipe::send_line` | `cli::AttentionCall`, one line of JSON (`attention_wire::Message`) | the verb's own process, which builds no window |
+| the verb (folio attention, family and event) | `bt-app` | `cli::attention` → `attention_wire::run_verb` → `bt_platform::attention_pipe::send_line` | `cli::AttentionCall`, one line of JSON (`attention_wire::Message`) | the verb's own process, which builds no window |
 | endpoint (strong tier) | `bt-platform` | `attention_pipe::AttentionPipe::start`; its listener hands each line to the closure it was given | one line of text | `folio-attention-endpoint` |
 | park and wake | `bt-app` | `attention_wire::open` → `attention_wire::park` (a bounded inbox, the oldest line dropped) → `AppEvent::AttentionSpoke` | one line of text | parked on `folio-attention-endpoint`; the event wakes the window thread |
 | take and deliver | `bt-app` | `FolioApp::user_event` → `attention_wire::take` → `attention_wire::Message::decode` → `deliver_attention`, which finds the pane by `attention_wire::names_this_pane` | `attention_wire::Message` | window thread |
 | ledger | `bt-workbench` | `attention::AttentionLedger::apply` | `attention::Event`, `attention::Reach`, `attention::Outcome` | window thread |
 | reach and interruption | `bt-app` | `notify::desktop_reach` → `Runtime::raise_attention` → `notify::interruption` (a taskbar flash, or a desktop message through the notifications) | `notify::Interruption` | window thread |
 | answer | `bt-app` | `Runtime::answer_attention` → `answer_attention_in` (from typing, the IME, a paste, a click, the wheel); the look through `Runtime::mark_attention_seen` (from `Runtime::activate_tab`) | `UserInputKind`, `bt_workbench::attention::AnswerKind` | window thread |
-| tab mark | `bt-app` | `TabState::mark_state` (from `Runtime::refresh_chrome_with_overlay`) → `seats::window_tab_strip` → `marks::status_dot_sprite` | `seats::TabMarkState` | window thread, at frame build |
+| tab mark | `bt-app` | `TabState::mark_state` (from `Runtime::refresh_chrome_with_overlay`) → `seats::window_tab_strip`, `seats::rail_chrome` or `seats::focus_rail_chrome` (the tab strip, the rail, the focus rail) → `marks::status_dot_sprite` | `seats::TabMarkState` | window thread, at frame build |
 | the pane that asks | `bt-app` | `Runtime::layout_peek_layer` (`LeafSession::session_facts` → `SessionFacts::claim`) → `peek_strip::push_mark_slot` → `marks::status_dot_sprite`; the palette's places row through `palette::place_row` | `peek_strip::PeekLeaf` | window thread, at the peek layer's and the palette's frame build |
 
 Contract: `docs/RULES.md` §29 (attention), its reach also in §30. Facts a ticket
@@ -2129,10 +2132,10 @@ A new size reaches a pane's grid at once and its shell at the quiet boundary.
 | schedule | `bt-app` | `schedule_leaf_grid_change` (the focused leaf last, through `Runtime::schedule_grid_change`) → `plan_grid_change` → `coalesce_pty_resize_on_grid_change` → `coalesce_pty_resize` | `PendingPtyResize`, the newest grid with the quiet deadline | window thread |
 | reflow | `bt-term` | `DualPlaneSession::resize_at` → `lifecycle::plan_resize` → `TerminalAdapter::resize` | `lifecycle::ResizePlan` | window thread: in the same turn for a shown pane, at the release for a hidden one |
 | release | `bt-app` | `Runtime::turn` → `Runtime::flush_pending_pty_resize` → `release_due_leaf_resize` → `service_pending_pty_resize` (`take_due_pty_resize`, `pty_resize_wake_deadline`) | `PendingPtyResize` | window thread, once per turn, after every other task that can change a session |
-| commit | `bt-app` | `commit_leaf_resize` → `pty_size` → `pty_door::resize`, then `bt_term::DualPlaneSession::mark_pty_resize_requested_at` (or, with nothing to tell, `bt_term::DualPlaneSession::mark_resize_settled_unchanged_at`); `replace_psreadline_resize_reanchor_debt` | `bt_pty::PtySize` | window thread, admitted as `doors::PtyResize` (§5.3 row 12) |
-| pseudoconsole | `bt-pty` | `PtySession::resize` | `PtySize` | window thread, synchronous: the `ResizePseudoConsole` round trip into conhost |
+| commit | `bt-app` | `commit_leaf_resize` → `pty_size` → `pty_door::resize`, then `bt_term::DualPlaneSession::mark_pty_resize_requested_at` (or, with nothing to tell, `bt_term::DualPlaneSession::mark_resize_settled_unchanged_at`); `replace_psreadline_resize_reanchor_debt` | `bt_pty::PtySize` | window thread, admitted as the PtyResize door (§5.3 row 12) |
+| pseudoconsole | `bt-pty` | `PtySession::resize` | `PtySize` | window thread, synchronous: the ResizePseudoConsole round trip into conhost |
 | close | `bt-app` | `Runtime::finish_resize_if_quiescent` → `bt_term::DualPlaneSession::finish_resize_if_quiescent`; an owed PSReadLine repair through `take_psreadline_resize_reanchor_input` → `write_pty_input` | the repair's bytes | window thread, a later turn (it runs before the release in `Runtime::turn`) |
-| a birth's missed size | `bt-app` | `Runtime::land_births` → `apply_owed_shell_resize` → `pty_door::resize` | `bt_pty::PtySize` | window thread, when the `bt-pty-birth` worker's shell lands |
+| a birth's missed size | `bt-app` | `Runtime::land_births` → `Runtime::land_own_shell` (or, for a restart's successor, `land_successor`) → `land_shell_birth` → `apply_owed_shell_resize` → `pty_door::resize`; a silent birth death's last-resort shell through `Runtime::land_birth_death_fallback` → `runtime::tabs::land_birth_death_fallback` → `land_birth_death_fallback_shell` → `apply_owed_shell_resize` | `bt_pty::PtySize` | window thread, when the `bt-pty-birth` worker's shell lands |
 
 The free functions in `main.rs` that sequence it, in call order:
 `resize_worth_solving`, `size_authority_for_rectangle`, `solve_seats`,
@@ -2141,8 +2144,8 @@ The free functions in `main.rs` that sequence it, in call order:
 `release_due_leaf_resize`, `service_pending_pty_resize`, `take_due_pty_resize`,
 `pty_resize_wake_deadline`, `commit_leaf_resize`, `pty_size`,
 `replace_psreadline_resize_reanchor_debt`,
-`take_psreadline_resize_reanchor_input`, and at a birth's landing
-`apply_owed_shell_resize`. The `Runtime` methods around them (`resize`,
+`take_psreadline_resize_reanchor_input`, and at a birth's landing `land_shell_birth`,
+`land_birth_death_fallback_shell` and `apply_owed_shell_resize`. The `Runtime` methods around them (`resize`,
 `resolve_seat_layout`, `resize_leaves_to_layout`, `flush_pending_pty_resize`,
 `finish_resize_if_quiescent`) are in `runtime/dpi.rs`, `runtime/panes.rs` and
 `runtime/diagnostics.rs`.
@@ -2168,7 +2171,7 @@ A paste gesture becomes bytes on the pane's writer thread.
 | spend | `bt-app` | `Runtime::send_paste` → `paste_body` → `paste_text` (or `paste_spelled` for the input line) → `input::paste_bytes` (bracketed when the pane set mode 2004) | the paste's bytes | window thread |
 | offer | `bt-app` | `offer_pty_input` (a pane in birth holds the bytes instead) | `PtyInput` | window thread |
 | the ring | `bt-pty` | `PtySession::write_with_reason` → `InputRing::try_push` | the paste's bytes, one write | window thread, one lock |
-| the write | `bt-pty` | `pump_pty_input` | the paste's bytes | the pane's writer thread (unnamed, `bt-pty`'s own spawn; outside the thread door, §5.1) |
+| the write | `bt-pty` | `pump_pty_input` | the paste's bytes | the pane's writer thread (unnamed, bt-pty's own spawn; outside the thread door, §5.1) |
 
 Contract: `docs/RULES.md` §9 and `Runtime::deliver_paste`'s doc comment. Facts a
 ticket must not re-derive:
@@ -2203,7 +2206,7 @@ A file shown in a preview pane: its load, its watch, its formulas, its save.
 | refresh | `bt-app` | `Runtime::refresh_preview_file` → `preview::PreviewBuffer::note_disk_moved` → `Runtime::request_stale_previews` → `preview::PreviewBuffer::claim_head_read` (a comparison read) → back through the read row; landed by `preview::PreviewBuffer::land_comparison` | `preview::DiskVerdict` | window thread, then `bt-preview-worker` |
 | formulas | `bt-app` | `Runtime::resolve_document_math` → `Runtime::request_preview_math` → `computation_lane::ComputationLane::decorate` → `run_decoration_worker` (`MathWorkerRequest::PreviewMath`) → `AppEvent::MathReady` → `FolioApp::drain_math_answers` → `Runtime::apply_math_results` → `PreviewMathCache::land` | `PreviewMathKey`, `DecorationWorkerCompletion::PreviewMath` | asked and landed on the window thread, rendered on `bt-math-worker` (the computation lane's decoration share) |
 | save | `bt-app` | `Runtime::save_preview_on` → `preview::PreviewBuffer::request_save` → `preview::PreviewSaves::submit` → `persist::StorageLane::send_document` → `document_request::serve_document` → `AppEvent::DocumentsAnswered` → `FolioApp::take_preview_save_answers` → `Runtime::hear_preview_saves` → `preview::PreviewPool::hear_save` → `preview::PreviewBuffer::hear_save` | `document_request::DocumentJob`, `document_request::DocumentAnswer`, `preview::SaveAnswer` | asked and heard on the window thread, written on `session-writer` (§5.1) |
-| the quit's and the stop's write | `bt-app` | `FolioApp::settle_quit` → `Runtime::quit_save` → `preview::PreviewPool::save_dirty`; `FolioApp::stop_every_window` → `Runtime::keep_unsaved_edits` → `preview::PreviewPool::keep_dirty`; both → `preview::PreviewBuffer::write_now_for_quit` | `preview::SaveOutcome` | window thread, synchronous (§5.3 row 20), until S-6c (`T-QUIT-AND-STOP-SAVES`) moves it onto the storage worker |
+| the quit's and the stop's write | `bt-app` | `FolioApp::settle_quit` → `Runtime::quit_save` → `preview::PreviewPool::save_dirty`; `FolioApp::stop_every_window` → `Runtime::keep_unsaved_edits` → `preview::PreviewPool::keep_dirty`; both → `preview::PreviewBuffer::write_now_for_quit` | `preview::SaveOutcome` | window thread, synchronous (§5.3 row 20), until S-6c (T-QUIT-AND-STOP-SAVES) moves it onto the storage worker |
 
 Contract: `docs/RULES.md` §18 (what a preview shows), §19 (the buffer and its
 save) and §56 (the load, the watch and the formulas, T-CHAINS-72). Facts a
@@ -2233,7 +2236,7 @@ A page in a pane: the host, the engine's events, the wake, the outcomes.
 |---|---|---|---|---|
 | open | `bt-app` | `Runtime::open_web_page` → `Runtime::open_web_page_with` → `Runtime::open_web_page_on` (a parked spare first, through `Runtime::adopt_spare_web_page`) → `webhost::WebSeat::open` | the address, and the wake that sends `AppEvent::WebPageSpoke` | window thread |
 | host | `bt-platform` | `WebHost::new`; the engine asked through `WebHost::request_environment` and `WebHost::request_controller` (from `bt_app::webhost::WebSeat::start_environment` and `bt_app::webhost::WebSeat::step`, admitted through the window-thread doors WebEnvironment and WebController); the handlers attached by `WebHost::attach_events` | `webview::WebEvent` | window thread |
-| engine callback | `bt-platform` | each handler, and each creation completion, ends in `Shared::push`, which queues the event and calls the wake | `webview::WebEvent` | **window thread**: WebView2 calls back on the thread that created its environment, inside the message pump winit turns; WKWebView's delegates are main-thread only |
+| engine callback | `bt-platform` | an answer the engine needs before the callback returns is given inside it, from the gates the caller handed `WebHost::new` or a fixed answer (the engine's NavigationStarting, FrameNavigationStarting, WebResourceRequested, NewWindowRequested, DownloadStarting, PermissionRequested, LaunchingExternalUriScheme, AcceleratorKeyPressed and MoveFocusRequested events: see RULES §49); every event that is queued ends in `Shared::push`, which queues it and calls the wake | `webview::WebEvent` | **window thread**: WebView2 calls back on the thread that created its environment, inside the message pump winit turns; WKWebView's delegates are main-thread only |
 | wake | `bt-app` | the wake closure built in `Runtime::open_web_page_on` (and in `Runtime::make_spare_web_controller`) → `window_seam::LoopProxy::send_event` → `AppEvent::WebPageSpoke` | nothing; the event is a turn of the loop | window thread |
 | drive | `bt-app` | `FolioApp::user_event` → `FolioApp::for_every_window_engines_included` → `Runtime::drive_web_page` → `webhost::WebSeat::drive` (`bt_platform::WebHost::drain`, then `WebSeat::digest` per event) | `webhost::WebOutcome` | window thread |
 | apply | `bt-app` | `Runtime::apply_web_outcomes` | `webhost::WebOutcome` | window thread |
@@ -2249,11 +2252,14 @@ the row's other entries are still unfolded). Facts a ticket must not re-derive:
   environment and the controller are asked only through window-thread doors);
   WKWebView's delegates are main-thread only. Nothing about a callback is
   cross-thread, so the queue is a `RefCell` queue on the host, not a channel.
-- **A callback only queues and wakes.** It pushes a `WebEvent` and sends
-  `AppEvent::WebPageSpoke`; what the event means is decided on the next turn by
-  `WebSeat::drive`, never inside the callback — except a chord this window
-  owns, which the accelerator handler takes back synchronously, because that
-  callback runs before the page sees the key.
+- **A callback decides only what cannot wait, and queues everything else.**
+  `SetCancel`, `SetResponse`, `SetState` and `SetHandled` cannot be decided later,
+  so a navigation is let through, cancelled or rewritten, a refused subresource is
+  answered 403, a new window is claimed, a download cancelled, a permission denied
+  and an owned chord taken back inside the callback, from the gates the caller gave
+  the host or a fixed answer (RULES §49 lists each). What the event means for the
+  pane — a notice, a new pane, a hand-off — is decided on the next turn by
+  `WebSeat::drive`; every queued event goes through `Shared::push` and the wake.
 - **One event wakes every engine in every window.** `WebPageSpoke` carries
   nothing: its arm drives every window's seats, a closing window's included, and
   the page shrinker wakes with the same event.
