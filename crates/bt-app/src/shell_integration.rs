@@ -4923,7 +4923,8 @@ fn psreadline_module_in_trial(
     trial_psmodules: &Path,
 ) -> std::io::Result<PathBuf> {
     let durable = durable_psmodules.join(crate::psreadline::ARTEFACT);
-    let whole = crate::psreadline::module_files().iter().all(|(name, bytes)| {
+    let files = crate::psreadline::module_files();
+    let whole = files.iter().all(|(name, bytes)| {
         bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, durable.join(name))
             .is_ok_and(|existing| existing == *bytes)
     });
