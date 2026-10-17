@@ -77329,7 +77329,7 @@ fn main() -> Result<()> {
     // **Every diagnostic door, read once, here** (`entry_doors`, T-DIAGNOSTIC-DOORS-AT-THE-ENTRY):
     // the recordings and traces this run was asked for, handed to each library that writes one
     // before any station can be reached. Nothing below reads them from the environment again.
-    let doors = entry_doors::EntryDoors::read().install();
+    let doors = entry_doors::EntryDoors::at_the_entry().install();
     // **What this process was handed is passed on only by name**, before any door can start a
     // child: the uninstaller removes the data folder, and a `diagnostics.log` handle inherited
     // down a chain of Folio processes is a holder there its probe refuses on.

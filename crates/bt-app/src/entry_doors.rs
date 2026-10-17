@@ -7,7 +7,7 @@
 //! renderer's frame. That code is library code, and a test binary runs it as readily as the
 //! program, so a shell that had `BT_PTY_DUMP` set for a diagnosis made every test that started a
 //! real pane record into the diagnosis's file. The doors are a system boundary, and the boundary
-//! is here: [`EntryDoors::read`] is called by `main`, once, before anything can reach a station,
+//! is here: [`EntryDoors::at_the_entry`] is called by `main`, once, before anything can reach a station,
 //! and [`EntryDoors::install`] hands each library its answer. Nothing below reads the
 //! environment again — the shell cannot change it under a running process anyway — and a process
 //! whose entry is not `main`, every test binary, installs nothing and honours no door. A test that
@@ -115,7 +115,7 @@ static INSTALLED: OnceLock<EntryDoors> = OnceLock::new();
 
 impl EntryDoors {
     /// **The one reader of the diagnostic doors.** Called by `main` and by nothing else.
-    pub(crate) fn read() -> Self {
+    pub(crate) fn at_the_entry() -> Self {
         Self::from_values(DoorValues {
             pty_dump: std::env::var_os("BT_PTY_DUMP"),
             pty_input_dump: std::env::var_os("BT_PTY_INPUT_DUMP"),
@@ -383,9 +383,9 @@ mod tests {
         std::fs::remove_dir_all(&folder).unwrap();
     }
 
-    /// RED (mutation: drop any one door from [`EntryDoors::read`], or the trace files from
+    /// RED (mutation: drop any one door from [`EntryDoors::at_the_entry`], or the trace files from
     /// [`EntryDoors::install`] — the child's assertion or the folder's listing names it) — **the
-    /// entry reads every door and installs its answer**: after `read().install()` the gates open
+    /// entry reads every door and installs its answer**: after `at_the_entry().install()` the gates open
     /// the files the variables name, the switches are on, and the recording a pane is born with
     /// is the one the two dump variables name.
     #[test]
@@ -394,7 +394,7 @@ mod tests {
             "entry_doors::tests::the_entry_reads_every_door_and_hands_each_library_its_answer";
         if let Some(folder) = std::env::var_os(CHILD) {
             let folder = PathBuf::from(folder);
-            let doors = EntryDoors::read().install();
+            let doors = EntryDoors::at_the_entry().install();
             crate::ime_outbound::install();
             walk_every_station();
             let at = |door: &str| Some(folder.join(format!("{door}.log")));
