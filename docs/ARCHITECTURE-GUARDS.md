@@ -663,6 +663,47 @@ beside the others and its headless impl in `headless.rs`); never add a native
 row for code that only reads or tells the window. A row nothing writes any more
 is named too, and is taken off.
 
+## Environment doors
+
+The rule: a `BT_` variable is the person's shell speaking to one run of the
+program, so it is read once, at the program's entry, and handed to the code
+that acts on it; a library never reads one at the moment of use
+(T-DIAGNOSTIC-DOORS-AT-THE-ENTRY, 2026-10-17). Read in a library, a door is
+honoured by every binary that reaches the library — a test binary as readily as
+`folio.exe` — and a shell left with `BT_PTY_DUMP` and `BT_CARD_TRACE` set made
+the test suite write gigabytes of recordings into the folder they named.
+`bt_app::entry_doors` is the product's one reader of the recording and trace
+doors; `bt-pty` takes a `PtyRecording` on the command it spawns, `bt_app::trace`
+and the platform's IME and summon traces open what the entry installed, and the
+three crates under `bt-app` ask `bt_viewport::trace::perf`.
+
+Where and what to do: `crates/bt-source/tests/env_doors.rs` reads every product
+item (no `cfg(test)`, no integration test or build script, no `cfg` naming
+`test`) of every first-party package and judges every token `var`, `var_os`,
+`vars` and `vars_os` by a closed grammar: `std::env::var_os("…")` and
+`std::env::var("…")` (`::std` too), `env::var_os(…)` in a file with a
+module-level `use std::env;`, the bare call in a file whose `use std::env::…`
+brings the name in under its own name, and in each of them an argument that is
+one string literal or a `const NAME: &str = "…";` with one value in the same
+file. A method call, a declaration and a bare name the file does not import
+from `std::env` are no read. Every other shape that names one of the four is a
+refusal by file and line, never a silent skip: a computed argument (a
+parameter, `format!`, another module's constant, a macro's `$name`), an
+enumeration (`vars()`, `vars_os()`), the reader handed on as a value, a path
+through another module, a bare reader under a glob of `std::env`, and a `use`
+that renames a reader. Extending the grammar is another ticket. Its fixture
+`tests/fixtures/env_doors` plants one function per shape, and the test holds
+the scan to a table. The list `docs/plans/ENV-DOORS.tsv` is an equality keyed
+by file and item: every item that reads a `BT_` name or holds a refusal has
+exactly its row, the row's `names` and `refused` are exactly what the item
+reads, and a row whose item reads nothing is stale. Its categories are `entry`
+(the product's entry reader and the tools' own entries), `door` (a behaviour or
+test door still read where it is used; the ticket column names the follow-up
+that moves it) and `unjudged` (a refused shape that reads no `BT_` door; the
+reason says what it reads). **The list only shrinks**: when red, move the read
+to the entry and hand the answer down as a parameter or an installed answer;
+review refuses an added row, and the grammar is not widened to quiet a refusal.
+
 ## Machine-independent paths
 
 The rule: committed code, tests, and documentation do not carry one developer's
