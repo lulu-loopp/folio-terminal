@@ -76971,6 +76971,18 @@ fn start_claim_sweep(
         .is_ok()
 }
 
+/// **The media platform's one-time warm-up** (§7.23), started by `prewarm`. Nobody waits on it:
+/// the first video hover starts the platform itself when the warm-up has not, and pays the cost
+/// then. **A start the thread door refuses is said once in `say`**
+/// (T-PROFILE-INSTALL-REFUSED-START) — before, it was thrown away unsaid.
+fn start_video_prewarm(prewarm: fn() -> std::io::Result<()>, say: impl Fn(&str)) {
+    if let Err(error) = prewarm() {
+        say(&format!(
+            "the media platform's warm-up could not be started: {error}; the first video hover starts it"
+        ));
+    }
+}
+
 fn main() -> Result<()> {
     // **What this process was handed is passed on only by name**, before any door can start a
     // child: the uninstaller removes the data folder, and a `diagnostics.log` handle inherited
@@ -77330,7 +77342,7 @@ fn main() -> Result<()> {
     }
     // The one-time media-session warm-up (§7.23) is paid here, off the first
     // hover: the process-resident session costs ~210ms cold and ~10ms warm.
-    bt_platform::video::prewarm();
+    start_video_prewarm(bt_platform::video::prewarm, diagnostics::note);
     // **The one message this program reads before winit dispatches it** (§7.54).
     //
     // `WM_HOTKEY` for a registration that named no window is a **thread**

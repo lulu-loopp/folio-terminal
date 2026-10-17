@@ -3288,7 +3288,7 @@ mod tests {
     /// RED (T-PROFILE-INSTALL-REFUSED-START) — **a launch probe the thread door refused is said
     /// once and holds nothing**: the window thread that asked goes on, the row stays "not known",
     /// and the deployment latch is free for a press. Before, the refusal panicked the window
-    /// thread (`.expect("failed to spawn thread")`).
+    /// thread (an `expect` on the thread door's answer).
     ///
     /// MUTATIONS: put the `expect` back on the start — the test panics; the probe's `Answered`
     /// not saying — no line.

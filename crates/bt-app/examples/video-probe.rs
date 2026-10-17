@@ -137,7 +137,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&out_dir)?;
     // The 200 ms the platform costs the first question, spent before a window
     // exists rather than in the middle of the first play.
-    bt_platform::video::prewarm();
+    if let Err(error) = bt_platform::video::prewarm() {
+        eprintln!("video-probe: the media platform's warm-up could not be started: {error}");
+    }
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);

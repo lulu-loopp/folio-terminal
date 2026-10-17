@@ -11924,7 +11924,7 @@ mod tests {
     /// RED (T-PROFILE-INSTALL-REFUSED-START) — **an Enable whose worker the thread door refused is
     /// answered on the window that clicked**: the refusal's card, in the sentence that says
     /// nothing was changed, and one line in diagnostics with the door's reason. Before, the start
-    /// was thrown away (`let _ = spawn_at_priority(..)`): no answer was filed, the window was
+    /// was thrown away (`let _ =` on the thread door's answer): no answer was filed, the window was
     /// never woken, and nothing said why the click did nothing.
     ///
     /// Through the scripted executor, which refuses the start as a machine out of threads would;

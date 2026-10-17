@@ -348,15 +348,21 @@ fn decode_from_url(
 /// Once, at start-up, from `bt-app`'s `main`. It is deliberately not called
 /// lazily from the file column: the point of it is to spend the first question's
 /// ~200 ms somewhere nobody is waiting, and a hover is not that place.
-pub fn prewarm() {
-    let _ = crate::spawn_at_priority(
+///
+/// # Errors
+///
+/// The thread door's refusal: nothing was warmed, and the first hover's decode starts the
+/// platform itself ([`media_session`]). The caller says it (T-PROFILE-INSTALL-REFUSED-START).
+pub fn prewarm() -> std::io::Result<()> {
+    crate::spawn_at_priority(
         "folio-video-prewarm",
         crate::ThreadPriority::Normal,
         |_ctx| {
             let _inside = READERS.enter();
             media_session();
         },
-    );
+    )
+    .map(drop)
 }
 
 /// **How many threads are inside Media Foundation right now**, and the way to
