@@ -5,7 +5,9 @@
 //! right press, with nothing held, raises the page's menu.
 
 use super::*;
-use crate::headless::{HeadlessApplication, HeadlessFolio, HeadlessParts, headless_window};
+use crate::headless::{
+    HeadlessApplication, HeadlessFolio, HeadlessParts, Ledger, WindowEffect, headless_window,
+};
 use crate::runtime::pointer::CaptureOwner;
 use crate::test_support::{buffer_saying, host_spelling, seat_of, tab_with_a_preview};
 use crate::{PreviewSurface, TabId, TabState};
@@ -22,13 +24,15 @@ fn a_page_tab(id: u64) -> (TabState, PreviewSurface) {
 }
 
 /// One application with two windows, `1` and `2`, each holding a page tab (tab 1 and tab 2)
-/// and drawn once; window 1's page's surface beside it.
-fn two_windows_with_pages(tag: &str) -> (HeadlessApplication, PreviewSurface) {
+/// and drawn once; window 1's page's surface and window 1's own ledger beside it (window 2
+/// records into a ledger of its own, so what window 1 did can be told apart).
+fn two_windows_with_pages(tag: &str) -> (HeadlessApplication, PreviewSurface, Ledger) {
     let (first, surface) = a_page_tab(1);
     let folio = HeadlessFolio::with_tabs(tag, vec![first], 0);
+    let first_ledger = folio.ledger.clone();
     let second = headless_window(
         &folio.app,
-        HeadlessParts::new(&folio.app.gpu, 2, (1200, 800), 1.0, &folio.ledger),
+        HeadlessParts::new(&folio.app.gpu, 2, (1200, 800), 1.0, &Ledger::default()),
         vec![a_page_tab(2).0],
         0,
     );
@@ -50,7 +54,7 @@ fn two_windows_with_pages(tag: &str) -> (HeadlessApplication, PreviewSurface) {
             .expect("a headless frame composes");
         runtime.redraw().expect("and reaches the glass");
     }
-    (application, surface)
+    (application, surface, first_ledger)
 }
 
 /// A point on window `id`'s glass over the drawn paragraph that holds `text`.
@@ -167,7 +171,7 @@ fn caret(application: &mut HeadlessApplication, surface: PreviewSurface) -> std:
 /// under the held press and the first assertion fails.
 #[test]
 fn a_second_button_during_a_held_gesture_opens_nothing() {
-    let (mut application, surface) = two_windows_with_pages("pointer-second-button");
+    let (mut application, surface, _) = two_windows_with_pages("pointer-second-button");
     let first = on_the_paragraph(&mut application, 1, "first paragraph");
     let second = on_the_paragraph(&mut application, 1, "second paragraph");
     let before = caret(&mut application, surface);
@@ -264,10 +268,12 @@ fn a_second_button_during_a_held_gesture_opens_nothing() {
 ///
 /// MUTATION: route a press arriving in another window than the capture's (compare the press's
 /// window with the slot's in `Runtime::button_meets_the_slot`) — window 2's menu rises under
-/// window 1's held press; clear `swallowed` when a capture ends — the assertion naming B22 fails.
+/// window 1's held press; clear `swallowed` when a capture ends — the assertion naming B22 fails;
+/// skip the owner's cancel in `FolioApp::capture_before_pointer_event` (`|_this| Ok(())` for
+/// `cancel_owner`) — window 1 records no repaint and the cancel's assertion fails.
 #[test]
 fn a_second_button_in_another_window_is_swallowed_too() {
-    let (mut application, _) = two_windows_with_pages("pointer-second-window");
+    let (mut application, _, first_ledger) = two_windows_with_pages("pointer-second-window");
     let one = on_the_paragraph(&mut application, 1, "second paragraph");
     let two = on_the_paragraph(&mut application, 2, "first paragraph");
 
@@ -350,6 +356,7 @@ fn a_second_button_in_another_window_is_swallowed_too() {
         MouseButton::Left,
     );
     assert_eq!(the_slot(&application), Some((WindowId::from(1), true)));
+    first_ledger.take();
     button_at(
         &mut application,
         2,
@@ -357,9 +364,13 @@ fn a_second_button_in_another_window_is_swallowed_too() {
         ElementState::Pressed,
         MouseButton::Left,
     );
+    assert!(
+        first_ledger.take().contains(&WindowEffect::Redraw),
+        "window 1's owner ran its own cancel: the selection let go repaints its page"
+    );
     assert_eq!(
         the_slot(&application),
         Some((WindowId::from(2), true)),
-        "window 1's stale selection is cancelled and window 2 latches its own"
+        "and window 2 latches its own selection in its place"
     );
 }

@@ -3780,8 +3780,8 @@ fn a_forwarded_gesture_is_delivered_to_the_shell_it_was_handed_to() {
 /// left up. The child hears exactly a left press and a left release, and the
 /// route stands until the left release and comes off there. Since
 /// T-POINTER-CAPTURE cut 4 (R-8) the slot swallows the right button's press and
-/// release before any road is asked, so neither reaches the owned release; the
-/// cell road still takes no second button while a forwarded gesture is latched.
+/// release before any road is asked, so neither reaches the owned release nor
+/// the cell road, where a second press would have begun a selection.
 ///
 /// Red gates: drop the latched-button test from the release arm, or let a
 /// second press overwrite the route, and the chord's byte list is wrong; let
@@ -3858,14 +3858,10 @@ fn a_chord_under_a_forwarded_gesture_leaves_it_whole() {
         crate::runtime::pointer::ReleaseVerdict::Swallow,
         "another button's release goes nowhere under the forwarded gesture (R-8)"
     );
-    let road = squeezed_body("Runtime", "mouse_input");
-    assert!(
-        road.contains(
-            "ifmatches!(self.held_mouse_route(),Some(MouseRoute::Forward{..})){returnOk(());}match state"
-                .replace(' ', "")
-                .as_str()
-        ),
-        "the cell road begins no selection under a latched forwarded gesture"
+    assert_eq!(
+        crate::runtime::pointer::press_against_the_slot(Some(&forwarded), MouseButton::Right),
+        crate::runtime::pointer::PressVerdict::Swallow,
+        "and another button's press reaches no road, so it begins no selection under it"
     );
 }
 

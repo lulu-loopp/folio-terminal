@@ -5248,12 +5248,6 @@ impl<B: Backend> Runtime<'_, B> {
                 UserInputKind::MouseButton,
             );
         }
-        // **A gesture already handed to the program keeps the pane**: another
-        // button pressed over a cell while it is held is not forwarded and does
-        // not begin a selection that would take the route from it.
-        if matches!(self.held_mouse_route(), Some(MouseRoute::Forward { .. })) {
-            return Ok(());
-        }
         match state {
             ElementState::Pressed if button == MouseButton::Left => {
                 // The selection is addressed to the shell in the pressed pane,
