@@ -354,7 +354,7 @@ evaluation); turn its ledger's rows into roots and boundary items; walk; judge `
 guard that follows an unresolved edge on its own stated rule passes it to `walk_following`, and
 the edge stays in `unresolved` all the same. Where and what to do: `crates/bt-source/tests/call_graph.rs`
 holds a fixture per grammar row and per kind (`tests/fixtures/call_graph/`), each red under a named
-mutation, and prints the walk's cost over the real tree (`CALL_GRAPH_REAL_TREE`). When a guard
+mutation, and prints the walk's counts over the real tree (`CALL_GRAPH_REAL_TREE`; not a timing — the timing-bound list only shrinks). When a guard
 needs a shape the grammar does not have, the grammar is widened in a ticket of its own, with its
 fixture; a shape is never resolved by a guess.
 

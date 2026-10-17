@@ -9079,17 +9079,14 @@ fn every_worker_door_body_is_reached_from_a_completions_door() {
     );
 }
 
-/// **What the call graph costs over the completions doors, printed** (T-BT-SOURCE-CALL-GRAPH):
-/// the reading of the product's packages, then one walk per `# completions` row's door over one
-/// [`CallGraph`] (its edges kept across doors, as [`worker_door_body_failures`] keeps them), with
-/// the counts it met. Printed, not asserted.
+/// **The call graph's walk from every completions door, counted and printed**
+/// (T-BT-SOURCE-CALL-GRAPH): one walk per `# completions` row's door over one [`CallGraph`] (its
+/// edges kept across doors, as [`worker_door_body_failures`] keeps them), with what it met. Not a
+/// timing: the timing-bound list only shrinks, so the cost is measured outside the suite.
 #[test]
-fn the_call_graph_walk_from_every_completions_door_is_timed() {
-    let started = std::time::Instant::now();
+fn the_call_graph_walk_from_every_completions_door_is_counted() {
     let world = World::new();
-    let read = started.elapsed();
     let graph = CallGraph::new(&world.graph);
-    let started = std::time::Instant::now();
     let (mut doors, mut reached, mut unresolved) = (0, BTreeSet::new(), 0);
     for row in completions() {
         let Ok(records) = door_records(&world, row.door) else {
@@ -9109,9 +9106,8 @@ fn the_call_graph_walk_from_every_completions_door_is_timed() {
         reached.extend(reach.reached);
     }
     eprintln!(
-        "CALL_GRAPH_COMPLETIONS	doors {doors}	items reached {}	unresolved edges met          {unresolved}	world {read:.2?}	walks {:.2?}",
-        reached.len(),
-        started.elapsed()
+        "CALL_GRAPH_COMPLETIONS\tdoors {doors}\titems reached {}\tunresolved edges met {unresolved}",
+        reached.len()
     );
     assert!(doors > 0, "the ledger has doors");
 }

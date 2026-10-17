@@ -1,12 +1,11 @@
 //! **The call graph's grammar, a fixture per row and per unresolved kind** (T-BT-SOURCE-CALL-GRAPH,
 //! `bt_source::call_graph`'s module table). Each fixture under `tests/fixtures/call_graph/` is a
 //! small crate; each test names the mutation of the engine that turns it red. The last test runs
-//! the engine over `bt-app` and its first-party dependencies and prints what it costs.
+//! the engine over `bt-app` and its first-party dependencies and prints what it met.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
 
 use bt_source::call_graph::{Arms, CallGraph, Edge, ItemId, Resolver, Target, Unresolved, Via};
 use bt_source::{
@@ -662,11 +661,13 @@ fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
-/// **What the engine costs over `bt-app` and its first-party packages, printed**: the reading,
-/// the edges of every product callable of `bt-app` and the walk from all of them as roots — the
-/// upper bound of any door walk — with the counts of what it met. Printed, not asserted.
+/// **The walk over `bt-app` and its first-party packages, from every product callable of
+/// `bt-app` as a root** — the upper bound of any door walk — with the counts of what it met,
+/// printed; and the product holds no cutoff and no body that does not parse. Not a timing: the
+/// timing-bound list only shrinks, so the cost is measured outside the suite (the ticket's
+/// report).
 #[test]
-fn the_whole_product_walk_is_timed() {
+fn the_whole_product_walk_is_counted() {
     let workspace = Workspace::read(&workspace_root()).expect("this workspace");
     let held: Vec<(String, Arc<Index>)> = workspace
         .packages()
@@ -689,19 +690,15 @@ fn the_whole_product_walk_is_timed() {
         .iter()
         .map(|(name, index)| (name.as_str(), &**index))
         .collect();
-    let started = Instant::now();
     let resolver =
         Resolver::new(&packages, Arms::product()).unwrap_or_else(|refusals| panic!("{refusals:?}"));
-    let read = started.elapsed();
     let roots: Vec<ItemId> = resolver
         .callables("bt-app")
         .into_iter()
         .filter(|id| resolver.admitted(*id))
         .collect();
     let graph = CallGraph::new(&resolver);
-    let started = Instant::now();
     let reach = graph.walk(&roots, &BTreeSet::new());
-    let walked = started.elapsed();
     let mut kinds: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for (edge, _) in &reach.unresolved {
         let kind = match &edge.to {
@@ -719,15 +716,13 @@ fn the_whole_product_walk_is_timed() {
     }
     eprintln!(
         "CALL_GRAPH_REAL_TREE\tpackages {}\troots {}\treached {}\tforeign {}\tunresolved {:?}\t\
-         implicit traits {}\tread {:.2?}\twalk {:.2?}\tunparsed declarations {}",
+         implicit traits {}\tunparsed declarations {}",
         packages.len(),
         roots.len(),
         reach.reached.len(),
         reach.foreign.len(),
         kinds,
         reach.implicit.len(),
-        read,
-        walked,
         resolver.unparsed().len()
     );
     assert!(
