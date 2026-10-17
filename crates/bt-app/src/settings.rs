@@ -9822,7 +9822,8 @@ impl ProfileButton {
             | Fallback::Unreadable
             | Fallback::Undetermined
             | Fallback::Unsupported
-            | Fallback::Constrained => None,
+            | Fallback::Constrained
+            | Fallback::NotRun => None,
         }
     }
 

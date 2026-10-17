@@ -413,6 +413,25 @@ session shows the source text. It never blocks and never spawns; its
 `PumpReport::more_pending` reads `DualPlaneSession::outstanding_decoration_work`.
 `bt-app` does not call it: its lane is its executor (§5.1).
 
+**`bt-math` owns its Typst font book, and the book is a per-target policy** (CC-9,
+design T-COMPOSE-CRATE §4). Measured 2026-10-15 on typst-assets 0.15.1: Typst sets
+every run of every formula in New Computer Modern Math **Book** (weight 450), and that
+face alone draws the README's transform and the corpus pixel for pixel as the
+seventeen-face book does (`the_math_book_face_alone_draws_the_corpus_as_the_desktop_floor_does`);
+the Regular (400) and Bold (700) faces of the same family are never selected. A render
+costs 9–14 ms in the test profile with either book.
+
+| | Desktop (Windows, macOS) | Browser (`wasm32-unknown-unknown`) |
+|---|---|---|
+| Constructor | `MathEngine::new()` | `MathEngine::with_faces(faces)` (also on the desktop, where tests use it); a list without New Computer Modern Math — an empty one included — is refused with `NoMathFace`, never built into an engine that sets blank formulas |
+| Faces compiled in | typst-assets' seventeen: Libertinus Serif ×6, New Computer Modern Math ×3, New Computer Modern ×4, DejaVu Sans Mono ×4 — 9,683,068 bytes (`typst-kit-embed-fonts`) | none: `typst-as-lib` is taken without `typst-kit-fonts`/`typst-kit-embed-fonts` for wasm32 (`crates/bt-math/Cargo.toml`); the wasm32 gate refuses a graph that turns typst-assets' `fonts` on |
+| Faces at run time | the seventeen, then every face the machine has installed (one scan, on the file-read ledger's `Fonts` lane) | exactly the faces the host hands in, in its order; the website hands New Computer Modern Math Book (1,432,068 bytes) |
+| The floor | kept: the math family is on every machine, and the other sixteen faces claim characters the math face lacks before any installed face is asked — DejaVu Sans Mono draws ☃ and Ж (`a_character_no_face_draws_is_refused_by_name_never_drawn_as_tofu`) | removed: the host's faces are the whole book |
+| Fallback order | the math family first (the template names it); for the characters it lacks, `covering_families`' cover of every family in the book — embedded and installed — that claims one | the same rule over the host's faces |
+| A character no face draws | the formula is refused by name — `MissingCjkGlyph` for an ideograph, `MissingGlyph(c)` otherwise — and stays as the text the terminal printed; never a `.notdef` box, never a dropped symbol (`a_character_no_face_draws_is_refused_by_name_never_drawn_as_tofu`) | the same refusal; with the math face alone that is every CJK, Cyrillic, dingbat and emoji character in a formula |
+| SVG documents (`rasterize_svg_document`) | resvg with the machine's installed faces | no faces: a browser has none to scan, so an SVG's text draws nothing; the host decides which codec it installs (CC-7) |
+| Depth limit and stack | `MAX_NESTING_DEPTH` 256 against `MATH_WORKER_STACK_BYTES` (16 MiB), the stack of the one thread the renderer runs on (`bt-math-worker`); the deepest admitted formula of the eighteen shapes needs at most 1.88 MiB in release (environments in environments), 1.76 MiB in the test profile and 6.16 MiB unoptimised, and the suite holds the test profile to a quarter of the stack (`MATH_STACK_HEADROOM`) | the same limit; the glue links with `-zstack-size` equal to `MATH_WORKER_STACK_BYTES` for the shadow stack, and the browser's own call stack is the browser smoke's measurement — if it overflows, a Web Worker or a smaller wasm limit is the owner's choice |
+
 The library crates below `bt-app` that a browser build will reference —
 `bt-unicode`, `bt-transcript`, `bt-doc`, `bt-layout`, `bt-viewport`,
 `bt-detect`, `bt-effects`, `bt-math`, `bt-render`, `bt-term` and `bt-compose` —
