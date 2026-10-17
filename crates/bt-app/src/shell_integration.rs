@@ -5844,7 +5844,7 @@ mod tests {
     ///
     /// MUTATIONS: drop the `latch.store(false, ..)` after a refused start in
     /// `begin_startup_migration_through` — the second asking returns at the latch and only one
-    /// refusal is said; say nothing in `ObservationEnds::worker_ended` — the refusals are thrown
+    /// refusal is said; say nothing in `lane::Answered::worker_ended` — the refusals are thrown
     /// away again; hand `spawn_profile_observation` a row from the startup (T-OBSERVATION-REFUSAL-
     /// ON-THE-PAGE review) — its refusal is filed on a page nobody opened.
     #[test]
@@ -5906,11 +5906,11 @@ mod tests {
     /// is said once, its asked rows read could-not-run, and the window is woken once**; a run no
     /// row asked for is said and wakes nothing. Driven end to end through the scripted executor:
     /// `start_profile_observation` is handed a body that panics on the worker, `start_worker`
-    /// contains the panic and tells `ObservationEnds` once (`WorkerEnd::Panicked`). The wake and
-    /// the voice each hold a sender, so the test reads them until the worker's end lets the last
-    /// sender go — no clock.
+    /// contains the panic and tells the run's `lane::Answered` once (`WorkerEnd::Panicked`). The
+    /// wake and the voice each hold a sender, so the test reads them until the worker's end lets
+    /// the last sender go — no clock.
     ///
-    /// MUTATIONS: `ObservationEnds::worker_ended` returning on `Panicked` as on `Returned` —
+    /// MUTATIONS: `lane::Answered::worker_ended` returning on `Panicked` as on `Returned` —
     /// nothing said, nothing filed, no wake; drop the `editions.is_empty()` return — the run no
     /// row asked for wakes the window.
     #[test]
@@ -5997,8 +5997,8 @@ mod tests {
     /// backend does not stand in for. What the edge hands the door is driven here as it hands it:
     /// the rows' programs, the data root and the voice.
     ///
-    /// MUTATIONS: drop `publish_profile_observation_not_run` from `ObservationEnds::worker_ended`
-    /// — nothing is filed and the row stays `Pending`; decide `Heard::Failed(Unanswered::NotRun)`
+    /// MUTATIONS: drop `publish_profile_observation_not_run` from `start_profile_observation`'s
+    /// `lane::Answered` — nothing is filed and the row stays `Pending`; decide `Heard::Failed(Unanswered::NotRun)`
     /// as `Undetermined` in `profile_fallback_from_parts` — the row names a question that was
     /// asked; answer `CapPowerShellNotProvided` for `NotRun` in `profiles::powershell_row_text` —
     /// the row reads as a refusal.
@@ -11864,5 +11864,228 @@ mod tests {
             )
             .unwrap()
         });
+    }
+
+    /// **Taken in turn by the tests that read the process's queue of Enable and Undo answers**
+    /// (`take_profile_installs` drains the whole queue, and the suite runs tests on parallel
+    /// threads).
+    static PROFILE_INSTALL_ANSWERS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A headless window to deliver a `$PROFILE` answer to, and the voice a worker's end is said
+    /// in, collecting its lines.
+    fn a_window_that_clicked(
+        tag: &str,
+    ) -> (
+        crate::headless::HeadlessFolio,
+        impl Fn(&str) + Send + Sync + 'static,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let folio = crate::headless::HeadlessFolio::with_tabs(
+            tag,
+            vec![crate::test_support::ringing_tab(1, 1)],
+            0,
+        );
+        let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let lines = std::sync::Arc::clone(&said);
+        (
+            folio,
+            move |line: &str| lines.lock().unwrap().push(line.to_owned()),
+            said,
+        )
+    }
+
+    /// The answers the queue holds for `window`, each delivered to it as the window's event
+    /// delivers them, and the cards the window then shows, as `(kind, body)`.
+    fn delivered(
+        folio: &mut crate::headless::HeadlessFolio,
+    ) -> (
+        Vec<ProfileInstallOutcome>,
+        Vec<(crate::toast::ToastKind, String)>,
+    ) {
+        let window = folio.runtime().window_id();
+        let answers = take_profile_installs();
+        let owed: Vec<_> = profile_installs_for(&answers, window).cloned().collect();
+        for outcome in owed.clone() {
+            folio
+                .runtime()
+                .deliver_profile_install(outcome)
+                .expect("a headless window takes its answer");
+        }
+        let cards = folio
+            .window
+            .toasts
+            .toasts()
+            .iter()
+            .map(|card| (card.kind(), card.body().to_owned()))
+            .collect();
+        (owed, cards)
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START) — **an Enable whose worker the thread door refused is
+    /// answered on the window that clicked**: the refusal's card, in the sentence that says
+    /// nothing was changed, and one line in diagnostics with the door's reason. Before, the start
+    /// was thrown away (`let _ = spawn_at_priority(..)`): no answer was filed, the window was
+    /// never woken, and nothing said why the click did nothing.
+    ///
+    /// Through the scripted executor, which refuses the start as a machine out of threads would;
+    /// what the window does with the answer is its own delivery (`deliver_profile_install`), on
+    /// the headless window.
+    ///
+    /// MUTATIONS: the install's `Answered` answering nothing — no outcome, no card; its voice
+    /// dropped (`Answered` not saying) — no line; `unfinished_change` answering `ChangeStopped`
+    /// for a refused start — the card claims the change may have run.
+    #[test]
+    fn a_refused_enable_is_answered_on_the_window_that_clicked() {
+        let _turn = PROFILE_INSTALL_ANSWERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mut folio, say, said) = a_window_that_clicked("refused-enable");
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        gate.refuse_next_start();
+        let started = profile_runtime::start_profile_install(
+            &crate::lane::Executor::scripted(gate),
+            say,
+            PathBuf::from("powershell.exe"),
+            Vec::new(),
+            None,
+            folio.runtime().window_id(),
+        );
+        let (owed, cards) = delivered(&mut folio);
+        let said = said.lock().unwrap().clone();
+        assert!(!started, "the door refused the start");
+        assert_eq!(
+            owed,
+            vec![ProfileInstallOutcome::Refused(
+                crate::i18n::Text::ChangeNotStarted.text().to_owned()
+            )],
+            "the click is answered as the install's own refusal"
+        );
+        assert_eq!(
+            cards,
+            vec![(
+                crate::toast::ToastKind::Error,
+                crate::i18n::Text::ChangeNotStarted.text().to_owned()
+            )],
+            "and the window that clicked shows it"
+        );
+        assert_eq!(said.len(), 1, "the refused start is said once: {said:?}");
+        assert!(
+            said[0].contains(crate::lane::REFUSED_START),
+            "in the door's words: {said:?}"
+        );
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START) — **an Undo whose worker the thread door refused is
+    /// answered on the window that pressed it**, as the Enable's refusal is: the Undo's own
+    /// refusal, its card, and one line in diagnostics.
+    ///
+    /// MUTATIONS: the Undo's `Answered` answering nothing — no outcome, no card; answering
+    /// `Refused` for `UndoRefused` — the outcome names the wrong road; its voice dropped — no
+    /// line.
+    #[test]
+    fn a_refused_undo_is_answered_on_the_window_that_pressed_it() {
+        let _turn = PROFILE_INSTALL_ANSWERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mut folio, say, said) = a_window_that_clicked("refused-undo");
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        gate.refuse_next_start();
+        let edit = ProfileEdit {
+            profile: PathBuf::from("profile.ps1"),
+            before: ProfileRevision::default(),
+            after: ProfileRevision::default(),
+        };
+        let started = profile_runtime::start_profile_install_undo(
+            &crate::lane::Executor::scripted(gate),
+            say,
+            PathBuf::from("powershell.exe"),
+            edit,
+            folio.runtime().window_id(),
+        );
+        let (owed, cards) = delivered(&mut folio);
+        let said = said.lock().unwrap().clone();
+        assert!(!started, "the door refused the start");
+        assert_eq!(
+            owed,
+            vec![ProfileInstallOutcome::UndoRefused(
+                crate::i18n::Text::ChangeNotStarted.text().to_owned()
+            )],
+            "the press is answered as the Undo's own refusal"
+        );
+        assert_eq!(
+            cards,
+            vec![(
+                crate::toast::ToastKind::Error,
+                crate::i18n::Text::ChangeNotStarted.text().to_owned()
+            )],
+            "and the window that pressed it shows it"
+        );
+        assert_eq!(said.len(), 1, "the refused start is said once: {said:?}");
+        assert!(
+            said[0].contains(crate::lane::REFUSED_START),
+            "in the door's words: {said:?}"
+        );
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START) — **a Settings removal whose worker the thread door
+    /// refused is answered**: the removal's slot holds an unfinished removal, which the window
+    /// raises as a refusal in the sentence that says nothing was changed, and the refusal is said
+    /// once. Before, the start was thrown away and the click did nothing anyone could see.
+    ///
+    /// MUTATIONS: the removal's `Answered` answering nothing — the slot stays empty; read an
+    /// unfinished removal as no news (`window_text` answering `None`) — no card; its voice dropped
+    /// — no line.
+    #[test]
+    fn a_refused_settings_removal_is_answered() {
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        gate.refuse_next_start();
+        let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let lines = std::sync::Arc::clone(&said);
+        let started =
+            profile_runtime::start_removal(&crate::lane::Executor::scripted(gate), move |line| {
+                lines.lock().unwrap().push(line.to_owned())
+            });
+        let answer = take_removal();
+        let said = said.lock().unwrap().clone();
+        assert!(!started, "the door refused the start");
+        assert!(
+            matches!(
+                answer,
+                Some(profile_runtime::RemovalAnswer::Unfinished(
+                    crate::i18n::Text::ChangeNotStarted
+                ))
+            ),
+            "the removal is answered as one that did not run: {answer:?}"
+        );
+        assert_eq!(
+            answer.and_then(|answer| answer.window_text()),
+            Some((true, crate::i18n::Text::ChangeNotStarted.text().to_owned())),
+            "and the window raises it as a refusal"
+        );
+        assert_eq!(said.len(), 1, "the refused start is said once: {said:?}");
+        assert!(
+            said[0].contains(crate::lane::REFUSED_START),
+            "in the door's words: {said:?}"
+        );
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START) — **a worker that never started and one that stopped
+    /// in a panic are told apart in the sentence their asker is answered with**: the first changed
+    /// nothing and says so; the second may have stopped anywhere and claims nothing. A worker
+    /// that returned answered for itself and never reaches the sentence.
+    ///
+    /// MUTATION: `WorkerEnd::started` answering `true` for `NotStarted` — a refused start claims
+    /// it may have run.
+    #[test]
+    fn a_change_that_never_started_is_not_told_as_one_that_stopped() {
+        use crate::lane::WorkerEnd;
+        assert_eq!(
+            crate::i18n::unfinished_change(WorkerEnd::NotStarted("refused".to_owned()).started()),
+            crate::i18n::Text::ChangeNotStarted
+        );
+        assert_eq!(
+            crate::i18n::unfinished_change(WorkerEnd::Panicked("stopped".to_owned()).started()),
+            crate::i18n::Text::ChangeStopped
+        );
     }
 }

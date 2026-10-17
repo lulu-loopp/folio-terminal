@@ -203,6 +203,54 @@ pub(crate) trait Ends: Send + Sync {
     fn worker_ended(&self, cause: WorkerEnd);
 }
 
+impl WorkerEnd {
+    /// Whether the worker ran at all: `false` only for a start the thread door refused, so its
+    /// asker knows nothing it asked for was done.
+    pub(crate) fn started(&self) -> bool {
+        !matches!(self, Self::NotStarted(_))
+    }
+}
+
+/// **The end of a worker that serves one asking and no ledger** (T-PROFILE-INSTALL-REFUSED-START):
+/// told how the worker ended, it says an end other than a return once — `"{what} ended:
+/// {cause}"`, in the voice it was handed (`diagnostics::note` in the product) — and hands the
+/// cause to `answer`, which sets the asker's own failure state and wakes it. A body that returned
+/// gave its own answer, so nothing is said or answered for it.
+///
+/// A refused start is told on the asking thread, before [`Executor::start_worker`] answers it; a
+/// panic, on the worker after its body unwound. The `$PROFILE` observation, the one-click install,
+/// its Undo and the Settings removal, the Explorer probe and press, the stale-claim sweep and
+/// three door processes' waits each end through one.
+pub(crate) struct Answered<A> {
+    what: &'static str,
+    say: Box<dyn Fn(&str) + Send + Sync>,
+    answer: A,
+}
+
+impl<A: Fn(&WorkerEnd) + Send + Sync + 'static> Answered<A> {
+    pub(crate) fn new(
+        what: &'static str,
+        say: impl Fn(&str) + Send + Sync + 'static,
+        answer: A,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            what,
+            say: Box::new(say),
+            answer,
+        })
+    }
+}
+
+impl<A: Fn(&WorkerEnd) + Send + Sync> Ends for Answered<A> {
+    fn worker_ended(&self, cause: WorkerEnd) {
+        if matches!(cause, WorkerEnd::Returned) {
+            return;
+        }
+        (self.say)(&format!("{} ended: {cause}", self.what));
+        (self.answer)(&cause);
+    }
+}
+
 /// **A lane's request ledger.** Shared between the requester's side ([`Ledger::admit`],
 /// [`Request`]) and the worker's ([`Ledger::publish`], [`Ledger::worker_ended`]); one mutex, held
 /// for a map operation and never across a sink or a line said.

@@ -69977,31 +69977,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     for outcome in
                         shell_integration::profile_installs_for(&installs, runtime.window_id())
                     {
-                        match outcome.clone() {
-                            shell_integration::ProfileInstallOutcome::Installed {
-                                program,
-                                edit,
-                            } => {
-                                let id = runtime.toast_with_verb(
-                                    toast::ToastKind::Info,
-                                    toast::ToastAnchor::Window,
-                                    i18n::Text::ShellProfileAddedToast.text(),
-                                    i18n::Text::ProfilesUndo.text(),
-                                )?;
-                                runtime.window.powershell_profile_undo = Some((id, program, edit));
-                            }
-                            shell_integration::ProfileInstallOutcome::Refused(reason)
-                            | shell_integration::ProfileInstallOutcome::UndoRefused(reason) => {
-                                runtime.toast(
-                                    toast::ToastKind::Error,
-                                    toast::ToastAnchor::Window,
-                                    Some(i18n::Text::ShellProfileRefused.text().to_owned()),
-                                    reason,
-                                )?;
-                            }
-                            shell_integration::ProfileInstallOutcome::Present
-                            | shell_integration::ProfileInstallOutcome::Undone => {}
-                        }
+                        runtime.deliver_profile_install(outcome.clone())?;
                     }
                     Ok(())
                 })
@@ -76970,6 +76946,31 @@ fn report_frame_shape_stop(error: &anyhow::Error, path: &Path, announce: impl Fn
     announce(path);
 }
 
+/// **The stale claim files' sweep** (0.4.7 U-43), started by `executor` on a worker of its own;
+/// `true` when it started. Nobody waits on it: a sweep's only answer is its one line in
+/// diagnostics.log, and the files it would have taken are left for the next start's sweep. **A
+/// start the door refuses, or a sweep that panics, is said once in `say`**
+/// (T-PROFILE-INSTALL-REFUSED-START) — before, a refused start was thrown away unsaid.
+fn start_claim_sweep(
+    executor: &lane::Executor,
+    say: impl Fn(&str) + Send + Sync + 'static,
+) -> bool {
+    executor
+        .start_worker(
+            "folio-claim-sweep",
+            lane::Answered::new("the stale claim sweep", say, |_| ()),
+            |worker| {
+                let swept = bt_platform::instance::sweep_stale_claims(worker);
+                if swept > 0 {
+                    diagnostics::note(&format!(
+                        "Folio: {swept} stale claim files were swept from the runtime folder"
+                    ));
+                }
+            },
+        )
+        .is_ok()
+}
+
 fn main() -> Result<()> {
     // **What this process was handed is passed on only by name**, before any door can start a
     // child: the uninstaller removes the data folder, and a `diagnostics.log` handle inherited
@@ -77295,17 +77296,9 @@ fn main() -> Result<()> {
     // is taken; only empty, unheld `*.lock` files older than an hour in
     // Folio's runtime folder. Windows' claim is a kernel name, with no file.
     if bt_platform::host_platform() != bt_platform::HostPlatform::Windows {
-        let _ = bt_platform::spawn_at_priority(
-            "folio-claim-sweep",
-            bt_platform::ThreadPriority::BelowNormal,
-            |worker| {
-                let swept = bt_platform::instance::sweep_stale_claims(worker);
-                if swept > 0 {
-                    diagnostics::note(&format!(
-                        "Folio: {swept} stale claim files were swept from the runtime folder"
-                    ));
-                }
-            },
+        start_claim_sweep(
+            &lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
+            diagnostics::note,
         );
     }
     // **And the witness to the day this thread stops answering** (§1.5).

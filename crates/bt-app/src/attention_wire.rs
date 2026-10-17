@@ -514,7 +514,10 @@ fn quoted(words: attention_map::Words, payload: Option<&serde_json::Value>) -> O
 fn payload_of(source: Option<&crate::cli::AttentionPayload>) -> Option<String> {
     match source? {
         crate::cli::AttentionPayload::Inline(text) => Some(text.clone()),
-        crate::cli::AttentionPayload::Stdin => payload_on_stdin(),
+        crate::cli::AttentionPayload::Stdin => payload_on_stdin(
+            &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
+            |line| eprintln!("folio attention: {line}"),
+        ),
     }
 }
 
@@ -552,33 +555,42 @@ const STDIN_BUDGET: Duration = Duration::from_millis(200);
 /// (c)6): this process never has a window, and the thread that waits out [`STDIN_BUDGET`] is its
 /// main thread, which enters as [`PAYLOAD_ENTRY`] — once, which is all a process that exits after
 /// one send ever asks. The reader it waits on comes from the thread door, as every thread Folio
-/// starts does, at `Normal` (RULES 53's standalone-process exception).
+/// starts does, at `Normal` (RULES 53's standalone-process exception) — by `executor`, the thread
+/// door in the product.
+///
+/// **A reader the door would not start is no payload, said once** (T-PROFILE-INSTALL-REFUSED-START):
+/// the verb goes on without a sentence, as it does when the budget runs out, and the door's reason
+/// is said in `say` (standard error); before, the refusal panicked the verb. A reader that panics
+/// is said the same way, and its wait ends at once with no payload.
 #[must_use]
-fn payload_on_stdin() -> Option<String> {
+fn payload_on_stdin(
+    executor: &crate::lane::Executor,
+    say: impl Fn(&str) + Send + Sync + 'static,
+) -> Option<String> {
     use std::io::IsTerminal;
     if std::io::stdin().is_terminal() {
         return None;
     }
     bt_platform::admission::enter_standalone_main(PAYLOAD_ENTRY, |_ctx| {
         let (sender, payload) = std::sync::mpsc::channel();
-        bt_platform::spawn_at_priority(
-            "folio-attention-stdin",
-            bt_platform::ThreadPriority::Normal,
-            move |_ctx| {
-                use std::io::Read;
-                let mut bytes = Vec::new();
-                let read = bt_platform::file_reads::Reader::new(
-                    std::io::stdin().lock(),
-                    bt_platform::file_reads::Lane::Attention,
-                    None,
-                )
-                .take(MAX_PAYLOAD_BYTES)
-                .read_to_end(&mut bytes);
-                let _ = sender.send(read.ok().map(|_| bytes));
-            },
-        )
-        // What `std::thread::spawn` said when the system refused a thread, kept word for word.
-        .expect("failed to spawn thread");
+        executor
+            .start_worker(
+                "folio-attention-stdin",
+                crate::lane::Answered::new("the attention verb's payload reader", say, |_| ()),
+                move |_ctx| {
+                    use std::io::Read;
+                    let mut bytes = Vec::new();
+                    let read = bt_platform::file_reads::Reader::new(
+                        std::io::stdin().lock(),
+                        bt_platform::file_reads::Lane::Attention,
+                        None,
+                    )
+                    .take(MAX_PAYLOAD_BYTES)
+                    .read_to_end(&mut bytes);
+                    let _ = sender.send(read.ok().map(|_| bytes));
+                },
+            )
+            .ok()?;
         let bytes = payload.recv_timeout(STDIN_BUDGET).ok()??;
         String::from_utf8(bytes).ok()
     })
@@ -1275,7 +1287,14 @@ mod tests {
         ) {
             return;
         }
-        assert_eq!(payload_on_stdin().as_deref(), Some(PAYLOAD));
+        assert_eq!(
+            payload_on_stdin(
+                &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
+                |line| panic!("the reader started and returned, so nothing is said: {line}"),
+            )
+            .as_deref(),
+            Some(PAYLOAD)
+        );
         assert_eq!(role(), Role::Worker("folio-attention"));
         assert_eq!(
             enter_standalone_main("again", |_ctx| ()),
@@ -1285,6 +1304,37 @@ mod tests {
                 phase: None,
             }),
             "the process's one entry is spent"
+        );
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START) — **an `attention` verb whose payload reader the door
+    /// refused goes on with no payload, said once**: the verb sends its line without a sentence, as
+    /// it does when the budget runs out, and the door's reason is said in the voice handed in.
+    /// Before, the refusal panicked the verb. Alone in a process of its own, with a payload on its
+    /// standard input that the refused reader never reads.
+    ///
+    /// MUTATION: put the `expect` back on the start — the child panics.
+    #[test]
+    fn a_refused_payload_reader_is_no_payload_said_once() {
+        if !crate::test_support::alone_in_a_process(
+            "attention_wire::tests::a_refused_payload_reader_is_no_payload_said_once",
+            br#"{"hook_event_name":"Stop"}"#,
+        ) {
+            return;
+        }
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        gate.refuse_next_start();
+        let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let lines = std::sync::Arc::clone(&said);
+        let payload = payload_on_stdin(&crate::lane::Executor::scripted(gate), move |line| {
+            lines.lock().unwrap().push(line.to_owned());
+        });
+        assert_eq!(payload, None, "a reader that never started read nothing");
+        let said = said.lock().unwrap().clone();
+        assert_eq!(said.len(), 1, "the refused start is said once: {said:?}");
+        assert!(
+            said[0].contains(crate::lane::REFUSED_START),
+            "in the door's words: {said:?}"
         );
     }
 }

@@ -4,7 +4,7 @@ use crate::i18n::Text;
 use std::{io, sync::Mutex};
 
 static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static REMOVAL: Mutex<Option<Report>> = Mutex::new(None);
+static REMOVAL: Mutex<Option<RemovalAnswer>> = Mutex::new(None);
 /// Every answered one-click install or Undo not yet delivered, each with the window that asked.
 /// A queue, not a slot: two windows' clicks in flight are two answers, and neither replaces the
 /// other.
@@ -190,8 +190,13 @@ pub(super) fn spawn_profile_observation(
 
 /// **Start one observation run**: numbered here, as it is asked — before the door is knocked on,
 /// so a start it refuses has a number to file under — and `body` handed the number on the
-/// worker. Its end is told to [`ObservationEnds`] with `editions` (the editions of the rows that
-/// asked), the voice `say` and the window's `wake`. `true` when the worker started.
+/// worker. `true` when the worker started.
+///
+/// **What the worker's end says** ([`crate::lane::Answered`]): a start the thread door refused, or
+/// a panic the worker's containment caught — once each, in the voice `say` — and on the Profiles
+/// page: each of `editions` (the editions of the rows that asked) the run had not answered is
+/// filed as not run, and the window woken through `wake` to draw it. A body that returned says
+/// nothing; a run no row asked for (the startup's) files nothing and so wakes nothing.
 pub(super) fn start_profile_observation(
     executor: &crate::lane::Executor,
     editions: Vec<PowerShellEdition>,
@@ -204,43 +209,16 @@ pub(super) fn start_profile_observation(
     executor
         .start_worker(
             "powershell-profile-observation",
-            std::sync::Arc::new(ObservationEnds {
-                say: Box::new(say),
-                wake: Box::new(wake),
-                observation,
-                editions,
+            crate::lane::Answered::new("the PowerShell profile observation", say, move |_| {
+                if editions.is_empty() {
+                    return;
+                }
+                publish_profile_observation_not_run(&editions, observation);
+                wake();
             }),
             move |worker| body(worker, observation),
         )
         .is_ok()
-}
-
-/// **What the observation's worker says of its own end**: a start the thread door refused, or a
-/// panic the worker's containment caught — once each, in the voice it was handed, and on the
-/// Profiles page: each of `editions` the run `observation` had not answered is filed as not run,
-/// and the window woken to draw it. A body that returned says nothing; a run no row asked for
-/// (the startup's) files nothing and so wakes nothing.
-struct ObservationEnds {
-    say: Box<dyn Fn(&str) + Send + Sync>,
-    wake: Box<dyn Fn() + Send + Sync>,
-    observation: u64,
-    editions: Vec<PowerShellEdition>,
-}
-
-impl crate::lane::Ends for ObservationEnds {
-    fn worker_ended(&self, cause: crate::lane::WorkerEnd) {
-        if matches!(cause, crate::lane::WorkerEnd::Returned) {
-            return;
-        }
-        (self.say)(&format!(
-            "the PowerShell profile observation ended: {cause}"
-        ));
-        if self.editions.is_empty() {
-            return;
-        }
-        publish_profile_observation_not_run(&self.editions, self.observation);
-        (self.wake)();
-    }
 }
 
 /// **Whether the Settings remover has anything to remove here**: a line in one of the exact
@@ -723,54 +701,121 @@ pub(super) fn undo_profile_install(edit: &ProfileEdit, data: &Path) -> io::Resul
     Ok(())
 }
 
+/// [`crate::i18n::unfinished_change`] for the end of a `$PROFILE` worker.
+fn unfinished_change(end: &crate::lane::WorkerEnd) -> Text {
+    crate::i18n::unfinished_change(end.started())
+}
+
+/// **Enable via `$PROFILE`, for the window `window`**: started at the thread door, below normal,
+/// and said in diagnostics.log ([`start_profile_install`]).
 pub fn begin_profile_install(
     program: PathBuf,
     arguments: Vec<OsString>,
     seen: Option<ProfileRevision>,
     window: winit::window::WindowId,
 ) {
-    let _ = bt_platform::spawn_at_priority(
-        "powershell-profile-install",
-        bt_platform::ThreadPriority::BelowNormal,
-        move |worker| {
-            let outcome = match install_for_program(worker, &program, &arguments, seen.as_ref()) {
-                Ok(Some(edit)) => ProfileInstallOutcome::Installed { program, edit },
-                Ok(None) => ProfileInstallOutcome::Present,
-                Err(error) => ProfileInstallOutcome::Refused(error.to_string()),
-            };
-            answer_profile_install(window, outcome);
-        },
+    start_profile_install(
+        &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
+        crate::diagnostics::note,
+        program,
+        arguments,
+        seen,
+        window,
     );
 }
 
+/// [`begin_profile_install`] with the executor its worker is started by and the voice a worker
+/// that did not finish is said in. `true` when the worker started.
+///
+/// **Every click is answered** (T-PROFILE-INSTALL-REFUSED-START): the worker files the install's
+/// outcome for `window`; a start the door refused, or a worker that ended in a panic, is said once
+/// in `say` and answered as the install's own refusal ([`ProfileInstallOutcome::Refused`], in
+/// [`crate::i18n::unfinished_change`]'s words), which wakes the window to raise the refusal's
+/// card. The row keeps its button, so the same click asks again.
+pub(crate) fn start_profile_install(
+    executor: &crate::lane::Executor,
+    say: impl Fn(&str) + Send + Sync + 'static,
+    program: PathBuf,
+    arguments: Vec<OsString>,
+    seen: Option<ProfileRevision>,
+    window: winit::window::WindowId,
+) -> bool {
+    executor
+        .start_worker(
+            "powershell-profile-install",
+            crate::lane::Answered::new("the PowerShell profile install", say, move |end| {
+                let sentence = unfinished_change(end).text().to_owned();
+                answer_profile_install(window, ProfileInstallOutcome::Refused(sentence));
+            }),
+            move |worker| {
+                let outcome = match install_for_program(worker, &program, &arguments, seen.as_ref())
+                {
+                    Ok(Some(edit)) => ProfileInstallOutcome::Installed { program, edit },
+                    Ok(None) => ProfileInstallOutcome::Present,
+                    Err(error) => ProfileInstallOutcome::Refused(error.to_string()),
+                };
+                answer_profile_install(window, outcome);
+            },
+        )
+        .is_ok()
+}
+
+/// **Undo of one click, for the window `window`**: started at the thread door, below normal, and
+/// said in diagnostics.log ([`start_profile_install_undo`]).
 pub fn begin_profile_install_undo(
     program: PathBuf,
     edit: ProfileEdit,
     window: winit::window::WindowId,
 ) {
-    let _ = bt_platform::spawn_at_priority(
-        "powershell-profile-install-undo",
-        bt_platform::ThreadPriority::BelowNormal,
-        move |worker| {
-            let data = persist::storage_dir();
-            let outcome = match undo_profile_install(&edit, &data) {
-                Ok(()) => {
-                    let environment =
-                        ProbeEnvironment::current(worker, "PowerShell profile observation");
-                    let _ = observe_profile_lines(
-                        worker,
-                        next_observation(),
-                        &data,
-                        &[program],
-                        &environment,
-                    );
-                    ProfileInstallOutcome::Undone
-                }
-                Err(error) => ProfileInstallOutcome::UndoRefused(error.to_string()),
-            };
-            answer_profile_install(window, outcome);
-        },
+    start_profile_install_undo(
+        &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
+        crate::diagnostics::note,
+        program,
+        edit,
+        window,
     );
+}
+
+/// [`begin_profile_install_undo`] with the executor and the voice handed in; `true` when the
+/// worker started. A start the door refused, or a panic, is said once in `say` and answered as the
+/// Undo's own refusal ([`ProfileInstallOutcome::UndoRefused`]), as [`start_profile_install`]
+/// answers the click. The Undo card is spent by then; the Settings remover still takes out a line
+/// in a form Folio owns.
+pub(crate) fn start_profile_install_undo(
+    executor: &crate::lane::Executor,
+    say: impl Fn(&str) + Send + Sync + 'static,
+    program: PathBuf,
+    edit: ProfileEdit,
+    window: winit::window::WindowId,
+) -> bool {
+    executor
+        .start_worker(
+            "powershell-profile-install-undo",
+            crate::lane::Answered::new("the PowerShell profile Undo", say, move |end| {
+                let sentence = unfinished_change(end).text().to_owned();
+                answer_profile_install(window, ProfileInstallOutcome::UndoRefused(sentence));
+            }),
+            move |worker| {
+                let data = persist::storage_dir();
+                let outcome = match undo_profile_install(&edit, &data) {
+                    Ok(()) => {
+                        let environment =
+                            ProbeEnvironment::current(worker, "PowerShell profile observation");
+                        let _ = observe_profile_lines(
+                            worker,
+                            next_observation(),
+                            &data,
+                            &[program],
+                            &environment,
+                        );
+                        ProfileInstallOutcome::Undone
+                    }
+                    Err(error) => ProfileInstallOutcome::UndoRefused(error.to_string()),
+                };
+                answer_profile_install(window, outcome);
+            },
+        )
+        .is_ok()
 }
 
 /// **The answers addressed to `window`**, oldest first — what the window owed them delivers; an
@@ -793,24 +838,69 @@ pub fn take_profile_installs() -> Vec<ProfileInstallAnswer> {
         .unwrap_or_default()
 }
 
+/// **What the Settings remover answered**: the report of a removal that ran, or the sentence of
+/// one whose worker did not run to its end (T-PROFILE-INSTALL-REFUSED-START) — the worker names
+/// the files it looks at, so a removal that never ran has no file to report against.
+#[derive(Clone, Debug)]
+pub enum RemovalAnswer {
+    Ran(Report),
+    Unfinished(Text),
+}
+
+impl RemovalAnswer {
+    /// **What a window is owed**: [`Report::window_text`] for a removal that ran; a removal that
+    /// did not finish is a refusal, in its own sentence.
+    #[must_use]
+    pub fn window_text(&self) -> Option<(bool, String)> {
+        match self {
+            Self::Ran(report) => report.window_text(),
+            Self::Unfinished(sentence) => Some((true, sentence.text().to_owned())),
+        }
+    }
+}
+
+fn answer_removal(answer: RemovalAnswer) {
+    if let Ok(mut outcome) = REMOVAL.lock() {
+        *outcome = Some(answer);
+    }
+    if let Some(wake) = WAKE.get() {
+        wake();
+    }
+}
+
+/// **The Settings row's "remove the `$PROFILE` line"**: started at the thread door, below normal,
+/// and said in diagnostics.log ([`start_removal`]).
 pub fn begin_removal() {
-    let _ = bt_platform::spawn_at_priority(
-        "powershell-profile-removal",
-        bt_platform::ThreadPriority::BelowNormal,
-        |worker| {
-            let environment = ProbeEnvironment::current(worker, "PowerShell profile removal");
-            let report = remove_shell_integration(CheckAsker::Worker(worker), &environment);
-            if let Ok(mut outcome) = REMOVAL.lock() {
-                *outcome = Some(report);
-            }
-            if let Some(wake) = WAKE.get() {
-                wake();
-            }
-        },
+    start_removal(
+        &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
+        crate::diagnostics::note,
     );
 }
 
-pub fn take_removal() -> Option<Report> {
+/// [`begin_removal`] with the executor and the voice handed in; `true` when the worker started.
+/// A start the door refused, or a panic, is said once in `say` and answered as an unfinished
+/// removal ([`RemovalAnswer::Unfinished`], in [`unfinished_change`]'s words), which the window
+/// raises as a refusal's card; the row stays, so the same click asks again.
+pub(crate) fn start_removal(
+    executor: &crate::lane::Executor,
+    say: impl Fn(&str) + Send + Sync + 'static,
+) -> bool {
+    executor
+        .start_worker(
+            "powershell-profile-removal",
+            crate::lane::Answered::new("the PowerShell profile removal", say, |end| {
+                answer_removal(RemovalAnswer::Unfinished(unfinished_change(end)));
+            }),
+            |worker| {
+                let environment = ProbeEnvironment::current(worker, "PowerShell profile removal");
+                let report = remove_shell_integration(CheckAsker::Worker(worker), &environment);
+                answer_removal(RemovalAnswer::Ran(report));
+            },
+        )
+        .is_ok()
+}
+
+pub fn take_removal() -> Option<RemovalAnswer> {
     REMOVAL.lock().ok()?.take()
 }
 

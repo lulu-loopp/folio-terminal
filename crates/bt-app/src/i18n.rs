@@ -3039,6 +3039,13 @@ text_entries! {
     /// write being undone, saw (0.4.8 G7).
     ShellProfileChangedElsewhere,
     ShellProfileNothing,
+    /// A change asked of a worker the thread door would not start — `$PROFILE`'s Enable, Undo or
+    /// removal, the Explorer first-page switch — so nothing was changed
+    /// (T-PROFILE-INSTALL-REFUSED-START).
+    ChangeNotStarted,
+    /// A change whose worker ended in a panic before it answered: it may have stopped anywhere,
+    /// so the sentence claims nothing about what was done (T-PROFILE-INSTALL-REFUSED-START).
+    ChangeStopped,
 
     // ── the application menu bar (M3-2, macOS) ─────────────────────────────
     //
@@ -6167,6 +6174,16 @@ impl Text {
                 "No Folio profile lines found.",
                 "未找到 Folio 整合行。",
             ),
+            Self::ChangeNotStarted => pick(
+                lang,
+                "Folio could not start this change, so nothing was changed.",
+                "Folio could not start this change, so nothing was changed.", // zh: pending T-PROFILE-INSTALL-REFUSED-START
+            ),
+            Self::ChangeStopped => pick(
+                lang,
+                "Folio stopped before this change finished.",
+                "Folio stopped before this change finished.", // zh: pending T-PROFILE-INSTALL-REFUSED-START
+            ),
 
             // ── the application menu bar (M3-2, macOS) ─────────────────────
             //
@@ -6567,6 +6584,12 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // zh: pending T-PROFILE-INSTALL-REFUSED-START — a change whose worker would not start, or
+        // stopped before it finished.
+        (Self::ChangeNotStarted, HostPlatform::Windows),
+        (Self::ChangeNotStarted, HostPlatform::MacOs),
+        (Self::ChangeStopped, HostPlatform::Windows),
+        (Self::ChangeStopped, HostPlatform::MacOs),
         // zh: pending T-OBSERVATION-REFUSAL-ON-THE-PAGE — the Profiles row of an edition whose
         // `$PROFILE` check could not run.
         (Self::CapPowerShellCheckNotRun, HostPlatform::Windows),
@@ -7396,6 +7419,18 @@ pub fn context_menu_failed(message: &str) -> String {
 /// refused is carried through verbatim, since on the machine where it fires
 /// nobody else can see it.
 #[must_use]
+/// **The sentence a change whose worker did not run to its end is answered with**
+/// (T-PROFILE-INSTALL-REFUSED-START), `started` saying whether the worker ran at all
+/// (`lane::WorkerEnd::started`): a worker the thread door refused changed nothing, and one that
+/// ended in a panic may have stopped anywhere, so the second claims nothing about what was done.
+pub(crate) fn unfinished_change(started: bool) -> Text {
+    if started {
+        Text::ChangeStopped
+    } else {
+        Text::ChangeNotStarted
+    }
+}
+
 pub fn explorer_first_page_failed(message: &str) -> String {
     match current() {
         Lang::English => format!("Windows would not register the package: {message}"),
