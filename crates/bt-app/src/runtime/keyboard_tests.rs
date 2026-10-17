@@ -91,7 +91,7 @@ fn told(folio: &HeadlessFolio) -> (usize, Vec<String>) {
 /// live, then torn down and ended twice, the second end unpaired — through `ime_input`, as winit
 /// delivers it.
 ///
-/// MUTATIONS: `ime_native_facts` reads `native_window(..)` and `snapshot` instead of
+/// MUTATIONS: `ime_native_facts` reads `bt_platform::ime_observation::snapshot` directly instead of
 /// `WindowHost::ime_facts` (or answers `NativeFacts::default()`) — no read, default facts — red;
 /// `ime_input` formats a line of its own (the pairing line without its window, or any other
 /// words) or says it to `diagnostics::note` rather than the window's door — the restart's line is

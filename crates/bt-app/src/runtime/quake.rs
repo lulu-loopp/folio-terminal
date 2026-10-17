@@ -2,7 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::window_seam::prelude::*;
-use crate::{Runtime, native_window, persisted_window_bounds, profiles, quake, shortcuts};
+use crate::{Runtime, persisted_window_bounds, profiles, quake, shortcuts};
 use anyhow::Result;
 
 impl<B: Backend> Runtime<'_, B> {
@@ -32,7 +32,6 @@ impl<B: Backend> Runtime<'_, B> {
     /// statement of fact rather than a step: present what is composed, say the
     /// window has been on the glass, ask Win32 which monitor it is actually on.
     pub(crate) fn show_quake_window(&mut self) -> Result<()> {
-        let native = native_window(&self.window.window)?;
         // **The machine is read in one place and the rules are applied in one
         // place** (§7.54e ③, user ruling 2026-09-05: 「呼出规则唯一…写成一个函数,
         // 所有入口调它」). Which display, how big on it, and whether the reader has
@@ -42,7 +41,7 @@ impl<B: Backend> Runtime<'_, B> {
         // which are the whole of the answer and are pinned by the source gate
         // `a_summon_is_placed_by_one_function_and_main_does_not_do_the_geometry`.
         let screen = quake::SummonScreen::under_the_pointer(
-            native,
+            || self.window.window.work_area(),
             self.window.renderer.dpi_milli().get() * 96 / 1000,
         );
         let settings = self.app.settings_store.loaded();
@@ -75,10 +74,10 @@ impl<B: Backend> Runtime<'_, B> {
         // A rectangle that would not be taken is said out loud and the window is
         // shown anyway: it is standing somewhere, and a summon a few pixels off is
         // enormously better than a summon that refused to come down.
-        if let Err(error) = bt_platform::stand_window_at(native, rect) {
+        if let Err(error) = self.window.window.stand_at(rect) {
             eprintln!("BT_QUAKE {error}");
         }
-        if let Err(error) = bt_platform::set_window_topmost(native, true) {
+        if let Err(error) = self.window.window.set_topmost(true) {
             eprintln!("recoverable always-on-top failure: {error}");
         }
         // Never maximized: this window's shape *is* the rectangle above, and a
@@ -228,10 +227,7 @@ impl<B: Backend> Runtime<'_, B> {
         if !self.is_quake_window() || !self.window.custom_window_frame.in_size_move() {
             return;
         }
-        let Ok(native) = native_window(&self.window.window) else {
-            return;
-        };
-        let Ok(rect) = bt_platform::get_window_rect(native) else {
+        let Some(rect) = self.window.window.outer_rect() else {
             return;
         };
         // The display the window is on *now*, asked at its own top-left rather

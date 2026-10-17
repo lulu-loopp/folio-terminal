@@ -1468,6 +1468,7 @@ mod tests {
             git_expanded: None,
             git_sel: None,
             git_remotes_open: false,
+            folder_unknown: false,
         }
     }
 

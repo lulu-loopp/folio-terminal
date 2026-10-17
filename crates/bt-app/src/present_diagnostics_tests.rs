@@ -341,10 +341,7 @@ fn freshness_format_counts_attempts_and_actual_dispatch_progress() {
 #[test]
 fn existing_hidden_callers_keep_the_same_fused_value() {
     let body = crate::test_support::item_body(&bt_source::ItemQuery::function("window_is_hidden"));
-    assert!(body.contains("return false;"));
-    assert!(body.contains(
-        "bt_platform::is_window_minimized(native) || bt_platform::is_window_cloaked(native)"
-    ));
+    assert!(body.contains("window.is_iconic() || window.is_cloaked()"));
     for (minimized, cloaked, expected) in [
         (false, false, false),
         (false, true, true),
@@ -363,11 +360,9 @@ fn existing_hidden_callers_keep_the_same_fused_value() {
 #[test]
 fn attempt_generation_is_carried_by_configure_and_native_reads_are_line_gated() {
     let body = method_body("Runtime", "finish_present_attempt");
-    assert!(
-        body.find("if self.app.trace_perf").unwrap() < body.find("native_present_facts").unwrap()
-    );
+    assert!(body.find("if self.app.trace_perf").unwrap() < body.find(".present_facts()").unwrap());
     let body = method_body("Runtime", "check_picture_freshness");
-    assert!(body.find("if let Some(line)").unwrap() < body.find("native_present_facts").unwrap());
+    assert!(body.find("if let Some(line)").unwrap() < body.find(".present_facts()").unwrap());
     let in_render = |text: &str| {
         found_in_package(
             "bt-render",

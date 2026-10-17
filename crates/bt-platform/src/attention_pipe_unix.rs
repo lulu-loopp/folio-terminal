@@ -39,7 +39,7 @@
 //!   stop event becomes `poll` over the listener, the read end of a self-pipe
 //!   and up to [`MAX_IN_FLIGHT`] accepted connections. The pool survives for
 //!   the half of its reason that survives: a caller that attaches and says
-//!   nothing costs **its own** slot for [`READ_DEADLINE`] rather than the
+//!   nothing costs **its own** slot for `READ_DEADLINE` rather than the
 //!   endpoint's whole attention. The other half — that a pipe instance starts
 //!   listening before `ConnectNamedPipe` is called, which is the defect
 //!   `accepted` was added to name — has no counterpart here, because a
@@ -165,7 +165,7 @@ const WRITE_DEADLINE: Duration = Duration::from_millis(250);
 /// being *served* must not mean being queued behind somebody else's read. A
 /// fifth caller waits in the kernel's accept queue — a wait of microseconds
 /// unless one of the four is a caller that attached and went quiet, and that
-/// one is swept at [`READ_DEADLINE`].
+/// one is swept at `READ_DEADLINE`.
 const MAX_IN_FLIGHT: usize = 4;
 
 /// What an endpoint has been asked, since it opened.
@@ -250,7 +250,15 @@ pub fn endpoint_for(directory: &Path) -> Option<String> {
 }
 
 /// **The endpoint.** Live from the moment [`AttentionPipe::start`] returns,
-/// closed when this is dropped.
+/// closed by [`AttentionPipe::retire_within`] — its door (T-DROP-DOORS, D-79): *an
+/// endpoint is retired through an explicit door, not by its drop.*
+///
+/// The product's endpoint lives in a `static` for the process's life and is
+/// never retired; the door is the road for a scope that owns one (every test,
+/// anything later). A drop that finds the door was not called waits for
+/// nothing: it hangs up the stop pipe, takes the name down, lets the listener
+/// go and says so once ([`crate::door_skipped`]).
+#[must_use = "an endpoint is retired through `AttentionPipe::retire_within`, never by its drop"]
 pub struct AttentionPipe {
     name: String,
     path: PathBuf,
@@ -259,6 +267,9 @@ pub struct AttentionPipe {
     /// `poll`.
     stop: RawFd,
     listener: Option<JoinHandle<()>>,
+    /// The listener's end: its body holds the sender, so this hears `Disconnected`
+    /// once the listener has left (the door's bounded wait).
+    ended: std::sync::mpsc::Receiver<()>,
     counts: Arc<Mutex<PipeCounts>>,
 }
 
@@ -339,12 +350,15 @@ impl AttentionPipe {
             }
         };
         let counts = Arc::new(Mutex::new(PipeCounts::default()));
+        // The listener's end, heard by the door: the sender goes with the listener's body.
+        let (alive, ended) = std::sync::mpsc::channel::<()>();
         let started = {
             let counts = Arc::clone(&counts);
             crate::spawn_at_priority(
                 "folio-attention-endpoint",
                 crate::ThreadPriority::Normal,
                 move |_ctx| {
+                    let _alive = alive;
                     listen(&listener, wake, &counts, &deliver);
                 },
             )
@@ -356,6 +370,7 @@ impl AttentionPipe {
                 stop,
                 listener: Some(listener),
                 counts,
+                ended,
             }),
             Err(error) => {
                 // SAFETY: nothing else ever had either descriptor — the thread
@@ -381,32 +396,69 @@ impl AttentionPipe {
     pub fn counts(&self) -> PipeCounts {
         *self.counts.lock().unwrap_or_else(PoisonError::into_inner)
     }
-}
 
-impl Drop for AttentionPipe {
-    fn drop(&mut self) {
-        let word = [1u8];
-        // SAFETY: one byte into this process's own pipe, whose read end is held
-        // by the thread joined on the next line.
-        unsafe {
-            libc::write(self.stop, word.as_ptr().cast(), 1);
-        }
-        if let Some(listener) = self.listener.take() {
-            let _ = listener.join();
-        }
-        // SAFETY: the only other user of this descriptor has been joined.
-        unsafe {
-            libc::close(self.stop);
-        }
+    /// **The door: stop listening, wait — up to `bound` — for the listener to leave,
+    /// and take the name down.** Answers whether it left in time.
+    ///
+    /// The one road on which this endpoint waits, and its wait is bounded by the
+    /// caller: the listener leaves at its next `poll`, which the hung-up stop pipe
+    /// ends — after the client it is serving has had its frame or its deadline,
+    /// and after the caller's own closure has returned, which no bound written
+    /// here could cover. So the door waits on the listener's end (the sender its
+    /// body holds goes with it) for `bound`, and a listener still standing past
+    /// it is let go. Called on whatever thread owns the endpoint; nothing in the
+    /// product does (its endpoint is a `static`).
+    pub fn retire_within(mut self, bound: std::time::Duration) -> bool {
+        self.hang_up();
+        let left = match self.listener.take() {
+            Some(listener) => match crate::listener_says_within(&self.ended, bound) {
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = listener.join();
+                    true
+                }
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
+            },
+            None => true,
+        };
         // **The name goes with the listener**, wherever the listener is owned by
-        // something that is dropped. In the product it is not: `bt-app` parks
+        // something that retires it. In the product it is not: `bt-app` parks
         // the endpoint in a `OnceLock` static, a static is never dropped, and so
         // a real Folio leaves its name behind on every exit — which is
         // [`crate::launch_pipe`]'s own note at the other door, and why the
         // general answer is the unlink under the claim's lock and not this line.
-        // This one is for a scope that owns one: every test below, and anything
-        // that comes later.
         let _ = std::fs::remove_file(&self.path);
+        left
+    }
+
+    /// One byte into the stop pipe and its write end closed: the listener's
+    /// `poll` wakes on either. Needs no wait — this process's own pipe, whose
+    /// read end the listener holds and closes on its way out.
+    fn hang_up(&self) {
+        let word = [1u8];
+        // SAFETY: the write end is this value's own descriptor, written and
+        // closed once, here, on the one road (door or drop) that reaches it.
+        unsafe {
+            libc::write(self.stop, word.as_ptr().cast(), 1);
+            libc::close(self.stop);
+        }
+    }
+}
+
+impl Drop for AttentionPipe {
+    /// Waits for nothing. After [`AttentionPipe::retire_within`] there is nothing left
+    /// to do; without it, the stop pipe is hung up, the name taken down and the
+    /// listener let go of, and the drop says so once.
+    fn drop(&mut self) {
+        if let Some(listener) = self.listener.take() {
+            self.hang_up();
+            drop(listener);
+            let _ = std::fs::remove_file(&self.path);
+            crate::door_skipped::say(
+                "the attention endpoint (`AttentionPipe`)",
+                "its retire door",
+                "its listener was told to stop and let go of",
+            );
+        }
     }
 }
 
@@ -911,7 +963,10 @@ mod tests {
         let runtime = std::fs::metadata(path.parent().expect("it lives in the runtime directory"))
             .expect("and that directory is there");
         assert_eq!(runtime.permissions().mode() & 0o777, 0o700);
-        drop(endpoint);
+        assert!(
+            endpoint.retire_within(crate::door_skipped::PATIENCE),
+            "the listener left"
+        );
         assert!(
             !path.exists(),
             "a clean quit left its doorbell standing: {}",
@@ -975,7 +1030,10 @@ mod tests {
         let endpoint =
             AttentionPipe::start(&directory, |_| {}).expect("open over the cleared name");
         assert_eq!(endpoint.name(), path.to_str().expect("a text path"));
-        drop(endpoint);
+        assert!(
+            endpoint.retire_within(crate::door_skipped::PATIENCE),
+            "the listener left"
+        );
         drop(claim);
     }
 
@@ -1082,5 +1140,110 @@ mod tests {
             crate::instance::claim_name(&real),
             "the doorbell and the launch door are two names in one directory"
         );
+    }
+
+    /// An endpoint whose listener stands inside `deliver` until the test lets it
+    /// go, and the flag `deliver` raises on its way out.
+    fn a_held_endpoint(
+        directory: &Path,
+    ) -> (
+        AttentionPipe,
+        mpsc::Sender<()>,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let (entered, inside) = mpsc::channel();
+        let (release, held) = mpsc::channel::<()>();
+        let left = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let leaving = Arc::clone(&left);
+        let endpoint = AttentionPipe::start(directory, move |_line| {
+            let _ = entered.send(());
+            let _ = held.recv();
+            leaving.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .expect("open the attention endpoint");
+        post(endpoint.name(), "hold");
+        crate::door_skipped::received(&inside, "the listener inside `deliver`");
+        (endpoint, release, left)
+    }
+
+    /// RED (T-DROP-DOORS, D-79) — **the door waits for the listener to leave,
+    /// takes the name down, and says no skipped door.**
+    ///
+    /// The listener is held inside `deliver`; the door is called on a thread of
+    /// its own, and the hold let go once that thread is on its way into the
+    /// door. When the door returns, `deliver` has returned and the name is gone.
+    ///
+    /// MUTATION: let the listener go in `retire_within` instead of joining it and the
+    /// door returns while `deliver` still stands — `left` reads false (unless
+    /// the release overtakes the door, which the order below makes the rare
+    /// case).
+    #[test]
+    fn the_door_waits_for_the_listener_to_leave() {
+        let directory = scratch(line!());
+        let (endpoint, release, left) = a_held_endpoint(&directory);
+        let path = PathBuf::from(endpoint.name());
+        let (going, on_its_way) = mpsc::channel();
+        let (retired, heard) = mpsc::channel();
+        let leaving = Arc::clone(&left);
+        std::thread::spawn(move || {
+            let _ = going.send(());
+            assert!(
+                endpoint.retire_within(crate::door_skipped::PATIENCE),
+                "the listener left"
+            );
+            let _ = retired.send((
+                leaving.load(std::sync::atomic::Ordering::SeqCst),
+                crate::door_skipped::skipped_on_this_thread(),
+            ));
+        });
+        crate::door_skipped::received(&on_its_way, "the retiring thread");
+        let _ = release.send(());
+        let (had_left, skipped) =
+            crate::door_skipped::received(&heard, "the door, once the listener is let go");
+        assert!(had_left, "the door returned before the listener left");
+        assert_eq!(skipped, 0, "a retired endpoint's drop says nothing");
+        assert!(!path.exists(), "a retired endpoint left its name standing");
+    }
+
+    /// RED (T-DROP-DOORS, D-79) — **an endpoint dropped without its door waits
+    /// for nothing, and says so once.**
+    ///
+    /// The listener is held inside `deliver` for the whole of the drop: a drop
+    /// that joined it would stand until the test let go, and the test lets go
+    /// only after the drop has answered.
+    ///
+    /// MUTATION: put the join back in `Drop` and the drop's thread does not
+    /// answer within the suite's patience; take the saying out and the count is
+    /// zero.
+    #[test]
+    fn an_endpoint_dropped_without_its_door_waits_for_nothing_and_says_so_once() {
+        let directory = scratch(line!());
+        let (endpoint, release, _left) = a_held_endpoint(&directory);
+        let skipped =
+            crate::door_skipped::dropped_alone(endpoint, "a drop while the listener is held");
+        assert_eq!(skipped, 1, "the drop says its skipped door once");
+        let _ = release.send(());
+    }
+
+    /// RED (T-DROP-DOORS, D-79, the review's bound) — **the door's wait ends at its bound**: a
+    /// listener held inside the caller's closure has not left within no time at all, and the door
+    /// answers so and lets it go.
+    ///
+    /// MUTATION: join the listener in `retire_within` without the bounded wait and the door's
+    /// thread does not answer within the suite's patience.
+    #[test]
+    fn the_door_lets_a_listener_go_past_its_bound() {
+        let directory = scratch(line!());
+        let (endpoint, release, _left) = a_held_endpoint(&directory);
+        let (answered, heard) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = answered.send(endpoint.retire_within(Duration::ZERO));
+        });
+        let left = crate::door_skipped::received(&heard, "the door with no time at all");
+        assert!(
+            !left,
+            "a listener held in its closure has not left within no time at all"
+        );
+        drop(release);
     }
 }

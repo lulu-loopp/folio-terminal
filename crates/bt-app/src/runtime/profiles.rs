@@ -922,6 +922,13 @@ impl<B: Backend> Runtime<'_, B> {
         // press from travelling.
         self.close_popups_except(Popup::Root);
         self.window.root_menu.toggle(seat);
+        // **The shells' folders are asked once per look too** (T-CWD-FROM-PROCESS): the rows
+        // naming where a terminal stands are taken here, as the menu opens, and the frames that
+        // lay it out read what was taken.
+        if self.window.root_menu.seat().is_some() {
+            self.window.root_menu_shell_folders =
+                self.shell_folders_for_the_root_menu(&crate::pane_folder::SystemProcessFolders);
+        }
         // **The disk is asked once per look** (user ruling 2026-09-05). The
         // remembered folders are the only rows on this list that can name
         // somewhere that has gone, and "has it gone" is a question about the

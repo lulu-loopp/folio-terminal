@@ -170,3 +170,6 @@ fn implements_a_lookalike() {
     struct Hidden;
     impl crate::lookalike::WindowHost for Hidden {}
 }
+
+// The window's platform handle (RULE C).
+mod handles;
