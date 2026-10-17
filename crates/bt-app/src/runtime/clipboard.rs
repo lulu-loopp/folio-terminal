@@ -615,13 +615,15 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// The pastes whose places this window's panes hold.
     fn places_held(&self) -> Vec<crate::clipboard_lane::ClipboardId> {
-        self.window
-            .tabs
-            .iter()
-            .flat_map(|tab| tab.sessions.values())
-            .filter_map(|leaf| leaf.paste_hold.as_ref())
-            .flat_map(PasteHold::pastes)
-            .collect()
+        let mut held = Vec::new();
+        for tab in &self.window.tabs {
+            for leaf in tab.sessions.values() {
+                if let Some(hold) = &leaf.paste_hold {
+                    held.extend(hold.pastes());
+                }
+            }
+        }
+        held
     }
 
     /// **Why a paste still owed is withdrawn now**, if it is.
