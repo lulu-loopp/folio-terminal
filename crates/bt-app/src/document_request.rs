@@ -274,10 +274,11 @@ pub(crate) enum Outcome {
     /// the bytes went there by an ordinary write because it cannot exchange two
     /// files in one step (`NoExchange::PlainWriter`): the staged copy took the
     /// name by one rename, so a crash leaves the old file or the new one, never
-    /// a part of either; on a drive with no journal (FAT, exFAT) a crash at that
-    /// rename can leave the folder's entry for the file damaged, for the
-    /// system's disk check to repair, and a writer that wrote the file between
-    /// the last check of its bytes and the rename is replaced unseen.
+    /// a part of either; on a drive with no journal (FAT, exFAT) an interruption
+    /// at that rename can leave the file only under the copy's name beside it,
+    /// or the folder's entry damaged, which the system's disk check can usually
+    /// repair; and a writer that wrote the file between the end of the last
+    /// check of its bytes and the rename is replaced unseen.
     Landed {
         bytes: Arc<[u8]>,
         kept: Option<PathBuf>,
@@ -588,9 +589,9 @@ fn exchange(
 /// rename ([`Volume::commit`]), with no displaced copy to read back. A writer
 /// that crossed before that read is answered as the precondition answers it —
 /// `Moved` with its bytes — and is not written over; the staged copy goes. One
-/// that writes between that read and the rename is replaced unseen: the
-/// rename is the plain road's whole window, which the exchange road does not
-/// have. `ordinary_on`: the drive, when the road was taken because the drive
+/// that writes between the end of that read and the rename is replaced unseen:
+/// that span is the plain road's whole window, which the exchange road does
+/// not have. `ordinary_on`: the drive, when the road was taken because the drive
 /// cannot exchange.
 fn plainly(
     worker: &WorkerCtx,

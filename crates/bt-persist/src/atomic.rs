@@ -77,9 +77,12 @@ pub fn stage_beside(path: &Path, contents: &[u8], staging: Staging) -> io::Resul
 /// `MOVEFILE_REPLACE_EXISTING` on Windows, `rename(2)` on Unix), and nothing
 /// writes the body again. For the storage worker's plain road, which stages
 /// once, checks the file's bytes, and only then puts the staged copy in place,
-/// so the one moment another writer's bytes could be replaced unseen is the
-/// rename itself. A crash leaves `path` holding its old file or the new one,
-/// never a part of either. What a rename can carry is the caller's to carry
+/// so another writer's bytes can be replaced unseen only between the end of
+/// that check and the rename. A crash leaves `path` holding its old file or the
+/// new one, never a part of either; on a drive with no journal (FAT, exFAT),
+/// where a replacing rename removes the target's entry and then renames the
+/// staged one, an interruption between the two can leave the new bytes only
+/// under the staged name, or the folder's entry damaged. What a rename can carry is the caller's to carry
 /// first ([`bt_platform::carry_metadata`]). A rename that fails removes the
 /// staged file.
 ///
