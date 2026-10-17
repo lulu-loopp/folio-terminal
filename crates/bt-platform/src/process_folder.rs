@@ -51,6 +51,7 @@ pub fn current_directory(pid: u32) -> Result<PathBuf, FolderRefusal> {
 }
 
 /// A bridge to another machine, by its image name as the foreground-program door spells it.
+#[cfg(any(windows, target_os = "macos", test))]
 fn is_far_side(image: &std::path::Path) -> bool {
     crate::foreground_program::crosses_remote_boundary(&crate::foreground_program::canonical_image(
         &image.to_string_lossy(),
@@ -715,8 +716,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// RED (real process) — **a process that has ended is `Exited`**, its id still held by this
-    /// test's handle so that no other process can have taken it.
+    /// RED (real process) — **a process that has ended is `Exited`**: on Windows its id is still
+    /// held by this test's handle, so no other process can have taken it; on macOS the wait reaps
+    /// it, and the id is read at once after.
     ///
     /// MUTATIONS: answer `Unreadable` for every failed read on Windows (drop the `has_exited`
     /// arm; observed red); on macOS, map no errno to `Exited` (the Mac gate's).
