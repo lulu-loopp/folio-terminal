@@ -9,7 +9,7 @@
 use crate::window_seam::prelude::*;
 use crate::{
     FolioApp, MouseRoute, PressedCellTarget, Runtime, TabClick, UserInputKind, input, mouse_trace,
-    protocol_mouse_button, route_forwarded_mouse_button, seats, settings,
+    route_forwarded_mouse_button, seats, settings,
 };
 use anyhow::Result;
 use std::time::Instant;
@@ -18,16 +18,19 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::window::WindowId;
 
 use super::capture::{
-    CaptureIndex, CaptureOwner, PressVerdict, cancel_then_route, capture_index_for_button_event,
-    press_against_the_slot, release_ends_the_capture,
+    CaptureOwner, PressVerdict, ReleaseVerdict, cancel_then_route, press_against_the_slot,
+    release_against_the_slot,
 };
 
 impl<B: Backend> FolioApp<B> {
     /// **Application-wide capture precedence** (T-POINTER-CAPTURE R-5/R-6).
-    /// A button event can arrive in a window other than the capture's. Select
-    /// the matching capture before the arrived window is borrowed; if its owner
-    /// is elsewhere, run that owner's release or cancel now. The arrived
-    /// window is routed only after this method returns.
+    /// A button event can arrive in a window other than the capture's. Before
+    /// the arrived window is borrowed, the slot is asked by button: a press of
+    /// the held button there has the owner's window cancel its stale capture
+    /// first, and the release of the held button is handed to the owner's
+    /// window now. The arrived window is routed only after this method
+    /// returns, and answers everything else itself, a swallowed button
+    /// included, from the same verdicts ([`Runtime::button_meets_the_slot`]).
     pub(crate) fn capture_before_pointer_event(
         &mut self,
         arrived_in: WindowId,
@@ -36,9 +39,16 @@ impl<B: Backend> FolioApp<B> {
         let WindowEvent::MouseInput { state, button, .. } = event else {
             return Ok(false);
         };
-        let Some(app) = self.app.as_mut() else {
+        let Some(app) = self.app.as_ref() else {
             return Ok(false);
         };
+        let Some(capture) = app.pointer_capture.as_ref() else {
+            return Ok(false);
+        };
+        let owner_window = capture.window;
+        if owner_window == arrived_in {
+            return Ok(false);
+        }
         let reported_button = *button;
         let button = match state {
             ElementState::Pressed => self
@@ -52,45 +62,32 @@ impl<B: Backend> FolioApp<B> {
                         bt_platform::host_platform(),
                     )
                 }),
-            ElementState::Released if reported_button == MouseButton::Left => {
-                let secondary_capture = |capture: &super::capture::PointerCapture| {
-                    capture.button == MouseButton::Right
-                        && self.windows.values().any(|window| {
-                            window.window.id() == capture.window && window.secondary_press
-                        })
-                };
-                if app.pointer_capture.as_ref().is_some_and(secondary_capture)
-                    || app.pointer_capture_overlaps.iter().any(secondary_capture)
-                {
-                    MouseButton::Right
-                } else {
-                    reported_button
-                }
+            ElementState::Released
+                if reported_button == MouseButton::Left
+                    && capture.button == MouseButton::Right
+                    && self.windows.values().any(|window| {
+                        window.window.id() == owner_window && window.secondary_press
+                    }) =>
+            {
+                MouseButton::Right
             }
             ElementState::Released => reported_button,
         };
-        let index = capture_index_for_button_event(
-            app.pointer_capture.as_ref(),
-            &app.pointer_capture_overlaps,
-            arrived_in,
-            *state,
-            button,
-        );
-        let Some(index) = index else {
-            return Ok(false);
+        let owner_ends = match state {
+            ElementState::Pressed => {
+                press_against_the_slot(Some(capture), button) == PressVerdict::CancelThenRoute
+            }
+            ElementState::Released => {
+                release_against_the_slot(Some(capture), app.swallowed, button)
+                    == ReleaseVerdict::ToOwner
+            }
         };
-        app.focus_capture(index);
-        let owner_window = app
-            .pointer_capture
-            .as_ref()
-            .map(|capture| capture.window)
-            .expect("the selected capture is primary");
-        if owner_window == arrived_in {
+        if !owner_ends {
             return Ok(false);
         }
         if !self.windows.contains(owner_window) {
             if let Some(app) = self.app.as_mut() {
-                let _ = app.take_capture_at(CaptureIndex::Primary);
+                app.pointer_capture = None;
             }
             return Ok(false);
         }
@@ -116,14 +113,46 @@ impl<B: Backend> FolioApp<B> {
 }
 
 impl<B: Backend> Runtime<'_, B> {
-    /// **A press against the slot** (R-5): a press of the held capture's own button proves the
-    /// capture stale — its release was lost — so the capture is cancelled before the press is
-    /// routed, whichever window holds it. A press of another button is routed as it always was
-    /// (cut 4 rules on it).
-    pub(crate) fn press_against_the_capture(&mut self, button: MouseButton) -> Result<()> {
-        match press_against_the_slot(self.app.pointer_capture.as_ref(), button) {
-            PressVerdict::Route => Ok(()),
-            PressVerdict::CancelThenRoute => self.cancel_own_capture(),
+    /// **Every button event of this window, compared with the slot first**
+    /// (R-5, R-6, R-8), before any layer of the press road is asked. Answers
+    /// whether the event was spent here.
+    ///
+    /// A press of the held capture's own button proves the capture stale, so
+    /// it is cancelled and the press goes on to be routed. A press of any other
+    /// button while a gesture holds the pointer, in whichever window, goes
+    /// nowhere and is remembered, and so does its release, even one that comes
+    /// after the gesture has ended. The release of the held button goes to its
+    /// owner, which may hand it on.
+    pub(crate) fn button_meets_the_slot(
+        &mut self,
+        state: ElementState,
+        button: MouseButton,
+        position: Option<PhysicalPosition<f64>>,
+    ) -> Result<bool> {
+        match state {
+            ElementState::Pressed => match self.app.answer_press(button) {
+                PressVerdict::Route => Ok(false),
+                PressVerdict::CancelThenRoute => {
+                    self.cancel_own_capture()?;
+                    Ok(false)
+                }
+                PressVerdict::Swallow => {
+                    self.mouse_trace(|| {
+                        format!("mouse_input swallowed state={state:?} button={button:?}")
+                    });
+                    Ok(true)
+                }
+            },
+            ElementState::Released => match self.app.answer_release(button) {
+                ReleaseVerdict::Route => Ok(false),
+                ReleaseVerdict::ToOwner => self.release_capture(button, position),
+                ReleaseVerdict::Swallow => {
+                    self.mouse_trace(|| {
+                        format!("mouse_input swallowed state={state:?} button={button:?}")
+                    });
+                    Ok(true)
+                }
+            },
         }
     }
 
@@ -179,22 +208,20 @@ impl<B: Backend> Runtime<'_, B> {
     }
 
     /// **The release of the capture's button, delivered to its owner** (R-6) — asked first of
-    /// every release, so no layer drawn where the button comes up can take it. Answers whether
-    /// the release was consumed; a release no capture owns, or one the owner hands on (the glance
-    /// card's thumb, a peek's head press), goes on down the ordinary road.
+    /// every release ([`Self::button_meets_the_slot`]), so no layer drawn where the button comes
+    /// up can take it. Answers whether the release was consumed; one the owner hands on (the
+    /// glance card's thumb, a peek's head press) goes on down the ordinary road. A capture of
+    /// another window is that window's to end ([`FolioApp::capture_before_pointer_event`]).
     pub(crate) fn release_capture(
         &mut self,
         button: MouseButton,
         position: Option<PhysicalPosition<f64>>,
     ) -> Result<bool> {
-        let Some(capture) = self.app.pointer_capture.as_ref() else {
+        let Some(capture) = self.own_capture() else {
             return Ok(false);
         };
-        if !release_ends_the_capture(capture, button) {
-            return Ok(false);
-        }
         match &capture.owner {
-            CaptureOwner::Route(_) => self.release_cell_route(button),
+            CaptureOwner::Route(_) => self.release_cell_route(),
             // Letting go of the thumb pays for a frame and consumes nothing: the same button
             // coming up still reaches whatever else was waiting for it.
             CaptureOwner::GlanceThumb(_) => {
@@ -426,10 +453,7 @@ impl<B: Backend> Runtime<'_, B> {
     ///   ([`Self::forwarded_gesture_hit`]), in the encoding the press was sent
     ///   in, and the route comes off. A child given a press and never its
     ///   release holds a button down for ever.
-    ///
-    /// A button the mouse protocol has no name for ends nothing here, as it
-    /// forwarded nothing.
-    fn release_cell_route(&mut self, button: MouseButton) -> Result<bool> {
+    fn release_cell_route(&mut self) -> Result<bool> {
         match self.held_mouse_route().cloned() {
             None => Ok(false),
             Some(MouseRoute::MathBlock) => {
@@ -439,13 +463,9 @@ impl<B: Backend> Runtime<'_, B> {
                 }
                 Ok(true)
             }
-            // A selection is only ever begun by the left button, so only the
-            // left button's release ends it; any other button's release goes on
-            // down the ordinary road as an event of its own.
+            // A selection is only ever begun by the left button, and the slot
+            // hands its owner only the release of the button that latched it.
             Some(MouseRoute::Local(drag)) => {
-                if button != MouseButton::Left {
-                    return Ok(false);
-                }
                 // Its shell gone, the selection is let go with nothing done.
                 if self.live_paste_target(drag.owner).is_none() {
                     self.drop_mouse_route();
@@ -459,13 +479,9 @@ impl<B: Backend> Runtime<'_, B> {
                 owner,
                 ..
             }) => {
-                // **Only the button that started the gesture ends it.** Any
-                // other button's release is not this gesture's: it is not
-                // forwarded under this route, it does not clear it, and it
-                // goes on down the ordinary road as an event of its own.
-                if protocol_mouse_button(button) != Some(latched) {
-                    return Ok(false);
-                }
+                // **Only the button that started the gesture ends it**: the
+                // slot hands its owner only that button's release, and any
+                // other button's press and release under it went nowhere (R-8).
                 // **To the shell the press was handed to, and to no other.** A
                 // shell that is gone (or whose tab is no longer on top) is owed
                 // nothing: the route comes off with no byte sent anywhere.
@@ -508,3 +524,7 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "release_tests.rs"]
+mod tests;
