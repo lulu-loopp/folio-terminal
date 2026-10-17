@@ -2646,6 +2646,8 @@ impl<'ast> Visit<'ast> for HandleWalk<'_, '_> {
             syn::Item::Enum(item) => &item.attrs,
             syn::Item::Union(item) => &item.attrs,
             syn::Item::Trait(item) => &item.attrs,
+            syn::Item::Type(item) => &item.attrs,
+            syn::Item::Macro(item) => &item.attrs,
             _ => return syn::visit::visit_item(self, node),
         };
         if !test_only(attrs) {
@@ -2768,8 +2770,54 @@ impl<'ast> Visit<'ast> for HandleWalk<'_, '_> {
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        self.judge_tokens(node.tokens.clone());
+        // A macro written at module level — an invocation or a `macro_rules!` body — is no item's
+        // and may stand in code written for the window: its tokens are read as the window's.
+        if self.item.is_none() {
+            let name = format!(
+                "the macro `{}!` in {}",
+                segments(&node.path).join("::"),
+                self.module_name()
+            );
+            self.read(name, true, |walk| walk.judge_tokens(node.tokens.clone()));
+        } else {
+            self.judge_tokens(node.tokens.clone());
+        }
         syn::visit::visit_macro(self, node);
+    }
+
+    fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
+        match (&node.ident, &self.item) {
+            (Some(ident), None) => {
+                let name = format!("`macro_rules! {ident}` in {}", self.module_name());
+                self.read(name, true, |walk| {
+                    walk.judge_tokens(node.mac.tokens.clone());
+                });
+            }
+            _ => syn::visit::visit_item_macro(self, node),
+        }
+    }
+
+    fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
+        // A type alias is a name the walk does not follow: one naming a handle is refused wherever
+        // it is written, as Rules A and B refuse an alias of a holder.
+        let name = format!("the type alias `{}` in {}", node.ident, self.module_name());
+        self.read(name, true, |walk| syn::visit::visit_item_type(walk, node));
+    }
+
+    fn visit_impl_item_type(&mut self, node: &'ast syn::ImplItemType) {
+        let (owner, _) = self.block.clone().unwrap_or_default();
+        let name = format!("the associated type `{owner}::{}`", node.ident);
+        self.read(name, true, |walk| {
+            syn::visit::visit_impl_item_type(walk, node);
+        });
+    }
+
+    fn visit_trait_item_type(&mut self, node: &'ast syn::TraitItemType) {
+        let (owner, _) = self.block.clone().unwrap_or_default();
+        let name = format!("the associated type `{owner}::{}`", node.ident);
+        self.read(name, true, |walk| {
+            syn::visit::visit_trait_item_type(walk, node);
+        });
     }
 
     fn visit_item_use(&mut self, _: &'ast syn::ItemUse) {}
@@ -2804,7 +2852,7 @@ fn doors_handing_out_a_handle(index: &Index, reading: &Reading<'_>) -> Vec<Strin
         let mut walk = HandleWalk {
             reading,
             modules: vec![SEAM.to_owned()],
-            block: None,
+            block: Some((declared.name().to_owned(), true)),
             item: Some((format!("the door `{SEAM}::{}`", declared.name()), true)),
             scopes: Vec::new(),
             found: BTreeMap::new(),
@@ -2959,6 +3007,10 @@ fn every_road_around_the_window_seam_is_named() {
              — the window's platform handle and its composition tree are the native \
              backend's own: code written for the window speaks to the platform through the \
              seam's doors",
+            "`crate::handles::too_far` names `Far9`, which does not settle \
+             — the window's platform handle and its composition tree are the native \
+             backend's own: code written for the window speaks to the platform through the \
+             seam's doors",
             "`crate::runtime::aliases_a_holder_inside` names Runtime for the native backend — \
              the window is reached through the seam",
             "`crate::runtime::builds_by_a_literal` names Shell for the native backend — the \
@@ -2995,6 +3047,10 @@ fn every_road_around_the_window_seam_is_named() {
              guard does not read macros",
             "`macro_rules! door_through_a_reexport` at runtime.rs:384: a macro's tokens name \
              Host — the guard does not read macros",
+            "`macro_rules! hands_it_over` in crate::handles names bt_platform::Compositor \
+             — the window's platform handle and its composition tree are the native \
+             backend's own: code written for the window speaks to the platform through the \
+             seam's doors",
             "`macro_rules! makes_a_door` at runtime.rs:350: a macro's tokens name WindowHost — \
              the guard does not read macros",
             "`paste!` at runtime.rs:394: it builds names from pieces, which the guard cannot \
@@ -3155,6 +3211,10 @@ fn every_road_around_the_window_seam_is_named() {
              window is reached through the seam",
             "the type `crate::runtime::Keeper` holds Runtime for the native backend — the window \
              is reached through the seam",
+            "the type alias `Handle` in crate::handles names bt_platform::NativeWindow \
+             — the window's platform handle and its composition tree are the native \
+             backend's own: code written for the window speaks to the platform through the \
+             seam's doors",
             "the type alias `NativeBackend` in runtime.rs names Native for the native backend — \
              the window is reached through the seam",
             "the type alias `NativeRuntime` in runtime.rs names Native for the native backend — \

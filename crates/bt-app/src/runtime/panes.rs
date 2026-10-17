@@ -4782,27 +4782,32 @@ impl<B: Backend> Runtime<'_, B> {
         if travelling.is_empty() {
             return Ok(());
         }
-        let carried: Vec<(LeafId, webhost::WebSeat)> = travelling
+        // **Each page's new place, asked before anything moves**: a window that cannot name one
+        // refuses here, with every page still where it was.
+        let addressed: Vec<(LeafId, LeafId, webhost::SeatAddress)> = travelling
             .iter()
-            .filter_map(|(was, now)| {
-                let page = self.window.web.remove(was)?;
-                let picture = self.window.web_thumbs.take(*was);
-                if let Some(picture) = picture {
-                    self.window.web_thumbs.put(*now, picture);
-                }
-                Some((*now, page))
-            })
-            .collect();
-        for (now, mut page) in carried {
-            let mut outcomes = Vec::new();
-            let address = self
-                .window
-                .window
-                .page_address(bt_platform::PageVisual {
+            .map(|(was, now)| {
+                let address = self.window.window.page_address(bt_platform::PageVisual {
                     tab: now.tab.0,
                     seat: now.seat.0,
-                })
-                .map_err(|error| anyhow!(error))?;
+                })?;
+                Ok((*was, *now, address))
+            })
+            .collect::<Result<_, String>>()
+            .map_err(|error| anyhow!(error))?;
+        let carried: Vec<(LeafId, webhost::SeatAddress, webhost::WebSeat)> = addressed
+            .into_iter()
+            .filter_map(|(was, now, address)| {
+                let page = self.window.web.remove(&was)?;
+                let picture = self.window.web_thumbs.take(was);
+                if let Some(picture) = picture {
+                    self.window.web_thumbs.put(now, picture);
+                }
+                Some((now, address, page))
+            })
+            .collect();
+        for (now, address, mut page) in carried {
+            let mut outcomes = Vec::new();
             let report = page.rehost(
                 &self.window.compositor,
                 &self.window.compositor,

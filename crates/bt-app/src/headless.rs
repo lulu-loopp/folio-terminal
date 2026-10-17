@@ -259,10 +259,14 @@ pub(crate) struct HeadlessWindow {
 /// **What a headless window's questions to the system answer** — the documented stand-ins, one
 /// per question, each a field a test may script to drive the branch behind it.
 ///
-/// The defaults are the answers the product gives about a window whose handle cannot be got, so a
-/// test that scripts nothing drives the code a window with no platform under it drives: the
-/// window is on the screen and uncovered, the platform names no rectangle, no glass and no
-/// pointer, and the system lets the window take the keyboard.
+/// **A recorder, by design, not a window without a handle.** The read defaults are the product's
+/// answers about a window whose handle cannot be got — on the screen and uncovered, no rectangle,
+/// no glass, no pointer, no present facts, not the foreground's holder — so a test that scripts
+/// nothing drives the branches such a window drives. The instructions are not: where the product
+/// with no handle is refused (`take_foreground` answers `false`, every `Result` door an `Err`),
+/// the headless window records the instruction and lets it through (`takes_the_foreground`
+/// defaults to `true`, every other instruction answers `Ok`), so the code after an instruction is
+/// driven too; a test that wants the refusal scripts it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PlatformAnswers {
     /// `WindowHost::is_minimized`, winit's own reading: `Some(false)`.
@@ -285,6 +289,8 @@ pub(crate) struct PlatformAnswers {
     pub(crate) holds_the_foreground: bool,
     /// `WindowHost::take_foreground`: `true`, the system lets it.
     pub(crate) takes_the_foreground: bool,
+    /// `WindowHost::present_facts`: every fact unread.
+    pub(crate) present_facts: bt_platform::NativePresentFacts,
 }
 
 impl Default for PlatformAnswers {
@@ -300,6 +306,7 @@ impl Default for PlatformAnswers {
             pointer: None,
             holds_the_foreground: false,
             takes_the_foreground: true,
+            present_facts: bt_platform::NativePresentFacts::default(),
         }
     }
 }
@@ -404,7 +411,7 @@ impl WindowHost for HeadlessWindow {
         self.answers.get().pointer
     }
     fn present_facts(&self) -> bt_platform::NativePresentFacts {
-        bt_platform::NativePresentFacts::default()
+        self.answers.get().present_facts
     }
     fn holds_the_foreground(&self, _holder: bt_platform::hotkey::Foreground) -> bool {
         self.answers.get().holds_the_foreground

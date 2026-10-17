@@ -875,15 +875,18 @@ and the headless one alike.
     sealed in `window_seam::PageTree`, whose two walks — the install and the rehost — are the
     seam's own).
 
-  The headless window records each instruction as a typed `WindowEffect` with its arguments, and
-  answers each question with a documented stand-in a test can script (`headless::PlatformAnswers`:
-  the answers the product gives about a window whose handle cannot be got). The web engine is the
-  one group a headless window cannot carry through: it hosts no engine, so `page_address` is
-  recorded and refused, and its tree is no page tree. The handle itself is read in two places
-  only: `native_window_of`, by the native backend's doors, and by the two native constructors
-  (`Runtime::create`, `Runtime::open_window`), which hand it to what they install on the window
-  (the clipboard's owner, the custom frame, the touch translation, the composition tree, the
-  outer rectangle) — on the native list already. The seam's guard holds it: code written for the
+  The headless window is a recorder: it records each instruction as a typed `WindowEffect` with
+  its arguments and lets it through (where the product with no handle would be refused), and
+  answers each question with a documented stand-in a test can script (`headless::PlatformAnswers`;
+  the read defaults are the product's answers about a window whose handle cannot be got). The web
+  engine is the one group a headless window cannot carry through: it hosts no engine, so
+  `page_address` is recorded and refused, and its tree is no page tree. The handle itself is read
+  by `native_window_of` only, and that is called from native code only: the native backend's doors
+  in `window_seam`; `native_dpi_snapshot` (the native `WindowHost::dpi_snapshot`);
+  `folios_own_metal_view` (macOS, the surface target the constructors and the device-loss rebuild
+  choose); and the two native constructors (`Runtime::create`, `Runtime::open_window`), which
+  hand it to what they install on the window (the clipboard's owner, the custom frame, the touch
+  translation, the composition tree, the outer rectangle) — on the native list already. The seam's guard holds it: code written for the
   window names neither type, and no door of the seam does (RULE C, `ARCHITECTURE-GUARDS.md`).
 * **The headless backend is test-only** (`crate::headless`, `#[cfg(test)]`): a window that records
   what it was told as typed values (`WindowEffect`, read from a `Ledger`), a renderer that keeps the

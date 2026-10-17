@@ -69,3 +69,36 @@ pub fn associated<B: Backend>(window: &B::Window, own: &crate::window_seam::Nati
     window.request_redraw();
     own.request_redraw();
 }
+
+// PLANTED: a module-level type alias of the handle — the walk does not follow an alias, so the
+// alias itself is refused; the function written through it is the road it would open.
+pub type Handle = bt_platform::NativeWindow;
+
+pub fn through_an_alias(window: &impl WindowHost) -> Option<Handle> {
+    window.request_redraw();
+    None
+}
+
+// PLANTED: a module-level `macro_rules!` whose body spells the tree.
+macro_rules! hands_it_over {
+    () => {
+        bt_platform::Compositor
+    };
+}
+
+// PLANTED: a chain of renames past the walk's hop limit — refused, never passed.
+use bt_platform::NativeWindow as Far0;
+use Far0 as Far1;
+use Far1 as Far2;
+use Far2 as Far3;
+use Far3 as Far4;
+use Far4 as Far5;
+use Far5 as Far6;
+use Far6 as Far7;
+use Far7 as Far8;
+use Far8 as Far9;
+
+pub fn too_far(window: &impl WindowHost) -> Option<Far9> {
+    window.request_redraw();
+    None
+}
