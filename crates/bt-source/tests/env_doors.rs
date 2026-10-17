@@ -84,6 +84,9 @@ const HEADER: &str = "file\titem\tcategory\tnames\trefused\tticket\treason";
 /// The four names of `std::env` that read the environment.
 const READERS: [&str; 4] = ["var", "var_os", "vars", "vars_os"];
 
+/// What goes before each refused site in a message: a line of its own, indented.
+const SITE: &str = "\n    ";
+
 /// The categories a row may have.
 const CATEGORIES: [&str; 3] = ["entry", "door", "unjudged"];
 
@@ -523,18 +526,18 @@ fn differences(
         };
         match rows.get(&(file.clone(), item.clone())) {
             None => said.push(format!(
-                "{file} {item} reads {names} with {} refused shape(s) and has no row:\n    {}",
+                "{file} {item} reads {names} with {} refused shape(s) and has no row:{SITE}{}",
                 reads.refused.len(),
-                reads.refused.join("\n    ")
+                reads.refused.join(SITE)
             )),
             Some(row) if row.names != reads.names || row.refused != reads.refused.len() => {
                 said.push(format!(
                     "{file} {item} reads {names} with {} refused shape(s); its row says {} \
-                     with {}:\n    {}",
+                     with {}:{SITE}{}",
                     reads.refused.len(),
                     row.names.iter().cloned().collect::<Vec<_>>().join(","),
                     row.refused,
-                    reads.refused.join("\n    ")
+                    reads.refused.join(SITE)
                 ));
             }
             Some(_) => {}
