@@ -190,8 +190,14 @@ above the line with the runs it came from: the largest total seen with a cold
 cache (nothing restored, everything compiled: the toolchain step's log says
 `No cache found.`), times 1.36, rounded up. A job that restores no cache
 (`release-script-tests`, `cask-audit`) takes the largest total of every run in
-the window instead. When a cold total nears the budget divided by 1.36, the
-number is derived again from new runs, not raised by hand.
+the window instead. Network-bound jobs get a 10-minute floor: a stall, not a
+hang, is what trips them, and a budget a stall trips first is a false cancel.
+`cask-audit` is one (the online strict audit downloads the DMG);
+`release-script-tests` runs offline steps (no network, a `gh` stand-in) but is
+short enough that a stall in its checkout or the runner's start would trip a
+derived 4 first, so it takes the same floor. When a cold total nears the
+budget divided by 1.36, the number is derived again from new runs, not raised
+by hand.
 
 Measured on 2026-10-17 over every completed run of 2026-10-15 to 10-17
 (38658095635 to 39032766393, 58 runs, and the first attempt of each of the
@@ -213,8 +219,8 @@ Minutes.
 | `gates-can-fail` | Windows | 6.4 / 7.4 | 8.1 / 10.15 (38693069271) | 14 | 20 |
 | `licensing` | Windows | 2.9 / 3.35 | 6.3 / 7.92 (39014776542) | 11 | 16 |
 | `wasm-lib-check` | Windows | 1.3 / 2.5 | 3.8 / 4.77 (38720519586) | 7 | 30 |
-| `release-script-tests` | Windows | no cache: 1.8 / 2.53 (38687157155) | - | 4 | 10 |
-| `cask-audit` | macOS | no cache: 1.1 / 1.80 (38665182697) | - | 3 | 10 |
+| `release-script-tests` | Windows | no cache: 1.8 / 2.53 (38687157155) | - | 10 (floor; the rule gives 4) | 10 |
+| `cask-audit` | macOS | no cache: 1.1 / 1.80 (38665182697) | - | 10 (floor; the rule gives 3) | 10 |
 
 The 1.36 was, when `logic`'s budget was first derived, the slowest cold `test`
 step over the fastest (47.8 / 35.1 min; cause unknown: the fast ones were

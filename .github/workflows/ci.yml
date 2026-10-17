@@ -44,8 +44,12 @@ jobs:
     # 2026-10-17): the largest total seen, x 1.36, rounded up. This job
     # restores no cache, so every run is in the one regime: over all 58 runs
     # of 2026-10-15 to 10-17 (38658095635 to 39032766393), p50 1.8 min, max
-    # 2.53 (run 38687157155). 2.53 x 1.36 = 3.44, so 4.
-    timeout-minutes: 4
+    # 2.53 (run 38687157155). 2.53 x 1.36 = 3.44. Its own steps are offline
+    # (no network, a `gh` stand-in), but a job this short is tripped first by
+    # a stall in what every job does, the checkout and the runner's start,
+    # not by a hang: it takes the 10-minute floor of the network-bound jobs
+    # (`cask-audit`). So 10.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Offline release build verification
@@ -75,8 +79,9 @@ jobs:
     # 2026-10-17): the largest total seen, x 1.36, rounded up. This job
     # restores no cache, so every run is in the one regime: over all 58 runs
     # of 2026-10-15 to 10-17 (38658095635 to 39032766393), p50 1.1 min, max
-    # 1.80 (run 38665182697). 1.80 x 1.36 = 2.45, so 3.
-    timeout-minutes: 3
+    # 1.80 (run 38665182697). 1.80 x 1.36 = 2.45. Network-bound jobs get a
+    # 10-minute floor: a stall, not a hang, is what trips them. So 10.
+    timeout-minutes: 10
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_FROM_API: "1"
