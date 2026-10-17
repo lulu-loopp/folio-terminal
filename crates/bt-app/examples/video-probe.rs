@@ -159,10 +159,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_size: None,
     };
     event_loop.run_app(&mut probe)?;
-    // §7.35's ordering, and `shutdown_media_session`'s own debug assertion:
-    // every engine is gone before the platform is handed back.
-    drop(probe.engine.take());
-    bt_platform::video::shutdown_media_session();
+    // §7.35's ordering: the engine is shut down through its door, and the media
+    // session's way out — an owner-thread door on the way out — waits for it to
+    // have left before the platform is handed back.
+    if let Some(mut engine) = probe.engine.take() {
+        engine.shutdown();
+    }
+    assert!(
+        bt_platform::admission::exiting(),
+        "the probe is on its way out"
+    );
+    admit::<bt_platform::admission::doors::MediaQuiet, _>(
+        bt_platform::video::shutdown_media_session,
+    );
     Ok(())
 }
 

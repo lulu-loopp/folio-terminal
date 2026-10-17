@@ -259,8 +259,14 @@ pub fn prewarm() -> std::io::Result<()> {
 
 /// Shut the media platform down on the way out.
 ///
-/// The other half of [`prewarm`], and a no-op for the same reason.
-pub fn shutdown_media_session() {}
+/// The other half of [`prewarm`], and a no-op for the same reason. The Windows
+/// arm's owner-thread door (`doors::MediaQuiet`) on every platform, so `main`
+/// admits it once with no `cfg`.
+pub fn shutdown_media_session(
+    token: crate::admission::WaitToken<'_, crate::admission::doors::MediaQuiet>,
+) {
+    let _ = token;
+}
 
 /// **Playback: `AVPlayer` on a Mac, and a refusal on a platform with no
 /// decoder at all** (M4-5; `docs/DESIGN.md` §13.35).

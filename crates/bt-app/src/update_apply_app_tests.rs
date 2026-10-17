@@ -121,6 +121,7 @@ fn every_owner_door_takes_its_own_token_by_value() {
     let _: fn(WaitToken<'_, doors::TraceFlush>) = trace_sink::flush;
     let _: fn(WaitToken<'_, doors::UpdateLeave>) -> Option<crate::update_apply::Left> =
         crate::update_handoff::leave_armed;
+    let _: fn(WaitToken<'_, doors::MediaQuiet>) = bt_platform::video::shutdown_media_session;
     let _: fn(&Compositor, WaitToken<'_, doors::CompositorCommit>) -> Result<(), String> =
         Compositor::commit;
     let _: fn(WaitToken<'_, doors::CompositorBirth>, NativeWindow) -> Result<Compositor, String> =

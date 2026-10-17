@@ -2131,6 +2131,11 @@ impl<B: Backend> Runtime<'_, B> {
         for web in self.window.web.values_mut() {
             let _ = web.close(&self.window.compositor);
         }
+        // **Every recording is told to stop, through its door, and none is waited for**
+        // (T-DROP-DOORS, D-80): each engine thread is asked to leave and let go of, and the
+        // one wait for them is the process's, at exit, before the platform they decode on
+        // is taken down (`bt_platform::video::shutdown_media_session`).
+        self.window.video.shutdown_all();
         // **Every child is told and none of them is waited for**
         // (T-PANE-CLOSE-OFF-THREAD). Each session comes out of its leaf, so
         // nothing left in this window can reach one that is being taken apart,

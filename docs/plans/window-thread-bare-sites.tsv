@@ -117,8 +117,6 @@ bt-platform	-	crate::macos_update::verify_clone	std::fs::canonicalize	1
 bt-platform	[all(windows, target_arch = "x86_64")]	crate::hang::capture_thread_stack	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[not(windows)]	crate::file_replace::replace_file_preserving	std::fs::File::sync_all	1
 bt-platform	[not(windows)]	crate::file_replace::replace_file_preserving	std::fs::rename	1
-bt-platform	[not(windows)] [target_os = "macos"]	crate::video::macos_player::Engine::shutdown	std::thread::JoinHandle::join	1
-bt-platform	[not(windows)] [target_os = "macos"]	crate::video::macos_player::Engine::shutdown	std::thread::sleep	1
 bt-platform	[not(windows)] [target_os = "macos"]	crate::video::macos_player::Engine::wait_for_metadata	std::thread::sleep	1
 bt-platform	[not(windows)] [target_os = "macos"]	crate::video::macos_player::Machinery::one_turn	std::sync::mpsc::Receiver::recv_timeout	1
 bt-platform	[not(windows)] [target_os = "macos"]	crate::video::within_budget	std::sync::mpsc::Receiver::recv_timeout	1
@@ -174,8 +172,6 @@ bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start	windows::Win32::Syst
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::stop_listening	windows::Win32::System::Threading::SetEvent	1
 bt-platform	[windows]	crate::process_image_path	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::video::Readers::quiet_within	std::sync::Condvar::wait_timeout	1
-bt-platform	[windows]	crate::video::engine::Engine::shutdown	std::thread::JoinHandle::join	1
-bt-platform	[windows]	crate::video::engine::Engine::shutdown	std::thread::sleep	1
 bt-platform	[windows]	crate::video::engine::Engine::wait_for_metadata	std::thread::sleep	1
 bt-platform	[windows]	crate::video::engine::Pump::run	std::sync::mpsc::Receiver::recv_timeout	1
 bt-platform	[windows]	crate::video::engine::can_play_types	std::thread::JoinHandle::join	1

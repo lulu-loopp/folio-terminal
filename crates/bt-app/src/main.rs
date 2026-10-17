@@ -77533,8 +77533,13 @@ fn main() -> Result<()> {
     // or from `Starting` when the loop stopped before its first turn.
     bt_platform::admission::exiting();
     // The session that outlived every question is released once the loop has
-    // returned, never before a question could still be in flight.
-    bt_platform::video::shutdown_media_session();
+    // returned, never before a question could still be in flight — and never
+    // before the engines every window's teardown let go of have left (D-80). An
+    // owner-thread door (`doors::MediaQuiet`, row 27), admitted on the way out; a
+    // refusal leaves the platform to the process's end.
+    let _ = bt_platform::admission::admitted::<doors::MediaQuiet, _>(
+        bt_platform::video::shutdown_media_session,
+    );
     // **An update's exit guard** (0.4.6 U-34): after a Restart to update, this
     // process leaves behind the applier it started, or starts Folio again —
     // here, with the loop over and the session's sentinel gone, after letting

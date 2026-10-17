@@ -4706,26 +4706,12 @@ const DIRWATCH_MACOS: &str =
     "bt-platform crate::macos_watch::<DirWatch as Drop>::drop [target_os = \"macos\"]";
 const STOPPER_SIGNAL: &str =
     "bt-platform crate::macos_watch::Stopper::signal [target_os = \"macos\"]";
-const ENGINE_WINDOWS: &str = "bt-platform crate::video::engine::<Engine as Drop>::drop [windows]";
-const ENGINE_WINDOWS_SHUTDOWN: &str =
-    "bt-platform crate::video::engine::Engine::shutdown [windows]";
-const ENGINE_MACOS: &str = "bt-platform crate::video::macos_player::<Engine as Drop>::drop \
-                            [not(windows)] [target_os = \"macos\"]";
-const ENGINE_MACOS_SHUTDOWN: &str = "bt-platform crate::video::macos_player::Engine::shutdown \
-                                     [not(windows)] [target_os = \"macos\"]";
-const ENGINE_PORTABLE_SHUTDOWN: &str = "bt-platform crate::video::engine::no_player::Engine::\
-                                        shutdown [not(windows)] [not(target_os = \
-                                        \"macos\")]";
-const SEAT: &str = "bt-app crate::video_seat::<VideoSeat as Drop>::drop";
-const SEAT_SHUTDOWN: &str = "bt-app crate::video_seat::VideoSeat::shutdown";
-const SEATS: &str = "bt-app crate::video_seat::<VideoSeats as Drop>::drop";
-const SEATS_SHUTDOWN_ALL: &str = "bt-app crate::video_seat::VideoSeats::shutdown_all";
 const PTY_SHUTDOWN: &str = "bt-pty crate::PtySession::shutdown";
 /// **The exception table** (revision (e)3 as corrected by (f)2, (g), and (n)): the `Drop`s that may
 /// reach the vocabulary, each owed a repayment in `docs/plans/structural-debt.md`. A row leaves
 /// when its repayment lands (T-DROP-DOORS): the wait moves to the value's named door, its `Drop`
 /// keeps only what needs no wait, and the check below then holds that `Drop` like any other.
-const EXCEPTIONS: [Exception; 6] = [
+const EXCEPTIONS: [Exception; 2] = [
     Exception {
         row: "DirWatch (Windows)",
         drop: DIRWATCH_WINDOWS,
@@ -4734,26 +4720,10 @@ const EXCEPTIONS: [Exception; 6] = [
         row: "DirWatch (macOS)",
         drop: DIRWATCH_MACOS,
     },
-    Exception {
-        row: "video::engine::Engine",
-        drop: ENGINE_WINDOWS,
-    },
-    Exception {
-        row: "macos_player::Engine",
-        drop: ENGINE_MACOS,
-    },
-    Exception {
-        row: "VideoSeat",
-        drop: SEAT,
-    },
-    Exception {
-        row: "VideoSeats",
-        drop: SEATS,
-    },
 ];
 
 /// **Every pinned body**, walked from the exceptions: nothing a listed `Drop` reaches is exempt.
-const PINNED: [Pinned; 13] = [
+const PINNED: [Pinned; 4] = [
     Pinned {
         body: DIRWATCH_WINDOWS,
         edges: &[&[CLOSE_WINDOWS], &[CLOSE_WINDOWS], &[CLOSE_WINDOWS]],
@@ -4777,64 +4747,6 @@ const PINNED: [Pinned; 13] = [
         edges: &[],
         effects: &[],
         leaves: &["signal"],
-    },
-    Pinned {
-        body: ENGINE_WINDOWS,
-        edges: &[&[ENGINE_WINDOWS_SHUTDOWN]],
-        effects: &[],
-        leaves: &[],
-    },
-    Pinned {
-        body: ENGINE_WINDOWS_SHUTDOWN,
-        edges: &[],
-        effects: &[("thread::sleep", 1), ("JoinHandle::join", 1)],
-        leaves: &["load", "take"],
-    },
-    Pinned {
-        body: ENGINE_MACOS,
-        edges: &[&[ENGINE_MACOS_SHUTDOWN]],
-        effects: &[],
-        leaves: &[],
-    },
-    Pinned {
-        body: ENGINE_MACOS_SHUTDOWN,
-        edges: &[],
-        effects: &[("thread::sleep", 1), ("JoinHandle::join", 1)],
-        leaves: &["load", "take"],
-    },
-    Pinned {
-        body: ENGINE_PORTABLE_SHUTDOWN,
-        edges: &[],
-        effects: &[],
-        leaves: &[],
-    },
-    Pinned {
-        body: SEAT,
-        edges: &[&[SEAT_SHUTDOWN]],
-        effects: &[],
-        leaves: &[],
-    },
-    Pinned {
-        body: SEAT_SHUTDOWN,
-        edges: &[&[
-            ENGINE_WINDOWS_SHUTDOWN,
-            ENGINE_MACOS_SHUTDOWN,
-            ENGINE_PORTABLE_SHUTDOWN,
-        ]],
-        effects: &[],
-        leaves: &[],
-    },
-    Pinned {
-        body: SEATS,
-        edges: &[&[SEATS_SHUTDOWN_ALL]],
-        effects: &[],
-        leaves: &[],
-    },
-    Pinned {
-        body: SEATS_SHUTDOWN_ALL,
-        edges: &[&[SEAT_SHUTDOWN]],
-        effects: &[],
-        leaves: &["take"],
     },
 ];
 

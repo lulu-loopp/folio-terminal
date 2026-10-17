@@ -642,6 +642,9 @@ pub mod doors {
         TraceFlush => "17", 214, [Exiting];
         /// Row 29: an update's exit guard at the process's end, bounded (`UpdateLeave`).
         UpdateLeave => "29", 222, [Exiting];
+        /// Row 27: the media session's way out — the engines let go of, then the readers,
+        /// waited for within their bounds before `MFShutdown` (`MediaQuiet`).
+        MediaQuiet => "27", 223, [Exiting];
         /// Row 18: the launch handed to a running Folio, before the loop exists (`Starting`).
         LaunchHandOver => "18", 0, [Starting];
         /// Row 21: `CreateCoreWebView2CompositionController` (`WebController`).
