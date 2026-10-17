@@ -4816,7 +4816,7 @@ fn local_data_root() -> Option<PathBuf> {
 }
 
 /// **The module, written into `psmodules` and kept current**: each of the executable's module
-/// files ([`crate::psreadline::MODULE_FILES`], the manifest last) compared with what is on disk
+/// files ([`crate::psreadline::module_files`], the manifest last) compared with what is on disk
 /// under `psmodules\<artefact>\` and written only where it differs, through the atomic replace
 /// every script goes through ([`install_script_at`]). Answers the artefact directory — the one
 /// entry a pane's `PSModulePath` is given. A function of the directory so a test writes into one
@@ -4829,7 +4829,7 @@ pub(crate) fn install_psreadline_module_at(psmodules: &Path) -> std::io::Result<
     install_psreadline_files_at(
         psmodules,
         crate::psreadline::ARTEFACT,
-        crate::psreadline::MODULE_FILES,
+        crate::psreadline::module_files(),
     )
 }
 
@@ -4877,7 +4877,7 @@ fn install_psreadline_files_at(
 ///
 /// [`update_trial::Writer::PsReadLineModule`]: crate::update_trial::Writer::PsReadLineModule
 pub fn psreadline_module_for_birth() -> Option<PathBuf> {
-    if crate::psreadline::MODULE_FILES.is_empty() {
+    if crate::psreadline::module_files().is_empty() {
         return None;
     }
     let durable = local_data_root()?.join(PSMODULES_DIRECTORY);
@@ -4923,7 +4923,7 @@ fn psreadline_module_in_trial(
     trial_psmodules: &Path,
 ) -> std::io::Result<PathBuf> {
     let durable = durable_psmodules.join(crate::psreadline::ARTEFACT);
-    let whole = crate::psreadline::MODULE_FILES.iter().all(|(name, bytes)| {
+    let whole = crate::psreadline::module_files().iter().all(|(name, bytes)| {
         bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, durable.join(name))
             .is_ok_and(|existing| existing == *bytes)
     });

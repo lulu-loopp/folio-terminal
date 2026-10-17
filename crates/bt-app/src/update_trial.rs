@@ -4333,7 +4333,7 @@ mod tests {
         .unwrap();
         // Another build's artefact (T-INTEGRATION-INJECT-2-BUILD): what a launch
         // removes once nothing holds it, and what a trial leaves for the commit.
-        if crate::psreadline::MODULE_FILES.is_empty() {
+        if crate::psreadline::module_files().is_empty() {
             return false;
         }
         let other = root

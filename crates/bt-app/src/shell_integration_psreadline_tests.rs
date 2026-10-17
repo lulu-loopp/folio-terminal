@@ -6,7 +6,7 @@
 //! retirement of other builds' artefacts, and when a pane is given the prefix at all — are pure or
 //! over the test's own directories and hold on every platform. The real panes are Windows-only by
 //! nature ([`real_shell`]): Windows PowerShell 5.1 and its module path are Windows facts, and the
-//! executable carries the module's bytes for a Windows target only (`psreadline::MODULE_FILES`,
+//! executable carries the module's bytes for a Windows target only (`psreadline::module_files`,
 //! empty elsewhere, which `psreadline`'s own test pins on every platform).
 
 use super::*;
@@ -428,7 +428,7 @@ fn other_builds_artefacts_are_pruned_and_a_held_one_is_kept_whole() {
 /// the stale durable file is rewritten.
 #[test]
 fn a_trial_names_a_current_durable_module_and_otherwise_writes_its_own() {
-    if crate::psreadline::MODULE_FILES.is_empty() {
+    if crate::psreadline::module_files().is_empty() {
         // No module to compare: nothing a trial could name or write (any target but Windows).
         return;
     }
@@ -443,7 +443,7 @@ fn a_trial_names_a_current_durable_module_and_otherwise_writes_its_own() {
     );
     assert!(!trial.exists(), "and nothing is written for the trial");
 
-    let (name, _) = crate::psreadline::MODULE_FILES[0];
+    let (name, _) = crate::psreadline::module_files()[0];
     let stale = durable.join(crate::psreadline::ARTEFACT).join(name);
     std::fs::write(&stale, b"the old build's").unwrap();
     assert_eq!(
@@ -1240,7 +1240,7 @@ mod real_shell {
             [artefact.as_str()],
             "the live shell's artefact is kept: {kept:?}"
         );
-        for (name, _) in crate::psreadline::MODULE_FILES {
+        for (name, _) in crate::psreadline::module_files() {
             assert!(
                 module.join(name).is_file(),
                 "and kept whole: {name} is still there"

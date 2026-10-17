@@ -156,7 +156,7 @@ mod programs_lane;
 mod psreadline;
 // The build script's PSReadLine package reader and its pins (T-INTEGRATION-INJECT-2-BUILD),
 // compiled here only so its tests run: `build.rs` reaches the same file by `#[path]`, and what
-// ships is the table it generates (`psreadline::MODULE_FILES`).
+// ships is the container it writes (`psreadline::module_files`).
 #[cfg(test)]
 mod psreadline_artefact;
 mod pty_door;

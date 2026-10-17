@@ -4,8 +4,9 @@
 //! **This is build-script code**, on `bt-pty`'s `conpty_sidecar` model. `build.rs` reaches it by
 //! `#[path]`; the crate compiles it only under `cfg(test)`, which is how a build script's checks
 //! get tests at all. Everything here is a pure function of bytes: reading the package and writing
-//! the files are `build.rs`'s business, and what the executable embeds is the table `build.rs`
-//! generates from this one (`psreadline_module.rs` in `OUT_DIR`, read by `crate::psreadline`).
+//! the files are `build.rs`'s business, and what the executable embeds is the container
+//! `build.rs` writes from this one (`psreadline_module.bin` in `OUT_DIR`, read by
+//! `crate::psreadline::module_files`).
 //!
 //! The package is Microsoft's PSReadLine 2.4.5 as the PowerShell Gallery serves it, fetched once
 //! by the person who moved the pin and kept in `vendor/psreadline/` with its SHA-256, its entries
