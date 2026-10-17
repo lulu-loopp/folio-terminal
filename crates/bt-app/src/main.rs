@@ -76097,6 +76097,18 @@ fn window_ime_cursor_area(seat: SeatViewport, area: ImeCursorArea) -> ImeCursorA
     }
 }
 
+/// The terminal caret the input method is told, in the window's pixels: the composed frame's cursor
+/// cell measured by the glass at the focused pane's own `metrics` (ticket 37), carried from the
+/// glass's seat to the window's axis. The one measurement both the IME offer and its `IME_DRAW`
+/// trace make.
+fn terminal_ime_cursor_area<G: Glass>(
+    glass: &G,
+    metrics: bt_render::CellMetrics,
+    frame: &ViewportFrame,
+) -> ImeCursorArea {
+    window_ime_cursor_area(glass.seat_viewport(), glass.ime_cursor_area(metrics, frame))
+}
+
 /// What the OS is currently doing with the window, as far as its rectangle is
 /// concerned. The three postures are exhaustive and mutually exclusive: Windows
 /// reports iconic and zoomed separately, and a window that is both is iconic —
