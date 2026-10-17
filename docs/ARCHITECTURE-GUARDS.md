@@ -638,6 +638,18 @@ reaches the platform past every door — the call sites are listed in
 T-NATIVE-HANDLE-BEHIND-THE-SEAM. A new use of either is a new crossing; say it
 there.
 
+**The startup order is a shared function, not native code** (T-STARTUP-ORDER-SHARED):
+`crate::startup::begin` (the removal verbs, the command line, the hand-over) and
+`crate::startup::open_first_window` (the startup migration, the script's
+preparation, the window, the PowerShell questions, the first tab) are generic
+over the steps they are handed, and name no holder. `main` and `Runtime::create`
+hand them their steps as closures written in their own bodies, which is why the
+order needed no native-list row; the headless start hands them recording
+stand-ins, and the order is a behavioural test, not a reading of either body. A
+new startup step that must run in that order is a field of `startup::FrontDoor`
+or `startup::FirstWindow` and a `headless::StartupStep`, not a line placed by
+hand between two others.
+
 Where and what to do: `crates/bt-source/tests/window_seam.rs`
 (`bt_app_reaches_its_window_only_through_the_seam`) reads `bt-app` by item
 identity — every bound resolved through `use` items, globs and renames by
