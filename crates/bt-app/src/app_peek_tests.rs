@@ -6,7 +6,7 @@
 use super::*;
 use crate::test_support::{
     a_decode, a_held_raster, a_read_out, chevron_button, glance_fixture, method_body, peek_open,
-    probe_leaf, tab_with_a_picture, the_three_chevrons,
+    png_bytes, probe_leaf, scratch_png_named, tab_with_a_picture, the_three_chevrons,
 };
 use std::time::Duration;
 
@@ -1400,27 +1400,6 @@ fn a_card_coming_down_leaves_the_failure_a_pane_still_shows() {
         !cache.contains_key(&key),
         "a card opening over the file reads it again"
     );
-}
-
-/// One picture's bytes, `width` × `height` of one colour, as a PNG this process wrote.
-fn png_bytes(width: u32, height: u32) -> Vec<u8> {
-    let picture = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
-        width,
-        height,
-        image::Rgba([0x2a, 0x6f, 0xd0, 0xff]),
-    ));
-    let mut bytes = std::io::Cursor::new(Vec::new());
-    picture
-        .write_to(&mut bytes, image::ImageFormat::Png)
-        .expect("a PNG this process wrote");
-    bytes.into_inner()
-}
-
-/// A scratch `.png` of this test's own under the build directory, named by `bt_testpath`.
-fn scratch_png_named(tag: &str) -> PathBuf {
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/peek-tests");
-    std::fs::create_dir_all(&directory).expect("a scratch directory under the build directory");
-    directory.join(format!("{}.png", bt_testpath::unique_name(tag)))
 }
 
 /// **A picture pane's walk over one file, as `refit_preview_picture` takes it**: the pane reads

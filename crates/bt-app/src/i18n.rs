@@ -980,6 +980,9 @@ text_entries! {
     /// What a quit's or a stop's road says of a body a save sent that did not
     /// land, no longer the body (S-6a round 6, R1).
     PreviewSaveUnlanded,
+    /// The clause for a save handed over while the preview already has
+    /// `preview::PREVIEW_SAVES_OWED` saves on their way (T-STORAGE-WORKER-ON-THE-SEAM, R1).
+    PreviewSaveTooMany,
     /// The start's toast for one copy a stop kept in the recovered folder, `{folder}` filled
     /// by [`recovered_edits_kept_in`] (T-RECOVERED-FOLDER).
     RecoveredEditKept,
@@ -1309,6 +1312,10 @@ text_entries! {
     /// A question the row depends on (the parse answer, the edition's observation) got no
     /// answer; the next visit to the Profiles page asks again (release read m2).
     CapPowerShellUndetermined,
+    /// The edition's observation could not run — its worker's start was refused, or it ended
+    /// before it answered — so the row claims nothing; the next visit to the Profiles page asks
+    /// again (T-OBSERVATION-REFUSAL-ON-THE-PAGE).
+    CapPowerShellCheckNotRun,
     /// The edition runs `-Command` text in Constrained Language Mode, where the loader does
     /// nothing: the row claims nothing and offers nothing (T-PROBE-NO-CACHED-FAILURE).
     CapPowerShellConstrained,
@@ -3043,6 +3050,13 @@ text_entries! {
     /// write being undone, saw (0.4.8 G7).
     ShellProfileChangedElsewhere,
     ShellProfileNothing,
+    /// A change asked of a worker the thread door would not start — `$PROFILE`'s Enable, Undo or
+    /// removal, the Explorer first-page switch — so nothing was changed
+    /// (T-PROFILE-INSTALL-REFUSED-START).
+    ChangeNotStarted,
+    /// A change whose worker ended in a panic before it answered: it may have stopped anywhere,
+    /// so the sentence claims nothing about what was done (T-PROFILE-INSTALL-REFUSED-START).
+    ChangeStopped,
 
     // ── the application menu bar (M3-2, macOS) ─────────────────────────────
     //
@@ -3991,6 +4005,11 @@ impl Text {
                 "a version you saved was not written to the disk",
                 "a version you saved was not written to the disk", // zh: pending S-6a
             ),
+            Self::PreviewSaveTooMany => pick(
+                lang,
+                "too many saves are already on their way to the disk",
+                "too many saves are already on their way to the disk", // zh: pending T-STORAGE-WORKER-ON-THE-SEAM
+            ),
             Self::RecoveredEditKept => pick(
                 lang,
                 "An unsaved edit was kept at {folder}",
@@ -4290,6 +4309,11 @@ impl Text {
                 lang,
                 "PowerShell integration could not be determined for these arguments. Folio asks again when this page opens.",
                 "自定义启动参数，PowerShell 整合状态未知。再次打开此页时重新检测。",
+            ),
+            Self::CapPowerShellCheckNotRun => pick(
+                lang,
+                "PowerShell integration could not be determined for these arguments: the check could not run. Folio asks again when this page opens.",
+                "PowerShell integration could not be determined for these arguments: the check could not run. Folio asks again when this page opens.", // zh: pending T-OBSERVATION-REFUSAL-ON-THE-PAGE
             ),
             Self::CapPowerShellConstrained => pick(
                 lang,
@@ -6171,6 +6195,16 @@ impl Text {
                 "No Folio profile lines found.",
                 "未找到 Folio 整合行。",
             ),
+            Self::ChangeNotStarted => pick(
+                lang,
+                "Folio could not start this change, so nothing was changed.",
+                "Folio could not start this change, so nothing was changed.", // zh: pending T-PROFILE-INSTALL-REFUSED-START
+            ),
+            Self::ChangeStopped => pick(
+                lang,
+                "Folio stopped before this change finished.",
+                "Folio stopped before this change finished.", // zh: pending T-PROFILE-INSTALL-REFUSED-START
+            ),
 
             // ── the application menu bar (M3-2, macOS) ─────────────────────
             //
@@ -6571,6 +6605,16 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // zh: pending T-PROFILE-INSTALL-REFUSED-START — a change whose worker would not start, or
+        // stopped before it finished.
+        (Self::ChangeNotStarted, HostPlatform::Windows),
+        (Self::ChangeNotStarted, HostPlatform::MacOs),
+        (Self::ChangeStopped, HostPlatform::Windows),
+        (Self::ChangeStopped, HostPlatform::MacOs),
+        // zh: pending T-OBSERVATION-REFUSAL-ON-THE-PAGE — the Profiles row of an edition whose
+        // `$PROFILE` check could not run.
+        (Self::CapPowerShellCheckNotRun, HostPlatform::Windows),
+        (Self::CapPowerShellCheckNotRun, HostPlatform::MacOs),
         // zh: pending T-PREVIEW-NO-EXCHANGE-RULING — the sentence a preview save written by an
         // ordinary write says the first time on each drive that cannot exchange.
         (Self::PreviewSavedOrdinarily, HostPlatform::Windows),
@@ -6596,6 +6640,8 @@ impl Text {
         (Self::PreviewSaveReloaded, HostPlatform::MacOs),
         (Self::PreviewSaveUnlanded, HostPlatform::Windows),
         (Self::PreviewSaveUnlanded, HostPlatform::MacOs),
+        (Self::PreviewSaveTooMany, HostPlatform::Windows),
+        (Self::PreviewSaveTooMany, HostPlatform::MacOs),
         // zh: pending T-SHELL-BIRTH-DEATH — the face of a shell that ended at birth.
         (Self::ShellBirthDeath, HostPlatform::Windows),
         (Self::ShellBirthDeath, HostPlatform::MacOs),
@@ -7392,6 +7438,18 @@ pub fn context_menu_failed(message: &str) -> String {
     }
 }
 
+/// **The sentence a change whose worker did not run to its end is answered with**
+/// (T-PROFILE-INSTALL-REFUSED-START), `started` saying whether the worker ran at all
+/// (`lane::WorkerEnd::started`): a worker the thread door refused changed nothing, and one that
+/// ended in a panic may have stopped anywhere, so the second claims nothing about what was done.
+pub(crate) fn unfinished_change(started: bool) -> Text {
+    if started {
+        Text::ChangeStopped
+    } else {
+        Text::ChangeNotStarted
+    }
+}
+
 /// The same, for the package the first page needs (§7.4a).
 ///
 /// A sentence of its own rather than that one with a different word, because the
@@ -7404,6 +7462,17 @@ pub fn explorer_first_page_failed(message: &str) -> String {
     match current() {
         Lang::English => format!("Windows would not register the package: {message}"),
         Lang::Chinese => format!("Windows 拒绝登记这个包：{message}"),
+    }
+}
+
+/// **The same, for a removal Windows refused** (T-PROFILE-INSTALL-REFUSED-START review): the
+/// switch turned off asks Windows to remove the package, not to register it.
+#[must_use]
+pub fn explorer_first_page_remove_failed(message: &str) -> String {
+    match current() {
+        Lang::English => format!("Windows would not remove the package: {message}"),
+        // zh: pending T-PROFILE-INSTALL-REFUSED-START
+        Lang::Chinese => format!("Windows would not remove the package: {message}"),
     }
 }
 

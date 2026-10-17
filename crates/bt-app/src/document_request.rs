@@ -86,7 +86,7 @@ use bt_persist::{
 };
 use bt_platform::admission::WorkerCtx;
 
-use crate::persist::{DocumentWrites, Revision, StorageLane};
+use crate::persist::{DocumentWrites, OnTheWorker, Reply, Revision, StorageLane};
 use crate::quit::{CopyStanding, Standing};
 use crate::settings_bundle::{LineRead, read_lines};
 
@@ -232,19 +232,23 @@ pub(crate) struct RecoveredJob {
     pub(crate) answer: mpsc::Sender<Result<PathBuf, String>>,
 }
 
-/// **Serve one [`RecoveredJob`] on the storage worker** and answer it.
-pub(crate) fn serve_recovered(worker: &WorkerCtx, job: RecoveredJob) {
+/// **Serve one [`RecoveredJob`] on the storage worker** and answer it. The job
+/// is lent: its road stands until the worker has published its terminal.
+pub(crate) fn serve_recovered(worker: &WorkerCtx, job: &RecoveredJob) {
     let _ = worker;
     let kept = crate::preview::keep_in_recovered(&job.folder, job.name, &job.bytes, job.at);
     let _ = job.answer.send(kept);
 }
 
 /// **One stable read of a document**: the bytes go to `answer` with the
-/// request's generation, on the worker, which parses them there.
+/// request's generation, on the worker, which parses them there. The answer is
+/// called through the job, which the worker lets go only after the request's
+/// terminal is published — so a parse that panics leaves its road standing until
+/// its `Failed` is there to read.
 pub(crate) struct ReadJob {
     pub(crate) which: PathBuf,
     pub(crate) generation: u64,
-    pub(crate) answer: Box<dyn FnOnce(u64, StableRead) + Send>,
+    pub(crate) answer: Box<dyn Fn(u64, StableRead) + Send>,
 }
 
 /// **What became of one [`DocumentJob`].**
@@ -321,6 +325,10 @@ pub(crate) enum Refusal {
     Disk(String),
     /// No worker took the request, or the worker ended before answering it.
     NoWorker(String),
+    /// The worker failed on the request — its task panicked — and went on
+    /// (T-STORAGE-WORKER-ON-THE-SEAM, R2); the words are
+    /// `persist::storage_task_failed`'s.
+    Failed(String),
 }
 
 impl Refusal {
@@ -346,7 +354,7 @@ impl Refusal {
                 )
             }
             Self::Unread(error) => format!("it could not be read: {error}"),
-            Self::Disk(error) | Self::NoWorker(error) => error.clone(),
+            Self::Disk(error) | Self::NoWorker(error) | Self::Failed(error) => error.clone(),
         }
     }
 }
@@ -361,28 +369,29 @@ pub(crate) enum Step {
     Exchanged,
 }
 
-/// **Serve one [`DocumentJob`] on the storage worker** and answer it.
-pub(crate) fn serve_document(worker: &WorkerCtx, job: DocumentJob) {
+/// **Serve one [`DocumentJob`] on the storage worker** and answer it. The job is
+/// lent: its road stands until the worker has published its terminal.
+pub(crate) fn serve_document(worker: &WorkerCtx, job: &DocumentJob) {
     serve_document_between(worker, job, &mut |_| {});
 }
 
 /// [`serve_document`], with `between` run at each [`Step`].
 pub(crate) fn serve_document_between(
     worker: &WorkerCtx,
-    job: DocumentJob,
+    job: &DocumentJob,
     between: &mut dyn FnMut(Step),
 ) {
     serve_document_on(worker, &TheVolume, job, between);
 }
 
-/// [`serve_document_between`] on `volume`.
+/// [`serve_document_between`] on `volume`. The job is lent, as there.
 pub(crate) fn serve_document_on(
     worker: &WorkerCtx,
     volume: &dyn Volume,
-    job: DocumentJob,
+    job: &DocumentJob,
     between: &mut dyn FnMut(Step),
 ) {
-    let served = conditional_write(worker, volume, &job, between);
+    let served = conditional_write(worker, volume, job, between);
     let retired = match (&served.outcome, &served.not_durable) {
         (Outcome::Landed { .. }, None) => retire(worker, &job.kept, job.version),
         _ => Vec::new(),
@@ -399,7 +408,7 @@ pub(crate) fn serve_document_on(
 }
 
 /// **Serve one [`ReadJob`]**: the stable read, handed to the asker's answer.
-pub(crate) fn serve_read(worker: &WorkerCtx, job: ReadJob) {
+pub(crate) fn serve_read(worker: &WorkerCtx, job: &ReadJob) {
     let read = bt_persist::read_stable(worker, &job.which);
     (job.answer)(job.generation, read);
 }
@@ -1378,7 +1387,7 @@ pub(crate) struct MergeNotice {
 enum Outstanding<T> {
     Document(InFlight<T>),
     Read {
-        answer: mpsc::Receiver<(u64, ReadAnswer<T>)>,
+        answer: OnTheWorker<(u64, ReadAnswer<T>)>,
     },
 }
 
@@ -1389,7 +1398,7 @@ struct InFlight<T> {
     bytes: Arc<[u8]>,
     /// The revision the write is conditional on.
     base: Revision<T>,
-    answer: mpsc::Receiver<DocumentAnswer>,
+    answer: OnTheWorker<DocumentAnswer>,
 }
 
 /// **The store half one hand-editable document holds** — see the module
@@ -1434,7 +1443,7 @@ pub(crate) struct DocumentState<T> {
 
 /// A quit's copy of a document, on the storage worker or answered.
 enum RecoveryCopy {
-    Sent(mpsc::Receiver<Result<PathBuf, String>>),
+    Sent(OnTheWorker<Result<PathBuf, String>>),
     Answered(Result<PathBuf, String>),
 }
 
@@ -1612,26 +1621,30 @@ impl<T: StoredDocument> DocumentState<T> {
             kept: self.kept.clone(),
             answer,
         };
-        if !self.lane.send_document(job) {
-            let _ = refusal.send(DocumentAnswer {
-                generation: self.generation,
-                version: self.version,
-                asker: 0,
-                outcome: Outcome::Refused {
-                    cause: Refusal::NoWorker(crate::persist::NO_STORAGE_WORKER.to_owned()),
-                },
-                not_durable: None,
-                retired: Vec::new(),
-                left: None,
-            });
-            self.lane.wake();
-        }
+        let answer = match self.lane.send_document(job) {
+            Ok(request) => OnTheWorker::admitted(answered, request),
+            Err(refused) => {
+                let _ = refusal.send(DocumentAnswer {
+                    generation: self.generation,
+                    version: self.version,
+                    asker: 0,
+                    outcome: Outcome::Refused {
+                        cause: Refusal::NoWorker(refused.said(crate::persist::NO_STORAGE_WORKER)),
+                    },
+                    not_durable: None,
+                    retired: Vec::new(),
+                    left: None,
+                });
+                self.lane.wake();
+                OnTheWorker::answered_at_the_door(answered)
+            }
+        };
         self.outstanding.push_back(Outstanding::Document(InFlight {
             generation: self.generation,
             document: self.desired.clone(),
             bytes,
             base: self.revision.clone(),
-            answer: answered,
+            answer,
         }));
     }
 
@@ -1658,15 +1671,18 @@ impl<T: StoredDocument> DocumentState<T> {
                 let _ = answer.send((generation, ReadAnswer::<T>::of(read)));
             }),
         };
-        if !self.lane.send_read(job) {
-            let _ = refusal.send((
-                self.generation,
-                ReadAnswer::NotServed(crate::persist::NO_STORAGE_WORKER.to_owned()),
-            ));
-            self.lane.wake();
-        }
-        self.outstanding
-            .push_back(Outstanding::Read { answer: answered });
+        let answer = match self.lane.send_read(job) {
+            Ok(request) => OnTheWorker::admitted(answered, request),
+            Err(refused) => {
+                let _ = refusal.send((
+                    self.generation,
+                    ReadAnswer::NotServed(refused.said(crate::persist::NO_STORAGE_WORKER)),
+                ));
+                self.lane.wake();
+                OnTheWorker::answered_at_the_door(answered)
+            }
+        };
+        self.outstanding.push_back(Outstanding::Read { answer });
     }
 
     /// **Take every answer the worker has given, in the order it served them**,
@@ -1675,22 +1691,30 @@ impl<T: StoredDocument> DocumentState<T> {
         let mut news = ReadNews::default();
         let mut landed = false;
         let mut heard = false;
-        while let Some(request) = self.outstanding.front() {
+        while let Some(request) = self.outstanding.front_mut() {
             let answered = match request {
-                Outstanding::Document(flight) => match flight.answer.try_recv() {
-                    Ok(answer) => Some(Ok(answer)),
-                    Err(mpsc::TryRecvError::Empty) => None,
-                    Err(mpsc::TryRecvError::Disconnected) => Some(Err(())),
+                Outstanding::Document(flight) => match flight.answer.hear() {
+                    Reply::Answered(answer) => Some(Ok(answer)),
+                    Reply::Waiting => None,
+                    Reply::Failed(words) => Some(Err(Refusal::Failed(words))),
+                    Reply::Gone => Some(Err(Refusal::NoWorker(
+                        crate::persist::STORAGE_WORKER_GONE.to_owned(),
+                    ))),
                 },
-                Outstanding::Read { answer } => match answer.try_recv() {
-                    Ok((generation, read)) => {
+                Outstanding::Read { answer } => match answer.hear() {
+                    Reply::Answered((generation, read)) => {
                         self.outstanding.pop_front();
                         heard = true;
                         self.on_read(generation, read, &mut news);
                         continue;
                     }
-                    Err(mpsc::TryRecvError::Empty) => None,
-                    Err(mpsc::TryRecvError::Disconnected) => {
+                    Reply::Waiting => None,
+                    Reply::Failed(words) => {
+                        self.outstanding.pop_front();
+                        eprintln!("BT_PERSIST {} was not read again: {words}", self.file);
+                        continue;
+                    }
+                    Reply::Gone => {
                         self.outstanding.pop_front();
                         eprintln!(
                             "BT_PERSIST {} was not read again: {}",
@@ -1721,14 +1745,21 @@ impl<T: StoredDocument> DocumentState<T> {
         let mut news = ReadNews::default();
         let mut landed = false;
         let mut heard = false;
+        let file = self.file;
         for _ in 0..self.outstanding.len() {
             match self.outstanding.pop_front() {
-                Some(Outstanding::Document(flight)) => {
-                    let answer = within_patience(&flight.answer, self.file);
+                Some(Outstanding::Document(mut flight)) => {
+                    let answer = match flight.answer.within_patience(file) {
+                        Reply::Answered(answer) => Ok(answer),
+                        Reply::Failed(words) => Err(Refusal::Failed(words)),
+                        Reply::Waiting | Reply::Gone => Err(Refusal::NoWorker(
+                            crate::persist::STORAGE_WORKER_GONE.to_owned(),
+                        )),
+                    };
                     landed |= self.on_document(flight, answer);
                 }
-                Some(Outstanding::Read { answer }) => {
-                    if let Ok((generation, read)) = within_patience(&answer, self.file) {
+                Some(Outstanding::Read { mut answer }) => {
+                    if let Reply::Answered((generation, read)) = answer.within_patience(file) {
                         heard = true;
                         self.on_read(generation, read, &mut news);
                     }
@@ -1774,14 +1805,20 @@ impl<T: StoredDocument> DocumentState<T> {
     }
 
     /// **One write's answer** — every one is processed, whatever its generation
-    /// ((b)4). Answers whether it landed.
-    fn on_document(&mut self, flight: InFlight<T>, answer: Result<DocumentAnswer, ()>) -> bool {
+    /// ((b)4). Answers whether it landed. `Err` is a write that ended without an
+    /// answer: the worker gone with it, or failed on it.
+    fn on_document(
+        &mut self,
+        flight: InFlight<T>,
+        answer: Result<DocumentAnswer, Refusal>,
+    ) -> bool {
         let file = self.file;
-        let Ok(answer) = answer else {
-            self.refused(&Refusal::NoWorker(
-                crate::persist::STORAGE_WORKER_GONE.to_owned(),
-            ));
-            return false;
+        let answer = match answer {
+            Ok(answer) => answer,
+            Err(cause) => {
+                self.refused(&cause);
+                return false;
+            }
         };
         if let Some((path, why)) = &answer.left {
             eprintln!(
@@ -2240,21 +2277,21 @@ impl<T: StoredDocument> QuitDocument for DocumentState<T> {
             at,
             answer,
         };
-        self.recovery = Some(if self.lane.send_recovered(job) {
-            RecoveryCopy::Sent(answered)
-        } else {
-            RecoveryCopy::Answered(Err(crate::persist::NO_STORAGE_WORKER.to_owned()))
+        self.recovery = Some(match self.lane.send_recovered(job) {
+            Ok(request) => RecoveryCopy::Sent(OnTheWorker::admitted(answered, request)),
+            Err(refused) => {
+                RecoveryCopy::Answered(Err(refused.said(crate::persist::NO_STORAGE_WORKER)))
+            }
         });
     }
 
     fn copy_standing(&mut self) -> CopyStanding {
-        if let Some(RecoveryCopy::Sent(answer)) = &self.recovery {
-            let answered = match answer.try_recv() {
-                Ok(answered) => answered,
-                Err(mpsc::TryRecvError::Empty) => return CopyStanding::Waiting,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Err(crate::persist::STORAGE_WORKER_GONE.to_owned())
-                }
+        if let Some(RecoveryCopy::Sent(answer)) = &mut self.recovery {
+            let answered = match answer.hear() {
+                Reply::Answered(answered) => answered,
+                Reply::Waiting => return CopyStanding::Waiting,
+                Reply::Failed(words) => Err(words),
+                Reply::Gone => Err(crate::persist::STORAGE_WORKER_GONE.to_owned()),
             };
             self.recovery = Some(RecoveryCopy::Answered(answered));
         }
@@ -2292,38 +2329,13 @@ impl<T: StoredDocument> QuitDocument for DocumentState<T> {
     }
 }
 
-/// **One answer, within the suite's patience** (`lane::PATIENCE`): a lost
-/// completion fails the test that awaited it, naming the file, instead of
-/// hanging the suite. The wait ends on the answer, so a quick machine pays
-/// nothing. `Err` is the worker gone with the request unanswered.
-#[cfg(test)]
-fn within_patience<A>(answer: &mpsc::Receiver<A>, file: &str) -> Result<A, ()> {
-    match answer.recv_timeout(crate::lane::PATIENCE) {
-        Ok(answer) => Ok(answer),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(()),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            panic!("no answer about {file} within the suite's patience")
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-    use std::sync::{Arc, Mutex, mpsc};
+    use std::sync::{Arc, mpsc};
 
-    use super::{DocumentAnswer, DocumentJob, LinkPolicy, Mode, ReadJob};
-    use crate::persist::StorageLane;
-
-    /// Whether `answer` has been given its terminal by the worker's end: the channel closed with
-    /// nothing in it, which a store reads as `Refused(NoWorker(STORAGE_WORKER_GONE))` for a write
-    /// and as "not read again" for a read.
-    fn ended_by_the_workers_end<A>(answer: &Mutex<mpsc::Receiver<A>>) -> bool {
-        matches!(
-            answer.lock().expect("the answer").try_recv(),
-            Err(mpsc::TryRecvError::Disconnected)
-        )
-    }
+    use super::{DocumentAnswer, DocumentJob, LinkPolicy, Mode, Outcome, ReadJob};
+    use crate::persist::{OnTheWorker, Reply, StorageLane};
 
     /// A write of `bytes` to `which`, answered on `answer`.
     fn write(which: &Path, answer: mpsc::Sender<DocumentAnswer>) -> DocumentJob {
@@ -2342,86 +2354,89 @@ mod tests {
         }
     }
 
-    /// RED (T-PANIC-ROWS-HONEST) — **a storage worker that panics ends every request it owes with
-    /// its terminal, each once, and then wakes the loop; a later request is refused at the door.**
+    /// RED (T-STORAGE-WORKER-ON-THE-SEAM, R2; was T-PANIC-ROWS-HONEST's "a storage worker panic
+    /// ends every owed request") — **a panic in one storage request is that request's `Failed`,
+    /// and the worker goes on.**
     ///
     /// Two requests are admitted: a re-read, whose answer (the store's parse, on the worker)
     /// panics, and behind it a write. The product's panic hook ends the process for a panic it is
-    /// not told is contained, so the worker's loop runs inside `contained_panic::contain`: the
-    /// hook's decision at the panic is yes, the read's answer is dropped by the unwind (its
-    /// terminal: not read again), the worker's end drops the queued write (its terminal:
-    /// `Refused(NoWorker(STORAGE_WORKER_GONE))`), and only then wakes the loop — once. A request
-    /// made after it is refused where it is handed over.
+    /// not told is contained, so each request runs inside `lane::task`
+    /// (`contained_panic::contain`): the hook's decision at the panic is yes, the read ends
+    /// `Failed` in its own words, and the worker serves the write behind it, which lands. Each
+    /// answer is followed by its wake, and a request made after them is admitted: the worker
+    /// is still there. (The worker's own end — every request still owed ending `WorkerGone`,
+    /// then one wake — is the lane contract's `ADeadWorkerIsObservable`, run on this lane
+    /// through `persist::contract_adapter`.)
     ///
-    /// MUTATIONS: ① the worker's loop without `contained_panic::contain` — the decision at the
-    /// panic is no (the process would end there); ② `WorkerEnd::drop` without its drain (the
-    /// queued jobs dropped only after the wake) — the write has no terminal when the loop is woken.
+    /// MUTATIONS: ① serve the job without its `lane::task` in `SessionWriter::start`'s loop — the
+    /// panic is the worker's end, which wakes the loop once, and the write behind the read is
+    /// never answered; ② publish `Done` for a failed task — the read is heard gone (its road
+    /// closed, no answer on it), not failed.
     #[test]
-    fn a_storage_worker_panic_ends_every_owed_request_with_its_terminal() {
+    fn a_panic_in_one_storage_request_fails_it_and_the_worker_goes_on() {
         let which = bt_testpath::temp_path("panic-rows-存储");
-        let (read_answer, read_answered) = mpsc::channel::<u64>();
-        let read_answered = Arc::new(Mutex::new(read_answered));
-        let (write_answer, write_answered) = mpsc::channel::<DocumentAnswer>();
-        let write_answered = Arc::new(Mutex::new(write_answered));
-        let (woke, wakes) = mpsc::channel::<bool>();
-        let (read_seen, write_seen) = (Arc::clone(&read_answered), Arc::clone(&write_answered));
+        let _ = std::fs::remove_file(&which);
+        let (woke, wakes) = mpsc::channel::<()>();
         let lane = StorageLane::with_a_worker_and_wake(move || {
-            // At the wake: has every request the worker owed been given its terminal?
-            let _ = woke.send(
-                ended_by_the_workers_end(&read_seen) && ended_by_the_workers_end(&write_seen),
-            );
+            let _ = woke.send(());
         });
 
         let (told, decision) = mpsc::channel();
         let (open, gate) = mpsc::channel::<bool>();
-        let admitted = lane.send_read(ReadJob {
-            which: which.clone(),
-            generation: 1,
-            answer: Box::new(move |generation, _read| {
-                let _ = told.send(crate::the_hook_lets_this_panic_unwind());
-                if crate::lane::receive(&gate, "the test's word to fail the parse") {
-                    panic!("scripted: the document would not parse 解析失败");
-                }
-                let _ = read_answer.send(generation);
-            }),
-        });
-        assert!(admitted, "the read is admitted");
+        let (read_answer, read_answered) = mpsc::channel();
+        let admitted = lane
+            .send_read(ReadJob {
+                which: which.clone(),
+                generation: 1,
+                answer: Box::new(move |generation, _read| {
+                    let _ = told.send(crate::the_hook_lets_this_panic_unwind());
+                    if crate::lane::receive(&gate, "the test's word to fail the parse") {
+                        panic!("scripted: the document would not parse 解析失败");
+                    }
+                    let _ = read_answer.send(generation);
+                }),
+            })
+            .expect("the read is admitted");
+        let mut read = OnTheWorker::admitted(read_answered, admitted);
         assert!(
             crate::lane::receive(&decision, "the hook's decision inside the read's answer"),
             "the worker serves where the resident hook lets a panic unwind"
         );
-        assert!(
-            lane.send_document(write(&which, write_answer)),
-            "the write is admitted behind it"
-        );
+        let (write_answer, write_answered) = mpsc::channel::<DocumentAnswer>();
+        let admitted = lane
+            .send_document(write(&which, write_answer))
+            .expect("the write is admitted behind it");
+        let mut written = OnTheWorker::admitted(write_answered, admitted);
         open.send(true).expect("the worker waits at the gate");
 
-        assert!(
-            crate::lane::receive(&wakes, "the worker's end"),
-            "every owed request had its terminal when the loop was woken"
-        );
-        assert!(
-            ended_by_the_workers_end(&read_answered),
-            "the read ended once"
-        );
-        assert!(
-            ended_by_the_workers_end(&write_answered),
-            "the write ended once"
-        );
-
-        let (late, late_answered) = mpsc::channel::<DocumentAnswer>();
-        assert!(
-            !lane.send_document(write(&which, late)),
-            "a request after the worker's end is refused at the door"
-        );
-        assert!(
-            matches!(
-                late_answered.try_recv(),
-                Err(mpsc::TryRecvError::Disconnected)
+        crate::lane::wait_for_a_wake(&wakes, "the read's end");
+        crate::lane::wait_for_a_wake(&wakes, "the write's answer");
+        match read.hear() {
+            Reply::Failed(words) => assert!(
+                words.contains("scripted: the document would not parse 解析失败"),
+                "the read failed in its own words: {words}"
             ),
-            "and the job is not kept"
+            heard => panic!("the read is that request's failure, not {heard:?}"),
+        }
+        match written.hear() {
+            Reply::Answered(answer) => assert!(
+                matches!(answer.outcome, Outcome::Landed { .. }),
+                "the write behind it landed: {:?}",
+                answer.outcome
+            ),
+            heard => panic!("the worker went on to the write, not {heard:?}"),
+        }
+        assert!(which.exists(), "and the write is on the disk");
+
+        assert!(
+            lane.send_read(ReadJob {
+                which: which.clone(),
+                generation: 3,
+                answer: Box::new(|_, _| {}),
+            })
+            .is_ok(),
+            "a request after the failure is admitted: the worker is still there"
         );
-        assert!(wakes.try_recv().is_err(), "the end woke the loop once");
-        assert!(!which.exists(), "nothing was written");
+        let _ = std::fs::remove_file(&which);
     }
 }

@@ -441,6 +441,39 @@ impl<B: Backend> Runtime<'_, B> {
         shell_integration::begin_profile_install_undo(program, edit, self.window_id());
     }
 
+    /// **One answer to this window's Enable or Undo**, as the window shows it: a written line is
+    /// an `Info` card carrying the Undo; a refusal — the writer's own, or a worker that did not run
+    /// to its end (T-PROFILE-INSTALL-REFUSED-START) — an `Error` card with the reason; a line
+    /// already there, or an Undo that landed, nothing (the row redraws from the observation).
+    pub(crate) fn deliver_profile_install(
+        &mut self,
+        outcome: shell_integration::ProfileInstallOutcome,
+    ) -> Result<()> {
+        match outcome {
+            shell_integration::ProfileInstallOutcome::Installed { program, edit } => {
+                let id = self.toast_with_verb(
+                    toast::ToastKind::Info,
+                    toast::ToastAnchor::Window,
+                    i18n::Text::ShellProfileAddedToast.text(),
+                    i18n::Text::ProfilesUndo.text(),
+                )?;
+                self.window.powershell_profile_undo = Some((id, program, edit));
+            }
+            shell_integration::ProfileInstallOutcome::Refused(reason)
+            | shell_integration::ProfileInstallOutcome::UndoRefused(reason) => {
+                self.toast(
+                    toast::ToastKind::Error,
+                    toast::ToastAnchor::Window,
+                    Some(i18n::Text::ShellProfileRefused.text().to_owned()),
+                    reason,
+                )?;
+            }
+            shell_integration::ProfileInstallOutcome::Present
+            | shell_integration::ProfileInstallOutcome::Undone => {}
+        }
+        Ok(())
+    }
+
     /// Write the table to `profiles.json` and re-probe what it can start.
     ///
     /// **Three things move together and are moved in one place**: the file, the

@@ -2203,7 +2203,7 @@ pub(crate) fn serve_on_a_volume(
         "bt-preview-save-test",
         bt_platform::ThreadPriority::BelowNormal,
         move |worker| {
-            document_request::serve_document_on(worker, &volume, job, &mut |step| {
+            document_request::serve_document_on(worker, &volume, &job, &mut |step| {
                 if step == document_request::Step::Read
                     && let Some(crossing) = &crossing
                 {
@@ -2999,6 +2999,67 @@ pub(crate) fn engines_settling_to(target: u64) -> u64 {
         crate::lane::PATIENCE
     );
     reached
+}
+
+/// One picture's bytes, `width` × `height` of one colour, as a PNG this process wrote.
+pub(crate) fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+    let picture = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        width,
+        height,
+        image::Rgba([0x2a, 0x6f, 0xd0, 0xff]),
+    ));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    picture
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .expect("a PNG this process wrote");
+    bytes.into_inner()
+}
+
+/// A scratch `.png` of this test's own under the build directory, named by `bt_testpath`. The
+/// path is spelled with no `..` in it, as a page resolving a picture beside it spells it.
+pub(crate) fn scratch_png_named(tag: &str) -> PathBuf {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("the crate stands two folders below the workspace")
+        .join("target")
+        .join("peek-tests");
+    std::fs::create_dir_all(&directory).expect("a scratch directory under the build directory");
+    directory.join(format!("{}.png", bt_testpath::unique_name(tag)))
+}
+
+/// **A scratch file a test wrote, removed when the test lets go of it** — on a red as on a green.
+pub(crate) struct ScratchFile(pub(crate) PathBuf);
+
+impl Drop for ScratchFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// A glance card over `file`, raised from a row of `host`, on `clock`, naming the file by its own
+/// name.
+pub(crate) fn card_over(host: RowHost, file: &Path, clock: PeekClock) -> FilePeek {
+    FilePeek {
+        host,
+        source: preview::PreviewSource::file(file.display().to_string()),
+        key: file.display().to_string(),
+        name: file
+            .file_name()
+            .expect("the card's file has a name")
+            .to_string_lossy()
+            .into_owned(),
+        rect: [10.0, 10.0, 200.0, 30.0],
+        clock,
+        frame: None,
+        body: None,
+        head: None,
+        foot: None,
+        foot_lit: false,
+        column: None,
+        closing_at: None,
+        dwell: None,
+    }
 }
 
 /// A real folder with a real file in it, for the glance-foot tests: the path

@@ -1,12 +1,16 @@
 //! **The rendered page's caret, driven** (T-HEADLESS-RUNTIME-SEAM): the press, the release, the
 //! keys and the blur that put a caret in a Markdown page and take it out again, run on a headless
-//! window through the window's own methods.
+//! window through the window's own methods. **And the peek completions, driven**
+//! (T-PEEK-COMPLETIONS-RUNTIME-PINS): a file's read answered on the real computation lane and
+//! taken by the window as a `MathReady` turn takes it.
 
 use super::*;
-use crate::headless::{HeadlessFolio, key_down};
+use crate::headless::{HeadlessFolio, WindowEffect, key_down};
 use crate::preview_press::Spend;
 use crate::preview_select::{Grain, Selection};
-use crate::test_support::{buffer_saying, host_spelling, seat_of, tab_with_a_preview};
+use crate::test_support::{
+    buffer_saying, host_spelling, png_bytes, scratch_png_named, seat_of, tab_with_a_preview,
+};
 use crate::{PreviewSurface, TabId};
 
 /// A heading and three paragraphs: the second with a bold word whose marks the rendered face
@@ -942,4 +946,382 @@ fn the_page_has_one_entrance_one_exit_and_one_owed_caret() {
             "{name} hands the span's producer the page's rendered selection"
         );
     }
+}
+
+// ── the peek completions, driven (T-PEEK-COMPLETIONS-RUNTIME-PINS) ─────────
+
+/// **A window of one shell beside two empty preview panes, its computation lane the suite's
+/// scripted executor under the test's eye**: the window, the lane, the lane's gate, the shell's
+/// seat and the two panes. A test puts its picture and its page on the panes once the lane is in
+/// place, so every read the window asks goes down the lane the test watches.
+fn two_panes_on_a_watched_lane(
+    tag: &str,
+) -> (
+    HeadlessFolio,
+    crate::computation_lane::fixtures::Watched,
+    Arc<crate::lane::Gate>,
+    bt_layout::SeatId,
+    [PreviewSurface; 2],
+) {
+    let mut seats = crate::seats::Seats::lone_terminal();
+    let shell = seats.identity();
+    // The first pane pinned, so the second is a pane of its own rather than the first reused.
+    let pinned = seats
+        .add_preview(&crate::test_support::cross_metrics())
+        .expect("the first preview seat lands");
+    assert!(seats.toggle_preview_lock(pinned));
+    let second = seats
+        .add_preview(&crate::test_support::cross_metrics())
+        .expect("a pinned pane is not a reuse target");
+    let panes = [pinned, second];
+    let (layout, overflow) = crate::test_support::cross_solve(&seats);
+    let tab = crate::assemble_tab_state(
+        TabId(1),
+        std::collections::BTreeMap::from([(shell, crate::test_support::leaf_saying("SHELL"))]),
+        std::collections::BTreeMap::new(),
+        preview::PreviewPool::default(),
+        crate::PreviewPanes::default(),
+        std::collections::BTreeMap::new(),
+        shell,
+        crate::TabSeed::default(),
+        seats,
+        layout,
+        overflow,
+    );
+    let mut folio = HeadlessFolio::with_tabs(tag, vec![tab], 0);
+    let gate = Arc::new(crate::lane::Gate::default());
+    let lane = crate::computation_lane::fixtures::watched(crate::lane::Executor::scripted(
+        Arc::clone(&gate),
+    ));
+    folio.app.math_worker = Arc::clone(&lane.lane);
+    (
+        folio,
+        lane,
+        gate,
+        shell,
+        panes.map(|seat| seat_of(TabId(1), seat)),
+    )
+}
+
+/// `surface` shows the picture in `file`.
+fn a_picture_on(folio: &mut HeadlessFolio, surface: PreviewSurface, file: &Path) {
+    folio.window.tabs[0]
+        .preview_panes
+        .entry(surface)
+        .show_picture(file.to_path_buf());
+}
+
+/// `surface` shows a Markdown page beside `file` whose one picture is `file`.
+fn a_page_on(folio: &mut HeadlessFolio, surface: PreviewSurface, file: &Path) {
+    let name = file
+        .file_name()
+        .expect("the picture has a name")
+        .to_string_lossy();
+    let page = file.with_extension("md");
+    let held = folio.window.tabs[0]
+        .preview_pool
+        .insert(crate::test_support::buffer_saying(
+            &page.display().to_string(),
+            "说明 page.md",
+            &format!("# 截图 shots\n\n![截图 shot](<{name}>)\n"),
+        ));
+    folio.window.tabs[0]
+        .preview_panes
+        .entry(surface)
+        .show_source(held);
+}
+
+/// The read the window awaits for `file`, if one is out.
+fn read_awaited(folio: &HeadlessFolio, file: &Path) -> Option<ComputationId> {
+    match folio
+        .window
+        .peek_cache
+        .peek(&normalized_local_image_path_key(file))
+    {
+        Some(PeekCacheEntry::Pending { asked }) => Some(*asked),
+        _ => None,
+    }
+}
+
+/// **The window takes these terminals** as a `MathReady` turn hands them to it: sorted
+/// ([`crate::sort_math_terminals`]) and applied in one batch.
+fn the_window_takes(folio: &mut HeadlessFolio, ended: Vec<crate::computation_lane::Ended>) {
+    let mut batch = crate::sort_math_terminals(ended).done;
+    folio
+        .runtime()
+        .apply_math_results(&mut batch, false)
+        .expect("the window takes its answers");
+}
+
+/// **What the window holds and draws about one file**, the facts a set-aside answer must leave as
+/// they are.
+#[derive(Debug, PartialEq)]
+struct HeldAbout {
+    /// The cache's entry: the identity a read is out under, or what was filed.
+    entry: String,
+    /// The sentence the pane shows instead of the picture.
+    refusal: Option<String>,
+    /// The decode's own size the pane was told.
+    native: Option<(u32, u32)>,
+    /// The facts filed for a recording.
+    facts: Option<preview::VideoFacts>,
+    /// The pages' picture generation, and the exact-size passes owed.
+    generation: u64,
+    owed: Vec<String>,
+    /// The pictures the last walk handed the glass.
+    images: usize,
+}
+
+impl HeldAbout {
+    fn of(folio: &HeadlessFolio, file: &Path, pane: PreviewSurface) -> Self {
+        let key = normalized_local_image_path_key(file);
+        let picture = folio.window.tabs[0]
+            .preview_panes
+            .get(pane)
+            .and_then(PreviewPane::image);
+        let mut owed: Vec<String> = folio
+            .window
+            .markdown_pictures
+            .owed
+            .keys()
+            .cloned()
+            .collect();
+        owed.sort();
+        Self {
+            entry: match folio.window.peek_cache.peek(&key) {
+                Some(PeekCacheEntry::Pending { asked }) => format!("pending {}", asked.number()),
+                Some(PeekCacheEntry::Ready { key, .. }) => format!("ready {key}"),
+                Some(PeekCacheEntry::Failed(failure)) => format!("failed {failure:?}"),
+                None => "nothing".to_owned(),
+            },
+            refusal: picture
+                .and_then(|picture| picture.failure.as_ref())
+                .map(|refusal| refusal.notice.clone()),
+            native: picture.and_then(|picture| picture.native),
+            facts: folio.window.video_facts.get(&key).copied(),
+            generation: folio.window.markdown_pictures.generation,
+            owed,
+            images: folio.window.renderer.preview_images.len(),
+        }
+    }
+}
+
+/// RED (T-PEEK-COMPLETIONS-RUNTIME-PINS; T-PEEK-ANSWER-IDENTITY) — **a set-aside peek answer
+/// changes nothing on the window**: a pane (and, for a picture, a Markdown page) shows a file;
+/// the window reads it, the file changes under the read, and the walk asks about the bytes there
+/// now. The older read's answer — a half-written picture's failure, or a recording's facts from
+/// its shorter bytes — comes home before the newer one or after it, through the window's own
+/// drain on the real lane, and is set aside: no pane refused, no page re-flowed or sharpened, no
+/// `video_facts` filed, and no redraw asked.
+///
+/// MUTATIONS: drop the early `return` after `file_peek_answer` in
+/// `Runtime::complete_peek_image` — the half-written bytes' failure refuses the pane and asks a
+/// redraw; write `video_facts` before the gate in `Runtime::complete_peek_video_frame` — the
+/// shorter bytes' facts are filed.
+#[test]
+fn a_set_aside_peek_answer_changes_nothing_on_the_window() {
+    let picture = png_bytes(6, 3);
+    let kinds = [
+        (
+            "截图 picture",
+            "png",
+            picture[..picture.len() / 3].to_vec(),
+            picture.clone(),
+        ),
+        ("录屏 recording", "mp4", vec![0x5a; 64], vec![0x5a; 256]),
+    ];
+    for (name, extension, older_bytes, newer_bytes) in kinds {
+        for older_second in [true, false] {
+            let case = format!("{name}, the older answer arriving second: {older_second}");
+            let (mut folio, mut lane, _gate, _shell, [pane, page]) =
+                two_panes_on_a_watched_lane("peek-set-aside");
+            let file = scratch_png_named(name).with_extension(extension);
+            let _written = crate::test_support::ScratchFile(file.clone());
+            std::fs::write(&file, &older_bytes).expect("a scratch file this test owns");
+            a_picture_on(&mut folio, pane, &file);
+            if extension == "png" {
+                a_page_on(&mut folio, page, &file);
+            }
+            folio.runtime().refresh_preview_for_layout();
+            let older = read_awaited(&folio, &file)
+                .unwrap_or_else(|| panic!("{case}: the surfaces read the file"));
+            let older_answer = lane.next_ended(
+                crate::computation_lane::Share::Decoration,
+                crate::computation_lane::fixtures::nobody,
+            );
+            assert_eq!(older_answer.1, older, "{case}: the older read is answered");
+
+            std::fs::write(&file, &newer_bytes).expect("the writer finishes");
+            folio.runtime().forget_the_picture_in(&file);
+            folio.runtime().refresh_preview_for_layout();
+            let newer = read_awaited(&folio, &file)
+                .unwrap_or_else(|| panic!("{case}: the walk asks about the bytes there now"));
+            assert_ne!(older, newer, "{case}: a new question, under a new identity");
+            let mut newer_answer = Some(lane.next_ended(
+                crate::computation_lane::Share::Decoration,
+                crate::computation_lane::fixtures::nobody,
+            ));
+            assert_eq!(
+                newer_answer.as_ref().map(|answer| answer.1),
+                Some(newer),
+                "{case}: the newer read is answered"
+            );
+
+            if older_second {
+                the_window_takes(&mut folio, newer_answer.take().into_iter().collect());
+                assert!(
+                    read_awaited(&folio, &file).is_none(),
+                    "{case}: the fixture's own precondition: the newer answer is filed"
+                );
+                folio.draw();
+                folio.ledger.take();
+            }
+            let before = HeldAbout::of(&folio, &file, pane);
+            the_window_takes(&mut folio, vec![older_answer]);
+            assert_eq!(
+                HeldAbout::of(&folio, &file, pane),
+                before,
+                "{case}: the set-aside answer changes nothing the window holds or draws"
+            );
+            let effects = folio.ledger.take();
+            assert!(
+                !effects.iter().any(|effect| matches!(
+                    effect,
+                    WindowEffect::Redraw | WindowEffect::Presented { .. }
+                )),
+                "{case}: and asks no redraw: {effects:?}"
+            );
+            if let Some(answer) = newer_answer.take() {
+                the_window_takes(&mut folio, vec![answer]);
+                assert!(
+                    read_awaited(&folio, &file).is_none(),
+                    "{case}: the newer answer, arriving second, is filed"
+                );
+            }
+            if extension == "mp4" {
+                assert_eq!(
+                    folio
+                        .window
+                        .video_facts
+                        .get(&normalized_local_image_path_key(&file))
+                        .and_then(|facts| facts.bytes),
+                    Some(newer_bytes.len() as u64),
+                    "{case}: the recording's facts are the newer read's"
+                );
+            }
+        }
+    }
+}
+
+/// RED (T-PEEK-COMPLETIONS-RUNTIME-PINS; T-PEEK-ANSWER-IDENTITY round 2) — **an awaited peek
+/// answer that lands after a terminal's own decode of the file still tells every surface waiting
+/// on it**: a picture pane, a Markdown page, the hover flyout and the glance card all wait on one
+/// file's read while the shell's verification decode of the same file is on the worker. Both come
+/// home in one drain, the verification first: it leaves the read's record alone
+/// (`remember_decode`), so the read's answer is the awaited one — the pane is told the picture's
+/// size, the page's picture generation ticks, the flyout asks for its resample, the card's overlay
+/// is rebuilt and asks for its picture, and a redraw is asked. What each resample does when it
+/// lands is the scale lane's completion and not this one's.
+///
+/// MUTATION: drop `remember_decode`'s `Pending` guard — the verification's pixels are filed over
+/// the record, the read's answer is set aside, and no surface is told.
+#[test]
+fn an_awaited_peek_answer_after_a_terminals_decode_tells_every_waiting_surface() {
+    let (mut folio, mut lane, gate, shell, [pane, page]) =
+        two_panes_on_a_watched_lane("peek-awaited");
+    let file = scratch_png_named("等着 awaited");
+    let _written = crate::test_support::ScratchFile(file.clone());
+    // Large enough that the card's box and the flyout's are two sizes. The two resamples are still
+    // one target to the scale share (`ScaleWorkerRequest::same_target`: leaf, purpose and content
+    // key), so the newer may supersede the older; this test asks only that each is asked
+    // (T-PEEK-SCALE-ADDRESS-BY-SURFACE).
+    std::fs::write(&file, png_bytes(600, 300)).expect("a scratch file this test owns");
+
+    // The shell's verification of the printed path is on the worker when the surfaces ask.
+    gate.hold();
+    let leaf = folio.runtime().focused_shell_address();
+    let verification = lane
+        .lane
+        .decorate(MathWorkerRequest::InlineImage {
+            leaf,
+            task: bt_term::InlineImageTask {
+                occurrence_id: 1,
+                source: bt_term::InlineImageSource::LocalPath(file.clone()),
+            },
+        })
+        .ok()
+        .expect("the verification is admitted");
+    assert!(gate.wait_entered(1), "and reaches the worker");
+    a_picture_on(&mut folio, pane, &file);
+    a_page_on(&mut folio, page, &file);
+    folio.window.peek_hover.active = Some(crate::PeekCandidate {
+        subject: crate::PeekSubject::from_path(file.clone()),
+        seat: shell,
+        pointer: PhysicalPosition::new(40.0, 40.0),
+    });
+    let now = Instant::now();
+    folio.window.file_peek = Some(crate::test_support::card_over(
+        crate::RowHost::Terminal(shell),
+        &file,
+        crate::PeekClock::Settling(now),
+    ));
+    folio
+        .runtime()
+        .advance_file_peek(now)
+        .expect("the card comes up");
+    folio.runtime().refresh_preview_for_layout();
+    let asked = read_awaited(&folio, &file).expect("the surfaces' read is out");
+    gate.release();
+    let first = lane.next_ended(
+        crate::computation_lane::Share::Decoration,
+        crate::computation_lane::fixtures::nobody,
+    );
+    let second = lane.next_ended(
+        crate::computation_lane::Share::Decoration,
+        crate::computation_lane::fixtures::nobody,
+    );
+    assert_eq!(
+        [first.1, second.1],
+        [verification, asked],
+        "the fixture's own precondition: the verification comes home first"
+    );
+    let generation = folio.window.markdown_pictures.generation;
+    let builds = folio.window.renderer.overlay_builds;
+    assert!(
+        folio.window.peek_thumbnail_pending.is_none() && folio.window.peek_card_pending.is_none(),
+        "the fixture's own precondition: neither the flyout nor the card has asked a resample"
+    );
+    folio.ledger.take();
+
+    the_window_takes(&mut folio, vec![first, second]);
+    let picture = folio.window.tabs[0]
+        .preview_panes
+        .get(pane)
+        .and_then(PreviewPane::image);
+    assert_eq!(
+        picture.and_then(|picture| picture.native),
+        Some((600, 300)),
+        "the pane is told the picture"
+    );
+    assert!(
+        picture.is_some_and(|picture| picture.drawn.is_some()),
+        "and places it"
+    );
+    assert!(
+        folio.window.markdown_pictures.generation > generation,
+        "the page's picture generation ticks"
+    );
+    assert!(
+        folio.window.peek_thumbnail_pending.is_some(),
+        "the flyout asks for its picture at its own size"
+    );
+    assert!(
+        folio.window.renderer.overlay_builds > builds && folio.window.peek_card_pending.is_some(),
+        "the card's overlay is rebuilt, and asks for its picture at its own size"
+    );
+    let effects = folio.ledger.take();
+    assert!(
+        effects.contains(&WindowEffect::Redraw),
+        "and a redraw is asked: {effects:?}"
+    );
 }

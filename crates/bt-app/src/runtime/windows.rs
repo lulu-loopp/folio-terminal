@@ -1621,6 +1621,12 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(())
     }
 
+    /// **The close an answer re-requested, taken by the event loop** — once: the
+    /// request is spent by the taking, so the next event closes nothing.
+    pub(crate) fn take_close_request(&mut self) -> Option<WindowId> {
+        self.window.window_close_requested.take()
+    }
+
     /// **What this window would lose if the process left now**, by name.
     ///
     /// One window's contribution to the summary card's one list. Two classes,
@@ -2222,3 +2228,7 @@ pub(crate) fn recent_term_leaf_seed(profile_id: &str, cwd: String) -> LeafSeed {
         carried_environment: None,
     }
 }
+
+#[cfg(test)]
+#[path = "windows_tests.rs"]
+mod tests;

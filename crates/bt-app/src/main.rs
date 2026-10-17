@@ -13875,7 +13875,7 @@ struct App<B: Backend = Native> {
     quit_reason: quit::Reason,
     /// **The hand-over's answer**, while the quit's way out waits for it (U-21): the storage
     /// worker writes `Handoff` and starts the applier, and this thread looks on its turns.
-    handoff_answer: Option<std::sync::mpsc::Receiver<update_handoff::HandedOff>>,
+    handoff_answer: Option<persist::OnTheWorker<update_handoff::HandedOff>>,
     /// **How long the quit waits for the panes it told to go** — [`PANE_RETIREMENT_DEADLINE`] in
     /// every application the product builds; an instance's own so that a test drives the quit
     /// with the suite's patience (`lane::PATIENCE`) rather than the product's four seconds.
@@ -15150,8 +15150,9 @@ struct WindowRuntime<B: Backend = Native> {
     taskbar_reading: bt_platform::TaskbarReading,
     /// **The taskbar flash running on this window's button, and what it is
     /// about** (ticket 62) — written by [`Runtime::raise_attention`], retired
-    /// when the window comes to the foreground (the flash ends there) or when
-    /// [`Runtime::replace_contradicted_flash`] re-places it.
+    /// when the window comes to the foreground (the flash ends there:
+    /// [`Runtime::window_focused`]) or when [`Runtime::replace_contradicted_flash`]
+    /// re-places it.
     taskbar_flash: Option<TaskbarFlash>,
     /// **The last reading of where this window is, whole** (ticket 48): the
     /// four facts [`sample_window_place`] answered, focus included, as the pass
@@ -16048,6 +16049,7 @@ struct WindowRuntime<B: Backend = Native> {
     /// A request rather than a call, because the close belongs to the event
     /// loop: [`FolioApp::close`] is what performs it, and the gate re-requests it
     /// rather than performing half of it here (see [`Runtime::answer_dirty_gate`]).
+    /// The loop takes it through [`Runtime::take_close_request`].
     window_close_requested: Option<WindowId>,
     /// The final tab asked the native close because its last shell exited.
     ///
@@ -68442,7 +68444,7 @@ impl<B: Backend> FolioApp<B> {
             }
             quit::Handoff::Sent { .. } => {
                 match update_handoff::look(
-                    app.handoff_answer.as_ref(),
+                    app.handoff_answer.as_mut(),
                     txn,
                     quit.handoff_is_overdue(now),
                 ) {
@@ -69178,8 +69180,10 @@ impl<B: Backend> FolioApp<B> {
                     // And §7.1.5e′'s: a card about the keys under your hands is a
                     // card about a keyboard this window no longer has. `hide` and
                     // not `spend` — nothing was pressed, so a hand that comes back
-                    // still holding `Ctrl` is answered again.
-                    runtime.window.key_hint.hide();
+                    // still holding `Ctrl` is answered again. And the input method's
+                    // context goes with the keyboard: the keyboard's own door
+                    // ([`Runtime::blurred`]) says both.
+                    runtime.blurred();
                     // **And the command palette** (DESIGN.md §7.55): 失焦即收. It is
                     // a box for aiming at something *now*, and a window the reader
                     // has left is a window they are not aiming at — coming back to
@@ -69190,9 +69194,6 @@ impl<B: Backend> FolioApp<B> {
                     // to, while this one is anchored to an intent.
                     let _ = runtime.close_command_palette();
                     runtime.window.tab_clicks.interrupt();
-                    // Do not cancel or synthesize anything: IMM32 may synchronously deliver a partial
-                    // Commit during this transition, and the product decision is to accept it.
-                    runtime.window.ime_active = false;
                     runtime.window.ime_cursor.reset();
                     hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
                         runtime.destroy_ime_caret("window_blur")
@@ -69225,8 +69226,8 @@ impl<B: Backend> FolioApp<B> {
                     runtime.observe_ime_focus(true);
                     // **A taskbar flash ends here** (`FLASHW_TIMERNOFG`: until the window comes to
                     // the foreground; on macOS activation ends the bounce), so the record of what
-                    // it was about ends with it (ticket 62).
-                    runtime.window.taskbar_flash = None;
+                    // it was about ends with it (ticket 62) — attention's own door.
+                    runtime.window_focused();
                     // **R31's third invalidation moment, B: the window came back.**
                     // Whatever happened while it was away happened in another process
                     // — an editor saving, a `git` run in another terminal, a
@@ -69297,7 +69298,7 @@ impl<B: Backend> FolioApp<B> {
             // shut belongs to the event loop, and re-requesting it means closing goes
             // through the one door it always went through instead of a second one
             // opened for the gate.
-            let requested = std::mem::take(&mut runtime.window.window_close_requested);
+            let requested = runtime.take_close_request();
             shutting |= requested == Some(window_id);
             let result = if shutting {
                 result.and(hang_watch::during(hang_watch::Station::EventShut, || {
@@ -69977,31 +69978,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     for outcome in
                         shell_integration::profile_installs_for(&installs, runtime.window_id())
                     {
-                        match outcome.clone() {
-                            shell_integration::ProfileInstallOutcome::Installed {
-                                program,
-                                edit,
-                            } => {
-                                let id = runtime.toast_with_verb(
-                                    toast::ToastKind::Info,
-                                    toast::ToastAnchor::Window,
-                                    i18n::Text::ShellProfileAddedToast.text(),
-                                    i18n::Text::ProfilesUndo.text(),
-                                )?;
-                                runtime.window.powershell_profile_undo = Some((id, program, edit));
-                            }
-                            shell_integration::ProfileInstallOutcome::Refused(reason)
-                            | shell_integration::ProfileInstallOutcome::UndoRefused(reason) => {
-                                runtime.toast(
-                                    toast::ToastKind::Error,
-                                    toast::ToastAnchor::Window,
-                                    Some(i18n::Text::ShellProfileRefused.text().to_owned()),
-                                    reason,
-                                )?;
-                            }
-                            shell_integration::ProfileInstallOutcome::Present
-                            | shell_integration::ProfileInstallOutcome::Undone => {}
-                        }
+                        runtime.deliver_profile_install(outcome.clone())?;
                     }
                     Ok(())
                 })
@@ -76982,6 +76959,43 @@ fn report_frame_shape_stop(error: &anyhow::Error, path: &Path, announce: impl Fn
     announce(path);
 }
 
+/// **The stale claim files' sweep** (0.4.7 U-43), started by `executor` on a worker of its own;
+/// `true` when it started. Nobody waits on it: a sweep's only answer is its one line in
+/// diagnostics.log, and the files it would have taken are left for the next start's sweep. **A
+/// start the door refuses, or a sweep that panics, is said once in `say`**
+/// (T-PROFILE-INSTALL-REFUSED-START) — before, a refused start was thrown away unsaid.
+fn start_claim_sweep(
+    executor: &lane::Executor,
+    say: impl Fn(&str) + Send + Sync + 'static,
+) -> bool {
+    executor
+        .start_worker(
+            "folio-claim-sweep",
+            lane::Answered::new("the stale claim sweep", say, |_| ()),
+            |worker| {
+                let swept = bt_platform::instance::sweep_stale_claims(worker);
+                if swept > 0 {
+                    diagnostics::note(&format!(
+                        "Folio: {swept} stale claim files were swept from the runtime folder"
+                    ));
+                }
+            },
+        )
+        .is_ok()
+}
+
+/// **The media platform's one-time warm-up** (§7.23), started by `prewarm`. Nobody waits on it:
+/// the first video hover starts the platform itself when the warm-up has not, and pays the cost
+/// then. **A start the thread door refuses is said once in `say`**
+/// (T-PROFILE-INSTALL-REFUSED-START) — before, it was thrown away unsaid.
+fn start_video_prewarm(prewarm: fn() -> std::io::Result<()>, say: impl Fn(&str)) {
+    if let Err(error) = prewarm() {
+        say(&format!(
+            "the media platform's warm-up could not be started: {error}; the first video hover starts it"
+        ));
+    }
+}
+
 fn main() -> Result<()> {
     // **What this process was handed is passed on only by name**, before any door can start a
     // child: the uninstaller removes the data folder, and a `diagnostics.log` handle inherited
@@ -77307,17 +77321,9 @@ fn main() -> Result<()> {
     // is taken; only empty, unheld `*.lock` files older than an hour in
     // Folio's runtime folder. Windows' claim is a kernel name, with no file.
     if bt_platform::host_platform() != bt_platform::HostPlatform::Windows {
-        let _ = bt_platform::spawn_at_priority(
-            "folio-claim-sweep",
-            bt_platform::ThreadPriority::BelowNormal,
-            |worker| {
-                let swept = bt_platform::instance::sweep_stale_claims(worker);
-                if swept > 0 {
-                    diagnostics::note(&format!(
-                        "Folio: {swept} stale claim files were swept from the runtime folder"
-                    ));
-                }
-            },
+        start_claim_sweep(
+            &lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
+            diagnostics::note,
         );
     }
     // **And the witness to the day this thread stops answering** (§1.5).
@@ -77349,7 +77355,7 @@ fn main() -> Result<()> {
     }
     // The one-time media-session warm-up (§7.23) is paid here, off the first
     // hover: the process-resident session costs ~210ms cold and ~10ms warm.
-    bt_platform::video::prewarm();
+    start_video_prewarm(bt_platform::video::prewarm, diagnostics::note);
     // **The one message this program reads before winit dispatches it** (§7.54).
     //
     // `WM_HOTKEY` for a registration that named no window is a **thread**

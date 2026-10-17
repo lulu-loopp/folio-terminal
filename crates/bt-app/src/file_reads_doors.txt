@@ -116,6 +116,8 @@ observe_profile_lines: Marks::read
 observe_profile_lines: ProfileFiles::read
 observe_profile_lines: ProfileRevision::read
 install_for_program: ProfileRevision::read
+# `Written::publish` is keyed by its file: `publish` is a name several items declare.
+shell_integration/profile_runtime.rs: publish: ProfileRevision::read
 ProfileRevision::carries_the_line: profile_marks::Decoded::read
 TraceFile::append: .open
 Trace::create: .open

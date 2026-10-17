@@ -338,7 +338,12 @@ a path call `Trait::m` / `D::m` with `D: Trait`) into that trait's implementatio
 reached only through a trait object (the update job's `driver.prepare`) needs no list line. A
 trait is its identity — package, module path and name, resolved through `use` items, globs and
 re-exports by `bt_source::TraitResolver` — so two traits of one name (the macOS and the
-Windows `PreparePoint`) are never followed together. What is followed: the method of every
+Windows `PreparePoint`) are never followed together. Every trait the guard decides with — the traits a
+product `impl` block implements, a trait's supertraits, the traits a receiver's stated type or
+a bound names — comes from the resolver's checked API (`resolve_checked`,
+`supertraits_checked`, `implemented_checked`): a path chained past the resolver's hop limit
+fails the guard by name ("… chains past the resolver's hop limit — refused, never passed"),
+never read as "no trait" (a cycle among `use`s and globs names nothing more, and is no cutoff). What is followed: the method of every
 product `impl` of the trait, on every platform arm; the trait's default body, only for an
 impl that does not override it (or when there is no impl); and the trait's first-party
 supertraits, whose impls count only for types implementing the stated trait. The answer is the
@@ -405,7 +410,11 @@ first request, a refused request handed back with its job, a supersession announ
 the wake and its terminal — which carries no answer — taken past the drain mark; and the git
 mutation lane (T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER, `git_mutation_lane`) on `lane::Queue` too,
 one share per repository, made by its first request and let go once nothing of it is held or owed, its
-identities the share's generation beside the minted number so a later share never repeats one. A lane of
+identities the share's generation beside the minted number so a later share never repeats one; and the
+storage worker (T-STORAGE-WORKER-ON-THE-SEAM, `persist::StorageLane`) on `Ledger` and `Executor` with a
+line of its own, as the hand-off lane is — one FIFO, the trial's receipt served ahead of it, and each job
+kind's own answer road, read only once the request's terminal has been taken (`persist::OnTheWorker`), or
+left to the lane's sink at admission by a reader that reads its road alone. A lane of
 several threads keeps one ledger per thread, so one thread's end ends only its own requests,
 and keeps what each request asked, so a `Failed` one is settled — as its surface's own error,
 or held by its pane — and asked again only by new input to that surface, rather than left in

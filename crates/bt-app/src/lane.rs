@@ -60,11 +60,11 @@
 //! and program-walk lanes (`settings::FontLane`, `taskbar_lane`, `programs_lane`; S-4), each a
 //! latest-value lane on [`Coalescing`], the computation lane (`computation_lane`, S-8), three
 //! first-in-first-out shares on [`Queue`], each with its own ledger, and the git mutation lane
-//! (`git_mutation_lane`), a first-in-first-out share on [`Queue`] per repository; each adapter
-//! hands its real lane a scripted [`Executor`], and every lane keeps every claim. S-7 (the
-//! clipboard) moves one more onto it, the same way. The storage worker is not on it: its requests
-//! end once through their own answer channels and the worker's end (`persist`'s `WorkerEnd`), and
-//! its move onto the seam is T-STORAGE-WORKER-ON-THE-SEAM (`docs/plans/structural-debt.md` D-97).
+//! (`git_mutation_lane`), a first-in-first-out share on [`Queue`] per repository, and the storage
+//! worker (`persist::StorageLane`, T-STORAGE-WORKER-ON-THE-SEAM), on [`Ledger`] and [`Executor`]
+//! with a line of its own — one FIFO, the jobs it serves ahead of it, and each kind's own answer
+//! road; each adapter hands its real lane a scripted [`Executor`], and every lane keeps every
+//! claim. S-7 (the clipboard) moves one more onto it, the same way.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -100,10 +100,12 @@ pub(crate) enum Terminal<Id, T, E> {
         not(test),
         expect(
             dead_code,
-            reason = "T-STORAGE-WORKER-ON-THE-SEAM until 2026-12-31: no lane on the seam \
-                      cancels a request yet; the contract's terminal set keeps it (C2), and the \
-                      storage worker, once on the seam, is the first lane that may drop one at \
-                      its requester's word"
+            reason = "T-CLIPBOARD-LANE until 2026-12-31: no lane on the seam cancels a request \
+                      yet; the contract's terminal set keeps it (C2). The storage worker drops \
+                      none at its requester's word (T-STORAGE-WORKER-ON-THE-SEAM, 2026-10-15: a \
+                      quit's copy past its bound is abandoned, its asker gone, and a worker's \
+                      end is WorkerGone), so S-7's paste, cancelled at its deadline or its cap \
+                      (side-effects contract (c)4), is the first"
         )
     )]
     Cancelled,
@@ -201,6 +203,54 @@ type TerminalOf<Id, O> = Terminal<Id, <O as Owed<Id>>::Answer, <O as Owed<Id>>::
 /// The executor's hook: what the thread's end is reported to.
 pub(crate) trait Ends: Send + Sync {
     fn worker_ended(&self, cause: WorkerEnd);
+}
+
+impl WorkerEnd {
+    /// Whether the worker ran at all: `false` only for a start the thread door refused, so its
+    /// asker knows nothing it asked for was done.
+    pub(crate) fn started(&self) -> bool {
+        !matches!(self, Self::NotStarted(_))
+    }
+}
+
+/// **The end of a worker that serves one asking and no ledger** (T-PROFILE-INSTALL-REFUSED-START):
+/// told how the worker ended, it says an end other than a return once — `"{what} ended:
+/// {cause}"`, in the voice it was handed (`diagnostics::note` in the product) — and hands the
+/// cause to `answer`, which sets the asker's own failure state and wakes it. A body that returned
+/// gave its own answer, so nothing is said or answered for it.
+///
+/// A refused start is told on the asking thread, before [`Executor::start_worker`] answers it; a
+/// panic, on the worker after its body unwound. The `$PROFILE` observation, the one-click install,
+/// its Undo and the Settings removal, the Explorer probe and press, the stale-claim sweep and
+/// three door processes' waits each end through one.
+pub(crate) struct Answered<A> {
+    what: &'static str,
+    say: Box<dyn Fn(&str) + Send + Sync>,
+    answer: A,
+}
+
+impl<A: Fn(&WorkerEnd) + Send + Sync + 'static> Answered<A> {
+    pub(crate) fn new(
+        what: &'static str,
+        say: impl Fn(&str) + Send + Sync + 'static,
+        answer: A,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            what,
+            say: Box::new(say),
+            answer,
+        })
+    }
+}
+
+impl<A: Fn(&WorkerEnd) + Send + Sync> Ends for Answered<A> {
+    fn worker_ended(&self, cause: WorkerEnd) {
+        if matches!(cause, WorkerEnd::Returned) {
+            return;
+        }
+        (self.say)(&format!("{} ended: {cause}", self.what));
+        (self.answer)(&cause);
+    }
 }
 
 /// **A lane's request ledger.** Shared between the requester's side ([`Ledger::admit`],
@@ -661,6 +711,7 @@ where
 /// thread's end is reported to the lane's ledger. The product's starts the thread through the
 /// thread door at `band`; the suite's (`Executor::scripted`) starts the same body under the suite's
 /// gate, which can hold each task, end the worker, or make a task panic.
+#[derive(Clone)]
 pub(crate) struct Executor {
     band: ThreadPriority,
     /// The stack its workers are given, in bytes; `None`, the thread door's default.
@@ -1312,11 +1363,14 @@ pub(crate) enum LaneName {
     /// `git_mutation_lane`: one repository's share of the Git pages' writes and checkouts
     /// (`bt-git-mutation`).
     GitMutation,
+    /// `persist::StorageLane`: the storage worker (`session-writer`) — the session, the four
+    /// hand-editable documents and the preview's saves.
+    Storage,
 }
 
 #[cfg(test)]
 impl LaneName {
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::Handoff,
         Self::Font,
         Self::Taskbar,
@@ -1325,6 +1379,7 @@ impl LaneName {
         Self::ComputationPath,
         Self::Programs,
         Self::GitMutation,
+        Self::Storage,
     ];
 }
 
@@ -1588,6 +1643,32 @@ pub(crate) const GIT_MUTATION: Contract = Contract {
         waiting: Bound::At(2000),
         executing: 1,
         answers_held: Bound::At(2001),
+    },
+    cancellation: Cancellation::Abandon,
+    saying: Saying::PerRequest,
+};
+
+/// `persist::StorageLane`, on the seam (T-STORAGE-WORKER-ON-THE-SEAM): one `session-writer`
+/// thread; ids minted by the lane's `Ledger` for every kind it serves; every job run and ended in
+/// the order minted — but a trial's receipt, served ahead of what is queued, which no consumer
+/// takes by a prefix of that order — none coalesced; the asking store, buffer or session is the
+/// target incarnation, and a request whose asker has gone ends in the lane's sink, which lets it
+/// go; the ledger owes 50 at once (`persist::STORAGE_BOUND`: the fixed askers' 18 and the
+/// preview's 32), one running and the rest waiting, an answer not yet taken holding its place,
+/// and refuses the rest at the door; a failure (a panic in one request's work) is said once per
+/// request, and the worker goes on.
+#[cfg(test)]
+pub(crate) const STORAGE: Contract = Contract {
+    lane: Some(LaneName::Storage),
+    replacement: Replacement::Fifo,
+    execution: Order::Submission,
+    delivery: Delivery::Submission,
+    bounds: Bounds {
+        // `persist::STORAGE_BOUND`, written out rather than read, so that a change to either the
+        // declaration or the lane is a disagreement the suite reports.
+        waiting: Bound::At(49),
+        executing: 1,
+        answers_held: Bound::At(50),
     },
     cancellation: Cancellation::Abandon,
     saying: Saying::PerRequest,

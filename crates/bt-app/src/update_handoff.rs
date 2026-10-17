@@ -63,7 +63,7 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use bt_platform::admission::{WaitToken, WorkerCtx, doors};
@@ -74,6 +74,7 @@ use bt_platform::install_txn::{self, Held};
 use bt_platform::file_reads::{self, Lane};
 
 use crate::cli;
+use crate::persist::Reply;
 use crate::update_apply::{ExitGuard, Leave, Left, Outgoing, Window};
 use crate::update_txn::{Class, Event, HeaderOutcome, Home, Journal, Nonce, Refusal, Role, TxnId};
 
@@ -736,35 +737,48 @@ pub(crate) enum Looked {
 /// **One look at the hand-over's answer** for transaction `txn`, `overdue`
 /// once [`crate::quit::HANDOFF_DEADLINE`] has passed. Never waits.
 ///
-/// **A channel read closed is the storage worker's end** (C2): it dropped the
-/// hand-over unanswered — queued behind its end, or inside it when it
-/// panicked — and no answer will come. That is the overdue answer's case, read
-/// on the turn the end's wake brings rather than at the deadline: no applier is
-/// known, and the window's mark decides.
-pub(crate) fn look(answer: Option<&Receiver<HandedOff>>, txn: TxnId, overdue: bool) -> Looked {
-    match answer.map(Receiver::try_recv) {
-        Some(Err(mpsc::TryRecvError::Disconnected)) => Looked::Over {
+/// **A request that ended with no answer is over** (C2), read on the turn the
+/// wake brings rather than at the deadline: no applier is known, and the
+/// window's mark decides. Its terminal says which end it was
+/// (`persist::OnTheWorker`): the worker failed on it — its task panicked, and the
+/// worker went on (T-STORAGE-WORKER-ON-THE-SEAM, R2) — or the worker's end left it
+/// owed (queued behind the end, or inside it); the line names which.
+pub(crate) fn look(
+    answer: Option<&mut crate::persist::OnTheWorker<HandedOff>>,
+    txn: TxnId,
+    overdue: bool,
+) -> Looked {
+    match answer.map(crate::persist::OnTheWorker::hear) {
+        Some(Reply::Failed(words)) => Looked::Over {
+            line: format!(
+                "Folio: update {txn}'s hand-over had no answer: the storage worker failed on it \
+                 ({words}) and went on; the window's mark decides who opens Folio as this process \
+                 leaves"
+            ),
+            applier: None,
+        },
+        Some(Reply::Gone) => Looked::Over {
             line: format!(
                 "Folio: update {txn}'s hand-over had no answer: the storage worker stopped; the \
                  window's mark decides who opens Folio as this process leaves"
             ),
             applier: None,
         },
-        Some(Ok(handed)) => Looked::Over {
+        Some(Reply::Answered(handed)) => Looked::Over {
             line: handed.line(txn),
             applier: match handed {
                 HandedOff::Started { applier } => Some(applier),
                 _ => None,
             },
         },
-        None | Some(Err(mpsc::TryRecvError::Empty)) if overdue => Looked::Over {
+        None | Some(Reply::Waiting) if overdue => Looked::Over {
             line: format!(
                 "Folio: update {txn}'s hand-over did not answer in time; the window's mark decides \
                  who opens Folio as this process leaves"
             ),
             applier: None,
         },
-        None | Some(Err(mpsc::TryRecvError::Empty)) => Looked::Waiting,
+        None | Some(Reply::Waiting) => Looked::Waiting,
     }
 }
 
@@ -1228,11 +1242,11 @@ mod tests {
                 let _ = woke.send(());
             },
         );
-        let answer = store
+        let mut answer = store
             .hand_off(handoff)
             .expect("the storage worker takes the hand-over");
         crate::lane::wait_for_a_wake(&wakes, "the worker's wake after the hand-over's answer");
-        match look(Some(&answer), TxnId::new(TXN), false) {
+        match look(Some(&mut answer), TxnId::new(TXN), false) {
             Looked::Over { applier, .. } => assert_eq!(
                 applier,
                 Some(crate::update_apply::this_process()),
@@ -1278,13 +1292,15 @@ mod tests {
         let handoff = HandoffJob::new(&staged, nonce(), spawner).expect("Prepared → Handoff");
         let mut store =
             SessionStore::at(folder.0.join("session.json"), folder.0.join("session.lock"));
-        let answer = store
+        let mut answer = store
             .hand_off(handoff)
             .expect("the storage worker takes the hand-over");
         quit.handoff_sent(Instant::now());
-        let answered = answer
-            .recv_timeout(Duration::from_secs(20))
-            .expect("the storage worker answers");
+        let crate::persist::Reply::Answered(answered) =
+            answer.within_patience("the storage worker's answer")
+        else {
+            panic!("the storage worker answers");
+        };
         assert_eq!(
             answered,
             HandedOff::Started {
@@ -1778,13 +1794,13 @@ mod tests {
     /// The loop's looks at the answer, as `hand_the_update_over` makes them,
     /// with `now` read as `at(turn)`, until the hand-over is over.
     fn look_until_over(
-        answer: &std::sync::mpsc::Receiver<HandedOff>,
+        answer: &mut crate::persist::OnTheWorker<HandedOff>,
         quit: &Quit,
         at: impl Fn(u32) -> Instant,
     ) -> String {
         for turn in 0..2_000 {
             match look(
-                Some(answer),
+                Some(&mut *answer),
                 TxnId::new(TXN),
                 quit.handoff_is_overdue(at(turn)),
             ) {
@@ -1836,21 +1852,21 @@ mod tests {
             HandoffJob::new(&staged, nonce(), Box::new(held)).expect("Prepared → Handoff");
         let mut store =
             SessionStore::at(folder.0.join("session.json"), folder.0.join("session.lock"));
-        let answer = store
+        let mut answer = store
             .hand_off(handoff)
             .expect("the storage worker takes the hand-over");
         let sent = Instant::now();
         quit.handoff_sent(sent);
         assert_eq!(
             look(
-                Some(&answer),
+                Some(&mut answer),
                 TxnId::new(TXN),
                 quit.handoff_is_overdue(sent)
             ),
             Looked::Waiting
         );
         let line = match look(
-            Some(&answer),
+            Some(&mut answer),
             TxnId::new(TXN),
             quit.handoff_is_overdue(sent + crate::quit::HANDOFF_DEADLINE),
         ) {
@@ -1883,9 +1899,11 @@ mod tests {
         // The late start goes through; the applier finds O's live mark.
         *gate.0.lock().expect("the gate") = true;
         gate.1.notify_all();
-        let late = answer
-            .recv()
-            .expect("the worker answers after it is released");
+        let crate::persist::Reply::Answered(late) =
+            answer.within_patience("the answer after the release")
+        else {
+            panic!("the worker answers after it is released");
+        };
         assert!(matches!(late, HandedOff::Started { .. }), "{late:?}");
         assert_eq!(asked.lock().expect("the record").calls.len(), 1);
         let late_applier = Running { pid: 1, started: 1 };
@@ -1907,9 +1925,9 @@ mod tests {
             .expect("back to Prepared for the second road");
         let (spawner, _) = recording(&staged, false);
         let handoff = HandoffJob::new(&staged, nonce(), spawner).expect("Prepared → Handoff");
-        let answer = store.hand_off(handoff).expect("the worker takes it");
+        let mut answer = store.hand_off(handoff).expect("the worker takes it");
         let sent = Instant::now();
-        let line = look_until_over(&answer, &quit, |_| sent);
+        let line = look_until_over(&mut answer, &quit, |_| sent);
         assert!(line.contains("handed to its applier"), "{line}");
         assert_eq!(
             crate::update_apply::window_owner(&staged.home, txn),

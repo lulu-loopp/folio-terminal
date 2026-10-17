@@ -22,11 +22,22 @@ typst-svg.workspace = true
 typst-syntax = "=0.15.1"
 web-time.workspace = true
 
+# **The font policy, per target** (`docs/ARCHITECTURE.md`, bt-math). On the desktop the Typst book
+# is typst-assets' seventeen faces followed by the machine's own (`MathEngine::new`). A browser has
+# no machine fonts to scan and a download pays for every byte, so a wasm32 build compiles no face
+# in and draws with exactly the faces its host hands `MathEngine::with_faces`; the wasm32 gate
+# (`scripts/ci/check-wasm-lib.ps1`) refuses a wasm32 graph that turns typst-assets' fonts on.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+typst-as-lib = { workspace = true, features = ["typst-kit-fonts", "typst-kit-embed-fonts"] }
+
 [dev-dependencies]
 # Every test's scratch name comes from one place (`bt_testpath`, T-TEST-HYGIENE-048).
 bt-testpath = { path = "../bt-testpath" }
 serde.workspace = true
 serde_json.workspace = true
+# The faces a test hands `MathEngine::with_faces`, read from the very crate the desktop build
+# embeds them from. Already in the lock file at this version through typst, so no new package.
+typst-assets = { version = "=0.15.1", features = ["fonts"] }
 
 [lints]
 workspace = true

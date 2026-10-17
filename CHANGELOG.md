@@ -119,6 +119,9 @@ All notable changes to Folio are recorded here. The format follows
 - Right after Windows starts, Folio no longer closes a moment after opening when its PowerShell 7 tabs come from the Microsoft Store: a background check of PowerShell 7 no longer runs while such a tab is starting. <!-- zh: pending T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH -->
 - A failure while Folio checks your PowerShell profiles for its line no longer closes Folio, and a check that could not start when Folio opened is tried again at the next chance (after an update is confirmed, say) instead of waiting until you open the Profiles page. <!-- zh: pending T-HEADLESS-RUNTIME-SEAM -->
 - Typing with an input method while you are scrolled back through a pane's history no longer opens the candidate list over a line of that history; it opens at the bottom edge of the pane, toward the line you are typing on. <!-- zh: pending T-IME-CARET-OFF-VIEW-ROW -->
+- When Folio's check of your PowerShell profiles cannot start, or stops before it finishes, while the Profiles page is open, the PowerShell rows with their own arguments now say the check could not run, instead of keeping what they said before with no word of why; opening the page again checks again. <!-- zh: pending T-OBSERVATION-REFUSAL-ON-THE-PAGE -->
+- If Folio fails unexpectedly while saving one file, that file's save says so and the others go on being saved; before, saving stopped for the rest of the run. A preview save made while 32 others are still on their way to the disk says so on its pane and keeps your edits. <!-- zh: pending T-STORAGE-WORKER-ON-THE-SEAM -->
+- When Folio cannot start adding its line to your PowerShell profile or taking it back out (Undo or the Settings removal), the window now says so in a card instead of doing nothing; the same click tries again. When Folio cannot start switching its Explorer first-page entry on or off, or its launch check of that entry, Folio no longer closes: the switch says so in a card, and the card blames Windows only when Windows refused. <!-- zh: pending T-PROFILE-INSTALL-REFUSED-START -->
 
 ### Changed
 
@@ -129,6 +132,10 @@ All notable changes to Folio are recorded here. The format follows
 - What you install or change while Folio runs is seen without a restart: a Copilot CLI (or the Node.js it needs) on the Agents page, a display's refresh rate, a keyboard layout that moves the summon key, and a new `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `COPILOT_HOME`; files added inside folded folders appear the next time you open the command palette, a picture that was not ready the first time you hovered it shows on the next hover, and on macOS a font installed while Folio runs can be chosen and used. <!-- zh: Folio 运行期间安装或更改的内容无需重启即可识别：Agent 页上的 Copilot CLI（或它所需的 Node.js）、显示器刷新率、改变快捷终端快捷键位置的键盘布局，以及新的 `CLAUDE_CONFIG_DIR`、`CODEX_HOME` 或 `COPILOT_HOME`；折叠文件夹中新增的文件在下次打开搜索面板时出现，首次悬停时未就绪的图片在下次悬停时显示；macOS 上，Folio 运行期间安装的字体可以选用。 -->
 - Folio's window no longer waits while Folio looks for installed programs: usually the shell is already running when the window first appears, but on the first start after the computer boots (or when `PATH` holds a slow network folder) the window opens first, its tab says "Terminal", and whatever you type is held until the shell starts.
 - Folio's window now appears before its shells have started, instead of waiting for each one: on a slow start a tab shows its profile's name (or "Terminal") and whatever you type is kept until the shell is ready. If a shell cannot start, Folio says why and keeps running. <!-- zh: Folio 的窗口现在会在 shell 启动前出现，不再逐个等待：启动较慢时，标签页显示配置文件名称（或「终端」），输入的内容保留到 shell 就绪。shell 无法启动时，Folio 说明原因并继续运行。 -->
+
+### Internal
+
+- The diagnostics line Folio writes when an input method breaks its own composition bracket now carries the window's input-method facts at that moment (whether the window still had its input context and the keyboard focus), read at most 32 times per window. <!-- zh: pending T-IME-BRACKET-FACTS -->
 
 ## 0.4.7-preview — 2026-10-06
 

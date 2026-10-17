@@ -456,12 +456,18 @@ impl Gate {
         self.state().pending.iter().copied().collect()
     }
 
-    /// What the storage worker answered for the receipt, once it has.
-    fn receipt_answered(&self) -> Option<persist::ReceiptWritten> {
+    /// What the storage worker answered for the receipt, once it has — or, its
+    /// answer's channel closed with nothing in it, that it never will: the worker
+    /// failed on the write or ended before it (T-STORAGE-WORKER-ON-THE-SEAM).
+    fn receipt_answered(&self) -> Option<ReceiptAnswer> {
         let mut state = self.state();
-        let written = state.receipt_answer.as_ref()?.try_recv().ok()?;
+        let answered = match state.receipt_answer.as_ref()?.try_recv() {
+            Ok(written) => ReceiptAnswer::Written(written),
+            Err(mpsc::TryRecvError::Empty) => return None,
+            Err(mpsc::TryRecvError::Disconnected) => ReceiptAnswer::Unanswered,
+        };
         state.receipt_answer = None;
-        Some(written)
+        Some(answered)
     }
 
     fn adopt_claim(&self) {
@@ -1016,9 +1022,11 @@ pub(crate) fn watch(
                 }
                 break 'turn;
             }
-            // (1) The receipt.
-            if let Some(written) = gate.receipt_answered() {
-                match written.result {
+            // (1) The receipt. One the storage worker left unanswered — it failed on the write
+            // or ended — is owed like a refused one, and asked again below, at this turn and
+            // each one after, on the watch's own cadence.
+            match gate.receipt_answered() {
+                Some(ReceiptAnswer::Written(written)) => match written.result {
                     Ok(()) => say(&format!(
                         "BT_UPDATE_TRIAL receipt of {txn} written by {:?}",
                         written.by
@@ -1031,7 +1039,15 @@ pub(crate) fn watch(
                         receipt_refusal = error;
                         gate.owe_receipt();
                     }
+                },
+                Some(ReceiptAnswer::Unanswered) => {
+                    receipt_refusal = RECEIPT_UNANSWERED.to_owned();
+                    say(&format!(
+                        "BT_UPDATE_TRIAL receipt of {txn} not written: {receipt_refusal}; the watch asks again at each of its turns, while its watchdog runs or, for the reserved trial, while it asks to commit itself"
+                    ));
+                    gate.owe_receipt();
                 }
+                None => {}
             }
             // The bound: the watchdog's life for an ordinary trial, whose
             // landed receipt a holder or a hand-back's recovery adopts; for
@@ -1589,6 +1605,19 @@ fn receipt_granted(job: &ReceiptJob) -> Result<(), String> {
         ))
     }
 }
+
+/// **What the watch reads of the storage worker's write of the receipt.**
+enum ReceiptAnswer {
+    /// The worker wrote it, or the home refused it.
+    Written(persist::ReceiptWritten),
+    /// The answer's channel closed with nothing in it ([`RECEIPT_UNANSWERED`]).
+    Unanswered,
+}
+
+/// What the watch says of a receipt the storage worker never answered: it
+/// failed on the write — its task panicked, and it went on — or it ended before
+/// it. The receipt is owed, as a refused one is.
+const RECEIPT_UNANSWERED: &str = "the storage worker failed on it or ended before writing it";
 
 /// **The storage worker has the receipt**: its answer is read by the watch,
 /// which says in the log what became of it.
@@ -2533,6 +2562,52 @@ mod tests {
             "asked at each turn: refused at three, then landed"
         );
         assert!(turns > 4 && handed.is_empty(), "{turns} turns, {handed:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-STORAGE-WORKER-ON-THE-SEAM, the review's nit 4) — **a receipt the
+    /// storage worker left unanswered is asked again by the watch**: the worker
+    /// failed on the write (its task panicked, and it went on) or ended before
+    /// it, so the receipt's answer channel closes with nothing in it; the watch
+    /// owes the receipt as it owes a refused one and writes it at its own turn.
+    ///
+    /// MUTATION: in `Gate::receipt_answered`, read a closed channel as no answer
+    /// yet (`Disconnected` → `return None`) — nothing is owed, and the receipt
+    /// never lands.
+    #[test]
+    fn a_receipt_the_storage_worker_left_unanswered_is_asked_again_by_the_watch() {
+        let root = scratch("receipt-unanswered");
+        let home = Home::at(root.join("home"));
+        let job = refused_receipt(&home);
+        std::fs::create_dir_all(home.transaction(TXN)).unwrap();
+        let gate = Gate::new();
+        gate.adopt_claim();
+        assert!(gate.hand_receipt());
+        gate.keep_receipt(job.clone());
+        let (answer, unanswered) = mpsc::channel::<persist::ReceiptWritten>();
+        drop(answer);
+        gate.await_receipt(unanswered);
+        let mut landed_at = None;
+        let (turns, handed) = watch_by_turns(
+            &gate,
+            (&home, &OnDisk),
+            &job,
+            watchdog_asleep().every,
+            Told::to_the_log(&|| {}),
+            None,
+            &mut |turn, on_disk| {
+                if on_disk && landed_at.is_none() {
+                    landed_at = Some(turn);
+                    std::fs::write(home.journal(), journal_bytes(TXN, Phase::Committed)).unwrap();
+                }
+            },
+        );
+        assert_eq!(
+            landed_at,
+            Some(1),
+            "the watch's first turn reads the closed channel and writes the receipt itself"
+        );
+        assert!(turns > 1 && handed.is_empty(), "{turns} turns, {handed:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

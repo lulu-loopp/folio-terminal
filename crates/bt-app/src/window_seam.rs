@@ -214,6 +214,11 @@ pub(crate) trait WindowHost {
     /// The platform's own handle for this window, for the doors that speak to the system about
     /// it — or why there is none.
     fn native_handle(&self) -> anyhow::Result<bt_platform::NativeWindow>;
+    /// **The window's input-method facts, read now** (T-IME-BRACKET-FACTS):
+    /// `bt_platform::ime_observation::snapshot` of the window's own handle, read-only — it never
+    /// associates a context, focuses or notifies. Default facts (every field `None`) where the
+    /// platform has none to read: off Windows, or a window with no native handle.
+    fn ime_facts(&self) -> bt_platform::ime_observation::NativeFacts;
     /// macOS's Option key as Alt, or as the composing key the keyboard prints with.
     fn set_option_as_alt(&self, option_sends_alt: bool);
     /// The window's scale and rectangle as the platform reports them, beside winit's.
@@ -294,6 +299,11 @@ impl WindowHost for Arc<Window> {
     }
     fn native_handle(&self) -> anyhow::Result<bt_platform::NativeWindow> {
         crate::native_window_of(self)
+    }
+    fn ime_facts(&self) -> bt_platform::ime_observation::NativeFacts {
+        crate::native_window_of(self)
+            .map(bt_platform::ime_observation::snapshot)
+            .unwrap_or_default()
     }
     fn set_option_as_alt(&self, option_sends_alt: bool) {
         crate::option_as_alt(self, option_sends_alt);

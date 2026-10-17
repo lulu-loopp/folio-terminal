@@ -528,6 +528,8 @@ Two causes are kept separate:
 
 **Per-lane conformance** moves into each lane's repair ticket (S-4, S-5, S-6a, S-7). Each lane adopts the seam, and its `LaneUnderTest` adapter injects the scripted `Executor` into the **real** lane, so the suite drives the lane's own admission and acceptance.
 
+*Correction, 2026-10-15 (T-STORAGE-WORKER-ON-THE-SEAM):* S-6a did not adopt the seam: it moved the preview's save onto the storage worker's own request protocol, and the worker stayed off the seam (`docs/plans/structural-debt.md` D-97). T-STORAGE-WORKER-ON-THE-SEAM adopts it for the storage worker: `persist::StorageLane` on `lane::Ledger` and `lane::Executor` with a line of its own (one FIFO, the trial's receipt served ahead of it, each job kind's own answer road), every job admitted by the ledger up to `persist::STORAGE_BOUND` (50, coordinator ruling R1), a panic in one job that request's `Failed` with the worker going on (R2), and `LaneName::Storage` keeping every claim. `Terminal::Cancelled`'s first adopter is S-7 (T-CLIPBOARD-LANE, R3): the storage worker drops no request at its requester's word.
+
 MUTATIONS:
 - in the ledger, drop a superseded identity's terminal;
 - deliver twice on a cancel racing an answer;

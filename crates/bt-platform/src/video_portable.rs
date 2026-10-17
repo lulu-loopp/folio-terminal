@@ -249,7 +249,13 @@ fn within_budget<T: Send + 'static>(
 /// A no-op, and one of the plan's §4.4 class-N items rather than deferred work:
 /// `MFStartup` is a Windows requirement that AVFoundation does not have, so
 /// there is nothing to warm and nothing downstream notices.
-pub fn prewarm() {}
+///
+/// # Errors
+///
+/// None: there is no thread to start. The `Result` is the Windows door's shape.
+pub fn prewarm() -> std::io::Result<()> {
+    Ok(())
+}
 
 /// Shut the media platform down on the way out.
 ///

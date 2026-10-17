@@ -481,3 +481,50 @@ fn with_environment_seeds_the_first_launchs_pane_with_the_launchers_environment(
         "without the flag the pane takes the account's environment"
     );
 }
+
+/// RED (T-PROFILE-INSTALL-REFUSED-START) — **a stale-claim sweep the thread door refused is said
+/// once.** Nobody waits on the sweep — its one line in diagnostics.log is its whole answer, and the
+/// files it would have taken are left for the next start's — so a refused start is said, in the
+/// door's words, and nothing else. Before, it was thrown away (`let _ =` on the thread door's answer)
+/// and nothing said the sweep had not run.
+///
+/// MUTATION: the sweep's `Answered` not saying — no line.
+#[test]
+fn a_refused_claim_sweep_is_said_once() {
+    let gate = std::sync::Arc::new(lane::Gate::default());
+    gate.refuse_next_start();
+    let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let lines = std::sync::Arc::clone(&said);
+    let started = start_claim_sweep(&lane::Executor::scripted(gate), move |line| {
+        lines.lock().unwrap().push(line.to_owned());
+    });
+    let said = said.lock().unwrap().clone();
+    assert!(!started, "the door refused the start");
+    assert_eq!(said.len(), 1, "the refused start is said once: {said:?}");
+    assert!(
+        said[0].contains(lane::REFUSED_START),
+        "in the door's words: {said:?}"
+    );
+}
+
+/// RED (T-PROFILE-INSTALL-REFUSED-START) — **a media warm-up the thread door refused is said
+/// once.** Nobody waits on the warm-up — the first video hover starts the platform itself — so the
+/// refusal is said, in the door's words, and nothing else. Before, `prewarm` threw it away.
+///
+/// MUTATION: `start_video_prewarm` ignoring the refusal — no line.
+#[test]
+fn a_refused_video_prewarm_is_said_once() {
+    fn refused() -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "the launch suite refuses this thread on purpose",
+        ))
+    }
+    let said = std::cell::RefCell::new(Vec::<String>::new());
+    start_video_prewarm(refused, |line| said.borrow_mut().push(line.to_owned()));
+    let said = said.into_inner();
+    assert_eq!(said.len(), 1, "the refused start is said once: {said:?}");
+    assert!(
+        said[0].contains("the launch suite refuses this thread on purpose"),
+        "in the door's words: {said:?}"
+    );
+}
