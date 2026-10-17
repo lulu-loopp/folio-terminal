@@ -11,6 +11,17 @@ for Folio you must already be able to run programs as this user, and a program
 that can do that can read the same content directly. What they are is a way for
 this build to put screen contents on disk, and a public build owes a list of them.
 
+**Read once, at the program's entry.** Every recording and trace switch below
+(`BT_PTY_DUMP`, `BT_PTY_INPUT_DUMP`, every `BT_*_TRACE`, `BT_CHROME_DUMP`,
+`BT_FOCUS_THUMB_DUMP`, `BT_GLYPH_CENSUS`, `BT_LAYOUT_EVENTS`) is read once, by
+`folio.exe`'s entry (`bt_app::entry_doors`, before anything can reach the code
+that writes it), and handed to that code; no library reads one at the moment of
+use. A test binary runs the same libraries but not that entry, so it honours
+none of them unless it hands one in itself. The behaviour doors that are still
+read where they are used are each a row of `docs/plans/ENV-DOORS.tsv` with the
+ticket that moves it to the entry, and `crates/bt-source/tests/env_doors.rs`
+holds the source to that list. What each switch does is unchanged.
+
 `docs/BT-ENVIRONMENT.md` is checked against the source by a test —
 `bt_app::diagnostics::bt_environment_doc_tests` — which scans every non-binary,
 non-integration-test `.rs` file under `crates/` and `vendor/` for `BT_` string
@@ -132,6 +143,13 @@ and `BT_INSTALL_TXN_CHILD_GO` — the three paths `bt-platform`'s
 second copy of its own test binary: the admission file the child holds shared, the
 file the child creates once it holds it, and the file whose appearance tells it to
 let go. Only that test's child half reads them; no product code does.
+`BT_PTY_RECORDING_TEST_CHILD` names the private folder `bt-pty`'s two real-pane
+recording tests (`tests::a_real_pane_nobody_asked_to_record_records_nothing_whatever_the_environment_says`
+and `tests::a_real_pane_asked_to_record_records_to_its_own_files_and_the_second_takes_dot_two`)
+set on the copy of their own test binary that starts the panes, with `BT_PTY_DUMP` and
+`BT_PTY_INPUT_DUMP` set to files of that folder; `BT_ENTRY_DOORS_TEST_CHILD` does the same
+for `bt-app`'s two `entry_doors::tests` that run with every diagnostic door set. Only those
+tests' child halves read them, and they write only into the test's own temporary folder.
 `BT_STANDALONE_ENTRY_TEST_CHILD` carries the name of the one test `bt-app`'s
 `tests::alone_in_a_process` runs again in a process of its own — the three
 standalone-entry cases of `attention_wire` and `explorer_menu`, whose claim holds
