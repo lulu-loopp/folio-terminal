@@ -1716,8 +1716,11 @@ fn two_preview_panes_at_two_sizes_each_get_their_picture() {
 /// painted**: the panes ask the same size while the scale share is busy; each request is
 /// answered, each answer goes to the pane that asked it, and the next frame draws both pictures.
 ///
-/// MUTATION: give every preview picture one address (as above) — the second request joins the
-/// first, its one answer goes to the first pane, and the second waits for good.
+/// MUTATIONS: give every preview picture one address (as above) — the second request joins the
+/// first, its one answer goes to the first pane, and the second waits for good; deliver every
+/// answer to the first pane showing the picture, whatever asked and whatever it awaits (the
+/// `PreviewPanes::awaiting_scale` predicate made `true`) — both answers reach the first pane and
+/// the second is never painted.
 #[test]
 fn two_preview_panes_at_one_size_are_both_painted() {
     let (mut folio, mut lane, gate, _shell, panes) =
@@ -1755,9 +1758,9 @@ fn two_preview_panes_at_one_size_are_both_painted() {
 
 /// RED (T-SCALE-ADDRESS-PER-ASKER) — **one Markdown page's picture at two sizes: both sizes land
 /// and nothing stays `Pending`**. The page reads its picture and owes the exact-size pass at the
-/// size it draws it; the pass is sent while the scale share is busy; then the page owes the same
-/// picture at a second size (a refit to a new measure) and sends that too, while the first still
-/// waits. Both rasters land in the window's cache, and no entry of it is left `Pending`.
+/// size it draws it; the pass is sent while the scale share is busy; then the window is narrowed
+/// (`Runtime::resized`), the page is laid out again to its narrower column and owes the same
+/// picture at a second size, and sends that too while the first still waits. Both rasters land in the window's cache, and no entry of it is left `Pending`.
 ///
 /// MUTATION: give every page picture one address (`Self::MarkdownImage { .. } =>
 /// ScalePurpose::MarkdownImage((0, 0))` in `ScaleWorkerRequest::purpose`) — the second size
@@ -1768,7 +1771,8 @@ fn a_page_picture_at_two_sizes_lands_both_and_leaves_nothing_pending() {
         two_panes_on_a_watched_lane("markdown-two-sizes");
     let file = scratch_png_named("页面两种大小 page sizes");
     let _written = crate::test_support::ScratchFile(file.clone());
-    std::fs::write(&file, png_bytes(240, 120)).expect("a scratch file this test owns");
+    // Wider than the page's column at either window width, so the page draws it to the column.
+    std::fs::write(&file, png_bytes(2400, 1200)).expect("a scratch file this test owns");
     a_page_on(&mut folio, page, &file);
     folio.runtime().refresh_preview_for_layout();
     assert!(
@@ -1809,18 +1813,33 @@ fn a_page_picture_at_two_sizes_lands_both_and_leaves_nothing_pending() {
         .runtime()
         .finish_preview_scale_if_quiet(deadline)
         .expect("the quiet sends the first size");
-    let second = crate::MarkdownRasterRequest {
-        key: crate::MarkdownRasterKey {
-            content: first.key.content.clone(),
-            width_px: first.key.width_px / 2,
-            height_px: first.key.height_px / 2,
-        },
-        ..first.clone()
-    };
+    // The reader narrows the window while that pass is out, through the window's own resize door:
+    // the page is laid out again to its narrower column and owes the picture at the new size.
+    let wide = folio.window.window.size;
+    let narrow = winit::dpi::PhysicalSize::new(wide.width * 2 / 3, wide.height);
+    folio.window.window.size = narrow;
     folio
+        .runtime()
+        .resized(narrow)
+        .expect("the window takes its new rectangle");
+    folio.draw();
+    let second = folio
         .window
         .markdown_pictures
-        .owe(second.clone(), Instant::now());
+        .owed
+        .values()
+        .next()
+        .cloned()
+        .expect("the narrower page owes its picture at the new size");
+    assert_eq!(
+        second.key.content, first.key.content,
+        "the fixture's own precondition: the same picture"
+    );
+    assert_ne!(
+        (second.key.width_px, second.key.height_px),
+        (first.key.width_px, first.key.height_px),
+        "the fixture's own precondition: at a second size"
+    );
     let deadline = quiet(&folio);
     folio
         .runtime()
