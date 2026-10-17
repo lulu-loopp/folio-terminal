@@ -4720,24 +4720,12 @@ const SEAT: &str = "bt-app crate::video_seat::<VideoSeat as Drop>::drop";
 const SEAT_SHUTDOWN: &str = "bt-app crate::video_seat::VideoSeat::shutdown";
 const SEATS: &str = "bt-app crate::video_seat::<VideoSeats as Drop>::drop";
 const SEATS_SHUTDOWN_ALL: &str = "bt-app crate::video_seat::VideoSeats::shutdown_all";
-const PTY: &str = "bt-pty crate::<PtySession as Drop>::drop";
 const PTY_SHUTDOWN: &str = "bt-pty crate::PtySession::shutdown";
-const DUMP_FINISH: &str = "bt-pty crate::PtyDump::finish";
-const DUMP_PUBLISH: &str = "bt-pty crate::PtyDump::publish";
-const INPUT_CLOSE: &str = "bt-pty crate::InputRing::close";
-const INPUT_STATE: &str = "bt-pty crate::InputRing::state";
-const OUTPUT_CLOSE: &str = "bt-pty crate::OutputRing::close";
-const OUTPUT_STATE: &str = "bt-pty crate::OutputRing::state";
-const REAP_WITHIN: &str = "bt-pty crate::reap_within";
-const JOIN_WITHIN: &str = "bt-pty crate::join_within";
-/// `thiserror`'s `#[from]` on `PtyError::Io`: a first-party `From` no byte holds, so an edge
-/// with no body to read.
-const PTY_ERROR_FROM: &str = "bt-pty crate::PtyError::from (generated)";
 /// **The exception table** (revision (e)3 as corrected by (f)2, (g), and (n)): the `Drop`s that may
 /// reach the vocabulary, each owed a repayment in `docs/plans/structural-debt.md`. A row leaves
 /// when its repayment lands (T-DROP-DOORS): the wait moves to the value's named door, its `Drop`
 /// keeps only what needs no wait, and the check below then holds that `Drop` like any other.
-const EXCEPTIONS: [Exception; 7] = [
+const EXCEPTIONS: [Exception; 6] = [
     Exception {
         row: "DirWatch (Windows)",
         drop: DIRWATCH_WINDOWS,
@@ -4762,14 +4750,10 @@ const EXCEPTIONS: [Exception; 7] = [
         row: "VideoSeats",
         drop: SEATS,
     },
-    Exception {
-        row: "PtySession",
-        drop: PTY,
-    },
 ];
 
 /// **Every pinned body**, walked from the exceptions: nothing a listed `Drop` reaches is exempt.
-const PINNED: [Pinned; 23] = [
+const PINNED: [Pinned; 13] = [
     Pinned {
         body: DIRWATCH_WINDOWS,
         edges: &[&[CLOSE_WINDOWS], &[CLOSE_WINDOWS], &[CLOSE_WINDOWS]],
@@ -4851,73 +4835,6 @@ const PINNED: [Pinned; 23] = [
         edges: &[&[SEAT_SHUTDOWN]],
         effects: &[],
         leaves: &["take"],
-    },
-    Pinned {
-        body: PTY,
-        edges: &[&[DUMP_FINISH], &[PTY_SHUTDOWN]],
-        effects: &[],
-        leaves: &["take"],
-    },
-    Pinned {
-        body: DUMP_FINISH,
-        edges: &[&[DUMP_PUBLISH]],
-        effects: &[("Write::write_fmt", 1)],
-        leaves: &[],
-    },
-    Pinned {
-        body: DUMP_PUBLISH,
-        edges: &[],
-        effects: &[("File::sync_data", 2)],
-        leaves: &[],
-    },
-    Pinned {
-        body: PTY_SHUTDOWN,
-        edges: &[
-            &[INPUT_CLOSE],
-            &[PTY_ERROR_FROM],
-            &[REAP_WITHIN],
-            &[PTY_ERROR_FROM],
-            &[OUTPUT_CLOSE],
-            &[JOIN_WITHIN],
-        ],
-        effects: &[("Child::try_wait", 2)],
-        leaves: &["take"],
-    },
-    Pinned {
-        body: INPUT_CLOSE,
-        edges: &[&[INPUT_STATE]],
-        effects: &[],
-        leaves: &[],
-    },
-    Pinned {
-        body: INPUT_STATE,
-        edges: &[],
-        effects: &[],
-        leaves: &[],
-    },
-    Pinned {
-        body: OUTPUT_CLOSE,
-        edges: &[&[OUTPUT_STATE]],
-        effects: &[],
-        leaves: &[],
-    },
-    Pinned {
-        body: OUTPUT_STATE,
-        edges: &[],
-        effects: &[],
-        leaves: &[],
-    },
-    Pinned {
-        body: REAP_WITHIN,
-        edges: &[],
-        effects: &[("thread::sleep", 1)],
-        leaves: &[],
-    },
-    Pinned {
-        body: JOIN_WITHIN,
-        edges: &[],
-        effects: &[("JoinHandle::join", 1), ("thread::sleep", 1)],
-        leaves: &[],
     },
 ];
 
