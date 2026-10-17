@@ -67555,6 +67555,28 @@ impl<B: Backend> FolioApp<B> {
     /// as the close of the ordinary window that ends it (`Self::close`, which
     /// asks the summoned terminal again). A close a `Save all` wait re-requested
     /// is taken as the dispatcher takes one.
+    /// **When the loop must come back to end a close's wait** (S-6b): the soonest bound of a
+    /// close waiting on a gate, or of an ended tab waiting for its saves, after `now`. A leaving
+    /// window's waits are not decided (`Self::settle_close_waits` skips it), and no close's wait
+    /// is decided while a quit is under way, so neither joins the wake-up: their bounds would be
+    /// a wake-up in the past on every turn. The answers themselves wake the loop.
+    fn close_waits_wake(&self, now: Instant) -> Option<Instant> {
+        if self.app.as_ref().is_some_and(|app| app.quit.is_some()) {
+            return None;
+        }
+        self.windows
+            .values()
+            .filter(|window| window.leaving.is_none())
+            .flat_map(|window| {
+                [
+                    window.dirty_gate.waits_until(),
+                    window.exited_tab_waits.next_after(now),
+                ]
+            })
+            .flatten()
+            .min()
+    }
+
     fn settle_close_waits(&mut self, event_loop: &B::Loop, now: Instant) -> Result<()> {
         // **Not while a quit is under way** (round 3): the quit's card is the one question,
         // and a wait decided under it would close a pane or a tab mid-quit, or put the gate's
@@ -69341,22 +69363,7 @@ impl<B: Backend> FolioApp<B> {
             .and_then(quit::Quit::deadline);
         // **And every close's bound, while it waits for its saves** (S-6b): the answers
         // wake the loop themselves; the clock is only the bound.
-        // A leaving window's wait is not looked at, and neither is any while a quit is under
-        // way (`Self::settle_close_waits`): their bounds would be a wake-up in the past on every
-        // turn.
-        let quitting = self.app.as_ref().is_some_and(|app| app.quit.is_some());
-        let close_wake = self
-            .windows
-            .values()
-            .filter(|window| window.leaving.is_none() && !quitting)
-            .flat_map(|window| {
-                [
-                    window.dirty_gate.waits_until(),
-                    window.exited_tab_waits.next_after(now),
-                ]
-            })
-            .flatten()
-            .min();
+        let close_wake = self.close_waits_wake(now);
         let wake_deadline = earliest_deadline([wake_deadline, quit_wake, close_wake]);
         event_loop
             .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));

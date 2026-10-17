@@ -1007,3 +1007,113 @@ fn save_all_over_a_body_undone_since_its_save_asks_before_the_window_goes() {
     );
     assert_eq!(saving.asked_title(), restore::gate_title_text());
 }
+
+/// RED (S-6b round 4) — **a close's wait is not decided while a quit is under way; once the quit is
+/// cancelled, the next turn decides it.**
+///
+/// The pane's close waits for its save. A quit begins: the quit's card is the one question, so the
+/// save landing under it closes nothing — the wait stands and the pane stays. The quit is
+/// cancelled; on the next turn the wait is decided, and the pane closes.
+///
+/// MUTATION: drop the quit guard at the head of `FolioApp::settle_close_waits` — the "the wait
+/// stands" assertion goes red: the wait closes the pane mid-quit.
+#[test]
+fn a_close_wait_is_not_decided_while_a_quit_is_under_way() {
+    let mut saving = Saving::open("under-a-quit", &["退出 quitting.md"]);
+    saving.press_save(0);
+    let seat = saving.seats[0];
+    saving
+        .application
+        .runtime()
+        .close_pane(seat)
+        .expect("the close is asked");
+    assert!(saving.waits());
+    saving
+        .application
+        .folio
+        .app
+        .as_mut()
+        .expect("the application")
+        .quit = Some(crate::quit::Quit::begin(vec![
+        "退出 quitting.md".to_owned(),
+    ]));
+
+    saving.serve(None);
+    saving.turn();
+    assert!(saving.waits(), "the wait stands under the quit");
+    assert!(saving.pane_stands(0), "and no pane is closed mid-quit");
+
+    saving
+        .application
+        .folio
+        .app
+        .as_mut()
+        .expect("the application")
+        .quit = None;
+    saving.turn();
+    assert!(!saving.waits(), "the quit cancelled, the wait is decided");
+    assert!(
+        !saving.pane_stands(0),
+        "the save had landed: the pane closes"
+    );
+}
+
+/// RED (S-6b round 4) — **a close's bound joins the loop's wake-up only where the wait is decided:
+/// never in a leaving window, never under a quit.**
+///
+/// A pane's close waits for its save, so its bound is the loop's next wake-up. Under a quit, or once
+/// the window is leaving, the wait is not decided (`FolioApp::settle_close_waits`), so its bound
+/// would be a wake-up in the past on every turn: it is left out.
+///
+/// MUTATION: in `FolioApp::close_waits_wake`, drop the quit check — the "under a quit" assertion
+/// goes red; drop the `leaving.is_none()` filter — the "leaving" assertion goes red.
+#[test]
+fn a_close_bound_joins_the_wake_up_only_where_the_wait_is_decided() {
+    let mut saving = Saving::open("wake", &["醒 wake.md"]);
+    saving.press_save(0);
+    let seat = saving.seats[0];
+    saving
+        .application
+        .runtime()
+        .close_pane(seat)
+        .expect("the close is asked");
+    let now = Instant::now();
+    let bound = saving.application.folio.close_waits_wake(now);
+    assert!(
+        bound.is_some_and(|bound| bound > now),
+        "the bound is the next wake-up"
+    );
+
+    let app = saving
+        .application
+        .folio
+        .app
+        .as_mut()
+        .expect("the application");
+    app.quit = Some(crate::quit::Quit::begin(vec!["醒 wake.md".to_owned()]));
+    assert_eq!(
+        saving.application.folio.close_waits_wake(now),
+        None,
+        "under a quit no close's bound wakes the loop"
+    );
+    saving
+        .application
+        .folio
+        .app
+        .as_mut()
+        .expect("the application")
+        .quit = None;
+
+    saving
+        .application
+        .folio
+        .windows
+        .get_mut(WindowId::from(1))
+        .expect("the window")
+        .leaving = Some(now);
+    assert_eq!(
+        saving.application.folio.close_waits_wake(now),
+        None,
+        "a leaving window's bound does not wake the loop"
+    );
+}
