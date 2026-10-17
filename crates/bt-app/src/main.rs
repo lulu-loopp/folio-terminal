@@ -82307,7 +82307,7 @@ mod clipboard_path_tests {
                 "and it is addressed — tab, seat and shell — as it arrives (X-1)",
             ),
             (
-                ".and_then(bt_platform::pointer_position_in_window)",
+                "bt_platform::pointer_position_in_window(native)",
                 "and there is one door onto the platform's cursor in this window",
             ),
             (
