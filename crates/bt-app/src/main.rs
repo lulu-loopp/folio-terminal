@@ -2133,9 +2133,28 @@ impl MathWorkerRequest {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ScalePurpose {
     InlineImage(u64),
-    Peek,
+    Peek(PeekSurface),
     Preview,
     MarkdownImage,
+}
+
+/// **Which of the window's two glances asked for a peek resample**
+/// (T-PEEK-SCALE-ADDRESS-BY-SURFACE).
+///
+/// The terminal's flyout and the glance card both ask the scale share for one
+/// decoded picture at a display size, and each keeps its own pending slot and
+/// its own raster (`peek_thumbnail_pending` / `peek_card_pending`). The surface
+/// is part of the address for the reason [`ScaleWorkerRequest::same_target`]
+/// gives about leaves: without it, a card over the file the flyout is waiting
+/// on asked "the same question" and its request superseded the flyout's, whose
+/// slot then waited for an answer that was never coming. It travels back on
+/// the answer, so each surface is told only its own.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PeekSurface {
+    /// The terminal's inline-image flyout, sized against the pane it was raised in.
+    Flyout,
+    /// The glance card, sized to the card's own picture box.
+    Card,
 }
 
 enum ScaleWorkerRequest {
@@ -2145,6 +2164,7 @@ enum ScaleWorkerRequest {
     },
     Peek {
         leaf: ShellAddress,
+        surface: PeekSurface,
         task: bt_term::InlineImageScaleTask,
     },
     Preview {
@@ -2165,7 +2185,7 @@ impl ScaleWorkerRequest {
     fn purpose(&self) -> ScalePurpose {
         match self {
             Self::InlineImage { task, .. } => ScalePurpose::InlineImage(task.occurrence_id),
-            Self::Peek { .. } => ScalePurpose::Peek,
+            Self::Peek { surface, .. } => ScalePurpose::Peek(*surface),
             Self::Preview { .. } => ScalePurpose::Preview,
             Self::MarkdownImage { .. } => ScalePurpose::MarkdownImage,
         }
@@ -2223,7 +2243,9 @@ impl ScaleWorkerRequest {
 
     /// Coalescing is per leaf: two panes asking for the same picture at the same size are two
     /// answers owed, and letting one stand in for the other is how a pane ends up waiting forever
-    /// for a raster that was delivered next door.
+    /// for a raster that was delivered next door. The purpose is per surface on the same terms
+    /// ([`PeekSurface`]): the flyout and the glance card over one file are two slots waiting, and
+    /// one superseding the other left the older one waiting for nothing.
     fn same_target(&self, other: &Self) -> bool {
         self.leaf() == other.leaf()
             && self.purpose() == other.purpose()
@@ -2238,9 +2260,14 @@ impl ScaleWorkerRequest {
                     scaled: bt_term::scale_inline_image(&task),
                 },
             ),
-            Self::Peek { leaf, task } => (
+            Self::Peek {
+                leaf,
+                surface,
+                task,
+            } => (
                 leaf,
                 DecorationWorkerCompletion::PeekScaledImage {
+                    surface,
                     scaled: bt_term::scale_inline_image(&task),
                 },
             ),
@@ -2310,7 +2337,9 @@ enum DecorationWorkerCompletion {
         fit: (u32, u32),
         outcome: PeekPageOutcome,
     },
+    /// A peek resample, and the surface that asked for it ([`PeekSurface`]).
     PeekScaledImage {
+        surface: PeekSurface,
         scaled: bt_term::ScaledInlineImage,
     },
     PreviewScaledImage {
@@ -17577,6 +17606,7 @@ mod worker_answer_routing_tests {
         let peeked = MathWorkerResult {
             leaf: address,
             completion: DecorationWorkerCompletion::PeekScaledImage {
+                surface: PeekSurface::Flyout,
                 scaled: bt_term::ScaledInlineImage {
                     occurrence_id: 0,
                     content_key: String::new(),
