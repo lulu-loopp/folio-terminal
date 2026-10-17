@@ -360,9 +360,7 @@ fn existing_hidden_callers_keep_the_same_fused_value() {
 #[test]
 fn attempt_generation_is_carried_by_configure_and_native_reads_are_line_gated() {
     let body = method_body("Runtime", "finish_present_attempt");
-    assert!(
-        body.find("if self.app.trace_perf").unwrap() < body.find(".present_facts()").unwrap()
-    );
+    assert!(body.find("if self.app.trace_perf").unwrap() < body.find(".present_facts()").unwrap());
     let body = method_body("Runtime", "check_picture_freshness");
     assert!(body.find("if let Some(line)").unwrap() < body.find(".present_facts()").unwrap());
     let in_render = |text: &str| {

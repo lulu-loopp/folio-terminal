@@ -58109,7 +58109,7 @@ mod hold_station_tests {
                 "WebVisual",
                 "compositor.attach_web_visual(",
             ),
-            ("WebSeat", "step", "WebInstall", "tree.install(&mutself.host,"),
+            ("WebSeat", "step", "WebInstall", "tree.install("),
             ("WebSeat", "step", "WebFloor", "self.stand_on_the_floor("),
             ("WebSeat", "step", "WebNavigate", "self.host.navigate("),
         ] {
