@@ -24852,23 +24852,17 @@ impl TabRename {
 /// selection on the clipboard (the cut then takes it), `Ctrl+V` puts one line of
 /// the clipboard in, `Ctrl+←`/`Ctrl+→` and `Ctrl+Backspace` walk and eat by
 /// word, and `Shift` with any motion drags the selection's far end along.
-/// **The clipboard, as one key press can reach it** (0.3).
+/// **The clipboard, as one key press can reach it** (0.3): what the press wants put on it, read
+/// back by the caller ([`Self::copied`]). A paste is not here: the window asks the clipboard lane
+/// for it when the chord is one ([`rename_pastes`], T-CLIPBOARD-LANE) and never hands the chord to
+/// [`rename_key`]; the line lands through the editor's own insert door (`Runtime::rename_ime`) on
+/// the turn the clipboard answers.
 ///
-/// Handed in rather than read here, on `settings_field_key`'s own arrangement:
-/// asking the system what it is holding is a call into another process, and a
-/// field that made it on every keystroke would pay for a paste it was not being
-/// asked for. The caller reads the clipboard only when the chord *is* a paste
-/// ([`rename_pastes`]), and reads [`Self::copied`] back afterwards to learn
-/// whether this press wants anything put there.
-///
-/// A struct rather than two parameters because it keeps [`rename_key`] pure: the
-/// whole editor stays testable without a window handle, which is what the tests
-/// this migration is pinned by depend on.
+/// A struct rather than a bare return because it keeps [`rename_key`] pure: the whole editor
+/// stays testable without a window handle, which is what the tests this migration is pinned by
+/// depend on.
 #[derive(Debug, Default)]
-struct RenameClipboard<'a> {
-    /// What the clipboard holds, already cut to one line — empty unless this
-    /// press was a paste.
-    paste: &'a str,
+struct RenameClipboard {
     /// What this press wants put on the clipboard, if anything.
     copied: Option<String>,
 }
@@ -24889,7 +24883,7 @@ fn rename_key(
     editor: &mut TabRename,
     key: &Key,
     modifiers: ModifiersState,
-    clipboard: &mut RenameClipboard<'_>,
+    clipboard: &mut RenameClipboard,
 ) -> RenameVerdict {
     use text_field::TextMove;
     // A chord is not text: an Alt- or Win-modified key is swallowed unhandled,
@@ -24945,9 +24939,6 @@ fn rename_key(
                 editor.field.delete();
                 editor.clamp_scroll();
             }
-        }
-        _ if rename_pastes(key, modifiers) => {
-            editor.insert(clipboard.paste);
         }
         // Every other `Ctrl`-letter chord: swallowed, for the reason the whole
         // ladder is ordered by — the thing underneath this editor is a shell.

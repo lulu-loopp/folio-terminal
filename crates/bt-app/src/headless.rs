@@ -1265,13 +1265,15 @@ impl HeadlessFolio {
             let now = runtime
                 .window
                 .clipboard
-                .paste
-                .as_ref()
-                .map_or_else(Instant::now, |owed| owed.asked_at);
+                .pastes
+                .iter()
+                .map(|owed| owed.asked_at)
+                .min()
+                .unwrap_or_else(Instant::now);
             runtime
                 .settle_clipboard(now)
                 .expect("the clipboard's answers are spent");
-            runtime.window.clipboard.paste.is_none() && runtime.window.clipboard.copy.is_none()
+            runtime.window.clipboard.is_empty()
         });
     }
 }

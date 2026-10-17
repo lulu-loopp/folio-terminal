@@ -670,7 +670,7 @@ fn a_paste_whose_pane_closes_ends_cancelled_and_writes_nothing() {
         .settle_clipboard(now)
         .expect("the turn settles the clipboard");
     assert!(
-        folio.runtime().window.clipboard.paste.is_none(),
+        folio.runtime().window.clipboard.pastes.is_empty(),
         "withdrawn"
     );
     assert_eq!(lane.sunk(), [crate::lane::Terminal::Cancelled]);
@@ -690,16 +690,17 @@ fn a_paste_whose_pane_closes_ends_cancelled_and_writes_nothing() {
     );
 }
 
-/// RED (T-CLIPBOARD-LANE) — **two pastes into one pane: the older ends `Superseded` by the newer,
-/// and each ends once** — the newer's text is written once, the key typed between the two presses
-/// goes before it (the person's order: the older paste contributed nothing), and nothing reaches
-/// the lane's sink.
+/// RED (T-CLIPBOARD-LANE round 2) — **two pastes into one pane queue, in the order they were
+/// pressed**: `Ctrl+V`, `k`, `Ctrl+V` with the clipboard's worker held reaches the shell as the
+/// first paste, `k`, the second — what the shell is sent when the clipboard answers at once — and
+/// each ends once, taken by the window: nothing reaches the lane's sink, nothing is said.
 ///
-/// MUTATION: in `Runtime::ask_for_a_paste`, let the older paste go (`drop(older)`) instead of
-/// superseding it — its terminal is not the window's but the lane's sink's.
+/// MUTATION: in `Runtime::ask_for_a_paste`, supersede the paste still owed by the newer one
+/// (`self.app.clipboard_lane.supersede(older, id)` on the last owed paste) — the first press's
+/// text is lost (`k粘贴 pasted`).
 #[test]
-fn two_pastes_into_one_pane_end_the_older_superseded_and_each_once() {
-    let mut folio = a_window_pasting("clipboard-lane-supersede", "粘贴 pasted");
+fn two_pastes_into_one_pane_queue_in_the_order_they_were_pressed() {
+    let mut folio = a_window_pasting("clipboard-lane-queue", "粘贴 pasted");
     let lane = recording_lane(
         &mut folio,
         &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
@@ -713,12 +714,83 @@ fn two_pastes_into_one_pane_end_the_older_superseded_and_each_once() {
     chord(&mut folio, "v", KeyCode::KeyV);
     hold.worker_hold().release();
     folio.settle_clipboard();
-    assert_eq!(sent_to_the_shell(&mut folio, 0), "k粘贴 pasted");
+    assert_eq!(sent_to_the_shell(&mut folio, 0), "粘贴 pastedk粘贴 pasted");
     assert!(
         lane.sunk().is_empty(),
         "each terminal was taken by the window"
     );
     assert!(lane.said().is_empty(), "and none was a failure");
+}
+
+/// RED (T-CLIPBOARD-LANE round 2) — **a paste owed to the shell is not lost to a later paste into a
+/// field**: with the worker held, a paste pressed in the shell and then one pressed in the palette
+/// that opened over it both land — the shell's in the shell, the palette's in its box.
+///
+/// MUTATION: in `Runtime::ask_for_a_paste`, supersede the paste still owed by the newer one — the
+/// shell is sent nothing.
+#[test]
+fn a_shell_paste_still_owed_lands_beside_a_later_paste_into_a_field() {
+    let mut folio = a_window_pasting("clipboard-lane-cross", "粘贴 pasted");
+    let hold = folio.window.window.clipboard.clone();
+    hold.worker_hold().hold();
+    chord(&mut folio, "v", KeyCode::KeyV);
+    hold.worker_hold()
+        .wait_standing("the shell's paste on the clipboard lane's worker");
+    folio
+        .runtime()
+        .open_command_palette()
+        .expect("the palette opens");
+    chord(&mut folio, "v", KeyCode::KeyV);
+    hold.worker_hold().release();
+    folio.settle_clipboard();
+    assert_eq!(sent_to_the_shell(&mut folio, 0), "粘贴 pasted");
+    let query = folio
+        .runtime()
+        .window
+        .palette
+        .as_ref()
+        .map(|palette| palette.query().into_owned())
+        .unwrap_or_default();
+    assert_eq!(query, "粘贴 pasted");
+}
+
+/// RED (T-CLIPBOARD-LANE round 2) — **a window owes at most `PASTES_OWED` pastes**: with the
+/// worker held, the press past that desk is refused on the window, says once that the clipboard
+/// was busy, and the pastes before it all land, in order, when the worker goes on.
+///
+/// MUTATION: drop the desk's check in `Runtime::ask_for_a_paste` — the ninth press is queued and
+/// nothing is said.
+#[test]
+fn a_paste_past_the_windows_desk_is_refused_on_it() {
+    let mut folio = a_window_pasting("clipboard-lane-desk", "粘");
+    let hold = folio.window.window.clipboard.clone();
+    hold.worker_hold().hold();
+    chord(&mut folio, "v", KeyCode::KeyV);
+    hold.worker_hold()
+        .wait_standing("the first paste on the clipboard lane's worker");
+    for _ in 1..crate::clipboard_lane::PASTES_OWED {
+        chord(&mut folio, "v", KeyCode::KeyV);
+    }
+    assert_eq!(
+        notices(&mut folio, crate::i18n::Text::PasteClipboardBusy.text()),
+        0
+    );
+    chord(&mut folio, "v", KeyCode::KeyV);
+    assert_eq!(
+        notices(&mut folio, crate::i18n::Text::PasteClipboardBusy.text()),
+        1,
+        "the press past the desk says so once"
+    );
+    assert_eq!(
+        folio.runtime().window.clipboard.pastes.len(),
+        crate::clipboard_lane::PASTES_OWED
+    );
+    hold.worker_hold().release();
+    folio.settle_clipboard();
+    assert_eq!(
+        sent_to_the_shell(&mut folio, 0),
+        "粘".repeat(crate::clipboard_lane::PASTES_OWED)
+    );
 }
 
 /// RED (T-CLIPBOARD-LANE; (c)4) — **a paste past its deadline is cancelled, the held keys go in
@@ -767,12 +839,16 @@ fn a_paste_past_its_deadline_is_cancelled_and_the_held_keys_go_in_order() {
     );
 }
 
-/// RED (T-CLIPBOARD-LANE; (c)4) — **held input past the cap cancels the paste and goes in order**:
-/// a commit that takes what the pane holds past `bt_pty::PTY_INPUT_RING_BYTES`, and a key after it,
-/// both reach the shell, in their order, on the turn the cap is passed.
+/// RED (T-CLIPBOARD-LANE; (c)4; round 2) — **held input past the cap cancels the paste and goes in
+/// order, each write as it was typed**: a commit, then one that would take what the pane holds
+/// past `bt_pty::PTY_INPUT_RING_BYTES`, then a key — on the turn the cap is passed the paste is
+/// withdrawn and the three are offered to the shell in their order, each as its own write: the
+/// first and the key are taken, and the flood is refused exactly as the pane would have refused it
+/// with no paste in the way (it does not fit beside the first), its one line said by the pane's
+/// own door. Nothing is offered as one joined write that the pane would refuse whole.
 ///
 /// MUTATION: make `PasteHold::over_the_cap` answer `false` — the paste stays owed and nothing is
-/// sent.
+/// sent (`""`).
 #[test]
 fn held_input_over_the_cap_cancels_the_paste_and_goes_in_order() {
     let mut folio = a_window_pasting("clipboard-lane-cap", "粘贴 never");
@@ -785,6 +861,7 @@ fn held_input_over_the_cap_cancels_the_paste_and_goes_in_order() {
     chord(&mut folio, "v", KeyCode::KeyV);
     hold.worker_hold()
         .wait_standing("the paste on the clipboard lane's worker");
+    commit(&mut folio, "中文");
     let flood = "汉".repeat(bt_pty::PTY_INPUT_RING_BYTES.get() / 3 + 1);
     commit(&mut folio, &flood);
     type_key(&mut folio, "z", KeyCode::KeyZ);
@@ -792,27 +869,28 @@ fn held_input_over_the_cap_cancels_the_paste_and_goes_in_order() {
         .runtime()
         .window
         .clipboard
-        .paste
-        .as_ref()
+        .pastes
+        .first()
         .map(|owed| owed.asked_at)
         .expect("a paste is owed");
     folio
         .runtime()
         .settle_clipboard(asked)
         .expect("the turn settles the clipboard");
-    assert_eq!(sent_to_the_shell(&mut folio, 0), format!("{flood}z"));
+    assert_eq!(sent_to_the_shell(&mut folio, 0), "中文z");
     assert_eq!(lane.sunk(), [crate::lane::Terminal::Cancelled]);
     hold.worker_hold().release();
 }
 
-/// RED (T-CLIPBOARD-LANE; (c)4) — **the worker's end cancels the paste and releases the keys**:
-/// the lane's worker ends with the paste owed; it ends `WorkerGone`, the key held behind it reaches
-/// the shell, and the window says its notice once.
+/// RED (T-CLIPBOARD-LANE; (c)4) — **the worker's end ends the paste and releases the keys**: the
+/// lane's worker ends with the paste owed; the paste ends `WorkerGone` — the seam's terminal for
+/// it, not a cancel — the key held behind it reaches the shell, and the window says the
+/// read-failed notice once.
 ///
-/// MUTATION: in `Runtime::spend_paste`, keep the hold for a `WorkerGone` (skip
-/// `give_back_the_hold`) — the key is never sent.
+/// MUTATION: drop `Terminal::WorkerGone` from `Runtime::spend_paste`'s notice arm — the notice is
+/// not said (`0`).
 #[test]
-fn worker_gone_cancels_the_paste_and_releases_the_keys() {
+fn worker_gone_ends_the_paste_and_releases_the_keys() {
     let mut folio = a_window_pasting("clipboard-lane-gone", "粘贴 never");
     let gate = std::sync::Arc::new(crate::lane::Gate::default());
     let lane = recording_lane(
@@ -834,14 +912,15 @@ fn worker_gone_cancels_the_paste_and_releases_the_keys() {
     );
 }
 
-/// RED (T-CLIPBOARD-LANE; (c)4) — **a fifth outstanding clipboard request is refused at once**:
-/// with four owed (`clipboard_lane::BOUND`), a paste is refused at the lane's door, synchronously;
-/// the window says once that the clipboard was busy, owes nothing, and holds no input.
+/// RED (T-CLIPBOARD-LANE; (c)4; round 2) — **a request past the lane's bound is refused at
+/// once**: with `clipboard_lane::BOUND` owed (a desk of pastes and a copy in each of two windows),
+/// a paste is refused at the lane's door, synchronously; the window says once that the clipboard
+/// was busy, owes nothing, and holds no input.
 ///
 /// MUTATION: build the lane's ledger with no bound (`None` for `Some(BOUND)` in
-/// `ClipboardLane::start`) — the fifth is queued, and nothing is said.
+/// `ClipboardLane::start`) — the paste is queued, and nothing is said.
 #[test]
-fn a_fifth_outstanding_clipboard_request_is_refused_at_once() {
+fn a_request_past_the_lanes_bound_is_refused_at_once() {
     let mut folio = a_window_pasting("clipboard-lane-full", "粘贴 never");
     let gate = std::sync::Arc::new(crate::lane::Gate::default());
     let _lane = recording_lane(
@@ -865,7 +944,7 @@ fn a_fifth_outstanding_clipboard_request_is_refused_at_once() {
         .collect();
     chord(&mut folio, "v", KeyCode::KeyV);
     assert!(
-        folio.runtime().window.clipboard.paste.is_none(),
+        folio.runtime().window.clipboard.pastes.is_empty(),
         "refused at the door"
     );
     assert_eq!(

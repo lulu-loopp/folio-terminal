@@ -1293,6 +1293,22 @@ where
         self.asked.notify_all();
     }
 
+    /// **The asker's: end `id` with `terminal` and take its job out of line** — a request its
+    /// asker withdrew (`Cancelled`) or replaced (`Superseded { by }`) leaves the line with its
+    /// terminal, its job dropped under the line's lock, as [`Relation::Displaces`] takes a
+    /// displaced one out, so what waits in line is never more than what the ledger owes. A job
+    /// the worker has already taken stays with the worker, which asks [`Ledger::owes`] before it
+    /// begins it. Answers whether this was `id`'s terminal (the ledger's [`Ledger::publish`]).
+    pub(crate) fn withdraw(&self, id: Id, terminal: TerminalOf<Id, O>) -> bool {
+        let taken = {
+            let mut line = lock(&self.line);
+            let at = line.waiting.iter().position(|(waiting, _)| *waiting == id);
+            at.and_then(|at| line.waiting.remove(at))
+        };
+        drop(taken);
+        self.ledger.publish(id, terminal)
+    }
+
     /// How many requests wait in line, admitted and not yet taken by the worker — where a test
     /// sees a request wait for the one before it.
     #[cfg(test)]
@@ -1702,16 +1718,17 @@ pub(crate) const STORAGE: Contract = Contract {
 };
 
 /// `clipboard_lane`, on the seam (S-7, T-CLIPBOARD-LANE): one `bt-clipboard` thread, started by
-/// the first request, a FIFO share on `Queue`; ids minted by the lane's `Ledger`; every request run and ended in the order minted, none coalesced by the
-/// lane — a window's newer paste or copy replaces its older one, and a window withdraws a paste
-/// whose target has gone or whose deadline or held-input cap has passed, each the asker's act
-/// through the lane (`Superseded`, `Cancelled`), a withdrawn request dropped by the worker unrun;
-/// the asking window is the target incarnation, and a closed window's request, or a withdrawn
-/// one, ends in the lane's sink, which lets it go; the ledger owes 4 at once
-/// (`clipboard_lane::BOUND`: one paste and one copy in each of two windows), one running and the
-/// rest waiting, an answer not yet taken holding its place, and refuses the rest at the door; a
-/// failure (the door's refusal, or a panic in one request's work) is said once per request, and
-/// the worker goes on.
+/// the first request, a FIFO share on `Queue`; ids minted by the lane's `Ledger`; every request
+/// run and ended in the order minted, none coalesced by the lane — a window's pastes queue behind
+/// each other, its newer copy replaces its older one (`Superseded`), and it withdraws a paste
+/// whose target has gone or whose deadline or held-input cap has passed (`Cancelled`), each the
+/// asker's act through the lane, a withdrawn or replaced request leaving the line unrun
+/// (`Queue::withdraw`); the asking window is the target incarnation, and a closed window's
+/// request, or a withdrawn one, ends in the lane's sink, which lets it go; the ledger owes 18 at
+/// once (`clipboard_lane::BOUND`: a desk of eight pastes and one copy in each of two windows), one
+/// running and the rest waiting, an answer not yet taken holding its place, and refuses the rest
+/// at the door; a failure (the door's refusal, or a panic in one request's work) is said once per
+/// request, and the worker goes on.
 #[cfg(test)]
 pub(crate) const CLIPBOARD: Contract = Contract {
     lane: Some(LaneName::Clipboard),
@@ -1721,9 +1738,9 @@ pub(crate) const CLIPBOARD: Contract = Contract {
     bounds: Bounds {
         // `clipboard_lane::BOUND`, written out rather than read, so that a change to either the
         // declaration or the lane is a disagreement the suite reports.
-        waiting: Bound::At(3),
+        waiting: Bound::At(17),
         executing: 1,
-        answers_held: Bound::At(4),
+        answers_held: Bound::At(18),
     },
     cancellation: Cancellation::Abandon,
     withdrawal: Withdrawal::ByTheAsker,
@@ -1773,11 +1790,16 @@ pub(crate) enum Claim {
     /// target, and is not run when its work had not begun (C2's terminal set; T-CLIPBOARD-LANE).
     /// A lane whose askers withdraw nothing never says `Cancelled`.
     AWithdrawnRequestEndsCancelledOnce,
+    /// A request its asker withdrew leaves the lane's line with its terminal: with the worker
+    /// held, requests withdrawn one after another, past the declared bound, leave nothing waiting,
+    /// so the bound holds of the line as of the ledger (T-CLIPBOARD-LANE round 2). A lane whose
+    /// askers withdraw nothing is asked one request.
+    AWithdrawnRequestLeavesTheLine,
 }
 
 #[cfg(test)]
 impl Claim {
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 14] = [
         Self::FullLaneAnswersWithoutWaiting,
         Self::EveryRequestHasItsOwnIdentity,
         Self::OrderIsAsDeclared,
@@ -1791,6 +1813,7 @@ impl Claim {
         Self::AFailureIsSaidOnce,
         Self::AnOrphanedAnswerReachesItsSink,
         Self::AWithdrawnRequestEndsCancelledOnce,
+        Self::AWithdrawnRequestLeavesTheLine,
     ];
 
     fn check(self, run: &mut Run<'_>) -> Result<(), Failure> {
@@ -1810,6 +1833,7 @@ impl Claim {
             Self::AWithdrawnRequestEndsCancelledOnce => {
                 a_withdrawn_request_ends_cancelled_once(run)
             }
+            Self::AWithdrawnRequestLeavesTheLine => a_withdrawn_request_leaves_the_line(run),
         }
     }
 }
@@ -1892,6 +1916,10 @@ pub(crate) enum Failure {
     CancelledButRun { key: u64 },
     /// A lane declaring that its askers withdraw nothing said `Cancelled`.
     CancelledUndeclared { key: u64 },
+    /// Requests their asker withdrew were still waiting in the lane's line.
+    WithdrawnStaysInLine { in_line: usize },
+    /// The lane declares withdrawal and gives the suite no reading of its line.
+    LineUnobserved,
 }
 
 /// A [`Failure`]'s kind, which is what [`EXPECTED_FAILURES`] pins: the counts beside it depend on
@@ -1933,6 +1961,8 @@ pub(crate) enum FailureKind {
     CancelledRaised,
     CancelledButRun,
     CancelledUndeclared,
+    WithdrawnStaysInLine,
+    LineUnobserved,
 }
 
 #[cfg(test)]
@@ -1973,6 +2003,8 @@ impl Failure {
             Self::CancelledRaised { .. } => FailureKind::CancelledRaised,
             Self::CancelledButRun { .. } => FailureKind::CancelledButRun,
             Self::CancelledUndeclared { .. } => FailureKind::CancelledUndeclared,
+            Self::WithdrawnStaysInLine { .. } => FailureKind::WithdrawnStaysInLine,
+            Self::LineUnobserved => FailureKind::LineUnobserved,
         }
     }
 }
@@ -2034,6 +2066,12 @@ pub(crate) trait LaneUnderTest {
     /// asked of a lane that declares [`Withdrawal::ByTheAsker`].
     fn withdraw(&mut self, _target: u32, _ticket: u64) {
         unreachable!("this lane's askers withdraw nothing");
+    }
+    /// How many requests wait in the lane's line, admitted and not yet taken by its worker; `None`
+    /// for a lane the suite cannot read it of. Asked of a lane that declares
+    /// [`Withdrawal::ByTheAsker`].
+    fn in_line(&self) -> Option<usize> {
+        None
     }
     /// What the lane's sink has taken since last asked: the terminals of requests whose requester
     /// had gone (C6). A lane with no sink of its own — one that drops such an answer, or raises it
@@ -3319,6 +3357,52 @@ fn a_withdrawn_request_ends_cancelled_once(run: &mut Run<'_>) -> Result<(), Fail
                 return Err(Failure::CancelledButRun { key });
             }
             Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+fn a_withdrawn_request_leaves_the_line(run: &mut Run<'_>) -> Result<(), Failure> {
+    let contract = run.contract();
+    let first = run.hold_one()?;
+    match contract.withdrawal {
+        Withdrawal::Never => {
+            run.lane.gate().release();
+            let mut found = Vec::new();
+            if !run.settle(&mut found, |found| has_key(found, first.key())) {
+                return Err(Failure::NoAnswer);
+            }
+            Ok(())
+        }
+        Withdrawal::ByTheAsker => {
+            // Past the declared bound, one at a time: each is admitted only because the one before
+            // it left, and none of them may stay behind in line.
+            let rounds = match contract.bounds.waiting {
+                Bound::At(declared) => 2 * declared + 2,
+                Bound::Unbounded => 64,
+            };
+            for question in 1..=rounds as u64 {
+                let (asked, _) = run.submit(0, question);
+                let Some(ticket) = asked.ticket else {
+                    run.lane.gate().release();
+                    return Err(Failure::BoundBroken {
+                        declared: rounds,
+                        observed: question as usize,
+                    });
+                };
+                run.lane.withdraw(0, ticket);
+            }
+            let in_line = run.lane.in_line();
+            run.lane.gate().release();
+            let mut found = Vec::new();
+            if !run.settle(&mut found, |found| has_key(found, first.key())) {
+                return Err(Failure::NoAnswer);
+            }
+            match in_line {
+                None => Err(Failure::LineUnobserved),
+                Some(0) => Ok(()),
+                Some(in_line) => Err(Failure::WithdrawnStaysInLine { in_line }),
+            }
         }
     }
 }

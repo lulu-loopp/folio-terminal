@@ -23,6 +23,7 @@ AJoinedRequestCarriesItsTwin
 AFailureIsSaidOnce
 AnOrphanedAnswerReachesItsSink
 AWithdrawnRequestEndsCancelledOnce
+AWithdrawnRequestLeavesTheLine
 
 # rows
 lane	claim	failure	repair

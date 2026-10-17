@@ -1495,12 +1495,14 @@ in the order they were asked (a history page never before the page it continues)
 clipboard is on the seam since S-7 (T-CLIPBOARD-LANE, `clipboard_lane`, registry row 26 done): one
 `bt-clipboard` worker, a FIFO share on `lane::Queue` started by its first request, serves every
 read and write of the clipboard through the asking window's own door (`WindowHost::clipboard`),
-and `bt_platform`'s three clipboard doors take its `WorkerCtx`; a window owes one paste and one
-copy at most, a newer one ending the older `Superseded`, and it withdraws a paste whose aim has
-gone or that outlived `clipboard_lane::PASTE_DEADLINE` or the held-input cap (`Cancelled`, the
-seam's first adopter); the person's input to a pane waits behind the paste it is owed
-(`clipboard_lane::PasteHold`) and follows its bytes; `LaneName::Clipboard` keeps every claim,
-including `AWithdrawnRequestEndsCancelledOnce` (`docs/ARCHITECTURE-GUARDS.md`, *Lane contract and
+and `bt_platform`'s three clipboard doors take its `WorkerCtx`; a window owes up to
+`clipboard_lane::PASTES_OWED` pastes, queued in the order pressed, and one copy, a newer copy
+ending the older `Superseded`; it withdraws a paste whose aim has gone or that outlived
+`clipboard_lane::PASTE_DEADLINE` or the held-input cap (`Cancelled`, the seam's first adopter),
+and a withdrawn or replaced request leaves the worker's line (`lane::Queue::withdraw`); the
+person's input to a pane waits behind the pastes it is owed, in one queue per pane
+(`clipboard_lane::PasteHold`), and follows each paste's bytes; `LaneName::Clipboard` keeps every claim,
+including `AWithdrawnRequestEndsCancelledOnce` and `AWithdrawnRequestLeavesTheLine` (`docs/ARCHITECTURE-GUARDS.md`, *Lane contract and
 the completion seam*). The storage worker (`persist::StorageLane`, `session-writer`) is on it since
 T-STORAGE-WORKER-ON-THE-SEAM (D-97 repaid), with a line of its own on `lane::Ledger` and
 `lane::Executor`, as the hand-off lane is: its one worker is started by `Executor::start_worker`;

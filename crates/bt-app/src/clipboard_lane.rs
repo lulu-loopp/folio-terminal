@@ -31,27 +31,34 @@
 //! * **Start.** The worker is started by the first request; a start the thread door refuses
 //!   refuses that request alone, at the door ([`Declined::NotStarted`], said once by the ledger),
 //!   and the next request starts it again.
-//! * **Capacity.** A window owes at most one paste and one copy: a newer one of either replaces the
-//!   older ([`ClipboardLane::supersede`]). The ledger owes at most [`BOUND`] identities at once —
-//!   one paste and one copy in the window the person is in, and the same two in the window they
-//!   have just left: a paste is owed no longer than [`PASTE_DEADLINE`], and the person is in one
-//!   window at a time, so only a worker stuck inside the platform (a program that does not answer
-//!   `WM_DESTROYCLIPBOARD`, a source that never renders its delayed format) lets a third window's
-//!   request find four owed. That one is refused at the door, synchronously, with [`LANE_FULL`],
-//!   and no identity is minted for it (revision (b)3); a request after the worker has ended is
-//!   refused the same way with [`LANE_GONE`]. The gesture says the refusal once.
+//! * **Capacity.** A window owes at most [`PASTES_OWED`] pastes (its desk: a paste past it is
+//!   refused on the window, said once) and one copy (a newer copy replaces the older,
+//!   [`ClipboardLane::supersede`]: the clipboard ends holding the newer either way). A paste is
+//!   never replaced by a later one: the later one queues behind it, and both read the clipboard in
+//!   order. The ledger owes at most [`BOUND`] identities at once — a full desk and a copy in the
+//!   window the person is in, and the same in the window they have just left: a paste is owed no
+//!   longer than [`PASTE_DEADLINE`], and the person is in one window at a time, so only a worker
+//!   stuck inside the platform (a program that does not answer `WM_DESTROYCLIPBOARD`, a source
+//!   that never renders its delayed format) lets a third window's request find the ledger full.
+//!   That one is refused at the door, synchronously, with [`LANE_FULL`], and no identity is minted
+//!   for it (revision (b)3); a request after the worker has ended is refused the same way with
+//!   [`LANE_GONE`]. The gesture says the refusal once. A request withdrawn or replaced leaves the
+//!   worker's line with its terminal (`lane::Queue::withdraw`), so the line is bounded as the
+//!   ledger is.
 //! * **Completion.** Every admitted request ends exactly once: `Done` with the clipboard's answer;
 //!   `Failed` when the door refused — the five opens spent, no text on the clipboard, a write the
 //!   system refused — or the work panicked, which its task catches (the worker goes on, and the
 //!   ledger says the failure in `diagnostics.log` once); `Superseded { by }` when the window's
-//!   newer paste or copy replaced it before it was answered; `Cancelled` when the window withdrew
+//!   newer copy replaced it before it was answered; `Cancelled` when the window withdrew
 //!   it ([`ClipboardLane::withdraw`]): its pane closed or was restarted, its tab left the front,
 //!   its field let the keyboard go, or it outlived [`PASTE_DEADLINE`] or the held-input cap; or
 //!   `WorkerGone` for every request still owed when the worker's thread ends, which leaves the lane
-//!   faulted.
+//!   faulted — the seam's terminal, not a cancel: the window then releases a paste's held input,
+//!   in order, and says the read-failed notice once.
 //! * **Withdrawal** (`Cancelled`, its first adopter on the seam). The window withdraws a request by
 //!   ending it `Cancelled` and letting it go, so its terminal goes to the lane's sink and never to a
-//!   surface; a request withdrawn before the worker reached it is dropped by the worker unrun
+//!   surface; a request withdrawn before the worker reached it leaves the line unrun
+//!   (`lane::Queue::withdraw`), and one the worker has just taken is dropped before its work
 //!   ([`Ledger::owes`](crate::lane::Ledger::owes)) — "the lane dropped the request before its work
 //!   was done, at its requester's word". `Superseded` is the other word for the same act by the
 //!   same asker with a newer request in hand: the older's terminal names it.
@@ -67,10 +74,13 @@
 //! **Between a paste's press and its answer** the pane it was aimed at holds the person's input
 //! ([`PasteHold`]: keys, input-method commits, mouse reports, another paste or a dropped path),
 //! and releases it, in the order it was offered, right after the paste's bytes — or, for a paste
-//! that ends with nothing to write, at once. A paste that waits for the multi-line card keeps the
-//! hold until the card is answered. The hold is bounded by [`PASTE_DEADLINE`] and by
-//! `bt_pty::PTY_INPUT_RING_BYTES`: past either the paste is withdrawn and the held input goes to
-//! the shell in its order.
+//! that ends with nothing to write, at once; each write is offered as the write it was. A paste
+//! that waits for the multi-line card keeps the hold until the card is answered. The hold is
+//! bounded by [`PASTE_DEADLINE`] and by `bt_pty::PTY_INPUT_RING_BYTES`: past either the paste is
+//! withdrawn and the held input goes to the shell in its order. A program in mouse mode therefore
+//! gets the clicks made while a paste is owed up to a second late, in order. A one-line field and
+//! the quick edit hold nothing: a key typed into one between the press and the answer lands before
+//! the pasted text.
 //!
 //! **One road on every platform** (T-CLIPBOARD-LANE judgement 4): the same requests, the same
 //! terminals and the same hold everywhere; only the door differs. On Windows the worker opens the
@@ -82,7 +92,8 @@
 //! `clipboard-picture` worker): the bytes come off the clipboard here, and their encode to a file
 //! is a different resource with its own generation, ceiling and answer.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -92,9 +103,16 @@ use bt_platform::admission::WorkerCtx;
 use crate::lane::{self, Executor, Ledger, Owed, Queue, Refused, Relation, Saying, Terminal};
 use crate::{ClipboardWriteEffect, PasteTarget, PreviewSurface, TextFieldSeat};
 
-/// **How many identities the lane's ledger owes at once** — see the module's *Capacity*: one paste
-/// and one copy in each of two windows.
-pub(crate) const BOUND: usize = 4;
+/// **How many pastes one window may owe at once** — its desk: past it, a paste is refused on the
+/// window, said once, before it reaches the lane. A paste is a deliberate press (`Ctrl+V`'s key
+/// repeat is not one: the keystroke ladder answers only a first press), each owed at most
+/// [`PASTE_DEADLINE`], so eight is more presses than a hand makes in that second and as many as a
+/// macro or a remote session's burst is given room for before the clipboard has answered once.
+pub(crate) const PASTES_OWED: usize = 8;
+
+/// **How many identities the lane's ledger owes at once** — see the module's *Capacity*: a full
+/// desk of pastes ([`PASTES_OWED`]) and one copy, in each of two windows.
+pub(crate) const BOUND: usize = 2 * (PASTES_OWED + 1);
 
 /// **How long a paste may be owed** — from its admission to its terminal answer, the side-effects
 /// contract's revision (c)4: the worker's backlog, the 75 ms of contention the door waits through
@@ -312,10 +330,7 @@ impl ClipboardLane {
     /// lane's sink and never to a surface. A request the worker has not reached yet is dropped by the
     /// worker unrun. Answers whether it was this call that ended it.
     pub(crate) fn withdraw(&self, request: ClipboardRequest) -> bool {
-        let cancelled = self
-            .queue
-            .ledger()
-            .publish(request.id(), Terminal::Cancelled);
+        let cancelled = self.queue.withdraw(request.id(), Terminal::Cancelled);
         drop(request);
         cancelled
     }
@@ -328,12 +343,18 @@ impl ClipboardLane {
         mut older: ClipboardRequest,
         by: ClipboardId,
     ) -> ClipboardTerminal {
-        self.queue
-            .ledger()
-            .publish(older.id(), Terminal::Superseded { by });
+        self.queue.withdraw(older.id(), Terminal::Superseded { by });
         older
             .take()
             .expect("a request still held has a terminal once it is superseded")
+    }
+}
+
+#[cfg(test)]
+impl ClipboardLane {
+    /// How many requests wait in the worker's line (`lane::Queue::in_line`).
+    pub(crate) fn in_line(&self) -> usize {
+        self.queue.in_line()
     }
 }
 
@@ -377,10 +398,14 @@ pub(crate) enum PasteInto {
     Preview(PreviewSurface),
 }
 
-/// **A paste a window is owed**: its request, where it goes, and when it was asked (the deadline's
-/// clock).
+/// **A paste a window is owed**: its identity, its request until its terminal is in hand, where
+/// it goes, and when it was asked (the deadline's clock). A terminal paste's answer is spent only
+/// when it reaches the front of its pane's [`PasteHold`], so an answer can be in hand and wait
+/// behind an earlier paste of the same pane.
 pub(crate) struct OwedPaste {
-    pub(crate) request: ClipboardRequest,
+    pub(crate) id: ClipboardId,
+    pub(crate) request: Option<ClipboardRequest>,
+    pub(crate) ended: Option<ClipboardTerminal>,
     pub(crate) into: PasteInto,
     pub(crate) asked_at: Instant,
 }
@@ -398,47 +423,110 @@ pub(crate) struct OwedCopy {
     pub(crate) effect: ClipboardWriteEffect,
 }
 
-/// **What one window owes the clipboard's answers** — at most one paste and one copy (the
-/// module's *Capacity*). Held by the window, so that closing it is what abandons them.
+/// **What one window owes the clipboard's answers** — its pastes, in the order they were asked
+/// (at most [`PASTES_OWED`]), and one copy (the module's *Capacity*). Held by the window, so that
+/// closing it is what abandons them.
 #[derive(Default)]
 pub(crate) struct ClipboardAsks {
-    pub(crate) paste: Option<OwedPaste>,
+    pub(crate) pastes: Vec<OwedPaste>,
     pub(crate) copy: Option<OwedCopy>,
 }
 
 impl ClipboardAsks {
-    /// The instant the window's turn must come round by to withdraw its paste, if one is owed.
+    /// The instant the window's turn must come round by to withdraw a paste, if one is owed.
     pub(crate) fn deadline(&self) -> Option<Instant> {
-        self.paste.as_ref().map(OwedPaste::deadline)
+        self.pastes
+            .iter()
+            .filter(|owed| owed.ended.is_none())
+            .map(OwedPaste::deadline)
+            .min()
+    }
+
+    /// Whether the window owes nothing: no paste, and no copy.
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.pastes.is_empty() && self.copy.is_none()
     }
 }
 
-/// **The person's input to one pane, held behind a paste that has not answered** (the side-effects
+/// One thing a pane holds, in the order the person offered it.
+#[derive(Debug)]
+pub(crate) enum Held {
+    /// A paste the window asked for this pane: what it writes goes here, when it has answered.
+    Paste(ClipboardId),
+    /// One write of the person's, kept as the write it was.
+    Typed(Vec<u8>),
+}
+
+/// **The person's input to one pane, held behind the pastes it is owed** (the side-effects
 /// contract's revision (b)9: keys typed after a paste are held behind it in the pane's input order,
-/// the way a pane in birth holds them). Held on the pane's `LeafSession`, so a pane that closes
-/// takes what it held with it.
+/// the way a pane in birth holds them). One queue per pane: each paste asked for it takes its
+/// place ([`Held::Paste`]), and every write offered after it waits behind it as the write it was
+/// ([`Held::Typed`]), so `Ctrl+V`, `k`, `Ctrl+V` reaches the shell as the first paste, `k`, the
+/// second. Held on the pane's `LeafSession`, so a pane that closes takes what it held with it.
 #[derive(Debug, Default)]
 pub(crate) struct PasteHold {
-    typed: RefCell<Vec<u8>>,
+    items: RefCell<VecDeque<Held>>,
+    /// Whether a write was offered that took what is typed here past what the pane's input ring
+    /// holds ([`Self::over_the_cap`]).
+    crossed: Cell<bool>,
 }
 
 impl PasteHold {
-    /// Keep `bytes`, behind whatever is held. Taken whole, whatever the size: the cap is the
-    /// window's to enforce ([`Self::over_the_cap`]), on the turn the bytes were offered, by
-    /// withdrawing the paste and releasing everything held, this write included, in its order.
+    /// A paste asked for this pane takes its place behind everything held.
+    pub(crate) fn queue_paste(&self, id: ClipboardId) {
+        self.items.borrow_mut().push_back(Held::Paste(id));
+    }
+
+    /// Keep one write, behind whatever is held. Taken whole, as the write it was: the cap is the
+    /// window's to enforce ([`Self::over_the_cap`]), on the turn the write was offered, by
+    /// withdrawing the pastes held here and releasing everything, this write included, in its
+    /// order — each write offered as it was typed.
     pub(crate) fn hold(&self, bytes: &[u8]) {
-        self.typed.borrow_mut().extend_from_slice(bytes);
+        let typed: usize = self
+            .items
+            .borrow()
+            .iter()
+            .map(|held| match held {
+                Held::Typed(bytes) => bytes.len(),
+                Held::Paste(_) => 0,
+            })
+            .sum();
+        if typed > 0 && typed + bytes.len() > bt_pty::PTY_INPUT_RING_BYTES.get() {
+            self.crossed.set(true);
+        }
+        self.items
+            .borrow_mut()
+            .push_back(Held::Typed(bytes.to_vec()));
     }
 
-    /// Whether what is held has passed the pane's input ring's capacity
-    /// (`bt_pty::PTY_INPUT_RING_BYTES`, what a pane in birth holds).
+    /// Whether a write offered here would have taken what is held past the pane's input ring's
+    /// capacity (`bt_pty::PTY_INPUT_RING_BYTES`, what a pane in birth holds) — the side-effects
+    /// contract's (c)4: such a write withdraws the pastes held here.
     pub(crate) fn over_the_cap(&self) -> bool {
-        self.typed.borrow().len() > bt_pty::PTY_INPUT_RING_BYTES.get()
+        self.crossed.get()
     }
 
-    /// Everything held, in the order it was offered.
-    pub(crate) fn into_held(self) -> Vec<u8> {
-        self.typed.into_inner()
+    /// The first thing held, taken off.
+    pub(crate) fn pop_front(&self) -> Option<Held> {
+        self.items.borrow_mut().pop_front()
+    }
+
+    /// Put `held` back at the front.
+    pub(crate) fn push_front(&self, held: Held) {
+        self.items.borrow_mut().push_front(held);
+    }
+
+    /// The pastes whose places this holds.
+    pub(crate) fn pastes(&self) -> Vec<ClipboardId> {
+        self.items
+            .borrow()
+            .iter()
+            .filter_map(|held| match held {
+                Held::Paste(id) => Some(*id),
+                Held::Typed(_) => None,
+            })
+            .collect()
     }
 }
 
@@ -635,6 +723,10 @@ pub(crate) mod contract_adapter {
             unreachable!("the clipboard lane's target is the asking window, not the application");
         }
 
+        fn in_line(&self) -> Option<usize> {
+            Some(self.lane.in_line())
+        }
+
         fn sunk(&mut self) -> Vec<Delivered> {
             let sunk =
                 std::mem::take(&mut *self.sunk.lock().unwrap_or_else(PoisonError::into_inner));
@@ -734,8 +826,10 @@ mod tests {
     /// RED (T-CLIPBOARD-LANE) — **a request withdrawn before the worker reached it is never run**:
     /// its terminal is `Cancelled`, it goes to the sink, and the door never hears it.
     ///
-    /// MUTATION: drop the `queue.ledger().owes(id)` question in `run_clipboard_lane` — the withdrawn write
-    /// reaches the door.
+    /// MUTATION: leave the withdrawn job in line (drop the `remove` in `lane::Queue::withdraw`) and
+    /// drop the `queue.ledger().owes(id)` question in `run_clipboard_lane` — the withdrawn write
+    /// reaches the door. Either alone keeps it from the door: the line is the first guard, the
+    /// worker's question the second, for a job it took just as it was withdrawn.
     #[test]
     fn a_withdrawn_request_is_dropped_unrun_and_its_cancel_reaches_the_sink() {
         let gate = Arc::new(Gate::default());

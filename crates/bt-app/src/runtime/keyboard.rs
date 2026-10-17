@@ -1404,10 +1404,7 @@ impl<B: Backend> Runtime<'_, B> {
             if rename_pastes(&event.logical_key, self.window.modifiers) {
                 return self.paste_into_field(crate::TextFieldSeat::TabName);
             }
-            let mut clipboard = RenameClipboard {
-                paste: "",
-                copied: None,
-            };
+            let mut clipboard = RenameClipboard { copied: None };
             let mut editor = self.window.rename.take().expect("the editor is open");
             let verdict = rename_key(
                 &mut editor,
