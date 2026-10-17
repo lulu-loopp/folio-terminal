@@ -713,7 +713,22 @@ jobs:
   logic:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
-    timeout-minutes: 75
+    # **A budget derived from measurement, re-derived rather than bumped**
+    # (T-CI-LOGIC-JOB-BUDGET, measured 2026-10-17). The cold-cache regime
+    # dominates: a run whose cache does not restore compiles everything, and
+    # it is the regime a cache-key change or an evicted cache puts every run
+    # in. Cold, this job from its start to the end of its last list check plus
+    # the two post steps, over runs 38671015245 38714746975 38719369282
+    # 38720519586 38726741790 38835150475 38835297300 38837089117 38842728496
+    # 39004900090 (attempt 1): 57.0-75.8 min, max 75.8. Headroom 1.36 =
+    # the slowest cold `test` step over the fastest (47.8 / 35.1 min): the
+    # spread of runner speed already seen, applied once more beyond the
+    # slowest. 75.8 x 1.36 = 103.1, so 104. The warm-cache max over the ten
+    # green runs on `main` before the image moved (38436781373 to
+    # 38691455267) is 44.5. Re-derive with the same rule when the cold max
+    # passes 104 / 1.36 = 76 min. The licensing gates are their own job
+    # (`licensing`), so a slow suite cannot cancel them.
+    timeout-minutes: 104
     steps:
       # Whole history: see `gates-can-fail`'s checkout. The debt-list check runs
       # here for real, and a merge base is what it compares against.
@@ -823,7 +838,16 @@ jobs:
       # starts real ConPTY sessions and `bt-render` asks for a real adapter;
       # each has a job of its own below, where the machine it needs is set up
       # and where a failure means something specific.
+      #
+      # Its own budget, under the job's, so that a run past it fails here with
+      # a line naming the budget instead of being cancelled, without a reason,
+      # in whatever step the job's clock happens to stop. The cold max of this
+      # step is 47.8 min (run 38842728496: 34.9 min of it is the compile, the
+      # rest running the tests); x 1.36, the job's headroom, is 65.0, so 65.
+      # The job's 104 leaves 39 for the other steps, whose cold max is 28.1
+      # (x 1.36 = 38.2).
       - name: test
+        timeout-minutes: 65
         run: cargo test --workspace --locked --exclude bt-pty --exclude bt-render
 
       # The adapter and cell_capture modules are the vendor compatibility seam. Their job is to
@@ -963,11 +987,32 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-window-seam-native.ps1
 
+  # ── the licensing line: notices, machine paths, words, vendored notices ──
+  #
+  # Its own job, not the tail of `logic`: none of these gates reads a build,
+  # and at the end of `logic` they were the steps a slow suite cancelled when
+  # that job ran out of its budget (runs 38714746975, 38726741790,
+  # 38835150475, 39004900090). Budget, by `logic`'s rule (measured
+  # 2026-10-17 over the runs named there): the observed max of each step it
+  # runs - checkout 1.0, toolchain with a cache restore 1.5, the fetch 0.8
+  # (0.4 of downloads inside `logic`'s clippy step and 0.4 of its fetch step,
+  # which is what a job with no build fetches), cargo-about built from source
+  # 3.2, the gates 2.9 (run 38708586878), the cache save 1.7, the
+  # checkout's post 0.2 - is 11.3 min; x 1.36 = 15.4, so 16.
+  licensing:
+    if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
+    runs-on: windows-2025
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # The cache carries `~/.cargo/bin`, so a warm run finds cargo-about
+      # already installed at the pinned version and the step below is a check.
+      - uses: ./.github/actions/toolchain
+
       # `check-vendor-notices.ps1` reads upstream alacritty 0.26.0 out of the
-      # registry to diff it against `vendor/`, so the sources have to be there.
-      # A no-op after the build above; named anyway, because a job that only
-      # works because of what a previous step happened to leave behind is a job
-      # that breaks when the steps are reordered.
+      # registry to diff it against `vendor/`, and `check-notices.ps1` asks
+      # cargo for the resolved graph, so the sources have to be there. Nothing
+      # in this job builds, so this is the step that puts them there.
       - name: fetch the sources the notices gates read
         run: cargo fetch --locked
 
