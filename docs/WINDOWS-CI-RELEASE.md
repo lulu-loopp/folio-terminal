@@ -221,10 +221,12 @@ follows `rust-toolchain.toml` and not the image.
 
 GitHub keeps 10 GB of caches per repository; past that it evicts the entries
 read least recently, and an entry nobody reads for seven days goes anyway. A
-run restores what its own ref saved or what the default branch saved, never a
-sibling branch's: an entry saved by a branch dispatch, a pull request or a tag
+run restores what its own ref saved or what the default branch saved (a pull
+request's run also what its base branch saved), never a sibling branch's: an entry saved by a branch dispatch, a pull request or a tag
 is readable by that ref alone. rust-cache keys an entry
-`v0-rust-<job>-<os>-<arch>-<environment hash>-<dependency hash>` and restores
+`v0-rust-<job>-<os>-<arch>-<environment hash>-<dependency hash>` (the
+dependency hash covers the manifests' dependency sections, `Cargo.lock`,
+`rust-toolchain(.toml)` and `.cargo/config.toml`) and restores
 by the key without the dependency hash when the full key is missing, taking the
 newest entry with that prefix; before saving it removes the workspace's own
 crates from `target/`, so an entry is the compiled dependencies and the
@@ -261,10 +263,10 @@ S + the largest entry <= 10 GB (today 6.34 + 1.82 = 8.16): one job whose key
 moved re-saves without evicting a sibling. A dependency change moves every key
 at once and needs 2 S = 12.67 GB for a moment; up to 2 S - 10 = 2.67 GB of the
 outgoing set can be evicted before the incoming set is saved, so a second
-`main` run started within the hour after such a landing can find some jobs
-cold. When S + the largest entry passes 10 GB, the job sizes are measured
+`main` run started before that landing's last job has saved (`logic`, up to
+about 77 minutes in) can find some jobs cold. When S + the largest entry passes 10 GB, the job sizes are measured
 again and the set is made smaller before anything else is cached. A branch
-whose `Cargo.lock` matches `main`'s restores the full key; one that changed it
+whose dependency hash matches `main`'s restores the full key; one that changed it
 restores `main`'s entry by prefix and compiles its difference on every
 dispatch (before this rule only its first dispatch did).
 

@@ -100,9 +100,10 @@ runs:
     # **Only `main` writes the store; every other run only reads it.** GitHub
     # keeps 10 GB of caches per repository and, past that, evicts the entries
     # read least recently. A run may restore what its own ref saved or what
-    # the default branch saved, never a sibling branch's, so an entry a branch
-    # dispatch (or a pull request, or a tag) saves is readable by that ref
-    # alone, and every byte of it pushes `main`'s entries towards eviction.
+    # the default branch saved (a pull request's run also what its base
+    # branch saved), never a sibling branch's, so an entry a branch dispatch
+    # (or a pull request, or a tag) saves is readable by that ref alone, and
+    # every byte of it pushes `main`'s entries towards eviction.
     # `gh cache list` on 2026-10-17: 9.97 GB in 11 entries; `main`'s current
     # set, one entry per job that comes here with the cache, is 6.34 GB
     # (logic 1.82, core-macos 1.02, smoke 0.92, gpu 0.76, core-linux 0.50,
@@ -119,10 +120,12 @@ runs:
     # moves every key at once and needs the outgoing and incoming sets
     # together, 2 x 6.34 = 12.67 > 10; up to 2.67 GB of the outgoing set can
     # go before the incoming one is saved, so a second `main` run started
-    # within the hour after such a landing can find some jobs cold
-    # (docs/WINDOWS-CI-RELEASE.md, "Cache store"). A branch run restores
-    # `main`'s entry by the key's prefix (the restore key stops before the
-    # `Cargo.lock` hash) and compiles its own difference on every dispatch.
+    # before that landing's last job has saved (logic, up to ~77 minutes in)
+    # can find some jobs cold (docs/WINDOWS-CI-RELEASE.md, "Cache store"). A
+    # branch run restores `main`'s entry by the key's prefix (the restore key
+    # stops before the dependency hash: the manifests' dependency sections,
+    # Cargo.lock, rust-toolchain(.toml) and .cargo/config.toml) and compiles
+    # its own difference on every dispatch.
     - if: ${{ inputs.cache == 'true' }}
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       with:
