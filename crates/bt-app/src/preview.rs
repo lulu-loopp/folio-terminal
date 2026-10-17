@@ -12827,10 +12827,12 @@ mod tests {
     /// 2026-08-23).
     ///
     /// The coalescing half of the window's half of the address. The lane keeps
-    /// only the newest request per target, and `TabId(1)` is a tab in *every*
-    /// window — so a target that could not tell two windows apart would let one
-    /// window's question supersede the other's, and the window whose question was
-    /// dropped would wait for an answer that was never coming.
+    /// only the newest request per target, and on 2026-08-23 `TabId(1)` was a tab
+    /// in *every* window — so a target that could not tell two windows apart let
+    /// one window's question supersede the other's, and the window whose question
+    /// was dropped waited for an answer that was never coming. Since F1b a `TabId`
+    /// is unique across the process, so the window no longer has to tell two tabs
+    /// apart; this pins that it is still part of the target.
     ///
     /// Mutation: leave `window` out of `same_target` and only one read is made.
     #[test]

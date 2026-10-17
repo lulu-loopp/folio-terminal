@@ -2135,7 +2135,7 @@ A new size reaches a pane's grid at once and its shell at the quiet boundary.
 | commit | `bt-app` | `commit_leaf_resize` → `pty_size` → `pty_door::resize`, then `bt_term::DualPlaneSession::mark_pty_resize_requested_at` (or, with nothing to tell, `bt_term::DualPlaneSession::mark_resize_settled_unchanged_at`); `replace_psreadline_resize_reanchor_debt` | `bt_pty::PtySize` | window thread, admitted as the PtyResize door (§5.3 row 12) |
 | pseudoconsole | `bt-pty` | `PtySession::resize` | `PtySize` | window thread, synchronous: the ResizePseudoConsole round trip into conhost |
 | close | `bt-app` | `Runtime::finish_resize_if_quiescent` → `bt_term::DualPlaneSession::finish_resize_if_quiescent`; an owed PSReadLine repair through `take_psreadline_resize_reanchor_input` → `write_pty_input` | the repair's bytes | window thread, a later turn (it runs before the release in `Runtime::turn`) |
-| a birth's missed size | `bt-app` | `Runtime::land_births` → `Runtime::land_own_shell` (or, for a restart's successor, `land_successor`) → `land_shell_birth` → `apply_owed_shell_resize` → `pty_door::resize`; a silent birth death's last-resort shell through `Runtime::land_birth_death_fallback` → `runtime::tabs::land_birth_death_fallback` → `land_birth_death_fallback_shell` → `apply_owed_shell_resize` | `bt_pty::PtySize` | window thread, when the `bt-pty-birth` worker's shell lands |
+| a birth's missed size | `bt-app` | `Runtime::land_births` → `Runtime::land_own_shell` (or, for a restart's successor, `Runtime::land_restart` → `land_successor`) → `land_shell_birth` → `apply_owed_shell_resize` → `pty_door::resize`; a silent birth death's last-resort shell through `Runtime::land_birth_death_fallback` → `runtime::tabs::land_birth_death_fallback` → `land_birth_death_fallback_shell` → `apply_owed_shell_resize` | `bt_pty::PtySize` | window thread, when the `bt-pty-birth` worker's shell lands |
 
 The free functions in `main.rs` that sequence it, in call order:
 `resize_worth_solving`, `size_authority_for_rectangle`, `solve_seats`,
@@ -2236,7 +2236,7 @@ A page in a pane: the host, the engine's events, the wake, the outcomes.
 |---|---|---|---|---|
 | open | `bt-app` | `Runtime::open_web_page` → `Runtime::open_web_page_with` → `Runtime::open_web_page_on` (a parked spare first, through `Runtime::adopt_spare_web_page`) → `webhost::WebSeat::open` | the address, and the wake that sends `AppEvent::WebPageSpoke` | window thread |
 | host | `bt-platform` | `WebHost::new`; the engine asked through `WebHost::request_environment` and `WebHost::request_controller` (from `bt_app::webhost::WebSeat::start_environment` and `bt_app::webhost::WebSeat::step`, admitted through the window-thread doors WebEnvironment and WebController); the handlers attached by `WebHost::attach_events` | `webview::WebEvent` | window thread |
-| engine callback | `bt-platform` | an answer the engine needs before the callback returns is given inside it, from the gates the caller handed `WebHost::new` or a fixed answer (the engine's NavigationStarting, FrameNavigationStarting, WebResourceRequested, NewWindowRequested, DownloadStarting, PermissionRequested, LaunchingExternalUriScheme, AcceleratorKeyPressed and MoveFocusRequested events: see RULES §49); every event that is queued ends in `Shared::push`, which queues it and calls the wake | `webview::WebEvent` | **window thread**: WebView2 calls back on the thread that created its environment, inside the message pump winit turns; WKWebView's delegates are main-thread only |
+| engine callback | `bt-platform` | an answer the engine needs before the callback returns is given inside it, from the gates the caller handed `WebHost::new` or a fixed answer (on Windows NavigationStarting, FrameNavigationStarting, WebResourceRequested, ScriptDialogOpening, NewWindowRequested, DownloadStarting, PermissionRequested, LaunchingExternalUriScheme, AcceleratorKeyPressed and MoveFocusRequested; on macOS the two navigation-policy decisions, the authentication challenge, the new-view request, the three JavaScript panels and the two permission requests; the list RULES §49 keeps, closed as of 2026-10-17); every event that is queued ends in `Shared::push`, which queues it and calls the wake | `webview::WebEvent` | **window thread**: WebView2 calls back on the thread that created its environment, inside the message pump winit turns; WKWebView's delegates are main-thread only |
 | wake | `bt-app` | the wake closure built in `Runtime::open_web_page_on` (and in `Runtime::make_spare_web_controller`) → `window_seam::LoopProxy::send_event` → `AppEvent::WebPageSpoke` | nothing; the event is a turn of the loop | window thread |
 | drive | `bt-app` | `FolioApp::user_event` → `FolioApp::for_every_window_engines_included` → `Runtime::drive_web_page` → `webhost::WebSeat::drive` (`bt_platform::WebHost::drain`, then `WebSeat::digest` per event) | `webhost::WebOutcome` | window thread |
 | apply | `bt-app` | `Runtime::apply_web_outcomes` | `webhost::WebOutcome` | window thread |
@@ -2253,12 +2253,15 @@ the row's other entries are still unfolded). Facts a ticket must not re-derive:
   WKWebView's delegates are main-thread only. Nothing about a callback is
   cross-thread, so the queue is a `RefCell` queue on the host, not a channel.
 - **A callback decides only what cannot wait, and queues everything else.**
-  `SetCancel`, `SetResponse`, `SetState` and `SetHandled` cannot be decided later,
-  so a navigation is let through, cancelled or rewritten, a refused subresource is
-  answered 403, a new window is claimed, a download cancelled, a permission denied
-  and an owned chord taken back inside the callback, from the gates the caller gave
-  the host or a fixed answer (RULES §49 lists each). What the event means for the
-  pane — a notice, a new pane, a hand-off — is decided on the next turn by
+  `SetCancel`, `SetResponse`, `SetState`, `SetHandled` and WebKit's decision and
+  completion handlers cannot be settled later, so a navigation is let through,
+  cancelled or rewritten, a refused subresource is answered 403, a page's dialog is
+  dismissed, a new window is claimed, a download cancelled, a permission denied, an
+  authentication challenge answered and an owned chord taken back inside the
+  callback, from the gates the caller gave the host or a fixed answer. RULES §49
+  lists each callback, and the list is closed as of 2026-10-17: every Windows `add_`
+  registration and every macOS delegate method was read. What the event means for
+  the pane — a notice, a new pane, a hand-off — is decided on the next turn by
   `WebSeat::drive`; every queued event goes through `Shared::push` and the wake.
 - **One event wakes every engine in every window.** `WebPageSpoke` carries
   nothing: its arm drives every window's seats, a closing window's included, and

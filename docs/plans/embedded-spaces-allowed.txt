@@ -67,8 +67,8 @@ crates/bt-app/src/preview.rs:11457 a diff line sample: the code's indentation af
 crates/bt-app/src/preview.rs:11458 a diff line sample: the code's indentation after the `+`/`-` sign is the input
 crates/bt-app/src/preview.rs:12772 tab expansion's expected columns
 crates/bt-app/src/preview.rs:12775 tab expansion's expected columns
-crates/bt-app/src/preview.rs:18344 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/preview.rs:18371 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/preview.rs:18346 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/preview.rs:18373 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/profiles.rs:27206 the spacing between the arguments is the input under test
 crates/bt-app/src/psreadline.rs:2894 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/psreadline.rs:3401 a help-text sample: the indentation after an escaped line break is the text's own

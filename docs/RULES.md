@@ -1923,25 +1923,37 @@ entries above are still unfolded):
    about a callback is cross-thread.
 2. **A callback answers the engine only what cannot be answered later, and queues
    the rest.** WebView2's arguments (`SetCancel`, `SetResponse`, `SetState`,
-   `SetHandled`) and WebKit's decision handlers must be settled before the callback
-   returns, so these are decided inside it, from the policy the caller handed the
-   host at `WebHost::new` (the navigation gate and the request gate) or from a fixed
-   answer: `NavigationStarting` asks the navigation gate and proceeds, cancels, or
-   cancels and navigates to the rewritten target (WebKit:
-   `decidePolicyForNavigationAction:` for the main frame); `FrameNavigationStarting`
-   asks the request gate and cancels a refused subframe; `WebResourceRequested` asks
-   the request gate, returns with nothing queued when allowed, and answers an empty
-   403 when refused; `NewWindowRequested` is marked handled, so the engine opens no
-   window of its own; `DownloadStarting` is cancelled; `PermissionRequested` is
-   denied (WebKit: each capability's handler answers `Deny`) and
-   `LaunchingExternalUriScheme` cancelled, both with nothing queued; a chord this
-   window owns is taken back in `AcceleratorKeyPressed`, which runs before the page
-   sees the key; and `MoveFocusRequested` is marked handled. **Every event that is
-   queued ends in `Shared::push`**, which pushes a `WebEvent` and wakes the loop with
-   `AppEvent::WebPageSpoke`, which carries nothing; what it means for the pane — the
-   refused request's notice, the new pane, the download's hand-off — is decided on
-   the next turn by `WebSeat::drive`, which drives every window's seats, a closing
-   window's included.
+   `SetHandled`, a dialog's accept) and WebKit's decision and completion handlers must
+   be settled before the callback returns, so these are decided inside it, from the
+   policy the caller handed the host at `WebHost::new` (the navigation gate and the
+   request gate) or from a fixed answer. The list is closed as of 2026-10-17 (every
+   `add_` registration of the Windows host and every WebKit delegate method of the
+   macOS host read):
+   - Windows: `NavigationStarting` asks the navigation gate and proceeds, cancels, or
+     cancels and navigates to the rewritten target; `FrameNavigationStarting` asks the
+     request gate and cancels a refused subframe; `WebResourceRequested` asks the
+     request gate, returns with nothing queued when allowed and answers an empty 403
+     when refused; `ScriptDialogOpening` returns without accepting or deferring, so the
+     page's alert, confirm or prompt is dismissed; `NewWindowRequested` is marked
+     handled, so the engine opens no window of its own; `DownloadStarting` is
+     cancelled; `PermissionRequested` is denied and `LaunchingExternalUriScheme`
+     cancelled, both with nothing queued; `AcceleratorKeyPressed` takes back a chord
+     this window owns, before the page sees the key; `MoveFocusRequested` is marked
+     handled. Every other registration only queues.
+   - macOS: `decidePolicyForNavigationAction:` asks the navigation gate for the main
+     frame and the request gate for a subframe, and answers before a rewrite is
+     started; `decidePolicyForNavigationResponse:` cancels a response that would be a
+     download; `didReceiveAuthenticationChallenge:` performs the default handling for a
+     server-trust challenge and rejects every other protection space;
+     `createWebViewWithConfiguration:` returns no view, so WebKit opens no window; the
+     three JavaScript panels (alert, confirm, prompt) complete at once as dismissed;
+     the media-capture and device-motion permission handlers answer `Deny`. Every other
+     delegate method only queues.
+   **Every event that is queued ends in `Shared::push`**, which pushes a `WebEvent` and
+   wakes the loop with `AppEvent::WebPageSpoke`, which carries nothing; what it means
+   for the pane — the refused request's notice, the new pane, the download's hand-off,
+   the dismissed dialog's notice — is decided on the next turn by `WebSeat::drive`,
+   which drives every window's seats, a closing window's included.
 3. **Nothing in the host blocks, and a callback may arrive for a pane that has
    gone.** Creation is asynchronous — the pump is winit's and a nested one would run
    the application re-entrantly — and a callback cannot be cancelled, so the
