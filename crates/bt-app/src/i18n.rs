@@ -943,6 +943,10 @@ text_entries! {
     /// looks like a still picture because it is one.
     PreviewAnimationBroken,
     PreviewSaved,
+    /// "Saved", for a save written by an ordinary write because the drive cannot
+    /// replace the file in one step — said the first time on each such drive
+    /// (T-PREVIEW-NO-EXCHANGE-RULING, owner ruling 2026-10-15).
+    PreviewSavedOrdinarily,
     PreviewConflict,
     /// The clause that gets filled into [`not_saved`].
     PreviewNothingToSave,
@@ -3923,6 +3927,11 @@ impl Text {
                 pick(lang, "First frame · would not play", "首帧 · 无法播放")
             }
             Self::PreviewSaved => pick(lang, "Saved", "已保存"),
+            Self::PreviewSavedOrdinarily => pick(
+                lang,
+                "Saved · this drive cannot replace a file in one step, so this save was an ordinary write",
+                "Saved · this drive cannot replace a file in one step, so this save was an ordinary write", // zh: pending T-PREVIEW-NO-EXCHANGE-RULING
+            ),
             Self::PreviewConflict => pick(
                 lang,
                 "Not saved · changed on disk · edits kept",
@@ -6558,6 +6567,10 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // zh: pending T-PREVIEW-NO-EXCHANGE-RULING — the sentence a preview save written by an
+        // ordinary write says the first time on each drive that cannot exchange.
+        (Self::PreviewSavedOrdinarily, HostPlatform::Windows),
+        (Self::PreviewSavedOrdinarily, HostPlatform::MacOs),
         // zh: pending S-6a — the two clauses a preview save that never reached the disk is
         // "not saved" for.
         (Self::PreviewSaveNotStarted, HostPlatform::Windows),

@@ -5887,10 +5887,12 @@ impl PreviewBuffer {
     /// conflict, never merged and never lost. A link is written the plain way
     /// (`PlainWriter`), as the preview always wrote one, until the owner's
     /// ruling on links (J5 Q5(b): refuse, and say so on the pane) is built for
-    /// the preview; a volume that cannot exchange two files is refused — the
-    /// preview's one switch for it, [`ON_A_VOLUME_THAT_CANNOT_EXCHANGE`], is
-    /// `Refuse` until the owner rules. `asker` is the body revision the bytes
-    /// are, echoed on the answer ([`Self::hear_save`]).
+    /// the preview; on a volume that cannot exchange two files the file is
+    /// written the plain way, still only while it holds the bytes expected —
+    /// the preview's one switch for it, [`ON_A_VOLUME_THAT_CANNOT_EXCHANGE`],
+    /// is `PlainWriter` (owner ruling 2026-10-15), and the first such landing on
+    /// each drive is said ([`PreviewSaves::saved`]). `asker` is the body
+    /// revision the bytes are, echoed on the answer ([`Self::hear_save`]).
     ///
     /// **The door returns at once** (C1); the window thread writes nothing.
     /// One write is on the worker per buffer: a press while one is out is the
@@ -5968,6 +5970,10 @@ impl PreviewBuffer {
     /// | `MovedDuringRead` (no other writer's bytes named) | unchanged | stays | the conflict; after a Reload, reloaded — nothing waits for an answer |
     /// | `Refused` | unchanged | stays | not saved, and why |
     ///
+    /// "Saved" is, for a landing by an ordinary write on a drive that cannot
+    /// exchange two files in one step, the sentence that says so — the first time
+    /// on that drive this session, and "Saved" after ([`PreviewSaves::saved`]).
+    ///
     /// After a conflict or a refusal nothing more is sent for this buffer until
     /// the person presses save again — no retry of its own (C5) — and a press
     /// pending behind it is dropped with it, because it was made before the
@@ -6004,7 +6010,9 @@ impl PreviewBuffer {
         // An answer that did not land leaves the history's position of the body
         // sent where it was: it says where that body lives (round 7, B3).
         match heard {
-            Heard::Landed { body } if body == self.revision => Some(SaveOutcome::Saved),
+            Heard::Landed { body, ordinary_on } if body == self.revision => {
+                Some(saves.saved(ordinary_on))
+            }
             // The pending slot draining — a press the person made, not a retry.
             Heard::Landed { .. } if again && self.dirty => {
                 match self.request_save(saves, asked_from) {
@@ -6012,7 +6020,7 @@ impl PreviewBuffer {
                     SaveAsked::Refused(why) => Some(SaveOutcome::Failed(why)),
                 }
             }
-            Heard::Landed { .. } => Some(SaveOutcome::Saved),
+            Heard::Landed { ordinary_on, .. } => Some(saves.saved(ordinary_on)),
             // **A Reload, and an answer that names no other writer's bytes**
             // (round 9): nothing is known to answer, so nothing waits for an
             // answer — the next save's precondition meets whatever the file then
@@ -7393,7 +7401,7 @@ impl PreviewPool {
                 continue;
             }
             let refused = match buffer.write_now_for_quit() {
-                SaveOutcome::Saved => {
+                SaveOutcome::Saved | SaveOutcome::SavedOrdinarily => {
                     kept.push(Kept::Saved { name, file });
                     continue;
                 }
@@ -7979,6 +7987,10 @@ fn utf16_units(bytes: &[u8], little_endian: bool, whole_pairs: bool) -> Vec<u16>
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SaveOutcome {
     Saved,
+    /// Saved, by an ordinary write, on a drive that cannot exchange two files
+    /// in one step — the first such save on that drive this session, which the
+    /// pane says once ([`PreviewSaves::saved`]); a later one is [`Self::Saved`].
+    SavedOrdinarily,
     /// The file on disk is not the file that was read (ruling 8⑨).
     Conflict,
     Failed(String),
@@ -7986,11 +7998,14 @@ pub enum SaveOutcome {
 
 /// **What a preview save does on a volume that cannot exchange two files in
 /// one step** — FAT and exFAT removable media on macOS, and Windows file systems
-/// that refuse the replacement: the one switch for the policy the owner is asked
-/// to rule on (S-6a round 2). Refused, said on the pane; the edit stays in the
-/// buffer, and a stop keeps it in the recovered folder.
+/// that refuse the replacement: the one switch for the policy (S-6a round 2),
+/// ruled by the owner on 2026-10-15 (T-PREVIEW-NO-EXCHANGE-RULING). The file is
+/// written the plain way — still only while it holds the bytes the buffer last
+/// read or placed — and the pane says so the first time on each drive; a crash
+/// during such a write can leave the file cut short. The configuration stores
+/// keep refusing.
 const ON_A_VOLUME_THAT_CANNOT_EXCHANGE: crate::document_request::NoExchange =
-    crate::document_request::NoExchange::Refuse;
+    crate::document_request::NoExchange::PlainWriter;
 
 /// What a buffer with no file says a save of it cannot do — the clause
 /// [`crate::i18n::not_saved`] is filled with.
@@ -8013,7 +8028,12 @@ pub(crate) enum SaveAsked {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Heard {
     /// The file holds the bytes written; they were body revision `body`.
-    Landed { body: u64 },
+    /// `ordinary_on`: the drive they went to by an ordinary write, because it
+    /// cannot exchange two files in one step.
+    Landed {
+        body: u64,
+        ordinary_on: Option<crate::document_request::Drive>,
+    },
     /// The file holds another writer's bytes, and holds them still. `named`:
     /// the answer carries those bytes — a file moving while the worker read it,
     /// or one past the bound, names none (round 9).
@@ -8200,7 +8220,11 @@ impl OnDisk {
             );
         }
         match answer.outcome {
-            Outcome::Landed { bytes, kept } => {
+            Outcome::Landed {
+                bytes,
+                kept,
+                ordinary_on,
+            } => {
                 self.bytes = Some(bytes);
                 // The file holds Folio's bytes: nobody else's are there to keep,
                 // and nothing sent is owed.
@@ -8219,7 +8243,15 @@ impl OnDisk {
                         version: answer.version + 1,
                     });
                 }
-                Heard::Landed { body: answer.asker }
+                if ordinary_on.is_some() {
+                    eprintln!(
+                        "BT_PERSIST {name} was written by an ordinary write: its drive cannot exchange two files in one step"
+                    );
+                }
+                Heard::Landed {
+                    body: answer.asker,
+                    ordinary_on,
+                }
             }
             Outcome::Moved { bytes } => {
                 eprintln!(
@@ -8257,7 +8289,10 @@ impl OnDisk {
                 self.bytes = sent.map(|sent| sent.bytes);
                 self.unanswered = false;
                 self.unlanded = None;
-                Heard::Landed { body: answer.asker }
+                Heard::Landed {
+                    body: answer.asker,
+                    ordinary_on: None,
+                }
             }
             Outcome::Conflict { theirs, kept } => {
                 eprintln!(
@@ -8322,6 +8357,9 @@ pub(crate) struct PreviewSaves {
     lane: crate::persist::StorageLane,
     tickets: u64,
     owed: Vec<OwedSave>,
+    /// The drives a save landed on by an ordinary write has been said for this
+    /// session ([`Self::saved`]).
+    told_ordinary: Vec<u64>,
     /// How many answers reached the sink.
     #[cfg(test)]
     sunk: u64,
@@ -8352,8 +8390,33 @@ impl PreviewSaves {
             lane,
             tickets: 0,
             owed: Vec::new(),
+            told_ordinary: Vec::new(),
             #[cfg(test)]
             sunk: 0,
+        }
+    }
+
+    /// **What a landing says** (T-PREVIEW-NO-EXCHANGE-RULING, owner ruling
+    /// 2026-10-15): "Saved" — or, for a landing by an ordinary write
+    /// (`ordinary_on`, a drive that cannot exchange two files in one step), the
+    /// sentence that says so, once per drive this session: the drive is
+    /// remembered when the sentence is answered, and a later landing on it is
+    /// "Saved". A drive that would not name itself is said every time, since
+    /// nothing shows it was said before.
+    pub(crate) fn saved(
+        &mut self,
+        ordinary_on: Option<crate::document_request::Drive>,
+    ) -> SaveOutcome {
+        let Some(crate::document_request::Drive(drive)) = ordinary_on else {
+            return SaveOutcome::Saved;
+        };
+        match drive {
+            Some(drive) if self.told_ordinary.contains(&drive) => SaveOutcome::Saved,
+            Some(drive) => {
+                self.told_ordinary.push(drive);
+                SaveOutcome::SavedOrdinarily
+            }
+            None => SaveOutcome::SavedOrdinarily,
         }
     }
 
@@ -8639,6 +8702,23 @@ pub fn preview_saved_notice() -> &'static str {
     crate::i18n::Text::PreviewSaved.text()
 }
 
+/// **The acknowledgement of a save by an ordinary write**, said the first time
+/// on each drive that cannot exchange two files in one step
+/// ([`SaveOutcome::SavedOrdinarily`]; owner ruling 2026-10-15). It is news, as
+/// "Saved" is, and stands in "Saved"'s place — never among the standing facts
+/// a padlock is reserved from — but it does not expire on "Saved"'s clock: a
+/// sentence said once stays until the pane's next notice replaces it.
+pub fn preview_saved_ordinarily_notice() -> &'static str {
+    crate::i18n::Text::PreviewSavedOrdinarily.text()
+}
+
+/// **Whether `notice` acknowledges a save** — "Saved", or the sentence of a save
+/// by an ordinary write — rather than standing for something that did not
+/// happen.
+pub fn is_a_save_acknowledgement(notice: &str) -> bool {
+    notice == preview_saved_notice() || notice == preview_saved_ordinarily_notice()
+}
+
 /// What the window says instead of overwriting somebody else's write.
 ///
 /// It says what happened, what was *not* done, and what is still true — the
@@ -8661,6 +8741,7 @@ pub fn preview_conflict_notice() -> &'static str {
 pub(crate) fn save_notice(outcome: SaveOutcome) -> String {
     match outcome {
         SaveOutcome::Saved => preview_saved_notice().to_owned(),
+        SaveOutcome::SavedOrdinarily => preview_saved_ordinarily_notice().to_owned(),
         SaveOutcome::Conflict => preview_conflict_notice().to_owned(),
         SaveOutcome::Failed(error) => {
             eprintln!("recoverable preview save failure: {error}");
@@ -15184,10 +15265,11 @@ mod tests {
     /// RED (S-6a round 2, B4) — **a refused save is said in the pane's words.**
     ///
     /// Each refusal Folio decides is a sentence of the language table —
-    /// `ExchangeUnavailable` is "this drive cannot replace the file safely",
-    /// the policy the owner is asked to rule on, whose one switch
-    /// (`ON_A_VOLUME_THAT_CANNOT_EXCHANGE`) refuses — and a disk's own error is
-    /// the system's sentence. Dirty stays on each.
+    /// `ExchangeUnavailable` is "this drive cannot replace the file safely" (the
+    /// preview's own policy writes plainly on such a drive since the owner's
+    /// ruling of 2026-10-15, `ON_A_VOLUME_THAT_CANNOT_EXCHANGE`, so the worker
+    /// does not answer it this refusal) — and a disk's own error is the
+    /// system's sentence. Dirty stays on each.
     ///
     /// MUTATION: answer `cause.described()` from `refusal_said` — the pane gets
     /// the technical account.
@@ -15198,10 +15280,6 @@ mod tests {
         let (lane, jobs) = crate::persist::StorageLane::scripted();
         let mut saves = PreviewSaves::on(lane);
         let mut buffer = opened(&dir, "备忘 memo.md", "原文 original\n");
-        assert_eq!(
-            ON_A_VOLUME_THAT_CANNOT_EXCHANGE,
-            crate::document_request::NoExchange::Refuse
-        );
         for (cause, said) in [
             (
                 Refusal::ExchangeUnavailable("ERROR_INVALID_FUNCTION (1)".to_owned()),
@@ -15234,7 +15312,10 @@ mod tests {
                 SaveAsked::Sent
             );
             let job = crate::test_support::next_document(&jobs);
-            assert_eq!(job.no_exchange, crate::document_request::NoExchange::Refuse);
+            assert_eq!(
+                job.no_exchange,
+                crate::document_request::NoExchange::PlainWriter
+            );
             let _ = job.answer.send(DocumentAnswer {
                 generation: job.generation,
                 version: job.version,
@@ -15251,6 +15332,179 @@ mod tests {
             );
             assert!(buffer.dirty);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One press of save, served on `volume` with `crossing` written into the
+    /// file between the precondition read and the exchange, and what the pane
+    /// that pressed is told.
+    fn saved_on(
+        buffer: &mut PreviewBuffer,
+        saves: &mut PreviewSaves,
+        jobs: &crate::persist::ScriptedJobs,
+        volume: impl crate::document_request::Volume + Send + 'static,
+        crossing: Option<Vec<u8>>,
+    ) -> Option<SaveOutcome> {
+        assert_eq!(
+            buffer.request_save(saves, crate::test_support::PRESSED_ON),
+            SaveAsked::Sent
+        );
+        let job = crate::test_support::next_document(jobs);
+        assert_eq!(
+            job.no_exchange,
+            crate::document_request::NoExchange::PlainWriter,
+            "the preview's request asks for the plain writer on such a drive"
+        );
+        crate::test_support::serve_on_a_volume(job, volume, crossing);
+        let mut answers = saves.take_answers();
+        assert_eq!(answers.len(), 1, "one answer");
+        buffer.hear_save_answer(answers.remove(0), saves)
+    }
+
+    /// RED (T-PREVIEW-NO-EXCHANGE-RULING, owner ruling 2026-10-15) — **a save on
+    /// a drive that cannot exchange lands plainly and says so, once per drive.**
+    ///
+    /// The drive's exchange answers `ERROR_NOT_SUPPORTED` (50)
+    /// (`test_support::NoExchangeDrive`). The press asks for the plain writer;
+    /// the file holds the body, nothing is left beside it, the buffer is clean,
+    /// and the pane that pressed hears the sentence that says the save was an
+    /// ordinary write — an acknowledgement, not a standing fact. A second save to
+    /// the same drive is "Saved"; a save of another file on a second drive says
+    /// the sentence again.
+    ///
+    /// MUTATIONS: ① `ON_A_VOLUME_THAT_CANNOT_EXCHANGE` back to `Refuse` — the
+    /// save is refused and the file keeps its old bytes; ② `PreviewSaves::saved`
+    /// without remembering the drive (drop the `push`) — the second save says the
+    /// sentence again; ③ `PreviewSaves::saved` answering "Saved" once any drive
+    /// was told (`!self.told_ordinary.is_empty()`) — the second drive is "Saved".
+    #[test]
+    fn a_save_on_a_drive_that_cannot_exchange_lands_plainly_and_says_so() {
+        use crate::test_support::NoExchangeDrive;
+        let dir = scratch("no-exchange-plain");
+        let (lane, jobs) = crate::persist::StorageLane::scripted();
+        let mut saves = PreviewSaves::on(lane);
+        let mut memo = opened(&dir, "备忘 memo.md", "原文 original\n");
+        let mut notes = opened(&dir, "笔记 notes.md", "开头 start\n");
+
+        assert!(memo.edit_content(|content| {
+            content.push_str("第一 first\n");
+            true
+        }));
+        assert_eq!(
+            saved_on(&mut memo, &mut saves, &jobs, NoExchangeDrive(7), None),
+            Some(SaveOutcome::SavedOrdinarily),
+            "the first save on the drive says it was an ordinary write"
+        );
+        assert_eq!(
+            std::fs::read_to_string(on_disk(&memo)).unwrap(),
+            "原文 original\n第一 first\n",
+            "the save landed with the bytes"
+        );
+        assert!(!memo.dirty);
+        assert_eq!(
+            save_notice(SaveOutcome::SavedOrdinarily),
+            crate::i18n::Text::PreviewSavedOrdinarily.text()
+        );
+        assert!(
+            is_a_save_acknowledgement(crate::i18n::Text::PreviewSavedOrdinarily.text()),
+            "the sentence is news, not a padlock's fact"
+        );
+
+        assert!(memo.edit_content(|content| {
+            content.push_str("第二 second\n");
+            true
+        }));
+        assert_eq!(
+            saved_on(&mut memo, &mut saves, &jobs, NoExchangeDrive(7), None),
+            Some(SaveOutcome::Saved),
+            "said once per drive"
+        );
+        assert_eq!(
+            std::fs::read_to_string(on_disk(&memo)).unwrap(),
+            "原文 original\n第一 first\n第二 second\n"
+        );
+
+        assert!(notes.edit_content(|content| {
+            content.push_str("另一个盘 another drive\n");
+            true
+        }));
+        assert_eq!(
+            saved_on(&mut notes, &mut saves, &jobs, NoExchangeDrive(8), None),
+            Some(SaveOutcome::SavedOrdinarily),
+            "a second drive says it again"
+        );
+        assert_eq!(
+            std::fs::read_to_string(on_disk(&notes)).unwrap(),
+            "开头 start\n另一个盘 another drive\n"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            2,
+            "nothing of the writes is left beside the files"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED (T-PREVIEW-NO-EXCHANGE-RULING) — **a byte mismatch on the plain road
+    /// is refused like the exchange road.**
+    ///
+    /// A writer puts its bytes in the file between the precondition read and
+    /// the write. On a drive that exchanges, the exchange hands them back and
+    /// they are put back under the file's name: the pane says the conflict. On a
+    /// drive that cannot exchange, the plain road reads the file again before it
+    /// writes and finds the bytes moved: nothing is written, and the pane says
+    /// the same conflict. Either way the file holds the other writer's bytes,
+    /// nothing is left beside it, and the edits stay.
+    ///
+    /// MUTATION: in `document_request::plainly`, write without reading the file
+    /// again (drop the `unless_it_holds` check) — the other writer's bytes are
+    /// written over and the pane says the save was an ordinary write.
+    #[test]
+    fn a_byte_mismatch_on_the_plain_road_is_refused_like_the_exchange_road() {
+        let dir = scratch("no-exchange-mismatch");
+        let (lane, jobs) = crate::persist::StorageLane::scripted();
+        let mut saves = PreviewSaves::on(lane);
+        for (name, plain_road) in [("交换 exchanged.md", false), ("普通 ordinary.md", true)] {
+            let mut buffer = opened(&dir, name, "原文 original\n");
+            assert!(buffer.edit_content(|content| {
+                content.push_str("我的 mine\n");
+                true
+            }));
+            let theirs = format!("第三方 a third writer of {name}\n").into_bytes();
+            let said = if plain_road {
+                saved_on(
+                    &mut buffer,
+                    &mut saves,
+                    &jobs,
+                    crate::test_support::NoExchangeDrive(7),
+                    Some(theirs.clone()),
+                )
+            } else {
+                saved_on(
+                    &mut buffer,
+                    &mut saves,
+                    &jobs,
+                    crate::document_request::TheVolume,
+                    Some(theirs.clone()),
+                )
+            };
+            assert_eq!(said, Some(SaveOutcome::Conflict), "{name}: the conflict");
+            assert_eq!(
+                std::fs::read(on_disk(&buffer)).unwrap(),
+                theirs,
+                "{name}: the other writer's bytes are under the file's name"
+            );
+            assert!(buffer.dirty, "{name}: the edits stay");
+            assert!(
+                buffer.on_disk.holds(&theirs),
+                "{name}: the revision is theirs"
+            );
+        }
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            2,
+            "nothing is left beside either file"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

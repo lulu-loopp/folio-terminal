@@ -1670,7 +1670,9 @@ impl<B: Backend> Runtime<'_, B> {
         for tab in &mut self.window.tabs {
             for (name, outcome) in tab.preview_pool.save_dirty() {
                 match outcome {
-                    preview::SaveOutcome::Saved => report.saved.push(name),
+                    preview::SaveOutcome::Saved | preview::SaveOutcome::SavedOrdinarily => {
+                        report.saved.push(name);
+                    }
                     preview::SaveOutcome::Conflict => report
                         .failed
                         .push((name, preview::preview_conflict_notice().to_owned())),

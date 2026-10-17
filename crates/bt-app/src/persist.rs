@@ -8125,6 +8125,7 @@ mod conditional_write_tests {
         let served = on_a_worker(move |worker| {
             settle_exchange(
                 worker,
+                &crate::document_request::TheVolume,
                 &probe,
                 &base,
                 &kept_path,
@@ -8137,6 +8138,7 @@ mod conditional_write_tests {
             Outcome::Landed {
                 bytes: Arc::from(&bytes(&settings("我们的 Ours Mono"))[..]),
                 kept: Some(displaced.clone()),
+                ordinary_on: None,
             }
         );
         assert!(displaced.is_file(), "the displaced copy stays");
@@ -8154,6 +8156,7 @@ mod conditional_write_tests {
             outcome: Outcome::Landed {
                 bytes: Arc::clone(&write.bytes),
                 kept: Some(displaced.clone()),
+                ordinary_on: None,
             },
             not_durable: Some("the directory flush failed".to_owned()),
             retired: Vec::new(),
@@ -8799,6 +8802,50 @@ mod conditional_write_tests {
         refuse_as_a_link(&jobs);
         store.settle();
         assert_eq!(store.take_fault(), None, "and not said twice in one streak");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-PREVIEW-NO-EXCHANGE-RULING, owner ruling 2026-10-15) — **a configuration store on
+    /// a drive that cannot exchange still refuses.** The preview's save writes plainly on such a
+    /// drive; `settings.json` does not: the store's own request asks for the refusal, and served
+    /// on a drive whose exchange answers `ERROR_NOT_SUPPORTED` (50) nothing is written, nothing is
+    /// left beside the file, and the store says at once that the file cannot be written.
+    ///
+    /// MUTATION: the stores' request with `NoExchange::PlainWriter` (`DocumentState::send_owed`)
+    /// — the file holds the change and no fault is said.
+    #[test]
+    fn a_configuration_store_on_a_drive_that_cannot_exchange_still_refuses() {
+        let root = scratch("store-no-exchange");
+        let path = root.join(SETTINGS_FILE_NAME);
+        let base = bytes(&settings("基线 Base Mono"));
+        std::fs::write(&path, &base).unwrap();
+        let (lane, jobs) = StorageLane::held();
+        let mut store = SettingsStore::read_at(path.clone(), is_writer_of_document(&path), lane);
+
+        let _ = store.store(settings("我们的 Ours Mono"));
+        let write = next_write(&jobs);
+        assert_eq!(
+            write.expected.as_deref(),
+            Some(&base[..]),
+            "a write over the file, which only an exchange replaces"
+        );
+        on_a_worker(move |worker| {
+            crate::document_request::serve_document_on(
+                worker,
+                &crate::test_support::NoExchangeDrive(7),
+                write,
+                &mut |_| {},
+            );
+        });
+        store.settle();
+
+        assert_eq!(file_bytes(&path), base, "nothing was written");
+        assert_eq!(names_in(&root), [SETTINGS_FILE_NAME], "nothing is left beside it");
+        assert_eq!(
+            store.take_fault(),
+            Some(crate::i18n::persisted_file_unwritable(SETTINGS_FILE_NAME)),
+            "the refusal is said at once"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

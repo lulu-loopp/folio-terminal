@@ -2278,6 +2278,25 @@ pub fn same_file(one: &std::path::Path, other: &std::path::Path) -> bool {
     }
 }
 
+/// **The identity of the volume `path` is on** — the half of the identity
+/// [`same_file`] compares that names the volume: on Windows the volume serial
+/// number (`FILE_ID_INFO`), on Unix the device (`st_dev`). Two paths on one
+/// volume answer the same number, and two volumes mounted at once answer two.
+/// `None` when the path cannot be asked or the platform keeps no such identity.
+/// It blocks on the disk: a worker's question.
+#[must_use]
+pub fn volume_identity(path: &std::path::Path) -> Option<u64> {
+    #[cfg(any(unix, windows))]
+    {
+        file_identity(path).map(|(volume, _)| volume)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = file_identity(path);
+        None
+    }
+}
+
 /// **Rename `from` to `to`, and never over another entry** — the move both
 /// rename doors make (the Files column's and the preview head's), as one call
 /// that refuses rather than replaces (T-HARDCODE-047 slice 2, RT-3's remainder).

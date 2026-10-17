@@ -29,7 +29,11 @@
 //! still holding what was written, so the person's file is back under its name,
 //! and answers `Conflict`. **A link** is refused unless the request's
 //! `link_policy` is `PlainWriter`, which writes it the plain way; a volume that
-//! cannot exchange is refused for every request ((b)1). **Per-file order** holds
+//! cannot exchange is refused unless the request's `no_exchange` is
+//! `PlainWriter` — the preview's save (T-PREVIEW-NO-EXCHANGE-RULING, owner
+//! ruling 2026-10-15); every store refuses ((b)1). The plain road reads the file
+//! again just before it writes and writes only while it still holds `expected`,
+//! so a writer that crossed is not written over. **Per-file order** holds
 //! because there is one queue: every request naming one path, whichever store or
 //! buffer queued it, is served in the order it was queued.
 //!
@@ -112,19 +116,56 @@ pub(crate) enum LinkPolicy {
 }
 
 /// **What a request does on a volume that cannot exchange two files in one
-/// step** ((b)1; hand-off item 6). The four stores refuse; the preview's save
-/// refuses until the owner rules on it, and its one switch is
-/// `preview::ON_A_VOLUME_THAT_CANNOT_EXCHANGE` (S-6a round 2).
+/// step** ((b)1; hand-off item 6). The four stores refuse. The preview's save
+/// writes plainly (owner ruling 2026-10-15, T-PREVIEW-NO-EXCHANGE-RULING); its
+/// one switch is `preview::ON_A_VOLUME_THAT_CANNOT_EXCHANGE`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NoExchange {
     /// Nothing is written; the answer is `Refused(ExchangeUnavailable)`.
     Refuse,
-    /// Write the file the plain way, as the preview's save did before S-6a.
-    #[expect(
-        dead_code,
-        reason = "T-PREVIEW-NO-EXCHANGE-RULING until 2026-11-30: the owner's pending ruling on a preview save over a volume that cannot exchange"
-    )]
+    /// Write the file the plain way, still only while it holds `expected`, and
+    /// name the drive on the landing ([`Outcome::Landed`]'s `ordinary_on`).
     PlainWriter,
+}
+
+/// **A drive, as a landing names it**: the identity of the volume the file is
+/// on (`bt_platform::volume_identity`), or `None` when the volume would not
+/// say. Two files on one drive name the same drive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Drive(pub(crate) Option<u64>);
+
+/// **The volume a request's file is on, as the worker meets it**: its exchange
+/// and its identity. The product's is [`TheVolume`]; a test scripts one that
+/// answers as a drive without the exchange does.
+pub(crate) trait Volume {
+    /// `bt_platform::replace_keeping_displaced`'s contract.
+    fn exchange(
+        &self,
+        worker: &WorkerCtx,
+        temp: &Path,
+        target: &Path,
+    ) -> Result<bt_platform::Displaced, bt_platform::ExchangeRefusal>;
+    /// The drive `file` is on.
+    fn drive(&self, file: &Path) -> Drive;
+}
+
+/// **The operating system's volume**: the exchange door and the volume's own
+/// identity.
+pub(crate) struct TheVolume;
+
+impl Volume for TheVolume {
+    fn exchange(
+        &self,
+        worker: &WorkerCtx,
+        temp: &Path,
+        target: &Path,
+    ) -> Result<bt_platform::Displaced, bt_platform::ExchangeRefusal> {
+        bt_platform::replace_keeping_displaced(worker, temp, target)
+    }
+
+    fn drive(&self, file: &Path) -> Drive {
+        Drive(bt_platform::volume_identity(file))
+    }
 }
 
 /// **A file the worker left beside a document, and the version whose landing
@@ -221,10 +262,14 @@ pub(crate) struct DocumentAnswer {
 pub(crate) enum Outcome {
     /// The file holds `bytes`. `kept` names the displaced copy of the bytes the
     /// file held before, kept because the exchange is not known to be durable;
-    /// a later durable landing retires it.
+    /// a later durable landing retires it. `ordinary_on` names the drive when
+    /// the bytes went there by an ordinary write because it cannot exchange two
+    /// files in one step (`NoExchange::PlainWriter`): a crash during it can
+    /// leave the file cut short.
     Landed {
         bytes: Arc<[u8]>,
         kept: Option<PathBuf>,
+        ordinary_on: Option<Drive>,
     },
     /// The precondition saw another file — `None`: no file, where one was
     /// expected — and nothing was written.
@@ -314,7 +359,17 @@ pub(crate) fn serve_document_between(
     job: DocumentJob,
     between: &mut dyn FnMut(Step),
 ) {
-    let served = conditional_write(worker, &job, between);
+    serve_document_on(worker, &TheVolume, job, between);
+}
+
+/// [`serve_document_between`] on `volume`.
+pub(crate) fn serve_document_on(
+    worker: &WorkerCtx,
+    volume: &dyn Volume,
+    job: DocumentJob,
+    between: &mut dyn FnMut(Step),
+) {
+    let served = conditional_write(worker, volume, &job, between);
     let retired = match (&served.outcome, &served.not_durable) {
         (Outcome::Landed { .. }, None) => retire(worker, &job.kept, job.version),
         _ => Vec::new(),
@@ -377,23 +432,30 @@ pub(crate) fn precondition(read: StableRead, expected: Option<&[u8]>) -> Precond
     }
 }
 
+/// **What a precondition that does not hold answers**: `None` when it holds and
+/// the write may go ahead; otherwise the answer, nothing written.
+fn unless_it_holds(read: StableRead, expected: Option<&[u8]>) -> Option<Served> {
+    match precondition(read, expected) {
+        Precondition::Holds => None,
+        Precondition::Moved(bytes) => Some(Served::plainly(Outcome::Moved { bytes })),
+        Precondition::Raced => Some(Served::plainly(Outcome::MovedDuringRead)),
+        Precondition::Unread(error) => Some(Served::plainly(Outcome::Refused {
+            cause: Refusal::Unread(error),
+        })),
+    }
+}
+
 /// §3.2's steps 1–4, as revised.
 fn conditional_write(
     worker: &WorkerCtx,
+    volume: &dyn Volume,
     job: &DocumentJob,
     between: &mut dyn FnMut(Step),
 ) -> Served {
     let read = bt_persist::read_stable(worker, &job.which);
     between(Step::Read);
-    match precondition(read, job.expected.as_deref()) {
-        Precondition::Holds => {}
-        Precondition::Moved(bytes) => return Served::plainly(Outcome::Moved { bytes }),
-        Precondition::Raced => return Served::plainly(Outcome::MovedDuringRead),
-        Precondition::Unread(error) => {
-            return Served::plainly(Outcome::Refused {
-                cause: Refusal::Unread(error),
-            });
-        }
+    if let Some(answer) = unless_it_holds(read, job.expected.as_deref()) {
+        return answer;
     }
     let staging = if job.expected.is_some() {
         Staging::Replacing
@@ -410,7 +472,7 @@ fn conditional_write(
     };
     match &job.expected {
         None => first_write(worker, job, &temp),
-        Some(expected) => exchange(worker, job, expected, &temp, between),
+        Some(expected) => exchange(worker, volume, job, expected, &temp, between),
     }
 }
 
@@ -421,6 +483,7 @@ fn first_write(worker: &WorkerCtx, job: &DocumentJob, temp: &Path) -> Served {
         Ok(()) => Served::plainly(Outcome::Landed {
             bytes: Arc::clone(&job.bytes),
             kept: None,
+            ordinary_on: None,
         }),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let _ = std::fs::remove_file(temp);
@@ -437,6 +500,7 @@ fn first_write(worker: &WorkerCtx, job: &DocumentJob, temp: &Path) -> Served {
             outcome: Outcome::Landed {
                 bytes: Arc::clone(&job.bytes),
                 kept: None,
+                ordinary_on: None,
             },
             not_durable: Some(error.to_string()),
             left: None,
@@ -453,6 +517,7 @@ fn first_write(worker: &WorkerCtx, job: &DocumentJob, temp: &Path) -> Served {
 /// The exchange, keeping what it displaced, and what follows each answer.
 fn exchange(
     worker: &WorkerCtx,
+    volume: &dyn Volume,
     job: &DocumentJob,
     expected: &[u8],
     temp: &Path,
@@ -463,10 +528,19 @@ fn exchange(
         let _ = std::fs::remove_file(temp);
         Served::plainly(Outcome::Refused { cause })
     };
-    match bt_platform::replace_keeping_displaced(worker, temp, &job.which) {
-        Ok(displaced) => settle_exchange(worker, job, expected, &displaced.path, None, between),
+    match volume.exchange(worker, temp, &job.which) {
+        Ok(displaced) => settle_exchange(
+            worker,
+            volume,
+            job,
+            expected,
+            &displaced.path,
+            None,
+            between,
+        ),
         Err(ExchangeRefusal::NotDurable { displaced, error }) => settle_exchange(
             worker,
+            volume,
             job,
             expected,
             &displaced.path,
@@ -475,11 +549,17 @@ fn exchange(
         ),
         Err(ExchangeRefusal::Link) => match job.link_policy {
             LinkPolicy::Refuse => refused(Refusal::Link),
-            LinkPolicy::PlainWriter => plainly(job, temp),
+            LinkPolicy::PlainWriter => plainly(worker, job, expected, temp, None),
         },
         Err(ExchangeRefusal::ExchangeUnavailable(error)) => match job.no_exchange {
             NoExchange::Refuse => refused(Refusal::ExchangeUnavailable(error.to_string())),
-            NoExchange::PlainWriter => plainly(job, temp),
+            NoExchange::PlainWriter => plainly(
+                worker,
+                job,
+                expected,
+                temp,
+                Some(volume.drive(&job.which)),
+            ),
         },
         Err(ExchangeRefusal::BackupNameTaken(path)) => refused(Refusal::BackupNameTaken(path)),
         Err(ExchangeRefusal::Failed(error)) => refused(Refusal::Disk(error.to_string())),
@@ -487,15 +567,31 @@ fn exchange(
 }
 
 /// **The plain write** a request's policy asks for where the exchange refused:
-/// the staged sibling goes, and the file is replaced keeping what it carried,
-/// with no displaced copy to read back.
-fn plainly(job: &DocumentJob, temp: &Path) -> Served {
+/// the staged sibling goes; the file is read again, and only while it still
+/// holds `expected` is it replaced, keeping what it carried, with no displaced
+/// copy to read back. A writer that crossed since the precondition was read is
+/// answered as the precondition answers it — `Moved` with its bytes — and is
+/// not written over: there is no exchange to hand its bytes back after the
+/// write, so the plain road asks before it. `ordinary_on`: the drive, when the
+/// road was taken because the drive cannot exchange.
+fn plainly(
+    worker: &WorkerCtx,
+    job: &DocumentJob,
+    expected: &[u8],
+    temp: &Path,
+    ordinary_on: Option<Drive>,
+) -> Served {
     let _ = std::fs::remove_file(temp);
+    if let Some(answer) = unless_it_holds(bt_persist::read_stable(worker, &job.which), Some(expected))
+    {
+        return answer;
+    }
     Served::plainly(
         match bt_persist::atomic_replace_keeping_metadata(&job.which, &job.bytes) {
             Ok(()) => Outcome::Landed {
                 bytes: Arc::clone(&job.bytes),
                 kept: None,
+                ordinary_on,
             },
             Err(error) => Outcome::Refused {
                 cause: Refusal::Disk(error.to_string()),
@@ -511,6 +607,7 @@ fn plainly(job: &DocumentJob, temp: &Path) -> Served {
 /// Anything else is a hand edit that crossed: kept for a merge, or put back.
 pub(crate) fn settle_exchange(
     worker: &WorkerCtx,
+    volume: &dyn Volume,
     job: &DocumentJob,
     expected: &[u8],
     displaced: &Path,
@@ -525,6 +622,7 @@ pub(crate) fn settle_exchange(
                 outcome: Outcome::Landed {
                     bytes: Arc::clone(&job.bytes),
                     kept: None,
+                    ordinary_on: None,
                 },
                 not_durable,
                 left: Some((
@@ -545,6 +643,7 @@ pub(crate) fn settle_exchange(
             outcome: Outcome::Landed {
                 bytes: Arc::clone(&job.bytes),
                 kept,
+                ordinary_on: None,
             },
             not_durable,
             left: None,
@@ -560,7 +659,7 @@ pub(crate) fn settle_exchange(
             left: None,
         },
         Mode::Restore => {
-            let mut restored = restore(worker, job, displaced, theirs);
+            let mut restored = restore(worker, volume, job, displaced, theirs);
             restored.not_durable = restored.not_durable.or(not_durable);
             restored
         }
@@ -572,7 +671,13 @@ pub(crate) fn settle_exchange(
 /// displaces in turn is judged by [`settle_restoring_exchange`]; a file that
 /// moved again before it, or a second exchange that is refused, leaves both
 /// files and names the one beside it.
-fn restore(worker: &WorkerCtx, job: &DocumentJob, displaced: &Path, theirs: Arc<[u8]>) -> Served {
+fn restore(
+    worker: &WorkerCtx,
+    volume: &dyn Volume,
+    job: &DocumentJob,
+    displaced: &Path,
+    theirs: Arc<[u8]>,
+) -> Served {
     let crossed = |kept: &Path| {
         Served::plainly(Outcome::Conflict {
             theirs: Arc::clone(&theirs),
@@ -583,7 +688,7 @@ fn restore(worker: &WorkerCtx, job: &DocumentJob, displaced: &Path, theirs: Arc<
         StableRead::Bytes(bytes) if *bytes == *job.bytes => {}
         _ => return crossed(displaced),
     }
-    match bt_platform::replace_keeping_displaced(worker, displaced, &job.which) {
+    match volume.exchange(worker, displaced, &job.which) {
         Err(
             bt_platform::ExchangeRefusal::Link
             | bt_platform::ExchangeRefusal::ExchangeUnavailable(_)
@@ -1668,7 +1773,7 @@ impl<T: StoredDocument> DocumentState<T> {
             self.kept.retain(|kept| kept.path != *retired);
         }
         match answer.outcome {
-            Outcome::Landed { bytes, kept } => {
+            Outcome::Landed { bytes, kept, .. } => {
                 self.revision.landed(bytes, flight.document);
                 self.writes.record(file, Ok(()));
                 if let Some(error) = &answer.not_durable {

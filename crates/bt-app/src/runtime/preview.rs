@@ -4020,13 +4020,14 @@ impl<B: Backend> Runtime<'_, B> {
         // the duplication the ruling retired.
         let railed = self.preview_rail_kind(surface) == Some(seats::PreviewRailKind::Crumbs);
         let revealed = self.foot_reveal_is_fresh(RevealedFoot::Preview(seat), now);
-        let saved = self.preview_save_notice(surface, now) == Some(preview::preview_saved_notice());
+        let saved = self
+            .preview_save_notice(surface, now)
+            .filter(|notice| preview::is_a_save_acknowledgement(notice))
+            .map(str::to_owned);
         let wanted = if revealed {
             Some(foot_revealed_label())
-        } else if saved {
-            Some(preview::preview_saved_notice())
         } else {
-            None
+            saved.as_deref()
         };
         let (flash, dissolved) = self.foot_saying(FootSaying::Preview(surface), wanted, now);
         let notice = self
@@ -7427,7 +7428,7 @@ impl<B: Backend> Runtime<'_, B> {
             // padlock — so the one thing this slot takes from the save ledger is
             // the word that *is* news.
             self.preview_save_notice(surface, now)
-                .filter(|notice| *notice == preview::preview_saved_notice())
+                .filter(|notice| preview::is_a_save_acknowledgement(notice))
                 .map(str::to_owned)
         };
         flashed.map(|word| (word, &[] as &'static [notice::NoticeVerb]))
@@ -7466,7 +7467,7 @@ impl<B: Backend> Runtime<'_, B> {
             })
             .or_else(|| {
                 self.preview_save_notice(surface, now)
-                    .filter(|notice| *notice != preview::preview_saved_notice())
+                    .filter(|notice| !preview::is_a_save_acknowledgement(notice))
             })
     }
 
@@ -7855,7 +7856,9 @@ impl<B: Backend> Runtime<'_, B> {
     /// (ruling 6: the mock-up's four durations are one). A refusal does not
     /// expire, because it is not a report of something that happened but of
     /// something that did *not*, and a warning that fades is a warning the user
-    /// is entitled to have missed.
+    /// is entitled to have missed. The sentence of a save by an ordinary write
+    /// ([`preview::preview_saved_ordinarily_notice`]) is said once per drive and
+    /// does not expire either: it stays until the pane's next notice.
     fn preview_save_notice(&self, surface: PreviewSurface, now: Instant) -> Option<&str> {
         let (notice, at) = self.preview_pane(surface)?.notice()?;
         if notice == preview::preview_saved_notice()
@@ -11717,13 +11720,14 @@ impl<B: Backend> Runtime<'_, B> {
         // as a consequence). "Saved" was drawn only in a docked pane's foot, and
         // a float's went to the body strip that the ruling retired — so without
         // this the word would have had nowhere left to be printed at all.
-        let saved = self.preview_save_notice(surface, now) == Some(preview::preview_saved_notice());
+        let saved = self
+            .preview_save_notice(surface, now)
+            .filter(|notice| preview::is_a_save_acknowledgement(notice))
+            .map(str::to_owned);
         let wanted = if revealed {
             Some(foot_revealed_label())
-        } else if saved {
-            Some(preview::preview_saved_notice())
         } else {
-            None
+            saved.as_deref()
         };
         let (flash, foot_dissolved) = self.foot_saying(FootSaying::FloatPreview(id), wanted, now);
         let notice = self

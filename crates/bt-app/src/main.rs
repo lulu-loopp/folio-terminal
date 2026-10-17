@@ -58284,7 +58284,7 @@ mod files_locate_door_tests {
         );
         assert!(
             say.contains("self.preview_save_notice(surface, now)")
-                && say.contains("preview::preview_saved_notice()"),
+                && say.contains("preview::is_a_save_acknowledgement(notice)"),
             "the confirmation is not read off the clock that expires it:\n{say}"
         );
         // And it is taken down by being answered, through the one door both

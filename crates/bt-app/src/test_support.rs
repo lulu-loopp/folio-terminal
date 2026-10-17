@@ -2118,13 +2118,51 @@ pub(crate) fn serve_on_a_worker(
     job: document_request::DocumentJob,
     crossing: Option<Vec<u8>>,
 ) -> bt_platform::admission::Role {
+    serve_on_a_volume(job, document_request::TheVolume, crossing)
+}
+
+/// **A drive without the exchange, as a test scripts it**
+/// (T-PREVIEW-NO-EXCHANGE-RULING): its exchange answers `ERROR_NOT_SUPPORTED`
+/// (50), the code a Windows volume without `ReplaceFileW`'s operation gives,
+/// classified by the platform's own rule (`bt_platform::volume_cannot_replace`),
+/// and touches nothing; it names itself drive `.0`. Every other call is the
+/// disk's own.
+pub(crate) struct NoExchangeDrive(pub(crate) u64);
+
+impl document_request::Volume for NoExchangeDrive {
+    fn exchange(
+        &self,
+        _worker: &bt_platform::admission::WorkerCtx,
+        _temp: &std::path::Path,
+        _target: &std::path::Path,
+    ) -> Result<bt_platform::Displaced, bt_platform::ExchangeRefusal> {
+        let answer = std::io::Error::from_raw_os_error(50);
+        Err(if bt_platform::volume_cannot_replace(answer.raw_os_error()) {
+            bt_platform::ExchangeRefusal::ExchangeUnavailable(answer)
+        } else {
+            bt_platform::ExchangeRefusal::Failed(answer)
+        })
+    }
+
+    fn drive(&self, _file: &std::path::Path) -> document_request::Drive {
+        document_request::Drive(Some(self.0))
+    }
+}
+
+/// [`serve_on_a_worker`] on `volume` — the product's ([`document_request::TheVolume`])
+/// or one a test scripts ([`NoExchangeDrive`]).
+pub(crate) fn serve_on_a_volume(
+    job: document_request::DocumentJob,
+    volume: impl document_request::Volume + Send + 'static,
+    crossing: Option<Vec<u8>>,
+) -> bt_platform::admission::Role {
     let path = job.which.clone();
     let (done, served) = std::sync::mpsc::channel();
     bt_platform::spawn_at_priority(
         "bt-preview-save-test",
         bt_platform::ThreadPriority::BelowNormal,
         move |worker| {
-            document_request::serve_document_between(worker, job, &mut |step| {
+            document_request::serve_document_on(worker, &volume, job, &mut |step| {
                 if step == document_request::Step::Read
                     && let Some(crossing) = &crossing
                 {

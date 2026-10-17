@@ -153,6 +153,7 @@ fn landed(job: &DocumentJob) -> Outcome {
     Outcome::Landed {
         bytes: Arc::clone(&job.bytes),
         kept: None,
+        ordinary_on: None,
     }
 }
 
