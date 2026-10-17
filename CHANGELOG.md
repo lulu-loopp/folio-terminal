@@ -123,6 +123,7 @@ All notable changes to Folio are recorded here. The format follows
 - If Folio fails unexpectedly while saving one file, that file's save says so and the others go on being saved; before, saving stopped for the rest of the run. A preview save made while 32 others are still on their way to the disk says so on its pane and keeps your edits. <!-- zh: pending T-STORAGE-WORKER-ON-THE-SEAM -->
 - When Folio cannot start adding its line to your PowerShell profile or taking it back out (Undo or the Settings removal), the window now says so in a card instead of doing nothing; the same click tries again. When Folio cannot start switching its Explorer first-page entry on or off, or its launch check of that entry, Folio no longer closes: the switch says so in a card, and the card blames Windows only when Windows refused. <!-- zh: pending T-PROFILE-INSTALL-REFUSED-START -->
 - A picture's hover preview in the terminal no longer stays blank after the glance card showed the same file. <!-- zh: pending T-PEEK-SCALE-ADDRESS-BY-SURFACE -->
+- Closing a pane, a floating window or a glance card that is playing a video no longer freezes the window while the video's decoder stops, which could take up to two seconds per video when the decoder was stuck; quitting waits for such a decoder once, for at most two seconds. <!-- zh: pending T-DROP-DOORS -->
 
 ### Changed
 
