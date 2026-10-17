@@ -395,7 +395,7 @@ fn constant_in_file(
             continue;
         }
         if index.text(tokens[at - 1].name_span()) != "const"
-            || gap_before(index, tokens, at, file) != ""
+            || !gap_before(index, tokens, at, file).is_empty()
         {
             continue;
         }
@@ -410,12 +410,9 @@ fn constant_in_file(
         let value_from = token.span().end() + equals + 1;
         let rest = &index.union()[value_from..file.end()];
         let value_at = value_from + (rest.len() - rest.trim_start().len());
-        let Some(literal) = literals
+        let literal = literals
             .iter()
-            .find(|literal| literal.span().start() == value_at)
-        else {
-            return None;
-        };
+            .find(|literal| literal.span().start() == value_at)?;
         let LiteralValue::Str(value) = literal.value() else {
             return None;
         };
