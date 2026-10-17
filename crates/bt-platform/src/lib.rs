@@ -9280,6 +9280,10 @@ pub mod macos_update;
 /// M4–M8, E-12). Refused by name off macOS.
 pub mod install_flip;
 
+/// **A value dropped without its retire door, said once** (T-DROP-DOORS): the line and the
+/// per-thread count every door-owning value's `Drop` uses when its owner never called the door.
+pub mod door_skipped;
+
 /// **A worker's waits** — `sleep_within`, the one sleep a worker that polls
 /// may take, asked for with the worker's own `WorkerCtx`
 /// (`docs/plans/design/thread-door-2026-09-26.md` (j)13; U-28).

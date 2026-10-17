@@ -115,7 +115,7 @@ TitleFlush	14	WindowTitle	Running, Exiting	`owner_door::set_title`	`Runtime::flu
 PaneRetirementWait	15	PaneRetirementWait	Exiting	`pty_door::wait_for_retirements` (`bt_pty::wait_for_retirements`)	`FolioApp::settle_quit`, `Retire`	one call
 SessionWriteWait	16	SessionWriteWait	Exiting	`SessionWriter::wait_for`	`SessionStore::wait_for_landing`	one call
 SessionWriterRetire	16b	SessionWriterRetire	Exiting	`SessionWriter::close`	`SessionStore::close`	one call
-TraceFlush	17	TraceFlush	Exiting	`trace_sink::flush`	`fn main`; `trace_sink::Shutdown::drop`	one call
+TraceFlush	17	TraceFlush	Exiting	`trace_sink::flush`	`trace_sink::Shutdown::flush_through_its_door` (`fn main`'s tail and its build-error return)	one call
 UpdateLeave	29	UpdateLeave	Exiting	`update_handoff::leave_armed`	`fn main`	one call
 LaunchHandOver	18	Starting	Starting	`launch_wire::hand_over`	`fn main`	one call
 WebController	21	WebController	Running, Exiting	`WebHost::request_controller`	`WebSeat::step`	one call

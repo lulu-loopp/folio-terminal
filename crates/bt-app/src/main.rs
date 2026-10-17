@@ -77330,7 +77330,10 @@ fn main() -> Result<()> {
     // The door is `bt_viewport`'s because `bt-app` depends on the three crates
     // that write these lines and none of them can name this module; see
     // `bt_viewport::trace`.
-    let _trace_shutdown = trace_sink::start();
+    let trace_shutdown = trace_sink::start();
+    // **A value dropped without its retire door says so here, once** (T-DROP-DOORS): from now on
+    // the platform's line about a skipped door is a diagnostics note, never a wait.
+    bt_platform::door_skipped::install(diagnostics::note);
     ime_outbound::install();
     bt_render::set_trace_writer(trace_sink::stderr_line);
     if diagnostics::switched_on(std::env::var_os("BT_STARTUP_TRACE")) {
@@ -77464,9 +77467,10 @@ fn main() -> Result<()> {
     let event_loop = match builder.build() {
         Ok(event_loop) => event_loop,
         Err(error) => {
-            // The way out from before the loop: `_trace_shutdown`'s drop flushes the trace, which
-            // is an exit door (§5.3 row 17), so the phase says so first.
+            // The way out from before the loop: the trace writer is retired through its flush
+            // door, which is an exit door (§5.3 row 17), so the phase says so first (D-78).
             bt_platform::admission::exiting();
+            let _ = trace_shutdown.flush_through_its_door();
             return Err(anyhow::Error::new(error).context("create winit event loop"));
         }
     };
@@ -77573,9 +77577,10 @@ fn main() -> Result<()> {
     // the failure that queue exists for is a writer stuck in a kernel write,
     // and waiting on it forever here would move the hang to the end of the run.
     //
-    // An owner-thread door (`doors::TraceFlush`, row 17), admitted on the way out. A refusal
-    // loses what is still queued, as the flush's own timeout does.
-    let _ = bt_platform::admission::admitted::<doors::TraceFlush, _>(trace_sink::flush);
+    // An owner-thread door (`doors::TraceFlush`, row 17), admitted on the way out, through the
+    // writer's own door (D-78). A refusal loses what is still queued, as the flush's own timeout
+    // does.
+    let _ = trace_shutdown.flush_through_its_door();
     // **The uninstaller, after *Uninstall* on the Settings card, is the very last
     // act** (T-UNINSTALL-UX): started detached, with `--after-pid` naming this
     // process, so it touches nothing until this process has gone. Nothing for any

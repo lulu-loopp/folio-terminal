@@ -4706,17 +4706,6 @@ const DIRWATCH_MACOS: &str =
     "bt-platform crate::macos_watch::<DirWatch as Drop>::drop [target_os = \"macos\"]";
 const STOPPER_SIGNAL: &str =
     "bt-platform crate::macos_watch::Stopper::signal [target_os = \"macos\"]";
-const SHUTDOWN: &str = "bt-app crate::trace_sink::<Shutdown as Drop>::drop";
-const ADMITTED: &str = "bt-effects crate::admission::admitted";
-const ROLE: &str = "bt-effects crate::admission::role";
-const CONTAINS: &str = "bt-effects crate::admission::Phases::contains";
-const BIT: &str = "bt-effects crate::admission::Phases::bit";
-const COUNT: &str = "bt-effects crate::admission::count";
-const METER: &str = "bt-effects crate::admission::meter";
-const FRESH: &str = "bt-effects crate::admission::WaitToken::fresh";
-const FLUSH: &str = "bt-app crate::trace_sink::flush";
-const FLUSH_SINK: &str = "bt-app crate::trace_sink::flush_sink";
-const QUEUE_CLOSE: &str = "bt-app crate::trace_sink::Queue::close";
 const ATTENTION_WINDOWS: &str =
     "bt-platform crate::attention_pipe::<AttentionPipe as Drop>::drop [windows]";
 const ATTENTION_UNIX: &str =
@@ -4753,8 +4742,10 @@ const PTY_ERROR_FROM: &str = "bt-pty crate::PtyError::from (generated)";
 const REQUEST: &str = "bt-platform crate::http::<Request as Drop>::drop [windows]";
 const SHARED_LOCKED: &str = "bt-platform crate::http::Shared::locked [windows]";
 /// **The exception table** (revision (e)3 as corrected by (f)2, (g), and (n)): the `Drop`s that may
-/// reach the vocabulary, each owed a repayment in `docs/plans/structural-debt.md`.
-const EXCEPTIONS: [Exception; 13] = [
+/// reach the vocabulary, each owed a repayment in `docs/plans/structural-debt.md`. A row leaves
+/// when its repayment lands (T-DROP-DOORS): the wait moves to the value's named door, its `Drop`
+/// keeps only what needs no wait, and the check below then holds that `Drop` like any other.
+const EXCEPTIONS: [Exception; 12] = [
     Exception {
         row: "DirWatch (Windows)",
         drop: DIRWATCH_WINDOWS,
@@ -4762,10 +4753,6 @@ const EXCEPTIONS: [Exception; 13] = [
     Exception {
         row: "DirWatch (macOS)",
         drop: DIRWATCH_MACOS,
-    },
-    Exception {
-        row: "trace_sink::Shutdown",
-        drop: SHUTDOWN,
     },
     Exception {
         row: "AttentionPipe (Windows)",
@@ -4810,7 +4797,7 @@ const EXCEPTIONS: [Exception; 13] = [
 ];
 
 /// **Every pinned body**, walked from the exceptions: nothing a listed `Drop` reaches is exempt.
-const PINNED: [Pinned; 40] = [
+const PINNED: [Pinned; 29] = [
     Pinned {
         body: DIRWATCH_WINDOWS,
         edges: &[&[CLOSE_WINDOWS], &[CLOSE_WINDOWS], &[CLOSE_WINDOWS]],
@@ -4834,76 +4821,6 @@ const PINNED: [Pinned; 40] = [
         edges: &[],
         effects: &[],
         leaves: &["signal"],
-    },
-    Pinned {
-        body: SHUTDOWN,
-        edges: &[&[ADMITTED], &[FLUSH]],
-        effects: &[],
-        leaves: &[],
-    },
-    Pinned {
-        body: ADMITTED,
-        edges: &[&[ROLE], &[CONTAINS], &[COUNT], &[METER], &[FRESH], &[FRESH]],
-        effects: &[],
-        leaves: &[],
-    },
-    Pinned {
-        body: ROLE,
-        edges: &[],
-        effects: &[],
-        leaves: &[],
-    },
-    Pinned {
-        body: CONTAINS,
-        edges: &[&[BIT]],
-        effects: &[],
-        leaves: &[],
-    },
-    Pinned {
-        body: BIT,
-        edges: &[],
-        effects: &[],
-        leaves: &[],
-    },
-    Pinned {
-        body: COUNT,
-        edges: &[],
-        effects: &[],
-        leaves: &[],
-    },
-    Pinned {
-        body: METER,
-        edges: &[],
-        effects: &[],
-        leaves: &[],
-    },
-    Pinned {
-        body: FRESH,
-        edges: &[],
-        effects: &[],
-        leaves: &[],
-    },
-    Pinned {
-        body: FLUSH,
-        edges: &[&[FLUSH_SINK]],
-        effects: &[],
-        leaves: &["get"],
-    },
-    Pinned {
-        body: FLUSH_SINK,
-        edges: &[&[QUEUE_CLOSE]],
-        effects: &[
-            ("thread::sleep", 2),
-            ("Receiver::recv_timeout", 1),
-            ("JoinHandle::join", 1),
-        ],
-        leaves: &["now", "take"],
-    },
-    Pinned {
-        body: QUEUE_CLOSE,
-        edges: &[],
-        effects: &[],
-        leaves: &["take"],
     },
     Pinned {
         body: ATTENTION_WINDOWS,
