@@ -396,6 +396,7 @@ dependencies = [
  "serde",
  "serde_json",
  "typst-as-lib",
+ "typst-assets",
  "typst-layout",
  "typst-library",
  "typst-svg",
