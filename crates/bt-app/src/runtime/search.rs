@@ -5,7 +5,7 @@ use crate::input::Keystroke;
 use crate::window_seam::prelude::*;
 use crate::{
     PointerTarget, Runtime, SearchRefresh, SearchScanCache, frame_row_of_anchor, hang_watch, input,
-    marks, native_window, rescan_leaf_for_search, search, seats, tooltip, trace_sink,
+    marks, rescan_leaf_for_search, search, seats, tooltip, trace_sink,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -152,10 +152,8 @@ impl<B: Backend> Runtime<'_, B> {
         // Only over a page. A terminal never had the Win32 focus to begin with,
         // and calling `SetFocus` on the window it is already in would be this
         // window taking something from itself.
-        if self.seat_holds_a_page(seat)
-            && let Ok(native) = native_window(&self.window.window)
-        {
-            let _ = bt_platform::take_keyboard_focus(native);
+        if self.seat_holds_a_page(seat) {
+            let _ = self.window.window.take_keyboard_focus();
         }
         self.refresh_search(SearchRefresh::Asked)?;
         self.after_search_change()

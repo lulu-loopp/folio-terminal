@@ -56,7 +56,7 @@ use crate::{
 pub mod profile_marks;
 mod profile_runtime;
 pub use profile_runtime::{
-    ProfileInstallOutcome, begin_profile_install, begin_profile_install_undo,
+    Migrated, ProfileInstallOutcome, begin_profile_install, begin_profile_install_undo,
     begin_profile_observation_for, begin_removal, begin_startup_migration, profile_installs_for,
     remove_shell_integration, remove_shell_integration_at, take_profile_installs, take_removal,
 };
@@ -3799,8 +3799,32 @@ fn run_parse_probe(
     text: &str,
     environment: &ProbeEnvironment,
 ) -> Result<bool, ParseProbeFailure> {
-    let output = check_powershell(
-        worker,
+    parse_probe_through(
+        program,
+        text,
+        environment,
+        |program, command, input, patience, environment| {
+            check_powershell(worker, program, command, input, patience, environment)
+        },
+    )
+}
+
+/// [`run_parse_probe`] with the check that starts the PowerShell handed in: the parse command,
+/// the text on its input, **the patience every PowerShell machine probe a pane or a page asks**
+/// ([`POWERSHELL_PROBE_PATIENCE`]), and the answer read from what it printed.
+fn parse_probe_through(
+    program: &Path,
+    text: &str,
+    environment: &ProbeEnvironment,
+    check: impl FnOnce(
+        &Path,
+        &str,
+        Option<&str>,
+        bt_platform::ProbePatience,
+        &ProbeEnvironment,
+    ) -> Result<ProbeOutput, ParseProbeFailure>,
+) -> Result<bool, ParseProbeFailure> {
+    let output = check(
         program,
         PARSE_COMMAND,
         Some(text),
@@ -4766,12 +4790,15 @@ fn begin_powershell_preparation(questions: Vec<ParseQuestion>, effects: Preparat
 /// Prepare the script and ask the target parser about every command-bearing
 /// PowerShell row in this profile snapshot. Called at startup and after a table
 /// change; exact argv keys make unchanged rows free and changed rows new work.
-pub fn begin_powershell_preparation_for(programs: &profiles::ProfilePrograms) {
+///
+/// Answers [`QuestionsAsked`], the start's witness that its questions step asked them.
+pub fn begin_powershell_preparation_for(programs: &profiles::ProfilePrograms) -> QuestionsAsked {
     begin_powershell_preparation_over(
         profiles::table().profiles(),
         programs,
         PreparationEffects::MACHINE,
     );
+    QuestionsAsked(())
 }
 
 /// [`begin_powershell_preparation_for`] over rows and effects handed in: the questions are
@@ -4785,8 +4812,37 @@ fn begin_powershell_preparation_over(
 }
 
 /// Re-prepare only the script when a trial releases its durable write.
-pub fn begin_powershell_script_preparation() {
+///
+/// Answers [`ScriptPrepared`], the start's witness that its script step asked for this.
+pub fn begin_powershell_script_preparation() -> ScriptPrepared {
     begin_powershell_preparation(Vec::new(), PreparationEffects::MACHINE);
+    ScriptPrepared(())
+}
+
+/// **That a start's script step asked for the script's preparation** (T-STARTUP-ORDER-SHARED):
+/// the value `startup::FirstWindow::script` must answer, and only
+/// [`begin_powershell_script_preparation`] makes one.
+pub struct ScriptPrepared(());
+
+/// **That a start's questions step put the PowerShell rows' parser questions**
+/// (T-STARTUP-ORDER-SHARED): the value `startup::FirstWindow::questions` must answer, and only
+/// [`begin_powershell_preparation_for`] makes one.
+pub struct QuestionsAsked(());
+
+#[cfg(test)]
+impl ScriptPrepared {
+    /// The headless start's stand-in for the step.
+    pub(crate) fn stand_in() -> Self {
+        Self(())
+    }
+}
+
+#[cfg(test)]
+impl QuestionsAsked {
+    /// The headless start's stand-in for the step.
+    pub(crate) fn stand_in() -> Self {
+        Self(())
+    }
 }
 
 /// What one write into a profile did.
@@ -5755,84 +5811,43 @@ mod tests {
         );
     }
 
-    /// PIN (kept, T-HEADLESS-RUNTIME-SEAM) — **the startup doors stand before the window, and the
-    /// probe takes the quiet door with its own patience.** What is left of the startup pin after
-    /// its halves that run were converted. The two orders it reads — the process entry's (`main`)
-    /// and the native window's construction (`Runtime::create`) — are written inline in those two
-    /// functions, and neither runs under a test: the one is the process, the other builds the
-    /// native window the headless backend stands in for. They **could** be driven if the steps
-    /// lived in a shared startup function both backends call; that move is
-    /// T-STARTUP-ORDER-SHARED, and until it lands this reads the order. The probe's quiet door
-    /// (`CREATE_NO_WINDOW`, which a `Command` does not show) and the patience naming are read
-    /// here too. What runs is driven elsewhere: the startup's observation and its refused start
-    /// by `a_refused_startup_observation_is_said_and_asked_again`, the observation thread's name
-    /// and that nobody joins it by the window-waits registry
-    /// (`every_worker_door_body_is_reached_from_a_completions_door`,
-    /// `every_bare_site_is_a_row_and_every_row_a_site`), and the probe's arguments and input by
-    /// `a_probe_asks_without_a_profile_and_feeds_its_input_on_stdin`.
+    /// RED (T-STARTUP-ORDER-SHARED; it was read from `run_parse_probe`'s text before) — **a parse
+    /// question is put with the patience every PowerShell machine probe a pane or a page asks**: the
+    /// parse command, the row's text on the input, [`POWERSHELL_PROBE_PATIENCE`], and the answer
+    /// read from what the PowerShell printed.
+    ///
+    /// MUTATION: hand the check [`REMOVAL_PROBE_PATIENCE`] in `parse_probe_through` — the patience
+    /// it was handed is not the shared one.
     #[test]
-    fn shell_integration_startup_doors_stand_before_the_window() {
-        let main = crate::test_support::item_body(
-            &bt_source::ItemQuery::function("main").in_module("crate"),
+    fn a_parse_question_is_put_with_the_shared_powershell_patience() {
+        let program = Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe");
+        let text = "Write-Host '你好, 世界'";
+        let answer = parse_probe_through(
+            program,
+            text,
+            &ProbeEnvironment::Inherited,
+            |asked, command, input, patience, _| {
+                assert_eq!(asked, program);
+                assert_eq!(command, PARSE_COMMAND);
+                assert_eq!(input, Some(text));
+                assert_eq!(patience, POWERSHELL_PROBE_PATIENCE);
+                Ok(ProbeOutput {
+                    stdout: b"1".to_vec(),
+                    stderr: Vec::new(),
+                })
+            },
         );
-        let removed = main
-            .find("shell_integration::remove_shell_integration(")
-            .unwrap();
-        for later in [
-            "cli::parse(",
-            "launch_wire::hand_over(",
-            "diagnostics::enter_resident_run(",
-            "EventLoop::<AppEvent>::with_user_event()",
-        ] {
-            assert!(removed < main.find(later).unwrap(), "{later}");
-        }
-        let create = crate::test_support::method_body("Runtime", "create");
-        let prepare = create
-            .find("shell_integration::begin_startup_migration();")
-            .expect("startup prepares the PowerShell script");
-        assert!(prepare < create.find("opening_window_attributes(").unwrap());
-        assert!(
-            !crate::test_support::found(
-                bt_source::Needle::new(bt_source::Pattern::text(
-                    "shell_integration::begin_removal();",
-                )),
-                bt_source::View::CodeKeepingLiterals,
-            )
-            .in_the_product(crate::test_support::source())
-            .is_empty()
-        );
-        // The script is prepared before the window; the parser questions about the PowerShell
-        // rows follow the program walk's answers (T-PROGRAMS-REFRESH), read before the panes.
-        let warmed = create
-            .find("shell_integration::begin_powershell_script_preparation();")
-            .expect("launch starts the script's preparation");
-        assert!(warmed < create.find("opening_window_attributes(").unwrap());
-        let asked = create
-            .find("shell_integration::begin_powershell_preparation_for(&profile_programs);")
-            .expect("launch asks about the PowerShell rows the walk answered");
-        assert!(
-            asked
-                < create
-                    .find("let (tab, conpty_source) = create_tab_state(")
-                    .unwrap()
-        );
-        let command = source_for_probe_command();
-        assert!(command.contains("bt_platform::quiet_command(resolved)"));
-        assert!(
-            !crate::test_support::found_in(
-                bt_source::Needle::new(
-                    bt_source::Pattern::identifier("POWERSHELL_PROBE_PATIENCE",)
-                ),
-                bt_source::View::Identifiers,
-                bt_source::Scope::Module("crate::shell_integration".to_owned()),
-            )
-            .in_the_product(crate::test_support::source())
-            .is_empty()
-        );
+        assert_eq!(answer, Ok(true));
+    }
+
+    /// RED — **a removal somebody asked for waits longer for a quiet PowerShell than a pane's or a
+    /// page's probe does**: it is asked once and not again by itself, so a cold start's silence is
+    /// waited out where a probe that will be asked again gives up.
+    ///
+    /// MUTATION: give [`REMOVAL_PROBE_PATIENCE`] the probes' five seconds.
+    #[test]
+    fn a_removal_waits_longer_for_a_quiet_powershell_than_a_probe_does() {
         assert!(REMOVAL_PROBE_PATIENCE.quiet > POWERSHELL_PROBE_PATIENCE.quiet);
-        let parse_probe =
-            crate::test_support::item_body(&bt_source::ItemQuery::function("run_parse_probe"));
-        assert!(parse_probe.contains("POWERSHELL_PROBE_PATIENCE"));
     }
 
     /// RED (T-HEADLESS-RUNTIME-SEAM round 2) — **a startup observation the thread door refuses is
@@ -6276,10 +6291,6 @@ mod tests {
             console.contains("ShellProfileNothing"),
             "a person who typed the command is owed an answer"
         );
-    }
-
-    fn source_for_probe_command() -> &'static str {
-        crate::test_support::item_body(&bt_source::ItemQuery::function("powershell_probe_command"))
     }
 
     #[test]

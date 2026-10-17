@@ -3778,13 +3778,14 @@ fn a_forwarded_gesture_is_delivered_to_the_shell_it_was_handed_to() {
 ///
 /// Run: left down forwarded; right down and up (over an overlay, or anywhere);
 /// left up. The child hears exactly a left press and a left release, and the
-/// route stands until the left release and comes off there. Read: the owned
-/// release hands a different button's release on down the ordinary road, and
-/// the cell road takes no second button while a forwarded gesture is latched.
+/// route stands until the left release and comes off there. Since
+/// T-POINTER-CAPTURE cut 4 (R-8) the slot swallows the right button's press and
+/// release before any road is asked, so neither reaches the owned release nor
+/// the cell road, where a second press would have begun a selection.
 ///
 /// Red gates: drop the latched-button test from the release arm, or let a
-/// second press overwrite the route, and the chord's byte list is wrong; drop
-/// the owned release's button test and its assertion fails.
+/// second press overwrite the route, and the chord's byte list is wrong; let
+/// the slot route another button's release and its assertion fails.
 #[test]
 fn a_chord_under_a_forwarded_gesture_leaves_it_whole() {
     let mut session =
@@ -3838,23 +3839,29 @@ fn a_chord_under_a_forwarded_gesture_leaves_it_whole() {
     );
     assert!(route.is_none());
 
-    let release = squeezed_body("Runtime", "release_cell_route");
-    assert!(
-        release.contains("ifprotocol_mouse_button(button)!=Some(latched){returnOk(false);}"),
-        "the owned release hands another button's release on as an event of its own"
-    );
-    assert!(
-        release.contains("ifbutton!=MouseButton::Left{returnOk(false);}"),
-        "and a selection, begun by the left button, is ended only by it"
-    );
-    let road = squeezed_body("Runtime", "mouse_input");
-    assert!(
-        road.contains(
-            "ifmatches!(self.held_mouse_route(),Some(MouseRoute::Forward{..})){returnOk(());}match state"
-                .replace(' ', "")
-                .as_str()
+    let forwarded = crate::runtime::pointer::PointerCapture {
+        window: winit::window::WindowId::from(1_u64),
+        owner: crate::runtime::pointer::CaptureOwner::Route(MouseRoute::Forward {
+            button: input::MouseProtocolButton::Left,
+            sgr: true,
+            owner: a_shell(),
+        }),
+        button: MouseButton::Left,
+        started: None,
+    };
+    assert_eq!(
+        crate::runtime::pointer::release_against_the_slot(
+            Some(&forwarded),
+            crate::runtime::pointer::ButtonSet::default(),
+            MouseButton::Right,
         ),
-        "the cell road begins no selection under a latched forwarded gesture"
+        crate::runtime::pointer::ReleaseVerdict::Swallow,
+        "another button's release goes nowhere under the forwarded gesture (R-8)"
+    );
+    assert_eq!(
+        crate::runtime::pointer::press_against_the_slot(Some(&forwarded), MouseButton::Right),
+        crate::runtime::pointer::PressVerdict::Swallow,
+        "and another button's press reaches no road, so it begins no selection under it"
     );
 }
 

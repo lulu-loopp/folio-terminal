@@ -96,5 +96,37 @@ runs:
     # Third-party, so pinned to a commit rather than to a tag its owner can
     # repoint. This action itself is referenced by path, which is this
     # repository's own file at the same commit as the workflow calling it.
+    #
+    # **Only `main` writes the store; every other run only reads it.** GitHub
+    # keeps 10 GB of caches per repository and, past that, evicts the entries
+    # read least recently. A run may restore what its own ref saved or what
+    # the default branch saved (a pull request's run also what its base
+    # branch saved), never a sibling branch's, so an entry a branch dispatch
+    # (or a pull request, or a tag) saves is readable by that ref alone, and
+    # every byte of it pushes `main`'s entries towards eviction.
+    # `gh cache list` on 2026-10-17: 9.97 GB in 11 entries; `main`'s current
+    # set, one entry per job that comes here with the cache, is 6.34 GB
+    # (logic 1.82, core-macos 1.02, smoke 0.92, gpu 0.76, core-linux 0.50,
+    # gates-can-fail 0.41, conpty 0.38, wasm-lib-check 0.38, licensing 0.14).
+    # Over the 58 `ci.yml` runs of 2026-10-15..17 branch runs wrote 157
+    # entries (113.7 GB) against `main`'s 37 (25.0 GB), and those branch
+    # entries were read back by their own branch 18 times; meanwhile 12 of
+    # the 90 `main` job runs after the toolchain pin found nothing although
+    # `main` had saved that job's entry minutes to an hour earlier (evicted).
+    # With branches only reading, the store holds `main`'s set (6.34) plus
+    # superseded entries nothing reads any more, which are therefore the
+    # first evicted: one job re-saving after its key moved needs the set plus
+    # its own entry, 6.34 + 1.82 = 8.16 <= 10. A change to the dependencies
+    # moves every key at once and needs the outgoing and incoming sets
+    # together, 2 x 6.34 = 12.67 > 10; up to 2.67 GB of the outgoing set can
+    # go before the incoming one is saved, so a second `main` run started
+    # before that landing's last job has saved (logic, up to ~77 minutes in)
+    # can find some jobs cold (docs/WINDOWS-CI-RELEASE.md, "Cache store"). A
+    # branch run restores `main`'s entry by the key's prefix (the restore key
+    # stops before the dependency hash: the manifests' dependency sections,
+    # Cargo.lock, rust-toolchain(.toml) and .cargo/config.toml) and compiles
+    # its own difference on every dispatch.
     - if: ${{ inputs.cache == 'true' }}
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      with:
+        save-if: ${{ github.ref == 'refs/heads/main' }}

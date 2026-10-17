@@ -82,7 +82,7 @@ fn facts_read(folio: &HeadlessFolio) -> usize {
 /// live (the line read back from the runtime's own bracket door), then torn down and ended twice,
 /// the second end unpaired — through `ime_input`, as winit delivers it.
 ///
-/// MUTATION: `ime_native_facts` reads `native_window(..)` and `snapshot` instead of
+/// MUTATION: `ime_native_facts` reads `bt_platform::ime_observation::snapshot` directly instead of
 /// `WindowHost::ime_facts` (or answers `NativeFacts::default()`) — no read, default facts — red.
 #[test]
 fn a_restart_inside_a_live_composition_writes_the_windows_native_facts() {

@@ -631,12 +631,42 @@ build names from pieces. With all of these, every door of the seam the product
 implements is implemented in the seam (the headless backend is test-only and is
 not read).
 
-**What the guard does not hold**: the platform handle. `WindowHost::native_handle`
-and `CompositorDoor::platform_tree` hand generic code a `bt_platform` value that
-reaches the platform past every door — the call sites are listed in
-`ARCHITECTURE.md` §4.5, and moving them behind doors is
-T-NATIVE-HANDLE-BEHIND-THE-SEAM. A new use of either is a new crossing; say it
-there.
+**The platform handle stays behind the doors** (T-NATIVE-HANDLE-BEHIND-THE-SEAM,
+RULE C): code written for the window — an item with a backend parameter in
+scope, or whose generics, `where` clause or `impl Trait` (or `dyn`) arguments
+are bounded by a seam trait: a function over `&impl WindowHost`, a generic
+holder block's method, a trait's default body, a holder's declaration — names
+neither `bt_platform::NativeWindow` nor `bt_platform::Compositor`, in its
+signature, its body or a macro's tokens in it, and no door trait of the seam
+names either in its declaration. What is followed: a name, to what it stands for,
+through the body's `use` leaves, the module's own (renames included), child
+modules, `crate`/`self`/`super` paths and the module's globs (a glob of
+`bt_platform` opens both names), to a fixed point within the walk's hop limit; a
+cycle names nothing more. What is refused, by name, wherever it is written: a
+name that does not settle within the hop limit; a type alias or an associated
+type naming either handle (the walk does not follow aliases, as Rules A and B do
+not); and a module-level macro — an invocation or a `macro_rules!` body — whose
+tokens spell either (a module-level macro is no item's, so it is read as code
+written for the window). Code written for no window — the web engine's
+host, a lane's executor, the platform's own glue — may name them: no door hands
+it a handle. The seam's own two sealed values, `webhost::SeatAddress` (the
+window's handle, read only by the engine) and `window_seam::PageTree` (the tree,
+walked only by the seam), are how a page reaches its window. When red, add the
+door the code needs to `WindowHost` (or `CompositorDoor`), with the
+`bt-platform` call in the native impl and a recorded `WindowEffect` (or a
+documented stand-in answer in `headless::PlatformAnswers`) in the headless one.
+
+**The startup order is a shared function, not native code** (T-STARTUP-ORDER-SHARED):
+`crate::startup::begin` (the removal verbs, the command line, the hand-over) and
+`crate::startup::resume` (the startup migration, the script's
+preparation, the window, the PowerShell questions, the first tab) are generic
+over the steps they are handed, and name no holder. `main` and `Runtime::create`
+hand them their steps as closures written in their own bodies, which is why the
+order needed no native-list row; the headless start hands them recording
+stand-ins, and the order is a behavioural test, not a reading of either body. A
+new startup step that must run in that order is a field of `startup::FrontDoor`
+or `startup::FirstWindow` and a `headless::StartupStep`, not a line placed by
+hand between two others.
 
 Where and what to do: `crates/bt-source/tests/window_seam.rs`
 (`bt_app_reaches_its_window_only_through_the_seam`) reads `bt-app` by item
