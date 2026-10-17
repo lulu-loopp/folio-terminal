@@ -482,6 +482,10 @@ const PLANTED: &str = "\
 | no thread | `bt-source` | `Index::of_package` | - | `no-such-thread` |
 | a package | `bt-source` | `Index::of_package` | - | `bt-source` |
 | a module | `bt-source` | `bt_source::index` | - | any |
+| two crates | `bt-source` `bt-term` | `Index::of_package` | - | any |
+| prose crate | bt-source | `Index::of_package` | - | any |
+| test thread | `bt-source` | `Index::of_package` | - | `folio-bt-source-no-such-directory` |
+| vendored thread | `bt-source` | `Index::of_package` | - | `alacritty-tty-reader-thread` |
 
 ### 7.10 A table without its separator
 
@@ -528,6 +532,19 @@ fn a_chain_row_names_an_item_or_is_refused_by_name() {
         ("no thread", "no first-party product code spells it"),
         ("a package", "`bt-source` is a package"),
         ("a module", "`bt_source::index` names no product item"),
+        ("two crates", "the crate cell spells one backticked package"),
+        (
+            "prose crate",
+            "the crate cell spells one backticked package",
+        ),
+        (
+            "test thread",
+            "`folio-bt-source-no-such-directory` is thread-shaped and no first-party product code",
+        ),
+        (
+            "vendored thread",
+            "`alacritty-tty-reader-thread` is thread-shaped and no first-party product code",
+        ),
     ];
     for (row, what) in planted {
         assert!(refused(row, what), "row `{row}`: {what}\n{reading:#?}");
@@ -550,9 +567,20 @@ fn a_chain_row_names_an_item_or_is_refused_by_name() {
         planted.len() + tables.len(),
         "{reading:#?}"
     );
-    // `found`'s three names and its thread, and the unrefused names of the rows refused for
-    // something else: `nameless` has none, `short` is refused whole.
-    assert_eq!(reading.resolved, 4 + 2, "{reading:#?}");
+    // `found`'s three names and its thread, and the entry names of the four rows refused only
+    // for a lane cell (`no thread`, `a package`, `test thread`, `vendored thread`); `nameless` has
+    // none, `short` and the two crate-cell rows are refused whole.
+    assert_eq!(reading.resolved, 4 + 4, "{reading:#?}");
+    // The test thread's plant means something only while the literal is there, in test code.
+    let source = Index::of_package("bt-source");
+    let in_tests = source.literals().iter().any(|literal| {
+        matches!(literal.value(), LiteralValue::Str(text) if text == "folio-bt-source-no-such-directory")
+    });
+    assert!(
+        in_tests,
+        "bt-source's tests no longer spell the planted thread name"
+    );
+    assert!(!spawns(source, "folio-bt-source-no-such-directory"));
 }
 
 /// RED (T-CHAINS-72) — a document without §7, a §7 without a table, and a table without the two
