@@ -734,10 +734,11 @@ enum Queued {
 type AheadJobs = Arc<Mutex<std::collections::VecDeque<(StorageId, StorageJob)>>>;
 
 /// **The storage worker's end, however it ends** (review round 3, C2). It owns
-/// the worker's channel ends and the jobs it has taken, so the queue's receiver
-/// lives exactly as long as it. Under the queue's lock — the lock every door
-/// admits under — it marks the lane down and drops every job still queued, ahead
-/// or in hand, so each such request's answer channel disconnects; no request can
+/// the worker's channel ends and the jobs it has taken and not begun, so the
+/// queue's receiver lives exactly as long as it. Under the queue's lock — the lock
+/// every door admits under — it marks the lane down and drops every job still
+/// queued, ahead or taken (the one being served, held by the loop, went with the
+/// loop's unwinding), so each such request's answer channel disconnects; no request can
 /// be admitted after that, because admission asks `up` under the same lock. The
 /// session receipts' channel closes after them, so a session write the worker
 /// took and will not answer reads as the worker's end on the turn the wake brings
@@ -756,8 +757,10 @@ struct WorkerEnd {
     /// The jobs admitted ahead of the queue ([`StorageLane::submit_ahead`]): dropped
     /// with the queued ones, so each such request's answer channel disconnects too.
     ahead: AheadJobs,
-    /// **The jobs the worker has taken and not yet ended**, the one it serves first: each
-    /// is let go — its road with it — only after its terminal is published, or here.
+    /// **The jobs the worker has taken off the queue and not yet begun** — the ones
+    /// admitted ahead, then the queue's — in the order it serves them. The one it
+    /// serves is taken out of here and held by the loop itself until its terminal
+    /// is published; these are let go — their roads with them — here.
     in_hand: std::collections::VecDeque<(StorageId, StorageJob)>,
 }
 
@@ -1598,20 +1601,23 @@ impl SessionWriter {
                     if let Queued::Job(id, job) = next {
                         end.in_hand.push_back((id, *job));
                     }
-                    while let Some((id, job)) = end.in_hand.front_mut() {
-                        let id = *id;
+                    while let Some((id, mut job)) = end.in_hand.pop_front() {
                         let Some(receipts) = end.receipts.as_ref() else {
+                            end.in_hand.push_front((id, job));
                             break 'serving;
                         };
                         // **One request, one task** (R2): a panic in it is this request's
-                        // `Failed`, said once by the ledger, and the worker goes on. The job is
-                        // lent, so its road stands until its terminal is published.
+                        // `Failed`, said once by the ledger, and the worker goes on. The loop
+                        // holds the job and lends it to the task, so its road stands until its
+                        // terminal is published.
                         let served = crate::lane::task(ctx, |ctx| {
                             #[cfg(test)]
                             if let Some(door) = &door {
-                                return Ok(door(ctx, job, receipts));
+                                return Ok(door(ctx, &mut job, receipts));
                             }
-                            Ok::<_, std::convert::Infallible>(serve_storage_job(ctx, job, receipts))
+                            Ok::<_, std::convert::Infallible>(serve_storage_job(
+                                ctx, &mut job, receipts,
+                            ))
                         });
                         let wakes = job.wakes();
                         let (terminal, gone) = match served {
@@ -1622,7 +1628,7 @@ impl SessionWriter {
                             Err(failure) => {
                                 // A session write's answer is its receipt, on the session's own
                                 // road: a failed one is a refusal in the failure's words.
-                                let gone = match &*job {
+                                let gone = match &job {
                                     StorageJob::Session(request) => receipts
                                         .send(SessionWriteReceipt {
                                             generation: request.generation,
@@ -1636,7 +1642,7 @@ impl SessionWriter {
                         };
                         ledger.publish(id, terminal);
                         // The job, and its road, let go after its terminal.
-                        end.in_hand.pop_front();
+                        drop(job);
                         if gone {
                             break 'serving;
                         }
@@ -1734,12 +1740,13 @@ impl SessionWriter {
     /// Hand an update's hand-over to the writer thread (U-21): the durable
     /// `Handoff`, then the applier's start. `None` when there is no writer
     /// thread: then nothing is written and nothing started. Its reader is the
-    /// update's way out, which reads the answer's own road
-    /// (`update_handoff::look`), so its identity goes to the lane's sink at once.
+    /// update's way out (`update_handoff::look`), which holds the request beside
+    /// its road and tells a failed hand-over from the worker's end by its
+    /// terminal.
     fn send_handoff(
         &mut self,
         job: crate::update_handoff::HandoffJob,
-    ) -> Option<mpsc::Receiver<crate::update_handoff::HandedOff>> {
+    ) -> Option<OnTheWorker<crate::update_handoff::HandedOff>> {
         let (answer, answered) = mpsc::channel();
         self.lane
             .submit_storage_job(StorageJob::Handoff {
@@ -1747,10 +1754,7 @@ impl SessionWriter {
                 answer,
             })
             .ok()
-            .map(|request| {
-                drop(request);
-                answered
-            })
+            .map(|request| OnTheWorker::admitted(answered, request))
     }
 
     /// Every receipt that has arrived, newest-relevant last; a channel read closed after them
@@ -2779,11 +2783,11 @@ impl SessionStore {
 
     /// **Hand an update's hand-over to the storage worker** (U-21): `Handoff` written durably
     /// there, then the applier started — never on the calling thread, which is the window's. The
-    /// answer comes back on the channel this returns; `None` when there is no worker.
+    /// answer comes back on the request this returns; `None` when there is no worker.
     pub(crate) fn hand_off(
         &mut self,
         job: crate::update_handoff::HandoffJob,
-    ) -> Option<mpsc::Receiver<crate::update_handoff::HandedOff>> {
+    ) -> Option<OnTheWorker<crate::update_handoff::HandedOff>> {
         self.writer.send_handoff(job)
     }
 
@@ -7596,7 +7600,11 @@ mod receipt_wake_tests {
         let txn = TxnId::new([0x7a; 16]);
         let (answer, answered) = mpsc::channel::<HandedOff>();
         drop(answer);
-        match look(Some(&answered), txn, false) {
+        match look(
+            Some(&mut super::OnTheWorker::answered_at_the_door(answered)),
+            txn,
+            false,
+        ) {
             Looked::Over { line, applier } => {
                 assert_eq!(applier, None, "no applier is known");
                 assert!(line.contains("the storage worker stopped"), "{line}");
@@ -7605,10 +7613,78 @@ mod receipt_wake_tests {
         }
         let (_open, waiting) = mpsc::channel::<HandedOff>();
         assert_eq!(
-            look(Some(&waiting), txn, false),
+            look(
+                Some(&mut super::OnTheWorker::answered_at_the_door(waiting)),
+                txn,
+                false
+            ),
             Looked::Waiting,
             "an open channel with nothing in it is no answer yet"
         );
+    }
+
+    /// RED (T-STORAGE-WORKER-ON-THE-SEAM, the review's nit 5) — **a hand-over the storage
+    /// worker failed on says so, not that the worker stopped**: the request's terminal is
+    /// `Failed` (its task panicked, and the worker went on), its road closed with no answer;
+    /// the look is over — no applier is known, the window's mark decides — and its line names
+    /// the failure. A request the worker's end left owed (`WorkerGone`) still says the worker
+    /// stopped.
+    ///
+    /// MUTATION: in `update_handoff::look`, read `Reply::Failed` as `Reply::Gone` — the line
+    /// says the worker stopped.
+    #[test]
+    fn a_hand_over_the_worker_failed_on_says_it_failed() {
+        let txn = TxnId::new([0x7b; 16]);
+        let (lane, _jobs) = StorageLane::held();
+        let asked = |lane: &StorageLane| {
+            lane.send_read(ReadJob {
+                which: bt_testpath::temp_path("bt-app-handoff-failed-读"),
+                generation: 1,
+                answer: Box::new(|_, _| {}),
+            })
+            .expect("admitted")
+        };
+        let failed = asked(&lane);
+        lane.shared.ledger.publish(
+            failed.id(),
+            crate::lane::Terminal::Failed(crate::lane::TaskFailure::Panicked(
+                "scripted: the hand-over fails 交接失败".to_owned(),
+            )),
+        );
+        let (answer, answered) = mpsc::channel::<HandedOff>();
+        drop(answer);
+        match look(
+            Some(&mut super::OnTheWorker::admitted(answered, failed)),
+            txn,
+            false,
+        ) {
+            Looked::Over { line, applier } => {
+                assert_eq!(applier, None, "no applier is known");
+                assert!(
+                    line.contains("the storage worker failed on it")
+                        && line.contains("scripted: the hand-over fails 交接失败")
+                        && !line.contains("stopped"),
+                    "{line}"
+                );
+            }
+            Looked::Waiting => panic!("a failed hand-over is over"),
+        }
+        let gone = asked(&lane);
+        lane.shared
+            .ledger
+            .worker_ended(crate::lane::WorkerEnd::Returned);
+        let (answer, answered) = mpsc::channel::<HandedOff>();
+        drop(answer);
+        match look(
+            Some(&mut super::OnTheWorker::admitted(answered, gone)),
+            txn,
+            false,
+        ) {
+            Looked::Over { line, .. } => {
+                assert!(line.contains("the storage worker stopped"), "{line}");
+            }
+            Looked::Waiting => panic!("a hand-over the worker's end left is over"),
+        }
     }
 }
 

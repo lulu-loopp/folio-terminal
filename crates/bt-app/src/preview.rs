@@ -14807,16 +14807,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// RED (S-6a, C2) — **a save nothing would write is said on the pane, and
-    /// the buffer stays dirty.**
-    ///
-    /// Three refusals, each said with its reason and none of them a retry: a
-    /// lane no worker serves refuses at the door; a body over the worker's
-    /// bound is refused before it is handed over; and a worker that ends with
-    /// the request unanswered is heard as the request's refusal.
-    ///
-    /// MUTATIONS: in `request_save`, answer `Sent` when the lane refuses the
-    /// request; drop the bound — the over-bound body is handed over.
     /// RED (T-STORAGE-WORKER-ON-THE-SEAM, R1) — **the preview's desk owes at most
     /// `PREVIEW_SAVES_OWED` saves at once; a save past them is refused on its pane, and nothing
     /// is handed over.** Thirty-two buffers, each with an edit, are saved on a lane whose queue
@@ -14872,6 +14862,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// RED (S-6a, C2) — **a save nothing would write is said on the pane, and
+    /// the buffer stays dirty.**
+    ///
+    /// Three refusals, each said with its reason and none of them a retry: a
+    /// lane no worker serves refuses at the door; a body over the worker's
+    /// bound is refused before it is handed over; and a worker that ends with
+    /// the request unanswered is heard as the request's refusal.
+    ///
+    /// MUTATIONS: in `request_save`, answer `Sent` when the lane refuses the
+    /// request; drop the bound — the over-bound body is handed over.
     #[test]
     fn a_refused_lane_says_not_saved_on_the_pane_and_keeps_dirty() {
         let dir = scratch("save-refused");

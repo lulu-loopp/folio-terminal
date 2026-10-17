@@ -13875,7 +13875,7 @@ struct App<B: Backend = Native> {
     quit_reason: quit::Reason,
     /// **The hand-over's answer**, while the quit's way out waits for it (U-21): the storage
     /// worker writes `Handoff` and starts the applier, and this thread looks on its turns.
-    handoff_answer: Option<std::sync::mpsc::Receiver<update_handoff::HandedOff>>,
+    handoff_answer: Option<persist::OnTheWorker<update_handoff::HandedOff>>,
     /// **How long the quit waits for the panes it told to go** — [`PANE_RETIREMENT_DEADLINE`] in
     /// every application the product builds; an instance's own so that a test drives the quit
     /// with the suite's patience (`lane::PATIENCE`) rather than the product's four seconds.
@@ -68442,7 +68442,7 @@ impl<B: Backend> FolioApp<B> {
             }
             quit::Handoff::Sent { .. } => {
                 match update_handoff::look(
-                    app.handoff_answer.as_ref(),
+                    app.handoff_answer.as_mut(),
                     txn,
                     quit.handoff_is_overdue(now),
                 ) {
