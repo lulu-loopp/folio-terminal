@@ -1245,7 +1245,8 @@ fn a_card_over(shell: bt_layout::SeatId, file: &Path, due: Instant) -> crate::Fi
 /// home in one drain, the verification first: it leaves the read's record alone
 /// (`remember_decode`), so the read's answer is the awaited one — the pane is told the picture's
 /// size, the page's picture generation ticks, the flyout asks for its resample, the card's overlay
-/// is rebuilt and a redraw is asked; and when the resamples land, the flyout shows.
+/// is rebuilt and asks for its picture, and a redraw is asked. What each resample does when it
+/// lands is the scale lane's completion and not this one's.
 ///
 /// MUTATION: drop `remember_decode`'s `Pending` guard — the verification's pixels are filed over
 /// the record, the read's answer is set aside, and no surface is told.
@@ -1254,8 +1255,8 @@ fn an_awaited_peek_answer_after_a_terminals_decode_tells_every_waiting_surface()
     let (mut folio, mut lane, gate, shell, [pane, page]) =
         two_panes_on_a_watched_lane("peek-awaited");
     let file = scratch_png_named("等着 awaited");
-    // Large enough that the card's box and the flyout's are two sizes: the one resample lane
-    // answers each its own.
+    // Large enough that the card's box and the flyout's are two sizes, so each asks a resample of
+    // its own.
     std::fs::write(&file, png_bytes(600, 300)).expect("a scratch file this test owns");
 
     // The shell's verification of the printed path is on the worker when the surfaces ask.
@@ -1338,16 +1339,5 @@ fn an_awaited_peek_answer_after_a_terminals_decode_tells_every_waiting_surface()
         "and a redraw is asked: {effects:?}"
     );
 
-    while lane.lane.held(crate::computation_lane::Share::Scale) > 0 {
-        let resampled = lane.next_ended(
-            crate::computation_lane::Share::Scale,
-            crate::computation_lane::fixtures::nobody,
-        );
-        the_window_takes(&mut folio, vec![resampled]);
-    }
-    assert!(
-        folio.window.renderer.peek_overlay.is_some(),
-        "the flyout shows once its resample lands"
-    );
     std::fs::remove_file(&file).expect("the scratch file this test wrote");
 }
