@@ -1125,7 +1125,7 @@ impl<B: Backend> Runtime<'_, B> {
             // A folder nobody could say is said on the right hand, and the path gives up the
             // width (`seats::dress_foot`, the rule every foot with a standing fact keeps; a
             // receipt owns the strip alone).
-            let words = seats::dress_foot(
+            let words: seats::FootWords = seats::dress_foot(
                 seats::FootDress {
                     run: path_box,
                     lead: &text,
@@ -2268,7 +2268,7 @@ impl<B: Backend> Runtime<'_, B> {
         // The torn-out tree's foot is the docked column's foot in a window of
         // its own, so it spells a root the same way (§13.40).
         let root = home_shortened_path(&root);
-        let (name, words) = {
+        let (name, words): (String, seats::FootWords) = {
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
             (
