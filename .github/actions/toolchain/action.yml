@@ -42,7 +42,8 @@ runs:
     # `RUSTUP_TOOLCHAIN` is exported for the rest of the job — without it every
     # later `cargo` reads `rust-toolchain.toml` again and asks for the Windows
     # channel a second time.
-    - shell: pwsh
+    - id: install
+      shell: pwsh
       env:
         EXTRA_TARGETS: ${{ inputs.targets }}
       run: |
@@ -58,6 +59,37 @@ runs:
         rustup toolchain install $channel --component rustfmt --component clippy --no-self-update
         $targets = @($env:EXTRA_TARGETS -split '\s+' | Where-Object { $_ })
         if ($targets.Count -gt 0) { rustup target add --toolchain $channel @targets }
+        "channel=$channel" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+    # **The cache key names the compiler the build uses, and only that one.**
+    # rust-cache hashes `rustc -vV` of every toolchain `rustup toolchain list`
+    # prints into the key's prefix, the part with no fallback, and the runner
+    # image brings a `stable` of its own that nothing here compiles with. As
+    # the image's stable moved from 1.98.1 to 1.99.0 (runners from 2026-10-15
+    # on) every job's key changed with it and every restore said "No cache
+    # found"; the
+    # cold `logic` job then ran past its budget, a cancelled job saves no cache,
+    # and `main` stayed cold for two days (T-CI-LOGIC-JOB-BUDGET). With the
+    # pinned channel the only toolchain left, the key moves when
+    # `rust-toolchain.toml` moves and not when the image does. The pinned
+    # channel becomes the default first, so a cargo started outside the
+    # workspace gets the same compiler rather than none.
+    - if: ${{ inputs.cache == 'true' }}
+      shell: pwsh
+      env:
+        CHANNEL: ${{ steps.install.outputs.channel }}
+      run: |
+        rustup default $env:CHANNEL
+        if ($LASTEXITCODE -ne 0) { throw "rustup could not make $($env:CHANNEL) the default" }
+        foreach ($other in @(rustup toolchain list --quiet | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -ne $env:CHANNEL })) {
+          Write-Host "removing $other, which this repository does not build with"
+          rustup toolchain uninstall $other
+          if ($LASTEXITCODE -ne 0) { throw "rustup could not uninstall $other" }
+        }
+        $left = @(rustup toolchain list --quiet | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if ($left.Count -ne 1 -or $left[0] -ne $env:CHANNEL) {
+          throw "the cache key would hash these toolchains, not $($env:CHANNEL) alone: $($left -join ', ')"
+        }
 
     # Third-party, so pinned to a commit rather than to a tag its owner can
     # repoint. This action itself is referenced by path, which is this
