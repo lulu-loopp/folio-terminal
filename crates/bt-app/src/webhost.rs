@@ -2035,10 +2035,20 @@ enum BrowserWait {
 /// window, and the four operations above would then be *guaranteed* to disagree
 /// rather than merely able to. The tab travels with it for that reason and no
 /// other: nothing here reads it, and everything here is filed under it.
+///
+/// **The window is sealed in it**: the window's handle is the native backend's own, handed over by
+/// its `WindowHost::page_address` door, and only the engine here reads it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SeatAddress {
     pub(crate) page: bt_platform::PageVisual,
-    pub(crate) window: bt_platform::NativeWindow,
+    window: bt_platform::NativeWindow,
+}
+
+impl SeatAddress {
+    /// A page's place in the window the platform names by `window`.
+    pub(crate) fn new(page: bt_platform::PageVisual, window: bt_platform::NativeWindow) -> Self {
+        Self { page, window }
+    }
 }
 
 /// How one [`WebSeat::rehost`] ended, in the caller's own vocabulary.
@@ -2342,8 +2352,7 @@ impl WebSeat {
     /// does is lay a page out, and a page laid out at 2.0 on a 1.5 display is
     /// wrong from its first frame — see [`Self::scale`].
     pub(crate) fn open(
-        page: bt_platform::PageVisual,
-        window: bt_platform::NativeWindow,
+        address: SeatAddress,
         url: &str,
         minted: Mint,
         scale: f64,
@@ -2358,7 +2367,7 @@ impl WebSeat {
         let request_gate = Rc::clone(&mint);
         let refusal = Rc::new(RefCell::new(None));
         let refusal_sink = Rc::clone(&refusal);
-        let label = Rc::new(std::cell::Cell::new(page));
+        let label = Rc::new(std::cell::Cell::new(address.page));
         let (gate_label, request_label) = (Rc::clone(&label), Rc::clone(&label));
         let host = WebHost::new(
             Box::new(move |candidate| {
@@ -2429,7 +2438,7 @@ impl WebSeat {
             wake,
         );
         let mut web = Self {
-            address: SeatAddress { page, window },
+            address,
             folder,
             machine: WebMachine::new(),
             host,
@@ -2512,13 +2521,19 @@ impl WebSeat {
     /// pane's, so a page that adopts it adopts nothing a pane would not have had.
     pub(crate) fn open_parked(
         page: bt_platform::PageVisual,
-        window: bt_platform::NativeWindow,
+        parent: &bt_platform::SpareParent,
         scale: f64,
         scheme: WebColorScheme,
         wake: Box<dyn Fn() + Send + Sync>,
     ) -> Result<(Self, Vec<WebOutcome>), String> {
-        let (mut seat, outcomes) =
-            Self::open(page, window, BLANK_PAGE, Mint::Blank, scale, scheme, wake)?;
+        let (mut seat, outcomes) = Self::open(
+            SeatAddress::new(page, parent.window()),
+            BLANK_PAGE,
+            Mint::Blank,
+            scale,
+            scheme,
+            wake,
+        )?;
         seat.policy = RecoveryPolicy::Parked;
         Ok((seat, outcomes))
     }
@@ -3291,8 +3306,8 @@ impl WebSeat {
                 let generation = self.machine.generation();
                 let report = hang_watch::during(hang_watch::Station::WebInstall, || {
                     compositor
-                        .platform_tree()
-                        .and_then(|tree| self.host.install(tree, page, generation))
+                        .page_tree()
+                        .and_then(|tree| tree.install(&mut self.host, page, generation))
                 })?;
                 self.guards = report.guards;
                 if !report.unapplied.is_empty() {
@@ -4061,22 +4076,16 @@ impl WebSeat {
             compensation: bt_platform::RehostCompensation::default(),
         };
         let outcome = match from
-            .platform_tree()
-            .and_then(|from| Ok((from, to.platform_tree()?)))
+            .page_tree()
+            .and_then(|from| Ok((from, to.page_tree()?)))
         {
             Ok((from_tree, to_tree)) => admitted::<doors::WebRehost, _>(|token| {
-                self.host.rehost(
+                from_tree.rehost(
+                    &to_tree,
                     token,
-                    &bt_platform::RehostSide {
-                        compositor: from_tree,
-                        page: self.address.page,
-                        window: self.address.window,
-                    },
-                    &bt_platform::RehostSide {
-                        compositor: to_tree,
-                        page: address.page,
-                        window: address.window,
-                    },
+                    &mut self.host,
+                    (self.address.page, self.address.window),
+                    (address.page, address.window),
                     rect,
                     visible,
                 )

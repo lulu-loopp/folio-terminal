@@ -31,3 +31,8 @@ pub struct Beyond;
 impl crate::elsewhere::Bk20 for Beyond {
     type Window = NativeWindow;
 }
+
+// PLANTED: a door handing the platform handle out.
+pub trait HandleDoor {
+    fn handle(&self) -> bt_platform::NativeWindow;
+}

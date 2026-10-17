@@ -2534,12 +2534,14 @@ fn a_picture_torn_off_into_a_window_still_takes_delivery_of_its_resample() {
     let float = 3_u64;
     let target: PeekThumbnailTarget = ("push-pin".to_owned(), 320, 180);
     let mut panes = PreviewPanes::default();
+    let picture = pending_picture("push-pin.png", target.clone());
+    let asker = picture.asker;
     panes
         .entry(seat_of(TAB_ONE, seat))
-        .show_picture_state(pending_picture("push-pin.png", target.clone()));
+        .show_picture_state(picture);
 
     assert_eq!(
-        panes.awaiting_scale(&target),
+        panes.awaiting_scale(asker, &target),
         Some(seat_of(TAB_ONE, seat)),
         "the docked pane is the one that asked"
     );
@@ -2549,7 +2551,7 @@ fn a_picture_torn_off_into_a_window_still_takes_delivery_of_its_resample() {
     *panes.entry(PreviewSurface::Float(float)) = pane;
 
     assert_eq!(
-        panes.awaiting_scale(&target),
+        panes.awaiting_scale(asker, &target),
         Some(PreviewSurface::Float(float)),
         "and the window it became is still the one that asked"
     );
@@ -2561,11 +2563,11 @@ fn a_picture_torn_off_into_a_window_still_takes_delivery_of_its_resample() {
     let lane: Option<PreviewSurface> = None;
     assert_ne!(
         lane,
-        panes.awaiting_scale(&target),
+        panes.awaiting_scale(asker, &target),
         "the picture that asked is not the pane that happens to hold the lane"
     );
 
-    let surface = panes.awaiting_scale(&target).expect("an asker");
+    let surface = panes.awaiting_scale(asker, &target).expect("an asker");
     assert!(
         panes
             .entry(surface)
@@ -2585,7 +2587,7 @@ fn a_picture_torn_off_into_a_window_still_takes_delivery_of_its_resample() {
     assert_eq!(picture.pending, None, "and retires the question with it");
     assert!(picture.raster.is_some(), "leaving the pixels behind");
     assert_eq!(
-        panes.awaiting_scale(&target),
+        panes.awaiting_scale(asker, &target),
         None,
         "nothing is left waiting on an answer that has arrived"
     );
@@ -2600,25 +2602,25 @@ fn an_in_flight_resample_cannot_outlive_the_surface_that_asked_for_it() {
     let seat = seat_of(TAB_ONE, SeatId(9));
     let target: PeekThumbnailTarget = ("push-pin".to_owned(), 64, 64);
     let mut panes = PreviewPanes::default();
-    panes
-        .entry(seat)
-        .show_picture_state(pending_picture("push-pin.png", target.clone()));
-    assert_eq!(panes.awaiting_scale(&target), Some(seat));
+    let picture = pending_picture("push-pin.png", target.clone());
+    let asker = picture.asker;
+    panes.entry(seat).show_picture_state(picture);
+    assert_eq!(panes.awaiting_scale(asker, &target), Some(seat));
 
     panes.remove(seat);
     assert_eq!(
-        panes.awaiting_scale(&target),
+        panes.awaiting_scale(asker, &target),
         None,
         "the pane closed and took its question with it"
     );
 
     // And the same when the surface stays but stops showing a picture.
-    panes
-        .entry(seat)
-        .show_picture_state(pending_picture("push-pin.png", target.clone()));
+    let picture = pending_picture("push-pin.png", target.clone());
+    let asker = picture.asker;
+    panes.entry(seat).show_picture_state(picture);
     panes.entry(seat).take_picture_down();
     assert_eq!(
-        panes.awaiting_scale(&target),
+        panes.awaiting_scale(asker, &target),
         None,
         "a surface that gave up its picture is not waiting on one"
     );
