@@ -734,7 +734,7 @@ mod tests {
     /// RED (T-CLIPBOARD-LANE) — **a request withdrawn before the worker reached it is never run**:
     /// its terminal is `Cancelled`, it goes to the sink, and the door never hears it.
     ///
-    /// MUTATION: drop the `ledger.owes(id)` question in `run_clipboard_lane` — the withdrawn write
+    /// MUTATION: drop the `queue.ledger().owes(id)` question in `run_clipboard_lane` — the withdrawn write
     /// reaches the door.
     #[test]
     fn a_withdrawn_request_is_dropped_unrun_and_its_cancel_reaches_the_sink() {

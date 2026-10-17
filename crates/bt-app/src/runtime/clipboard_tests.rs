@@ -695,8 +695,8 @@ fn a_paste_whose_pane_closes_ends_cancelled_and_writes_nothing() {
 /// goes before it (the person's order: the older paste contributed nothing), and nothing reaches
 /// the lane's sink.
 ///
-/// MUTATION: in `Runtime::ask_for_a_paste`, keep the older paste instead of superseding it (drop
-/// the new request) — the second press pastes nothing.
+/// MUTATION: in `Runtime::ask_for_a_paste`, let the older paste go (`drop(older)`) instead of
+/// superseding it — its terminal is not the window's but the lane's sink's.
 #[test]
 fn two_pastes_into_one_pane_end_the_older_superseded_and_each_once() {
     let mut folio = a_window_pasting("clipboard-lane-supersede", "粘贴 pasted");
@@ -883,8 +883,8 @@ fn a_fifth_outstanding_clipboard_request_is_refused_at_once() {
 /// ledger; nothing was written, nothing is said on screen, and the selection stands to be copied
 /// again.
 ///
-/// MUTATION: say the refusal again in `Runtime::answer_copy`'s `Failed` arm
-/// (`diagnostics::note`), or in the ledger — two lines.
+/// MUTATION: publish `Done` for the door's refusal in `run_clipboard_lane` — the refusal is said
+/// nowhere (no line, not one).
 #[test]
 fn the_copy_writes_refusal_is_said_once() {
     let leaf = leaf_saying("复制 retry me");
