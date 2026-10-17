@@ -1335,9 +1335,10 @@ pub struct DirtyGate {
     after_the_wait: bool,
 }
 
-/// **How long a close waits for the saves it is about** (S-6b): the storage
-/// worker's own bound on one write landing, [`crate::persist::SESSION_SAVE_BUDGET`]
-/// — the storage lane's patience, derived and not written beside it. A save of
+/// **How long a close waits for the saves it is about** (S-6b): the budget this
+/// process gives one session write to land, [`crate::persist::SESSION_SAVE_BUDGET`]
+/// — a writer's budget, derived and not written beside it; the storage worker
+/// itself has no bound on a write it is inside. A save of
 /// an ordinary document answers within a frame or two (S-6a measured a median
 /// of 3.5 ms, the slowest of sixty 56 ms); one still unanswered past the bound
 /// is a write the worker is stuck inside (a network share's flush), and the

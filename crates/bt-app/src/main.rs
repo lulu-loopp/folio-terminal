@@ -67559,6 +67559,13 @@ impl<B: Backend> FolioApp<B> {
     /// asks the summoned terminal again). A close a `Save all` wait re-requested
     /// is taken as the dispatcher takes one.
     fn settle_close_waits(&mut self, event_loop: &B::Loop, now: Instant) -> Result<()> {
+        // **Not while a quit is under way** (round 3): the quit's card is the one question,
+        // and a wait decided under it would close a pane or a tab mid-quit, or put the gate's
+        // question beneath the card. The waits stand; a quit that is cancelled leaves them to
+        // be looked at on the next turn, and one that goes on takes their windows with it.
+        if self.app.as_ref().is_some_and(|app| app.quit.is_some()) {
+            return Ok(());
+        }
         for index in 0..self.windows.len() {
             let Some(id) = self.windows.key_at(index) else {
                 continue;
@@ -69337,9 +69344,14 @@ impl<B: Backend> FolioApp<B> {
             .and_then(quit::Quit::deadline);
         // **And every close's bound, while it waits for its saves** (S-6b): the answers
         // wake the loop themselves; the clock is only the bound.
+        // A leaving window's wait is not looked at, and neither is any while a quit is under
+        // way (`Self::settle_close_waits`): their bounds would be a wake-up in the past on every
+        // turn.
+        let quitting = self.app.as_ref().is_some_and(|app| app.quit.is_some());
         let close_wake = self
             .windows
             .values()
+            .filter(|window| window.leaving.is_none() && !quitting)
             .flat_map(|window| {
                 [
                     window.dirty_gate.waits_until(),

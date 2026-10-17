@@ -2535,7 +2535,7 @@ impl<B: Backend> Runtime<'_, B> {
             ));
         }
         let wake_deadline = wake.map(|(_, at)| at);
-        self.reap_exited_tabs()?;
+        self.reap_exited_tabs(Instant::now())?;
         Ok(wake_deadline)
     }
 }

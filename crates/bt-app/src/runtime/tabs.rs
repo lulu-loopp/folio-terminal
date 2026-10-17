@@ -3568,9 +3568,11 @@ impl<B: Backend> Runtime<'_, B> {
     /// only when a tab has no live shell left has the tab itself ended. That is
     /// the same rule §7.1.4 already gives closing — the last pane closing is the
     /// tab closing — read from the other direction.
-    pub(in crate::runtime) fn reap_exited_tabs(&mut self) -> Result<()> {
+    ///
+    /// `now` is the instant the reaper looks, read by the turn as it calls this: an exited
+    /// shell's age and an ended tab's wait for its saves (S-6b) are judged against it.
+    pub(in crate::runtime) fn reap_exited_tabs(&mut self, now: Instant) -> Result<()> {
         let active = self.window.active_tab;
-        let now = Instant::now();
         let mut exits = Vec::new();
         let mut active_exited_panes = Vec::new();
         let mut exited = Vec::new();

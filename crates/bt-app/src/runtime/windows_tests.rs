@@ -854,69 +854,90 @@ fn the_worker_gone_under_a_clean_buffers_save_asks_in_words_that_are_true() {
     );
 }
 
-/// RED (S-6b round 2, R1) — **a tab whose shells have all exited waits for its saves before the
-/// loop takes it away, and at the bound closes if only clean buffers' saves are left; a late
-/// conflict is said once in `diagnostics.log`.**
+/// RED (S-6b round 2, R1; driven through the reaper in round 3) — **a tab whose shells have all
+/// exited waits for its saves before the loop takes it away, and at the bound closes if only clean
+/// buffers' saves are left; a late conflict is said once in `diagnostics.log`.**
 ///
-/// Two ended tabs: the first holds a clean buffer whose save is out, the second a dirty one whose
-/// save is out. On a turn within the bound neither is closed, and the loop will come back at the
-/// bound. At the bound the first closes (its pool let go, as the cleanup does) and the second
+/// Two tabs whose shells have exited (`PtySession::fake_exited`, long past the birth grace): the
+/// first holds a clean buffer whose save is out, the second a dirty one whose save is out. The
+/// loop's own cleanup (`Runtime::reap_exited_tabs`) takes the turn. Within the bound it closes
+/// neither, and the loop will come back at the bound. At the bound the first closes and the second
 /// stands — whether unsaved edits go is the reader's turn — with nothing left to come back for.
 /// The first tab's save then meets another writer's bytes: its answer reaches the sink, which says
 /// it once, naming the file.
 ///
-/// MUTATION: in `ExitedTabWaits::ran_out`, close at once (`Some(bound) if true`) — the first
-/// assertion goes red: the ended tab is torn down with its save on the worker.
+/// MUTATION: in `ExitedTabWaits::ran_out`, close at once (`Some(_) =>` for
+/// `Some(bound) if now >= bound =>`) — the first assertion goes red: the ended tab is torn down
+/// with its save on the worker.
 #[test]
 fn an_ended_tab_waits_for_its_saves_and_closes_at_the_bound_when_only_clean_ones_are_left() {
     let mut saving = Saving::open("ended", &["终了 ended.md", "终了脏 ended-dirty.md"]);
     saving.press_save_then_undo(0);
     saving.press_save(1);
-    let start = Instant::now();
     {
         let runtime = saving.application.runtime();
-        let window = &mut *runtime.window;
-        let at_once =
-            crate::exited_tabs_the_loop_may_close(&window.dirty_gate, &window.tabs, 0, vec![0, 1]);
-        assert!(at_once.is_empty(), "neither ended tab closes at once");
-        let ran_out = window.exited_tab_waits.ran_out(
-            &window.dirty_gate,
-            &window.tabs,
-            0,
-            &[0, 1],
-            &at_once,
-            start,
-        );
-        assert!(
-            ran_out.is_empty(),
-            "within the bound both wait: {ran_out:?}"
-        );
-        let bound = window
-            .exited_tab_waits
-            .next_after(start)
-            .expect("the loop comes back at the bound");
-        assert!(bound >= start + restore::CLOSE_WAITS_FOR_A_SAVE);
-
-        let ran_out = window.exited_tab_waits.ran_out(
-            &window.dirty_gate,
-            &window.tabs,
-            0,
-            &[0, 1],
-            &[],
-            bound,
-        );
-        assert_eq!(
-            ran_out,
-            vec![0],
-            "at the bound only the clean buffer's tab closes"
-        );
-        assert_eq!(
-            window.exited_tab_waits.next_after(bound),
-            None,
-            "the dirty one stands, and nothing is left to come back for"
-        );
-        window.tabs[0].preview_pool.clear();
+        for tab in runtime.window.tabs.iter_mut() {
+            for (_, leaf) in tab.leaves_mut() {
+                leaf.pty = Some(bt_pty::PtySession::fake_exited(
+                    std::time::Duration::from_secs(60),
+                    0,
+                    b"",
+                    false,
+                ));
+            }
+        }
     }
+    let ids = |saving: &mut Saving| -> Vec<crate::TabId> {
+        saving
+            .application
+            .runtime()
+            .window
+            .tabs
+            .iter()
+            .map(|tab| tab.id)
+            .collect()
+    };
+    let start = Instant::now();
+    saving
+        .application
+        .runtime()
+        .reap_exited_tabs(start)
+        .expect("the cleanup takes its turn");
+    assert_eq!(
+        ids(&mut saving),
+        vec![crate::TabId(1), crate::TabId(2)],
+        "within the bound neither ended tab is torn down"
+    );
+    let bound = saving
+        .application
+        .runtime()
+        .window
+        .exited_tab_waits
+        .next_after(start)
+        .expect("the loop comes back at the bound");
+    assert!(bound >= start + restore::CLOSE_WAITS_FOR_A_SAVE);
+
+    saving
+        .application
+        .runtime()
+        .reap_exited_tabs(bound)
+        .expect("the cleanup takes its turn at the bound");
+    assert_eq!(
+        ids(&mut saving),
+        vec![crate::TabId(2)],
+        "at the bound only the clean buffer's tab closes; the dirty one stands"
+    );
+    assert_eq!(
+        saving
+            .application
+            .runtime()
+            .window
+            .exited_tab_waits
+            .next_after(bound),
+        None,
+        "nothing is left to come back for"
+    );
+
     saving.serve(Some("别人写的 by another writer\n"));
     saving.turn();
     let app = saving
@@ -928,4 +949,61 @@ fn an_ended_tab_waits_for_its_saves_and_closes_at_the_bound_when_only_clean_ones
     let said = app.preview_saves.sink_said();
     assert_eq!(said.len(), 1, "the late conflict is said once: {said:?}");
     assert!(said[0].contains("ended.md"), "naming its file: {said:?}");
+}
+
+/// RED (S-6b round 3, the review's blocker) — **`Save all` over a body undone since its save asks
+/// before the window goes.**
+///
+/// One window, two tabs: the first's buffer was saved and then undone back to the file's own
+/// body (clean, its save out), the second's is dirty with nothing sent. The window's close asks;
+/// *Save all* sends the dirty one and waits for both. Both land: the file of the first now holds
+/// the body pressed, and the body undone to is in no file. The shut is re-run from the top and asks
+/// about it — the window stays, and nothing is lost unasked.
+///
+/// MUTATION: in `Runtime::settle_close_wait`'s `saving` branch, close whenever every save landed
+/// (drop the `still_losing` re-run) — the "the window stays" assertion goes red: the window goes
+/// and the undone body with it.
+#[test]
+fn save_all_over_a_body_undone_since_its_save_asks_before_the_window_goes() {
+    let mut saving = Saving::open(
+        "save-all-undone",
+        &["撤回全部 undone-all.md", "脏 dirty.md"],
+    );
+    saving.press_save_then_undo(0);
+    saving.application.window_event(WindowEvent::CloseRequested);
+    assert_eq!(
+        saving.asked(),
+        Some(restore::GateRequest::Shut),
+        "the dirty buffer has nothing on its way: it asks"
+    );
+    saving
+        .application
+        .runtime()
+        .answer_dirty_gate(restore::GateAnswer::Save)
+        .expect("the answer is spent");
+    assert!(saving.waits(), "the shut waits for both saves");
+
+    saving.serve(None);
+    saving.serve(None);
+    saving.turn();
+    assert_eq!(
+        saving.file(0),
+        format!("{READ}{TYPED}"),
+        "the first save landed"
+    );
+    assert_eq!(
+        saving.file(1),
+        format!("{READ}{TYPED}"),
+        "and so did the second"
+    );
+    assert!(
+        !saving.leaving(1),
+        "the window stays: the body undone since the first save is in no file"
+    );
+    assert_eq!(
+        saving.asked(),
+        Some(restore::GateRequest::Shut),
+        "the shut, re-run, asks about it"
+    );
+    assert_eq!(saving.asked_title(), restore::gate_title_text());
 }

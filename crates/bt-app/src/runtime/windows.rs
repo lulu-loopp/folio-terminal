@@ -1728,6 +1728,23 @@ impl<B: Backend> Runtime<'_, B> {
                 .filter(|(_, at)| *at != preview::AtTheClose::Saved)
                 .map(|(name, _)| name)
                 .collect();
+            // **Every save landed, and something a close would lose is still
+            // here** (round 3): a body undone since its save, which the landing
+            // left in no file. The shut is re-run from the top and asks about it,
+            // as any close does; closing here would lose it unasked.
+            let still_losing = self
+                .window
+                .tabs
+                .iter()
+                .any(|tab| tab.preview_pool.close_names().next().is_some());
+            if unsaved.is_empty() && still_losing {
+                return Ok(match request {
+                    restore::GateRequest::ShutWithTheRun(closing) => {
+                        AfterTheWait::EndTheRunWith(closing)
+                    }
+                    _ => AfterTheWait::Shut,
+                });
+            }
             let closes = match request {
                 restore::GateRequest::ShutWithTheRun(closing) => closing,
                 _ => self.window_id(),
