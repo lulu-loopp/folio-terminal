@@ -972,6 +972,9 @@ text_entries! {
     /// What a quit's or a stop's road says of a body a save sent that did not
     /// land, no longer the body (S-6a round 6, R1).
     PreviewSaveUnlanded,
+    /// The clause for a save handed over while the preview already has
+    /// `preview::PREVIEW_SAVES_OWED` saves on their way (T-STORAGE-WORKER-ON-THE-SEAM, R1).
+    PreviewSaveTooMany,
     /// The start's toast for one copy a stop kept in the recovered folder, `{folder}` filled
     /// by [`recovered_edits_kept_in`] (T-RECOVERED-FOLDER).
     RecoveredEditKept,
@@ -3989,6 +3992,11 @@ impl Text {
                 "a version you saved was not written to the disk",
                 "a version you saved was not written to the disk", // zh: pending S-6a
             ),
+            Self::PreviewSaveTooMany => pick(
+                lang,
+                "too many saves are already on their way to the disk",
+                "too many saves are already on their way to the disk", // zh: pending T-STORAGE-WORKER-ON-THE-SEAM
+            ),
             Self::RecoveredEditKept => pick(
                 lang,
                 "An unsaved edit was kept at {folder}",
@@ -6615,6 +6623,8 @@ impl Text {
         (Self::PreviewSaveReloaded, HostPlatform::MacOs),
         (Self::PreviewSaveUnlanded, HostPlatform::Windows),
         (Self::PreviewSaveUnlanded, HostPlatform::MacOs),
+        (Self::PreviewSaveTooMany, HostPlatform::Windows),
+        (Self::PreviewSaveTooMany, HostPlatform::MacOs),
         // zh: pending T-SHELL-BIRTH-DEATH — the face of a shell that ended at birth.
         (Self::ShellBirthDeath, HostPlatform::Windows),
         (Self::ShellBirthDeath, HostPlatform::MacOs),

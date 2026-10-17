@@ -169,7 +169,3 @@ WindowRuntime.web_thumbs	-	PROJ	web	the 2026-09-25 table
 App.update_job	-	ASYNC	the application (update_job)	proposed at the census-1 merge (2026-09-26): U-19's card and row press the job on the window thread; the job stays the application's
 WindowRuntime.update_card	-	VIEW	update_card	proposed at the census-1 merge (2026-09-26): U-19's card state, written by the card module and by the window's pointer and settle roads
 WindowRuntime.pane_head_clicks	-	VIEW	panes	T-POINTER-CAPTURE cut 3: the release ladder moved into runtime::pointer::release, which interrupts the pane-head click chain as the ladder did
-WindowRuntime.ime_active	-	VIEW	keyboard	T-HEADLESS-RUNTIME-SEAM: the blur arm of FolioApp::on_window_event clears it beside Runtime::ime_input's writes; seen once the dispatch's runtime binding was typed
-WindowRuntime.key_hint	-	VIEW	keyboard	T-HEADLESS-RUNTIME-SEAM: the blur arm of FolioApp::on_window_event hides it beside the keyboard module's writes; seen once the dispatch's runtime binding was typed
-WindowRuntime.taskbar_flash	-	OBS	attention	T-HEADLESS-RUNTIME-SEAM: the focus arm of FolioApp::on_window_event ends the flash beside attention's own replacement; seen once the dispatch's runtime binding was typed
-WindowRuntime.window_close_requested	-	LIFE	windows	T-HEADLESS-RUNTIME-SEAM: the tail of FolioApp::on_window_event takes the request that Runtime::answer_exit sets; seen once the dispatch's runtime binding was typed

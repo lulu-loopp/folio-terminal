@@ -872,6 +872,14 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 
+    /// **The window came to the foreground, and a taskbar flash ends there** (ticket 62):
+    /// `FLASHW_TIMERNOFG` runs until the window comes forward, and on macOS activation ends the
+    /// bounce, so the record of what the flash was about ends with it. Attention's door for the
+    /// focus; nothing is asked of the platform, which has already stopped.
+    pub(crate) fn window_focused(&mut self) {
+        self.window.taskbar_flash = None;
+    }
+
     /// **Take back a taskbar flash the lane's newest answer contradicts** (0.4.5 ticket 62).
     ///
     /// Called for every window when `taskbar_lane` has news. A flash this window started on a
@@ -1179,3 +1187,7 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "attention_tests.rs"]
+mod tests;
