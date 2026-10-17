@@ -1199,9 +1199,9 @@ impl<B: Backend> Runtime<'_, B> {
                     self.window.preview_math.land(*key, artifact);
                     true
                 }
-                DecorationWorkerCompletion::PeekScaledImage { scaled } => {
+                DecorationWorkerCompletion::PeekScaledImage { surface, scaled } => {
                     if target_active {
-                        self.complete_peek_scale(scaled)?;
+                        self.complete_peek_scale(surface, scaled)?;
                     }
                     false
                 }

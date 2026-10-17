@@ -840,6 +840,22 @@ and the headless one alike.
   `rebuild_every_native_surface`, the native backend's `Backend::rebuild_every_surface`; the
   compile-time check that `Runtime` is its two layers; and `main`, the process entry, which builds
   the native `FolioApp` the event loop runs (listed since the guard reads expression position).
+* **The startup order is not native; it is `crate::startup`'s** (T-STARTUP-ORDER-SHARED,
+  2026-10-17). The steps a launch takes before its first window has a tab are written once, in two
+  generic functions every start goes through: `startup::begin`, which `main` calls before there is
+  a loop — a removal verb (`--remove-shell-integration`, `--remove-explorer-menu`), the command
+  line (a rescue door's line, else the parse), the hand-over — and `startup::resume`,
+  which `Runtime::create` calls on the loop's first resume — the startup migration and the script's
+  preparation, the window, the PowerShell questions, the first tab. The split is the event loop's:
+  the window's half runs on the loop the process's half builds. What each step does is handed in
+  (`startup::FrontDoor`, `startup::FirstWindow`): the product's steps are the bodies `main` and
+  `Runtime::create` write inline, so neither gains a native-list row; the headless start
+  (`headless::start`) hands in stand-ins that record a typed `headless::StartupStep`, and the order
+  is pinned by running it (`startup::tests::{the_startup_steps_run_in_their_order,
+  the_powershell_questions_are_asked_before_the_first_tab}`) instead of by reading `main` and
+  `Runtime::create`. The native list is unchanged by it: what `Runtime::create` still writes for
+  `Native` — the window and its renderer, and the `App` and `WindowRuntime` assembled from them —
+  is native.
 * **What still crosses the seam: the platform handle.** `WindowHost::native_handle` answers the
   `bt_platform::NativeWindow` of a native window (and an error on a headless one), and
   `CompositorDoor::platform_tree` the platform's composition tree a page's engine hangs in. Generic

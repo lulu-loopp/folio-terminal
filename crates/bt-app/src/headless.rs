@@ -1387,6 +1387,100 @@ pub(crate) fn key_down(
     }
 }
 
+/// **One step of a start**, as the headless start records it (T-STARTUP-ORDER-SHARED): the
+/// steps `startup::begin` and `startup::resume` take, each named once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StartupStep {
+    /// A removal verb answered.
+    Removal,
+    /// The command line read.
+    CommandLine,
+    /// The parsed request handed over, or kept.
+    HandOver,
+    /// The startup's `$PROFILE` observation started.
+    StartupMigration,
+    /// Folio's own script's preparation started.
+    ScriptPreparation,
+    /// The first window opened, through the backend's door.
+    WindowOpened,
+    /// The parser questions about the PowerShell rows put to the probe.
+    PowerShellQuestions,
+    /// The first window's first tab made.
+    FirstTab,
+}
+
+/// **What a headless start did**: its steps in the order they ran, and what each step that
+/// carries something was handed.
+#[derive(Debug, Default)]
+pub(crate) struct HeadlessStart {
+    pub(crate) steps: Vec<StartupStep>,
+    /// The request the hand-over was handed.
+    pub(crate) handed_over: Option<String>,
+    /// The program answers the PowerShell questions were asked about.
+    pub(crate) asked: Vec<String>,
+    /// The program answers the first tab was made from.
+    pub(crate) born_from: Vec<String>,
+}
+
+/// **A start with no process to leave and no window to open**: `startup::begin` and then, as the
+/// loop's first resume does, `startup::resume`, each step a stand-in that records
+/// itself. The command line is `argv`; the program walk answers `walk` one batch per look, as
+/// `programs_lane::take` hands over whatever has landed since the last — one look when the
+/// window is titled, one when the questions are asked.
+pub(crate) fn start(argv: &str, walk: Vec<Vec<String>>) -> HeadlessStart {
+    let ran = RefCell::new(HeadlessStart::default());
+    let step = |step: StartupStep| ran.borrow_mut().steps.push(step);
+    let walk = RefCell::new(VecDeque::from(walk));
+    let look = |answers: &mut Vec<String>| {
+        answers.extend(walk.borrow_mut().pop_front().unwrap_or_default());
+    };
+    let request = crate::startup::begin(crate::startup::FrontDoor {
+        removal: || step(StartupStep::Removal),
+        parse: || {
+            step(StartupStep::CommandLine);
+            argv.to_owned()
+        },
+        claim: |request: String| {
+            step(StartupStep::HandOver);
+            ran.borrow_mut().handed_over = Some(request.clone());
+            request
+        },
+    });
+    let mut answers = Vec::new();
+    let opened = crate::startup::resume(
+        &mut answers,
+        crate::startup::FirstWindow {
+            migration: || {
+                step(StartupStep::StartupMigration);
+                crate::shell_integration::Migrated::stand_in()
+            },
+            script: || {
+                step(StartupStep::ScriptPreparation);
+                crate::shell_integration::ScriptPrepared::stand_in()
+            },
+            // Handed the request the run carries, as `Runtime::create` is handed the parsed one.
+            window: |answers: &mut Vec<String>| {
+                look(answers);
+                step(StartupStep::WindowOpened);
+                Ok::<_, std::convert::Infallible>(request)
+            },
+            questions: |answers: &mut Vec<String>| {
+                look(answers);
+                step(StartupStep::PowerShellQuestions);
+                ran.borrow_mut().asked = answers.clone();
+                crate::shell_integration::QuestionsAsked::stand_in()
+            },
+            first_tab: |answers: &mut Vec<String>, _window: &mut String| {
+                step(StartupStep::FirstTab);
+                ran.borrow_mut().born_from = answers.clone();
+                Ok(())
+            },
+        },
+    );
+    let Ok(_) = opened;
+    ran.into_inner()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
