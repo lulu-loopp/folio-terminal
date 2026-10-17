@@ -820,7 +820,7 @@ handle** (T-HEADLESS-RUNTIME-SEAM, 2026-10-13; corrected in its round 2). `App`,
 `Runtime`, `FolioApp`, `NewWindowParts` and the helpers built from them hold their window through
 one type parameter, `B: window_seam::Backend`, whose associated types are the window's parts — the
 `winit` window (`WindowHost`: redraw, title, visibility, cursor, IME area, clipboard, the system
-hand-off), the GPU device (`DeviceLayer`), the renderer (`Glass`: every setter a frame is built
+hand-off, a runtime road's `diagnostics.log` line), the GPU device (`DeviceLayer`), the renderer (`Glass`: every setter a frame is built
 from, the measuring it answers, the present), the compositor (`CompositorDoor`), the custom frame
 (`FrameDoor`), the pickers and the formula menu, the IME caret and the event loop (`LoopDoor`:
 exit, control flow, a new window). The traits keep the inherent methods' names and signatures, so a
@@ -869,7 +869,9 @@ and the headless one alike.
   Moving each behind a door of its own is T-NATIVE-HANDLE-BEHIND-THE-SEAM; until it lands, the
   seam's guard holds the holders and the doors, and these call sites are what it does not hold.
 * **The headless backend is test-only** (`crate::headless`, `#[cfg(test)]`): a window that records
-  what it was told as typed values (`WindowEffect`, read from a `Ledger`), a renderer that keeps the
+  what it was told as typed values (`WindowEffect`, read from a `Ledger` — a `diagnostics.log` line
+  a runtime road said through `WindowHost::note` among them, as `WindowEffect::Noted` with its exact
+  text; T-DIAGNOSTICS-TEST-SINK, held by the runtime-voice guard), a renderer that keeps the
   frame's inputs for a test to read back and measures text with the production font environment, and
   a loop door that records exit and control flow. `HeadlessFolio` builds a `Runtime` over it from
   ordinary tab fixtures; `HeadlessApplication` drives `FolioApp`'s event and quit doors. It is never

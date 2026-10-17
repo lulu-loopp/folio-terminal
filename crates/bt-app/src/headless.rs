@@ -67,6 +67,9 @@ pub(crate) enum WindowEffect {
     OptionAsAlt(bool),
     /// The window's input-method facts read (`WindowHost::ime_facts`).
     ImeFactsRead,
+    /// A line the window's runtime said in `diagnostics.log` (`WindowHost::note`), as it would
+    /// have been written — at most [`NOTES_KEPT`] of them between two takes of the ledger.
+    Noted(String),
     /// Text put on the clipboard.
     ClipboardWritten(String),
     /// A hand-off to the system: a file opened, a path revealed, an address handed over.
@@ -129,19 +132,56 @@ pub(crate) enum WindowEffect {
     WindowOpened,
 }
 
+/// **How many `diagnostics.log` lines a ledger keeps between two takes** (T-DIAGNOSTICS-TEST-SINK).
+/// A line past them is counted ([`Ledger::notes_beyond_the_cap`]) and not kept, so a road a test
+/// drives through a long run of events does not grow the ledger by a line per event, and a test
+/// that drives one past the bound reads how many lines it said all the same. A test's bound, not a
+/// product budget: the product's own bounds on a road's lines are the road's (a window's bracket
+/// lines stop at `ime_report::PAIRING_LINES_MAX`, also 32).
+pub(crate) const NOTES_KEPT: usize = 32;
+
 /// **A window's effects, in the order its doors were knocked on.** One per headless window,
 /// shared by its stand-ins.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Ledger(Rc<RefCell<Vec<WindowEffect>>>);
+pub(crate) struct Ledger(Rc<RefCell<Entries>>);
+
+/// What a [`Ledger`] holds: the effects, and the `diagnostics.log` lines counted past
+/// [`NOTES_KEPT`] since the last take.
+#[derive(Debug, Default)]
+struct Entries {
+    effects: Vec<WindowEffect>,
+    notes_kept: usize,
+    notes_beyond_the_cap: usize,
+}
 
 impl Ledger {
     fn record(&self, effect: WindowEffect) {
-        self.0.borrow_mut().push(effect);
+        self.0.borrow_mut().effects.push(effect);
     }
 
-    /// Everything recorded so far, emptied.
+    /// A line said in `diagnostics.log`: kept as [`WindowEffect::Noted`] while fewer than
+    /// [`NOTES_KEPT`] are held, counted after.
+    fn note(&self, line: &str) {
+        let mut entries = self.0.borrow_mut();
+        if entries.notes_kept < NOTES_KEPT {
+            entries.notes_kept += 1;
+            entries.effects.push(WindowEffect::Noted(line.to_owned()));
+        } else {
+            entries.notes_beyond_the_cap += 1;
+        }
+    }
+
+    /// Everything recorded so far, emptied — the count of lines past the cap with it.
     pub(crate) fn take(&self) -> Vec<WindowEffect> {
-        std::mem::take(&mut self.0.borrow_mut())
+        let mut entries = self.0.borrow_mut();
+        entries.notes_kept = 0;
+        entries.notes_beyond_the_cap = 0;
+        std::mem::take(&mut entries.effects)
+    }
+
+    /// How many `diagnostics.log` lines were said past [`NOTES_KEPT`] since the last take.
+    pub(crate) fn notes_beyond_the_cap(&self) -> usize {
+        self.0.borrow().notes_beyond_the_cap
     }
 }
 
@@ -291,6 +331,9 @@ impl WindowHost for HeadlessWindow {
     fn ime_facts(&self) -> NativeFacts {
         self.ledger.record(WindowEffect::ImeFactsRead);
         self.ime_facts.get()
+    }
+    fn note(&self, line: &str) {
+        self.ledger.note(line);
     }
     fn set_option_as_alt(&self, option_sends_alt: bool) {
         self.ledger
@@ -1428,6 +1471,7 @@ mod tests {
             PhysicalSize::new(3, 18).into(),
         );
         window.set_option_as_alt(true);
+        window.note("诊断 a line, said as it is written");
         window
             .set_clipboard_text("剪贴 clip")
             .expect("the headless clipboard takes text");
@@ -1544,6 +1588,7 @@ mod tests {
                 WindowEffect::Cursor(Cursor::Icon(CursorIcon::Text)),
                 WindowEffect::ImeArea([10, 20, 3, 18]),
                 WindowEffect::OptionAsAlt(true),
+                WindowEffect::Noted("诊断 a line, said as it is written".to_owned()),
                 WindowEffect::ClipboardWritten("剪贴 clip".to_owned()),
                 WindowEffect::HandedOff(bt_platform::Handoff::Reveal(folder.clone())),
                 WindowEffect::Presented {
@@ -1581,6 +1626,49 @@ mod tests {
         assert!(
             matches!(sent.as_slice(), [AppEvent::PtyOutput]),
             "the loop's one wake: {sent:?}"
+        );
+    }
+
+    /// RED (T-DIAGNOSTICS-TEST-SINK) — **the window's `diagnostics.log` door keeps the exact text
+    /// of every line up to its cap, and counts the rest**: [`NOTES_KEPT`] lines are kept in the
+    /// order said, byte for byte (a line of several scripts, a line with a tab); the one past them
+    /// is counted and not kept; a take empties both, and the next line is kept again.
+    ///
+    /// MUTATION: keep every line (no cap) — the ledger holds one line too many and counts none;
+    /// record a line trimmed or reformatted — the kept text differs.
+    #[test]
+    fn the_window_keeps_the_lines_it_is_told_up_to_its_cap_and_counts_the_rest() {
+        crate::test_support::on_the_window_thread();
+        let ledger = Ledger::default();
+        let device = HeadlessDevice::new(14.0);
+        let parts = HeadlessParts::new(&device, 8, (640, 480), 1.0, &ledger);
+        let said: Vec<String> = (0..=NOTES_KEPT)
+            .map(|line| format!("Folio: 第{line}行 line	{line} — said "))
+            .collect();
+        for line in &said {
+            parts.window.note(line);
+        }
+        assert_eq!(
+            ledger.notes_beyond_the_cap(),
+            1,
+            "the line past the cap is counted"
+        );
+        let kept: Vec<WindowEffect> = said[..NOTES_KEPT]
+            .iter()
+            .cloned()
+            .map(WindowEffect::Noted)
+            .collect();
+        assert_eq!(
+            ledger.take(),
+            kept,
+            "the first {NOTES_KEPT}, as they were said"
+        );
+        assert_eq!(ledger.notes_beyond_the_cap(), 0, "a take empties the count");
+        parts.window.note("after the take");
+        assert_eq!(
+            ledger.take(),
+            vec![WindowEffect::Noted("after the take".to_owned())],
+            "the cap is per take"
         );
     }
 

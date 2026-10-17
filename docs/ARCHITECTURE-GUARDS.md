@@ -651,6 +651,38 @@ beside the others and its headless impl in `headless.rs`); never add a native
 row for code that only reads or tells the window. A row nothing writes any more
 is named too, and is taken off.
 
+## Runtime voice
+
+The rule: a `Runtime` method says its `diagnostics.log` line through the window it
+has in hand, `WindowHost::note` (T-DIAGNOSTICS-TEST-SINK, 2026-10-17). The door's
+native arm is `diagnostics::note` — the resident log and a console run's trace
+queue, both process-wide and unreadable by a test — and the headless window keeps
+the exact text on its ledger (`WindowEffect::Noted`, at most `headless::NOTES_KEPT`
+lines between two takes, the rest counted by `Ledger::notes_beyond_the_cap`), so a
+headless test asserts the line the road wrote, not the line a builder would have
+written. A road a headless test drives says its line through the door; the roads
+no headless test drives yet keep their direct lines, each a row with its reason,
+and the list only shrinks.
+
+Where and what to do: `crates/bt-source/tests/runtime_voice.rs`
+(`bt_app_runtime_roads_say_their_lines_through_the_window`) reads every product
+`impl` block of `Runtime` through `bt-source` and counts each mention of
+`diagnostics::note` by the item holding it — a call, or the voice handed on as a
+value (a helper's `say`, a body's `use`) — against `BT_APP_DIRECT_LINES` in the
+same file, both ways (an unlisted line, a count above its row, and a row whose
+road says fewer or none are refused). What it cannot read is refused by its line,
+never passed: a bare `note` in a runtime road that is neither that path's tail nor
+a method after `.` (a name a `use`, a renamed module or a local gives it), and a
+`use` anywhere in the package that names the voice or opens its module by a glob.
+Not read, as limits: a free function a runtime method calls that says a line of
+its own, a stored closure or function pointer holding the voice, and the other
+backend holders (`FolioApp`, `App`), which have no window in hand. Its fixture
+(`tests/fixtures/runtime_voice/`) plants each refusal
+(`every_direct_line_in_a_runtime_road_is_named`). When red, say the line through
+`self.window.window.note(..)` and read it back in the road's headless test; a row
+whose road moved to the door is taken off in the same change. A row is never added
+for a new line.
+
 ## Machine-independent paths
 
 The rule: committed code, tests, and documentation do not carry one developer's

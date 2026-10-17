@@ -219,6 +219,12 @@ pub(crate) trait WindowHost {
     /// associates a context, focuses or notifies. Default facts (every field `None`) where the
     /// platform has none to read: off Windows, or a window with no native handle.
     fn ime_facts(&self) -> bt_platform::ime_observation::NativeFacts;
+    /// **A line this window's runtime says in `diagnostics.log`** (T-DIAGNOSTICS-TEST-SINK):
+    /// [`crate::diagnostics::note`] — the resident log, and a console run's trace queue — said
+    /// through the window a runtime road has in hand, so that the headless window can keep the
+    /// exact text the road wrote. Any thread may call `diagnostics::note`; this door is the
+    /// window thread's, where a `Runtime` method runs.
+    fn note(&self, line: &str);
     /// macOS's Option key as Alt, or as the composing key the keyboard prints with.
     fn set_option_as_alt(&self, option_sends_alt: bool);
     /// The window's scale and rectangle as the platform reports them, beside winit's.
@@ -304,6 +310,9 @@ impl WindowHost for Arc<Window> {
         crate::native_window_of(self)
             .map(bt_platform::ime_observation::snapshot)
             .unwrap_or_default()
+    }
+    fn note(&self, line: &str) {
+        crate::diagnostics::note(line);
     }
     fn set_option_as_alt(&self, option_sends_alt: bool) {
         crate::option_as_alt(self, option_sends_alt);
