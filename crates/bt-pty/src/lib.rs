@@ -2826,13 +2826,30 @@ thread_local! {
     static DOORS_SKIPPED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// **Say once that `what` was dropped without `door`, and what that leaves behind** — the
-/// platform's `door_skipped` line, in this crate's voice (it has no edge to `bt-platform`): one
-/// line to standard error, which a resident run points at its diagnostics, and a count on the
-/// dropping thread. Never a wait.
+/// Where a skipped door is said: the application's diagnostics, once it installs its road
+/// ([`say_skipped_doors_through`]).
+static SKIPPED_DOOR_ROAD: OnceLock<fn(&str)> = OnceLock::new();
+
+/// **Where this crate's skipped-door line goes from here on** — the same installed-sink shape as
+/// `bt_platform::door_skipped::install`, which this crate cannot name (it has no edge to
+/// `bt-platform`). `bt-app`'s `main` installs `diagnostics::note`, so the line never takes the
+/// console's `Stderr` lock on the window thread — a refused `pty-retirement` thread drops its
+/// session on the caller, which can be the window thread (X-7). Installed once; a second install
+/// is ignored.
+pub fn say_skipped_doors_through(say: fn(&str)) {
+    let _ = SKIPPED_DOOR_ROAD.set(say);
+}
+
+/// **Say once that `what` was dropped without `door`, and what that leaves behind**, through the
+/// installed road ([`say_skipped_doors_through`]) — standard error only before one is installed
+/// (a test, a probe) — and count it on the dropping thread. Never a wait.
 fn door_skipped(what: &str, door: &str, left: &str) {
     let _ = DOORS_SKIPPED.try_with(|skipped| skipped.set(skipped.get() + 1));
-    eprintln!("{what} was dropped without {door}, and did not wait: {left}");
+    let line = format!("{what} was dropped without {door}, and did not wait: {left}");
+    match SKIPPED_DOOR_ROAD.get() {
+        Some(say) => say(&line),
+        None => eprintln!("{line}"),
+    }
 }
 
 /// How many values dropped on this thread found their door uncalled.

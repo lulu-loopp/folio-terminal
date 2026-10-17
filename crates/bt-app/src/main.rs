@@ -77527,6 +77527,7 @@ fn main() -> Result<()> {
     // **A value dropped without its retire door says so here, once** (T-DROP-DOORS): from now on
     // the platform's line about a skipped door is a diagnostics note, never a wait.
     bt_platform::door_skipped::install(diagnostics::note);
+    bt_pty::say_skipped_doors_through(diagnostics::note);
     ime_outbound::install();
     bt_render::set_trace_writer(trace_sink::stderr_line);
     if diagnostics::switched_on(std::env::var_os("BT_STARTUP_TRACE")) {
