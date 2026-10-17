@@ -35,10 +35,11 @@ use crate::syntax::SyntaxNode;
 /// The deepest syntax tree this parser will build, counting tokens as a level of their own.
 ///
 /// The number is Folio's, and it is chosen against the stack its math worker runs on
-/// (`bt_math::MATH_WORKER_STACK_BYTES`, 16 MiB) rather than against taste about formulas: see the
-/// module documentation of `bt_math` for the measurement, and `bt_math`'s
-/// `the_vendored_parser_limit_and_the_worker_stack_are_chosen_together` for the assertion that
-/// keeps the two numbers from drifting apart.
+/// (`bt_math::MATH_WORKER_STACK_BYTES`, 16 MiB) rather than against taste about formulas: see that
+/// constant's documentation for the measurement, and `bt_math`'s
+/// `the_limit_and_the_worker_stack_are_one_pair` and
+/// `every_recursive_shape_renders_at_the_limit_on_a_quarter_of_the_worker_stack` for the assertions
+/// that keep the two numbers from drifting apart.
 ///
 /// It is also, by coincidence rather than by derivation, the same number Typst's own parser uses
 /// for its `MAX_DEPTH`.

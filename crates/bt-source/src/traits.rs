@@ -17,6 +17,13 @@
 //! macro-generated items, and anything outside the packages handed in — a
 //! standard or third-party trait resolves to nothing, which is how a caller
 //! tells it is not first-party.
+//!
+//! **What a guard decides with**: [`TraitResolver::resolve_checked`],
+//! [`TraitResolver::supertraits_checked`] and [`TraitResolver::implemented_checked`], which
+//! answer [`ResolveCutoff`] when a path chains past the resolver's hop limit, so a guard refuses
+//! what it could not read instead of reading it as "no trait". [`TraitResolver::resolve`],
+//! [`TraitResolver::supertraits`] and [`TraitResolver::implemented`] swallow the cutoff and are
+//! for callers that decide nothing from the answer.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -192,31 +199,90 @@ impl<'i> TraitResolver<'i> {
     }
 
     /// The first-party traits `id`'s declarations name as supertraits, each
-    /// resolved in the declaration's own module.
+    /// resolved in the declaration's own module. **It swallows the cutoff**, as
+    /// [`Self::resolve`] does; a caller that decides from the answer asks
+    /// [`Self::supertraits_checked`].
     #[must_use]
     pub fn supertraits(&self, id: &TraitId) -> BTreeSet<TraitId> {
-        let mut found = BTreeSet::new();
-        for declaration in self.declarations(id) {
-            for path in &declaration.supertraits {
-                found.extend(self.resolve(&id.package, &id.module_path, path));
-            }
-        }
-        found
+        self.supertraits_checked(id)
+            .unwrap_or_else(|ResolveCutoff(found)| found)
+    }
+
+    /// [`Self::supertraits`], **saying when it gave up** on any of them.
+    ///
+    /// # Errors
+    ///
+    /// [`ResolveCutoff`] when a supertrait path chains past the hop limit, carrying every
+    /// supertrait found.
+    pub fn supertraits_checked(&self, id: &TraitId) -> Result<BTreeSet<TraitId>, ResolveCutoff> {
+        let paths = self
+            .declarations(id)
+            .into_iter()
+            .flat_map(|declaration| declaration.supertraits.iter());
+        self.resolve_all(paths.map(|path| {
+            (
+                id.package.as_str(),
+                id.module_path.as_str(),
+                path.as_slice(),
+            )
+        }))
     }
 
     /// The traits an `impl` block of `package` implements: its trait path
     /// resolved in each module the block is written in. Empty for an inherent
-    /// block and for a trait that is not first-party.
+    /// block and for a trait that is not first-party. **It swallows the
+    /// cutoff**, as [`Self::resolve`] does; a caller that decides from the
+    /// answer asks [`Self::implemented_checked`].
     #[must_use]
     pub fn implemented(&self, package: &str, block: &ImplRecord) -> BTreeSet<TraitId> {
+        self.implemented_checked(package, block)
+            .unwrap_or_else(|ResolveCutoff(found)| found)
+    }
+
+    /// [`Self::implemented`], **saying when it gave up** in any module the block is written in.
+    ///
+    /// # Errors
+    ///
+    /// [`ResolveCutoff`] when the block's trait path chains past the hop limit in one of its
+    /// modules, carrying every trait found.
+    pub fn implemented_checked(
+        &self,
+        package: &str,
+        block: &ImplRecord,
+    ) -> Result<BTreeSet<TraitId>, ResolveCutoff> {
         let Some(path) = block.trait_path() else {
-            return BTreeSet::new();
+            return Ok(BTreeSet::new());
         };
-        block
-            .module_paths()
-            .into_iter()
-            .flat_map(|module| self.resolve(package, module, path))
-            .collect()
+        self.resolve_all(
+            block
+                .module_paths()
+                .into_iter()
+                .map(|module| (package, module, path)),
+        )
+    }
+
+    /// Every `(package, module, path)` resolved and united — `Err` with the union when any of
+    /// them was cut off.
+    fn resolve_all<'p>(
+        &self,
+        paths: impl Iterator<Item = (&'p str, &'p str, &'p [String])>,
+    ) -> Result<BTreeSet<TraitId>, ResolveCutoff> {
+        let mut found = BTreeSet::new();
+        let mut cut = false;
+        for (package, module, path) in paths {
+            match self.resolve_checked(package, module, path) {
+                Ok(named) => found.extend(named),
+                Err(ResolveCutoff(named)) => {
+                    cut = true;
+                    found.extend(named);
+                }
+            }
+        }
+        if cut {
+            Err(ResolveCutoff(found))
+        } else {
+            Ok(found)
+        }
     }
 
     fn package_at(&self, package: &str) -> Option<usize> {

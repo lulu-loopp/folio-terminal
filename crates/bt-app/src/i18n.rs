@@ -972,6 +972,9 @@ text_entries! {
     /// What a quit's or a stop's road says of a body a save sent that did not
     /// land, no longer the body (S-6a round 6, R1).
     PreviewSaveUnlanded,
+    /// The clause for a save handed over while the preview already has
+    /// `preview::PREVIEW_SAVES_OWED` saves on their way (T-STORAGE-WORKER-ON-THE-SEAM, R1).
+    PreviewSaveTooMany,
     /// The start's toast for one copy a stop kept in the recovered folder, `{folder}` filled
     /// by [`recovered_edits_kept_in`] (T-RECOVERED-FOLDER).
     RecoveredEditKept,
@@ -1301,6 +1304,10 @@ text_entries! {
     /// A question the row depends on (the parse answer, the edition's observation) got no
     /// answer; the next visit to the Profiles page asks again (release read m2).
     CapPowerShellUndetermined,
+    /// The edition's observation could not run — its worker's start was refused, or it ended
+    /// before it answered — so the row claims nothing; the next visit to the Profiles page asks
+    /// again (T-OBSERVATION-REFUSAL-ON-THE-PAGE).
+    CapPowerShellCheckNotRun,
     /// The edition runs `-Command` text in Constrained Language Mode, where the loader does
     /// nothing: the row claims nothing and offers nothing (T-PROBE-NO-CACHED-FAILURE).
     CapPowerShellConstrained,
@@ -3978,6 +3985,11 @@ impl Text {
                 "a version you saved was not written to the disk",
                 "a version you saved was not written to the disk", // zh: pending S-6a
             ),
+            Self::PreviewSaveTooMany => pick(
+                lang,
+                "too many saves are already on their way to the disk",
+                "too many saves are already on their way to the disk", // zh: pending T-STORAGE-WORKER-ON-THE-SEAM
+            ),
             Self::RecoveredEditKept => pick(
                 lang,
                 "An unsaved edit was kept at {folder}",
@@ -4277,6 +4289,11 @@ impl Text {
                 lang,
                 "PowerShell integration could not be determined for these arguments. Folio asks again when this page opens.",
                 "自定义启动参数，PowerShell 整合状态未知。再次打开此页时重新检测。",
+            ),
+            Self::CapPowerShellCheckNotRun => pick(
+                lang,
+                "PowerShell integration could not be determined for these arguments: the check could not run. Folio asks again when this page opens.",
+                "PowerShell integration could not be determined for these arguments: the check could not run. Folio asks again when this page opens.", // zh: pending T-OBSERVATION-REFUSAL-ON-THE-PAGE
             ),
             Self::CapPowerShellConstrained => pick(
                 lang,
@@ -6558,6 +6575,10 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // zh: pending T-OBSERVATION-REFUSAL-ON-THE-PAGE — the Profiles row of an edition whose
+        // `$PROFILE` check could not run.
+        (Self::CapPowerShellCheckNotRun, HostPlatform::Windows),
+        (Self::CapPowerShellCheckNotRun, HostPlatform::MacOs),
         // zh: pending S-6a — the two clauses a preview save that never reached the disk is
         // "not saved" for.
         (Self::PreviewSaveNotStarted, HostPlatform::Windows),
@@ -6579,6 +6600,8 @@ impl Text {
         (Self::PreviewSaveReloaded, HostPlatform::MacOs),
         (Self::PreviewSaveUnlanded, HostPlatform::Windows),
         (Self::PreviewSaveUnlanded, HostPlatform::MacOs),
+        (Self::PreviewSaveTooMany, HostPlatform::Windows),
+        (Self::PreviewSaveTooMany, HostPlatform::MacOs),
         // zh: pending T-SHELL-BIRTH-DEATH — the face of a shell that ended at birth.
         (Self::ShellBirthDeath, HostPlatform::Windows),
         (Self::ShellBirthDeath, HostPlatform::MacOs),

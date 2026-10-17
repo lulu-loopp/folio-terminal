@@ -2124,7 +2124,7 @@ pub(crate) fn serve_on_a_worker(
         "bt-preview-save-test",
         bt_platform::ThreadPriority::BelowNormal,
         move |worker| {
-            document_request::serve_document_between(worker, job, &mut |step| {
+            document_request::serve_document_between(worker, &job, &mut |step| {
                 if step == document_request::Step::Read
                     && let Some(crossing) = &crossing
                 {

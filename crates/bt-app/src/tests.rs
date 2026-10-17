@@ -349,8 +349,9 @@ fn covered_window_on(taskbar: bt_platform::TaskbarReading) -> notify::WindowPlac
 /// answer, the request goes to the desktop. An answer that says the bar is on
 /// screen leaves the flash running, and a pane that has gone is not called to.
 /// The answers here are real lane answers; the runtime's half — the lane's wake
-/// reaches every window, a flash is recorded where it is raised and forgotten
-/// where the window comes to the front — is held through `bt_source`.
+/// reaches every window and a flash is recorded where it is raised — is held
+/// through `bt_source`. That it is forgotten where the window comes to the front
+/// is run, not read: `runtime::attention::tests::a_focus_clears_the_taskbar_flash_through_attentions_door`.
 ///
 /// MUTATION: make `TaskbarFlash::contradicted_by` answer `false` (no re-place)
 /// — red.
@@ -421,18 +422,6 @@ fn a_notification_placed_before_the_first_answer_uses_the_default_and_is_re_plac
     let raise = method_body("Runtime", "raise_attention");
     assert!(raise.contains("TaskbarFlash::record("));
     assert!(raise.contains("self.window.taskbar_reading.generation"));
-    let windows = item_body(&ItemQuery::method("FolioApp", "on_window_event"));
-    let focused = windows
-        .find("WindowEvent::Focused(true) => {")
-        .map(|at| &windows[at..])
-        .expect("the window's focus has an arm");
-    let focused = &focused[..focused[1..]
-        .find("WindowEvent::")
-        .map_or(focused.len(), |at| at + 1)];
-    assert!(
-        focused.contains("taskbar_flash = None"),
-        "the record ends where the flash does"
-    );
 }
 
 #[test]
