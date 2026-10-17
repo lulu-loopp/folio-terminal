@@ -1,16 +1,17 @@
 //! **The capture** (`docs/plans/design/pointer-capture-2026-10-09.md` §2.2):
 //! one record per latched gesture, in one application slot.
 //!
-//! `App::pointer_capture` is the authority for the current gesture. Until cut
-//! 4 decides what another button does, `App::pointer_capture_overlaps` keeps
-//! the independent legacy-field overlaps cut 3 is not allowed to change.
+//! `App::pointer_capture` is the one gesture that holds the pointer, and
+//! `App::swallowed` the buttons pressed while it was held (R-8, cut 4).
 //!
 //! Every gesture is read and written through the accessors below, so a
 //! window reads only its own capture and a tab's gesture is read only on that
-//! tab. The release of the capture's button goes to its owner before any
-//! layer is asked ([`Runtime::release_capture`], R-6), and a press of the held
-//! button proves the capture stale and cancels it first
-//! ([`press_against_the_slot`], R-5 rule 2).
+//! tab. Every button event is first compared with the slot, by button and
+//! never by window ([`press_against_the_slot`], [`release_against_the_slot`]):
+//! the release of the capture's button goes to its owner before any layer is
+//! asked ([`Runtime::release_capture`], R-6), a press of the held button
+//! proves the capture stale and cancels it first (R-5 rule 2), and a press of
+//! any other button goes nowhere, nor does its release (R-5 rule 3, R-8).
 
 use crate::window_seam::prelude::*;
 use crate::{
@@ -18,7 +19,7 @@ use crate::{
     PanePress, PreviewBlockDrag, PreviewBodyDrag, PreviewSurface, PreviewTextDrag, RowPress,
     Runtime, TabId, TabPress, TerminalColumnDrag, TerminalThumbDrag, settings,
 };
-use winit::event::{ElementState, MouseButton};
+use winit::event::MouseButton;
 use winit::window::WindowId;
 
 use super::PointerHit;
@@ -71,67 +72,6 @@ pub(crate) enum CaptureOwner {
     SettingsMenuBar(f32),
 }
 
-impl CaptureOwner {
-    /// **Which release ends this gesture** (until cut 4 rules on the other
-    /// button): the glance card's, a floating window's, the settings sheet's
-    /// and a formula block's end on the release of any button, as they always
-    /// have; every other one on the release of the button that latched it.
-    pub(crate) const fn ends_on_any_release(&self) -> bool {
-        match self {
-            Self::GlanceHeadPress(_)
-            | Self::GlanceThumb(_)
-            | Self::FloatHeadPress(_)
-            | Self::FloatDrag(_)
-            | Self::SettingsSlider(_)
-            | Self::SettingsMenuBar(_)
-            | Self::Route(MouseRoute::MathBlock) => true,
-            Self::Divider(_)
-            | Self::TabPress(_)
-            | Self::PanePress(..)
-            | Self::RowPress(_)
-            | Self::Drag(_)
-            | Self::VideoBar(_)
-            | Self::PreviewBodyThumb(..)
-            | Self::BlockThumb(..)
-            | Self::PicturePan(..)
-            | Self::EditSelection(..)
-            | Self::RenderedSelection(..)
-            | Self::TerminalThumb(..)
-            | Self::TerminalFootMark(..)
-            | Self::Route(MouseRoute::Local(_) | MouseRoute::Forward { .. }) => false,
-        }
-    }
-
-    /// **Where this legacy field's release stood before cut 3.** Several
-    /// independent fields could be live together, and the first matching arm
-    /// ended the release. The compatibility list keeps that order until cut 4
-    /// replaces the other-button rule.
-    const fn legacy_release_precedence(&self) -> u8 {
-        match self {
-            Self::Route(_) => 0,
-            Self::SettingsSlider(_) => 1,
-            Self::SettingsMenuBar(_) => 2,
-            Self::GlanceThumb(_) => 3,
-            Self::GlanceHeadPress(_) => 4,
-            Self::FloatHeadPress(_) => 5,
-            Self::FloatDrag(_) => 6,
-            Self::VideoBar(_) => 7,
-            Self::PreviewBodyThumb(..) => 8,
-            Self::TerminalThumb(..) => 9,
-            Self::TerminalFootMark(..) => 10,
-            Self::BlockThumb(..) => 11,
-            Self::PicturePan(..) => 12,
-            Self::EditSelection(..) => 13,
-            Self::RenderedSelection(..) => 14,
-            Self::Drag(_) => 15,
-            Self::Divider(_) => 16,
-            Self::PanePress(..) => 17,
-            Self::RowPress(_) => 18,
-            Self::TabPress(_) => 19,
-        }
-    }
-}
-
 /// **One latched gesture** (§2.2).
 #[derive(Clone)]
 pub(crate) struct PointerCapture {
@@ -148,15 +88,72 @@ pub(crate) struct PointerCapture {
     pub(crate) started: Option<PointerHit>,
 }
 
-/// **What a press does with the slot** (R-5, cut 3): routed, or routed after
-/// the held capture is cancelled. A press of another button keeps today's
-/// routing until cut 4 rules on it.
+/// **The buttons that went down while a capture was held** (R-5 rule 3):
+/// each was delivered to nothing, and so is its release, even one that comes
+/// after the capture has ended.
+///
+/// A button's bit is the platform's own number for it: winit's five named
+/// buttons are numbers 0–4 on Windows and in AppKit alike (primary, secondary,
+/// middle, back, forward), and `Other(n)` is AppKit's `buttonNumber` n.
+/// Windows has those five buttons and AppKit reports the buttons down as one
+/// 64-bit mask (`NSEvent.pressedMouseButtons`), so a button number that has
+/// no bit here is one neither platform can report as down; it is never
+/// remembered.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ButtonSet(u64);
+
+impl ButtonSet {
+    fn bit(button: MouseButton) -> u64 {
+        let number = match button {
+            MouseButton::Left => 0,
+            MouseButton::Right => 1,
+            MouseButton::Middle => 2,
+            MouseButton::Back => 3,
+            MouseButton::Forward => 4,
+            MouseButton::Other(number) => u32::from(number),
+        };
+        1_u64.checked_shl(number).unwrap_or(0)
+    }
+
+    pub(crate) fn contains(self, button: MouseButton) -> bool {
+        self.0 & Self::bit(button) != 0
+    }
+
+    pub(crate) fn insert(&mut self, button: MouseButton) {
+        self.0 |= Self::bit(button);
+    }
+
+    pub(crate) fn remove(&mut self, button: MouseButton) {
+        self.0 &= !Self::bit(button);
+    }
+}
+
+/// **What a press does with the slot** (R-5).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PressVerdict {
+    /// No gesture holds the pointer: the press is routed as it always was.
     Route,
     /// The held capture's own button went down again: its release was lost,
     /// so the capture is stale. It is cancelled, then the press is routed.
     CancelThenRoute,
+    /// Another button, while a gesture holds the pointer (R-8): the press is
+    /// delivered to nothing and its button is remembered, so its release is
+    /// delivered to nothing too.
+    Swallow,
+}
+
+/// **What a release does with the slot** (R-5 rule 3, R-6, R-8).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReleaseVerdict {
+    /// No gesture holds the pointer and its press was not swallowed: the
+    /// release is routed as it always was.
+    Route,
+    /// The release of the held capture's own button: it goes to the owner
+    /// before any layer is asked, and the gesture ends.
+    ToOwner,
+    /// The release of a swallowed press, or of another button while a gesture
+    /// holds the pointer: delivered to nothing.
+    Swallow,
 }
 
 /// **The press precedence** (R-5): compared with the slot by button, never by
@@ -167,83 +164,30 @@ pub(crate) fn press_against_the_slot(
     button: MouseButton,
 ) -> PressVerdict {
     match slot {
+        None => PressVerdict::Route,
         Some(capture) if capture.button == button => PressVerdict::CancelThenRoute,
-        Some(_) | None => PressVerdict::Route,
+        Some(_) => PressVerdict::Swallow,
     }
 }
 
-/// **Whether a release ends the held capture** (R-6): the release of the
-/// capture's own button, or of any button for the gestures that have always
-/// ended on any ([`CaptureOwner::ends_on_any_release`]). The window plays no
-/// part, and neither does what is under the pointer.
-pub(crate) fn release_ends_the_capture(capture: &PointerCapture, button: MouseButton) -> bool {
-    capture.button == button || capture.owner.ends_on_any_release()
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CaptureIndex {
-    Primary,
-    Overlap(usize),
-}
-
-fn same_legacy_field(left: &PointerCapture, right: &PointerCapture) -> bool {
-    left.window == right.window
-        && std::mem::discriminant(&left.owner) == std::mem::discriminant(&right.owner)
-}
-
-pub(crate) fn capture_index_for_button_event(
-    primary: Option<&PointerCapture>,
-    overlaps: &[PointerCapture],
-    arrived_in: WindowId,
-    state: ElementState,
+/// **The release precedence** (R-5 rule 3, R-6, R-8): a release is compared
+/// with the swallowed buttons first — a swallowed press's release is
+/// swallowed whatever has happened to the capture meanwhile — and only then
+/// with the slot. As for a press, the window plays no part, and neither does
+/// what is under the pointer.
+pub(crate) fn release_against_the_slot(
+    slot: Option<&PointerCapture>,
+    swallowed: ButtonSet,
     button: MouseButton,
-) -> Option<CaptureIndex> {
-    let matches = |capture: &PointerCapture| match state {
-        ElementState::Pressed => capture.button == button,
-        ElementState::Released => release_ends_the_capture(capture, button),
-    };
-    if state == ElementState::Pressed {
-        if primary.is_some_and(matches) {
-            return Some(CaptureIndex::Primary);
-        }
-        return overlaps
-            .iter()
-            .rposition(matches)
-            .map(CaptureIndex::Overlap);
+) -> ReleaseVerdict {
+    if swallowed.contains(button) {
+        return ReleaseVerdict::Swallow;
     }
-    primary
-        .into_iter()
-        .map(|capture| (CaptureIndex::Primary, capture))
-        .chain(
-            overlaps
-                .iter()
-                .enumerate()
-                .map(|(index, capture)| (CaptureIndex::Overlap(index), capture)),
-        )
-        .filter(|(_, capture)| matches(capture))
-        .min_by_key(|(_, capture)| {
-            (
-                capture.owner.legacy_release_precedence(),
-                capture.window != arrived_in,
-            )
-        })
-        .map(|(index, _)| index)
-}
-
-pub(crate) fn latch_in(
-    primary: &mut Option<PointerCapture>,
-    overlaps: &mut Vec<PointerCapture>,
-    capture: PointerCapture,
-) {
-    overlaps.retain(|held| !same_legacy_field(held, &capture));
-    match primary.take() {
-        Some(held) if held.button != capture.button && !same_legacy_field(&held, &capture) => {
-            overlaps.retain(|older| !same_legacy_field(older, &held));
-            overlaps.push(held);
-        }
-        Some(_) | None => {}
+    match slot {
+        None => ReleaseVerdict::Route,
+        Some(capture) if capture.button == button => ReleaseVerdict::ToOwner,
+        Some(_) => ReleaseVerdict::Swallow,
     }
-    *primary = Some(capture);
 }
 
 pub(crate) fn cancel_then_route<S, T, E>(
@@ -256,56 +200,41 @@ pub(crate) fn cancel_then_route<S, T, E>(
 }
 
 impl<B: Backend> App<B> {
-    pub(crate) fn capture_index_where(
-        &self,
-        mut predicate: impl FnMut(&PointerCapture) -> bool,
-    ) -> Option<CaptureIndex> {
-        if self.pointer_capture.as_ref().is_some_and(&mut predicate) {
-            return Some(CaptureIndex::Primary);
+    /// **A press, answered by the slot and spent on the swallowed buttons.**
+    /// A remembered bit of this button is stale — its release was lost to
+    /// another process — so the press clears it, exactly as rule 2 proves a
+    /// stale capture, before the slot answers; a swallowed press is remembered.
+    pub(crate) fn answer_press(&mut self, button: MouseButton) -> PressVerdict {
+        self.swallowed.remove(button);
+        let verdict = press_against_the_slot(self.pointer_capture.as_ref(), button);
+        if verdict == PressVerdict::Swallow {
+            self.swallowed.insert(button);
         }
-        self.pointer_capture_overlaps
-            .iter()
-            .rposition(predicate)
-            .map(CaptureIndex::Overlap)
+        verdict
     }
 
-    pub(crate) fn focus_capture(&mut self, index: CaptureIndex) {
-        let CaptureIndex::Overlap(index) = index else {
-            return;
-        };
-        let Some(primary) = self.pointer_capture.as_mut() else {
-            self.pointer_capture = Some(self.pointer_capture_overlaps.remove(index));
-            return;
-        };
-        std::mem::swap(primary, &mut self.pointer_capture_overlaps[index]);
+    /// **A release, answered by the slot and spent on the swallowed
+    /// buttons**: the release of a remembered button clears its bit.
+    pub(crate) fn answer_release(&mut self, button: MouseButton) -> ReleaseVerdict {
+        let verdict =
+            release_against_the_slot(self.pointer_capture.as_ref(), self.swallowed, button);
+        self.swallowed.remove(button);
+        verdict
     }
 
-    pub(crate) fn take_capture_at(&mut self, index: CaptureIndex) -> Option<PointerCapture> {
-        match index {
-            CaptureIndex::Primary => {
-                let taken = self.pointer_capture.take();
-                self.pointer_capture = self.pointer_capture_overlaps.pop();
-                taken
-            }
-            CaptureIndex::Overlap(index) => (index < self.pointer_capture_overlaps.len())
-                .then(|| self.pointer_capture_overlaps.remove(index)),
-        }
-    }
-
-    fn take_capture_where(
+    pub(super) fn take_capture_where(
         &mut self,
-        predicate: impl FnMut(&PointerCapture) -> bool,
+        mut predicate: impl FnMut(&PointerCapture) -> bool,
     ) -> Option<PointerCapture> {
-        let index = self.capture_index_where(predicate)?;
-        self.take_capture_at(index)
+        self.pointer_capture.take_if(|capture| predicate(capture))
     }
 
+    /// **A latch replaces what the slot holds.** Nothing else can be there: a
+    /// press of the held button cancelled it first, a press of another button
+    /// was swallowed and latched nothing, and every other latch is a later
+    /// stage of this gesture (a pane press becoming a drag).
     fn latch_capture(&mut self, capture: PointerCapture) {
-        latch_in(
-            &mut self.pointer_capture,
-            &mut self.pointer_capture_overlaps,
-            capture,
-        );
+        self.pointer_capture = Some(capture);
     }
 }
 
@@ -650,11 +579,9 @@ impl<B: Backend> Runtime<'_, B> {
 }
 
 impl<B: Backend> Runtime<'_, B> {
-    /// **This window's most recently latched capture**, including the bounded
-    /// legacy-overlap list retained until cut 4.
+    /// **This window's capture**, when the slot holds one of this window's.
     pub(crate) fn own_capture(&self) -> Option<&PointerCapture> {
-        let window = self.window.window.id();
-        self.capture_where(|capture| capture.window == window)
+        self.capture_where(|_| true)
     }
 
     fn capture_where(
@@ -666,13 +593,6 @@ impl<B: Backend> Runtime<'_, B> {
             .pointer_capture
             .as_ref()
             .filter(|capture| capture.window == window && predicate(capture))
-            .or_else(|| {
-                self.app
-                    .pointer_capture_overlaps
-                    .iter()
-                    .rev()
-                    .find(|capture| capture.window == window && predicate(capture))
-            })
     }
 
     fn capture_where_mut(
@@ -680,28 +600,16 @@ impl<B: Backend> Runtime<'_, B> {
         mut predicate: impl FnMut(&PointerCapture) -> bool,
     ) -> Option<&mut PointerCapture> {
         let window = self.window.window.id();
-        if self
-            .app
-            .pointer_capture
-            .as_ref()
-            .is_some_and(|capture| capture.window == window && predicate(capture))
-        {
-            return self.app.pointer_capture.as_mut();
-        }
         self.app
-            .pointer_capture_overlaps
-            .iter_mut()
-            .rev()
-            .find(|capture| capture.window == window && predicate(capture))
+            .pointer_capture
+            .as_mut()
+            .filter(|capture| capture.window == window && predicate(capture))
     }
 
     /// **Whether a gesture of this window holds the pointer** — any of them,
     /// by the one slot ([`crate::Runtime::a_gesture_holds_the_pointer`]).
     pub(crate) fn a_capture_holds_the_pointer(&self) -> bool {
-        let window = self.window.window.id();
-        self.app
-            .capture_index_where(|capture| capture.window == window)
-            .is_some()
+        self.own_capture().is_some()
     }
 
     pub(crate) fn drop_own_capture(&mut self) {
@@ -711,10 +619,8 @@ impl<B: Backend> Runtime<'_, B> {
             .take_capture_where(|capture| capture.window == window);
     }
 
-    /// **Latch a gesture.** A gesture of the same button replaces the current
-    /// stage (for example pane press → drag). A gesture of another button is
-    /// retained beside it exactly as the independent legacy fields allowed;
-    /// cut 4 removes or changes that overlap after the owner rules on R-8.
+    /// **Latch a gesture**, replacing what the slot holds
+    /// ([`App::latch_capture`]'s reason).
     pub(crate) fn latch_capture(&mut self, owner: CaptureOwner, button: MouseButton) {
         let started = self
             .window

@@ -13798,14 +13798,11 @@ struct App<B: Backend = Native> {
     /// gesture that holds the pointer, in whichever window latched it. See
     /// [`runtime::pointer::PointerCapture`].
     pointer_capture: Option<runtime::pointer::PointerCapture>,
-    /// **Legacy other-button overlaps, until cut 4 rules on them.** Cut 3 may
-    /// not change A·b or B21: a different button can still begin a gesture
-    /// beside the slot's gesture, as the independent legacy fields allowed.
-    /// One record per `(window, owner kind)` bounds the list to the live
-    /// gestures the removed fields could have represented. A write to the same
-    /// field replaces its prior record, and releases keep the fields' old
-    /// release-road order rather than the records' latch order.
-    pointer_capture_overlaps: Vec<runtime::pointer::PointerCapture>,
+    /// **The buttons pressed while a capture was held** (T-POINTER-CAPTURE
+    /// R-5 rule 3, R-8): each went nowhere, and its release goes nowhere too,
+    /// in whichever window it arrives and even after the capture has ended.
+    /// See [`runtime::pointer::ButtonSet`].
+    swallowed: runtime::pointer::ButtonSet,
     /// **A cross-window release that has been decided and not yet performed**
     /// (multiwindow slice F2).
     ///
@@ -14115,7 +14112,7 @@ impl<B: Backend> App<B> {
             pending_new_windows: Vec::new(),
             drag_broker: None,
             pointer_capture: None,
-            pointer_capture_overlaps: Vec::new(),
+            swallowed: runtime::pointer::ButtonSet::default(),
             pending_handover: None,
             quit_requested: false,
             quit: None,
