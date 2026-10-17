@@ -86,15 +86,19 @@ TRADEMARK.md text eol=lf
 # directions: they check out as they were committed, and `git status` does not
 # report them as modified for a difference this file would otherwise introduce.
 
-# Microsoft's PSReadLine 2.4.6, shipped verbatim. `bt_app::psreadline` carries
-# `PSReadLine.psm1` in the executable with `include_bytes!` and compares the
-# installed copy against it; a checkout that rewrote its line endings would make
-# the shipped module and the repaired one different files.
+# Folio's own manifest for its PSReadLine (`PSReadLine.psd1`): `bt_app::psreadline`
+# embeds it with `include_bytes!` and writes it, byte for byte, beside Microsoft's
+# assemblies; a checkout that rewrote its line endings would make the module one
+# build writes and the module another build compares against different files.
 assets/psreadline/** -text
 
 # The upstream notices Apache-2.0 §4(b) requires to be reproduced. A notice is
 # reproduced or it is not.
 licenses/** -text
+
+# PSReadLine's licence, the vendored package's own `License.txt` byte for byte
+# (CRLF, as the package stores it); the artefact gate holds the two equal.
+vendor/psreadline/LICENSE-PSREADLINE.txt -text
 
 # Captured evidence and the spike probes: transcripts of what a tool printed and
 # source that was written and run outside this workspace. Both are records of

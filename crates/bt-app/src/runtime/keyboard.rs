@@ -681,7 +681,6 @@ impl<B: Backend> Runtime<'_, B> {
             menu_or_dialog: self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
                 || self.window.dirty_gate.is_open()
                 || self.window.first_run.is_open()
-                || self.window.psreadline_invite.is_open()
                 // The multi-line paste card (0.4.4 ticket 02): modal by the owner's ruling of
                 // 2026-09-23, so a drop is refused under it and a composition goes nowhere.
                 || self.paste_card_seat().is_some()
@@ -1187,19 +1186,6 @@ impl<B: Backend> Runtime<'_, B> {
             if !event.repeat {
                 let shift = self.window.modifiers.shift_key();
                 self.press_first_run_key(&event.logical_key, shift)?;
-            }
-            return Ok(());
-        }
-        // **The invitation owns the keyboard too**, in the order it is drawn.
-        // Esc declines, which is the answer that changes nothing on the machine
-        // — and every other key is swallowed rather than typed into a shell
-        // behind a scrim. Enter presses nothing on purpose: the affirmative here
-        // writes files, and a dialog that appeared while somebody was typing
-        // must not be able to install a module with the return key they were
-        // already reaching for.
-        if self.window.psreadline_invite.is_open() {
-            if !event.repeat && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-                self.answer_psreadline_invite(restore::InviteTarget::Decline)?;
             }
             return Ok(());
         }
@@ -2137,7 +2123,6 @@ impl<B: Backend> Runtime<'_, B> {
         self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
             || self.window.dirty_gate.is_open()
             || self.window.first_run.is_open()
-            || self.window.psreadline_invite.is_open()
             || self.paste_card_seat().is_some()
             || self.update_card_is_up()
             || self.settings_layout().is_some()

@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 /// v2 adds `display_formulas`, v3 adds `inline_formulas`, v4 adds
 /// `default_profile`, v5 adds `git_panel`, v6 adds `split_direction`, v7 adds
 /// `language`, v8 adds `terminal_font_family`, `terminal_font_size` and
-/// `psreadline_invite`, v9 adds `light_scheme` and `dark_scheme`, v10 adds
+/// `psreadline_invite` (retired 2026-10-17: the key is ignored on read and no
+/// longer written; T-INTEGRATION-INJECT-2-BUILD), v9 adds `light_scheme` and `dark_scheme`, v10 adds
 /// `background_image`, `background_fit`, `background_image_opacity`,
 /// `background_opacity`, `acrylic` and `always_on_top`. §2's
 /// "只收录已经在 DESIGN/M2 文档里落定的用户可见项" is satisfied the way §1.3
@@ -565,7 +566,6 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "language": "System" | "English" | "Chinese",
 ///   "terminal_font_family": "Consolas" | "Cascadia Mono" | … | "",
 ///   "terminal_font_size": 10..=24,
-///   "psreadline_invite": "NotAsked" | "Declined" | "Installed" | "Dismissed",
 ///   "light_scheme": "Solarized Light" | … | "",
 ///   "dark_scheme": "Nord" | … | "",
 ///   "background_image": "C:\\Users\\me\\Pictures\\ridge.jpg" | "",
@@ -787,17 +787,12 @@ pub struct SettingsV1 {
     /// file written by a newer build may name a size this one's list does not
     /// contain, and the reader's answer is to draw at that size, which it can.
     pub terminal_font_size: u8,
-    /// Whether the user has been offered the patched PSReadLine, and what they
-    /// said (`docs/DESIGN.md` §7.1.6c-3b).
-    ///
-    /// It is a preference and not a fact about the machine, which is why it is in
-    /// this file rather than being derived at startup from what is installed. The
-    /// fact — which PSReadLine the machine actually has — is read out of band
-    /// every run and is never written down, because it changes without Folio.
-    /// What cannot be re-derived is whether this person has already been asked
-    /// and said no; asking again every launch is the behaviour this field exists
-    /// to make impossible.
-    pub psreadline_invite: PsReadLineInviteV1,
+    // `psreadline_invite` — how far the PSReadLine invitation had got — is retired
+    // (T-INTEGRATION-INJECT-2-BUILD, owner ruling Q3 of 2026-10-15): Folio's Windows
+    // PowerShell panes run Folio's own PSReadLine and nothing invites anybody to install
+    // one. serde ignores the key, so a file an earlier build wrote loads, and it is not
+    // written again; the v7 -> v8 migration still inserts it for a file that old, which is
+    // harmless for the same reason.
     /// Which colour scheme the window is painted in while the theme resolves to
     /// Light (`docs/DESIGN.md` §7.1.6c-4a).
     ///
@@ -1459,7 +1454,6 @@ impl Default for SettingsV1 {
             terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
             terminal_cjk_font_family: DEFAULT_TERMINAL_CJK_FONT_FAMILY.to_owned(),
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
-            psreadline_invite: PsReadLineInviteV1::default(),
             light_scheme: DEFAULT_LIGHT_SCHEME.to_owned(),
             dark_scheme: DEFAULT_DARK_SCHEME.to_owned(),
             background_image: DEFAULT_BACKGROUND_IMAGE.to_owned(),
@@ -1577,35 +1571,11 @@ pub enum BackgroundFitV1 {
     Tile,
 }
 
-/// How far the PSReadLine invitation has got with this user — `docs/DESIGN.md`
-/// §7.1.6c-3b.
-///
-/// Four values and not a `bool`, because the invitation has to distinguish three
-/// kinds of "do not show this again" that behave differently the next time the
-/// window opens, and a two-state field would have to guess between them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum PsReadLineInviteV1 {
-    /// Never offered. The only state from which the dialog appears unprompted.
-    #[default]
-    NotAsked,
-    /// Offered once and refused. The dialog is owed exactly one more appearance,
-    /// and only immediately after the user changes the font size — the one
-    /// action whose visible symptom on an unpatched 5.1 is the bug the patch
-    /// fixes. After that it goes to [`Self::Dismissed`] whatever the answer.
-    Declined,
-    /// Folio wrote the module. The Terminal page offers to remove it; nothing
-    /// asks again.
-    Installed,
-    /// Refused twice, or refused after the second showing. Nothing asks again,
-    /// ever, on this machine — the Terminal page's row remains the only way in.
-    Dismissed,
-}
-
 /// Whether the first-run card has been put up on this machine —
 /// `docs/DESIGN.md` §7.56.
 ///
-/// **Two values and not a `bool`, for [`PsReadLineInviteV1`]'s reason**: the
-/// default has to be the one a migrated file cannot land on by accident. A
+/// **Two values and not a `bool`**: the default has to be the one a migrated
+/// file cannot land on by accident. A
 /// `bool` named `first_run_card_shown` would read `false` out of every document
 /// that predates the key, and `false` there would mean "put the card up" to
 /// every reader who has been using this program for months.
@@ -1895,38 +1865,31 @@ mod tests {
         assert_eq!(wire["terminal_font_size"], serde_json::Value::from(16));
     }
 
-    /// PIN — a settings file that has never been shown the PSReadLine
-    /// invitation says `NotAsked`, and says it with a word.
+    /// RED (T-INTEGRATION-INJECT-2-BUILD) — **the retired invitation key is read past and never
+    /// written**: a file carrying `psreadline_invite` at each of the four values an earlier
+    /// build wrote loads whole, every other field as written, and the file written back from it
+    /// carries no such key (a settings key retired the way `powershell_integration_offer` was).
+    ///
+    /// MUTATION: give `SettingsV1` `#[serde(deny_unknown_fields)]` — the old files do not load.
     #[test]
-    fn a_settings_file_that_was_never_shown_the_invitation_says_so() {
-        let defaults = SettingsV1::default();
-        assert_eq!(defaults.psreadline_invite, PsReadLineInviteV1::NotAsked);
-        let wire = serde_json::to_value(&defaults).unwrap();
-        assert_eq!(
-            wire["psreadline_invite"],
-            serde_json::Value::from("NotAsked")
-        );
-    }
-
-    /// PIN — every invitation state survives a round trip, and the four are
-    /// four rather than a `bool`, because each answers the next launch
-    /// differently.
-    #[test]
-    fn every_invitation_state_survives_a_round_trip_through_the_file() {
-        for state in [
-            PsReadLineInviteV1::NotAsked,
-            PsReadLineInviteV1::Declined,
-            PsReadLineInviteV1::Installed,
-            PsReadLineInviteV1::Dismissed,
-        ] {
-            let settings = SettingsV1 {
-                psreadline_invite: state,
+    fn the_retired_psreadline_invitation_key_loads_and_is_not_written_back() {
+        let written = serde_json::to_value(SettingsV1::default()).unwrap();
+        assert!(written.get("psreadline_invite").is_none(), "not written");
+        for state in ["NotAsked", "Declined", "Installed", "Dismissed"] {
+            let mut old = serde_json::to_value(SettingsV1 {
+                terminal_font_size: 18,
                 ..SettingsV1::default()
-            };
-            let text = serde_json::to_string(&settings).unwrap();
-            let read: SettingsV1 = serde_json::from_str(&text).unwrap();
-            assert_eq!(read.psreadline_invite, state);
-            assert_eq!(read, settings);
+            })
+            .unwrap();
+            old["psreadline_invite"] = serde_json::Value::from(state);
+            let read: SettingsV1 = serde_json::from_value(old)
+                .unwrap_or_else(|error| panic!("a file with {state} loads: {error}"));
+            assert_eq!(read.terminal_font_size, 18, "{state}: the rest is read");
+            let again = serde_json::to_value(&read).unwrap();
+            assert!(
+                again.get("psreadline_invite").is_none(),
+                "{state}: not written back"
+            );
         }
     }
 

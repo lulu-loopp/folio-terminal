@@ -1737,9 +1737,6 @@ impl<B: Backend> Runtime<'_, B> {
         hang_watch::during(hang_watch::Station::ClockRaiseFirstRunIfDue, || {
             self.raise_first_run_if_due()
         })?;
-        hang_watch::during(hang_watch::Station::ClockRaisePsreadlineInviteIfDue, || {
-            self.raise_psreadline_invite_if_due()
-        })?;
         hang_watch::during(hang_watch::Station::ClockAdvanceCursorBlinkIfDue, || {
             self.advance_cursor_blink_if_due(now)
         })?;

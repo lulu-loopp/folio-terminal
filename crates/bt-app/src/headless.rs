@@ -1286,7 +1286,6 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
         motion: Motion::Full,
         profile_programs: profiles::ProfilePrograms::unknown(),
         startup_shells: None,
-        psreadline_documents: None,
         context_menu_installed: false,
         claude_hooks_installed: false,
         agent_config_refusals: [None, None, None],

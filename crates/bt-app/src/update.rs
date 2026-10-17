@@ -1393,7 +1393,7 @@ pub fn feed() -> Option<&'static Feed> {
 
 /// Install the repaint the answer needs, once per process.
 ///
-/// The same shape as `psreadline::install_wake` and for the same reason: the
+/// The same shape as `attention_copilot::install_wake` and for the same reason: the
 /// answer can land while the window is sitting on a modal with nothing else to
 /// draw, and the mark it lights is on the title bar behind that modal.
 pub fn install_wake<F: Fn() + Send + Sync + 'static>(wake: F) {

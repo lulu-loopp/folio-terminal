@@ -2947,7 +2947,7 @@ struct ProfileSlot {
 /// round 2): observation workers can overlap — every Profiles-page open starts one, and a
 /// one-click install observes again — so what each publishes carries the number its run took,
 /// and an answer from a run older than the one already filed is refused (the
-/// `psreadline::PsReadLineProbe` rule). Counted from `1`.
+/// rule the retired PSReadLine probe kept). Counted from `1`.
 static OBSERVATION_REQUESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Number an observation run.
@@ -4015,12 +4015,20 @@ static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
 /// Teach the probe how to bring the event loop round when an answer lands.
 ///
-/// [`crate::psreadline::install_wake`]'s twin and for its reason: a pane that
-/// has started, printed its prompt and gone quiet produces no further frame on
-/// its own, so an answer that landed after that frame would sit unread until the
-/// reader typed something.
+/// A pane that has started, printed its prompt and gone quiet produces no further frame on its
+/// own, so an answer that landed after that frame would sit unread until the reader typed
+/// something.
 pub fn install_wake(wake: impl Fn() + Send + Sync + 'static) {
     let _ = WAKE.set(Box::new(wake));
+}
+
+/// **Bring the window round for an answer about a legacy PowerShell artefact** — the earlier
+/// Folio's PSReadLine copy (`psreadline::begin_legacy_removal`), which the window takes on the
+/// same wake as the `$PROFILE` line's (`AppEvent::PowerShellProfileProbed`).
+pub(crate) fn wake_for_profile_answers() {
+    if let Some(wake) = WAKE.get() {
+        wake();
+    }
 }
 
 /// **The environment a probe's child runs in** (T-PROBE-NO-CACHED-FAILURE): the one a pane of the

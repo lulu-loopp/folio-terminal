@@ -17,6 +17,8 @@
 #      ModuleVersion and the assembly as its RootModule, and has no NestedModules,
 #      FormatsToProcess, ScriptsToProcess or TypesToProcess and no .psm1 anywhere: the module is
 #      binary-only, which is what lets it load under every execution policy.
+#   5. The licence the notices reproduce (vendor/psreadline/LICENSE-PSREADLINE.txt) is the
+#      package's own License.txt, byte for byte.
 #
 # Every refusal names the file it is about. It reads; it writes nothing but a temporary copy of
 # the DLLs it asks Windows about, which it removes. scripts/ci/check-psreadline-artefact-tests.ps1
@@ -38,6 +40,7 @@ $inputs = [ordered]@{
     readme   = "vendor/psreadline/README.md"
     package  = "vendor/psreadline/PSReadLine.2.4.5.nupkg"
     manifest = "assets/psreadline/PSReadLine.psd1"
+    licence  = "vendor/psreadline/LICENSE-PSREADLINE.txt"
 }
 if ($ListInputs) {
     foreach ($label in $inputs.Keys) { Write-Output "$label`t$($inputs[$label])" }
@@ -53,7 +56,8 @@ function Refuse([string]$Line) { $failures.Add($Line) | Out-Null }
 $tableFile = Join-Path $Root $inputs.table
 $readmeFile = Join-Path $Root $inputs.readme
 $manifestFile = Join-Path $Root $inputs.manifest
-foreach ($file in @($tableFile, $readmeFile, $manifestFile)) {
+$licenceFile = Join-Path $Root $inputs.licence
+foreach ($file in @($tableFile, $readmeFile, $manifestFile, $licenceFile)) {
     if (-not (Test-Path -LiteralPath $file)) { throw "check-psreadline-artefact: $file is missing" }
 }
 $table = [IO.File]::ReadAllText($tableFile)
@@ -114,6 +118,12 @@ try {
             Refuse "${tableFile}: $($file.Entry) is pinned to $($file.Sha256), but the package's hashes to $hash"
         }
         $row = [regex]::Matches($readme, '\| `' + [regex]::Escape($file.Entry) + '` \| `([0-9a-f]{64})` \|')
+        if ($file.Entry -eq "License.txt") {
+            $licence = (Get-FileHash -LiteralPath $licenceFile -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($licence -ne $hash) {
+                Refuse "${licenceFile}: hashes to $licence, but the package's License.txt hashes to $hash"
+            }
+        }
         if ($row.Count -ne 1) {
             Refuse "${readmeFile}: $($file.Entry) has $($row.Count) rows in the entry table, wanted one"
         } elseif ($row[0].Groups[1].Value -ne $file.Sha256) {

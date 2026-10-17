@@ -17,7 +17,7 @@ foreach ($line in (& pwsh -NoProfile -File $gate -ListInputs)) {
     $label, $path = $line -split "`t", 2
     $inputs[$label] = $path
 }
-if ($inputs.Count -ne 4) { throw "the gate listed $($inputs.Count) inputs, wanted four" }
+if ($inputs.Count -ne 5) { throw "the gate listed $($inputs.Count) inputs, wanted five" }
 
 function New-Copy {
     $root = Join-Path ([IO.Path]::GetTempPath()) ("folio-psreadline-gate-" + [guid]::NewGuid())
@@ -61,6 +61,8 @@ $cases = @(
        From = "PowerShellVersion = '5.1'"; To = "PowerShellVersion = '5.1'`nFormatsToProcess = 'PSReadLine.format.ps1xml'"; Names = "FormatsToProcess" },
     @{ Case = "an entry's pin moved alone"; Label = "table";
        From = "451994c3d3e38d939b4fa5f8594d0207840f45e7a210aa75f81aef85aa17c592"; To = $moved; Names = "Microsoft.PowerShell.Pager.dll" },
+    @{ Case = "the licence copy moved alone"; Label = "licence";
+       From = "Jason Shirk"; To = "somebody else"; Names = "licence" },
     @{ Case = "an entry the table no longer names"; Label = "table";
        From = "        `"SamplePSReadLineProfile.ps1`",`n"; To = ""; Names = "SamplePSReadLineProfile.ps1" }
 )
