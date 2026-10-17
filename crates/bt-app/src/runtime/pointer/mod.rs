@@ -17,12 +17,12 @@ mod release;
 mod router;
 pub(crate) mod touch;
 
+pub(crate) use capture::{ButtonSet, CaptureOwner, PointerCapture};
 #[cfg(test)]
 pub(crate) use capture::{
-    CaptureIndex, PressVerdict, cancel_then_route, capture_index_for_button_event, latch_in,
-    press_against_the_slot, release_ends_the_capture,
+    PressVerdict, ReleaseVerdict, cancel_then_route, press_against_the_slot,
+    release_against_the_slot,
 };
-pub(crate) use capture::{CaptureOwner, PointerCapture};
 
 #[cfg(test)]
 pub(crate) use router::{BANDS_THAT_TAKE_NO_POINTER, POINTER_LAYERS_TOP_FIRST, Visits};

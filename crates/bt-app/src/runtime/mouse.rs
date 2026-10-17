@@ -4226,22 +4226,18 @@ impl<B: Backend> Runtime<'_, B> {
                 self.after_search_change()?;
             }
         }
-        // **A gesture in progress owns its release** (T-STRIP-HOVER-THROUGH,
-        // confirmation review 2026-10-04). A route latched by a press on a cell —
-        // a formula's mark, a selection, a press handed to the program — is
-        // ended by the button coming up wherever the pointer is, and ahead of
-        // every surface drawn there: the claims below decide where a gesture
-        // *starts*, and a release over the search capsule, a notice strip or any
-        // other surface is not a new gesture there but the end of the one the
-        // pane already owns.
-        if state == ElementState::Released && self.release_capture(button, router_at)? {
+        // **The slot answers every button before any surface does**
+        // (T-POINTER-CAPTURE R-5, R-6, R-8), below only the press's window-wide
+        // answers above (the tip, the hint card, the peek, the capsule's caret),
+        // which any press at all gives. A gesture in progress owns its release,
+        // wherever the pointer is and ahead of every surface drawn there — the
+        // claims below decide where a gesture *starts* — and while it is held
+        // another button goes nowhere, its press and its release, so no menu
+        // opens under the hand. A press of the held button proves its release
+        // was lost: the stale capture is cancelled first, then this press is
+        // routed.
+        if self.button_meets_the_slot(state, button, router_at)? {
             return Ok(());
-        }
-        // **And a press of the held capture's own button proves its release was
-        // lost** (T-POINTER-CAPTURE R-5): the stale capture is cancelled first,
-        // then this press is routed.
-        if state == ElementState::Pressed {
-            self.press_against_the_capture(button)?;
         }
         // The quit card first, in the order it is drawn: every press is
         // swallowed, its own scrim included, and the answer is the application's
@@ -5250,12 +5246,6 @@ impl<B: Backend> Runtime<'_, B> {
                 "forward mouse button event to PTY",
                 UserInputKind::MouseButton,
             );
-        }
-        // **A gesture already handed to the program keeps the pane**: another
-        // button pressed over a cell while it is held is not forwarded and does
-        // not begin a selection that would take the route from it.
-        if matches!(self.held_mouse_route(), Some(MouseRoute::Forward { .. })) {
-            return Ok(());
         }
         match state {
             ElementState::Pressed if button == MouseButton::Left => {

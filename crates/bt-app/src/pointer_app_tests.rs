@@ -4,10 +4,10 @@
 
 use super::*;
 use crate::runtime::pointer::{
-    BANDS_THAT_TAKE_NO_POINTER, CaptureIndex, CaptureOwner, FloatFacts, POINTER_LAYERS_TOP_FIRST,
-    Plane, PointerCapture, PointerFacts, PointerHit, PointerScene, PressVerdict, Visits,
-    cancel_then_route, capture_index_for_button_event, latch_in, press_against_the_slot,
-    release_ends_the_capture, walk_pointer_layers,
+    BANDS_THAT_TAKE_NO_POINTER, ButtonSet, CaptureOwner, FloatFacts, POINTER_LAYERS_TOP_FIRST,
+    Plane, PointerCapture, PointerFacts, PointerHit, PointerScene, PressVerdict, ReleaseVerdict,
+    Visits, cancel_then_route, press_against_the_slot, release_against_the_slot,
+    walk_pointer_layers,
 };
 use crate::test_support::{calls_of, source};
 use bt_source::{Pattern, Search, View, needle};
@@ -831,9 +831,8 @@ const LAYERS_THAT_ATE_RELEASES: [(&str, &str); 24] = [
     ("the chrome's own router", "self.chrome_mouse_input("),
 ];
 
-/// Every payload arm in the capture record. The release test below keeps both
-/// the button-ending table and the owner dispatch exhaustive by name, while
-/// its value table exercises the distinct ending policies.
+/// Every payload arm in the capture record, which the release dispatch names
+/// one by one.
 const CAPTURE_OWNER_ARMS: [&str; 20] = [
     "Divider",
     "TabPress",
@@ -857,89 +856,86 @@ const CAPTURE_OWNER_ARMS: [&str; 20] = [
     "SettingsMenuBar",
 ];
 
+/// Owners of every ending policy the slot has had: a tab's surface, a
+/// window's surface, the cell route, and the four that ended on any button's
+/// release until cut 4 (the formula block, the glance card's thumb, a floating
+/// window and the settings sheet's bar).
+fn representative_owners() -> [CaptureOwner; 6] {
+    let surface = PreviewSurface::Peek;
+    [
+        CaptureOwner::EditSelection(TabId(3), surface),
+        CaptureOwner::VideoBar(surface),
+        CaptureOwner::Route(MouseRoute::MathBlock),
+        CaptureOwner::GlanceThumb(4.0),
+        CaptureOwner::FloatHeadPress(FloatHeadPress::armed(
+            1,
+            PhysicalPosition::new(10.0, 10.0),
+            [0.0, 0.0, 100.0, 100.0],
+        )),
+        CaptureOwner::SettingsMenuBar(12.0),
+    ]
+}
+
+/// The buttons a hand can press, the platform-numbered ones past the named
+/// five included.
+const BUTTONS: [MouseButton; 7] = [
+    MouseButton::Left,
+    MouseButton::Right,
+    MouseButton::Middle,
+    MouseButton::Back,
+    MouseButton::Forward,
+    MouseButton::Other(5),
+    MouseButton::Other(63),
+];
+
 /// RED (T-POINTER-CAPTURE cut 3, R-6) — **a release reaches its owner over
 /// every layer that eats releases.**
 ///
 /// The release of the capture's button is decided by the capture alone — its
-/// owner and its button, never the window and never what is under the pointer
-/// — and it is asked before every layer of the press road: a card, the toasts,
-/// the settings sheet, a menu, the glance card, a floating window, a hosted page
-/// and the chrome's router all stand below `release_capture` in `mouse_input`.
-/// The gestures that always ended on any button's release still do until cut 4
-/// rules on the other button; every other one ends on its own.
+/// button, never the window, never the owner's kind and never what is under the
+/// pointer — and the slot is asked before every layer of the press road: a
+/// card, the toasts, the settings sheet, a menu, the glance card, a floating
+/// window, a hosted page and the chrome's router all stand below
+/// `button_meets_the_slot` in `mouse_input`. Since cut 4 no gesture ends on
+/// another button's release.
 ///
-/// MUTATION: put the page arm back above the release (move
+/// MUTATION: put the page arm back above the slot (move
 /// `self.press_web_page(state, button, position)` ahead of
-/// `self.release_capture(`) — the order assertion names the page.
+/// `self.button_meets_the_slot(`) — the order assertion names the page.
 #[test]
 fn a_release_reaches_its_owner_over_every_layer_that_eats_releases() {
     let (a, b) = (
         winit::window::WindowId::from(1_u64),
         winit::window::WindowId::from(2_u64),
     );
-    let tab = TabId(3);
-    let surface = PreviewSurface::Peek;
-    for (owner, any) in [
-        (CaptureOwner::EditSelection(tab, surface), false),
-        (CaptureOwner::VideoBar(surface), false),
-        (CaptureOwner::Route(MouseRoute::MathBlock), true),
-        (CaptureOwner::GlanceThumb(4.0), true),
-        (CaptureOwner::SettingsMenuBar(12.0), true),
-    ] {
+    for owner in representative_owners() {
         for window in [a, b] {
             let capture = a_capture(window, owner.clone(), MouseButton::Left);
-            assert!(
-                release_ends_the_capture(&capture, MouseButton::Left),
-                "the capture's own button ends it, in any window"
-            );
             assert_eq!(
-                release_ends_the_capture(&capture, MouseButton::Right),
-                any,
-                "another button's release ends it exactly where it always did"
+                release_against_the_slot(Some(&capture), ButtonSet::default(), MouseButton::Left),
+                ReleaseVerdict::ToOwner,
+                "the capture's own button ends it, in any window"
             );
         }
     }
-    let owned_in_a = a_capture(
-        a,
-        CaptureOwner::EditSelection(tab, surface),
-        MouseButton::Left,
-    );
-    assert_eq!(
-        capture_index_for_button_event(
-            Some(&owned_in_a),
-            &[],
-            b,
-            ElementState::Released,
-            MouseButton::Left,
-        ),
-        Some(CaptureIndex::Primary),
-        "a release reported by window B selects the capture owned by window A"
-    );
-    let ending = crate::test_support::squeezed_body("CaptureOwner", "ends_on_any_release");
     let dispatch = crate::test_support::squeezed_body("Runtime", "release_capture");
     for owner in CAPTURE_OWNER_ARMS {
-        let ending_arm = format!("Self::{owner}");
-        let dispatch_arm = format!("CaptureOwner::{owner}");
         assert!(
-            ending.contains(&ending_arm),
-            "the release-ending table names {owner}"
-        );
-        assert!(
-            dispatch.contains(&dispatch_arm),
+            dispatch.contains(&format!("CaptureOwner::{owner}")),
             "the release dispatch names {owner}"
         );
     }
     let road = crate::test_support::squeezed_body("Runtime", "mouse_input");
     let release = road
-        .find("self.release_capture(")
-        .expect("the release asks the capture first");
+        .find("self.button_meets_the_slot(")
+        .expect("the release asks the slot first");
     for (layer, door) in LAYERS_THAT_ATE_RELEASES {
         let at = road
             .find(door)
             .unwrap_or_else(|| panic!("`{door}` ({layer}) is on the press road"));
         assert!(
             release < at,
-            "{layer} is asked after the capture's release, so it cannot eat it"
+            "{layer} is asked after the slot, so it cannot eat the release"
         );
     }
 }
@@ -950,33 +946,26 @@ fn a_release_reaches_its_owner_over_every_layer_that_eats_releases() {
 ///
 /// A button cannot go down twice without coming up, so a press of the held
 /// capture's button proves its release was lost. The verdict compares buttons
-/// and never windows; a press of another button keeps today's routing until cut
-/// 4. The door asks it before any arm of the press road, and a stale capture of
-/// another window is handed to that window, which runs its owner's cancel.
+/// and never windows (it is not handed one). The door asks it before any arm
+/// of the press road, and a stale capture of another window is handed to that
+/// window, which runs its owner's cancel before the press is routed.
 ///
 /// MUTATION: answer `Route` for the held button, or route the continuation
 /// before `cancel_owner`; the state assertions fail.
 #[test]
 fn a_press_of_the_held_button_cancels_the_stale_capture_first() {
-    let (a, b) = (
-        winit::window::WindowId::from(1_u64),
-        winit::window::WindowId::from(2_u64),
-    );
-    let held = a_capture(a, CaptureOwner::GlanceThumb(2.0), MouseButton::Left);
-    assert_eq!(
-        press_against_the_slot(None, MouseButton::Left),
-        PressVerdict::Route
-    );
-    for pressed_in in [a, b] {
+    let a = winit::window::WindowId::from(1_u64);
+    for button in BUTTONS {
         assert_eq!(
-            press_against_the_slot(Some(&held), MouseButton::Left),
-            PressVerdict::CancelThenRoute,
-            "a press of the held button in window {pressed_in:?} finds the capture stale"
-        );
-        assert_eq!(
-            press_against_the_slot(Some(&held), MouseButton::Right),
+            press_against_the_slot(None, button),
             PressVerdict::Route,
-            "another button is routed as it always was (cut 4 rules on it)"
+            "{button:?} with no gesture held is routed"
+        );
+        let held = a_capture(a, CaptureOwner::GlanceThumb(2.0), button);
+        assert_eq!(
+            press_against_the_slot(Some(&held), button),
+            PressVerdict::CancelThenRoute,
+            "a press of the held {button:?} finds the capture stale"
         );
     }
     #[derive(Default)]
@@ -985,195 +974,228 @@ fn a_press_of_the_held_button_cancels_the_stale_capture_first() {
         live_payloads: usize,
         routed: bool,
     }
-    for arrived_in in [a, b] {
-        assert_eq!(
-            capture_index_for_button_event(
-                Some(&held),
-                &[],
-                arrived_in,
-                ElementState::Pressed,
-                MouseButton::Left,
-            ),
-            Some(CaptureIndex::Primary),
-            "the application finds A's stale capture when the press arrives in {arrived_in:?}"
-        );
-        let mut state = State {
-            owner_active: true,
-            live_payloads: 1,
-            routed: false,
-        };
-        cancel_then_route(
-            &mut state,
-            |state| {
-                assert!(state.owner_active, "the owner-specific cancel runs once");
-                state.owner_active = false;
-                state.live_payloads -= 1;
-                Ok::<(), ()>(())
-            },
-            |state| {
-                assert!(
-                    !state.owner_active,
-                    "the old owner is cancelled before routing"
+    let mut state = State {
+        owner_active: true,
+        live_payloads: 1,
+        routed: false,
+    };
+    cancel_then_route(
+        &mut state,
+        |state| {
+            assert!(state.owner_active, "the owner-specific cancel runs once");
+            state.owner_active = false;
+            state.live_payloads -= 1;
+            Ok::<(), ()>(())
+        },
+        |state| {
+            assert!(
+                !state.owner_active,
+                "the old owner is cancelled before routing"
+            );
+            assert_eq!(
+                state.live_payloads, 0,
+                "routing starts with no live payload"
+            );
+            state.routed = true;
+            state.live_payloads += 1;
+            Ok::<(), ()>(())
+        },
+    )
+    .expect("the model has no fallible step");
+    assert!(state.routed);
+    assert_eq!(
+        state.live_payloads, 1,
+        "two gesture payloads are never live"
+    );
+}
+
+/// RED (T-POINTER-CAPTURE cut 4, R-8, cells A·b and B21) — **a second button
+/// under any capture reaches nothing**: its press is swallowed and so is its
+/// release, whatever the owner, whichever button holds the pointer and
+/// whichever window either arrives in (the verdicts are not handed a window).
+///
+/// MUTATION: answer `Route` for another button in `press_against_the_slot`
+/// (let the press through) — the first assertion fails; answer `Route` for
+/// another button's release in `release_against_the_slot` — the second does.
+#[test]
+fn a_second_button_under_any_capture_reaches_nothing() {
+    let a = winit::window::WindowId::from(1_u64);
+    for owner in representative_owners() {
+        for held in BUTTONS {
+            let capture = a_capture(a, owner.clone(), held);
+            for other in BUTTONS.into_iter().filter(|other| *other != held) {
+                assert_eq!(
+                    press_against_the_slot(Some(&capture), other),
+                    PressVerdict::Swallow,
+                    "{other:?} pressed while {held:?} holds the pointer goes nowhere"
                 );
                 assert_eq!(
-                    state.live_payloads, 0,
-                    "routing starts with no live payload"
+                    release_against_the_slot(Some(&capture), ButtonSet::default(), other),
+                    ReleaseVerdict::Swallow,
+                    "and {other:?} let go while {held:?} holds it goes nowhere either"
                 );
-                state.routed = true;
-                state.live_payloads += 1;
-                Ok::<(), ()>(())
-            },
-        )
-        .expect("the model has no fallible step");
-        assert!(state.routed);
+            }
+        }
+    }
+}
+
+/// RED (T-POINTER-CAPTURE cut 4, R-5 rule 3) — **with no gesture held, a
+/// button is routed as it always was**, and a gesture's own release still ends
+/// it: the swallow is only ever a held gesture's or a swallowed press's.
+///
+/// MUTATION: answer `Swallow` for an empty slot in either verdict — the first
+/// assertions fail; answer `Swallow` for the held button's release — the last
+/// one does.
+#[test]
+fn with_no_gesture_held_a_button_is_routed_as_before() {
+    let a = winit::window::WindowId::from(1_u64);
+    for button in BUTTONS {
+        assert_eq!(press_against_the_slot(None, button), PressVerdict::Route);
         assert_eq!(
-            state.live_payloads, 1,
-            "two gesture payloads are never live"
+            release_against_the_slot(None, ButtonSet::default(), button),
+            ReleaseVerdict::Route,
+            "{button:?} let go with nothing held and nothing swallowed is routed"
+        );
+        let capture = a_capture(a, CaptureOwner::VideoBar(PreviewSurface::Peek), button);
+        assert_eq!(
+            release_against_the_slot(Some(&capture), ButtonSet::default(), button),
+            ReleaseVerdict::ToOwner,
+            "the held {button:?}'s own release still ends its gesture"
         );
     }
 }
 
-/// RED (T-POINTER-CAPTURE cut 3 boundary) — another button keeps the bounded
-/// legacy overlap until cut 4 decides A·b and B21. The primary is the newest
-/// gesture and the earlier gesture remains independently releasable.
+/// RED (T-POINTER-CAPTURE cut 4, R-5 rule 3, cell B22) — **a swallowed
+/// button stays swallowed until its own release**, in any order of the
+/// buttons coming up, and a swallowed press whose release was lost is proved
+/// stale by the next press of that button, which is routed.
 ///
-/// MUTATION: replace the primary unconditionally in `latch_in`; the overlap
-/// count is zero and the left release finds nothing.
+/// The application's own answers, in sequence on its one slot: left held;
+/// right and middle pressed (swallowed); left let go (the gesture ends, the
+/// slot empties); middle and right let go — both swallowed, with nothing held;
+/// then right pressed again — routed. And: right swallowed, its release lost,
+/// the gesture ended; the next right press is routed and so is its release.
+///
+/// MUTATION: clear `swallowed` in `App::take_capture_where` (when a capture
+/// ends) — the right release reaches the ordinary road and the assertion
+/// naming B22 fails; do not clear a stale bit in `App::answer_press` — the
+/// last release is swallowed.
 #[test]
-fn another_button_keeps_the_legacy_overlap_until_cut_4() {
-    let (a, b) = (
-        winit::window::WindowId::from(1_u64),
-        winit::window::WindowId::from(2_u64),
+fn a_swallowed_button_stays_swallowed_until_its_own_release() {
+    let mut folio = crate::headless::HeadlessFolio::with_tabs(
+        "pointer-swallowed-order",
+        vec![crate::test_support::tab_holding(
+            crate::test_support::leaf_saying("swallowed"),
+        )],
+        0,
     );
-    let mut primary = None;
-    let mut overlaps = Vec::new();
-    latch_in(
-        &mut primary,
-        &mut overlaps,
-        a_capture(
-            a,
-            CaptureOwner::EditSelection(TabId(3), PreviewSurface::Peek),
-            MouseButton::Left,
-        ),
-    );
-    latch_in(
-        &mut primary,
-        &mut overlaps,
-        a_capture(
-            b,
+    let mut runtime = folio.runtime();
+    let latch = |runtime: &mut Runtime<'_, crate::headless::Headless>| {
+        runtime.latch_capture(
             CaptureOwner::VideoBar(PreviewSurface::Peek),
-            MouseButton::Right,
-        ),
-    );
-    assert_eq!(
-        overlaps.len(),
-        1,
-        "the older independent field remains live"
-    );
-    assert_eq!(
-        capture_index_for_button_event(
-            primary.as_ref(),
-            &overlaps,
-            b,
-            ElementState::Released,
             MouseButton::Left,
-        ),
-        Some(CaptureIndex::Overlap(0)),
-        "A·b and cross-window B21 keep the first button's gesture"
+        );
+    };
+    latch(&mut runtime);
+    assert_eq!(
+        runtime.app.answer_press(MouseButton::Right),
+        PressVerdict::Swallow
     );
     assert_eq!(
-        capture_index_for_button_event(
-            primary.as_ref(),
-            &overlaps,
-            a,
-            ElementState::Released,
-            MouseButton::Right,
-        ),
-        Some(CaptureIndex::Primary),
-        "the other button's gesture remains independently live too"
+        runtime.app.answer_press(MouseButton::Middle),
+        PressVerdict::Swallow,
+        "a third button under the same gesture is swallowed too"
+    );
+    assert_eq!(
+        runtime.app.answer_release(MouseButton::Left),
+        ReleaseVerdict::ToOwner,
+        "the gesture's own release still goes to its owner"
+    );
+    runtime.drop_own_capture();
+    assert_eq!(
+        runtime.app.answer_release(MouseButton::Middle),
+        ReleaseVerdict::Swallow,
+        "B22: a swallowed press's release is swallowed after the gesture has ended"
+    );
+    assert_eq!(
+        runtime.app.answer_release(MouseButton::Right),
+        ReleaseVerdict::Swallow,
+        "in whatever order the swallowed buttons come up"
+    );
+    assert_eq!(
+        runtime.app.answer_press(MouseButton::Right),
+        PressVerdict::Route,
+        "its own release spent the memory: the next press is routed"
+    );
+    assert_eq!(
+        runtime.app.answer_release(MouseButton::Right),
+        ReleaseVerdict::Route
+    );
+
+    latch(&mut runtime);
+    assert_eq!(
+        runtime.app.answer_press(MouseButton::Right),
+        PressVerdict::Swallow
+    );
+    runtime.drop_own_capture();
+    assert_eq!(
+        runtime.app.answer_press(MouseButton::Right),
+        PressVerdict::Route,
+        "a second press of a swallowed button proves its release was lost"
+    );
+    assert_eq!(
+        runtime.app.answer_release(MouseButton::Right),
+        ReleaseVerdict::Route,
+        "and that press's release is routed like the press"
     );
 }
 
-/// RED (T-POINTER-CAPTURE cut 3 boundary) — **a new value of the same
-/// legacy field overwrites its old value**, even when another button wrote it.
-/// The removed field was one `Option`, not one slot per button.
+/// RED (T-POINTER-CAPTURE cut 4, R-4) — **the swallow arm allocates
+/// nothing**: a second button's press and release while a gesture is held, and
+/// a swallowed release after it has ended, answered by the window's door,
+/// counted by the test build's allocator on this thread.
 ///
-/// MUTATION: keep the old primary beside the new capture in `latch_in`; the
-/// overlap count is one and the assertion fails.
+/// MUTATION: build anything on the heap in the swallow arm of
+/// `App::answer_press` (`std::hint::black_box(vec![button])`) — the count
+/// reads 1.
 #[test]
-fn a_new_latch_of_the_same_legacy_field_overwrites_the_old_one() {
-    let window = winit::window::WindowId::from(1_u64);
-    let mut primary = None;
-    let mut overlaps = Vec::new();
-    latch_in(
-        &mut primary,
-        &mut overlaps,
-        a_capture(window, CaptureOwner::GlanceThumb(2.0), MouseButton::Left),
+fn the_swallow_arm_allocates_nothing() {
+    let mut folio = crate::headless::HeadlessFolio::with_tabs(
+        "pointer-swallow-allocations",
+        vec![crate::test_support::tab_holding(
+            crate::test_support::leaf_saying("swallow"),
+        )],
+        0,
     );
-    latch_in(
-        &mut primary,
-        &mut overlaps,
-        a_capture(window, CaptureOwner::GlanceThumb(7.0), MouseButton::Right),
-    );
-    assert!(
-        overlaps.is_empty(),
-        "the old value of the same window's same legacy field was overwritten"
-    );
-    assert!(matches!(
-        primary.as_ref().map(|capture| &capture.owner),
-        Some(CaptureOwner::GlanceThumb(7.0))
-    ));
-}
-
-/// RED (T-POINTER-CAPTURE cut 3 boundary) — **matching overlaps release in
-/// the legacy roads' order**, not newest-first or list order. The cell route
-/// stood before the chrome ladder, and within that ladder the video bar stood
-/// before the edit selection.
-///
-/// MUTATION: select the newest matching capture, or reverse the legacy release
-/// precedence; each assertion selects a different index and fails.
-#[test]
-fn legacy_overlaps_release_in_the_old_ladders_order() {
-    let window = winit::window::WindowId::from(1_u64);
-
-    let route = a_capture(
-        window,
-        CaptureOwner::Route(MouseRoute::MathBlock),
-        MouseButton::Right,
-    );
-    let video = a_capture(
-        window,
+    let mut runtime = folio.runtime();
+    runtime.latch_capture(
         CaptureOwner::VideoBar(PreviewSurface::Peek),
         MouseButton::Left,
     );
-    assert_eq!(
-        capture_index_for_button_event(
-            Some(&video),
-            std::slice::from_ref(&route),
-            window,
-            ElementState::Released,
-            MouseButton::Left,
-        ),
-        Some(CaptureIndex::Overlap(0)),
-        "the cell route still precedes the chrome release ladder"
-    );
-
-    let selection = a_capture(
-        window,
-        CaptureOwner::EditSelection(TabId(3), PreviewSurface::Peek),
-        MouseButton::Left,
-    );
-    assert_eq!(
-        capture_index_for_button_event(
-            Some(&selection),
-            std::slice::from_ref(&video),
-            window,
-            ElementState::Released,
-            MouseButton::Left,
-        ),
-        Some(CaptureIndex::Overlap(0)),
-        "the video bar still precedes the edit selection inside the chrome ladder"
-    );
+    for button in [MouseButton::Right, MouseButton::Other(9)] {
+        let (spent, allocations) = allocations_in(|| {
+            [
+                runtime.button_meets_the_slot(ElementState::Pressed, button, None),
+                runtime.button_meets_the_slot(ElementState::Released, button, None),
+            ]
+        });
+        assert_eq!(allocations, 0, "{button:?} under a held gesture allocated");
+        assert!(
+            spent
+                .into_iter()
+                .all(|spent| spent.is_ok_and(|spent| spent)),
+            "both were spent at the slot"
+        );
+    }
+    let _ = runtime
+        .button_meets_the_slot(ElementState::Pressed, MouseButton::Middle, None)
+        .expect("the press is swallowed");
+    runtime.drop_own_capture();
+    let (spent, allocations) = allocations_in(|| {
+        runtime.button_meets_the_slot(ElementState::Released, MouseButton::Middle, None)
+    });
+    assert_eq!(allocations, 0, "the late release allocated");
+    assert!(spent.is_ok_and(|spent| spent), "and it was swallowed");
 }
 
 /// RED (T-POINTER-CAPTURE cut 3, cell C1·0) — **a divider let go anywhere
@@ -1191,8 +1213,8 @@ fn legacy_overlaps_release_in_the_old_ladders_order() {
 fn a_divider_released_anywhere_commits_through_the_whole_dispatch() {
     let road = crate::test_support::squeezed_body("Runtime", "mouse_input");
     assert!(
-        road.find("self.release_capture(") < road.find("self.chrome_mouse_input("),
-        "the capture is asked before the chrome's router"
+        road.find("self.button_meets_the_slot(") < road.find("self.chrome_mouse_input("),
+        "the slot is asked before the chrome's router"
     );
     let release = crate::test_support::squeezed_body("Runtime", "release_capture");
     assert!(

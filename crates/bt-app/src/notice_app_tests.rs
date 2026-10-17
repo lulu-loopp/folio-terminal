@@ -272,7 +272,7 @@ fn a_forwarded_press_is_released_to_its_pane_over_the_capsule_and_the_strip() {
 
     let input = squeezed_body("Runtime", "mouse_input");
     let owned = input
-        .find("ifstate==ElementState::Released&&self.release_capture(")
+        .find("ifself.button_meets_the_slot(state,button,router_at)?{returnOk(());}")
         .expect("a release is first offered to the gesture that owns it");
     for later in [
         "self.quit_card_layout()",
