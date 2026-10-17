@@ -971,7 +971,7 @@ macOS 上,trial 在被观察前结束(M9 在 `Trial` 之前被杀)不再耗费 9
 
 ---
 
-### 4.5 winget local manifest: two clients (every release)
+### 4.5 winget local manifest: two clients (every release) <!-- zh: pending T-WINGET-TWO-CLIENTS -->
 
 `docs/RELEASING.md` "Validating before submitting" is the rule; this is how the row is run.
 It runs on **`folio-win11` only**: the install fetches `InstallerUrl` from the release
