@@ -87,7 +87,7 @@ impl<B: Backend> FolioApp<B> {
         }
         if !self.windows.contains(owner_window) {
             if let Some(app) = self.app.as_mut() {
-                app.pointer_capture = None;
+                let _ = app.take_capture_where(|capture| capture.window == owner_window);
             }
             return Ok(false);
         }

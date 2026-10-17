@@ -222,7 +222,7 @@ impl<B: Backend> App<B> {
         verdict
     }
 
-    fn take_capture_where(
+    pub(super) fn take_capture_where(
         &mut self,
         mut predicate: impl FnMut(&PointerCapture) -> bool,
     ) -> Option<PointerCapture> {
