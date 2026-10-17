@@ -1666,9 +1666,9 @@ impl<B: Backend> Runtime<'_, B> {
         let inherited = self
             .sessions
             .get(&source)
-            // Where the source stands is §7.1.4's ladder, the one `Restart shell` reads: a source
-            // whose shell never reported stands where it was put down, not at its profile's
-            // default.
+            // Where the source stands, the one `Restart shell` reads: its report, else its shell
+            // process's folder (T-CWD-FROM-PROCESS), else where it was put down — never its
+            // profile's default.
             .map(|leaf| seed.applied(&leaf.profile, leaf.seed_place_for_a_new_shell().as_ref()))
             // A seat with no shell to inherit from has no profile to inherit
             // either, and the fallback is the one answer that is startable by

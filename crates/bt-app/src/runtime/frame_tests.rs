@@ -325,12 +325,14 @@ fn restart_shell_keeps_the_rung_and_the_old_leaf_until_its_replacement_exists() 
 }
 
 /// RED (T-CWD-FROM-PROCESS, round 2) — **the window draws "Folder unknown" on the foot of a
-/// column opened on the home folder for a pane's folder nobody could say**: the column's tree is
-/// dressed for the frame (`Runtime::dress_files_feet`) and its foot carries the notice, and a
-/// column whose root is known carries none.
+/// column opened on the home folder for a pane's folder nobody could say**: read off the chrome
+/// labels the headless window's glass was handed for the frame, so every layer between the
+/// column's state and the drawn strip is on the road — the foot's dressing
+/// (`Runtime::dress_files_feet`), the tree content carrying it, and the seat painter hanging it
+/// (`FootStrip::notice`). A column whose root is known draws no such label.
 ///
-/// MUTATION (observed red): drop `tree.foot_notice = words.notice` in `dress_files_feet` — the
-/// foot carries nothing.
+/// MUTATIONS (observed red): drop `tree.foot_notice = words.notice` in `dress_files_feet`; hand
+/// the column's `FootStrip` an empty `notice` in the seat painter — either way no label says it.
 #[test]
 fn a_column_on_a_folder_nobody_could_say_draws_folder_unknown_on_its_foot() {
     let root = bt_testpath::temp_path("files-foot-unknown");
@@ -342,36 +344,31 @@ fn a_column_on_a_folder_nobody_could_say_draws_folder_unknown_on_its_foot() {
         )],
         0,
     );
-    let mut runtime = folio.runtime();
-    let seat = runtime
-        .seats
-        .files_seat()
-        .expect("the tab has a files column");
-    let scale = 1.0;
-    let now = std::time::Instant::now();
+    let unknown = crate::i18n::Text::FilesFolderUnknown.text();
+    let drawn = |folio: &mut HeadlessFolio| -> bool {
+        folio.draw();
+        let runtime = folio.runtime();
+        let labels = &runtime.window.renderer.chrome.1;
+        labels.iter().any(|label| label.text == unknown)
+    };
+    assert!(!drawn(&mut folio), "a known root draws no such label");
 
-    let mut trees = runtime.files_tree_contents();
-    runtime.dress_files_feet(scale, now, &mut trees);
-    assert_eq!(
-        trees[&seat].foot_notice, "",
-        "a known root says nothing more"
-    );
-
-    runtime
-        .files
-        .get_mut(&seat)
-        .expect("the column's state")
-        .folder_unknown = true;
-    let mut trees = runtime.files_tree_contents();
-    runtime.dress_files_feet(scale, now, &mut trees);
-    assert_eq!(
-        trees[&seat].foot_notice,
-        crate::i18n::Text::FilesFolderUnknown.text(),
-        "the foot says the folder is unknown"
-    );
+    {
+        let mut runtime = folio.runtime();
+        let seat = runtime
+            .seats
+            .files_seat()
+            .expect("the tab has a files column");
+        runtime
+            .files
+            .get_mut(&seat)
+            .expect("the column's state")
+            .folder_unknown = true;
+        runtime.refresh_chrome();
+    }
     assert!(
-        trees[&seat].foot_notice_width > 0.0,
-        "and is measured to be drawn"
+        drawn(&mut folio),
+        "the column's foot draws \"Folder unknown\""
     );
 }
 

@@ -6,13 +6,13 @@
 //! the injection, a program that is not a shell). It answers the folder or a named refusal; it
 //! never guesses one.
 //!
-//! * **Windows**: one `OpenProcess` for `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ`, and
-//!   on that one handle `QueryFullProcessImageNameW` (the bridge check), `NtQueryInformationProcess`
-//!   (`ProcessWow64Information`, then `ProcessBasicInformation`), and three `ReadProcessMemory`
-//!   reads — the PEB's `ProcessParameters` pointer,
-//!   `RTL_USER_PROCESS_PARAMETERS.CurrentDirectory.DosPath`, and the path's characters. A 32-bit process on a 64-bit Windows (WOW64) keeps its current directory
-//!   in its own 32-bit PEB, which `ProcessWow64Information` locates; it is read with the 32-bit
-//!   layout rather than refused.
+//! * **Windows**: one `OpenProcess` for `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ`,
+//!   and on that one handle `QueryFullProcessImageNameW` (the bridge check),
+//!   `NtQueryInformationProcess` (`ProcessWow64Information`, then `ProcessBasicInformation`), and
+//!   three `ReadProcessMemory` reads — the PEB's `ProcessParameters` pointer,
+//!   `RTL_USER_PROCESS_PARAMETERS.CurrentDirectory.DosPath`, and the path's characters. A 32-bit
+//!   process on a 64-bit Windows (WOW64) keeps its current directory in its own 32-bit PEB, which
+//!   `ProcessWow64Information` locates; it is read with the 32-bit layout rather than refused.
 //! * **macOS**: `proc_pidpath` (the bridge check), then one `proc_pidinfo(PROC_PIDVNODEPATHINFO)`,
 //!   whose `pvi_cdir` is the path of the process's current-directory vnode.
 //!

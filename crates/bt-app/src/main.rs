@@ -10167,13 +10167,15 @@ fn cli_leaf_seed(plan: &cli::CliPlan) -> LeafSeed {
 ///   what "同一 seat 反复重启永远用同一个可执行文件" asks for; reading
 ///   `settings.default_profile` here would turn a Git Bash pane into a
 ///   PowerShell the first time somebody changed that setting.
-/// * **The directory is §1.1's ladder**: the last trusted OSC 7 report, else
-///   the seat's initial cwd — [`LeafSession::place_for_a_new_shell`], read by
-///   the caller. The contract is explicit that this is 「最后已知」 and not
-///   「当前」: a `cd` the old shell performed without announcing it is a `cd`
-///   the restart cannot see. Until 2026-10-04 only the first rung was read, so
-///   a pane opened in a chosen folder whose shell never reported restarted at
-///   its profile's default instead of where it was born.
+/// * **The directory is where the pane stands**, read by the caller through
+///   [`LeafSession::seed_place_for_a_new_shell`]: the last trusted OSC 7 report,
+///   else the shell process's current folder, else the seat's initial cwd.
+///   Since T-CWD-FROM-PROCESS (2026-10-17) a `cd` the old shell performed
+///   without announcing it *is* seen when its process can be read — that
+///   supersedes §1.1's 「最后已知」 and not 「当前」 for this verb; a process
+///   that cannot be read leaves the old ladder. Until 2026-10-04 only the first
+///   rung was read, so a pane opened in a chosen folder whose shell never
+///   reported restarted at its profile's default instead of where it was born.
 /// * **No folder at all is an absence, not a fallback.** `None` (a pane whose
 ///   spawn could name no place, or one put down at its shell's own `~`) reaches
 ///   `profiles::spawn_place`, which answers it with the profile's own starting
@@ -52815,17 +52817,15 @@ impl<B: Backend> Runtime<'_, B> {
 
     // ── P143-P150: the glance card ──────────────────────────────────────────
 
-    /// The places this column could be pointed at (E54).
-    ///
-    /// The shells' folders are read here rather than in `profiles` because that
-    /// is where the sessions are: red line L1's argument, one layer up. Every
-    /// pane of the tab in front of you gets a say, not only the focused one —
-    /// "a terminal is here" is true of all of them, and the whole point of the
-    /// list is to name the places you are already standing.
     /// **The folders the root menu offers as "a terminal is here"**, read once as it opens
     /// (T-CWD-FROM-PROCESS): every terminal pane of the tab in front of you, each through
     /// [`LeafSession::folder`] — its report, else its shell process's folder, else where it was
     /// opened.
+    ///
+    /// The shells' folders are read here rather than in `profiles` because that is where the
+    /// sessions are: red line L1's argument, one layer up. Every pane of the tab in front of you
+    /// gets a say, not only the focused one — "a terminal is here" is true of all of them, and the
+    /// whole point of the list is to name the places you are already standing.
     fn shell_folders_for_the_root_menu(
         &self,
         door: &dyn pane_folder::ProcessFolders,
@@ -52840,6 +52840,9 @@ impl<B: Backend> Runtime<'_, B> {
             .collect()
     }
 
+    /// The places this column could be pointed at (E54): its own root, the home folder, the
+    /// shells' folders the menu took as it opened ([`Self::shell_folders_for_the_root_menu`]) and
+    /// the remembered folders, the kept ones first.
     fn root_choices(&self, seat: SeatId) -> Vec<profiles::RootChoice> {
         let tab = &self.window.tabs[self.window.active_tab];
         // Taken when the menu opened ([`Self::shell_folders_for_the_root_menu`]): the menu is

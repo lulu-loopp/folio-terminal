@@ -1427,8 +1427,8 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(());
         };
         let profile = leaf.profile.clone();
-        // §7.1.4's ladder, the one `Restart shell` reads: a shell that never reported is in the
-        // folder it was put down in.
+        // Where the pane stands, the one `Restart shell` reads: its report, else its shell
+        // process's folder (T-CWD-FROM-PROCESS), else the folder it was put down in.
         let cwd = leaf.seed_place_for_a_new_shell();
         // The source profile *is* the target profile, so `cwd_for_spawn` has no
         // namespace to cross and the folder arrives exactly as the shell reported
