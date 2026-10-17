@@ -179,6 +179,7 @@ mod shortcuts;
 /// the product at all.
 #[cfg(test)]
 mod source_pin;
+mod startup;
 mod storage_pass;
 mod storage_watch;
 mod table_block;
@@ -19512,7 +19513,9 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         Writer::Profiles => stores.profiles.release_trial(),
         Writer::Pins => stores.pins.release_trial(),
         Writer::UpdateCheck => update::release_trial(),
-        Writer::ProfileMigration => shell_integration::begin_startup_migration(),
+        Writer::ProfileMigration => {
+            shell_integration::begin_startup_migration();
+        }
         Writer::BashScript => {
             let _ = shell_integration::script_path();
         }
@@ -19520,7 +19523,9 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
             let _ = shell_integration::zdotdir_path();
         }
         // On a worker: the window thread waits for no disk here either.
-        Writer::PowerShellScript => shell_integration::begin_powershell_script_preparation(),
+        Writer::PowerShellScript => {
+            shell_integration::begin_powershell_script_preparation();
+        }
         Writer::PsReadLineUpgrade => {
             if let Some(documents) = psreadline::documents_directory()
                 && let Some(replacement) = psreadline::upgrade_recorded(
@@ -46111,6 +46116,53 @@ mod endpoint_claim_tests {
     }
 }
 
+/// **What the first window's opening step hands the steps after it** (`startup::FirstWindow`'s
+/// `window`): the native window and everything built on it before its first tab, which
+/// `Runtime::create` assembles the window's runtime from.
+struct OpenedWindow {
+    // **The fields stand in the reverse of the order they were built in**, because a struct drops
+    // its fields in declaration order: when the first tab fails and the opened window is dropped
+    // unassembled, everything built on the window — the renderer and the device, the composition
+    // tree, the pickers, the menu, the caret and the frame, each of which lets go of the window
+    // handle when it drops — goes before the window itself, as the locals they were went in
+    // reverse. The window, its handle and its placement drop last.
+    /// When the panes' phase began, for the startup trace.
+    phase_started: Instant,
+    pty_wake: PtyWakeSignal,
+    probe_input: Option<Vec<u8>>,
+    render_physical: PhysicalSize<u32>,
+    renderer_time: Duration,
+    translucency_available: bool,
+    renderer: bt_render::WindowRenderer,
+    gpu: bt_render::GpuContext,
+    compositor: bt_platform::Compositor,
+    window_time: Duration,
+    acrylic_available: bool,
+    save_picker: Option<bt_platform::SaveFilePicker>,
+    image_picker: bt_platform::ImagePicker,
+    folder_picker: bt_platform::FolderPicker,
+    math_context_menu: bt_platform::MathContextMenu,
+    ime_system_caret: bt_platform::ImeSystemCaret,
+    platform_chrome: bt_platform::PlatformChrome,
+    parked_pans: runtime::pointer::touch::ParkedPans,
+    custom_window_frame: bt_platform::CustomWindowFrame,
+    native: bt_platform::NativeWindow,
+    ime_report: ime_report::Report,
+    window: Arc<Window>,
+    restored: Option<RestoredPlacement>,
+}
+
+/// **What the first window's first-tab step made** (`startup::FirstWindow`'s `first_tab`): the
+/// launch's plan and the tabs built from it.
+struct FirstTabs {
+    cli_plan: cli::CliPlan,
+    plan: LaunchPlan,
+    cli_slot: Option<usize>,
+    tab_ids: TabIds,
+    tabs: Vec<TabState>,
+    conpty_sources: Vec<String>,
+}
+
 impl Runtime<'_, Native> {
     /// Open the process's device layer, its `App`, and its first window.
     ///
@@ -46489,400 +46541,521 @@ impl Runtime<'_, Native> {
         {
             eprintln!("{}", replacement.log_line());
         }
-        shell_integration::begin_startup_migration();
-        // Folio's own `folio.ps1`, compared and repaired on a worker nobody waits for: the first
-        // PowerShell birth that arrives before it finishes prepares it on its own birth worker.
-        // The parser questions about the PowerShell rows follow when the walk has answered them.
-        shell_integration::begin_powershell_script_preparation();
-        // **The canvas, settled before there is a window to paint one in**
-        // (§7.46 ②). Everything below this point — the first frame, the first
-        // pane, and the `OSC 11` that pane answers — happens on the canvas
-        // decided here, and there is no earlier one for anything to be painted
-        // in by mistake.
-        //
-        // **Before `set_theme`**, which is the whole of why it is here: the
-        // theme's own atomic caches the background it resolves to, and that
-        // background is now a colour of the scheme rather than a constant. A
-        // pair adopted afterwards would leave the first frame painted on the
-        // canvas of whichever scheme the process was born with.
-        adopt_stored_schemes(settings_store.loaded());
-        // Beside the schemes and for their reason: the floor is read on every cell of the
-        // first frame, so a file that asks for one must be obeyed before that frame is drawn
-        // rather than at the first press of the row.
-        install_minimum_contrast(settings_store.loaded().minimum_contrast);
-        let resolved_theme = resolve_theme_mode(theme_mode, system_os_theme());
-        if set_theme(resolved_theme) == ThemeChange::LockedByEnvironment {
-            eprintln!(
-                "BT_THEME persisted_mode={theme_mode:?} resolved_theme={resolved_theme:?} ignored_for_runtime=true reason=BT_BG"
-            );
-        }
-        let restored = restore_window_placement(event_loop, &opening);
-        // Titled from whatever the walk has answered so far; the active tab's own title replaces
-        // it before the first paint either way.
-        adopt_program_answers(&mut profile_programs, programs_lane::take());
-        let attributes = opening_window_attributes(
-            profiles::identity_title(&profiles::default_profile_identity(
-                &settings_store.loaded().default_profile,
-                &profile_programs,
-            )),
-            restored
-                .map(|placement| placement.size)
-                .unwrap_or(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT)),
-        );
-        let attributes = match restored.and_then(|placement| placement.position) {
-            Some(position) => attributes.with_position(position),
-            None => attributes,
-        };
-        let window = Arc::new(
-            event_loop
-                .create_window(attributes)
-                .context("create native window")?,
-        );
-        let mut ime_report = ime_report::Report::default();
-        ime_report.created(ime_report::now_ms());
-        ime_report.trace_order(window.id(), "created");
-        install_theme_class_background(&window);
-        hang_watch::during(hang_watch::Station::ImeAllowed, || {
-            ime_outbound::line(|| {
-                format!(
-                    "window={} {}",
-                    u64::from(window.id()),
-                    ime_outbound::allowed_line(true, "window_construction")
-                )
-            });
-            window.set_ime_allowed(true)
-        });
-        ime_report.allowed(true, ime_report::now_ms());
-        ime_report.trace_order(window.id(), "allowed");
-        // Beside `set_ime_allowed` because it is the other half of the same
-        // sentence — what this window does with the keys that are not plain
-        // letters — and the stored answer rather than the shipped one, so a
-        // reader who turned the row on does not watch their first `⌥a` compose
-        // an `å` before the setting is read.
-        set_option_as_alt(&window, settings_store.loaded().option_sends_alt);
-        let native = native_window(&window)?;
-        // **The clipboard's owner window, told once here and never carried by a
-        // caller again** (M1-9). `OpenClipboard` wants a window and
-        // `NSPasteboard` does not, so the handle used to be a parameter on a
-        // door that has to have one signature on every platform; the backend
-        // keeps the list of this process's windows instead, and
-        // `bt_platform::clipboard_text`, `set_clipboard_text` and
-        // `cancel_composition` ask it rather than their callers.
-        bt_platform::register_clipboard_owner(native);
-        // The frame's own measurement travels with the install, from the crate
-        // that paints it (spike Q5 item 2): the title bar the pointer is tested
-        // against and the title bar the renderer draws are literally the same
-        // number instead of two constants in two crates that happened to agree.
-        // The caption run's width left this pair with the drag boundary
-        // (§13.11 ⑥): what is clicked in that bar arrives as boxes now.
-        let custom_window_frame = bt_platform::CustomWindowFrame::install(
-            native,
-            bt_platform::CustomFrameGeometry {
-                title_bar_logical_px: bt_render::WINDOW_TITLE_BAR_LOGICAL_PX as u32,
+        // **The first window, in `startup::resume`'s order**: the startup migration and
+        // the script's preparation, the window, the PowerShell questions, the first tab. What the
+        // steps share is the program walk's answers, adopted by the window's title and by the
+        // questions, and read by the first tab.
+        let (opened, first) = startup::resume(
+            &mut profile_programs,
+            startup::FirstWindow {
+                migration: shell_integration::begin_startup_migration,
+                script: || {
+                    // Folio's own `folio.ps1`, compared and repaired on a worker nobody waits for: the first
+                    // PowerShell birth that arrives before it finishes prepares it on its own birth worker.
+                    // The parser questions about the PowerShell rows follow when the walk has answered them.
+                    shell_integration::begin_powershell_script_preparation()
+                },
+                window: |profile_programs: &mut profiles::ProfilePrograms| -> Result<OpenedWindow> {
+                    // **The canvas, settled before there is a window to paint one in**
+                    // (§7.46 ②). Everything below this point — the first frame, the first
+                    // pane, and the `OSC 11` that pane answers — happens on the canvas
+                    // decided here, and there is no earlier one for anything to be painted
+                    // in by mistake.
+                    //
+                    // **Before `set_theme`**, which is the whole of why it is here: the
+                    // theme's own atomic caches the background it resolves to, and that
+                    // background is now a colour of the scheme rather than a constant. A
+                    // pair adopted afterwards would leave the first frame painted on the
+                    // canvas of whichever scheme the process was born with.
+                    adopt_stored_schemes(settings_store.loaded());
+                    // Beside the schemes and for their reason: the floor is read on every cell of the
+                    // first frame, so a file that asks for one must be obeyed before that frame is drawn
+                    // rather than at the first press of the row.
+                    install_minimum_contrast(settings_store.loaded().minimum_contrast);
+                    let resolved_theme = resolve_theme_mode(theme_mode, system_os_theme());
+                    if set_theme(resolved_theme) == ThemeChange::LockedByEnvironment {
+                        eprintln!(
+                            "BT_THEME persisted_mode={theme_mode:?} resolved_theme={resolved_theme:?} ignored_for_runtime=true reason=BT_BG"
+                        );
+                    }
+                    let restored = restore_window_placement(event_loop, &opening);
+                    // Titled from whatever the walk has answered so far; the active tab's own title replaces
+                    // it before the first paint either way.
+                    adopt_program_answers(profile_programs, programs_lane::take());
+                    let attributes = opening_window_attributes(
+                        profiles::identity_title(&profiles::default_profile_identity(
+                            &settings_store.loaded().default_profile,
+                            profile_programs,
+                        )),
+                        restored
+                            .map(|placement| placement.size)
+                            .unwrap_or(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT)),
+                    );
+                    let attributes = match restored.and_then(|placement| placement.position) {
+                        Some(position) => attributes.with_position(position),
+                        None => attributes,
+                    };
+                    let window = Arc::new(
+                        event_loop
+                            .create_window(attributes)
+                            .context("create native window")?,
+                    );
+                    let mut ime_report = ime_report::Report::default();
+                    ime_report.created(ime_report::now_ms());
+                    ime_report.trace_order(window.id(), "created");
+                    install_theme_class_background(&window);
+                    hang_watch::during(hang_watch::Station::ImeAllowed, || {
+                        ime_outbound::line(|| {
+                            format!(
+                                "window={} {}",
+                                u64::from(window.id()),
+                                ime_outbound::allowed_line(true, "window_construction")
+                            )
+                        });
+                        window.set_ime_allowed(true)
+                    });
+                    ime_report.allowed(true, ime_report::now_ms());
+                    ime_report.trace_order(window.id(), "allowed");
+                    // Beside `set_ime_allowed` because it is the other half of the same
+                    // sentence — what this window does with the keys that are not plain
+                    // letters — and the stored answer rather than the shipped one, so a
+                    // reader who turned the row on does not watch their first `⌥a` compose
+                    // an `å` before the setting is read.
+                    set_option_as_alt(&window, settings_store.loaded().option_sends_alt);
+                    let native = native_window(&window)?;
+                    // **The clipboard's owner window, told once here and never carried by a
+                    // caller again** (M1-9). `OpenClipboard` wants a window and
+                    // `NSPasteboard` does not, so the handle used to be a parameter on a
+                    // door that has to have one signature on every platform; the backend
+                    // keeps the list of this process's windows instead, and
+                    // `bt_platform::clipboard_text`, `set_clipboard_text` and
+                    // `cancel_composition` ask it rather than their callers.
+                    bt_platform::register_clipboard_owner(native);
+                    // The frame's own measurement travels with the install, from the crate
+                    // that paints it (spike Q5 item 2): the title bar the pointer is tested
+                    // against and the title bar the renderer draws are literally the same
+                    // number instead of two constants in two crates that happened to agree.
+                    // The caption run's width left this pair with the drag boundary
+                    // (§13.11 ⑥): what is clicked in that bar arrives as boxes now.
+                    let custom_window_frame = bt_platform::CustomWindowFrame::install(
+                        native,
+                        bt_platform::CustomFrameGeometry {
+                            title_bar_logical_px: bt_render::WINDOW_TITLE_BAR_LOGICAL_PX as u32,
+                        },
+                        // **And how the frame asks for a turn when what it measured moves**
+                        // (§13.48) — the shape `SystemSettingsWatch` already has, for its
+                        // reason: a window whose platform takes its own buttons away has had
+                        // nothing happen to it that this loop would otherwise notice.
+                        {
+                            let proxy = proxy.clone();
+                            Box::new(move || {
+                                let _ = proxy.send_event(AppEvent::WindowChromeChanged);
+                            })
+                        },
+                    )
+                    .map_err(|error| anyhow!(error))
+                    .context("install self-drawn Win32 window frame")?;
+                    // **Touch is the system's to translate, and this window says so**
+                    // (owner ruling 2026-09-21). Beside the frame because it is the same
+                    // kind of statement about the same native window, and after it because
+                    // winit made the registration this undoes when it built the window.
+                    // Reported and never propagated: a window that answers nothing to a
+                    // finger is a window, and a launch that died instead is not.
+                    let parked_pans =
+                        runtime::pointer::touch::let_the_system_translate_touch(native, &proxy);
+                    // **This window's own chrome, read where it was measured** (M3-3;
+                    // T-MAC-LIGHTS needs it one step earlier than M3-3 did). `install` is
+                    // where the platform is asked what it still draws in this bar, and the
+                    // tabs this constructor is about to build are solved against a stage
+                    // whose top edge that answer decides — so it is read here, once, and
+                    // handed down. Every reader after the window exists asks the window
+                    // (`Runtime::platform_chrome`); there is no window to ask yet.
+                    let platform_chrome = custom_window_frame.platform_chrome();
+                    let ime_system_caret = bt_platform::ImeSystemCaret::new(native);
+                    let math_context_menu = bt_platform::MathContextMenu::new(native)
+                        .map_err(|error| anyhow!(error))
+                        .context("install deferred formula context menu")?;
+                    let folder_picker = bt_platform::FolderPicker::new(native)
+                        .map_err(|error| anyhow!(error))
+                        .context("install deferred folder chooser")?;
+                    let image_picker = bt_platform::ImagePicker::new(native)
+                        .map_err(|error| anyhow!(error))
+                        .context("install deferred picture chooser")?;
+                    // **Reported, not propagated** (`the_m1_startup_path_has_no_fatal_platform_call_off_windows`):
+                    // the export's dialog is not a reason for a window not to open. A window
+                    // without one says so when `Export…` is pressed.
+                    let save_picker = bt_platform::SaveFilePicker::new(native)
+                        .inspect_err(|error| {
+                            eprintln!("recoverable save dialog install failure: {error}")
+                        })
+                        .ok();
+                    // Asked of DWM once, before anything reads the Acrylic row, by writing
+                    // the attribute's own default: a Windows that has never heard of
+                    // `DWMWA_SYSTEMBACKDROP_TYPE` refuses it, and one that has is unchanged.
+                    // A build-number table would be this program maintaining a list of which
+                    // Windows has which feature, which is a list that is wrong the first time
+                    // anybody backports anything.
+                    let acrylic_available = bt_platform::system_backdrop_available(native);
+                    // Only now, with the self-drawn frame owning WM_NCCALCSIZE, does "the
+                    // window's rectangle" mean one thing instead of two. Restate the geometry
+                    // as that one rectangle: what winit built is the saved size plus a native
+                    // frame margin (26x71 physical at 192 DPI) that this window does not
+                    // wear, and left alone it would be saved, re-inflated and re-saved on
+                    // every restart. The window is still hidden, so this costs no flicker.
+                    //
+                    // # Note for the second window (multiwindow spike Q5, item 3)
+                    //
+                    // This is not first-window startup housekeeping — it is what every
+                    // window this process ever opens owes itself, and the spike deliberately
+                    // left its second window unfixed as evidence: it asked for 720x420
+                    // logical and got a 1466x911 client, because winit sizes by client and
+                    // `WM_NCCALCSIZE` then makes the client the whole outer rectangle. A
+                    // torn-out window that skips this line opens one native frame margin
+                    // larger than the one it was torn from, and grows again on every
+                    // restart. Left as a note rather than as a helper because the slice that
+                    // opens a second window is the one that will have somewhere to put it.
+                    let opened_at = dpi_snapshot(&window)?;
+                    stand_the_window_at(
+                        native,
+                        startup_window_rect(
+                            restored,
+                            opened_at.rect,
+                            opened_at.authoritative_scale,
+                        ),
+                        "restore the first window's outer rectangle",
+                    );
+                    let window_time = phase_started.elapsed();
+                    let startup_dpi = dpi_snapshot(&window)?;
+                    let physical = window.inner_size();
+                    let startup_scale_factor = startup_dpi.authoritative_scale;
+                    let phase_started = Instant::now();
+                    // The visual tree first, because the swapchain hangs off it. Its
+                    // `topmost = true` target composes above this window's own painting, so
+                    // anywhere the swapchain has not reached yet — before the first present,
+                    // and in the band a resize opens up — shows the class background brush
+                    // installed a few lines above, exactly as it did when the swapchain was
+                    // the window's own. An owner-thread door (`doors::CompositorBirth`): a refusal is this
+                    // road's own error.
+                    let compositor = bt_platform::admission::admitted::<
+                        bt_platform::admission::doors::CompositorBirth,
+                        _,
+                    >(|token| {
+                        bt_platform::Compositor::new(token, native)
+                    })
+                    .unwrap_or_else(|refused| Err(refused.to_string()))
+                    .map_err(|error| anyhow!(error))
+                    .context("open the window's DirectComposition visual tree")?;
+                    // The floor's colour is settled with the tree and not with the first
+                    // page: a page can be born at launch (`BT_WEB_DEV`, a restored session),
+                    // and a floor that learned its colour only from the *next* theme flip
+                    // would be black under the first one.
+                    install_page_ground_color(&compositor);
+                    // Row 23's wait, admitted as its owner-thread door (`doors::GpuOpen`); a refusal is this
+                    // road's own error.
+                    let (mut gpu, mut renderer) = bt_platform::admission::admitted::<
+                        bt_platform::admission::doors::GpuOpen,
+                        _,
+                    >(|token| {
+                        gpu_door::open_first_window(
+                            token,
+                            window_surface_target(&window, &compositor),
+                            physical.width,
+                            physical.height,
+                            startup_scale_factor,
+                        )
+                        .map_err(anyhow::Error::from)
+                    })
+                    .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
+                    .context("initialize wgpu renderer")?;
+                    note_gpu_adapter(&gpu);
+                    if trace_startup && let Some(alpha) = renderer.alpha_report() {
+                        // The spike printed exactly these two lines, and they are what a
+                        // machine that goes wrong here will be asked for: the chosen mode
+                        // alone leaves "why not the other one" unanswerable.
+                        trace_sink::stderr_line(format!(
+                            "BT_STARTUP alpha target={:?}",
+                            alpha.target
+                        ));
+                        trace_sink::stderr_line(format!(
+                            "BT_STARTUP alpha offered={:?}",
+                            alpha.offered
+                        ));
+                        trace_sink::stderr_line(format!(
+                            "BT_STARTUP alpha chosen={:?}",
+                            alpha.chosen
+                        ));
+                    }
+                    // What the Background opacity row is allowed to offer, taken from the
+                    // surface that was actually configured rather than assumed (§7.1.6c-4b).
+                    // Today `Compositor::new` and `choose_alpha_mode` between them mean a
+                    // window that opened at all opened premultiplied — but the row's state
+                    // has to be a *reading* and not a restatement of that argument, because
+                    // the day a second window target exists is the day an assumption here
+                    // draws a slider that moves and changes nothing.
+                    let translucency_available = renderer
+                        .alpha_report()
+                        .is_some_and(bt_render::SurfaceAlphaReport::is_premultiplied);
+                    // **Before the first grid is measured**, which is the whole of why it is
+                    // here and not after the seats are solved: every rectangle below is
+                    // derived from `renderer.metrics()`, so a face applied afterwards would
+                    // put a window on screen whose columns were counted for a different
+                    // cell. The hot path (`apply_terminal_font`) re-solves all of that; this
+                    // one has nothing to re-solve yet.
+                    apply_stored_terminal_font(&mut gpu, &mut renderer, settings_store.loaded())?;
+                    ensure_metrics_match_authoritative_scale(
+                        renderer.scale_factor(),
+                        startup_scale_factor,
+                    )?;
+                    trace_surface_size_clamp(
+                        trace_startup || trace_resize,
+                        "BT_STARTUP",
+                        physical,
+                        renderer.presentation_geometry(),
+                    );
+                    ensure_swapchain_matches_inner(&renderer, physical)?;
+                    log_dpi_snapshot(
+                        "create",
+                        startup_dpi,
+                        None,
+                        renderer.presentation_geometry(),
+                        physical,
+                    );
+                    let renderer_time = phase_started.elapsed();
+                    let render_physical =
+                        presentation_physical_size(renderer.presentation_geometry());
+                    // The seam of §4.2, in the one order it is allowed to run: window
+                    // geometry -> viewport -> solve -> seat rects -> the terminal seat's
+                    // cols/rows. The persisted tree is layout *intent* (L11); the rectangle
+                    // it produces here is computed fresh against this machine's DPI.
+                    let probe_input = load_probe_input()?;
+                    let pty_wake = PtyWakeSignal::new(proxy.clone());
+                    let phase_started = Instant::now();
+                    Ok(OpenedWindow {
+                        restored,
+                        window,
+                        ime_report,
+                        native,
+                        custom_window_frame,
+                        parked_pans,
+                        platform_chrome,
+                        ime_system_caret,
+                        math_context_menu,
+                        folder_picker,
+                        image_picker,
+                        save_picker,
+                        acrylic_available,
+                        window_time,
+                        compositor,
+                        gpu,
+                        renderer,
+                        translucency_available,
+                        renderer_time,
+                        render_physical,
+                        probe_input,
+                        pty_wake,
+                        phase_started,
+                    })
+                },
+                questions: |profile_programs: &mut profiles::ProfilePrograms| {
+                    // **The walk's answers, read as late as the launch can read them** — right before the
+                    // panes are made, without waiting. Everything below decides from these exactly as it
+                    // always did from the probe that stood here; a row still unanswered is decided by nobody.
+                    adopt_program_answers(profile_programs, programs_lane::take());
+                    shell_integration::begin_powershell_preparation_for(profile_programs)
+                },
+                first_tab: |profile_programs: &mut profiles::ProfilePrograms,
+                            opened: &mut OpenedWindow|
+                 -> Result<FirstTabs> {
+                    let OpenedWindow {
+                        gpu,
+                        renderer,
+                        render_physical,
+                        probe_input,
+                        pty_wake,
+                        platform_chrome,
+                        ..
+                    } = opened;
+                    let (render_physical, platform_chrome) = (*render_physical, *platform_chrome);
+                    let wake = &*pty_wake;
+                    let default_profile = profiles::default_profile(
+                        &settings_store.loaded().default_profile,
+                        profile_programs,
+                    );
+                    // The same answer as a seed spells it — see `Runtime::default_profile_id`.
+                    let default_profile_id = profiles::default_profile_identity(
+                        &settings_store.loaded().default_profile,
+                        profile_programs,
+                    );
+                    // The command line, put to this machine: the folder asked about, the
+                    // profile looked up in this build's table, and the crossing into that
+                    // profile's namespace. Everything it could not honour comes back in the
+                    // plan's own list and is said on a card once the window is up.
+                    let mut cli_plan: cli::CliPlan =
+                        cli::resolve(cli, default_profile, cli::machine_path_kind);
+                    // **`--with-environment` reads this process's environment, which on a first launch is
+                    // the launcher's** (owner ruling 2026-10-05: the one explicit way to carry it).
+                    cli_plan.carried_environment = cli
+                        .with_environment
+                        .then(cli::CarriedEnvironment::of_this_process);
+                    // Pinned tabs are an answer already given, so they simply open; the rest
+                    // become a question the prompt will ask over a window that already works.
+                    let plan = if probe_input.is_some() {
+                        LaunchPlan::default()
+                    } else {
+                        plan_launch(
+                            &opening.tabs,
+                            opening.active_tab as usize,
+                            cli_plan.wants_pane,
+                        )
+                    };
+                    // **The tab the command line asked for, in front of the revived ones**
+                    // (§7.2). It is built here rather than by `revive_plan` because it comes
+                    // from a command line and not from a file: there is no tree to rebuild,
+                    // no files column to re-root and no pool to refill — one terminal seat,
+                    // one seed, and the seed is the whole of what was asked for.
+                    let cli_root = cli_plan.wants_pane.then(|| {
+                        let seats = seats::Seats::lone_terminal();
+                        let leaves = seats
+                            .terminals()
+                            .into_iter()
+                            .map(|seat| (seat, cli_leaf_seed(&cli_plan)))
+                            .collect();
+                        (
+                            seats,
+                            TabSeed {
+                                // The command-line tab owns what `--with-environment` carried.
+                                carried_environment: cli_plan.carried_environment.clone(),
+                                ..TabSeed::default()
+                            },
+                            leaves,
+                            BTreeMap::new(),
+                            PreviewRestore::default(),
+                        )
+                    });
+                    // **The one slot both the strip and the seat are read off** — see
+                    // [`cli_tab_slot`] for why it is not `0`. Computed from the *plan* and
+                    // not from the built tabs, because it is also what `launch_active_tab`
+                    // is told, and a number derived twice is a number that can differ twice.
+                    let cli_slot = cli_root.is_some().then(|| {
+                        cli_tab_slot(&plan.open.iter().map(|tab| tab.pinned).collect::<Vec<_>>())
+                    });
+                    let restored_roots: Vec<_> = if plan.open.is_empty() && cli_root.is_none() {
+                        vec![(
+                            seats::Seats::lone_terminal(),
+                            TabSeed::default(),
+                            BTreeMap::new(),
+                            BTreeMap::new(),
+                            PreviewRestore::default(),
+                        )]
+                    } else {
+                        let mut roots: Vec<_> = plan.open.iter().map(revive_plan).collect();
+                        if let (Some(cli_root), Some(slot)) = (cli_root, cli_slot) {
+                            roots.insert(slot, cli_root);
+                        }
+                        roots
+                    };
+                    // **The process's tab numbering starts here, once** (F1b). Built before
+                    // the `App` it will live in, because the first window's tabs are numbered
+                    // before there is an `App` to ask — and numbered by the same allocator
+                    // every later window asks, which is the whole of the A case.
+                    let mut tab_ids = TabIds::new();
+                    let mut tabs = Vec::with_capacity(restored_roots.len());
+                    let mut conpty_sources = Vec::with_capacity(restored_roots.len());
+                    for (index, (seats, seed, leaves, files, preview)) in
+                        restored_roots.into_iter().enumerate()
+                    {
+                        let (tab, conpty_source) = create_tab_state(
+                            tab_ids.mint(),
+                            seats,
+                            LeafView::at(gpu, &*renderer, TextScale::ACTUAL)?,
+                            &*renderer,
+                            render_physical,
+                            wake,
+                            if index == 0 {
+                                probe_input.as_deref()
+                            } else {
+                                None
+                            },
+                            // A revived tab stands where its seed says, not where some other
+                            // tab happens to be — that address IS what a seed is for, and
+                            // now there is one per pane.
+                            &leaves,
+                            // And every files column comes back rooted where it was left,
+                            // which before this slice was nowhere at all.
+                            &files,
+                            // And every preview pane comes back on the file it was showing,
+                            // out of a pool that comes back as the list of names it was.
+                            &preview,
+                            seed,
+                            profile_programs,
+                            &default_profile_id,
+                            &settings_store.loaded().default_profile,
+                            // Startup: the opening rectangle is the program's own.
+                            SizePolicy::Lawful,
+                            // **The panel this window is opening with, both halves of it.**
+                            // `RailState::default()` stood here and was a horizontal window
+                            // with no panel at all, which every later solve corrected on the
+                            // first resize — so the cost was one frame, and with §7.1.6b′ that
+                            // frame is a card column standing on top of the panes. The stage's
+                            // left edge is a fact about the window, and it is known here: the
+                            // restored `Tab layout`/`Sidebar` pair, joined to the focus bit
+                            // `settings.json` opens the window in.
+                            seats::RailState {
+                                focus: focus_mode,
+                                ..rail
+                            },
+                            platform_chrome,
+                            FormulaSwitches::from_settings(settings_store.loaded()),
+                            scrollback_quota(settings_store.loaded().scrollback_lines),
+                            settings_store.loaded().line_wrapping,
+                        )?;
+                        tabs.push(tab);
+                        conpty_sources.push(conpty_source);
+                    }
+                    Ok(FirstTabs {
+                        cli_plan,
+                        plan,
+                        cli_slot,
+                        tab_ids,
+                        tabs,
+                        conpty_sources,
+                    })
+                },
             },
-            // **And how the frame asks for a turn when what it measured moves**
-            // (§13.48) — the shape `SystemSettingsWatch` already has, for its
-            // reason: a window whose platform takes its own buttons away has had
-            // nothing happen to it that this loop would otherwise notice.
-            {
-                let proxy = proxy.clone();
-                Box::new(move || {
-                    let _ = proxy.send_event(AppEvent::WindowChromeChanged);
-                })
-            },
-        )
-        .map_err(|error| anyhow!(error))
-        .context("install self-drawn Win32 window frame")?;
-        // **Touch is the system's to translate, and this window says so**
-        // (owner ruling 2026-09-21). Beside the frame because it is the same
-        // kind of statement about the same native window, and after it because
-        // winit made the registration this undoes when it built the window.
-        // Reported and never propagated: a window that answers nothing to a
-        // finger is a window, and a launch that died instead is not.
-        let parked_pans = runtime::pointer::touch::let_the_system_translate_touch(native, &proxy);
-        // **This window's own chrome, read where it was measured** (M3-3;
-        // T-MAC-LIGHTS needs it one step earlier than M3-3 did). `install` is
-        // where the platform is asked what it still draws in this bar, and the
-        // tabs this constructor is about to build are solved against a stage
-        // whose top edge that answer decides — so it is read here, once, and
-        // handed down. Every reader after the window exists asks the window
-        // (`Runtime::platform_chrome`); there is no window to ask yet.
-        let platform_chrome = custom_window_frame.platform_chrome();
-        let ime_system_caret = bt_platform::ImeSystemCaret::new(native);
-        let math_context_menu = bt_platform::MathContextMenu::new(native)
-            .map_err(|error| anyhow!(error))
-            .context("install deferred formula context menu")?;
-        let folder_picker = bt_platform::FolderPicker::new(native)
-            .map_err(|error| anyhow!(error))
-            .context("install deferred folder chooser")?;
-        let image_picker = bt_platform::ImagePicker::new(native)
-            .map_err(|error| anyhow!(error))
-            .context("install deferred picture chooser")?;
-        // **Reported, not propagated** (`the_m1_startup_path_has_no_fatal_platform_call_off_windows`):
-        // the export's dialog is not a reason for a window not to open. A window
-        // without one says so when `Export…` is pressed.
-        let save_picker = bt_platform::SaveFilePicker::new(native)
-            .inspect_err(|error| eprintln!("recoverable save dialog install failure: {error}"))
-            .ok();
-        // Asked of DWM once, before anything reads the Acrylic row, by writing
-        // the attribute's own default: a Windows that has never heard of
-        // `DWMWA_SYSTEMBACKDROP_TYPE` refuses it, and one that has is unchanged.
-        // A build-number table would be this program maintaining a list of which
-        // Windows has which feature, which is a list that is wrong the first time
-        // anybody backports anything.
-        let acrylic_available = bt_platform::system_backdrop_available(native);
-        // Only now, with the self-drawn frame owning WM_NCCALCSIZE, does "the
-        // window's rectangle" mean one thing instead of two. Restate the geometry
-        // as that one rectangle: what winit built is the saved size plus a native
-        // frame margin (26x71 physical at 192 DPI) that this window does not
-        // wear, and left alone it would be saved, re-inflated and re-saved on
-        // every restart. The window is still hidden, so this costs no flicker.
-        //
-        // # Note for the second window (multiwindow spike Q5, item 3)
-        //
-        // This is not first-window startup housekeeping — it is what every
-        // window this process ever opens owes itself, and the spike deliberately
-        // left its second window unfixed as evidence: it asked for 720x420
-        // logical and got a 1466x911 client, because winit sizes by client and
-        // `WM_NCCALCSIZE` then makes the client the whole outer rectangle. A
-        // torn-out window that skips this line opens one native frame margin
-        // larger than the one it was torn from, and grows again on every
-        // restart. Left as a note rather than as a helper because the slice that
-        // opens a second window is the one that will have somewhere to put it.
-        let opened_at = dpi_snapshot(&window)?;
-        stand_the_window_at(
+        )?;
+        let OpenedWindow {
+            restored,
+            window,
+            ime_report,
             native,
-            startup_window_rect(restored, opened_at.rect, opened_at.authoritative_scale),
-            "restore the first window's outer rectangle",
-        );
-        let window_time = phase_started.elapsed();
-        let startup_dpi = dpi_snapshot(&window)?;
-        let physical = window.inner_size();
-        let startup_scale_factor = startup_dpi.authoritative_scale;
-        let phase_started = Instant::now();
-        // The visual tree first, because the swapchain hangs off it. Its
-        // `topmost = true` target composes above this window's own painting, so
-        // anywhere the swapchain has not reached yet — before the first present,
-        // and in the band a resize opens up — shows the class background brush
-        // installed a few lines above, exactly as it did when the swapchain was
-        // the window's own. An owner-thread door (`doors::CompositorBirth`): a refusal is this
-        // road's own error.
-        let compositor = bt_platform::admission::admitted::<
-            bt_platform::admission::doors::CompositorBirth,
-            _,
-        >(|token| bt_platform::Compositor::new(token, native))
-        .unwrap_or_else(|refused| Err(refused.to_string()))
-        .map_err(|error| anyhow!(error))
-        .context("open the window's DirectComposition visual tree")?;
-        // The floor's colour is settled with the tree and not with the first
-        // page: a page can be born at launch (`BT_WEB_DEV`, a restored session),
-        // and a floor that learned its colour only from the *next* theme flip
-        // would be black under the first one.
-        install_page_ground_color(&compositor);
-        // Row 23's wait, admitted as its owner-thread door (`doors::GpuOpen`); a refusal is this
-        // road's own error.
-        let (mut gpu, mut renderer) = bt_platform::admission::admitted::<
-            bt_platform::admission::doors::GpuOpen,
-            _,
-        >(|token| {
-            gpu_door::open_first_window(
-                token,
-                window_surface_target(&window, &compositor),
-                physical.width,
-                physical.height,
-                startup_scale_factor,
-            )
-            .map_err(anyhow::Error::from)
-        })
-        .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
-        .context("initialize wgpu renderer")?;
-        note_gpu_adapter(&gpu);
-        if trace_startup && let Some(alpha) = renderer.alpha_report() {
-            // The spike printed exactly these two lines, and they are what a
-            // machine that goes wrong here will be asked for: the chosen mode
-            // alone leaves "why not the other one" unanswerable.
-            trace_sink::stderr_line(format!("BT_STARTUP alpha target={:?}", alpha.target));
-            trace_sink::stderr_line(format!("BT_STARTUP alpha offered={:?}", alpha.offered));
-            trace_sink::stderr_line(format!("BT_STARTUP alpha chosen={:?}", alpha.chosen));
-        }
-        // What the Background opacity row is allowed to offer, taken from the
-        // surface that was actually configured rather than assumed (§7.1.6c-4b).
-        // Today `Compositor::new` and `choose_alpha_mode` between them mean a
-        // window that opened at all opened premultiplied — but the row's state
-        // has to be a *reading* and not a restatement of that argument, because
-        // the day a second window target exists is the day an assumption here
-        // draws a slider that moves and changes nothing.
-        let translucency_available = renderer
-            .alpha_report()
-            .is_some_and(bt_render::SurfaceAlphaReport::is_premultiplied);
-        // **Before the first grid is measured**, which is the whole of why it is
-        // here and not after the seats are solved: every rectangle below is
-        // derived from `renderer.metrics()`, so a face applied afterwards would
-        // put a window on screen whose columns were counted for a different
-        // cell. The hot path (`apply_terminal_font`) re-solves all of that; this
-        // one has nothing to re-solve yet.
-        apply_stored_terminal_font(&mut gpu, &mut renderer, settings_store.loaded())?;
-        ensure_metrics_match_authoritative_scale(renderer.scale_factor(), startup_scale_factor)?;
-        trace_surface_size_clamp(
-            trace_startup || trace_resize,
-            "BT_STARTUP",
-            physical,
-            renderer.presentation_geometry(),
-        );
-        ensure_swapchain_matches_inner(&renderer, physical)?;
-        log_dpi_snapshot(
-            "create",
-            startup_dpi,
-            None,
-            renderer.presentation_geometry(),
-            physical,
-        );
-        let renderer_time = phase_started.elapsed();
-        let render_physical = presentation_physical_size(renderer.presentation_geometry());
-        // The seam of §4.2, in the one order it is allowed to run: window
-        // geometry -> viewport -> solve -> seat rects -> the terminal seat's
-        // cols/rows. The persisted tree is layout *intent* (L11); the rectangle
-        // it produces here is computed fresh against this machine's DPI.
-        let probe_input = load_probe_input()?;
-        let pty_wake = PtyWakeSignal::new(proxy.clone());
-        let wake = &pty_wake;
-        let phase_started = Instant::now();
-        // **The walk's answers, read as late as the launch can read them** — right before the
-        // panes are made, without waiting. Everything below decides from these exactly as it
-        // always did from the probe that stood here; a row still unanswered is decided by nobody.
-        adopt_program_answers(&mut profile_programs, programs_lane::take());
-        shell_integration::begin_powershell_preparation_for(&profile_programs);
-        let default_profile =
-            profiles::default_profile(&settings_store.loaded().default_profile, &profile_programs);
-        // The same answer as a seed spells it — see `Runtime::default_profile_id`.
-        let default_profile_id = profiles::default_profile_identity(
-            &settings_store.loaded().default_profile,
-            &profile_programs,
-        );
-        // The command line, put to this machine: the folder asked about, the
-        // profile looked up in this build's table, and the crossing into that
-        // profile's namespace. Everything it could not honour comes back in the
-        // plan's own list and is said on a card once the window is up.
-        let mut cli_plan: cli::CliPlan = cli::resolve(cli, default_profile, cli::machine_path_kind);
-        // **`--with-environment` reads this process's environment, which on a first launch is
-        // the launcher's** (owner ruling 2026-10-05: the one explicit way to carry it).
-        cli_plan.carried_environment = cli
-            .with_environment
-            .then(cli::CarriedEnvironment::of_this_process);
-        // Pinned tabs are an answer already given, so they simply open; the rest
-        // become a question the prompt will ask over a window that already works.
-        let plan = if probe_input.is_some() {
-            LaunchPlan::default()
-        } else {
-            plan_launch(
-                &opening.tabs,
-                opening.active_tab as usize,
-                cli_plan.wants_pane,
-            )
-        };
-        // **The tab the command line asked for, in front of the revived ones**
-        // (§7.2). It is built here rather than by `revive_plan` because it comes
-        // from a command line and not from a file: there is no tree to rebuild,
-        // no files column to re-root and no pool to refill — one terminal seat,
-        // one seed, and the seed is the whole of what was asked for.
-        let cli_root = cli_plan.wants_pane.then(|| {
-            let seats = seats::Seats::lone_terminal();
-            let leaves = seats
-                .terminals()
-                .into_iter()
-                .map(|seat| (seat, cli_leaf_seed(&cli_plan)))
-                .collect();
-            (
-                seats,
-                TabSeed {
-                    // The command-line tab owns what `--with-environment` carried.
-                    carried_environment: cli_plan.carried_environment.clone(),
-                    ..TabSeed::default()
-                },
-                leaves,
-                BTreeMap::new(),
-                PreviewRestore::default(),
-            )
-        });
-        // **The one slot both the strip and the seat are read off** — see
-        // [`cli_tab_slot`] for why it is not `0`. Computed from the *plan* and
-        // not from the built tabs, because it is also what `launch_active_tab`
-        // is told, and a number derived twice is a number that can differ twice.
-        let cli_slot = cli_root
-            .is_some()
-            .then(|| cli_tab_slot(&plan.open.iter().map(|tab| tab.pinned).collect::<Vec<_>>()));
-        let restored_roots: Vec<_> = if plan.open.is_empty() && cli_root.is_none() {
-            vec![(
-                seats::Seats::lone_terminal(),
-                TabSeed::default(),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                PreviewRestore::default(),
-            )]
-        } else {
-            let mut roots: Vec<_> = plan.open.iter().map(revive_plan).collect();
-            if let (Some(cli_root), Some(slot)) = (cli_root, cli_slot) {
-                roots.insert(slot, cli_root);
-            }
-            roots
-        };
-        // **The process's tab numbering starts here, once** (F1b). Built before
-        // the `App` it will live in, because the first window's tabs are numbered
-        // before there is an `App` to ask — and numbered by the same allocator
-        // every later window asks, which is the whole of the A case.
-        let mut tab_ids = TabIds::new();
-        let mut tabs = Vec::with_capacity(restored_roots.len());
-        let mut conpty_sources = Vec::with_capacity(restored_roots.len());
-        for (index, (seats, seed, leaves, files, preview)) in restored_roots.into_iter().enumerate()
-        {
-            let (tab, conpty_source) = create_tab_state(
-                tab_ids.mint(),
-                seats,
-                LeafView::at(&mut gpu, &renderer, TextScale::ACTUAL)?,
-                &renderer,
-                render_physical,
-                wake,
-                if index == 0 {
-                    probe_input.as_deref()
-                } else {
-                    None
-                },
-                // A revived tab stands where its seed says, not where some other
-                // tab happens to be — that address IS what a seed is for, and
-                // now there is one per pane.
-                &leaves,
-                // And every files column comes back rooted where it was left,
-                // which before this slice was nowhere at all.
-                &files,
-                // And every preview pane comes back on the file it was showing,
-                // out of a pool that comes back as the list of names it was.
-                &preview,
-                seed,
-                &profile_programs,
-                &default_profile_id,
-                &settings_store.loaded().default_profile,
-                // Startup: the opening rectangle is the program's own.
-                SizePolicy::Lawful,
-                // **The panel this window is opening with, both halves of it.**
-                // `RailState::default()` stood here and was a horizontal window
-                // with no panel at all, which every later solve corrected on the
-                // first resize — so the cost was one frame, and with §7.1.6b′ that
-                // frame is a card column standing on top of the panes. The stage's
-                // left edge is a fact about the window, and it is known here: the
-                // restored `Tab layout`/`Sidebar` pair, joined to the focus bit
-                // `settings.json` opens the window in.
-                seats::RailState {
-                    focus: focus_mode,
-                    ..rail
-                },
-                platform_chrome,
-                FormulaSwitches::from_settings(settings_store.loaded()),
-                scrollback_quota(settings_store.loaded().scrollback_lines),
-                settings_store.loaded().line_wrapping,
-            )?;
-            tabs.push(tab);
-            conpty_sources.push(conpty_source);
-        }
+            custom_window_frame,
+            parked_pans,
+            platform_chrome,
+            ime_system_caret,
+            math_context_menu,
+            folder_picker,
+            image_picker,
+            save_picker,
+            acrylic_available,
+            window_time,
+            compositor,
+            gpu,
+            mut renderer,
+            translucency_available,
+            renderer_time,
+            render_physical,
+            probe_input,
+            pty_wake,
+            phase_started,
+        } = opened;
+        let FirstTabs {
+            mut cli_plan,
+            plan,
+            cli_slot,
+            tab_ids,
+            tabs,
+            conpty_sources,
+        } = first;
         // The tab you were on comes back on top, if it was one of the ones that
         // came back. A placeholder shell is index 0 either way, and so is a tab
         // the command line asked for.
@@ -77112,179 +77285,199 @@ fn main() -> Result<()> {
     if cli::explorer_command(std::env::args_os().skip(1)) {
         std::process::exit(explorer_menu::serve());
     }
-    // **And the door that undoes what the other two registered**: somebody
-    // taking Folio back out of Explorer's menu, which is the one thing this
-    // program can be asked to do that has to work while the rest of it is being
-    // deleted.
-    //
-    // Above the parse for the two doorbells' reason — this launch is not opening
-    // a window and everything below would build one — and above everything the
-    // parse leads to for a reason of its own. A package manager's uninstall hook
-    // is not a person: it must not be handed over to a Folio that is already
-    // running (which would change *that* copy's idea of what is registered, in a
-    // process the hook is not waiting on), it must not write a settings file for
-    // a folder about to disappear, and it must not be met by a first-run card. It
-    // is one line of log text and an exit code.
-    //
-    // The line goes to standard output through the console door and **never to a
-    // message box**: this answer is for a transcript, and an uninstall that
-    // stopped to raise a modal nobody is in front of would be worse than an
-    // uninstall that said nothing at all.
-    if cli::remove_shell_integration(std::env::args_os().skip(1)) {
-        let report = shell_integration::remove_shell_integration(
-            shell_integration::CheckAsker::Verb,
-            &shell_integration::ProbeEnvironment::Inherited,
-        );
-        let done = report.text(false);
-        if done.is_empty() && report.exit_code() == 0 {
-            bt_platform::write_to_console(&format!("{}\n", i18n::Text::ShellProfileNothing.text()));
-        } else {
-            bt_platform::write_to_console(&done);
-        }
-        bt_platform::write_std_error(report.text(true).as_bytes());
-        std::process::exit(report.exit_code());
-    }
-    if cli::remove_explorer_menu(std::env::args_os().skip(1)) {
-        let report = explorer_menu::remove_from_explorer_menu();
-        bt_platform::write_to_console(&format!("{}\n", report.line));
-        std::process::exit(report.exit_code);
-    }
-    // **The rescue build's two doors** (`--update-recover`, `--update-apply`;
-    // `docs/plans/design/self-update-2026-09-16.md` (b).2). Headless like the
-    // doors above, and above the admission below for a reason of their own:
-    // the rescue build is the one process that must never hold the admission
-    // shared — it takes it exclusive to move files. `--update-recover` is the
-    // recovery door (`update_recover`, U-22; on Windows it recovers what a dead
-    // applier left, U-23); `--update-apply` is the applier — macOS
-    // (`update_apply_macos`, U-28) and Windows (`update_apply_windows`, U-23) —
-    // and is answered with one line where there is none.
-    // **A road process's panic unwinds** (0.4.6 U-34), and its hook is in place
-    // before anything of the door's line is parsed (round 2, blocker 3): the
-    // first word alone says it is a door.
-    if std::env::args_os()
-        .nth(1)
-        .is_some_and(|word| word == cli::UPDATE_APPLY_FLAG || word == cli::UPDATE_RECOVER_FLAG)
-    {
-        install_update_door_panic_hook_at(panic_log_path());
-    }
-    if let Some(door) = cli::update_door(std::env::args_os().skip(1)) {
-        let usage = match door {
-            Ok(cli::UpdateDoor::Recover {
-                home,
-                then_launch,
-                handed_back,
-            }) => std::process::exit(update_recover::run_here(home, then_launch, handed_back)),
-            Ok(cli::UpdateDoor::Apply { home, txn, nonce }) => match bt_platform::host_platform() {
-                bt_platform::HostPlatform::MacOs => {
-                    std::process::exit(update_apply_macos::run_here(&home, &txn, &nonce))
+    // **The process's half of the start, in `startup::begin`'s order**: a removal verb, the
+    // command line, the hand-over. What the hand-over keeps — the parsed request, the data
+    // directory, and the two lines a hand-over that did not happen owes the log — comes back.
+    let (request, storage, gave_up, stood_down) = startup::begin(startup::FrontDoor {
+        removal: || {
+            // **And the door that undoes what the other two registered**: somebody
+            // taking Folio back out of Explorer's menu, which is the one thing this
+            // program can be asked to do that has to work while the rest of it is being
+            // deleted.
+            //
+            // Above the parse for the two doorbells' reason — this launch is not opening
+            // a window and everything below would build one — and above everything the
+            // parse leads to for a reason of its own. A package manager's uninstall hook
+            // is not a person: it must not be handed over to a Folio that is already
+            // running (which would change *that* copy's idea of what is registered, in a
+            // process the hook is not waiting on), it must not write a settings file for
+            // a folder about to disappear, and it must not be met by a first-run card. It
+            // is one line of log text and an exit code.
+            //
+            // The line goes to standard output through the console door and **never to a
+            // message box**: this answer is for a transcript, and an uninstall that
+            // stopped to raise a modal nobody is in front of would be worse than an
+            // uninstall that said nothing at all.
+            if cli::remove_shell_integration(std::env::args_os().skip(1)) {
+                let report = shell_integration::remove_shell_integration(
+                    shell_integration::CheckAsker::Verb,
+                    &shell_integration::ProbeEnvironment::Inherited,
+                );
+                let done = report.text(false);
+                if done.is_empty() && report.exit_code() == 0 {
+                    bt_platform::write_to_console(&format!(
+                        "{}\n",
+                        i18n::Text::ShellProfileNothing.text()
+                    ));
+                } else {
+                    bt_platform::write_to_console(&done);
                 }
-                bt_platform::HostPlatform::Windows => {
-                    std::process::exit(update_apply_windows::run_here(&home, &txn, &nonce))
+                bt_platform::write_std_error(report.text(true).as_bytes());
+                std::process::exit(report.exit_code());
+            }
+            if cli::remove_explorer_menu(std::env::args_os().skip(1)) {
+                let report = explorer_menu::remove_from_explorer_menu();
+                bt_platform::write_to_console(&format!("{}\n", report.line));
+                std::process::exit(report.exit_code);
+            }
+        },
+        parse: || {
+            // **The rescue build's two doors** (`--update-recover`, `--update-apply`;
+            // `docs/plans/design/self-update-2026-09-16.md` (b).2). Headless like the
+            // doors above, and above the admission below for a reason of their own:
+            // the rescue build is the one process that must never hold the admission
+            // shared — it takes it exclusive to move files. `--update-recover` is the
+            // recovery door (`update_recover`, U-22; on Windows it recovers what a dead
+            // applier left, U-23); `--update-apply` is the applier — macOS
+            // (`update_apply_macos`, U-28) and Windows (`update_apply_windows`, U-23) —
+            // and is answered with one line where there is none.
+            // **A road process's panic unwinds** (0.4.6 U-34), and its hook is in place
+            // before anything of the door's line is parsed (round 2, blocker 3): the
+            // first word alone says it is a door.
+            if std::env::args_os().nth(1).is_some_and(|word| {
+                word == cli::UPDATE_APPLY_FLAG || word == cli::UPDATE_RECOVER_FLAG
+            }) {
+                install_update_door_panic_hook_at(panic_log_path());
+            }
+            if let Some(door) = cli::update_door(std::env::args_os().skip(1)) {
+                let usage = match door {
+                    Ok(cli::UpdateDoor::Recover {
+                        home,
+                        then_launch,
+                        handed_back,
+                    }) => {
+                        std::process::exit(update_recover::run_here(home, then_launch, handed_back))
+                    }
+                    Ok(cli::UpdateDoor::Apply { home, txn, nonce }) => {
+                        match bt_platform::host_platform() {
+                            bt_platform::HostPlatform::MacOs => std::process::exit(
+                                update_apply_macos::run_here(&home, &txn, &nonce),
+                            ),
+                            bt_platform::HostPlatform::Windows => std::process::exit(
+                                update_apply_windows::run_here(&home, &txn, &nonce),
+                            ),
+                            bt_platform::HostPlatform::OtherUnix => None,
+                        }
+                    }
+                    Err(usage) => Some(usage),
+                };
+                bt_platform::write_std_error(
+                    format!("{}\n", cli::update_door_refusal(usage)).as_bytes(),
+                );
+                std::process::exit(2);
+            }
+            // **The command line, before there is anything for it to be wrong about.**
+            // `spike-win-landing.md` §8 puts slice 0 exactly here, between the panic hook
+            // and the event loop, and the reason is what a refusal costs: a syntax error
+            // answered after `EventLoop::build` would have created a window, a swap
+            // chain and a shell in order to tell somebody they typed `--cdw`.
+            match cli::parse(std::env::args_os().skip(1)) {
+                Ok(request) => request,
+                Err(fault) => {
+                    report_at_the_front_door(&fault);
+                    std::process::exit(fault.exit_code());
                 }
-                bt_platform::HostPlatform::OtherUnix => None,
-            },
-            Err(usage) => Some(usage),
-        };
-        bt_platform::write_std_error(format!("{}\n", cli::update_door_refusal(usage)).as_bytes());
-        std::process::exit(2);
-    }
-    // **The command line, before there is anything for it to be wrong about.**
-    // `spike-win-landing.md` §8 puts slice 0 exactly here, between the panic hook
-    // and the event loop, and the reason is what a refusal costs: a syntax error
-    // answered after `EventLoop::build` would have created a window, a swap
-    // chain and a shell in order to tell somebody they typed `--cdw`.
-    let request = match cli::parse(std::env::args_os().skip(1)) {
-        Ok(request) => request,
-        Err(fault) => {
-            report_at_the_front_door(&fault);
-            std::process::exit(fault.exit_code());
-        }
-    };
-    // **This thread owns the window from here** (`bt_platform::admission`, ARCHITECTURE §5.1):
-    // the role every owner-thread door is admitted on, in the phase `Starting` until the loop's
-    // first turn. Below the six argv doors, whose processes never have a window, and above the
-    // hand-over, which is this phase's one wait (§5.3 row 18).
-    bt_platform::admission::enter_window_thread();
-    // **The machine's answers for `bt-term`, before anything here can make a session**
-    // (`host_answers`): its names and the resample pool's priority band. Every session is made by
-    // the event loop below, and a session's first working-directory report reads the names.
-    host_answers::install();
-    // **An update comes first** (`update_startup`, 0.4.6 U-12). The admission is
-    // taken shared here, before the data directory is resolved (which may move
-    // it), before settings, sidecars and the hand-over below; then one look at
-    // the update journal. A start the rescue build must finish leaves from
-    // inside the pass, having touched nothing of the data directory.
-    let admitted = update_startup::pass(&request);
-    // **And the third doorbell, which is this program ringing its own** (§7.59).
-    //
-    // The claim on the data directory is R4-5's and is taken exactly where it
-    // was: `is_writer_of` takes it on the first ask and holds it for the life of
-    // the process. What is new is what happens when it is *refused* — a Folio is
-    // already running, and since the ruling of 2026-09-08 this launch is that
-    // Folio's, not a second one. So the command line goes down the well-known
-    // pipe and this process leaves.
-    //
-    // **Above `enter_resident_run` and below the parse**, and both halves of that
-    // are deliberate. Below, because what is handed over is the request the parse
-    // produced. Above, because the one sentence this path can print — a folder
-    // that is not there — belongs on the console it was typed at; from the next
-    // line down, this program's words go into a file, and a person who typed
-    // `folio --cwd D:\gone` would be answered in a log they do not know exists.
-    //
-    // `None` is every reason to carry on and open a window, which is the
-    // behaviour every Folio had before this channel existed — see
-    // `launch_wire::hand_over` for the five of them and for why they are one
-    // branch.
-    //
-    // The binding is `handed` and not `code` on purpose: `main`'s own tail is
-    // pinned by `the_process_leaves_by_the_one_road_a_webview2_host_may_take` on
-    // the literal `leave_process(code)`, and a second call spelled the same way
-    // would answer that search first — turning a pin on where the run's last
-    // line is written into a pin on a branch that never writes one.
-    let storage = persist::storage_dir();
-    //
-    // The hand-over is this phase's owner-thread door (`doors::LaunchHandOver`, row 18), admitted
-    // only in `Starting`. A refusal is one more `None`: carry on and open a window.
-    // **Why a hand-over gave up is kept for the log** (0.4.8 D3): the front door has none, so the
-    // line waits here and is written once `enter_resident_run` has opened this run's.
-    let gave_up = std::cell::Cell::new(None::<String>);
-    let hand_over = || {
-        bt_platform::admission::admitted::<doors::LaunchHandOver, _>(|token| {
-            launch_wire::hand_over(
-                token,
-                &admitted,
-                &storage,
-                &request,
-                say_at_the_front_door,
-                |line| gave_up.set(Some(line)),
-            )
-        })
-        .ok()
-        .flatten()
-    };
-    // **An update's trial takes the claim first** (`update_trial`, §C.7): it
-    // asks for it until the old build has let go, and adopts it into the claim
-    // table before anything below asks who writes here. One a holder launched
-    // that is not handed the claim does not start and does not hand itself
-    // over — its applier sees the trial gone without a receipt and rolls
-    // back. A person's start standing in for U-35's reserved trial offers its
-    // launch to the trial that holds the claim, and when that trial does not
-    // take it within the wait, opens its own window, its writes held (0.4.8
-    // E3). Nothing at all in any other start.
-    let stood_down = match update_trial::take_the_claim(&storage, hand_over) {
-        update_trial::Claimed::Ours => None,
-        update_trial::Claimed::HandedOver(handed) => bt_platform::leave_process(handed),
-        update_trial::Claimed::StoodDown(line) => Some(line),
-        update_trial::Claimed::NotHad(line) => {
-            bt_platform::write_std_error(format!("{line}\n").as_bytes());
-            bt_platform::leave_process(1);
-        }
-    };
-    if !persist::is_writer_of(&storage)
-        && let Some(handed) = hand_over()
-    {
-        bt_platform::leave_process(handed);
-    }
+            }
+        },
+        claim: |request: cli::CliRequest| {
+            // **This thread owns the window from here** (`bt_platform::admission`, ARCHITECTURE §5.1):
+            // the role every owner-thread door is admitted on, in the phase `Starting` until the loop's
+            // first turn. Below the six argv doors, whose processes never have a window, and above the
+            // hand-over, which is this phase's one wait (§5.3 row 18).
+            bt_platform::admission::enter_window_thread();
+            // **The machine's answers for `bt-term`, before anything here can make a session**
+            // (`host_answers`): its names and the resample pool's priority band. Every session is made by
+            // the event loop below, and a session's first working-directory report reads the names.
+            host_answers::install();
+            // **An update comes first** (`update_startup`, 0.4.6 U-12). The admission is
+            // taken shared here, before the data directory is resolved (which may move
+            // it), before settings, sidecars and the hand-over below; then one look at
+            // the update journal. A start the rescue build must finish leaves from
+            // inside the pass, having touched nothing of the data directory.
+            let admitted = update_startup::pass(&request);
+            // **And the third doorbell, which is this program ringing its own** (§7.59).
+            //
+            // The claim on the data directory is R4-5's and is taken exactly where it
+            // was: `is_writer_of` takes it on the first ask and holds it for the life of
+            // the process. What is new is what happens when it is *refused* — a Folio is
+            // already running, and since the ruling of 2026-09-08 this launch is that
+            // Folio's, not a second one. So the command line goes down the well-known
+            // pipe and this process leaves.
+            //
+            // **Above `enter_resident_run` and below the parse**, and both halves of that
+            // are deliberate. Below, because what is handed over is the request the parse
+            // produced. Above, because the one sentence this path can print — a folder
+            // that is not there — belongs on the console it was typed at; from the next
+            // line down, this program's words go into a file, and a person who typed
+            // `folio --cwd D:\gone` would be answered in a log they do not know exists.
+            //
+            // `None` is every reason to carry on and open a window, which is the
+            // behaviour every Folio had before this channel existed — see
+            // `launch_wire::hand_over` for the five of them and for why they are one
+            // branch.
+            //
+            // The binding is `handed` and not `code` on purpose: `main`'s own tail is
+            // pinned by `the_process_leaves_by_the_one_road_a_webview2_host_may_take` on
+            // the literal `leave_process(code)`, and a second call spelled the same way
+            // would answer that search first — turning a pin on where the run's last
+            // line is written into a pin on a branch that never writes one.
+            let storage = persist::storage_dir();
+            //
+            // The hand-over is this phase's owner-thread door (`doors::LaunchHandOver`, row 18), admitted
+            // only in `Starting`. A refusal is one more `None`: carry on and open a window.
+            // **Why a hand-over gave up is kept for the log** (0.4.8 D3): the front door has none, so the
+            // line waits here and is written once `enter_resident_run` has opened this run's.
+            let gave_up = std::cell::Cell::new(None::<String>);
+            let hand_over = || {
+                bt_platform::admission::admitted::<doors::LaunchHandOver, _>(|token| {
+                    launch_wire::hand_over(
+                        token,
+                        &admitted,
+                        &storage,
+                        &request,
+                        say_at_the_front_door,
+                        |line| gave_up.set(Some(line)),
+                    )
+                })
+                .ok()
+                .flatten()
+            };
+            // **An update's trial takes the claim first** (`update_trial`, §C.7): it
+            // asks for it until the old build has let go, and adopts it into the claim
+            // table before anything below asks who writes here. One a holder launched
+            // that is not handed the claim does not start and does not hand itself
+            // over — its applier sees the trial gone without a receipt and rolls
+            // back. A person's start standing in for U-35's reserved trial offers its
+            // launch to the trial that holds the claim, and when that trial does not
+            // take it within the wait, opens its own window, its writes held (0.4.8
+            // E3). Nothing at all in any other start.
+            let stood_down = match update_trial::take_the_claim(&storage, hand_over) {
+                update_trial::Claimed::Ours => None,
+                update_trial::Claimed::HandedOver(handed) => bt_platform::leave_process(handed),
+                update_trial::Claimed::StoodDown(line) => Some(line),
+                update_trial::Claimed::NotHad(line) => {
+                    bt_platform::write_std_error(format!("{line}\n").as_bytes());
+                    bt_platform::leave_process(1);
+                }
+            };
+            if !persist::is_writer_of(&storage)
+                && let Some(handed) = hand_over()
+            {
+                bt_platform::leave_process(handed);
+            }
+            (request, storage, gave_up.take(), stood_down)
+        },
+    });
     // **The thread that owns the window says so, before it owns one.** Every
     // worker this process starts is spawned into the band below normal
     // (`bt_platform::spawn_at_priority`), and this is the other half of that
@@ -77302,7 +77495,7 @@ fn main() -> Result<()> {
     let channel = diagnostics::enter_resident_run(&storage);
     // A start whose hand-over gave up says why where this run's diagnostics go
     // (0.4.8 D3), above the line that says its window saves nothing.
-    if let Some(line) = gave_up.take() {
+    if let Some(line) = gave_up {
         diagnostics::note(&line);
     }
     // A stand-in that stood down beside the reserved trial says so where this
