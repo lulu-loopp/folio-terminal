@@ -123,8 +123,8 @@ crates/bt-source/src/declarations.rs:666 the spacing inside the predicate is the
 crates/bt-source/src/manifest.rs:616 a manifest fixture: a trailing comment set off by spaces
 crates/bt-source/src/manifest.rs:661 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/src/query.rs:902 the display form's second line, indented under the first after an escaped line break
-crates/bt-source/tests/contract.rs:383 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-source/tests/contract.rs:395 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-source/tests/contract.rs:385 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-source/tests/contract.rs:397 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/tests/index.rs:458 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/tests/index.rs:487 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/tests/index.rs:1096 code sample: the indentation after an escaped line break is the sample's own
