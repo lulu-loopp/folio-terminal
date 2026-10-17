@@ -311,6 +311,29 @@ the rules on a fixture. When red, regenerate with
 edit a row. A header count that grows (reads not attributed, calls not
 followed) means the map sees less; the change that regenerates it says why.
 
+## Cross-crate chains
+
+The rule: every name a chain table of `docs/ARCHITECTURE.md` §7 spells in its
+`entry` and `carries` cells is a product item of the crate the row names
+(T-CHAINS-72). §7 is hand-written and the ticket that moves a hop edits its row;
+this guard is what makes a row that was not edited go red instead of going stale.
+The grammar is listed in §7's own header and in the guard's doc: `item` at the
+crate's root, `module::item` in the module it is declared in, `Type::member`
+(a method, a field or a variant, its impl anywhere in the crate),
+`module::Type::member`, and any of them after a package segment. Every other
+shape between backticks in those cells, a row whose cells do not match the
+header, a `crate` cell that is not one package and an `entry` cell with no name
+are refusals naming the row; nothing is skipped.
+
+Where and what to do: `crates/bt-source/tests/chains.rs`
+`every_name_in_the_chain_tables_is_an_item_of_its_crate`, with its planted
+section in `a_chain_row_names_an_item_or_is_refused_by_name` (a resolving row, a
+moved name, a malformed name, an unknown crate) and
+`a_section_the_guard_cannot_read_is_refused`. When red, read where the hop went
+and edit the row to the item it is now; a name that is not an item (a constant,
+a module, a call) is written outside the backticks, or the grammar is widened in
+its own change with a planted case.
+
 ## Window-wait registry and effects
 
 The rule: work reachable from the window thread does not block, and every
