@@ -414,7 +414,11 @@ identities the share's generation beside the minted number so a later share neve
 storage worker (T-STORAGE-WORKER-ON-THE-SEAM, `persist::StorageLane`) on `Ledger` and `Executor` with a
 line of its own, as the hand-off lane is — one FIFO, the trial's receipt served ahead of it, and each job
 kind's own answer road, read only once the request's terminal has been taken (`persist::OnTheWorker`), or
-left to the lane's sink at admission by a reader that reads its road alone. A lane of
+left to the lane's sink at admission by a reader that reads its road alone; and the clipboard lane
+(T-CLIPBOARD-LANE, `clipboard_lane`) on `lane::Queue`, its asker a window that replaces a request it
+owes by a newer one (`Superseded`) and withdraws one it no longer wants (`Cancelled`, which the
+claim `AWithdrawnRequestEndsCancelledOnce` holds every lane to: once, in the sink, never run when
+its work had not begun — and never said by a lane that declares no withdrawal). A lane of
 several threads keeps one ledger per thread, so one thread's end ends only its own requests,
 and keeps what each request asked, so a `Failed` one is settled — as its surface's own error,
 or held by its pane — and asked again only by new input to that surface, rather than left in

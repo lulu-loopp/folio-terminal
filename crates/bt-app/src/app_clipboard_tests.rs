@@ -77,6 +77,13 @@ fn copy_on_select_is_the_readers_answer_and_off_means_off() {
     assert!(!should_copy_on_select_release(Some(&route), true, false));
 }
 
+/// RED (T-CLIPBOARD-LANE) — **`Ctrl+C`'s selection goes only when its copy has landed, and only
+/// while it is still the text that was copied.** A write the clipboard lane refuses applies no
+/// effect, so the selection stands and the reader can try again; a selection made again between
+/// the press and the answer is the reader's newer one, and a landed copy of the old text leaves it.
+///
+/// MUTATION: drop the comparison in `clear_copied_selection` — the newer selection is taken down
+/// by the older copy's answer.
 #[test]
 fn unavailable_clipboard_copy_keeps_selection_and_allows_a_retry() {
     let mut session =
@@ -91,23 +98,26 @@ fn unavailable_clipboard_copy_keeps_selection_and_allows_a_retry() {
     session.set_view_selection(Some(selection.clone()));
     projection.set_selection(Some(selection));
 
-    let copied = copy_selection(&mut session, &mut projection, |_| {
-        Err(anyhow!("injected clipboard owner contention"))
-    });
-    assert!(
-        !copied,
-        "clipboard contention must not escape as a fatal error"
-    );
+    // The press asks the lane to write the selection; a refusal applies no effect.
+    let clipboard = selection_to_copy(&session, false).expect("a selection to copy");
+    assert_eq!(clipboard, "retry me");
     assert_eq!(session.selection_text().as_deref(), Some("retry me"));
     assert!(projection.selection().is_some());
 
-    let mut clipboard = String::new();
-    let copied = copy_selection(&mut session, &mut projection, |text| {
-        clipboard.push_str(text);
-        Ok(())
-    });
-    assert!(copied);
-    assert_eq!(clipboard, "retry me");
+    // A landed copy of some other text leaves the selection that stands.
+    assert!(!clear_copied_selection(
+        &mut session,
+        &mut projection,
+        "an older copy"
+    ));
+    assert!(session.view_selection().is_some());
+
+    // The retry lands: its effect takes the copied selection down.
+    assert!(clear_copied_selection(
+        &mut session,
+        &mut projection,
+        &clipboard
+    ));
     assert!(session.view_selection().is_none());
     assert!(projection.selection().is_none());
 }
@@ -125,13 +135,13 @@ fn ctrl_c_keeps_its_existing_empty_text_write_and_clear_semantics() {
     };
     session.set_view_selection(Some(selection.clone()));
     projection.set_selection(Some(selection));
-    let mut writes = Vec::new();
-
-    assert!(copy_selection(&mut session, &mut projection, |text| {
-        writes.push(text.to_owned());
-        Ok(())
-    }));
-    assert_eq!(writes, [""]);
+    let writes = selection_to_copy(&session, false);
+    assert_eq!(
+        writes.as_deref(),
+        Some(""),
+        "Ctrl+C writes the empty text it is"
+    );
+    assert!(clear_copied_selection(&mut session, &mut projection, ""));
     assert!(session.view_selection().is_none());
     assert!(projection.selection().is_none());
 }

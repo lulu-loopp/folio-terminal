@@ -843,14 +843,17 @@ impl<B: Backend> Runtime<'_, B> {
             birth,
             session,
             projection,
+            paste_hold,
             ..
         } = self.window.tabs[active].shell_mut();
+        // The person's own gesture, so it waits behind a paste the shell is still owed, in order
+        // (`clipboard_lane`), as a keystroke does.
+        let target = match paste_hold {
+            Some(hold) => PtyTarget::BehindAPaste(hold),
+            None => PtyTarget::of(pty.as_ref(), birth.as_ref()),
+        };
         paste_text(session, projection, &text, |bytes| {
-            write_pty_input(
-                PtyTarget::of(pty.as_ref(), birth.as_ref()),
-                bytes,
-                "write an inserted files row path to PTY",
-            )
+            write_pty_input(target, bytes, "write an inserted files row path to PTY")
         })?;
         // One user gesture, landing in one named seat — so it answers what that seat was asking
         // (`attention` plan §10.3.2 row 4). The seat is the shell the path went into, which is the
@@ -1654,7 +1657,7 @@ impl<B: Backend> Runtime<'_, B> {
             self.clear_pane_selection(seat);
             self.publish_interaction_frame()?;
         } else if copy_on_select {
-            self.copy_selection_on_release(seat);
+            self.copy_selection_on_release(seat)?;
         }
         if let Some(hyperlink) = hyperlink_to_open {
             self.activate_hyperlink(seat, hyperlink, hyperlink_control)?;

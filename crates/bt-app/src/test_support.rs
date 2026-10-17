@@ -2634,6 +2634,7 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         // be owed an answer about.
         // Nothing has been pasted into a fixture.
         pending_paste: None,
+        paste_hold: None,
         // A fixture is not a restore, so nothing is owed to its prompt.
         pending_typing: None,
         // Nor a shell being born: it was never going to have one.
@@ -3183,7 +3184,7 @@ pub(crate) fn paste_text_into_on(
 ) -> StagedPaste {
     let recipient = tab.sessions[&target.seat].paste_recipient.clone();
     let prepared = prepare_clipboard_paste(
-        Ok(bt_platform::ClipboardPayload::Text(text.to_owned())),
+        bt_platform::ClipboardPayload::Text(text.to_owned()),
         &recipient,
         false,
     );

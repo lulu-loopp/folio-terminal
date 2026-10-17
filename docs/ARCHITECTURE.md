@@ -1491,9 +1491,17 @@ coalescing its channel — meanwhile; a verb's end that may bring a parked read'
 worker, which looks at its parked reads again after every drain of its channel before it waits
 for mail, and takes those whose turn has come before the questions not yet asked. A read also
 waits while a read of its repository asked before it still waits, so a repository's reads begin
-in the order they were asked (a history page never before the page it continues). Its adapter is `LaneName::GitMutation`. S-7 moves
-the clipboard onto the seam (`docs/ARCHITECTURE-GUARDS.md`, *Lane contract and the completion
-seam*). The storage worker (`persist::StorageLane`, `session-writer`) is on it since
+in the order they were asked (a history page never before the page it continues). Its adapter is `LaneName::GitMutation`. The
+clipboard is on the seam since S-7 (T-CLIPBOARD-LANE, `clipboard_lane`, registry row 26 done): one
+`bt-clipboard` worker, a FIFO share on `lane::Queue` started by its first request, serves every
+read and write of the clipboard through the asking window's own door (`WindowHost::clipboard`),
+and `bt_platform`'s three clipboard doors take its `WorkerCtx`; a window owes one paste and one
+copy at most, a newer one ending the older `Superseded`, and it withdraws a paste whose aim has
+gone or that outlived `clipboard_lane::PASTE_DEADLINE` or the held-input cap (`Cancelled`, the
+seam's first adopter); the person's input to a pane waits behind the paste it is owed
+(`clipboard_lane::PasteHold`) and follows its bytes; `LaneName::Clipboard` keeps every claim,
+including `AWithdrawnRequestEndsCancelledOnce` (`docs/ARCHITECTURE-GUARDS.md`, *Lane contract and
+the completion seam*). The storage worker (`persist::StorageLane`, `session-writer`) is on it since
 T-STORAGE-WORKER-ON-THE-SEAM (D-97 repaid), with a line of its own on `lane::Ledger` and
 `lane::Executor`, as the hand-off lane is: its one worker is started by `Executor::start_worker`;
 every job of every kind — the session's writes and its launch backup, an update trial's receipt

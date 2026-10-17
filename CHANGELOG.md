@@ -124,6 +124,7 @@ All notable changes to Folio are recorded here. The format follows
 - When Folio cannot start adding its line to your PowerShell profile or taking it back out (Undo or the Settings removal), the window now says so in a card instead of doing nothing; the same click tries again. When Folio cannot start switching its Explorer first-page entry on or off, or its launch check of that entry, Folio no longer closes: the switch says so in a card, and the card blames Windows only when Windows refused. <!-- zh: pending T-PROFILE-INSTALL-REFUSED-START -->
 - A picture's hover preview in the terminal no longer stays blank after the glance card showed the same file. <!-- zh: pending T-PEEK-SCALE-ADDRESS-BY-SURFACE -->
 - While you hold one mouse button in a drag or a selection, pressing another button does nothing: a right click no longer opens a menu under the held button, and letting go of the other button does nothing either. <!-- zh: pending F3-cut-4 -->
+- When another program holds the clipboard, copying and pasting no longer freeze Folio's window for a moment: the clipboard is asked in the background, and a paste arrives a moment later, with whatever you typed meanwhile after it. If the clipboard stays busy, the paste is dropped, what you typed goes through, and a notice says the clipboard was busy. <!-- zh: pending T-CLIPBOARD-LANE -->
 
 ### Changed
 
