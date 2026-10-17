@@ -11866,11 +11866,6 @@ mod tests {
         });
     }
 
-    /// **Taken in turn by the tests that read the process's queue of Enable and Undo answers**
-    /// (`take_profile_installs` drains the whole queue, and the suite runs tests on parallel
-    /// threads).
-    static PROFILE_INSTALL_ANSWERS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// A headless window to deliver a `$PROFILE` answer to, and the voice a worker's end is said
     /// in, collecting its lines.
     fn a_window_that_clicked(
@@ -11936,7 +11931,7 @@ mod tests {
     /// for a refused start — the card claims the change may have run.
     #[test]
     fn a_refused_enable_is_answered_on_the_window_that_clicked() {
-        let _turn = PROFILE_INSTALL_ANSWERS
+        let _turn = profile_runtime::PROFILE_INSTALL_ANSWERS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (mut folio, say, said) = a_window_that_clicked("refused-enable");
@@ -11984,7 +11979,7 @@ mod tests {
     /// line.
     #[test]
     fn a_refused_undo_is_answered_on_the_window_that_pressed_it() {
-        let _turn = PROFILE_INSTALL_ANSWERS
+        let _turn = profile_runtime::PROFILE_INSTALL_ANSWERS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (mut folio, say, said) = a_window_that_clicked("refused-undo");
@@ -12087,5 +12082,86 @@ mod tests {
             crate::i18n::unfinished_change(WorkerEnd::Panicked("stopped".to_owned()).started()),
             crate::i18n::Text::ChangeStopped
         );
+    }
+
+    /// A click's worker started by the scripted executor with `body`, which files `answer` and
+    /// then panics: the answers the queue then holds for its window, and the lines its end said
+    /// (read until the worker's end lets the voice go — no clock).
+    fn a_click_that_panics_after_it_answered(
+        unfinished: fn(String) -> ProfileInstallOutcome,
+        answer: ProfileInstallOutcome,
+    ) -> (Vec<ProfileInstallOutcome>, Vec<String>) {
+        let window = winit::window::WindowId::from(41_u64);
+        let (said, lines) = std::sync::mpsc::channel::<String>();
+        let started = profile_runtime::start_click(
+            &crate::lane::Executor::scripted(std::sync::Arc::new(crate::lane::Gate::default())),
+            "powershell-profile-click-suite",
+            "the click suite's worker",
+            move |line| said.send(line.to_owned()).unwrap(),
+            window,
+            unfinished,
+            move |_, filed| {
+                filed.file(answer);
+                panic!("the click suite fails this worker after it answered, on purpose");
+            },
+        );
+        assert!(started, "the worker started");
+        let said = lines.iter().collect::<Vec<_>>();
+        let answers = take_profile_installs();
+        let owed = profile_installs_for(&answers, window).cloned().collect();
+        (owed, said)
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START review) — **an Enable that answered and then panicked
+    /// keeps its answer**: the line was written (here: found present), so the click is answered
+    /// with that, and the panic is said once — never a second answer saying the change stopped
+    /// before it finished. The product's Enable files its answer before the observation that
+    /// follows the write (`Written::publish`), so a panic there is this case.
+    ///
+    /// MUTATION: `ClickAnswer::file` filing every time (no `filed` swap) — a second answer,
+    /// `Refused("Folio stopped before this change finished.")`, follows the true one.
+    #[test]
+    fn an_enable_that_panicked_after_it_answered_keeps_its_answer() {
+        let _turn = profile_runtime::PROFILE_INSTALL_ANSWERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (owed, said) = a_click_that_panics_after_it_answered(
+            ProfileInstallOutcome::Refused,
+            ProfileInstallOutcome::Present,
+        );
+        assert_eq!(
+            owed,
+            vec![ProfileInstallOutcome::Present],
+            "one answer, the true one"
+        );
+        assert_eq!(said.len(), 1, "the panic is said once: {said:?}");
+        assert!(
+            said[0].contains("after it answered, on purpose"),
+            "{said:?}"
+        );
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START review) — **an Undo that answered and then panicked
+    /// keeps its answer**: the Undo is done, so the click is answered `Undone`; a panic in the
+    /// observation that follows (the product files `Undone` before it) is said once and answers
+    /// nothing more.
+    ///
+    /// MUTATION: as above — a second answer, `UndoRefused("Folio stopped before this change
+    /// finished.")`.
+    #[test]
+    fn an_undo_that_panicked_after_it_answered_keeps_its_answer() {
+        let _turn = profile_runtime::PROFILE_INSTALL_ANSWERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (owed, said) = a_click_that_panics_after_it_answered(
+            ProfileInstallOutcome::UndoRefused,
+            ProfileInstallOutcome::Undone,
+        );
+        assert_eq!(
+            owed,
+            vec![ProfileInstallOutcome::Undone],
+            "one answer, the true one"
+        );
+        assert_eq!(said.len(), 1, "the panic is said once: {said:?}");
     }
 }

@@ -7411,14 +7411,6 @@ pub fn context_menu_failed(message: &str) -> String {
     }
 }
 
-/// The same, for the package the first page needs (§7.4a).
-///
-/// A sentence of its own rather than that one with a different word, because the
-/// two failures are different things a reader can act on: one is a registry key
-/// that would not open, and this is a deployment Windows refused — and what it
-/// refused is carried through verbatim, since on the machine where it fires
-/// nobody else can see it.
-#[must_use]
 /// **The sentence a change whose worker did not run to its end is answered with**
 /// (T-PROFILE-INSTALL-REFUSED-START), `started` saying whether the worker ran at all
 /// (`lane::WorkerEnd::started`): a worker the thread door refused changed nothing, and one that
@@ -7431,10 +7423,29 @@ pub(crate) fn unfinished_change(started: bool) -> Text {
     }
 }
 
+/// The same, for the package the first page needs (§7.4a).
+///
+/// A sentence of its own rather than that one with a different word, because the
+/// two failures are different things a reader can act on: one is a registry key
+/// that would not open, and this is a deployment Windows refused — and what it
+/// refused is carried through verbatim, since on the machine where it fires
+/// nobody else can see it.
+#[must_use]
 pub fn explorer_first_page_failed(message: &str) -> String {
     match current() {
         Lang::English => format!("Windows would not register the package: {message}"),
         Lang::Chinese => format!("Windows 拒绝登记这个包：{message}"),
+    }
+}
+
+/// **The same, for a removal Windows refused** (T-PROFILE-INSTALL-REFUSED-START review): the
+/// switch turned off asks Windows to remove the package, not to register it.
+#[must_use]
+pub fn explorer_first_page_remove_failed(message: &str) -> String {
+    match current() {
+        Lang::English => format!("Windows would not remove the package: {message}"),
+        // zh: pending T-PROFILE-INSTALL-REFUSED-START
+        Lang::Chinese => format!("Windows would not remove the package: {message}"),
     }
 }
 

@@ -9,6 +9,11 @@ static REMOVAL: Mutex<Option<RemovalAnswer>> = Mutex::new(None);
 /// A queue, not a slot: two windows' clicks in flight are two answers, and neither replaces the
 /// other.
 static PROFILE_INSTALLS: Mutex<Vec<ProfileInstallAnswer>> = Mutex::new(Vec::new());
+/// **Taken in turn by every test that files or drains [`PROFILE_INSTALLS`]** — the queue is the
+/// process's, `take_profile_installs` drains all of it, and the suite runs tests on parallel
+/// threads. Taken poison-tolerant (`unwrap_or_else(PoisonError::into_inner)`).
+#[cfg(test)]
+pub(super) static PROFILE_INSTALL_ANSWERS: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProfileInstallOutcome {
@@ -629,12 +634,17 @@ pub fn install_recorded(
 /// `seen` is what the row's check read ([`super::powershell_profile_seen`]); `None` when no check
 /// had answered, which is refused as a profile that changed elsewhere would be — there is no
 /// revision to write against.
+///
+/// **The write is answered before what follows it** (T-PROFILE-INSTALL-REFUSED-START review):
+/// what it answers is the edit and the observation still to publish ([`Written`]), so the click's
+/// answer is filed first and a panic in the follow-up cannot turn a written line into "stopped
+/// before this change finished".
 fn install_for_program(
     worker: &bt_platform::admission::WorkerCtx,
     program: &Path,
     arguments: &[OsString],
     seen: Option<&ProfileRevision>,
-) -> io::Result<Option<ProfileEdit>> {
+) -> io::Result<(Option<ProfileEdit>, Written)> {
     let Some(seen) = seen else {
         return Err(io::Error::other(Text::ShellProfileChangedElsewhere.text()));
     };
@@ -669,10 +679,76 @@ fn install_for_program(
         Some(powershell_edition(program)),
         seen,
     )?;
-    observed.seen = ProfileRevision::read(&observed.path);
-    publish_profile_observation(program, observation, observed.clone());
-    publish_powershell_profile_line_present(true);
-    Ok(wrote.edit)
+    Ok((
+        wrote.edit,
+        Written {
+            observed,
+            observation,
+        },
+    ))
+}
+
+/// **What a written line still owes the Profiles page**: the edition's observation, read again
+/// after the write and published under the click's own number, and the line's presence.
+struct Written {
+    observed: ProfileObservation,
+    observation: u64,
+}
+
+impl Written {
+    fn publish(mut self, program: &Path) {
+        self.observed.seen = ProfileRevision::read(&self.observed.path);
+        publish_profile_observation(program, self.observation, self.observed);
+        publish_powershell_profile_line_present(true);
+        if let Some(wake) = WAKE.get() {
+            wake();
+        }
+    }
+}
+
+/// **One click's answer, filed once** (T-PROFILE-INSTALL-REFUSED-START review): by the worker as
+/// soon as the change is known, or by the worker's end when it did not get that far — never by
+/// both, so a panic after the change was answered leaves the true answer standing.
+pub(super) struct ClickAnswer {
+    window: winit::window::WindowId,
+    filed: std::sync::atomic::AtomicBool,
+}
+
+impl ClickAnswer {
+    pub(super) fn file(&self, outcome: ProfileInstallOutcome) {
+        if !self.filed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            answer_profile_install(self.window, outcome);
+        }
+    }
+}
+
+/// **Start one click's worker** (Enable or Undo) by `executor`, named `name`, its end said as
+/// `what` in `say`; `true` when it started. `body` files the click's answer through the
+/// [`ClickAnswer`] it is lent; a start the door refused, or a body that ended in a panic before it
+/// filed one, is answered by `unfinished` with [`unfinished_change`]'s sentence.
+pub(super) fn start_click(
+    executor: &crate::lane::Executor,
+    name: &'static str,
+    what: &'static str,
+    say: impl Fn(&str) + Send + Sync + 'static,
+    window: winit::window::WindowId,
+    unfinished: fn(String) -> ProfileInstallOutcome,
+    body: impl FnOnce(&bt_platform::admission::WorkerCtx, &ClickAnswer) + Send + 'static,
+) -> bool {
+    let answer = std::sync::Arc::new(ClickAnswer {
+        window,
+        filed: std::sync::atomic::AtomicBool::new(false),
+    });
+    let ended = std::sync::Arc::clone(&answer);
+    executor
+        .start_worker(
+            name,
+            crate::lane::Answered::new(what, say, move |end| {
+                ended.file(unfinished(unfinished_change(end).text().to_owned()));
+            }),
+            move |worker| body(worker, &answer),
+        )
+        .is_ok()
 }
 
 /// **Undo of one click**: the click's edit taken back, then what its write brought into existence
@@ -740,24 +816,28 @@ pub(crate) fn start_profile_install(
     seen: Option<ProfileRevision>,
     window: winit::window::WindowId,
 ) -> bool {
-    executor
-        .start_worker(
-            "powershell-profile-install",
-            crate::lane::Answered::new("the PowerShell profile install", say, move |end| {
-                let sentence = unfinished_change(end).text().to_owned();
-                answer_profile_install(window, ProfileInstallOutcome::Refused(sentence));
-            }),
-            move |worker| {
-                let outcome = match install_for_program(worker, &program, &arguments, seen.as_ref())
-                {
-                    Ok(Some(edit)) => ProfileInstallOutcome::Installed { program, edit },
-                    Ok(None) => ProfileInstallOutcome::Present,
-                    Err(error) => ProfileInstallOutcome::Refused(error.to_string()),
-                };
-                answer_profile_install(window, outcome);
-            },
-        )
-        .is_ok()
+    start_click(
+        executor,
+        "powershell-profile-install",
+        "the PowerShell profile install",
+        say,
+        window,
+        ProfileInstallOutcome::Refused,
+        move |worker, answer| match install_for_program(worker, &program, &arguments, seen.as_ref())
+        {
+            Ok((edit, written)) => {
+                answer.file(match edit {
+                    Some(edit) => ProfileInstallOutcome::Installed {
+                        program: program.clone(),
+                        edit,
+                    },
+                    None => ProfileInstallOutcome::Present,
+                });
+                written.publish(&program);
+            }
+            Err(error) => answer.file(ProfileInstallOutcome::Refused(error.to_string())),
+        },
+    )
 }
 
 /// **Undo of one click, for the window `window`**: started at the thread door, below normal, and
@@ -788,34 +868,37 @@ pub(crate) fn start_profile_install_undo(
     edit: ProfileEdit,
     window: winit::window::WindowId,
 ) -> bool {
-    executor
-        .start_worker(
-            "powershell-profile-install-undo",
-            crate::lane::Answered::new("the PowerShell profile Undo", say, move |end| {
-                let sentence = unfinished_change(end).text().to_owned();
-                answer_profile_install(window, ProfileInstallOutcome::UndoRefused(sentence));
-            }),
-            move |worker| {
-                let data = persist::storage_dir();
-                let outcome = match undo_profile_install(&edit, &data) {
-                    Ok(()) => {
-                        let environment =
-                            ProbeEnvironment::current(worker, "PowerShell profile observation");
-                        let _ = observe_profile_lines(
-                            worker,
-                            next_observation(),
-                            &data,
-                            &[program],
-                            &environment,
-                        );
-                        ProfileInstallOutcome::Undone
+    start_click(
+        executor,
+        "powershell-profile-install-undo",
+        "the PowerShell profile Undo",
+        say,
+        window,
+        ProfileInstallOutcome::UndoRefused,
+        move |worker, answer| {
+            let data = persist::storage_dir();
+            match undo_profile_install(&edit, &data) {
+                // Answered before the observation that follows it: the Undo is done, and a
+                // failure of the observation is the observation's to say.
+                Ok(()) => {
+                    answer.file(ProfileInstallOutcome::Undone);
+                    let environment =
+                        ProbeEnvironment::current(worker, "PowerShell profile observation");
+                    let _ = observe_profile_lines(
+                        worker,
+                        next_observation(),
+                        &data,
+                        &[program],
+                        &environment,
+                    );
+                    if let Some(wake) = WAKE.get() {
+                        wake();
                     }
-                    Err(error) => ProfileInstallOutcome::UndoRefused(error.to_string()),
-                };
-                answer_profile_install(window, outcome);
-            },
-        )
-        .is_ok()
+                }
+                Err(error) => answer.file(ProfileInstallOutcome::UndoRefused(error.to_string())),
+            }
+        },
+    )
 }
 
 /// **The answers addressed to `window`**, oldest first — what the window owed them delivers; an
@@ -1571,6 +1654,9 @@ mod tests {
     /// `profile_installs_for` — each window receives both).
     #[test]
     fn two_windows_clicks_in_flight_each_get_their_own_answer() {
+        let _turn = PROFILE_INSTALL_ANSWERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let first = winit::window::WindowId::from(7_u64);
         let second = winit::window::WindowId::from(8_u64);
         let installed = |profile: &str| ProfileInstallOutcome::Installed {

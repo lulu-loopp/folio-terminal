@@ -174,7 +174,10 @@ impl<B: Backend> Runtime<'_, B> {
     /// refusal names a condition — a certificate the machine will not trust, a
     /// package already registered by another user — that no words of ours could
     /// guess.
-    pub(crate) fn report_explorer_package(&mut self, outcome: Result<bool, String>) -> Result<()> {
+    pub(crate) fn report_explorer_package(
+        &mut self,
+        outcome: Result<bool, explorer_menu::PressFailure>,
+    ) -> Result<()> {
         match outcome {
             // The first-run card asked for this beside three others and the
             // Settings row now reads it; a card for each is noise (§7.56 §8).
@@ -194,7 +197,7 @@ impl<B: Backend> Runtime<'_, B> {
                 toast::ToastKind::Error,
                 toast::ToastAnchor::Window,
                 None,
-                i18n::explorer_first_page_failed(&error),
+                error.sentence(),
             ),
         }
     }

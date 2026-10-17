@@ -709,6 +709,7 @@ where
 /// thread's end is reported to the lane's ledger. The product's starts the thread through the
 /// thread door at `band`; the suite's (`Executor::scripted`) starts the same body under the suite's
 /// gate, which can hold each task, end the worker, or make a task panic.
+#[derive(Clone)]
 pub(crate) struct Executor {
     band: ThreadPriority,
     /// The stack its workers are given, in bytes; `None`, the thread door's default.
