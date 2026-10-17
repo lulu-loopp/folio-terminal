@@ -2022,7 +2022,18 @@ Each thread kept its band, so the ones RULES 53 does not except still stand at
 ## 7. Cross-crate chains
 
 A chain is a decision that no single module owns. **Adding a hop edits this
-list.**
+list**, and the ticket that moves a hop edits its row.
+
+**Every table here is read by a guard** (T-CHAINS-72;
+`crates/bt-source/tests/chains.rs`, `docs/ARCHITECTURE-GUARDS.md`
+"Cross-crate chains"). In a table with a `crate` and an `entry` column, each
+backticked name in the `entry` and `carries` cells resolves to a product item of
+the row's crate: `item` at the crate's root, `module::item` in the module it is
+declared in, `Type::member` (a method, a field or a variant, its impl anywhere in
+the crate), `module::Type::member`, and any of them after a package segment
+(`bt_platform::…`), which names that package instead. Any other shape between
+backticks in those two cells is refused by row; the `hop` and `lane` cells are
+prose.
 
 ### 7.1 The printed path — recognition to hand-off
 
@@ -2030,11 +2041,11 @@ A bare absolute path a program printed in the terminal, made clickable.
 
 | hop | crate | entry | carries | lane |
 |---|---|---|---|---|
-| recognition | `bt-transcript` | `paths::detect_absolute_path_candidates`, `paths::may_read_unasked`; an agent's `[Image #k]` placeholder through `paths::image_placeholder_ranges` against the pane's learned `ImagePlaceholderTargets` (T-IMAGE-N) | `PrintedPathCandidate` | the feed, synchronously |
-| verdict | `bt-term` | `session::verify_path`, `DualPlaneSession::ask_about_reprinted_path` / `re_ask_about_link_target`, the `path_verdicts` ledger; beside it the `image_placeholders` table, learned by `learn_image_placeholders_from_fresh_rows` from `OSC 8` labels | `PathVerdict` | asked on `bt-path-verify-worker`; the ledger and the table are per pane and bounded |
-| projection | `bt-viewport` | `implicit_hyperlinks`, `mark_osc_8_dotted`, `ViewportFrame::hyperlink_at` | `CellHyperlink` (defined in `bt-transcript`), `HyperlinkHit` | window thread, at frame build |
-| activation | `bt-app` | `Runtime::activate_hyperlink`, `hyperlink_activation` → `reference_activation` (the one table; a previewed document's links read it too, through `preview_link_activation`), `verified_target_of` | `bt_platform::VerifiedTarget` | window thread, from `mouse_input` |
-| hand-off | `bt-platform` | `handoff::resolved_for_a_door`, `handoff::open_local_path_verified`; a share on another machine under `Ctrl` through `handoff::open_local_path` (no ledger — a share is never asked about); any other scheme through `handoff::shell_execute` | the OS's acceptance or refusal | the OS hand-off lane (`bt-app::handoff_lane`), answered through `AppEvent::HandoffAnswered` |
+| recognition | `bt-transcript` | `paths::detect_absolute_path_candidates`, `paths::may_read_unasked`; an agent's image placeholder ([Image #k]) through `paths::image_placeholder_ranges` against the pane's learned `paths::ImagePlaceholderTargets` (T-IMAGE-N) | `paths::PrintedPathCandidate` | the feed, synchronously |
+| verdict | `bt-term` | `session::verify_path`, `DualPlaneSession::ask_about_reprinted_path` / `DualPlaneSession::re_ask_about_link_target`, the ledger `DualPlaneSession::path_verdicts`; beside it the table `DualPlaneSession::image_placeholders`, learned by `DualPlaneSession::learn_image_placeholders_from_fresh_rows` from OSC 8 labels | `session::PathVerdict` | asked on `bt-path-verify-worker` (`bt-app`'s `run_path_verify_worker`); the ledger and the table are per pane and bounded |
+| projection | `bt-viewport` | `implicit_hyperlinks`, `mark_osc_8_dotted`, `ViewportFrame::hyperlink_at` | `bt_transcript::CellHyperlink`, `HyperlinkHit` | window thread, at frame build |
+| activation | `bt-app` | `Runtime::activate_hyperlink`, `hyperlink_activation` → `reference_activation` (the one table; a previewed document's links read it too, through `preview_link_activation`), `verified_target_of` | `bt_platform::handoff::VerifiedTarget` | window thread, from `mouse_input` |
+| hand-off | `bt-platform` | `handoff::resolved_for_a_door`; `ShellThread::hand_over`, which runs the door's private verbs — on Windows `handoff::windows_handoff::open_local_path_verified`, a share on another machine under Ctrl through `handoff::windows_handoff::open_local_path` (no ledger — a share is never asked about), any other scheme through `handoff::windows_handoff::shell_execute`; their macOS twins in the macOS module beside it | the OS's acceptance or a `handoff::HandOffRefusal` | the OS hand-off lane (`bt-app::handoff_lane`, thread `bt-os-handoff`), answered through `AppEvent::HandoffAnswered` |
 
 The chain **should remain layered** — five crates are not five excessive
 dependencies. Its defect is the absence of one current contract covering
@@ -2055,75 +2066,232 @@ remote `PathBuf` must not silently become a path on the viewing machine.
 `bt-transcript::paths::may_read_unasked` and `Runtime::activate_hyperlink` are
 where the namespace boundary is visible.
 
-### 7.2 The other chains — first pass, 2026-09-23
+### 7.2 The other chains — second pass, 2026-10-17
 
-Named so that the list exists and a hop cannot be added silently. Each line is
-the hops as the code runs them today, in order, with the lane; each ends with
-where the single current contract is written, or that it is not. None of them
-has the §7.1 table yet.
+The first pass (2026-09-23) named six chains as prose lines. This pass is the
+§7.1 form for each, read from the code on `origin/main` the day it was written
+(T-CHAINS-72): the hops in the order the code runs them, the entry, what the hop
+carries, the lane by its thread's name; then where the chain's one contract is
+written, and the facts a ticket must not re-derive. "Window thread" is the
+process's main thread, the one `bt_platform::admission::enter_window_thread`
+marks and winit's loop turns; every `Runtime` method runs there.
 
-- **Attention marks** — three ingress lanes: the escape sequence
-  (`bt-term::adapter`'s `AdapterEvent::AttentionRequest` → `lifecycle` →
-  `DualPlaneSession::apply_attention_request`, a level read off the status
-  snapshot during `Runtime::drain_pty`); the endpoint (`bt-platform::attention_pipe`
-  on `folio-attention-endpoint` → `attention_wire::park` → `AppEvent::AttentionSpoke`
-  → `attention_wire::take`); and the `folio attention` verb process, which
-  writes to that endpoint. They converge at `bt_workbench::attention::AttentionLedger::apply` through
-  `main.rs`'s `settle_attention` and `deliver_attention`, then
-  `notify::desktop_reach` → `Runtime::raise_attention` → `notify::interruption`
-  (a flash or a desktop toast); input answers through `answer_attention` /
-  `answer_attention_in` and `mark_attention_seen`; `TabState::mark_state`
-  paints the tab mark at frame build. Everything after the endpoint runs on the
-  window thread. Contract: `docs/RULES.md` §29, reach also in §30. Which
-  function paints the per-pane mark: not traced.
-- **Resize** — `ResizePlan` and `DualPlaneSession::resize_at`, the viewport's
-  reflow, `bt-pty::PtySession::resize`, and roughly ten free functions in
-  `main.rs` that sequence them. The ordering `flush_pending_pty_resize`
-  represents is the contract.
-- **Paste** — `runtime/clipboard.rs`'s `paste_from_clipboard` →
-  `bt_platform::clipboard_payload`, **synchronous on the window thread**
-  (`Station::ClipboardRead`) → `prepare_clipboard_paste` (paths through
-  `shell_literal`) → `deliver_paste` → `stage_paste` (send, the input line, or
-  held behind the multi-line card) → `send_paste` → `paste_text` →
-  `bt-term::input::paste_bytes` (bracketed or not) → `offer_pty_input` →
-  `PtySession::write_with_reason` → `InputRing::try_push` → `pump_pty_input` on
-  the pane's writer thread. Contract: `docs/RULES.md` §9 and `deliver_paste`'s
-  doc comment ("all four doors arrive here").
-- **Preview** — `open_preview_file` → `open_preview_source_on` → the
-  `PreviewWorker` on `bt-preview-worker` (the `file_reads` lane `Preview`) →
-  `AppEvent::PreviewReady` → `drain_preview_answers` → `apply_preview_results`
-  into the `PreviewBuffer`; formulas go to `bt-math-worker` and come back as
-  `MathReady` → `apply_math_results`; `preview_watch` on `bt-dir-watch` →
-  `PreviewFileChanged` → `advance_preview_watch` → `refresh_preview_file` asks
-  the worker again (a buffer whose disk revision is the file's bytes keeps its
-  body); `save_preview_on` → `PreviewBuffer::request_save` → the storage worker
-  (`session-writer`, §5.1) → `AppEvent::DocumentsAnswered` →
-  `Runtime::hear_preview_saves` → `PreviewBuffer::hear_save`; the quit's and
-  the stop's `PreviewBuffer::write_now_for_quit` still run **synchronously on
-  the window thread** (§5.3 row 20, until S-6c).
-  Contract: `docs/RULES.md` §18 (what a preview shows) and §19 (the buffer and
-  its save); the load, watch and math sequence as one contract: not written.
-- **Web pane** — `open_web_page` → `open_web_page_on` → `webhost::WebSeat::open`
-  → `bt_platform::WebHost` (WebView2, or WKWebView), on the window thread; the
-  host queues the engine's events and wakes the loop with
-  `AppEvent::WebPageSpoke` → `drive_web_page` → `WebSeat::drive` →
-  `apply_web_outcomes`; page pictures go to `web_thumb::PageShrinker` on
-  `folio-web-thumb`, which wakes with the same event; `hand_url_to_the_browser`
-  → `Runtime::hand_off` → the OS hand-off lane. Contract: not written —
-  `docs/RULES.md` §49 is not yet folded. Which thread the engine's callbacks
-  run on: not traced.
-- **Settings** — `settings_mouse_input` → `apply_settings_choice` /
-  `apply_settings_choice_announcing` (both still in `main.rs`) → the row's
-  `*_requested` decoder in `settings.rs` → its `apply_*` →
-  `persist::SettingsStore::store` → `document_request::DocumentState::send_owed`,
-  handed to the storage worker at once with no debounce and landed by receipt
-  (`StorageJob::Document`, `AppEvent::DocumentsAnswered`; §5.1). `settings.json` is read at
-  `SettingsStore::open` and never again in a run; `storage_watch`
-  (`bt-dir-watch` → `StorageChanged` → `advance_storage_watch`) asks the storage
-  worker to re-read only `profiles.json` and the pins, each only when the watcher
-  thread named it, and the answer's bytes are compared with the store's revision
-  (§9). Contract: the hand-over rule is only in
-  `SettingsStore`'s doc comment; `docs/RULES.md` §31 is not yet folded.
+#### 7.2.1 Attention marks
+
+A pane asks for the reader; the request reaches the ledger, then the reader,
+then a mark.
+
+| hop | crate | entry | carries | lane |
+|---|---|---|---|---|
+| escape sequence (weak tier) | `bt-term` | `inline_image::parse_request_attention` → `AdapterEvent::AttentionRequest` → `lifecycle::classify` → `DualPlaneSession::apply_attention_request` | `session::AttentionRequest`; the level `SessionStatus::attention_request` | window thread, inside the feed (`Runtime::drain_pty`) |
+| level to edge | `bt-app` | `deliver_osc_attention` (from `Runtime::drain_pty`) and `settle_attention` (from `Runtime::advance_strip_animation`), each through `bt_workbench::attention::AttentionLedger::weak_edge` | `AttentionDelivery` | window thread |
+| the verb (`folio attention <family>:<event>`) | `bt-app` | `cli::attention` → `attention_wire::run_verb` → `bt_platform::attention_pipe::send_line` | `cli::AttentionCall`, one line of JSON (`attention_wire::Message`) | the verb's own process, which builds no window |
+| endpoint (strong tier) | `bt-platform` | `attention_pipe::AttentionPipe::start`; its listener hands each line to the closure it was given | one line of text | `folio-attention-endpoint` |
+| park and wake | `bt-app` | `attention_wire::open` → `attention_wire::park` (a bounded inbox, the oldest line dropped) → `AppEvent::AttentionSpoke` | one line of text | parked on `folio-attention-endpoint`; the event wakes the window thread |
+| take and deliver | `bt-app` | `FolioApp::user_event` → `attention_wire::take` → `attention_wire::Message::decode` → `deliver_attention`, which finds the pane by `attention_wire::names_this_pane` | `attention_wire::Message` | window thread |
+| ledger | `bt-workbench` | `attention::AttentionLedger::apply` | `attention::Event`, `attention::Reach`, `attention::Outcome` | window thread |
+| reach and interruption | `bt-app` | `notify::desktop_reach` → `Runtime::raise_attention` → `notify::interruption` (a taskbar flash, or a desktop message through the notifications) | `notify::Interruption` | window thread |
+| answer | `bt-app` | `Runtime::answer_attention` → `answer_attention_in` (from typing, the IME, a paste, a click, the wheel); the look through `Runtime::mark_attention_seen` (from `Runtime::activate_tab`) | `UserInputKind`, `bt_workbench::attention::AnswerKind` | window thread |
+| tab mark | `bt-app` | `TabState::mark_state` (from `Runtime::refresh_chrome_with_overlay`) → `seats::window_tab_strip` → `marks::status_dot_sprite` | `seats::TabMarkState` | window thread, at frame build |
+| the pane that asks | `bt-app` | `Runtime::layout_peek_layer` (`LeafSession::session_facts` → `SessionFacts::claim`) → `peek_strip::push_mark_slot` → `marks::status_dot_sprite`; the palette's places row through `palette::place_row` | `peek_strip::PeekLeaf` | window thread, at the peek layer's and the palette's frame build |
+
+Contract: `docs/RULES.md` §29 (attention), its reach also in §30. Facts a ticket
+must not re-derive:
+
+- **Two roads reach the ledger, not three.** The weak tier is a level the
+  session holds (`SessionStatus::attention_request`), the strong tier a line on
+  the endpoint; the `folio attention` verb is a client of the endpoint, writing
+  through `send_line` from a process of its own, so nothing about it is a third
+  ingress into the window process.
+- **A level becomes an edge once.** Both readers of the level —
+  `deliver_osc_attention` in the drain and `settle_attention` on the animation
+  tick — go through `AttentionLedger::weak_edge`, which remembers the last
+  generation it saw, so the second reading of one level mints nothing.
+- **Off the window thread, the endpoint only parks and wakes.** The listener
+  thread pushes the line into `attention_wire`'s bounded inbox and sends
+  `AppEvent::AttentionSpoke`; decoding, naming the pane by capability, the
+  ledger, the reach and the interruption all run on the window thread.
+- **The per-pane mark is drawn off the live pane.** The pane whose request makes
+  a tab's claim is shown by the peek strip's dot (`peek_strip::push_mark_slot`,
+  the tab mark's own `StatusClaim` dot computed per leaf) and the palette's
+  places row; a live pane's head, body and border carry no attention mark, and
+  `seats::pane_mark` is the pane's kind, not its attention.
+
+#### 7.2.2 Resize
+
+A new size reaches a pane's grid at once and its shell at the quiet boundary.
+
+| hop | crate | entry | carries | lane |
+|---|---|---|---|---|
+| ingress | `bt-app` | `FolioApp::window_event` → `FolioApp::on_window_event` → `Runtime::resized` or `Runtime::scale_factor_changed` → `Runtime::resize`; the other ingresses join at the next two rows: a divider drag (`Runtime::drive_divider_drag` → `Runtime::commit_seat_geometry`), a split (`Runtime::split_seat`), a pane zoom (`Runtime::toggle_pane_zoom`), a tab switch (`Runtime::activate_tab`), a pane's text size (`Runtime::step_pane_text_scale`) | the window's new physical size | window thread |
+| solve | `bt-app` | `resize_worth_solving` (a minimised or empty rectangle solves nothing), `Runtime::resolve_seat_layout` → `size_authority_for_rectangle`, `solve_seats` | `bt_layout::solve::SeatLayout` | window thread |
+| per-leaf plan | `bt-app` | `Runtime::resize_leaves_to_layout` (refused while the DPI rectangle may not cut a grid) → `leaf_resize_plan` → `LeafSession::grid_for` | `LeafResizeTarget` | window thread |
+| schedule | `bt-app` | `schedule_leaf_grid_change` (the focused leaf last, through `Runtime::schedule_grid_change`) → `plan_grid_change` → `coalesce_pty_resize_on_grid_change` → `coalesce_pty_resize` | `PendingPtyResize`, the newest grid with the quiet deadline | window thread |
+| reflow | `bt-term` | `DualPlaneSession::resize_at` → `lifecycle::plan_resize` → `TerminalAdapter::resize` | `lifecycle::ResizePlan` | window thread: in the same turn for a shown pane, at the release for a hidden one |
+| release | `bt-app` | `Runtime::turn` → `Runtime::flush_pending_pty_resize` → `release_due_leaf_resize` → `service_pending_pty_resize` (`take_due_pty_resize`, `pty_resize_wake_deadline`) | `PendingPtyResize` | window thread, once per turn, after every other task that can change a session |
+| commit | `bt-app` | `commit_leaf_resize` → `pty_size` → `pty_door::resize`, then `bt_term::DualPlaneSession::mark_pty_resize_requested_at` (or, with nothing to tell, `bt_term::DualPlaneSession::mark_resize_settled_unchanged_at`); `replace_psreadline_resize_reanchor_debt` | `bt_pty::PtySize` | window thread, admitted as `doors::PtyResize` (§5.3 row 12) |
+| pseudoconsole | `bt-pty` | `PtySession::resize` | `PtySize` | window thread, synchronous: the `ResizePseudoConsole` round trip into conhost |
+| close | `bt-app` | `Runtime::finish_resize_if_quiescent` → `bt_term::DualPlaneSession::finish_resize_if_quiescent`; an owed PSReadLine repair through `take_psreadline_resize_reanchor_input` → `write_pty_input` | the repair's bytes | window thread, a later turn (it runs before the release in `Runtime::turn`) |
+| a birth's missed size | `bt-app` | `Runtime::land_births` → `apply_owed_shell_resize` → `pty_door::resize` | `bt_pty::PtySize` | window thread, when the `bt-pty-birth` worker's shell lands |
+
+The free functions in `main.rs` that sequence it, in call order:
+`resize_worth_solving`, `size_authority_for_rectangle`, `solve_seats`,
+`leaf_resize_plan`, `schedule_leaf_grid_change`, `plan_grid_change`,
+`coalesce_pty_resize_on_grid_change`, `coalesce_pty_resize`,
+`release_due_leaf_resize`, `service_pending_pty_resize`, `take_due_pty_resize`,
+`pty_resize_wake_deadline`, `commit_leaf_resize`, `pty_size`,
+`replace_psreadline_resize_reanchor_debt`,
+`take_psreadline_resize_reanchor_input`, and at a birth's landing
+`apply_owed_shell_resize`. The `Runtime` methods around them (`resize`,
+`resolve_seat_layout`, `resize_leaves_to_layout`, `flush_pending_pty_resize`,
+`finish_resize_if_quiescent`) are in `runtime/dpi.rs`, `runtime/panes.rs` and
+`runtime/diagnostics.rs`.
+
+Contract: `docs/RULES.md` §2, *The order a resize runs in* (T-CHAINS-72) — the
+ordering `flush_pending_pty_resize` represents, written there as rules. Facts a
+ticket must not re-derive are that section's four sentences: the solve comes
+before the carry; the grid moves in the gesture's turn and the shell hears once
+per quiet window; at the release the actor reflows, then the input-region phase
+is sampled, then ConPTY is told, then the epoch is closed; and a queued release
+always carries the last grid solved.
+
+#### 7.2.3 Paste
+
+A paste gesture becomes bytes on the pane's writer thread.
+
+| hop | crate | entry | carries | lane |
+|---|---|---|---|---|
+| the gestures | `bt-app` | `Runtime::paste_from_clipboard` (the keyboard's paste chord, from `Runtime::keyboard_input`), `Runtime::paste_from_clipboard_into` (the terminal's menu and the Edit menu), `Runtime::paste_paths_into` (a drop, a dragged path, a saved clipboard picture) | `PasteTarget` | window thread |
+| the clipboard read | `bt-app` | `Runtime::paste_from_clipboard_into` → the seam's clipboard door → `bt_platform::windows_clipboard::clipboard_payload` (macOS: `bt_platform::macos_clipboard_payload::clipboard_payload`) → `Runtime::apply_clipboard_payload` (the target re-checked through `Runtime::live_paste_target`) | `bt_platform::clipboard::ClipboardPayload` | window thread, **synchronous**, under `hang_watch::Station::ClipboardRead` (§5.3 row 26) |
+| prepare | `bt-app` | `prepare_clipboard_paste` (paths through `shell_literal::paths_text`) | `PreparedClipboardPaste` | window thread |
+| convergence | `bt-app` | `Runtime::deliver_paste` → `stage_paste` → `paste_road` (send, the PowerShell input line, or held behind the multi-line card until `Runtime::answer_paste_card`) | `StagedPaste`, `PendingPaste` | window thread |
+| spend | `bt-app` | `Runtime::send_paste` → `paste_body` → `paste_text` (or `paste_spelled` for the input line) → `input::paste_bytes` (bracketed when the pane set mode 2004) | the paste's bytes | window thread |
+| offer | `bt-app` | `offer_pty_input` (a pane in birth holds the bytes instead) | `PtyInput` | window thread |
+| the ring | `bt-pty` | `PtySession::write_with_reason` → `InputRing::try_push` | the paste's bytes, one write | window thread, one lock |
+| the write | `bt-pty` | `pump_pty_input` | the paste's bytes | the pane's writer thread (unnamed, `bt-pty`'s own spawn; outside the thread door, §5.1) |
+
+Contract: `docs/RULES.md` §9 and `Runtime::deliver_paste`'s doc comment. Facts a
+ticket must not re-derive:
+
+- **Two roads converge at `deliver_paste`, and the question is asked there
+  once.** A paste whose text the clipboard holds (`apply_clipboard_payload`) and
+  a paste whose paths are in hand (`paste_paths_into`) both arrive at
+  `Runtime::deliver_paste`, which asks `stage_paste` — and through it
+  `paste_road` — exactly once per paste, after the address is known to be live
+  and before a byte is written.
+- **The clipboard is read on the window thread today**, inside
+  `Station::ClipboardRead`, with the open's retries (five `OpenClipboard`
+  attempts, sleeps of 5, 10, 20 and 40 ms on Windows); S-7
+  (`T-CLIPBOARD-LANE`) moves that read onto a clipboard lane, and that ticket
+  edits this chain's read row.
+- **The window thread never writes to the shell.** It pushes one write into the
+  pane's input ring in the time of one lock (`InputRing::try_push`); the pane's
+  own writer thread drains the ring into the pseudoconsole, so a shell that does
+  not read cannot stall the window.
+
+#### 7.2.4 Preview
+
+A file shown in a preview pane: its load, its watch, its formulas, its save.
+
+| hop | crate | entry | carries | lane |
+|---|---|---|---|---|
+| open | `bt-app` | `Runtime::open_preview_file` → `Runtime::open_preview_file_on` → `Runtime::open_preview_source_on` → `Runtime::land_preview_source_on` → `preview::PreviewPool::open_held` → `preview::PreviewBuffer::claim_head_read` | `preview::PreviewWant` with its `preview::PreviewBase` | window thread |
+| ask | `bt-app` | `preview::PreviewWorker::request` | `preview::PreviewRequest` | window thread, a channel send |
+| read | `bt-app` | `preview::run_preview_worker` (the newest request per target) → `preview::read_head`, `preview::read_whole` or `preview::read_to_compare`, through the file-read door on lane Preview | `preview::PreviewResponse` with its `preview::PreviewAnswer`; wakes with `AppEvent::PreviewReady` | `bt-preview-worker` |
+| land | `bt-app` | `FolioApp::user_event` → `FolioApp::drain_preview_answers` (the application drains the worker's channel once) → `Runtime::apply_preview_results` (each window takes the answers addressed to it, `answers_for`) → `preview::PreviewBuffer::land_read` → `preview::PreviewBuffer::accept` | `preview::PreviewBase` | window thread |
+| watch | `bt-app` | `Runtime::turn` → `Runtime::advance_preview_watch` → `preview_watch::PreviewWatch::sync` and `preview_watch::PreviewWatch::due`; the kernel's news through `preview_watch::listener` and `AppEvent::PreviewFileChanged` (a wake only); folders no kernel hears through `Runtime::ask_the_unwatched_preview_files` | `preview_watch::FileNews` | the ear is opened by `watch-steward`, the listener runs on `bt-dir-watch`, the clock on the window thread |
+| refresh | `bt-app` | `Runtime::refresh_preview_file` → `preview::PreviewBuffer::note_disk_moved` → `Runtime::request_stale_previews` → `preview::PreviewBuffer::claim_head_read` (a comparison read) → back through the read row; landed by `preview::PreviewBuffer::land_comparison` | `preview::DiskVerdict` | window thread, then `bt-preview-worker` |
+| formulas | `bt-app` | `Runtime::resolve_document_math` → `Runtime::request_preview_math` → `computation_lane::ComputationLane::decorate` → `run_decoration_worker` (`MathWorkerRequest::PreviewMath`) → `AppEvent::MathReady` → `FolioApp::drain_math_answers` → `Runtime::apply_math_results` → `PreviewMathCache::land` | `PreviewMathKey`, `DecorationWorkerCompletion::PreviewMath` | asked and landed on the window thread, rendered on `bt-math-worker` (the computation lane's decoration share) |
+| save | `bt-app` | `Runtime::save_preview_on` → `preview::PreviewBuffer::request_save` → `preview::PreviewSaves::submit` → `persist::StorageLane::send_document` → `document_request::serve_document` → `AppEvent::DocumentsAnswered` → `FolioApp::take_preview_save_answers` → `Runtime::hear_preview_saves` → `preview::PreviewPool::hear_save` → `preview::PreviewBuffer::hear_save` | `document_request::DocumentJob`, `document_request::DocumentAnswer`, `preview::SaveAnswer` | asked and heard on the window thread, written on `session-writer` (§5.1) |
+| the quit's and the stop's write | `bt-app` | `FolioApp::settle_quit` → `Runtime::quit_save` → `preview::PreviewPool::save_dirty`; `FolioApp::stop_every_window` → `Runtime::keep_unsaved_edits` → `preview::PreviewPool::keep_dirty`; both → `preview::PreviewBuffer::write_now_for_quit` | `preview::SaveOutcome` | window thread, synchronous (§5.3 row 20), until S-6c (`T-QUIT-AND-STOP-SAVES`) moves it onto the storage worker |
+
+Contract: `docs/RULES.md` §18 (what a preview shows), §19 (the buffer and its
+save) and §56 (the load, the watch and the formulas, T-CHAINS-72). Facts a
+ticket must not re-derive:
+
+- **A read is answered against the body it was issued for.** The base
+  (`PreviewBase`: the buffer's incarnation and revision) is minted only by
+  `PreviewBuffer::claim_head_read`, every request to the worker goes through it,
+  and `land_read` refuses an answer whose base the buffer has moved past.
+- **A watch event is a question, never a load.** The kernel's news only wakes;
+  the window's clock asks the file's stamp after a quiet window, and a moved
+  file under a clean body is read to compare — a file that still holds the
+  body's bytes keeps the body and its history.
+- **A formula's answer belongs to the window's cache, keyed by its content.**
+  `PreviewMathKey` is content, mode, size and ink and nothing else, so an answer
+  lands under its own key whatever pane asked, and a late one cannot clobber a
+  newer body.
+- **The application drains each worker's channel once**, and each window takes
+  only the answers addressed to it (`answers_for`); no window calls `try_recv`
+  on a shared queue.
+
+#### 7.2.5 Web pane
+
+A page in a pane: the host, the engine's events, the wake, the outcomes.
+
+| hop | crate | entry | carries | lane |
+|---|---|---|---|---|
+| open | `bt-app` | `Runtime::open_web_page` → `Runtime::open_web_page_with` → `Runtime::open_web_page_on` (a parked spare first, through `Runtime::adopt_spare_web_page`) → `webhost::WebSeat::open` | the address, and the wake that sends `AppEvent::WebPageSpoke` | window thread |
+| host | `bt-platform` | `WebHost::new`; the engine asked through `WebHost::request_environment` and `WebHost::request_controller` (from `bt_app::webhost::WebSeat::start_environment` and `bt_app::webhost::WebSeat::step`, admitted through the window-thread doors WebEnvironment and WebController); the handlers attached by `WebHost::attach_events` | `webview::WebEvent` | window thread |
+| engine callback | `bt-platform` | each handler, and each creation completion, ends in `Shared::push`, which queues the event and calls the wake | `webview::WebEvent` | **window thread**: WebView2 calls back on the thread that created its environment, inside the message pump winit turns; WKWebView's delegates are main-thread only |
+| wake | `bt-app` | the wake closure built in `Runtime::open_web_page_on` (and in `Runtime::make_spare_web_controller`) → `window_seam::LoopProxy::send_event` → `AppEvent::WebPageSpoke` | nothing; the event is a turn of the loop | window thread |
+| drive | `bt-app` | `FolioApp::user_event` → `FolioApp::for_every_window_engines_included` → `Runtime::drive_web_page` → `webhost::WebSeat::drive` (`bt_platform::WebHost::drain`, then `WebSeat::digest` per event) | `webhost::WebOutcome` | window thread |
+| apply | `bt-app` | `Runtime::apply_web_outcomes` | `webhost::WebOutcome` | window thread |
+| page pictures | `bt-app` | `webhost::WebSeat::capture_page` → `WebOutcome::Captured` in `Runtime::apply_web_outcomes` → `Runtime::page_shrinker` → `web_thumb::PageShrinker::send` → (shrunk) → `AppEvent::WebPageSpoke` → `Runtime::collect_page_pictures` → `web_thumb::PageShrinker::collect` | `web_thumb::ShrinkJob`, `web_thumb::ShrunkPicture` | shrunk on `folio-web-thumb`, collected on the window thread |
+| to the browser | `bt-app` | `Runtime::hand_url_to_the_browser` → `runtime::web::browser_ask` → `Runtime::hand_off` → `handoff_lane::HandoffLane::submit` → `handoff_lane::run_handoff_lane` | `handoff_lane::Ask` | asked on the window thread, handed over on `bt-os-handoff`, answered through `AppEvent::HandoffAnswered` |
+
+Contract: `docs/RULES.md` §49, *The host's thread and its wake* (T-CHAINS-72;
+the row's other entries are still unfolded). Facts a ticket must not re-derive:
+
+- **The engine calls back on the window thread.** WebView2 delivers every
+  callback on the thread that created its environment, which is the window
+  thread and its message pump (`bt-platform`'s `webview` module header; the
+  environment and the controller are asked only through window-thread doors);
+  WKWebView's delegates are main-thread only. Nothing about a callback is
+  cross-thread, so the queue is a `RefCell` queue on the host, not a channel.
+- **A callback only queues and wakes.** It pushes a `WebEvent` and sends
+  `AppEvent::WebPageSpoke`; what the event means is decided on the next turn by
+  `WebSeat::drive`, never inside the callback — except a chord this window
+  owns, which the accelerator handler takes back synchronously, because that
+  callback runs before the page sees the key.
+- **One event wakes every engine in every window.** `WebPageSpoke` carries
+  nothing: its arm drives every window's seats, a closing window's included, and
+  the page shrinker wakes with the same event.
+
+#### 7.2.6 Settings
+
+A press on a Settings row, in force in memory at once and on disk by receipt;
+and a file changed by hand, read back.
+
+| hop | crate | entry | carries | lane |
+|---|---|---|---|---|
+| press | `bt-app` | `Runtime::mouse_input` → `Runtime::settings_mouse_input` → `settings::hit` → `settings::SettingsPanel::press_verb` | `settings::SettingsTarget`, `settings::SettingsKeyVerdict` | window thread |
+| decode and apply | `bt-app` | `Runtime::apply_settings_choice` → `Runtime::apply_settings_choice_announcing` → the row's decoder (for the theme `settings::theme_requested`) → the row's door (for the theme `Runtime::apply_theme_mode`) | the row's value | window thread |
+| store | `bt-app` | `persist::SettingsStore::store` → `document_request::DocumentState::store` → `document_request::DocumentState::send_owed` → `persist::StorageLane::send_document` | `document_request::DocumentJob` (conditional on the revision's bytes) | window thread |
+| write | `bt-app` | `document_request::serve_document`; then `persist::wake_documents` → `AppEvent::DocumentsAnswered` | `document_request::DocumentAnswer` | `session-writer` |
+| receipt | `bt-app` | `FolioApp::take_document_answers` → `Runtime::take_document_answers` → `persist::hear_documents` → `persist::SettingsStore::take_answers` → `document_request::DocumentState::take_answers` → `document_request::DocumentState::on_document` | `document_request::DocumentAnswer` | window thread |
+| open | `bt-app` | `persist::SettingsStore::open` → `persist::SettingsStore::read_at` | `persist::Revision` | window thread, at the window process's start |
+| watch | `bt-app` | `storage_watch::StorageWatch::arm`; `storage_watch::listener` → `AppEvent::StorageChanged` (a wake only); `Runtime::turn` → `Runtime::advance_storage_watch` → `storage_watch::StorageWatch::advance` | `storage_watch::Document` | the ear opened by `watch-steward`, the listener on `bt-dir-watch`, the clock on the window thread |
+| re-read | `bt-app` | `persist::SettingsStore::ask_reread` → `document_request::DocumentState::ask_read` → `persist::StorageLane::send_read` → `document_request::serve_read` → `document_request::DocumentState::on_read` | `document_request::ReadJob` | asked on the window thread, read on `session-writer` |
+| merge | `bt-app` | `Runtime::merge_documents` → `persist::SettingsStore::begin_merge` → each changed value through its row's door → `persist::SettingsStore::end_merge` | the file's fields | window thread |
+
+Contract: `docs/RULES.md` §33 (the three configuration entrances: the settings
+file and the one reload discipline), which now holds the hand-over rule that was
+only in `SettingsStore`'s doc comment. §31 (settings and migrations) is the
+schema and its migrations, not this chain, and stays unfolded. Facts a ticket
+must not re-derive:
+
+- **A press is in force at the press and on disk by receipt.** The row's door
+  changes memory and hands the document to the storage worker at once — no
+  debounce — and only an answer the worker served moves the store's revision
+  (a landed write, or a displaced one kept for the merge), never the press; one
+  write is in flight per document and the newest change waits in `desired`.
+- **Every write is conditional on the revision's bytes**, so a file changed by
+  hand is never overwritten by a press made before Folio read it.
+- **A re-read compares bytes, never documents.** `settings.json`,
+  `keybindings.json`, `profiles.json` and the pins are re-read when the watcher
+  names them; bytes equal to the revision or to a write in flight are Folio's
+  own, and anything else is merged field by field through each row's own door.
 
 ---
 
