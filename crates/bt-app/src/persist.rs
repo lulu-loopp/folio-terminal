@@ -9608,7 +9608,7 @@ mod conditional_write_tests {
             crate::document_request::serve_document_on(
                 worker,
                 &crate::test_support::NoExchangeDrive::new(7),
-                write,
+                &write,
                 &mut |_| {},
             );
         });
@@ -10206,6 +10206,7 @@ pub(crate) mod contract_adapter {
                     outcome: crate::document_request::Outcome::Landed {
                         bytes: Arc::clone(&job.bytes),
                         kept: None,
+                        ordinary_on: None,
                     },
                     not_durable: None,
                     retired: Vec::new(),
