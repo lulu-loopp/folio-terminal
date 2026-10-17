@@ -19388,35 +19388,15 @@ fn dirty_gate_names(
             .collect::<Vec<_>>()
     };
     match request {
-        // **Only the tab's LAST preview pane.** "The pool outlives any ONE
-        // pane — only the LAST preview pane's close would strand it" (P123),
-        // so closing one of two asks nothing at all.
-        restore::GateRequest::ClosePane(seat) => {
-            let tab = active_item(tabs, active_tab);
-            let previews = tab
-                .seats
-                .tree()
-                .seats_in_order()
-                .into_iter()
-                .filter(|found| found.kind == bt_layout::SeatKind::Preview)
-                .count();
-            let closing_a_preview = tab
-                .seats
-                .tree()
-                .find_seat(*seat)
-                .is_some_and(|found| found.kind == bt_layout::SeatKind::Preview);
-            if closing_this_pane_strands_the_pool(closing_a_preview, previews) {
-                one_tab(tab)
-            } else {
-                Vec::new()
-            }
-        }
-        restore::GateRequest::CloseTab(index) => tabs.get(*index).map(one_tab).unwrap_or_default(),
-        // The run's end, asked in the summoned terminal, loses what its shut
-        // would: every tab's dirty buffers.
-        restore::GateRequest::Shut | restore::GateRequest::ShutWithTheRun(_) => {
-            tabs.iter().flat_map(one_tab).collect()
-        }
+        // The pane's tab, the tab, or every tab: the pools the close would lose.
+        restore::GateRequest::ClosePane(_)
+        | restore::GateRequest::CloseTab(_)
+        | restore::GateRequest::Shut
+        | restore::GateRequest::ShutWithTheRun(_) => tabs_a_close_loses(tabs, active_tab, request)
+            .into_iter()
+            .flatten()
+            .flat_map(one_tab)
+            .collect(),
         // A discard names one file, and it is never empty — which matters,
         // because `raise_dirty_gate` treats an empty list as "there is
         // nothing to ask about" and lets the verb through. There is always
@@ -19451,12 +19431,58 @@ fn dirty_gate_names(
     }
 }
 
+/// **The tabs whose pools one close would lose** — `None` for a request that is
+/// not a close of a pane, a tab or a window.
+fn tabs_a_close_loses<'t>(
+    tabs: &'t [TabState],
+    active_tab: usize,
+    request: &restore::GateRequest,
+) -> Option<Vec<&'t TabState>> {
+    match request {
+        // **Only the tab's LAST preview pane.** "The pool outlives any ONE
+        // pane — only the LAST preview pane's close would strand it" (P123),
+        // so closing one of two asks nothing at all.
+        restore::GateRequest::ClosePane(seat) => {
+            let tab = active_item(tabs, active_tab);
+            let previews = tab
+                .seats
+                .tree()
+                .seats_in_order()
+                .into_iter()
+                .filter(|found| found.kind == bt_layout::SeatKind::Preview)
+                .count();
+            let closing_a_preview = tab
+                .seats
+                .tree()
+                .find_seat(*seat)
+                .is_some_and(|found| found.kind == bt_layout::SeatKind::Preview);
+            Some(
+                if closing_this_pane_strands_the_pool(closing_a_preview, previews) {
+                    vec![tab]
+                } else {
+                    Vec::new()
+                },
+            )
+        }
+        restore::GateRequest::CloseTab(index) => Some(tabs.get(*index).into_iter().collect()),
+        // The run's end, asked in the summoned terminal, loses what its shut
+        // would: every tab's dirty buffers.
+        restore::GateRequest::Shut | restore::GateRequest::ShutWithTheRun(_) => {
+            Some(tabs.iter().collect())
+        }
+        _ => None,
+    }
+}
+
 /// **Put `request` to a window's gate over that window's tabs** (ticket 58) —
 /// the whole of [`Runtime::raise_dirty_gate`] except the repaint.
 ///
 /// What the request would lose is read off the tabs, and the gate answers with
-/// it: [`restore::GateRaise::Busy`] while another question is up (its request
-/// kept), [`restore::GateRaise::NothingToAsk`] when nothing is at risk, and
+/// it: [`restore::GateRaise::Busy`] while another question is up or a close
+/// waits (its request kept), [`restore::GateRaise::NothingToAsk`] when nothing
+/// is at risk, [`restore::GateRaise::Waiting`] when the request is a close and
+/// a save of every dirty buffer it would lose is already on its way — the close
+/// waits for their answers instead of asking ([`close_wait_over`], S-6b) — and
 /// otherwise [`restore::GateRaise::Raised`] with the gate now holding this one.
 fn raise_dirty_gate_over(
     gate: &mut restore::DirtyGate,
@@ -19465,7 +19491,63 @@ fn raise_dirty_gate_over(
     request: restore::GateRequest,
 ) -> restore::GateRaise {
     let at_risk = dirty_gate_names(tabs, active_tab, &request);
+    if gate.verdict(&at_risk) == restore::GateRaise::Raised
+        && let Some(wait) = close_wait_over(tabs, active_tab, &request, Instant::now())
+    {
+        gate.wait(wait);
+        return restore::GateRaise::Waiting;
+    }
     gate.raise(request, &at_risk)
+}
+
+/// **The wait a close is held in, when everything it would lose is on its way to
+/// the disk** (S-6b) — `None` when the request is not a close, or one dirty
+/// buffer it would lose has no save of its body on the way
+/// ([`preview::PreviewPool::saves_a_close_awaits`]): that close asks now, as it
+/// always did. The wait names the tab a pane's or a tab's close is about by its
+/// identity, and ends [`restore::CLOSE_WAITS_FOR_A_SAVE`] after `now`.
+fn close_wait_over(
+    tabs: &[TabState],
+    active_tab: usize,
+    request: &restore::GateRequest,
+    now: Instant,
+) -> Option<restore::CloseWait> {
+    let mut awaited = Vec::new();
+    for tab in tabs_a_close_loses(tabs, active_tab, request)? {
+        awaited.extend(tab.preview_pool.saves_a_close_awaits()?);
+    }
+    let tab = match request {
+        restore::GateRequest::ClosePane(_) => Some(active_item(tabs, active_tab).id),
+        restore::GateRequest::CloseTab(index) => tabs.get(*index).map(|tab| tab.id),
+        _ => None,
+    };
+    Some(restore::CloseWait {
+        request: request.clone(),
+        tab,
+        awaited,
+        until: now + restore::CLOSE_WAITS_FOR_A_SAVE,
+        saving: false,
+    })
+}
+
+/// **What has become of every buffer a close waits for**, by name, read off the
+/// window's tabs (S-6b): a buffer no pool here holds any more — its tab gone, or
+/// discarded — loses nothing, and is read as saved.
+fn what_a_close_wait_found(
+    tabs: &[TabState],
+    wait: &restore::CloseWait,
+) -> Vec<(String, preview::AtTheClose)> {
+    wait.awaited
+        .iter()
+        .map(|awaited| {
+            tabs.iter()
+                .find_map(|tab| tab.preview_pool.at_the_close(*awaited))
+                .map_or_else(
+                    || (String::new(), preview::AtTheClose::Saved),
+                    |(name, found)| (name.to_owned(), found),
+                )
+        })
+        .collect()
 }
 
 /// **Keep every dirty preview buffer of these tabs before a stop that cannot ask**
@@ -19773,8 +19855,9 @@ fn keep_owed_documents_over(
 /// to re-run — `closes`, the window itself for a shut and the run's last ordinary
 /// window for [`restore::GateRequest::ShutWithTheRun`] — or `None` when nothing
 /// closes. The whole of [`Runtime::answer_exit`] but the write, which `Save all`
-/// has already made through [`Runtime::quit_save`] (`saved_all`: whether all of
-/// it landed).
+/// hands to the storage worker and waits for across turns (S-6b): its answer is
+/// spent here once the saves have answered (`Runtime::settle_close_wait`;
+/// `saved_all`: whether all of them landed).
 ///
 /// `Cancel` touches nothing and closes nothing. `Save all` closes only when every
 /// write landed ([`quit::Quit::saved`]'s rule one surface down). `Discard` drops
@@ -67182,6 +67265,46 @@ impl<B: Backend> FolioApp<B> {
         first_error.map_or(Ok(()), Err)
     }
 
+    /// **Every window's close that waits for its saves, looked at** (S-6b) — once
+    /// a turn, which the saves' answers wake (`AppEvent::DocumentsAnswered`, heard
+    /// by the buffers first: [`Self::take_preview_save_answers`]) and the waits'
+    /// bound ends (`restore::DirtyGate::waits_until`, in the turn's wake-up).
+    ///
+    /// Each window decides its own (`Runtime::settle_close_wait`); a pane's or a
+    /// tab's close is re-run there. The two closes that are the loop's are re-run
+    /// here, from the top, through the doors they always came through: a
+    /// window's shut as the OS close it was (`WindowEvent::CloseRequested`, which
+    /// puts the gate again and now finds nothing to ask — or asks), the run's end
+    /// as the close of the ordinary window that ends it (`Self::close`, which
+    /// asks the summoned terminal again). A close a `Save all` wait re-requested
+    /// is taken as the dispatcher takes one.
+    fn settle_close_waits(&mut self, event_loop: &B::Loop, now: Instant) -> Result<()> {
+        for index in 0..self.windows.len() {
+            let Some(id) = self.windows.key_at(index) else {
+                continue;
+            };
+            let Some(mut runtime) = self.runtime_at(index) else {
+                continue;
+            };
+            if runtime.window.leaving.is_some() {
+                continue;
+            }
+            let after = runtime.settle_close_wait(now)?;
+            let requested = runtime.take_close_request();
+            match after {
+                runtime::AfterTheWait::Nothing => {}
+                runtime::AfterTheWait::Shut => {
+                    self.on_window_event(event_loop, id, WindowEvent::CloseRequested);
+                }
+                runtime::AfterTheWait::EndTheRunWith(closing) => self.close(closing)?,
+            }
+            if let Some(closing) = requested {
+                self.close(closing)?;
+            }
+        }
+        Ok(())
+    }
+
     fn announce_recovered_edits(&mut self) -> Result<()> {
         let Some(announcement) = recovered::take() else {
             return Ok(());
@@ -68797,8 +68920,11 @@ impl<B: Backend> FolioApp<B> {
         if let Some(app) = self.app.as_mut() {
             app.web_pages_open = pages_open;
         }
+        // **A close waiting for its saves, first** (S-6b): what it closes is settled
+        // by the rest of this turn, as an event's close is.
         if let Err(error) = self
-            .settle_window_ring()
+            .settle_close_waits(event_loop, Instant::now())
+            .and_then(|()| self.settle_window_ring())
             .and_then(|()| self.settle_update_card())
             .and_then(|()| self.settle_application_change())
             .and_then(|()| self.settle_restore_answer())
@@ -68929,7 +69055,14 @@ impl<B: Backend> FolioApp<B> {
             .as_ref()
             .and_then(|app| app.quit.as_ref())
             .and_then(quit::Quit::deadline);
-        let wake_deadline = earliest_deadline([wake_deadline, quit_wake]);
+        // **And every close's bound, while it waits for its saves** (S-6b): the answers
+        // wake the loop themselves; the clock is only the bound.
+        let close_wake = self
+            .windows
+            .values()
+            .filter_map(|window| window.dirty_gate.waits_until())
+            .min();
+        let wake_deadline = earliest_deadline([wake_deadline, quit_wake, close_wake]);
         event_loop
             .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }

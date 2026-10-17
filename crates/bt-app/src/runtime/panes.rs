@@ -2094,7 +2094,9 @@ impl<B: Backend> Runtime<'_, B> {
         if names.is_empty() {
             return None;
         }
-        let lines = request.lines(&names);
+        // The request's lines, and the line a question put at the end of a close's
+        // wait adds (S-6b).
+        let lines = self.window.dirty_gate.lines(&names);
         let title = request.title();
         // **`Discard all` when the card is a list, `Discard` when it names one
         // thing** (B1). The word is a fact about the subject, and the subject is

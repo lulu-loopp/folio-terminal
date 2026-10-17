@@ -6133,6 +6133,38 @@ impl PreviewBuffer {
         self.on_disk.awaits(ticket)
     }
 
+    /// **Whether a save on its way carries this body** (S-6b): the save on the
+    /// worker was handed the body this buffer holds now, or a press is pending
+    /// behind it — the pending slot sends the body as it stands when the save
+    /// out is answered. A body typed on since the press, with nothing pending,
+    /// is not on its way: its landing would leave the buffer dirty.
+    fn is_saving_this_body(&self) -> bool {
+        self.on_disk.carries(self.revision)
+    }
+
+    /// **What has become of this buffer, for a close that waits for it**
+    /// (S-6b; [`crate::restore::CloseWait`]) — read on each turn the wait is looked at.
+    ///
+    /// Asked in this order, because the first that holds decides: a body moved
+    /// since the close was asked is the person's edit (or a Reload) and the
+    /// close is withdrawn; a clean body is in its file; a save of this body
+    /// still on its way is waited for; a conflict the pane said and nobody has
+    /// answered is the conflict's own road; anything else — a refusal, a failed
+    /// task, the worker gone — did not land, and the pane has said why.
+    fn at_the_close(&self, asked_at: u64) -> AtTheClose {
+        if self.revision != asked_at {
+            AtTheClose::Edited
+        } else if !self.dirty {
+            AtTheClose::Saved
+        } else if self.is_saving_this_body() {
+            AtTheClose::OnItsWay
+        } else if self.on_disk.has_an_unanswered_conflict() {
+            AtTheClose::Conflict
+        } else {
+            AtTheClose::NotSaved
+        }
+    }
+
     /// **Write the body back to its file now, on the thread that calls this** —
     /// what a quit's `Save` and a stop that cannot ask still do on the window
     /// thread ([`PreviewPool::save_dirty`], [`PreviewPool::keep_dirty`]; row 20's
@@ -7330,6 +7362,66 @@ impl PreviewPool {
             .collect()
     }
 
+    /// **The dirty buffers a close would lose, when a save of each one's body is
+    /// already on its way** (S-6b) — what a pane's, a tab's or a window's close
+    /// waits for instead of asking ([`crate::restore::CloseWait`]): each buffer by its
+    /// incarnation, with the body revision it holds now. `None` when one dirty
+    /// buffer has no save of its body on the way — its close asks now, as it
+    /// always did — and an empty list when nothing here is dirty.
+    pub(crate) fn saves_a_close_awaits(&self) -> Option<Vec<Awaited>> {
+        self.buffers
+            .iter()
+            .filter(|buffer| buffer.dirty)
+            .map(|buffer| buffer.is_saving_this_body().then(|| Awaited::now(buffer)))
+            .collect()
+    }
+
+    /// **Every dirty buffer, as a close that has just saved them waits for
+    /// them** (S-6b; the shut's `Save all`).
+    pub(crate) fn dirty_awaited(&self) -> Vec<Awaited> {
+        self.buffers
+            .iter()
+            .filter(|buffer| buffer.dirty)
+            .map(Awaited::now)
+            .collect()
+    }
+
+    /// **What has become of a buffer a close waits for**, with its name — or
+    /// `None` when this pool does not hold it ([`PreviewBuffer::at_the_close`]).
+    pub(crate) fn at_the_close(&self, awaited: Awaited) -> Option<(&str, AtTheClose)> {
+        self.buffers
+            .iter()
+            .find(|buffer| buffer.incarnation == awaited.incarnation)
+            .map(|buffer| (buffer.name.as_str(), buffer.at_the_close(awaited.revision)))
+    }
+
+    /// **Save every dirty buffer, for a shut answered `Save all`** (S-6b): each
+    /// one's save handed to the storage worker as a press on it would hand it
+    /// ([`PreviewBuffer::request_save`]) — the window thread writes nothing —
+    /// its answer said on the surface `shown_on` names for it. A buffer whose
+    /// conflict the pane said and nobody has answered is not sent: the shut is
+    /// not the person's answer to bytes they may not have seen (S-6a's ruling),
+    /// and the wait finds it as the conflict it is. Answers each refusal made
+    /// at the hand-over — no file, a body over the bound, too many saves out, no
+    /// worker — with the surface to say it on.
+    pub(crate) fn save_for_a_shut(
+        &mut self,
+        saves: &mut PreviewSaves,
+        shown_on: impl Fn(&PreviewSource) -> crate::PreviewSurface,
+    ) -> Vec<(crate::PreviewSurface, PreviewSource, String)> {
+        let mut refused = Vec::new();
+        for buffer in self.buffers.iter_mut().filter(|buffer| buffer.dirty) {
+            if buffer.on_disk.has_an_unanswered_conflict() {
+                continue;
+            }
+            let surface = shown_on(&buffer.source);
+            if let SaveAsked::Refused(why) = buffer.request_save(saves, surface) {
+                refused.push((surface, buffer.source.clone(), why));
+            }
+        }
+        refused
+    }
+
     /// **The names a quit's card owes** — every dirty buffer's, and every
     /// buffer's whose redo history holds a body a save sent that did not land
     /// (R1): leaving would take that body with it.
@@ -7500,6 +7592,45 @@ static PREVIEW_INCARNATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::A
 
 fn next_incarnation() -> BufferId {
     BufferId(PREVIEW_INCARNATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
+/// **One dirty buffer a close waits for** (S-6b; [`crate::restore::CloseWait`]): which
+/// buffer — its incarnation, which follows it wherever its tab goes — and the
+/// body revision it held when the close was asked, so that an edit made while
+/// the close waits is told from the save landing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Awaited {
+    incarnation: BufferId,
+    revision: u64,
+}
+
+impl Awaited {
+    /// `buffer`, as it stands now.
+    fn now(buffer: &PreviewBuffer) -> Self {
+        Self {
+            incarnation: buffer.incarnation,
+            revision: buffer.revision,
+        }
+    }
+}
+
+/// **What has become of a buffer a close waits for** (S-6b;
+/// [`PreviewBuffer::at_the_close`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AtTheClose {
+    /// The file holds its body: the close loses nothing of it.
+    Saved,
+    /// A save of its body is still on its way to the disk.
+    OnItsWay,
+    /// Its body moved since the close was asked — an edit, or a Reload: the
+    /// close is withdrawn, and the next close asks again.
+    Edited,
+    /// Its save met another writer's bytes, and the pane says so: the close is
+    /// withdrawn, and the pane stays for the person to look.
+    Conflict,
+    /// Its save did not land — refused, failed on, or never answered because
+    /// the worker ended — and the pane has said why.
+    NotSaved,
 }
 
 /// What is being asked about a file.
@@ -8166,6 +8297,14 @@ impl OnDisk {
 
     fn awaits(&self, ticket: u64) -> bool {
         self.out.as_ref().is_some_and(|out| out.ticket == ticket)
+    }
+
+    /// Whether the save out was handed body revision `body`, or a press waits
+    /// behind it, whose send takes the body as it then stands (S-6b).
+    fn carries(&self, body: u64) -> bool {
+        self.out
+            .as_ref()
+            .is_some_and(|out| self.again || out.body == body)
     }
 
     /// A save was handed over. It is the person's press, so a conflict said

@@ -7807,6 +7807,43 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 
+    /// **Every dirty buffer of this window's tabs handed to the storage worker,
+    /// for a shut answered `Save all`** (S-6b): each as a press on it would hand
+    /// it ([`preview::PreviewPool::save_for_a_shut`]) — the window thread writes
+    /// nothing — its answer said on the pane of its tab that shows its file, and
+    /// a refusal at the hand-over said there now. A buffer no pane of its tab
+    /// shows is said on no surface: if it does not land, the window's card names
+    /// it (`Runtime::settle_close_wait`).
+    pub(in crate::runtime) fn save_every_dirty_preview(&mut self) {
+        let saves = &mut self.app.preview_saves;
+        let mut refused = Vec::new();
+        for tab in &mut self.window.tabs {
+            let shown: Vec<(PreviewSurface, preview::PreviewSource)> = tab
+                .preview_panes
+                .iter()
+                .filter_map(|(surface, pane)| pane.source().map(|source| (surface, source.clone())))
+                .collect();
+            refused.extend(tab.preview_pool.save_for_a_shut(saves, |source| {
+                shown
+                    .iter()
+                    .find(|(_, showing)| showing == source)
+                    .map_or(PreviewSurface::Peek, |(surface, _)| *surface)
+            }));
+        }
+        let now = Instant::now();
+        for (surface, source, why) in refused {
+            let still_shows_it = self
+                .preview_buffer_on(surface)
+                .is_some_and(|buffer| buffer.source() == &source);
+            if still_shows_it {
+                self.preview_pane_mut(surface).say(Some((
+                    preview::save_notice(preview::SaveOutcome::Failed(why)),
+                    now,
+                )));
+            }
+        }
+    }
+
     /// **The storage worker's answers about preview saves, heard by this
     /// window's buffers** (S-6a): each answer goes to the buffer that asked, if
     /// one of this window's tabs holds it ([`preview::PreviewSaves::deliver`]),
