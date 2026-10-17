@@ -134,8 +134,8 @@ pub(crate) enum NoExchange {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Drive(pub(crate) Option<u64>);
 
-/// **The volume a request's file is on, as the worker meets it**: its exchange
-/// and its identity. The product's is [`TheVolume`]; a test scripts one that
+/// **The volume a request's file is on, as the worker meets it**: its exchange,
+/// its identity and the plain road's rename. The product's is [`TheVolume`]; a test scripts one that
 /// answers as a drive without the exchange does.
 pub(crate) trait Volume {
     /// `bt_platform::replace_keeping_displaced`'s contract.
@@ -147,6 +147,10 @@ pub(crate) trait Volume {
     ) -> Result<bt_platform::Displaced, bt_platform::ExchangeRefusal>;
     /// The drive `file` is on.
     fn drive(&self, file: &Path) -> Drive;
+    /// The plain road's one step on the file: `staged`, already written and
+    /// flushed, takes `target`'s name by one rename
+    /// (`bt_persist::commit_staged`). The error in the system's words.
+    fn commit(&self, staged: &Path, target: &Path) -> Result<(), String>;
 }
 
 /// **The operating system's volume**: the exchange door and the volume's own
@@ -165,6 +169,10 @@ impl Volume for TheVolume {
 
     fn drive(&self, file: &Path) -> Drive {
         Drive(bt_platform::volume_identity(file))
+    }
+
+    fn commit(&self, staged: &Path, target: &Path) -> Result<(), String> {
+        bt_persist::commit_staged(staged, target).map_err(|error| error.to_string())
     }
 }
 
@@ -264,8 +272,12 @@ pub(crate) enum Outcome {
     /// file held before, kept because the exchange is not known to be durable;
     /// a later durable landing retires it. `ordinary_on` names the drive when
     /// the bytes went there by an ordinary write because it cannot exchange two
-    /// files in one step (`NoExchange::PlainWriter`): a crash during it can
-    /// leave the file cut short.
+    /// files in one step (`NoExchange::PlainWriter`): the staged copy took the
+    /// name by one rename, so a crash leaves the old file or the new one, never
+    /// a part of either; on a drive with no journal (FAT, exFAT) a crash at that
+    /// rename can leave the folder's entry for the file damaged, for the
+    /// system's disk check to repair, and a writer that wrote the file between
+    /// the last check of its bytes and the rename is replaced unseen.
     Landed {
         bytes: Arc<[u8]>,
         kept: Option<PathBuf>,
@@ -549,13 +561,18 @@ fn exchange(
         ),
         Err(ExchangeRefusal::Link) => match job.link_policy {
             LinkPolicy::Refuse => refused(Refusal::Link),
-            LinkPolicy::PlainWriter => plainly(worker, job, expected, temp, None),
+            LinkPolicy::PlainWriter => plainly(worker, volume, job, expected, temp, None),
         },
         Err(ExchangeRefusal::ExchangeUnavailable(error)) => match job.no_exchange {
             NoExchange::Refuse => refused(Refusal::ExchangeUnavailable(error.to_string())),
-            NoExchange::PlainWriter => {
-                plainly(worker, job, expected, temp, Some(volume.drive(&job.which)))
-            }
+            NoExchange::PlainWriter => plainly(
+                worker,
+                volume,
+                job,
+                expected,
+                temp,
+                Some(volume.drive(&job.which)),
+            ),
         },
         Err(ExchangeRefusal::BackupNameTaken(path)) => refused(Refusal::BackupNameTaken(path)),
         Err(ExchangeRefusal::Failed(error)) => refused(Refusal::Disk(error.to_string())),
@@ -563,38 +580,43 @@ fn exchange(
 }
 
 /// **The plain write** a request's policy asks for where the exchange refused:
-/// the staged sibling goes; the file is read again, and only while it still
-/// holds `expected` is it replaced, keeping what it carried, with no displaced
-/// copy to read back. A writer that crossed since the precondition was read is
-/// answered as the precondition answers it — `Moved` with its bytes — and is
-/// not written over: there is no exchange to hand its bytes back after the
-/// write, so the plain road asks before it. `ordinary_on`: the drive, when the
-/// road was taken because the drive cannot exchange.
+/// the sibling already staged and flushed is the copy that goes in — nothing
+/// writes the body again. What a rename can carry is carried onto it first
+/// (`bt_platform::carry_metadata`: the attribute word on Windows; owner, mode
+/// and extended attributes on Unix); then the file is read again, and only
+/// while it still holds `expected` does the staged copy take its name by one
+/// rename ([`Volume::commit`]), with no displaced copy to read back. A writer
+/// that crossed before that read is answered as the precondition answers it —
+/// `Moved` with its bytes — and is not written over; the staged copy goes. One
+/// that writes between that read and the rename is replaced unseen: the
+/// rename is the plain road's whole window, which the exchange road does not
+/// have. `ordinary_on`: the drive, when the road was taken because the drive
+/// cannot exchange.
 fn plainly(
     worker: &WorkerCtx,
+    volume: &dyn Volume,
     job: &DocumentJob,
     expected: &[u8],
     temp: &Path,
     ordinary_on: Option<Drive>,
 ) -> Served {
-    let _ = std::fs::remove_file(temp);
+    bt_platform::carry_metadata(temp, &job.which);
     if let Some(answer) =
         unless_it_holds(bt_persist::read_stable(worker, &job.which), Some(expected))
     {
+        let _ = std::fs::remove_file(temp);
         return answer;
     }
-    Served::plainly(
-        match bt_persist::atomic_replace_keeping_metadata(&job.which, &job.bytes) {
-            Ok(()) => Outcome::Landed {
-                bytes: Arc::clone(&job.bytes),
-                kept: None,
-                ordinary_on,
-            },
-            Err(error) => Outcome::Refused {
-                cause: Refusal::Disk(error.to_string()),
-            },
+    Served::plainly(match volume.commit(temp, &job.which) {
+        Ok(()) => Outcome::Landed {
+            bytes: Arc::clone(&job.bytes),
+            kept: None,
+            ordinary_on,
         },
-    )
+        Err(error) => Outcome::Refused {
+            cause: Refusal::Disk(error),
+        },
+    })
 }
 
 /// **§3.2 step 4: what the exchange displaced, read and judged.** The bytes

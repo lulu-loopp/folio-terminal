@@ -58,7 +58,7 @@ mod write_tracker;
 
 pub use atomic::{
     Staging, atomic_replace_keeping_metadata, atomic_replace_preserving, atomic_write,
-    atomic_write_carrying_from, stage_beside,
+    atomic_write_carrying_from, commit_staged, stage_beside,
 };
 pub use debounce::Debouncer;
 pub use error::WriteError;

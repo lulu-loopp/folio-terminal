@@ -8832,7 +8832,7 @@ mod conditional_write_tests {
         on_a_worker(move |worker| {
             crate::document_request::serve_document_on(
                 worker,
-                &crate::test_support::NoExchangeDrive(7),
+                &crate::test_support::NoExchangeDrive::new(7),
                 write,
                 &mut |_| {},
             );

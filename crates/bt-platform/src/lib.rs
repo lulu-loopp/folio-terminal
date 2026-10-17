@@ -2283,6 +2283,9 @@ pub fn same_file(one: &std::path::Path, other: &std::path::Path) -> bool {
 /// number (`FILE_ID_INFO`), on Unix the device (`st_dev`). Two paths on one
 /// volume answer the same number, and two volumes mounted at once answer two.
 /// `None` when the path cannot be asked or the platform keeps no such identity.
+/// **A link is asked as itself**, as [`same_file`] asks it (`symlink_metadata`
+/// on Unix, `FILE_FLAG_OPEN_REPARSE_POINT` on Windows): a symbolic link names
+/// the volume the link is on, not the volume of the file it points at.
 /// It blocks on the disk: a worker's question.
 #[must_use]
 pub fn volume_identity(path: &std::path::Path) -> Option<u64> {
@@ -2292,7 +2295,7 @@ pub fn volume_identity(path: &std::path::Path) -> Option<u64> {
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = file_identity(path);
+        let _ = path;
         None
     }
 }

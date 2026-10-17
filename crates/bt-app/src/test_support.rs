@@ -2125,9 +2125,24 @@ pub(crate) fn serve_on_a_worker(
 /// (T-PREVIEW-NO-EXCHANGE-RULING): its exchange answers `ERROR_NOT_SUPPORTED`
 /// (50), the code a Windows volume without `ReplaceFileW`'s operation gives,
 /// classified by the platform's own rule (`bt_platform::volume_cannot_replace`),
-/// and touches nothing; it names itself drive `.0`. Every other call is the
+/// and touches nothing; it names itself drive `drive`. The plain road's rename
+/// is the disk's own (`bt_persist::commit_staged`), counted in `commits`, so a
+/// test sees whether the staged copy is what went in. Every other call is the
 /// disk's own.
-pub(crate) struct NoExchangeDrive(pub(crate) u64);
+pub(crate) struct NoExchangeDrive {
+    pub(crate) drive: u64,
+    pub(crate) commits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl NoExchangeDrive {
+    /// Drive `drive`, no rename made on it yet.
+    pub(crate) fn new(drive: u64) -> Self {
+        Self {
+            drive,
+            commits: std::sync::Arc::default(),
+        }
+    }
+}
 
 impl document_request::Volume for NoExchangeDrive {
     fn exchange(
@@ -2147,7 +2162,13 @@ impl document_request::Volume for NoExchangeDrive {
     }
 
     fn drive(&self, _file: &std::path::Path) -> document_request::Drive {
-        document_request::Drive(Some(self.0))
+        document_request::Drive(Some(self.drive))
+    }
+
+    fn commit(&self, staged: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
+        self.commits
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        bt_persist::commit_staged(staged, target).map_err(|error| error.to_string())
     }
 }
 

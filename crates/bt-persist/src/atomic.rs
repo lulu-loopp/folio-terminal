@@ -72,6 +72,23 @@ pub fn stage_beside(path: &Path, contents: &[u8], staging: Staging) -> io::Resul
     Ok(tmp_path)
 }
 
+/// **Step 2 of [`atomic_write`] alone**: a file [`stage_beside`] already wrote
+/// and flushed takes `path`'s name by one rename (`MoveFileExW` with
+/// `MOVEFILE_REPLACE_EXISTING` on Windows, `rename(2)` on Unix), and nothing
+/// writes the body again. For the storage worker's plain road, which stages
+/// once, checks the file's bytes, and only then puts the staged copy in place,
+/// so the one moment another writer's bytes could be replaced unseen is the
+/// rename itself. A crash leaves `path` holding its old file or the new one,
+/// never a part of either. What a rename can carry is the caller's to carry
+/// first ([`bt_platform::carry_metadata`]). A rename that fails removes the
+/// staged file.
+///
+/// # Errors
+/// The rename's error.
+pub fn commit_staged(staged: &Path, path: &Path) -> Result<(), WriteError> {
+    commit_rename(staged, path)
+}
+
 /// Write a new sibling document atomically, carrying the permissions and other
 /// metadata the source document can lend to a rename.
 ///

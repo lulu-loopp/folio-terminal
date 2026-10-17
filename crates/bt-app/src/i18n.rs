@@ -959,7 +959,11 @@ text_entries! {
     /// The clause for a file that is a link or has a second name (S-6a round 2).
     PreviewSaveLink,
     /// The clause for a file on a drive that cannot replace it in one step —
-    /// FAT and exFAT removable media (S-6a round 2).
+    /// FAT and exFAT removable media (S-6a round 2). Said by
+    /// `preview::refusal_said` for `Refusal::ExchangeUnavailable`, which only a
+    /// request whose `no_exchange` is `Refuse` is answered; since the owner's
+    /// ruling of 2026-10-15 the preview's own is `PlainWriter`, so no product road
+    /// says it while that switch stands (T-PREVIEW-NO-EXCHANGE-RULING).
     PreviewSaveNoExchange,
     /// The clause for a name beside the file, needed for its replacement, that
     /// is taken (S-6a round 2).
@@ -3929,8 +3933,8 @@ impl Text {
             Self::PreviewSaved => pick(lang, "Saved", "已保存"),
             Self::PreviewSavedOrdinarily => pick(
                 lang,
-                "Saved · this drive cannot replace a file in one step, so this save was an ordinary write",
-                "Saved · this drive cannot replace a file in one step, so this save was an ordinary write", // zh: pending T-PREVIEW-NO-EXCHANGE-RULING
+                "Saved · this drive cannot replace a file in one step",
+                "Saved · this drive cannot replace a file in one step", // zh: pending T-PREVIEW-NO-EXCHANGE-RULING
             ),
             Self::PreviewConflict => pick(
                 lang,
@@ -3959,8 +3963,8 @@ impl Text {
             ),
             Self::PreviewSaveNoExchange => pick(
                 lang,
-                "this drive cannot replace the file safely",
-                "this drive cannot replace the file safely", // zh: pending S-6a
+                "this drive cannot replace a file in one step",
+                "this drive cannot replace a file in one step", // zh: pending S-6a
             ),
             Self::PreviewSaveNameTaken => pick(
                 lang,

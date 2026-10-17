@@ -8000,10 +8000,14 @@ pub enum SaveOutcome {
 /// one step** — FAT and exFAT removable media on macOS, and Windows file systems
 /// that refuse the replacement: the one switch for the policy (S-6a round 2),
 /// ruled by the owner on 2026-10-15 (T-PREVIEW-NO-EXCHANGE-RULING). The file is
-/// written the plain way — still only while it holds the bytes the buffer last
-/// read or placed — and the pane says so the first time on each drive; a crash
-/// during such a write can leave the file cut short. The configuration stores
-/// keep refusing.
+/// written the plain way — the copy staged beside it is renamed over it, still
+/// only while the file holds the bytes the buffer last read or placed — and the
+/// pane says so the first time on each drive. A crash leaves the old file or the
+/// new one; on a drive with no journal a crash at the rename can leave the
+/// folder's entry damaged, for the system's disk check to repair; and a program
+/// that writes the file between the last check of its bytes and the rename is
+/// replaced unseen, the one window the exchange road does not have. The
+/// configuration stores keep refusing.
 const ON_A_VOLUME_THAT_CANNOT_EXCHANGE: crate::document_request::NoExchange =
     crate::document_request::NoExchange::PlainWriter;
 
@@ -15265,7 +15269,7 @@ mod tests {
     /// RED (S-6a round 2, B4) — **a refused save is said in the pane's words.**
     ///
     /// Each refusal Folio decides is a sentence of the language table —
-    /// `ExchangeUnavailable` is "this drive cannot replace the file safely" (the
+    /// `ExchangeUnavailable` is "this drive cannot replace a file in one step" (the
     /// preview's own policy writes plainly on such a drive since the owner's
     /// ruling of 2026-10-15, `ON_A_VOLUME_THAT_CANNOT_EXCHANGE`, so the worker
     /// does not answer it this refusal) — and a disk's own error is the
@@ -15376,7 +15380,10 @@ mod tests {
     /// save is refused and the file keeps its old bytes; ② `PreviewSaves::saved`
     /// without remembering the drive (drop the `push`) — the second save says the
     /// sentence again; ③ `PreviewSaves::saved` answering "Saved" once any drive
-    /// was told (`!self.told_ordinary.is_empty()`) — the second drive is "Saved".
+    /// was told (`!self.told_ordinary.is_empty()`) — the second drive is "Saved";
+    /// ④ `document_request::plainly` writing the body again after its check
+    /// (`bt_persist::atomic_replace_keeping_metadata(&job.which, &job.bytes)` in
+    /// place of `volume.commit`) — no staged copy takes the name on the drive.
     #[test]
     fn a_save_on_a_drive_that_cannot_exchange_lands_plainly_and_says_so() {
         use crate::test_support::NoExchangeDrive;
@@ -15390,10 +15397,17 @@ mod tests {
             content.push_str("第一 first\n");
             true
         }));
+        let seven = NoExchangeDrive::new(7);
+        let renames = Arc::clone(&seven.commits);
         assert_eq!(
-            saved_on(&mut memo, &mut saves, &jobs, NoExchangeDrive(7), None),
+            saved_on(&mut memo, &mut saves, &jobs, seven, None),
             Some(SaveOutcome::SavedOrdinarily),
             "the first save on the drive says it was an ordinary write"
+        );
+        assert_eq!(
+            renames.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the copy staged before the check is what took the name: the body is not written again after it"
         );
         assert_eq!(
             std::fs::read_to_string(on_disk(&memo)).unwrap(),
@@ -15415,7 +15429,7 @@ mod tests {
             true
         }));
         assert_eq!(
-            saved_on(&mut memo, &mut saves, &jobs, NoExchangeDrive(7), None),
+            saved_on(&mut memo, &mut saves, &jobs, NoExchangeDrive::new(7), None),
             Some(SaveOutcome::Saved),
             "said once per drive"
         );
@@ -15429,7 +15443,7 @@ mod tests {
             true
         }));
         assert_eq!(
-            saved_on(&mut notes, &mut saves, &jobs, NoExchangeDrive(8), None),
+            saved_on(&mut notes, &mut saves, &jobs, NoExchangeDrive::new(8), None),
             Some(SaveOutcome::SavedOrdinarily),
             "a second drive says it again"
         );
@@ -15476,7 +15490,7 @@ mod tests {
                     &mut buffer,
                     &mut saves,
                     &jobs,
-                    crate::test_support::NoExchangeDrive(7),
+                    crate::test_support::NoExchangeDrive::new(7),
                     Some(theirs.clone()),
                 )
             } else {

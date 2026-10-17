@@ -988,8 +988,8 @@ request it took and will not answer is known. Two policies per request:
 to put it back and answers `Conflict`; a link is refused unless the request's
 policy is `PlainWriter`, and a volume that cannot exchange is refused unless
 the request's `no_exchange` is `PlainWriter` (the preview's save; every store
-refuses), whose plain write reads the file again first and writes only while
-it holds `expected`. **One queue is per-file order**: every request naming one path is
+refuses), whose plain write keeps the copy already staged, reads the file
+again and renames that copy over it only while it holds `expected`. **One queue is per-file order**: every request naming one path is
 served in the order it was queued, whichever store or buffer queued it. The
 four stores hold the queue as `persist::StorageLane` clones of the session
 store's (a document request is admitted only while the worker is up — the
