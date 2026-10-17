@@ -1337,13 +1337,17 @@ and no exported macro naming the vocabulary;
 (7) every function that takes a `WaitToken` takes one registry door's and runs its
 effect inside its own call: not `async`, returning no closure, future, iterator,
 `dyn` object or `fn` pointer, keeping no `'static` closure;
-(8) **the closed `Drop` inventory**: thirteen `Drop`s may reach the vocabulary —
+(8) **the closed `Drop` inventory**, which since T-DROP-DOORS (2026-10-17) is
+empty: no `Drop` in the product may reach the vocabulary. The thirteen that did —
 `DirWatch` on both platforms, `trace_sink::Shutdown`, `AttentionPipe` and
 `LaunchPipe` on both platforms, the two video engines, `VideoSeat`, `VideoSeats`,
-`PtySession` and WinHTTP's `http::Request` — each with its chain pinned body by
-body (the first-party edges in order, the vocabulary effects by call site) and a
-repayment in `docs/plans/structural-debt.md` (D-40, D-78…D-82); any other `Drop`
-that names a wait, or calls a door or a pinned body, is red;
+`PtySession` and WinHTTP's `http::Request` (D-40, D-78…D-82) — are retired
+through explicit doors their owners call (`retire_within`, `retire`,
+`close_within`, `shutdown`, `retire_session`, `flush_through_its_door`), and a
+`Drop` that finds its door uncalled waits for nothing and says so once
+(`bt_platform::door_skipped`); a `Drop` that names a wait, or calls a door or a
+pinned body, is red, and the table and its pinned chains stand ready for a row
+an owner rules in;
 (9) every thread `bt-app` and `bt-platform` start comes through the thread door
 (A1c's guard, absorbed under its own name), and `bt-effects` and `bt-compose`
 start none;

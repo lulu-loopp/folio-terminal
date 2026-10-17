@@ -6211,3 +6211,49 @@ who can reach them: `DirWatch` is named in `bt-app`'s product only inside `crate
 (`watch_steward::tests::only_the_steward_starts_or_drops_a_watch`), so every drop happens on the
 steward's thread. Row 8 of §5.3 is `done`. D-40 stays open for the unbounded join itself, which
 a worker now waits on.
+
+## Revision (p), 2026-10-17 — the closed `Drop` inventory is empty (T-DROP-DOORS)
+
+L9 (T-DROP-DOORS) repays the thirteen retained exceptions of revision (n)'s table, TD-1…TD-13, and
+the debt rows behind them: D-40's remainder, D-78, D-79, D-80, D-81 and D-82
+(`docs/plans/structural-debt.md`). The rule, one for all of them: **the door is the only road
+that waits.** Each value is retired through an explicit door its owner calls; its `Drop` keeps
+only what needs no wait; a `Drop` that finds the door was never called does not wait in its
+place — it does the part that needs no wait, leaves the rest to the process's end, and says so
+once (`bt_platform::door_skipped`, which `fn main` points at `diagnostics::note`; `bt-pty`, which
+has no edge to `bt-platform`, says it to standard error in its own voice).
+
+| id | live exception | door, and who calls it | its `Drop` now | 2026-10-17 disposition |
+|---|---|---|---|---|
+| TD-1 | `DirWatch` (Windows) | `retire_within(self, &WorkerCtx, DIR_WATCH_RETIRE_BUDGET)` — the stop, a bounded wait through `wait::sleep_within`, the join, then the three handles; the watch steward, on its worker | `SetEvent`, the thread let go with its handles, said once | **retired** (D-40) |
+| TD-2 | `DirWatch` (macOS) | the same door — the stop source signalled, the bounded wait, the join; the steward | the signal, the thread let go, said once | **retired** (D-40) |
+| TD-3 | `trace_sink::Shutdown` | `flush_through_its_door(self)` — the one `TraceFlush` admission; `fn main`'s tail and its build-error return | said once | **retired** (D-78) |
+| TD-4, TD-5 | `AttentionPipe` (Windows, Unix) | `retire(self)` — stop, join, close the event or unlink the name; any owner (the product's lives in a static) | the stop, the listener let go, said once | **retired** (D-79) |
+| TD-6, TD-7 | `LaunchPipe` (Windows, Unix) | the same | the same | **retired** (D-79) |
+| TD-8, TD-9 | `video::engine::Engine`, `macos_player::Engine` | `shutdown(&mut self)` — now a request that waits for nothing (`Shutdown` sent, the thread let go); the seats, on every close road | the same request, said once | **retired** (D-80) |
+| TD-10, TD-11 | `VideoSeat`, `VideoSeats` | `VideoSeat::shutdown`, `VideoSeats::shutdown_all` — every road that ends a window (`Runtime::let_go_of_this_window`) | no `Drop` | **retired** (D-80) |
+| TD-12 | `PtySession` | `retire_session` → `take_apart` (the recording finished, the bounded reap and join) on `pty-retirement` | the part that needs no wait — the child killed without a reap, the rings closed, the threads let go, the pseudoconsole left — said once | **retired** (D-81) |
+| TD-13 | `http::Request` (Windows) | `close_within(self, CLOSE_WAIT)`; `download_from`, on every road out of the exchange | the handle closed, said once; the callback gives the count back | **retired** (D-82) |
+
+`EXCEPTIONS` contracts 13 → 0 and `PINNED` 40 → 0; the check over every other `Drop` stands, so a
+`Drop` that names a wait, or calls a door or a pinned body, is red, and a row an owner rules in
+later goes into the table with its pinned chain.
+
+**Where the waits went.** TD-1 and TD-2's join and TD-12's reap and join are worker waits, on the
+steward and on `pty-retirement`; TD-3's is the admitted exit door it always was; TD-4…TD-7's join
+is the door's, and no product road calls it; TD-13's is the update job's worker's, inside the
+door. TD-8…TD-11's wait — a 2 ms poll up to `SHUTDOWN_BUDGET` and a join, per engine, on the
+window thread at every close (`window_waits.tsv` row 25) — is gone from the close: the one wait for
+engine threads is the process's, at exit, in the new owner-thread door `MediaQuiet` (row 27,
+Exiting, station 223), whose body waits on the engine ledger within `SHUTDOWN_BUDGET` before the
+readers' quiet and `MFShutdown`. Row 25 is `done`; row 27 stays `open` for the owner's ruling on
+whether `MediaQuiet` joins revision (b)6's closed C7 list, as rows 15–17's doors did (a new member
+needs that ruling), or the way out's media waits move to a worker.
+
+**The census.** No spawn site is added or removed. The bare-site inventory shrinks by the drops'
+joins (both `DirWatch` arms, both engines' `shutdown` poll and join); the moved effects keep their
+counts (the endpoints' `SetEvent`/`CloseHandle`/`join` and `libc::write`/`close` now under
+`retire`, `stop_listening` and `hang_up`; WinHTTP's `wait_timeout` under `close_within`); the
+`# effects` section gains `DirWatch::retire_within` on each arm (`worker-door-body`, reached from
+the watch steward's row through the steward's `Held` trait) and `video::shutdown_media_session`
+(`owner-door-body`, `MediaQuiet`).
