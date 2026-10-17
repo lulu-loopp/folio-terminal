@@ -82,6 +82,11 @@ impl AttentionPipe {
     pub fn counts(&self) -> PipeCounts {
         match self._never {}
     }
+
+    /// The door the real arms retire their endpoint through (T-DROP-DOORS). Unreachable.
+    pub fn retire(self) {
+        match self._never {}
+    }
 }
 
 /// **The client half** — one line into somebody else's endpoint.

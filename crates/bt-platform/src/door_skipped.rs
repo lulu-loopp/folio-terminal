@@ -48,6 +48,34 @@ pub fn skipped_on_this_thread() -> u64 {
     SKIPPED.try_with(Cell::get).unwrap_or(0)
 }
 
+/// **What a door test waits on, and for how long** — the suites' patience for a movement that must
+/// come: a drop's thread ending, a door returning. A wait that ends on its message costs nothing
+/// when the machine is quick; running out is the test's red, by name.
+#[cfg(test)]
+pub(crate) const PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// One message, within [`PATIENCE`], or the test that awaited `what` fails by name.
+#[cfg(test)]
+pub(crate) fn received<T>(messages: &std::sync::mpsc::Receiver<T>, what: &str) -> T {
+    match messages.recv_timeout(PATIENCE) {
+        Ok(message) => message,
+        Err(_) => panic!("nothing within the door suites' patience while awaiting {what}"),
+    }
+}
+
+/// **Drop `value` on a thread of its own and answer how many skipped doors that thread said** —
+/// within [`PATIENCE`], so a drop that waits for what the test is holding fails the test by name
+/// rather than hanging it.
+#[cfg(test)]
+pub(crate) fn dropped_alone<V: Send + 'static>(value: V, what: &str) -> u64 {
+    let (said, heard) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        drop(value);
+        let _ = said.send(skipped_on_this_thread());
+    });
+    received(&heard, what)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
