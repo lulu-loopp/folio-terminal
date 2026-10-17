@@ -2130,12 +2130,42 @@ impl MathWorkerRequest {
     }
 }
 
+/// **What a resample is for, and for whom** — with the leaf and the content key, the address
+/// [`ScaleWorkerRequest::same_target`] coalesces by. Every variant names its asker down to the
+/// slot that takes the answer (T-SCALE-ADDRESS-PER-ASKER; CONVENTIONS「共享队列上的地址必须一路唯一到取答案的那一层」):
+/// a pane's printed picture by its occurrence, a glance by its surface, a preview's picture by
+/// its own number, and a page's picture by the size the window's raster cache files it under.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ScalePurpose {
     InlineImage(u64),
     Peek(PeekSurface),
-    Preview,
-    MarkdownImage,
+    Preview(PictureAsker),
+    /// The size is the address because the window's cache is: one entry per content key per size
+    /// ([`MarkdownRasterKey`]), which every page of the window reads. Two sizes of one picture are
+    /// two entries waiting, and one displacing the other left the older `Pending` for good — a
+    /// `Pending` entry is never asked again.
+    MarkdownImage((u32, u32)),
+}
+
+/// **Which preview picture asked for a resample** (T-SCALE-ADDRESS-PER-ASKER): one number per
+/// picture a preview surface shows, minted when the surface starts showing it
+/// ([`PreviewImageState::new`]), written on its question and carried home on the answer.
+///
+/// Every preview surface of a tab asks under the tab's focused shell, so without it two panes over
+/// one picture asked one question. At two sizes the newer displaced the older, and the older pane
+/// waited for an answer that was never coming; at one size the two joined, the one answer went to
+/// whichever pane was found first, and the other waited for good. The number is the picture's
+/// and not its host's for the reason [`PreviewPanes::awaiting_scale`] gives: the picture travels
+/// with its pane into a torn-off window and back, and its number travels with it. Process-wide,
+/// like [`next_incarnation`], so no two pictures in any window hold the same one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PictureAsker(u64);
+
+impl PictureAsker {
+    fn mint() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
 }
 
 /// **Which of the window's two glances asked for a peek resample**
@@ -2167,8 +2197,11 @@ enum ScaleWorkerRequest {
         surface: PeekSurface,
         task: bt_term::InlineImageScaleTask,
     },
+    /// A preview surface's picture, at the size its pane draws it, asked by that picture
+    /// ([`PictureAsker`]).
     Preview {
         leaf: ShellAddress,
+        asker: PictureAsker,
         task: bt_term::InlineImageScaleTask,
     },
     /// One picture in a markdown page, at the size the page draws it
@@ -2186,8 +2219,8 @@ impl ScaleWorkerRequest {
         match self {
             Self::InlineImage { task, .. } => ScalePurpose::InlineImage(task.occurrence_id),
             Self::Peek { surface, .. } => ScalePurpose::Peek(*surface),
-            Self::Preview { .. } => ScalePurpose::Preview,
-            Self::MarkdownImage { .. } => ScalePurpose::MarkdownImage,
+            Self::Preview { asker, .. } => ScalePurpose::Preview(*asker),
+            Self::MarkdownImage { .. } => ScalePurpose::MarkdownImage(self.size()),
         }
     }
 
@@ -2243,9 +2276,12 @@ impl ScaleWorkerRequest {
 
     /// Coalescing is per leaf: two panes asking for the same picture at the same size are two
     /// answers owed, and letting one stand in for the other is how a pane ends up waiting forever
-    /// for a raster that was delivered next door. The purpose is per surface on the same terms
-    /// ([`PeekSurface`]): the flyout and the glance card over one file are two slots waiting, and
-    /// one superseding the other left the older one waiting for nothing.
+    /// for a raster that was delivered next door. The purpose names the asker below the leaf on
+    /// the same terms ([`ScalePurpose`]): the flyout and the glance card over one file are two
+    /// slots waiting ([`PeekSurface`]), two preview panes over one picture are two pictures
+    /// waiting ([`PictureAsker`]), and a page's picture at two sizes is two cache entries waiting.
+    /// One superseding the other left the older one waiting for nothing, so a newer request
+    /// supersedes or joins only its own asker's.
     fn same_target(&self, other: &Self) -> bool {
         self.leaf() == other.leaf()
             && self.purpose() == other.purpose()
@@ -2271,9 +2307,10 @@ impl ScaleWorkerRequest {
                     scaled: bt_term::scale_inline_image(&task),
                 },
             ),
-            Self::Preview { leaf, task } => (
+            Self::Preview { leaf, asker, task } => (
                 leaf,
                 DecorationWorkerCompletion::PreviewScaledImage {
+                    asker,
                     scaled: bt_term::scale_inline_image(&task),
                 },
             ),
@@ -2299,18 +2336,13 @@ enum DecorationWorkerCompletion {
     /// A decoded image resampled into the display box a band shows it in. Resampling a
     /// wallpaper-sized decode is tens of milliseconds, so it belongs here and never on the event
     /// thread.
-    ScaleInlineImage {
-        scaled: bt_term::ScaledInlineImage,
-    },
+    ScaleInlineImage { scaled: bt_term::ScaledInlineImage },
     PeekImage {
         path: PathBuf,
         result: std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError>,
     },
     /// One video's frame and the facts that came out of the same open — see [`VideoGlance`].
-    PeekVideoFrame {
-        path: PathBuf,
-        glance: VideoGlance,
-    },
+    PeekVideoFrame { path: PathBuf, glance: VideoGlance },
     /// The head of one animated picture's frames, or the reason there are none —
     /// see [`animation::decode`].
     PeekAnimation {
@@ -2342,7 +2374,9 @@ enum DecorationWorkerCompletion {
         surface: PeekSurface,
         scaled: bt_term::ScaledInlineImage,
     },
+    /// A preview's resample, and the picture that asked for it ([`PictureAsker`]).
     PreviewScaledImage {
+        asker: PictureAsker,
         scaled: bt_term::ScaledInlineImage,
     },
     /// What the disk said about one printed path (§7.1.5j) — all of it, because since audit 3 C-2
@@ -2363,9 +2397,7 @@ enum DecorationWorkerCompletion {
     /// One picture of a markdown page, resampled to the size that page draws it
     /// at (§7.1.3k). It is filed by content and size, which is the whole of the
     /// key — see [`MarkdownRasterKey`].
-    MarkdownScaledImage {
-        scaled: bt_term::ScaledInlineImage,
-    },
+    MarkdownScaledImage { scaled: bt_term::ScaledInlineImage },
 }
 
 /// **What the page lane found** — two shapes rather than one optional picture, because a re-hover
@@ -5818,9 +5850,13 @@ impl PreviewPanes {
     /// **Which surface's picture asked this exact question of the scale
     /// worker**, if one of them did.
     ///
-    /// The request ledger read back the way it was written: by the target tuple
-    /// (`content key, width, height`) that the asking picture recorded on itself
-    /// before sending. Because the ledger entry lives on the *pane*, it travels
+    /// The request ledger read back the way it was written: by the picture's own
+    /// number ([`PictureAsker`]) and the target tuple (`content key, width,
+    /// height`) that the asking picture recorded on itself before sending. The
+    /// number is what keeps two panes over one picture at one size from taking
+    /// each other's answers (T-SCALE-ADDRESS-PER-ASKER): each asked under its
+    /// own address, so each is owed its own. Because the ledger entry lives on
+    /// the *pane*, it travels
     /// with the pane — into a torn-off window, back into a docked pane — and the
     /// answer finds its asker across either move. Routing the answer by "whoever
     /// holds the texture lane now" instead is the 2026-08-17 report: in exactly
@@ -5830,12 +5866,17 @@ impl PreviewPanes {
     /// An entry cannot outlive its host, and that is by construction rather than
     /// by a sweep: it *is* a field of the pane, so [`Self::remove`] takes it away
     /// with everything else the surface was holding.
-    fn awaiting_scale(&self, target: &PeekThumbnailTarget) -> Option<PreviewSurface> {
+    fn awaiting_scale(
+        &self,
+        asker: PictureAsker,
+        target: &PeekThumbnailTarget,
+    ) -> Option<PreviewSurface> {
         self.panes
             .iter()
             .find(|(_, pane)| {
-                pane.image()
-                    .is_some_and(|picture| picture.pending.as_ref() == Some(target))
+                pane.image().is_some_and(|picture| {
+                    picture.asker == asker && picture.pending.as_ref() == Some(target)
+                })
             })
             .map(|(surface, _)| *surface)
     }
@@ -25971,6 +26012,9 @@ impl PictureRefusal {
 /// display-sized raster and the question currently in flight for the solver's body rectangle.
 struct PreviewImageState {
     path: PathBuf,
+    /// **The number this picture asks the scale share under** ([`PictureAsker`]), and the one its
+    /// answers come home to.
+    asker: PictureAsker,
     pending: Option<PeekThumbnailTarget>,
     raster: Option<PeekThumbnail>,
     /// **Why there is no picture here**, and what may still be done about it.
@@ -26044,6 +26088,7 @@ impl PreviewImageState {
     fn new(path: PathBuf) -> Self {
         Self {
             path,
+            asker: PictureAsker::mint(),
             pending: None,
             raster: None,
             failure: None,

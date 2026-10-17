@@ -963,6 +963,21 @@ fn two_panes_on_a_watched_lane(
     bt_layout::SeatId,
     [PreviewSurface; 2],
 ) {
+    two_panes_on_a_watched_lane_beside(tag, Vec::new())
+}
+
+/// [`two_panes_on_a_watched_lane`], with `others` after it in the strip; the panes' tab is in
+/// front.
+fn two_panes_on_a_watched_lane_beside(
+    tag: &str,
+    others: Vec<crate::TabState>,
+) -> (
+    HeadlessFolio,
+    crate::computation_lane::fixtures::Watched,
+    Arc<crate::lane::Gate>,
+    bt_layout::SeatId,
+    [PreviewSurface; 2],
+) {
     let mut seats = crate::seats::Seats::lone_terminal();
     let shell = seats.identity();
     // The first pane pinned, so the second is a pane of its own rather than the first reused.
@@ -988,7 +1003,9 @@ fn two_panes_on_a_watched_lane(
         layout,
         overflow,
     );
-    let mut folio = HeadlessFolio::with_tabs(tag, vec![tab], 0);
+    let mut tabs = vec![tab];
+    tabs.extend(others);
+    let mut folio = HeadlessFolio::with_tabs(tag, tabs, 0);
     let gate = Arc::new(crate::lane::Gate::default());
     let lane = crate::computation_lane::fixtures::watched(crate::lane::Executor::scripted(
         Arc::clone(&gate),
@@ -1379,6 +1396,7 @@ fn a_busy_resample(
     lane.lane
         .scale(crate::ScaleWorkerRequest::Preview {
             leaf,
+            asker: crate::PictureAsker::mint(),
             task: crate::test_support::scale_task("忙着 busy.png", 8),
         })
         .ok()
@@ -1589,5 +1607,347 @@ fn a_late_card_answer_after_the_card_came_down_is_dropped() {
     assert!(
         folio.window.peek_picture.is_none(),
         "a late card answer leaves the slot of a card that has gone empty"
+    );
+}
+
+// ── every resample's address names its asker (T-SCALE-ADDRESS-PER-ASKER) ─────
+
+/// `surface`'s picture, in the panes' tab.
+fn picture_on(folio: &HeadlessFolio, surface: PreviewSurface) -> &crate::PreviewImageState {
+    folio.window.tabs[0]
+        .preview_panes
+        .get(surface)
+        .and_then(PreviewPane::image)
+        .expect("the surface shows its picture")
+}
+
+/// **Both panes over one picture ask their resamples while the scale share is busy**: each shows
+/// `file` (the second at `second_zoom`, when given), the window reads it, and the read lands while
+/// a busy resample holds the worker. Answers the busy request and the two pending targets.
+fn two_panes_ask_together(
+    folio: &mut HeadlessFolio,
+    lane: &mut crate::computation_lane::fixtures::Watched,
+    gate: &crate::lane::Gate,
+    panes: [PreviewSurface; 2],
+    file: &Path,
+    second_zoom: Option<f32>,
+) -> (ComputationId, [crate::PeekThumbnailTarget; 2]) {
+    for surface in panes {
+        a_picture_on(folio, surface, file);
+    }
+    if let Some(scale) = second_zoom {
+        folio.window.tabs[0]
+            .preview_panes
+            .entry(panes[1])
+            .zoom_to(crate::ImageZoom::scaled(scale));
+    }
+    folio.runtime().refresh_preview_for_layout();
+    assert!(
+        read_awaited(folio, file).is_some(),
+        "the fixture's own precondition: the panes read the file"
+    );
+    let read = lane.next_ended(
+        crate::computation_lane::Share::Decoration,
+        crate::computation_lane::fixtures::nobody,
+    );
+    gate.hold();
+    let entered = gate.entered();
+    let leaf = folio.runtime().focused_shell_address();
+    let busy = a_busy_resample(lane, leaf);
+    assert!(
+        gate.wait_entered(entered + 1),
+        "the busy resample reaches the worker"
+    );
+    the_window_takes(folio, vec![read]);
+    let asked = panes.map(|surface| {
+        picture_on(folio, surface)
+            .pending
+            .clone()
+            .expect("each pane asks its resample")
+    });
+    (busy, asked)
+}
+
+/// RED (T-SCALE-ADDRESS-PER-ASKER) — **two preview panes over one picture at two sizes each get
+/// their picture**: the panes ask while the scale share is busy, the second zoomed out so the two
+/// questions are two sizes. Neither request supersedes the other, and each pane holds its own
+/// size's raster with nothing left pending.
+///
+/// MUTATION: give every preview picture one address (`Self::Preview { .. } =>
+/// ScalePurpose::Preview(PictureAsker(0))` in `ScaleWorkerRequest::purpose`) — the second pane's
+/// request displaces the first's, and the first pane waits for good.
+#[test]
+fn two_preview_panes_at_two_sizes_each_get_their_picture() {
+    let (mut folio, mut lane, gate, _shell, panes) =
+        two_panes_on_a_watched_lane("preview-two-sizes");
+    let file = scratch_png_named("两种大小 two sizes");
+    let _written = crate::test_support::ScratchFile(file.clone());
+    std::fs::write(&file, png_bytes(240, 120)).expect("a scratch file this test owns");
+    let (busy, asked) =
+        two_panes_ask_together(&mut folio, &mut lane, &gate, panes, &file, Some(0.25));
+    assert_ne!(
+        asked[0], asked[1],
+        "the fixture's own precondition: the two panes ask two sizes"
+    );
+    gate.release();
+    let resamples = every_resample_but(&mut lane, busy);
+    assert!(
+        !resamples.iter().any(|(_, _, terminal, _)| matches!(
+            terminal,
+            crate::lane::Terminal::Superseded { .. }
+        )),
+        "neither pane's resample supersedes the other's"
+    );
+    the_window_takes(&mut folio, resamples);
+    for (surface, target) in panes.into_iter().zip(&asked) {
+        let picture = picture_on(&folio, surface);
+        assert!(
+            picture.pending.is_none()
+                && picture
+                    .raster
+                    .as_ref()
+                    .is_some_and(|raster| raster.matches(target)),
+            "each pane holds its picture at its own size ({surface:?})"
+        );
+    }
+}
+
+/// RED (T-SCALE-ADDRESS-PER-ASKER) — **two preview panes over one picture at one size are both
+/// painted**: the panes ask the same size while the scale share is busy; each request is
+/// answered, each answer goes to the pane that asked it, and the next frame draws both pictures.
+///
+/// MUTATION: give every preview picture one address (as above) — the second request joins the
+/// first, its one answer goes to the first pane, and the second waits for good.
+#[test]
+fn two_preview_panes_at_one_size_are_both_painted() {
+    let (mut folio, mut lane, gate, _shell, panes) =
+        two_panes_on_a_watched_lane("preview-one-size");
+    let file = scratch_png_named("同一大小 one size");
+    let _written = crate::test_support::ScratchFile(file.clone());
+    // Smaller than either pane, so both draw it at its own pixels.
+    std::fs::write(&file, png_bytes(24, 12)).expect("a scratch file this test owns");
+    let (busy, asked) = two_panes_ask_together(&mut folio, &mut lane, &gate, panes, &file, None);
+    assert_eq!(
+        asked[0], asked[1],
+        "the fixture's own precondition: the two panes ask one size"
+    );
+    gate.release();
+    let resamples = every_resample_but(&mut lane, busy);
+    the_window_takes(&mut folio, resamples);
+    for surface in panes {
+        let picture = picture_on(&folio, surface);
+        assert!(
+            picture.pending.is_none()
+                && picture
+                    .raster
+                    .as_ref()
+                    .is_some_and(|raster| raster.matches(&asked[0])),
+            "each pane holds its picture ({surface:?})"
+        );
+    }
+    folio.draw();
+    assert_eq!(
+        folio.window.renderer.preview_images.len(),
+        2,
+        "and the next frame paints both"
+    );
+}
+
+/// RED (T-SCALE-ADDRESS-PER-ASKER) — **one Markdown page's picture at two sizes: both sizes land
+/// and nothing stays `Pending`**. The page reads its picture and owes the exact-size pass at the
+/// size it draws it; the pass is sent while the scale share is busy; then the page owes the same
+/// picture at a second size (a refit to a new measure) and sends that too, while the first still
+/// waits. Both rasters land in the window's cache, and no entry of it is left `Pending`.
+///
+/// MUTATION: give every page picture one address (`Self::MarkdownImage { .. } =>
+/// ScalePurpose::MarkdownImage((0, 0))` in `ScaleWorkerRequest::purpose`) — the second size
+/// displaces the first, whose entry stays `Pending` and is never asked again.
+#[test]
+fn a_page_picture_at_two_sizes_lands_both_and_leaves_nothing_pending() {
+    let (mut folio, mut lane, gate, _shell, [page, _]) =
+        two_panes_on_a_watched_lane("markdown-two-sizes");
+    let file = scratch_png_named("页面两种大小 page sizes");
+    let _written = crate::test_support::ScratchFile(file.clone());
+    std::fs::write(&file, png_bytes(240, 120)).expect("a scratch file this test owns");
+    a_page_on(&mut folio, page, &file);
+    folio.runtime().refresh_preview_for_layout();
+    assert!(
+        read_awaited(&folio, &file).is_some(),
+        "the fixture's own precondition: the page reads its picture"
+    );
+    let read = lane.next_ended(
+        crate::computation_lane::Share::Decoration,
+        crate::computation_lane::fixtures::nobody,
+    );
+    the_window_takes(&mut folio, vec![read]);
+    let first = folio
+        .window
+        .markdown_pictures
+        .owed
+        .values()
+        .next()
+        .cloned()
+        .expect("the page owes its picture's exact-size pass");
+
+    gate.hold();
+    let entered = gate.entered();
+    let leaf = folio.runtime().focused_shell_address();
+    let busy = a_busy_resample(&lane, leaf);
+    assert!(
+        gate.wait_entered(entered + 1),
+        "the busy resample reaches the worker"
+    );
+    let quiet = |folio: &HeadlessFolio| {
+        folio
+            .window
+            .markdown_pictures
+            .settle_deadline
+            .expect("a pass is owed")
+    };
+    let deadline = quiet(&folio);
+    folio
+        .runtime()
+        .finish_preview_scale_if_quiet(deadline)
+        .expect("the quiet sends the first size");
+    let second = crate::MarkdownRasterRequest {
+        key: crate::MarkdownRasterKey {
+            content: first.key.content.clone(),
+            width_px: first.key.width_px / 2,
+            height_px: first.key.height_px / 2,
+        },
+        ..first.clone()
+    };
+    folio
+        .window
+        .markdown_pictures
+        .owe(second.clone(), Instant::now());
+    let deadline = quiet(&folio);
+    folio
+        .runtime()
+        .finish_preview_scale_if_quiet(deadline)
+        .expect("the quiet sends the second size");
+    for request in [&first, &second] {
+        assert!(
+            matches!(
+                folio.window.markdown_pictures.raster(&request.key),
+                Some(crate::MarkdownRaster::Pending)
+            ),
+            "the fixture's own precondition: both sizes are asked ({:?})",
+            request.key
+        );
+    }
+
+    gate.release();
+    let resamples = every_resample_but(&mut lane, busy);
+    the_window_takes(&mut folio, resamples);
+    for request in [&first, &second] {
+        assert!(
+            matches!(
+                folio.window.markdown_pictures.raster(&request.key),
+                Some(crate::MarkdownRaster::Ready { .. })
+            ),
+            "both sizes land ({:?})",
+            request.key
+        );
+    }
+    assert!(
+        !folio
+            .window
+            .markdown_pictures
+            .rasters
+            .values()
+            .any(|(raster, _)| matches!(raster, crate::MarkdownRaster::Pending)),
+        "and nothing stays pending"
+    );
+}
+
+/// RED (T-SCALE-ADDRESS-PER-ASKER) — **a tab switch while the flyout's resample is out keeps the
+/// answer for the flyout, which shows it on return**: the flyout asks while the scale share is
+/// busy, the reader steps to another tab, the answer lands there, and back on the first tab the
+/// next hover over the same reference shows the flyout from the picture that answer filed, asking
+/// nothing again.
+///
+/// MUTATION: gate `complete_peek_scale` on the answer's tab being in front again
+/// (`if target_active { … }` in `Runtime::apply_math_results`) — the answer is dropped, the
+/// flyout's question stays out, and the next hover finds it "already asked" and shows nothing.
+#[test]
+fn a_flyout_answer_landing_on_another_tab_is_shown_on_return() {
+    let (mut folio, mut lane, gate, shell, _panes) = two_panes_on_a_watched_lane_beside(
+        "peek-tab-switch",
+        vec![crate::test_support::cross_tab(2, &["另一个 other"])],
+    );
+    let file = scratch_png_named("切走 tab switch");
+    let _written = crate::test_support::ScratchFile(file.clone());
+    std::fs::write(&file, png_bytes(600, 300)).expect("a scratch file this test owns");
+    let hover = crate::PeekCandidate {
+        subject: crate::PeekSubject::from_path(file.clone()),
+        seat: shell,
+        pointer: PhysicalPosition::new(40.0, 40.0),
+    };
+    folio.window.peek_hover.active = Some(hover.clone());
+    folio
+        .runtime()
+        .show_or_request_peek(&hover, true)
+        .expect("the settled hover is answered");
+    let read = lane.next_ended(
+        crate::computation_lane::Share::Decoration,
+        crate::computation_lane::fixtures::nobody,
+    );
+    gate.hold();
+    let entered = gate.entered();
+    let leaf = folio.runtime().focused_shell_address();
+    let busy = a_busy_resample(&lane, leaf);
+    assert!(
+        gate.wait_entered(entered + 1),
+        "the busy resample reaches the worker"
+    );
+    the_window_takes(&mut folio, vec![read]);
+    let flyout = folio
+        .window
+        .peek_thumbnail_pending
+        .clone()
+        .expect("the flyout asks its resample");
+
+    folio
+        .runtime()
+        .activate_tab(1, false)
+        .expect("the reader steps to the other tab");
+    assert!(
+        folio.window.peek_hover.active.is_none(),
+        "the fixture's own precondition: the switch takes the hover with it"
+    );
+    gate.release();
+    let resamples = every_resample_but(&mut lane, busy);
+    the_window_takes(&mut folio, resamples);
+    assert!(
+        folio.window.peek_thumbnail_pending.is_none()
+            && folio
+                .window
+                .peek_thumbnail
+                .as_ref()
+                .is_some_and(|thumbnail| thumbnail.matches(&flyout)),
+        "the answer is kept for the flyout that asked it"
+    );
+
+    folio
+        .runtime()
+        .activate_tab(0, false)
+        .expect("the reader comes back");
+    folio.window.peek_hover.active = Some(hover.clone());
+    folio
+        .runtime()
+        .show_or_request_peek(&hover, true)
+        .expect("the next hover is answered");
+    assert!(
+        folio.window.renderer.peek_overlay.is_some(),
+        "the next hover shows the flyout"
+    );
+    assert_eq!(
+        folio
+            .app
+            .math_worker
+            .held(crate::computation_lane::Share::Scale),
+        0,
+        "and asks nothing again"
     );
 }
