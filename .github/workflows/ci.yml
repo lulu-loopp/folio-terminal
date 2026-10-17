@@ -40,7 +40,12 @@ jobs:
   release-script-tests:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
-    timeout-minutes: 10
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total seen, x 1.36, rounded up. This job
+    # restores no cache, so every run is in the one regime: over all 58 runs
+    # of 2026-10-15 to 10-17 (38658095635 to 39032766393), p50 1.8 min, max
+    # 2.53 (run 38687157155). 2.53 x 1.36 = 3.44, so 4.
+    timeout-minutes: 4
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Offline release build verification
@@ -66,7 +71,12 @@ jobs:
   cask-audit:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: macos-latest
-    timeout-minutes: 10
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total seen, x 1.36, rounded up. This job
+    # restores no cache, so every run is in the one regime: over all 58 runs
+    # of 2026-10-15 to 10-17 (38658095635 to 39032766393), p50 1.1 min, max
+    # 1.80 (run 38665182697). 1.80 x 1.36 = 2.45, so 3.
+    timeout-minutes: 3
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_FROM_API: "1"
@@ -113,7 +123,16 @@ jobs:
   gates-can-fail:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
-    timeout-minutes: 20
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total with no cache restored (the toolchain
+    # step's log says `No cache found.`), x 1.36, rounded up. Cold, over
+    # runs 38669130291 38693069271 38693259445 38707969116 38708586878
+    # 38714746975 38715696851 38719369282 38726741790 39010930188
+    # 39014647034 39014757099: 5.3-10.15 min, p50 8.1, max 10.15 (run
+    # 38693069271). 10.15 x 1.36 = 13.80, so 14. With a cache restored (in
+    # full or by its prefix), over the 9 of the ten green runs on `main`
+    # (39032766393 back to 38691455267) that restored one: p50 6.4, max 7.4.
+    timeout-minutes: 14
     steps:
       # Whole history, for one step: `check-migration-debt.ps1` compares the
       # debt list with `git merge-base HEAD origin/main`, and at the default
@@ -746,23 +765,27 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
     # **A budget derived from measurement, re-derived rather than bumped**
-    # (T-CI-LOGIC-JOB-BUDGET, measured 2026-10-17). The cold-cache regime
-    # dominates: a run whose cache does not restore compiles everything, and
-    # it is the regime a cache-key change or an evicted cache puts every run
-    # in. Cold, this job from its start to the end of its last list check plus
-    # the two post steps, over runs 38671015245 38714746975 38719369282
-    # 38720519586 38726741790 38835150475 38835297300 38837089117 38842728496
-    # 39004900090 (attempt 1): 57.0-75.8 min, max 75.8. Headroom 1.36 =
-    # the slowest cold `test` step over the fastest (47.8 / 35.1 min): an
-    # observed spread, cause unknown (the fast ones were mostly branch
-    # dispatches, the slow ones main pushes), applied once more beyond the
-    # slowest. 75.8 x 1.36 = 103.1, so 104. The warm-cache max over the ten
-    # green warm runs on `main` (38436781373 to 38691455267; the image's new
-    # stable rolled out across runners from 2026-10-15, so the first cold run,
-    # 38671015245, falls inside that span) is 44.5. Re-derive with the same rule when the cold max
-    # passes 104 / 1.36 = 76 min. The licensing gates are their own job
-    # (`licensing`), so a slow suite cannot cancel them.
-    timeout-minutes: 104
+    # (T-CI-LOGIC-JOB-BUDGET; re-derived by T-CI-JOB-BUDGETS-REDERIVE,
+    # measured 2026-10-17). The cold-cache regime dominates: a run whose
+    # cache does not restore compiles everything, and it is the regime a
+    # cache-key change or an evicted cache puts every run in. Cold and
+    # green, over runs 38700488746 38705000975 38715696851 38719369282
+    # 38720519586 38837089117 39010930188 39014647034 39014757099
+    # 39014771087 39014776542 39014784008 39014797273 39016679706
+    # 39017771237 39019091926: 46.3-77.17 min, p50 61.9, max 77.17 (run
+    # 39014647034, the first `main` push after the toolchain change, which
+    # was cold for every job). Headroom 1.36, the factor
+    # T-CI-LOGIC-JOB-BUDGET derived (then the slowest cold `test` step over
+    # the fastest, 47.8 / 35.1 min) and every job's budget uses; over the
+    # cold runs of 2026-10-15 to 10-17 that ratio is 47.8 (run 38842728496)
+    # / 29.8 (run 39014757099) = 1.60, which docs/WINDOWS-CI-RELEASE.md
+    # ("Job budgets") records. 77.17 x 1.36 = 104.95, so 105. With a cache restored, over
+    # the 8 of the ten green runs on `main` (39032766393 back to
+    # 38691455267) that restored one: p50 43.9, max 47.45. Re-derive with
+    # the same rule when the cold max passes 105 / 1.36 = 77.2 min. The
+    # licensing gates are their own job (`licensing`), so a slow suite
+    # cannot cancel them.
+    timeout-minutes: 105
     steps:
       # Whole history: see `gates-can-fail`'s checkout. The debt-list check runs
       # here for real, and a merge base is what it compares against.
@@ -877,9 +900,11 @@ jobs:
       # a line naming the budget instead of being cancelled, without a reason,
       # in whatever step the job's clock happens to stop. The cold max of this
       # step is 47.8 min (run 38842728496: 34.9 min of it is the compile, the
-      # rest running the tests); x 1.36, the job's headroom, is 65.0, so 65.
-      # The job's 104 leaves 39 for the other steps, whose cold max is 28.1
-      # (x 1.36 = 38.2).
+      # rest running the tests; no cold run since has gone past it, measured
+      # 2026-10-17); x 1.36, the job's headroom, is 65.0, so 65. The job's 105
+      # leaves 40 for the other steps, whose cold max is 29.6 (run 39014647034,
+      # x 1.36 = 40.2): a run at both edges at once is stopped by the job's
+      # clock, not by this step's.
       - name: test
         timeout-minutes: 65
         run: cargo test --workspace --locked --exclude bt-pty --exclude bt-render
@@ -1026,20 +1051,20 @@ jobs:
   # Its own job, not the tail of `logic`: none of these gates reads a build,
   # and at the end of `logic` they were the steps a slow suite cancelled when
   # that job ran out of its budget (runs 38714746975, 38726741790,
-  # 38835150475, 39004900090). Budget, by `logic`'s rule (measured
-  # 2026-10-17 over the runs named there): the observed max of each step it
-  # runs - checkout 1.0, toolchain with a cache restore 1.5, the fetch 0.8
-  # (0.4 of downloads inside `logic`'s clippy step and 0.4 of its fetch step,
-  # which is what a job with no build fetches), cargo-about built from source
-  # 3.2, the gates 2.9 (run 38708586878), the cache save 1.7, the
-  # checkout's post 0.2 - is 11.3 min; x 1.36 = 15.4, so 16. Not yet in it:
-  # the toolchain step's uninstall of the image's own toolchain, new with this
-  # job; the branch's first CI run is what confirms the job stays well
-  # under 16.
+  # 38835150475, 39004900090).
   licensing:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
-    timeout-minutes: 16
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total with no cache restored (the toolchain
+    # step's log says `No cache found.`), x 1.36, rounded up. Cold, over
+    # runs 39010930188 39014647034 39014757099 39014764059 39014776542
+    # 39014784008 39014791387 39014797273 39016679706 39017771237: 4.3-7.92
+    # min, p50 6.3, max 7.92 (run 39014776542). 7.92 x 1.36 = 10.77, so 11.
+    # With a cache restored (in full or by its prefix), over the 7 of the
+    # ten green runs on `main` (39032766393 back to 38691455267) that
+    # restored one: p50 2.9, max 3.4.
+    timeout-minutes: 11
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The cache carries `~/.cargo/bin`, so a warm run finds cargo-about
@@ -1099,7 +1124,15 @@ jobs:
   wasm-lib-check:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
-    timeout-minutes: 30
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total with no cache restored (the toolchain
+    # step's log says `No cache found.`), x 1.36, rounded up. Cold, over
+    # runs 38700488746 38714746975 38720519586 38835150475 38835297300
+    # 39010930188 39014647034 39014757099: 3.1-4.77 min, p50 3.8, max 4.77
+    # (run 38720519586). 4.77 x 1.36 = 6.49, so 7. With a cache restored (in
+    # full or by its prefix), over the 9 of the ten green runs on `main`
+    # (39032766393 back to 38691455267) that restored one: p50 1.3, max 2.5.
+    timeout-minutes: 7
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/toolchain
@@ -1113,7 +1146,16 @@ jobs:
   conpty:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
-    timeout-minutes: 30
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total with no cache restored (the toolchain
+    # step's log says `No cache found.`), x 1.36, rounded up. Cold, over
+    # runs 38699851507 38705000975 38708586878 38714746975 38715696851
+    # 38830428679 38835150475 38835297300 39010930188 39014647034
+    # 39014757099 39017771237: 7.2-11.80 min, p50 10.7, max 11.80 (run
+    # 38714746975). 11.80 x 1.36 = 16.05, so 17. With a cache restored (in
+    # full or by its prefix), over the 8 of the ten green runs on `main`
+    # (39032766393 back to 38691455267) that restored one: p50 6.4, max 7.1.
+    timeout-minutes: 17
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The compiler and the shared cache both come from
@@ -1159,7 +1201,18 @@ jobs:
   gpu:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
-    timeout-minutes: 40
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total with no cache restored (the toolchain
+    # step's log says `No cache found.`), x 1.36, rounded up. Cold, over
+    # runs 38662445897 38707969116 38708586878 38714746975 38715696851
+    # 38726741790 39010930188 39014647034 39014757099 39014764059
+    # 39014771087 39014776542 39014784008 39014791387 39019651600
+    # 39019659078 39020717604 39020858358: 12.9-20.95 min, p50 19.4, max
+    # 20.95 (run 38708586878). 20.95 x 1.36 = 28.49, so 29. With a cache
+    # restored (in full or by its prefix), over the 5 of the ten green runs
+    # on `main` (39032766393 back to 38691455267) that restored one: p50
+    # 5.0, max 5.6.
+    timeout-minutes: 29
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The compiler and the shared cache both come from
@@ -1191,7 +1244,19 @@ jobs:
   smoke:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
-    timeout-minutes: 60
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total with no cache restored (the toolchain
+    # step's log says `No cache found.`), x 1.36, rounded up. Cold, over
+    # runs 38662065931 38665056067 38665182697 38699851507 38700488746
+    # 38705000975 38708586878 38714746975 38715696851 38719369282
+    # 38726741790 38830428679 38835150475 38835297300 39010930188
+    # 39014647034 39014757099 39014764059 39014771087 39014776542
+    # 39014791387 39014797273 39016679706 39017771237: 6.3-11.05 min, p50
+    # 10.1, max 11.05 (run 39014776542). 11.05 x 1.36 = 15.03, so 16. With a
+    # cache restored (in full or by its prefix), over the 8 of the ten green
+    # runs on `main` (39032766393 back to 38691455267) that restored one:
+    # p50 4.2, max 5.5.
+    timeout-minutes: 16
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The compiler and the shared cache both come from
@@ -1303,7 +1368,18 @@ jobs:
   core-macos:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: macos-latest
-    timeout-minutes: 60
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total with no cache restored (the toolchain
+    # step's log says `No cache found.`), x 1.36, rounded up. Cold, over
+    # runs 38662065931 38707969116 38708586878 38714746975 38830428679
+    # 38835150475 38837089117 38842728496 39010930188 39014647034
+    # 39014757099 39014764059 39014776542 39014784008 39014791387
+    # 39019651600 39019659078 39020717604 39020858358: 19.0-50.63 min, p50
+    # 41.1, max 50.63 (run 39020858358). 50.63 x 1.36 = 68.86, so 69. With a
+    # cache restored (in full or by its prefix), over the 5 of the ten green
+    # runs on `main` (39032766393 back to 38691455267) that restored one:
+    # p50 37.1, max 41.3.
+    timeout-minutes: 69
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -1518,7 +1594,17 @@ jobs:
   core-linux:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total with no cache restored (the toolchain
+    # step's log says `No cache found.`), x 1.36, rounded up. Cold, over
+    # runs 38699851507 38705000975 38708586878 38714746975 38715696851
+    # 39010930188 39014647034 39014757099 39014764059 39014771087
+    # 39014776542 39014784008 39014791387 39016679706 39017771237: 6.7-10.82
+    # min, p50 10.4, max 10.82 (run 39010930188). 10.82 x 1.36 = 14.72, so
+    # 15. With a cache restored (in full or by its prefix), over the 8 of
+    # the ten green runs on `main` (39032766393 back to 38691455267) that
+    # restored one: p50 7.8, max 8.5.
+    timeout-minutes: 15
     # **The static C runtime is a Windows shipping rule and this job ships
     # nothing.** `.cargo/config.toml` puts `-C target-feature=+crt-static` on
     # every build so that `folio.exe` carries its own CRT rather than asking a
