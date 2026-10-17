@@ -6142,24 +6142,49 @@ impl PreviewBuffer {
         self.on_disk.carries(self.revision)
     }
 
+    /// **Whether a close would lose something of this buffer** (S-6b; the
+    /// coordinator's ruling on R1): its edits, when it is dirty; or, when it is
+    /// clean, a save of it that has not landed — one still on its way, or one
+    /// that did not land whose body lives only in the redo history
+    /// ([`Self::owed_unlanded`]). The save on its way lands whatever the close
+    /// does; what the close would lose is the pane that says how it ended.
+    fn a_close_loses_something(&self) -> bool {
+        self.dirty || self.on_disk.is_out() || self.owed_unlanded().is_some()
+    }
+
+    /// **Whether a close of this buffer may wait for its save** (S-6b): a dirty
+    /// body whose save is on its way ([`Self::is_saving_this_body`]), or a clean
+    /// one with a save of it still on the worker.
+    fn a_close_may_wait_for(&self) -> bool {
+        if self.dirty {
+            self.is_saving_this_body()
+        } else {
+            self.on_disk.is_out()
+        }
+    }
+
     /// **What has become of this buffer, for a close that waits for it**
     /// (S-6b; [`crate::restore::CloseWait`]) — read on each turn the wait is looked at.
     ///
     /// Asked in this order, because the first that holds decides: a body moved
     /// since the close was asked is the person's edit (or a Reload) and the
-    /// close is withdrawn; a clean body is in its file; a save of this body
-    /// still on its way is waited for; a conflict the pane said and nobody has
-    /// answered is the conflict's own road; anything else — a refusal, a failed
-    /// task, the worker gone — did not land, and the pane has said why.
-    fn at_the_close(&self, asked_at: u64) -> AtTheClose {
-        if self.revision != asked_at {
+    /// close is withdrawn; a save still on its way is waited for; a conflict the
+    /// pane said and nobody has answered is the conflict's own road; then a
+    /// buffer dirty at the close is saved when it is clean, and one clean at the
+    /// close when its save landed — a landing over a body undone since the press
+    /// leaves it dirty against the file, and the close, re-run from the top,
+    /// then asks about that body; and
+    /// anything else — a refusal, a failed task, the worker gone — did not
+    /// land, and the pane has said why.
+    fn at_the_close(&self, asked: Awaited) -> AtTheClose {
+        if self.revision != asked.revision {
             AtTheClose::Edited
-        } else if !self.dirty {
-            AtTheClose::Saved
-        } else if self.is_saving_this_body() {
+        } else if self.on_disk.is_out() && (!asked.dirty || self.is_saving_this_body()) {
             AtTheClose::OnItsWay
         } else if self.on_disk.has_an_unanswered_conflict() {
             AtTheClose::Conflict
+        } else if (asked.dirty && !self.dirty) || (!asked.dirty && self.owed_unlanded().is_none()) {
+            AtTheClose::Saved
         } else {
             AtTheClose::NotSaved
         }
@@ -7362,26 +7387,44 @@ impl PreviewPool {
             .collect()
     }
 
-    /// **The dirty buffers a close would lose, when a save of each one's body is
+    /// **The names a close's question owes** (S-6b; the coordinator's ruling
+    /// on R1): every buffer a close would lose something of — its edits, or a
+    /// save of it that has not landed ([`PreviewBuffer::a_close_loses_something`]).
+    pub fn close_names(&self) -> impl Iterator<Item = &str> {
+        self.buffers
+            .iter()
+            .filter(|buffer| buffer.a_close_loses_something())
+            .map(|buffer| buffer.name.as_str())
+    }
+
+    /// **Whether a close would lose edits here** — a dirty buffer — rather than
+    /// only saves that have not landed (S-6b): the question's title says which.
+    pub fn a_close_loses_edits(&self) -> bool {
+        self.buffers.iter().any(|buffer| buffer.dirty)
+    }
+
+    /// **The buffers a close would lose something of, when each one's save is
     /// already on its way** (S-6b) — what a pane's, a tab's or a window's close
     /// waits for instead of asking ([`crate::restore::CloseWait`]): each buffer by its
-    /// incarnation, with the body revision it holds now. `None` when one dirty
-    /// buffer has no save of its body on the way — its close asks now, as it
-    /// always did — and an empty list when nothing here is dirty.
+    /// incarnation, with the body revision it holds now and whether it is
+    /// dirty. A dirty buffer waits for a save of its body, a clean one for a
+    /// save of it still on the worker ([`PreviewBuffer::a_close_may_wait_for`]).
+    /// `None` when one of them has no such save — its close asks now — and an
+    /// empty list when the close loses nothing here.
     pub(crate) fn saves_a_close_awaits(&self) -> Option<Vec<Awaited>> {
         self.buffers
             .iter()
-            .filter(|buffer| buffer.dirty)
-            .map(|buffer| buffer.is_saving_this_body().then(|| Awaited::now(buffer)))
+            .filter(|buffer| buffer.a_close_loses_something())
+            .map(|buffer| buffer.a_close_may_wait_for().then(|| Awaited::now(buffer)))
             .collect()
     }
 
-    /// **Every dirty buffer, as a close that has just saved them waits for
-    /// them** (S-6b; the shut's `Save all`).
-    pub(crate) fn dirty_awaited(&self) -> Vec<Awaited> {
+    /// **Every buffer a close would lose something of, as a close that has just
+    /// saved the dirty ones waits for them** (S-6b; the shut's `Save all`).
+    pub(crate) fn close_awaited(&self) -> Vec<Awaited> {
         self.buffers
             .iter()
-            .filter(|buffer| buffer.dirty)
+            .filter(|buffer| buffer.a_close_loses_something())
             .map(Awaited::now)
             .collect()
     }
@@ -7392,7 +7435,7 @@ impl PreviewPool {
         self.buffers
             .iter()
             .find(|buffer| buffer.incarnation == awaited.incarnation)
-            .map(|buffer| (buffer.name.as_str(), buffer.at_the_close(awaited.revision)))
+            .map(|buffer| (buffer.name.as_str(), buffer.at_the_close(awaited)))
     }
 
     /// **Save every dirty buffer, for a shut answered `Save all`** (S-6b): each
@@ -7537,10 +7580,13 @@ impl PreviewPool {
     /// history, which is a second thing the user was never asked about.
     ///
     /// It still satisfies what the gate needs of it: the gate raises itself off
-    /// [`Self::dirty_names`], so a pool with no dirty buffer left in it cannot
-    /// ask the question a second time.
+    /// [`Self::close_names`], so a pool with nothing left in it a close would
+    /// lose cannot ask the question a second time. A clean buffer whose save
+    /// has not landed goes too (S-6b): the answer was to close anyway, and the
+    /// save on its way reaches the sink.
     pub fn discard_dirty(&mut self) {
-        self.buffers.retain(|buffer| !buffer.dirty);
+        self.buffers
+            .retain(|buffer| !buffer.a_close_loses_something());
     }
 }
 
@@ -7594,14 +7640,16 @@ fn next_incarnation() -> BufferId {
     BufferId(PREVIEW_INCARNATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
-/// **One dirty buffer a close waits for** (S-6b; [`crate::restore::CloseWait`]): which
-/// buffer — its incarnation, which follows it wherever its tab goes — and the
-/// body revision it held when the close was asked, so that an edit made while
-/// the close waits is told from the save landing.
+/// **One buffer a close waits for** (S-6b; [`crate::restore::CloseWait`]): which
+/// buffer — its incarnation, which follows it wherever its tab goes — the body
+/// revision it held when the close was asked, so that an edit made while the
+/// close waits is told from the save landing, and whether it was dirty then: a
+/// buffer clean at the close waits only for its save's landing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Awaited {
     incarnation: BufferId,
     revision: u64,
+    dirty: bool,
 }
 
 impl Awaited {
@@ -7610,7 +7658,13 @@ impl Awaited {
         Self {
             incarnation: buffer.incarnation,
             revision: buffer.revision,
+            dirty: buffer.dirty,
         }
+    }
+
+    /// Whether the buffer was dirty when the close was asked.
+    pub(crate) fn was_dirty(self) -> bool {
+        self.dirty
     }
 }
 
@@ -8523,6 +8577,9 @@ pub(crate) struct PreviewSaves {
     /// How many answers reached the sink.
     #[cfg(test)]
     sunk: u64,
+    /// What the sink said in `diagnostics.log`, in order.
+    #[cfg(test)]
+    sink_said: Vec<String>,
 }
 
 /// One save on the worker, and who is owed its answer.
@@ -8531,6 +8588,8 @@ struct OwedSave {
     incarnation: BufferId,
     body: u64,
     asked_from: crate::PreviewSurface,
+    /// The file it writes, for the sink to name.
+    file: PathBuf,
     answer: crate::persist::OnTheWorker<DocumentAnswer>,
 }
 
@@ -8540,6 +8599,7 @@ struct OwedSave {
 pub(crate) struct SaveAnswer {
     incarnation: BufferId,
     asked_from: crate::PreviewSurface,
+    file: PathBuf,
     answer: DocumentAnswer,
 }
 
@@ -8553,6 +8613,8 @@ impl PreviewSaves {
             told_ordinary: Vec::new(),
             #[cfg(test)]
             sunk: 0,
+            #[cfg(test)]
+            sink_said: Vec::new(),
         }
     }
 
@@ -8597,22 +8659,25 @@ impl PreviewSaves {
         self.tickets += 1;
         let ticket = self.tickets;
         let (answer, answered) = mpsc::channel();
-        let request =
-            self.lane
-                .send_document(job(ticket, answer))
-                .map_err(|refused| match refused {
-                    crate::persist::NotAdmitted::NoWorker => {
-                        crate::i18n::Text::PreviewSaveNotStarted.text().to_owned()
-                    }
-                    crate::persist::NotAdmitted::Full => {
-                        crate::i18n::Text::PreviewSaveTooMany.text().to_owned()
-                    }
-                })?;
+        let job = job(ticket, answer);
+        let file = job.which.clone();
+        let request = self
+            .lane
+            .send_document(job)
+            .map_err(|refused| match refused {
+                crate::persist::NotAdmitted::NoWorker => {
+                    crate::i18n::Text::PreviewSaveNotStarted.text().to_owned()
+                }
+                crate::persist::NotAdmitted::Full => {
+                    crate::i18n::Text::PreviewSaveTooMany.text().to_owned()
+                }
+            })?;
         self.owed.push(OwedSave {
             ticket,
             incarnation,
             body,
             asked_from,
+            file,
             answer: crate::persist::OnTheWorker::admitted(answered, request),
         });
         Ok(ticket)
@@ -8643,6 +8708,7 @@ impl PreviewSaves {
             answers.push(SaveAnswer {
                 incarnation: owed.incarnation,
                 asked_from: owed.asked_from,
+                file: owed.file.clone(),
                 answer,
             });
             false
@@ -8666,6 +8732,7 @@ impl PreviewSaves {
                 SaveAnswer {
                     incarnation: owed.incarnation,
                     asked_from: owed.asked_from,
+                    file: owed.file,
                     answer,
                 }
             })
@@ -8673,11 +8740,31 @@ impl PreviewSaves {
     }
 
     /// **The sink**: an answer for a buffer that is gone is recorded — counted,
-    /// and said in `stderr` with any file the worker left — then ignored.
+    /// and said in `stderr` with any file the worker left — then ignored. A save
+    /// that did not land — another writer's bytes met, or refused — is said
+    /// once in `diagnostics.log` as well, naming its file (S-6b): the pane that
+    /// would have said it is gone, as after a tab whose shell exited closed at
+    /// its wait's bound.
     pub(crate) fn sink(&mut self, answer: SaveAnswer) {
         #[cfg(test)]
         {
             self.sunk += 1;
+        }
+        let unlanded = match &answer.answer.outcome {
+            Outcome::Moved { .. } | Outcome::MovedDuringRead | Outcome::Conflict { .. } => {
+                Some("had changed on disk, and was not written over")
+            }
+            Outcome::Refused { .. } => Some("could not be written"),
+            Outcome::Landed { .. } | Outcome::Displaced { .. } => None,
+        };
+        if let Some(what) = unlanded {
+            let line = format!(
+                "a preview save of {} answered after its pane closed: the file {what}",
+                answer.file.display()
+            );
+            crate::diagnostics::note(&line);
+            #[cfg(test)]
+            self.sink_said.push(line);
         }
         let kept = match &answer.answer.outcome {
             Outcome::Landed { kept, .. } | Outcome::Conflict { kept, .. } => kept.clone(),
@@ -8727,6 +8814,12 @@ impl PreviewSaves {
     #[cfg(test)]
     pub(crate) fn sunk(&self) -> u64 {
         self.sunk
+    }
+
+    /// What the sink said in `diagnostics.log`.
+    #[cfg(test)]
+    pub(crate) fn sink_said(&self) -> &[String] {
+        &self.sink_said
     }
 
     /// How many saves are on the worker.

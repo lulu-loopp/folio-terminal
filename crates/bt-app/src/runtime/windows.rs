@@ -1658,7 +1658,7 @@ impl<B: Backend> Runtime<'_, B> {
             .window
             .tabs
             .iter()
-            .flat_map(|tab| tab.preview_pool.dirty_awaited())
+            .flat_map(|tab| tab.preview_pool.close_awaited())
             .collect();
         let request = if closes == self.window_id() {
             restore::GateRequest::Shut

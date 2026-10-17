@@ -676,3 +676,256 @@ fn save_all_on_a_windows_question_waits_for_the_saves_and_goes() {
         "with what was typed in the file"
     );
 }
+
+// ── round 2: a clean buffer whose save has not landed (the coordinator's ruling on R1) ──
+
+impl Saving {
+    /// Undo tab `at`'s edit, back to the body the file held when it was read: the buffer is clean.
+    fn undo(&mut self, at: usize) {
+        let runtime = self.application.runtime();
+        let pool = &mut runtime.window.tabs[at].preview_pool;
+        let source = pool
+            .buffers()
+            .next()
+            .expect("the tab's buffer")
+            .source()
+            .clone();
+        let buffer = pool.get_mut(&source).expect("the tab's buffer");
+        assert!(buffer.undo_edit().is_some(), "the edit is undone");
+        assert!(!buffer.dirty(), "back to the file's own body: clean");
+    }
+
+    /// Press save on tab `at`, then undo the edit: a clean buffer whose save is on the worker.
+    fn press_save_then_undo(&mut self, at: usize) {
+        self.press_save(at);
+        self.undo(at);
+    }
+
+    /// The title the question up in the first window is drawn with.
+    fn asked_title(&mut self) -> &'static str {
+        let runtime = self.application.runtime();
+        let request = runtime
+            .window
+            .dirty_gate
+            .request()
+            .cloned()
+            .expect("a question is up");
+        crate::gate_title_over(&runtime.window.tabs, runtime.window.active_tab, &request)
+    }
+}
+
+/// RED (S-6b round 2, R1) — **a clean buffer whose save is still on the worker holds the close
+/// until the save lands; the landing leaves the file holding the body pressed, and the close then
+/// asks about the body undone since.**
+///
+/// The person saves and undoes back to the file's own body: the buffer is clean, and its save is
+/// on its way. Closing the pane would leave nobody to say how that save ended, so the close waits
+/// — no question, the pane still there. The save lands: the file holds the body pressed and the
+/// pane the body undone to, which is now in no file (S-6a's B1: the saved position is the one the
+/// body was sent from). The close is re-run from the top and asks, in the edits' own words —
+/// asking nothing would lose the undone body unasked.
+///
+/// MUTATION: in `PreviewBuffer::a_close_loses_something`, count only a dirty buffer — the
+/// "waits" assertion goes red: the pane closes at once over the save on its way.
+#[test]
+fn a_clean_buffer_whose_save_is_out_holds_the_close_until_it_lands() {
+    let mut saving = Saving::open("clean-lands", &["撤回 undone.md"]);
+    saving.press_save_then_undo(0);
+    let seat = saving.seats[0];
+    saving
+        .application
+        .runtime()
+        .close_pane(seat)
+        .expect("the close is asked");
+    assert_eq!(saving.asked(), None, "nothing is asked");
+    assert!(
+        saving.waits(),
+        "the close waits for the clean buffer's save"
+    );
+    assert!(saving.pane_stands(0), "and the pane stays meanwhile");
+
+    saving.serve(None);
+    saving.turn();
+    assert_eq!(
+        saving.file(0),
+        format!("{READ}{TYPED}"),
+        "the save landed: the body pressed is in the file"
+    );
+    assert_eq!(
+        saving.asked(),
+        Some(restore::GateRequest::ClosePane(seat)),
+        "and the body undone since is in none: the re-run close asks"
+    );
+    assert_eq!(
+        saving.asked_title(),
+        restore::gate_title_text(),
+        "about unsaved changes, which it now is"
+    );
+    assert!(saving.pane_stands(0), "the pane stays for the answer");
+}
+
+/// RED (S-6b round 2, R1) — **a clean buffer's save that meets another writer's bytes withdraws the
+/// close, and the pane says the conflict.**
+///
+/// The close waits — and still waits on a turn before the answer — then the worker finds the file
+/// changed under the save. The close is withdrawn: nothing is asked, the pane stays and says the
+/// conflict, and the other writer's bytes are in the file.
+///
+/// MUTATION: in `PreviewBuffer::at_the_close`, wait only for a save of the body the buffer holds
+/// (`self.on_disk.is_out() && self.is_saving_this_body()`) — the clean buffer's save out reads as
+/// landed and the "still waits" assertion goes red: the pane closes before the conflict is heard.
+#[test]
+fn a_clean_buffers_save_that_meets_a_conflict_withdraws_the_close_and_says_so() {
+    let mut saving = Saving::open("clean-conflict", &["撤回对照 undone-compare.md"]);
+    saving.press_save_then_undo(0);
+    let seat = saving.seats[0];
+    saving
+        .application
+        .runtime()
+        .close_pane(seat)
+        .expect("the close is asked");
+    saving.turn();
+    assert!(saving.waits(), "before the answer the close still waits");
+    assert!(saving.pane_stands(0));
+
+    let theirs = "别人写的 by another writer\n";
+    saving.serve(Some(theirs));
+    saving.turn();
+    assert_eq!(saving.asked(), None, "the conflict asks nothing");
+    assert!(!saving.waits(), "the close is withdrawn");
+    assert!(saving.pane_stands(0), "the pane stays");
+    assert_eq!(
+        saving.pane_says(0).as_deref(),
+        Some(crate::preview::preview_conflict_notice()),
+        "and says the conflict"
+    );
+    assert_eq!(
+        saving.file(0),
+        theirs,
+        "the other writer's bytes are in the file"
+    );
+}
+
+/// RED (S-6b round 2, R1) — **the worker gone under a clean buffer's save: the question, in words
+/// that are true of it.**
+///
+/// The close waits; the worker ends with the save unanswered. The pane says it could not be
+/// written; the re-run close asks — and its title is not "discard unsaved changes", which a clean
+/// buffer has none of, but the fact: a save has not reached the disk. The file is named.
+///
+/// MUTATION: in `gate_title_over`, answer the request's own title always — the title assertion
+/// goes red.
+#[test]
+fn the_worker_gone_under_a_clean_buffers_save_asks_in_words_that_are_true() {
+    let mut saving = Saving::open("clean-gone", &["撤回日志 undone-log.md"]);
+    saving.press_save_then_undo(0);
+    let seat = saving.seats[0];
+    saving
+        .application
+        .runtime()
+        .close_pane(seat)
+        .expect("the close is asked");
+    assert!(saving.waits());
+
+    saving.end_the_worker();
+    saving.turn();
+    assert_eq!(
+        saving.asked(),
+        Some(restore::GateRequest::ClosePane(seat)),
+        "the save did not land: the close asks"
+    );
+    assert_eq!(
+        saving.asked_title(),
+        restore::gate_save_not_landed_title(),
+        "in words true of a clean buffer"
+    );
+    let names = saving
+        .application
+        .runtime()
+        .gate_dirty_names(&restore::GateRequest::ClosePane(seat));
+    assert_eq!(names.len(), 1, "naming its file: {names:?}");
+    assert!(names[0].contains("undone-log.md"), "{names:?}");
+    assert_eq!(
+        saving.pane_says(0),
+        Some(crate::i18n::not_saved(
+            crate::i18n::Text::PreviewSaveNotStarted.text()
+        )),
+        "the pane said why, once"
+    );
+}
+
+/// RED (S-6b round 2, R1) — **a tab whose shells have all exited waits for its saves before the
+/// loop takes it away, and at the bound closes if only clean buffers' saves are left; a late
+/// conflict is said once in `diagnostics.log`.**
+///
+/// Two ended tabs: the first holds a clean buffer whose save is out, the second a dirty one whose
+/// save is out. On a turn within the bound neither is closed, and the loop will come back at the
+/// bound. At the bound the first closes (its pool let go, as the cleanup does) and the second
+/// stands — whether unsaved edits go is the reader's turn — with nothing left to come back for.
+/// The first tab's save then meets another writer's bytes: its answer reaches the sink, which says
+/// it once, naming the file.
+///
+/// MUTATION: in `ExitedTabWaits::ran_out`, close at once (`Some(bound) if true`) — the first
+/// assertion goes red: the ended tab is torn down with its save on the worker.
+#[test]
+fn an_ended_tab_waits_for_its_saves_and_closes_at_the_bound_when_only_clean_ones_are_left() {
+    let mut saving = Saving::open("ended", &["终了 ended.md", "终了脏 ended-dirty.md"]);
+    saving.press_save_then_undo(0);
+    saving.press_save(1);
+    let start = Instant::now();
+    {
+        let runtime = saving.application.runtime();
+        let window = &mut *runtime.window;
+        let at_once =
+            crate::exited_tabs_the_loop_may_close(&window.dirty_gate, &window.tabs, 0, vec![0, 1]);
+        assert!(at_once.is_empty(), "neither ended tab closes at once");
+        let ran_out = window.exited_tab_waits.ran_out(
+            &window.dirty_gate,
+            &window.tabs,
+            0,
+            &[0, 1],
+            &at_once,
+            start,
+        );
+        assert!(
+            ran_out.is_empty(),
+            "within the bound both wait: {ran_out:?}"
+        );
+        let bound = window
+            .exited_tab_waits
+            .next_after(start)
+            .expect("the loop comes back at the bound");
+        assert!(bound >= start + restore::CLOSE_WAITS_FOR_A_SAVE);
+
+        let ran_out = window.exited_tab_waits.ran_out(
+            &window.dirty_gate,
+            &window.tabs,
+            0,
+            &[0, 1],
+            &[],
+            bound,
+        );
+        assert_eq!(
+            ran_out,
+            vec![0],
+            "at the bound only the clean buffer's tab closes"
+        );
+        assert_eq!(
+            window.exited_tab_waits.next_after(bound),
+            None,
+            "the dirty one stands, and nothing is left to come back for"
+        );
+        window.tabs[0].preview_pool.clear();
+    }
+    saving.serve(Some("别人写的 by another writer\n"));
+    saving.turn();
+    let app = saving
+        .application
+        .folio
+        .app
+        .as_ref()
+        .expect("the application");
+    let said = app.preview_saves.sink_said();
+    assert_eq!(said.len(), 1, "the late conflict is said once: {said:?}");
+    assert!(said[0].contains("ended.md"), "naming its file: {said:?}");
+}

@@ -16043,6 +16043,9 @@ struct WindowRuntime<B: Backend = Native> {
     /// The dirty-buffer gate, when one of the three doors has stopped to ask
     /// (P123-P125).
     dirty_gate: restore::DirtyGate,
+    /// **The ended tabs whose close waits for saves on their way** (S-6b), kept
+    /// by the loop's cleanup (`Runtime::reap_exited_tabs`).
+    exited_tab_waits: ExitedTabWaits,
     /// The PSReadLine invitation, when the probe has found a shell that would
     /// benefit (§7.1.6c-3b).
     psreadline_invite: psreadline::Invite,
@@ -19380,10 +19383,12 @@ fn dirty_gate_names(
     // of the three, because a reader looking at a card does not know which
     // question raised it and a name that carries its room in one card and
     // not in another is two cards.
+    // **And a clean buffer whose save has not landed** (S-6b, the coordinator's
+    // ruling on R1): the close would leave nobody to say how that save ended.
     let one_tab = |tab: &TabState| {
         let where_ = tab.display_title();
         tab.preview_pool
-            .dirty_names(None)
+            .close_names()
             .map(|name| unsaved_line(name, &where_))
             .collect::<Vec<_>>()
     };
@@ -19471,6 +19476,27 @@ fn tabs_a_close_loses<'t>(
             Some(tabs.iter().collect())
         }
         _ => None,
+    }
+}
+
+/// **The title of the question a gate puts over these tabs** — the request's own
+/// ([`restore::GateRequest::title`]), but for a close that would lose no edits,
+/// only saves that have not landed (S-6b): its words are then that, since
+/// "discard unsaved changes" would not be true of a clean buffer.
+fn gate_title_over(
+    tabs: &[TabState],
+    active_tab: usize,
+    request: &restore::GateRequest,
+) -> &'static str {
+    match tabs_a_close_loses(tabs, active_tab, request) {
+        Some(losing)
+            if !losing
+                .iter()
+                .any(|tab| tab.preview_pool.a_close_loses_edits()) =>
+        {
+            restore::gate_save_not_landed_title()
+        }
+        _ => request.title(),
     }
 }
 
@@ -19906,6 +19932,86 @@ fn exited_tabs_the_loop_may_close(
             gate.verdict(&at_risk).proceeds()
         })
         .collect()
+}
+
+/// **The ended tabs whose close waits for saves on their way** (S-6b, the
+/// coordinator's ruling on R1): a tab whose shells have all exited, which the
+/// loop would close but for saves still on the storage worker, is not torn down
+/// until they land — then it has nothing to ask and closes as any ended tab does
+/// — or until its wait's bound ([`restore::CLOSE_WAITS_FOR_A_SAVE`] from the first
+/// turn it was found waiting). No question can be asked of a tab that closes
+/// itself, so at the bound a tab that waits only for clean buffers' saves closes
+/// with its pool let go: each late answer reaches the sink, which says a save
+/// that did not land once in `diagnostics.log`. A tab still waiting for a dirty
+/// body's save at the bound stands, as an ended tab with unsaved edits always
+/// has: whether those go is the reader's turn. A tab whose close loses something
+/// no save is on its way for — a save that did not land, a conflict — stands
+/// too, its pane saying why.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ExitedTabWaits {
+    /// Each waiting tab's bound; `None` once the bound has passed and the tab
+    /// stands.
+    until: BTreeMap<TabId, Option<Instant>>,
+}
+
+impl ExitedTabWaits {
+    /// **The ended tabs whose wait ran out, to be closed now with their pools
+    /// let go** — of `ended`, those not already `closing` — and every other wait
+    /// brought level with the tabs as they stand at `now`. Nothing moves while
+    /// a question is up or a close waits on the gate (ticket 58).
+    fn ran_out(
+        &mut self,
+        gate: &restore::DirtyGate,
+        tabs: &[TabState],
+        active_tab: usize,
+        ended: &[usize],
+        closing: &[usize],
+        now: Instant,
+    ) -> Vec<usize> {
+        if gate.is_busy() {
+            return Vec::new();
+        }
+        let mut ran_out = Vec::new();
+        let mut until = BTreeMap::new();
+        for &index in ended.iter().filter(|index| !closing.contains(index)) {
+            let Some(tab) = tabs.get(index) else {
+                continue;
+            };
+            let Some(wait) = close_wait_over(
+                tabs,
+                active_tab,
+                &restore::GateRequest::CloseTab(index),
+                now,
+            ) else {
+                continue;
+            };
+            match self.until.get(&tab.id).copied().unwrap_or(Some(wait.until)) {
+                Some(bound) if now >= bound => {
+                    if wait.awaited.iter().any(|awaited| awaited.was_dirty()) {
+                        until.insert(tab.id, None);
+                    } else {
+                        ran_out.push(index);
+                    }
+                }
+                standing => {
+                    until.insert(tab.id, standing);
+                }
+            }
+        }
+        self.until = until;
+        ran_out
+    }
+
+    /// When the loop must come back to end a wait, if one is still to end after
+    /// `now` — a bound, never a look: each landing wakes the loop itself.
+    fn next_after(&self, now: Instant) -> Option<Instant> {
+        self.until
+            .values()
+            .flatten()
+            .copied()
+            .filter(|bound| *bound > now)
+            .min()
+    }
 }
 
 impl<B: Backend> Deref for Runtime<'_, B> {
@@ -45737,6 +45843,7 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         pane_head_clicks: MultiClicks::default(),
         root_menu: profiles::RootMenu::default(),
         dirty_gate: restore::DirtyGate::default(),
+        exited_tab_waits: ExitedTabWaits::default(),
         psreadline_invite: psreadline::Invite::default(),
         paste_card_hover: None,
         update_card: update_card::Card::default(),
@@ -69060,7 +69167,13 @@ impl<B: Backend> FolioApp<B> {
         let close_wake = self
             .windows
             .values()
-            .filter_map(|window| window.dirty_gate.waits_until())
+            .flat_map(|window| {
+                [
+                    window.dirty_gate.waits_until(),
+                    window.exited_tab_waits.next_after(now),
+                ]
+            })
+            .flatten()
             .min();
         let wake_deadline = earliest_deadline([wake_deadline, quit_wake, close_wake]);
         event_loop

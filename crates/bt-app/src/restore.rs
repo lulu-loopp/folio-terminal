@@ -1203,6 +1203,12 @@ pub const GATE_FOCUSED_ANSWER: GateAnswer = GateAnswer::Cancel;
 pub fn gate_title_text() -> &'static str {
     crate::i18n::Text::GateTitleUnsaved.text()
 }
+/// The title of a close's question when the close would lose no edits, only
+/// saves that have not landed (S-6b, the coordinator's ruling on R1).
+#[must_use]
+pub fn gate_save_not_landed_title() -> &'static str {
+    crate::i18n::Text::GateTitleSaveNotLanded.text()
+}
 /// The line a close's question adds when it is asked at the end of its wait,
 /// a save still on its way to the disk (S-6b).
 #[must_use]
@@ -1784,7 +1790,7 @@ impl DirtyGate {
 
     /// Whether a question is up or a close waits: either way no second request
     /// may replace it or slip past it (ticket 58).
-    fn is_busy(&self) -> bool {
+    pub(crate) fn is_busy(&self) -> bool {
         self.open.is_some() || self.waiting.is_some()
     }
 

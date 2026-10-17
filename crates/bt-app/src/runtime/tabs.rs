@@ -3703,12 +3703,30 @@ impl<B: Backend> Runtime<'_, B> {
         // Only the ones whose close is nothing to ask: a tab that still holds an
         // unsaved preview waits for the reader, and the question is never put
         // from here (ticket 58).
+        let ended = exited.clone();
         let exited = crate::exited_tabs_the_loop_may_close(
             &self.window.dirty_gate,
             &self.window.tabs,
             self.window.active_tab,
             exited,
         );
+        // **And the ones whose wait for saves on their way ran out** (S-6b): no
+        // question can be asked of a tab that closes itself, so each closes with
+        // its pool let go, and its late answers reach the sink.
+        let ran_out = self.window.exited_tab_waits.ran_out(
+            &self.window.dirty_gate,
+            &self.window.tabs,
+            self.window.active_tab,
+            &ended,
+            &exited,
+            now,
+        );
+        for &index in &ran_out {
+            self.window.tabs[index].preview_pool.clear();
+        }
+        let mut exited = exited;
+        exited.extend(ran_out);
+        exited.sort_unstable();
         let retired_tabs: BTreeSet<_> = exited.iter().copied().collect();
         settle_exit_dispositions(&mut exits, &retired_tabs, active, active_retires_panes);
         exit_diagnostics::say_shell_exits(exits.iter().map(|(_, exit)| exit), |line| {
