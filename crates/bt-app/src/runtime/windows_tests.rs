@@ -771,9 +771,9 @@ fn a_clean_buffer_whose_save_is_out_holds_the_close_until_it_lands() {
 /// changed under the save. The close is withdrawn: nothing is asked, the pane stays and says the
 /// conflict, and the other writer's bytes are in the file.
 ///
-/// MUTATION: in `PreviewBuffer::at_the_close`, wait only for a save of the body the buffer holds
-/// (`self.on_disk.is_out() && self.is_saving_this_body()`) — the clean buffer's save out reads as
-/// landed and the "still waits" assertion goes red: the pane closes before the conflict is heard.
+/// MUTATION: in `PreviewBuffer::at_the_close`, honour an unanswered conflict only for a buffer
+/// dirty at the close (`asked.dirty && …`) — the clean buffer's conflict reads as a save that did
+/// not land, the re-run close asks, and the "asks nothing" assertion goes red.
 #[test]
 fn a_clean_buffers_save_that_meets_a_conflict_withdraws_the_close_and_says_so() {
     let mut saving = Saving::open("clean-conflict", &["撤回对照 undone-compare.md"]);
