@@ -5,11 +5,11 @@ use crate::window_seam::prelude::*;
 use crate::{
     AppEvent, LeafId, PageKeepsake, PreviewSurface, RenameExit, Runtime, TabRename, WebHeadVerb,
     WebPlacement, a_page_is_off_the_glass, a_page_still_has_a_pane, a_page_was_replaced,
-    a_retirement_happens_on_this_turn, hang_watch, hole_for, input, marks, native_window, preview,
+    a_retirement_happens_on_this_turn, hang_watch, hole_for, input, marks, preview,
     preview_image_placement, restore, revived_page_of, seats, shown_address, web_mouse_button,
     web_trace, web_warmup, webhost, webnav, websheet,
 };
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use bt_layout::SeatId;
 use std::collections::BTreeSet;
 use std::time::Instant;
@@ -138,7 +138,7 @@ impl<B: Backend> Runtime<'_, B> {
                 tab: crate::web_spare::SPARE_TAB,
                 seat: 1,
             },
-            parent.window(),
+            &parent,
             self.window.renderer.scale_factor(),
             self.web_color_scheme_in_force(),
             Box::new(move || {
@@ -569,9 +569,7 @@ impl<B: Backend> Runtime<'_, B> {
             return;
         }
         self.window.web_keyboard = None;
-        if let Ok(native) = native_window(&self.window.window)
-            && let Err(error) = bt_platform::take_keyboard_focus(native)
-        {
+        if let Err(error) = self.window.window.take_keyboard_focus() {
             eprintln!("BT_WEB focus return failed: {error}");
         }
     }
@@ -635,8 +633,7 @@ impl<B: Backend> Runtime<'_, B> {
                 // next `Tab` is Folio's, which is what "handed back" has to mean
                 // before there is a pane order to hand it into.
                 webhost::WebOutcome::FocusLeftThePage { .. } => {
-                    let native = native_window(&self.window.window)?;
-                    if let Err(error) = bt_platform::take_keyboard_focus(native) {
+                    if let Err(error) = self.window.window.take_keyboard_focus() {
                         eprintln!("BT_WEB focus return failed: {error}");
                     }
                 }
@@ -1047,14 +1044,17 @@ impl<B: Backend> Runtime<'_, B> {
         if self.adopt_spare_web_page(leaf, index, url, &minted)? {
             return Ok(());
         }
-        let native = native_window(&self.window.window)?;
-        let proxy = self.app.event_proxy.clone();
-        match webhost::WebSeat::open(
-            bt_platform::PageVisual {
+        let address = self
+            .window
+            .window
+            .page_address(bt_platform::PageVisual {
                 tab: leaf.tab.0,
                 seat: seat.0,
-            },
-            native,
+            })
+            .map_err(|error| anyhow!(error))?;
+        let proxy = self.app.event_proxy.clone();
+        match webhost::WebSeat::open(
+            address,
             url,
             minted,
             // **This window's scale factor, at birth** (§7.8 ⑨). Every number a
@@ -1165,17 +1165,18 @@ impl<B: Backend> Runtime<'_, B> {
         }
         let leaving = hang_watch::enter(hang_watch::Station::WebAdopt);
         let began = Instant::now();
-        let native = native_window(&self.window.window)?;
         let page = bt_platform::PageVisual {
             tab: leaf.tab.0,
             seat: leaf.seat.0,
         };
+        let address = self
+            .window
+            .window
+            .page_address(page)
+            .map_err(|error| anyhow!(error))?;
         let mut door = WindowHandoff {
             to: &self.window.compositor,
-            address: webhost::SeatAddress {
-                page,
-                window: native,
-            },
+            address,
             outcomes: Vec::new(),
             answered: None,
         };
@@ -1389,9 +1390,7 @@ impl<B: Backend> Runtime<'_, B> {
         // The same sentence the download sheet and a modal already make, said at
         // the third surface this window stands over a page with: whatever is
         // asking for keys takes them.
-        if let Ok(native) = native_window(&self.window.window) {
-            let _ = bt_platform::take_keyboard_focus(native);
-        }
+        let _ = self.window.window.take_keyboard_focus();
         self.window.rename = Some(TabRename::open_address(leaf, &url));
         self.window
             .rename_blink

@@ -971,6 +971,66 @@ macOS 上,trial 在被观察前结束(M9 在 `Trial` 之前被杀)不再耗费 9
 
 ---
 
+### 4.5 winget local manifest: two clients (every release) <!-- zh: pending T-WINGET-TWO-CLIENTS -->
+
+`docs/RELEASING.md` "Validating before submitting" is the rule; this is how the row is run.
+It runs on **`folio-win11` only**: the install fetches `InstallerUrl` from the release
+page, and `folio-win10` has no network adapter (§2.4). Both cells start from the `clean`
+snapshot and run in one session, image client first, because the second cell changes the
+client.
+
+| Cell | Client | How the client gets there | Expected shape |
+| --- | --- | --- | --- |
+| **W-a** | the image's App Installer, as it is (`clean` carried **1.6.10121** on 2026-10-08) | nothing: record `winget --version` | `folio` resolves to `%LOCALAPPDATA%\Microsoft\WinGet\Links\folio.exe`, a symbolic link whose target is `<package folder>\folio-<version>\folio.exe`; user `PATH` gains `WinGet\Links`; `diagnostics.log` says `Folio was started as …\WinGet\Links\folio.exe and runs from …\folio-<version>\folio.exe; its own files are looked for there` |
+| **W-b** | the current App Installer (**1.29.290** on 2026-10-08) | updated in the guest, steps below; record `winget --version` | `folio` resolves to `<package folder>\folio-<version>\folio.exe`; user `PATH` gains that folder; nothing named `folio.exe` in `WinGet\Links`; no line about where Folio was started |
+
+Both cells, in addition: install exits 0; `folio --version` prints this release's version;
+`conpty.dll`, `OpenConsole.exe` and `folio.msix` are in `<package folder>\folio-<version>\`;
+Folio started by `folio` with one pane open has that folder's `conpty.dll` in its module list
+(`(Get-Process folio).Modules | Where-Object ModuleName -eq 'conpty.dll'`) and **no**
+`ConPTY: this pane runs on the Windows inbox ConPTY` line in `diagnostics.log`;
+`winget uninstall WeiyiShi.Folio` leaves no package folder, no `PATH` entry and no link.
+
+Recorded, not judged: winget's `Archive scan detected malware. Proceeding due to
+--ignore-local-archive-malware-scan` line, and `ZoneId=3` in every extracted file's
+`Zone.Identifier` stream (RELEASING.md, Troubleshooting).
+
+Red cells:
+
+- **W-b with the link shape**: `ArchiveBinariesDependOnPath` no longer takes effect on the
+  current client. The manifest is not submitted until that is understood.
+- **Either cell on the inbox ConPTY**: Folio does not find its own files through the road
+  that cell exercises. Up to 0.4.7 W-a was exactly this (the 0.4.7 post-publish row:
+  `…\WinGet\Links\conpty.dll is missing`); from 0.4.8 it is a regression.
+- **W-a with the folder shape** is not red: it is what winget does on a machine where it cannot
+  make a symbolic link. The row says which shape it met. When the image's own client is 1.9 or
+  newer, W-a cannot reach the link road; the row says so and W-a expects W-b's shape.
+
+Steps (PowerShell in the guest; the two settings need an elevated one):
+
+1. Copy `packaging/winget/manifests/w/WeiyiShi/Folio/<version>/` into the guest.
+2. Elevated: `winget settings --enable LocalManifestFiles` and
+   `winget settings --enable LocalArchiveMalwareScanOverride`.
+3. **W-a**: `winget --version`; `winget install --manifest <folder> --ignore-local-archive-malware-scan`;
+   in a new shell (the `PATH` change reaches only new ones), `Get-Command folio -All`, the
+   user `PATH`, the `WinGet\Links` listing with each entry's target, the package folder's
+   listing, `folio --version`; start `folio`, wait for the pane's prompt, read the module list
+   and the new `diagnostics.log` lines, close it; `winget uninstall WeiyiShi.Folio`; the
+   three listings again.
+4. **Update App Installer** (measured 2026-10-08: the bundle alone is refused with
+   `0x80073CF3`, the framework `Microsoft.WindowsAppRuntime.1.8` missing):
+   - download `https://aka.ms/getwinget` (the App Installer bundle) and
+     `https://github.com/microsoft/winget-cli/releases/latest/download/DesktopAppInstaller_Dependencies.zip`;
+   - `Add-AppxPackage` each `x64` package in the dependencies archive, then the bundle;
+   - `winget --version` again, and step 2 again (the 0.4.7 run enabled both settings again on
+     the new client).
+5. **W-b**: step 3's commands, unchanged.
+
+Evidence: `vm-live\winget\a-image\` and `vm-live\winget\b-current\`, each with the act logs,
+the elevated install's output and the shots. Report the two client versions on the row's
+line: `PASS on <current> / PASS on <image's>`, or which cell went red and its exact
+`diagnostics.log` line.
+
 ## 5. 截图清单
 
 自动产出(每台机一套):

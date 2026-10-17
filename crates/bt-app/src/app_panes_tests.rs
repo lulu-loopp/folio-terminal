@@ -384,7 +384,7 @@ fn a_page_follows_the_pane_it_is_drawn_in() {
     // goes back in.
     let carrier = squeezed_body("Runtime", "carry_the_pages_of_moved_panes");
     let removed = carrier
-        .find("self.window.web.remove(was)?")
+        .find("self.window.web.remove(&was)?")
         .expect("the pages are taken out of the window's table");
     // Read from the remove and not from the start of the method: the first
     // `.collect();` here is the one that reads the window's keys, and it

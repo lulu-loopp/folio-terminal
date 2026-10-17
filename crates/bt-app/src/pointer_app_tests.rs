@@ -601,6 +601,10 @@ fn a_complete_event_walks_once() {
 /// The module every pointer read belongs to.
 const POINTER_MODULE: &str = "crate::runtime::pointer";
 
+/// The window seam, where the window's cursor door is declared and implemented: exempt from the
+/// system-cursor door (N-S) alone, since a door's declaration and its backends' bodies are not reads.
+const SEAM_MODULE: &str = "crate::window_seam";
+
 fn is_pointer_module(module: &str) -> bool {
     module == POINTER_MODULE
         || module
@@ -637,6 +641,9 @@ fn the_six_doors() -> Vec<(&'static str, Pattern)> {
             "N-S",
             Pattern::path("bt_platform::pointer_position_in_window"),
         ),
+        // The window's own door onto the system cursor (`WindowHost::pointer_in_window`),
+        // declared and implemented in the seam, which is exempt for it: every call is a read.
+        ("N-S", Pattern::identifier("pointer_in_window")),
         ("N-W", Pattern::path("WindowEvent::CursorMoved")),
         ("N-W", Pattern::path("WindowEvent::CursorLeft")),
         ("N-W", Pattern::path("WindowEvent::CursorEntered")),
@@ -664,7 +671,9 @@ fn pointer_reads_outside_the_module() -> Vec<String> {
             .unwrap_or_else(|failure| panic!("{failure}"))
             .in_the_product(index);
         for (owner, count) in found.owners(index) {
-            if is_pointer_module(&owner.module_path) {
+            if is_pointer_module(&owner.module_path)
+                || (door == "N-S" && owner.module_path == SEAM_MODULE)
+            {
                 continue;
             }
             rows.extend(std::iter::repeat_n(format!("{owner}\t{door}"), count));

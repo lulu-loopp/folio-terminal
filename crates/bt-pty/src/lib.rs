@@ -1872,6 +1872,13 @@ impl ShellProcessId {
     pub const fn get(self) -> u32 {
         self.0
     }
+
+    /// An address for a test whose door is scripted and never reaches a process.
+    #[cfg(any(test, feature = "test-shell"))]
+    #[must_use]
+    pub const fn for_test(pid: u32) -> Self {
+        Self(pid)
+    }
 }
 
 /// What happened, for the window to say it in its own words.
