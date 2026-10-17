@@ -10,9 +10,10 @@
 //! the road wrote rather than the line a builder would have written. This guard holds the roads
 //! to that door: every mention of the voice inside an `impl` block of `Runtime` (inherent and
 //! trait blocks alike, on every arm, in the product) is a **direct line**, and the direct lines
-//! are exactly the rows of [`BT_APP_DIRECT_LINES`] — the roads no headless test drives yet, each
-//! with its reason. The list only shrinks: a new road says its line through the door, and a road
-//! a headless test comes to drive moves to the door with that test.
+//! are exactly the rows of `docs/plans/runtime-voice-direct-lines.tsv` — the roads no headless
+//! test drives yet, each with its reason. The list only shrinks (`scripts/ci/check-runtime-voice.ps1`
+//! holds it to the merge base's): a new road says its line through the door, and a road a
+//! headless test comes to drive moves to the door with that test.
 //!
 //! # What it reads, and what it refuses by name
 //!
@@ -57,90 +58,49 @@ enum Shape {
 
 /// One row of a direct-line list: the road (the item, as `bt-source` prints its identity), how
 /// it names the voice, how many times, and why it is not through the door yet.
-type Row = (&'static str, Shape, usize, &'static str);
+type Row = (String, Shape, usize, String);
 
-/// **`bt-app`'s runtime roads that still say their line directly**, each with the reason. The
-/// list only shrinks (see the module's header).
-const BT_APP_DIRECT_LINES: &[Row] = &[
-    (
-        "crate::runtime::files::Runtime::ask_for_file_indexes_on_open",
-        Shape::Call,
-        1,
-        "the palette's file index merged on its reopen: no headless test reopens an index",
-    ),
-    (
-        "crate::runtime::panes::Runtime::land_birth_death_fallback",
-        Shape::Value,
-        3,
-        "a shell's exit and fallback lines (`exit_diagnostics`): no headless test lands a death",
-    ),
-    (
-        "crate::runtime::panes::Runtime::land_own_shell",
-        Shape::Value,
-        3,
-        "a shell birth's refusal and fallback lines: no headless test lands a birth",
-    ),
-    (
-        "crate::runtime::panes::Runtime::land_pane_birth",
-        Shape::Value,
-        1,
-        "held input's delivery line (`deliver_held_input`): no headless test lands a birth",
-    ),
-    (
-        "crate::runtime::panes::Runtime::land_restart",
-        Shape::Value,
-        4,
-        "a restart's successor and fallback lines: no headless test lands a restart",
-    ),
-    (
-        "crate::runtime::preview::Runtime::adopt_clipboard_picture",
-        Shape::Call,
-        1,
-        "a clipboard picture's adoption: no headless test pastes a picture",
-    ),
-    (
-        "crate::runtime::preview::Runtime::check_picture_freshness",
-        Shape::Call,
-        2,
-        "the present's freshness lines (`present_diagnostics`): no headless test checks one",
-    ),
-    (
-        "crate::runtime::tabs::Runtime::reap_exited_tabs",
-        Shape::Call,
-        1,
-        "the reaped shells' exit lines (`exit_diagnostics`): no headless test reaps a tab",
-    ),
-    (
-        "crate::runtime::tabs::Runtime::reap_exited_tabs",
-        Shape::Value,
-        1,
-        "the last-resort shell's spawn failure (`exit_diagnostics`): no headless test reaps a tab",
-    ),
-    (
-        "crate::runtime::web::Runtime::make_spare_web_controller",
-        Shape::Call,
-        4,
-        "the spare web page's retirement: no headless test makes a spare page",
-    ),
-    (
-        "crate::runtime::web::Runtime::warm_web_engine",
-        Shape::Call,
-        1,
-        "the spare page's advance lines: no headless test warms the web engine",
-    ),
-    (
-        "crate::runtime::web::Runtime::warm_web_engine",
-        Shape::Value,
-        1,
-        "the warm-up clock's line (`web_warmup`): no headless test warms the web engine",
-    ),
-    (
-        "crate::runtime::windows::Runtime::keep_unsaved_edits",
-        Shape::Call,
-        1,
-        "a stop's kept preview edit: no headless test stops with an unsaved edit",
-    ),
-];
+/// **`bt-app`'s runtime roads that still say their line directly**, each with the reason, read
+/// from its committed file (`docs/plans/runtime-voice-direct-lines.tsv`). The list only shrinks:
+/// `scripts/ci/check-runtime-voice.ps1` holds it to the merge base's.
+fn bt_app_direct_lines() -> Vec<Row> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("docs")
+        .join("plans")
+        .join("runtime-voice-direct-lines.tsv");
+    let text = std::fs::read_to_string(&path).expect("the direct-line list is committed");
+    let mut rows = Vec::new();
+    let mut header = false;
+    for line in text.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if !header {
+            assert_eq!(
+                line, "road\tshape\tcount\treason",
+                "the direct-line list's header"
+            );
+            header = true;
+            continue;
+        }
+        let columns: Vec<&str> = line.split('\t').collect();
+        let [road, shape, count, reason] = columns[..] else {
+            panic!("a direct-line row is four columns: {line}");
+        };
+        let shape = match shape {
+            "call" => Shape::Call,
+            "value" => Shape::Value,
+            _ => panic!("a direct-line row's shape is call or value: {line}"),
+        };
+        let count = count
+            .parse()
+            .unwrap_or_else(|_| panic!("a direct-line row's count is a number: {line}"));
+        rows.push((road.to_owned(), shape, count, reason.to_owned()));
+    }
+    rows
+}
 
 /// What the guard found: the direct lines by road and shape, and every refusal of a shape it does
 /// not read.
@@ -275,7 +235,7 @@ fn judge(census: &Census, list: &[Row]) -> Vec<String> {
         .iter()
         .map(|(owner, shape, count, reason)| {
             assert!(!reason.is_empty(), "a row says why: {owner}");
-            (((*owner).to_owned(), *shape), *count)
+            ((owner.clone(), *shape), *count)
         })
         .collect();
     assert_eq!(listed.len(), list.len(), "a road and shape is one row");
@@ -330,7 +290,8 @@ fn fixture() -> Index {
 /// RED (planted) — **each direct line off the list, and each shape the guard does not read, is
 /// named, and nothing else is.** The fixture plants a direct call inside a closure of a method, the
 /// voice handed on as a value, the voice brought in by a body's `use` and called bare, the voice
-/// reached through a renamed module and a module-level `use` renaming it; the list holds a row
+/// reached through a renamed module, a module-level `use` renaming it and a module's glob over
+/// the voice's module; the list holds a row
 /// whose road says one line where it says two, and a row for a road that says none. A line
 /// through the window's door, a free function's line, a trait block's listed lines and a test
 /// block's line pass.
@@ -338,27 +299,23 @@ fn fixture() -> Index {
 fn every_direct_line_in_a_runtime_road_is_named() {
     let index = fixture();
     let census = census(&index, "Runtime", "diagnostics::note");
-    let list: &[Row] = &[
-        (
-            "crate::Runtime::listed",
-            Shape::Call,
-            1,
-            "the fixture's listed road",
-        ),
+    let list: Vec<Row> = [
+        ("crate::Runtime::listed", 1, "the fixture's listed road"),
         (
             "crate::<Runtime as Clone>::clone",
-            Shape::Call,
             1,
             "the fixture's trait road, listed one short",
         ),
         (
             "crate::Runtime::gone",
-            Shape::Call,
             1,
             "a road that says nothing any more",
         ),
-    ];
-    let refusals = judge(&census, list);
+    ]
+    .into_iter()
+    .map(|(road, count, reason)| (road.to_owned(), Shape::Call, count, reason.to_owned()))
+    .collect();
+    let refusals = judge(&census, &list);
     let named = |needle: &str| {
         refusals
             .iter()
@@ -399,10 +356,10 @@ fn every_direct_line_in_a_runtime_road_is_named() {
     );
     assert_eq!(
         named("a `use` that names `diagnostics::note`"),
-        1,
-        "{refusals:#?}"
+        2,
+        "the renaming `use` and the glob over its module: {refusals:#?}"
     );
-    assert_eq!(refusals.len(), 8, "nothing else is refused: {refusals:#?}");
+    assert_eq!(refusals.len(), 9, "nothing else is refused: {refusals:#?}");
     assert!(
         !census
             .lines
@@ -426,7 +383,7 @@ fn every_direct_line_in_a_runtime_road_is_named() {
 fn bt_app_runtime_roads_say_their_lines_through_the_window() {
     let index = Index::of_package("bt-app");
     let census = census(index, "Runtime", "diagnostics::note");
-    let refusals = judge(&census, BT_APP_DIRECT_LINES);
+    let refusals = judge(&census, &bt_app_direct_lines());
     assert!(
         refusals.is_empty(),
         "{}\n\nthe census: {:#?}",

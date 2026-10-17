@@ -134,10 +134,11 @@ pub(crate) enum WindowEffect {
 
 /// **How many `diagnostics.log` lines a ledger keeps between two takes** (T-DIAGNOSTICS-TEST-SINK).
 /// A line past them is counted ([`Ledger::notes_beyond_the_cap`]) and not kept, so a road a test
-/// drives through a long run of events does not grow the ledger by a line per event, and a test
-/// that drives one past the bound reads how many lines it said all the same. A test's bound, not a
-/// product budget: the product's own bounds on a road's lines are the road's (a window's bracket
-/// lines stop at `ime_report::PAIRING_LINES_MAX`, also 32).
+/// drives through a long run of events does not grow the ledger by a line per event, and a plain
+/// [`Ledger::take`] after one refuses with the count rather than hand back a shorter record. A
+/// test's bound, not a product budget and not derived from one: 32 mirrors the input method's
+/// bound on a window's bracket lines (`ime_report::PAIRING_LINES_MAX`); the product's own bounds
+/// on a road's lines are the road's.
 pub(crate) const NOTES_KEPT: usize = 32;
 
 /// **A window's effects, in the order its doors were knocked on.** One per headless window,
@@ -171,12 +172,30 @@ impl Ledger {
         }
     }
 
-    /// Everything recorded so far, emptied — the count of lines past the cap with it.
+    /// Everything recorded so far, emptied.
+    ///
+    /// # Panics
+    ///
+    /// When a line was said past [`NOTES_KEPT`] since the last take: what a test reads back would
+    /// be missing lines the road said, so it fails loudly with the count rather than pass on a
+    /// shorter record. The cap's own test reads the count first ([`Self::take_with_the_count`]).
     pub(crate) fn take(&self) -> Vec<WindowEffect> {
+        let beyond = self.notes_beyond_the_cap();
+        assert!(
+            beyond == 0,
+            "{beyond} diagnostics.log line(s) were said past the ledger's {NOTES_KEPT} and not \
+             kept; take the ledger more often"
+        );
+        self.take_with_the_count().0
+    }
+
+    /// Everything recorded so far, emptied, and how many lines were said past the cap — which the
+    /// take empties too.
+    fn take_with_the_count(&self) -> (Vec<WindowEffect>, usize) {
         let mut entries = self.0.borrow_mut();
         entries.notes_kept = 0;
-        entries.notes_beyond_the_cap = 0;
-        std::mem::take(&mut entries.effects)
+        let beyond = std::mem::take(&mut entries.notes_beyond_the_cap);
+        (std::mem::take(&mut entries.effects), beyond)
     }
 
     /// How many `diagnostics.log` lines were said past [`NOTES_KEPT`] since the last take.
@@ -1726,10 +1745,12 @@ mod tests {
     /// RED (T-DIAGNOSTICS-TEST-SINK) — **the window's `diagnostics.log` door keeps the exact text
     /// of every line up to its cap, and counts the rest**: [`NOTES_KEPT`] lines are kept in the
     /// order said, byte for byte (a line of several scripts, a line with a tab); the one past them
-    /// is counted and not kept; a take empties both, and the next line is kept again.
+    /// is counted and not kept; a plain take refuses, loudly, rather than hand back a record
+    /// missing a line; a take with the count empties both, and the next line is kept again.
     ///
     /// MUTATION: keep every line (no cap) — the ledger holds one line too many and counts none;
-    /// record a line trimmed or reformatted — the kept text differs.
+    /// record a line trimmed or reformatted — the kept text differs; let `take` pass with lines
+    /// past the cap — the refusal does not come.
     #[test]
     fn the_window_keeps_the_lines_it_is_told_up_to_its_cap_and_counts_the_rest() {
         crate::test_support::on_the_window_thread();
@@ -1747,15 +1768,20 @@ mod tests {
             1,
             "the line past the cap is counted"
         );
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ledger.take()));
+        assert!(
+            refused.is_err(),
+            "a take with a line past the cap fails loudly, and leaves the ledger as it was"
+        );
         let kept: Vec<WindowEffect> = said[..NOTES_KEPT]
             .iter()
             .cloned()
             .map(WindowEffect::Noted)
             .collect();
         assert_eq!(
-            ledger.take(),
-            kept,
-            "the first {NOTES_KEPT}, as they were said"
+            ledger.take_with_the_count(),
+            (kept, 1),
+            "the first {NOTES_KEPT}, as they were said, and the one past them counted"
         );
         assert_eq!(ledger.notes_beyond_the_cap(), 0, "a take empties the count");
         parts.window.note("after the take");

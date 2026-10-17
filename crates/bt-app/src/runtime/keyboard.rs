@@ -2206,7 +2206,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// The window's native facts are read through [`ime_native_facts`] only when
     /// a line will be written, at most [`ime_report::PAIRING_LINES_MAX`] times
     /// in the life of the window.
-    pub(crate) fn ime_bracket_line(
+    fn ime_bracket_line(
         &mut self,
         kind: ime_report::ImeKind,
         preedit_bytes: usize,

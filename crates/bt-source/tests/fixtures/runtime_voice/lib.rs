@@ -12,6 +12,12 @@ pub mod diagnostics {
 /// A `use` that renames the voice: a call through `say` is a call the guard cannot see. PLANTED.
 use crate::diagnostics::note as say;
 
+/// A glob over the voice's module: a bare `note` anywhere under it is a call the guard cannot
+/// see. PLANTED.
+mod opened {
+    use crate::diagnostics::*;
+}
+
 pub struct Window;
 
 impl Window {

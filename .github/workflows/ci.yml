@@ -741,6 +741,33 @@ jobs:
           }
           exit 0
 
+      # The runtime voice's direct-line list only shrinks: a planted row must go red, naming it.
+      - name: the runtime-voice list gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "docs/plans/runtime-voice-direct-lines.tsv"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "crate::runtime::planted::Runtime::planted_probe`tcall`t1`ta planted row`n")
+            $failed = $false
+            $said = ""
+            try {
+              & ./scripts/ci/check-runtime-voice.ps1
+            } catch {
+              $failed = $true
+              $said = "$_"
+            }
+            if (-not $failed) {
+              throw "the runtime-voice list accepted a row that is not at the merge base"
+            }
+            if ($said -notmatch "only shrinks" -or $said -notmatch "planted_probe") {
+              throw "the planted row was refused for another reason: $said"
+            }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          exit 0
+
   # ── everything that is decided by reading, not by hardware ────────────────
   logic:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
@@ -1020,6 +1047,13 @@ jobs:
       - name: the window seam's native list only shrinks
         shell: pwsh
         run: ./scripts/ci/check-window-seam-native.ps1
+
+      # T-DIAGNOSTICS-TEST-SINK: the runtime roads that still say their diagnostics line
+      # directly, not through the window's door, are listed, and the list is held to the merge
+      # base's (or its seed): no row added, no count grown.
+      - name: the runtime voice's direct-line list only shrinks
+        shell: pwsh
+        run: ./scripts/ci/check-runtime-voice.ps1
 
   # ── the licensing line: notices, machine paths, words, vendored notices ──
   #
