@@ -9628,6 +9628,99 @@ mod conditional_write_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// RED (T-PREVIEW-NO-EXCHANGE-RULING, stacked re-check) — **a preview save on a drive that
+    /// cannot exchange lands plainly through the storage lane itself, and says so once.** The
+    /// lane is the product's (`StorageLane::fresh_with` on the thread door, its worker started by
+    /// `SessionWriter::start`): the press is admitted by the lane's ledger and served inside the
+    /// request's `lane::task`, through the suite's door (`TestDoor`), which serves a document's
+    /// write exactly as `serve_storage_job` does but on a drive whose exchange answers
+    /// `ERROR_NOT_SUPPORTED` (50) (`test_support::NoExchangeDrive`). Its answer comes back on the
+    /// request's own road after the wake: the file holds the body, the copy the exchange was
+    /// handed is the copy the rename put in place, and the pane hears the sentence on the first
+    /// save and "Saved" on the second.
+    ///
+    /// MUTATION: `preview::ON_A_VOLUME_THAT_CANNOT_EXCHANGE` back to `Refuse` — the plain road is
+    /// bypassed: the save is refused and the file keeps its old bytes.
+    #[test]
+    fn a_preview_save_through_the_storage_lane_lands_plainly_on_a_drive_that_cannot_exchange() {
+        let root = scratch("lane-no-exchange");
+        let path = root.join("备忘 memo.md");
+        std::fs::write(&path, "原文 original\n").unwrap();
+        let drive = crate::test_support::NoExchangeDrive::new(7);
+        let seen = Arc::clone(&drive.seen);
+        let served = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&served);
+        let (mut lane, _receipts) = StorageLane::fresh_with(
+            crate::lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
+            Arc::new(super::wake_documents),
+            Box::new(crate::diagnostics::note),
+            Arc::new(super::let_go),
+        );
+        Arc::get_mut(&mut lane.shared)
+            .expect("a lane just made has one owner")
+            .door = Some(Arc::new(move |worker, job, receipts| {
+            if let StorageJob::Document(job) = &*job {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                crate::document_request::serve_document_on(worker, &drive, job, &mut |_| {});
+                return super::Served::Done;
+            }
+            super::serve_storage_job(worker, job, receipts)
+        }));
+        assert!(
+            super::SessionWriter::start(&lane),
+            "a worker serves the lane"
+        );
+        let mut saves = crate::preview::PreviewSaves::on(lane);
+        let mut buffer = crate::preview::PreviewBuffer::new(
+            crate::preview::PreviewSource::file(path.clone()),
+            "备忘 memo.md".to_owned(),
+        );
+        buffer.accept(crate::preview::read_head(&path));
+
+        for (line, said) in [
+            ("第一 first\n", crate::preview::SaveOutcome::SavedOrdinarily),
+            ("第二 second\n", crate::preview::SaveOutcome::Saved),
+        ] {
+            assert!(buffer.edit_content(|content| {
+                content.push_str(line);
+                true
+            }));
+            assert_eq!(
+                crate::test_support::save_through(&mut buffer, &mut saves),
+                Some(said),
+                "the sentence is said on the drive's first save only"
+            );
+        }
+        assert_eq!(
+            served.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "both saves were served inside the lane's tasks"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "原文 original\n第一 first\n第二 second\n",
+            "the saves landed with their bytes"
+        );
+        {
+            let seen = seen.lock().expect("the drive's record");
+            assert_eq!(
+                seen.exchanged.len(),
+                2,
+                "each save asked the exchange, refused"
+            );
+            assert_eq!(
+                seen.committed, seen.exchanged,
+                "each landing is the copy staged before its check"
+            );
+        }
+        assert_eq!(
+            names_in(&root),
+            ["备忘 memo.md"],
+            "nothing is left beside the file"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// RED ((c)3 item 2) — **a link is written the plain way only when the request says so.** A
     /// file with a second name is refused for a request that refuses links — nothing is written —
     /// and written through its name for one whose policy is `PlainWriter`, the preview's save as it

@@ -110,8 +110,8 @@ pub(crate) enum LinkPolicy {
     Refuse,
     /// Write the link's name the plain way — the preview's save, until the
     /// owner's ruling on links (J5 Q5(b), `Refuse`) is built for it. Honoured
-    /// for a link only: a volume that cannot exchange is refused whatever the
-    /// policy.
+    /// for a link only: a volume that cannot exchange is answered by the
+    /// request's `no_exchange`, whatever the link policy; see [`NoExchange`].
     PlainWriter,
 }
 
