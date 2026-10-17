@@ -23,6 +23,9 @@
 //!   `impl` through it would be written for a name the guard cannot see), and an `impl` whose self
 //!   type names a holder for the native backend without being that holder's path;
 //! * every product `impl` of a door trait declared in `crate::window_seam` is written there;
+//! * **the window's platform handle stays behind the doors** (RULE C, [`HandleWalk`]): code
+//!   written for the window names neither `bt_platform::NativeWindow` nor
+//!   `bt_platform::Compositor`, and no door of the seam does;
 //! * every row of the native list is still used (and `scripts/ci/check-window-seam-native.ps1`
 //!   holds the list to the merge base's: it only shrinks).
 //!
@@ -1972,6 +1975,16 @@ fn judge(
         };
         walk.visit_file(&parsed);
         refusals.extend(walk.refusals);
+        let mut handles = HandleWalk {
+            reading: &reading,
+            modules: modules.clone(),
+            block: None,
+            item: None,
+            scopes: Vec::new(),
+            found: BTreeMap::new(),
+        };
+        handles.visit_file(&parsed);
+        refusals.extend(handles.refusals());
         file_items(
             &parsed.items,
             &reading,
@@ -2122,6 +2135,8 @@ fn judge(
             named.into_iter().collect::<Vec<_>>().join(", ")
         ));
     }
+
+    refusals.extend(doors_handing_out_a_handle(index, &reading));
 
     let unused = allowed
         .iter()
@@ -2345,6 +2360,519 @@ impl<'ast> Visit<'ast> for AnyHolder<'_> {
     }
 }
 
+/// The crate whose two handles stay behind the seam.
+const PLATFORM: &str = "bt_platform";
+
+/// **The platform's handles**: the window's own (`bt_platform::NativeWindow`) and its composition
+/// tree's (`bt_platform::Compositor`).
+const PLATFORM_HANDLES: &[&str] = &["NativeWindow", "Compositor"];
+
+/// **RULE C: the window's platform handle stays behind the seam's doors**
+/// (T-NATIVE-HANDLE-BEHIND-THE-SEAM).
+///
+/// Code written for the window — an item with a backend parameter in scope, or whose generics,
+/// `where` clause or `impl Trait` arguments are bounded by one of the seam's traits (a function
+/// over `&impl WindowHost`, a method of a generic holder block, a trait's default body, a holder's
+/// declaration) — names neither `bt_platform::NativeWindow` nor `bt_platform::Compositor`, in its
+/// signature, its body or a macro's tokens in it. A name is followed to what it stands for through
+/// the body's `use` leaves, the module's own, `crate`/`self`/`super` paths and the module's globs
+/// (a glob of `bt_platform` itself opens both names), to a fixed point within [`HOPS`]; a name
+/// that does not settle is refused. Code written for no window (the platform's own glue: the web
+/// engine's host, a lane's executor) may name them: no door hands it a handle to speak with.
+struct HandleWalk<'r, 'a> {
+    reading: &'r Reading<'a>,
+    /// The module paths of the module being walked (a file may be reached by several).
+    modules: Vec<String>,
+    /// The impl block or trait around the walk: its name, and whether its own generics (or a
+    /// trait's supertraits) put the window in scope.
+    block: Option<(String, bool)>,
+    /// The item being read: its name as a refusal says it, and whether it is written for the
+    /// window.
+    item: Option<(String, bool)>,
+    scopes: Vec<UseScope>,
+    found: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl HandleWalk<'_, '_> {
+    /// Whether `generics`, and `inputs` (a signature's argument and return types), put the window
+    /// in scope: a backend parameter, or a bound naming one of the seam's traits.
+    fn for_the_window(&self, generics: &syn::Generics, inputs: &[&syn::Type]) -> bool {
+        struct Bounds<'s>(&'s BTreeSet<String>, bool);
+        impl<'ast> Visit<'ast> for Bounds<'_> {
+            fn visit_trait_bound(&mut self, node: &'ast syn::TraitBound) {
+                if node
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|last| self.0.contains(&last.ident.to_string()))
+                {
+                    self.1 = true;
+                }
+                syn::visit::visit_trait_bound(self, node);
+            }
+        }
+        let modules: Vec<&str> = self.modules.iter().map(String::as_str).collect();
+        if !self.reading.parameters(generics, &modules).is_empty() {
+            return true;
+        }
+        let mut bounds = Bounds(&self.reading.seam_traits, false);
+        bounds.visit_generics(generics);
+        for input in inputs {
+            bounds.visit_type(input);
+        }
+        bounds.1
+    }
+
+    /// **What `path` stands for, if it is one of the platform's handles** — `Err` when it does not
+    /// settle within [`HOPS`].
+    fn handle_named(&self, path: &[String]) -> Result<Option<String>, ()> {
+        // Each candidate with the module it is read in, and whether the body's own `use` leaves
+        // are in scope for it: only in the walk's own module, before a path has left it.
+        let mut frontier: Vec<(Vec<String>, String, bool)> = self
+            .modules
+            .iter()
+            .map(|module| (path.to_vec(), module.clone(), true))
+            .collect();
+        // A cycle among `use`s and globs names nothing more, and is not a cutoff.
+        let mut seen: BTreeSet<(Vec<String>, String, bool)> = BTreeSet::new();
+        for _ in 0..HOPS {
+            let mut next = Vec::new();
+            for (path, module, in_the_body) in frontier {
+                if !seen.insert((path.clone(), module.clone(), in_the_body)) {
+                    continue;
+                }
+                let Some(first) = path.first() else {
+                    continue;
+                };
+                if let [root, name, ..] = path.as_slice()
+                    && root == PLATFORM
+                    && PLATFORM_HANDLES.contains(&name.as_str())
+                {
+                    return Ok(Some(format!("{root}::{name}")));
+                }
+                // Another crate's path names what that crate says, and neither handle is the
+                // platform crate's but by that crate's own path.
+                if path.len() > 1
+                    && (["std", "core", "alloc"].contains(&first.as_str())
+                        || self.reading.dependencies.contains(first))
+                {
+                    continue;
+                }
+                let rest = || path.iter().skip(1).cloned();
+                // A body's own `use` leaves, innermost block first.
+                if let Some(leaves) = in_the_body
+                    .then(|| {
+                        self.scopes
+                            .iter()
+                            .rev()
+                            .find_map(|scope| scope.names.get(first))
+                    })
+                    .flatten()
+                    .filter(|leaves| leaves.iter().any(|leaf| leaf.as_slice() != [first.clone()]))
+                {
+                    for leaf in leaves {
+                        next.push((
+                            leaf.iter().cloned().chain(rest()).collect(),
+                            module.clone(),
+                            in_the_body,
+                        ));
+                    }
+                    continue;
+                }
+                if ["crate", "self", "super"].contains(&first.as_str()) {
+                    // The module the path's leading segments name, and the rest read there.
+                    let mut opened = None;
+                    for split in (1..path.len()).rev() {
+                        if let Some(found) = self.reading.module_of(&module, &path[..split]) {
+                            opened = Some((found, path[split..].to_vec()));
+                            break;
+                        }
+                    }
+                    if let Some((found, rest)) = opened {
+                        next.push((rest, found, false));
+                    }
+                    continue;
+                }
+                let own: Vec<&Vec<String>> = self
+                    .reading
+                    .module_uses
+                    .get(&module)
+                    .and_then(|names| names.get(first))
+                    .map(|leaves| {
+                        leaves
+                            .iter()
+                            .filter(|leaf| leaf.as_slice() != [first.clone()])
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !own.is_empty() {
+                    for leaf in own {
+                        next.push((
+                            leaf.iter().cloned().chain(rest()).collect(),
+                            module.clone(),
+                            false,
+                        ));
+                    }
+                    continue;
+                }
+                // A child module's name: the rest is read there.
+                if path.len() > 1
+                    && let Some(child) = self.reading.module_of(&module, &path[..1])
+                {
+                    next.push((path[1..].to_vec(), child, false));
+                    continue;
+                }
+                if path.len() == 1 {
+                    let globs = self
+                        .scopes
+                        .iter()
+                        .filter(|_| in_the_body)
+                        .flat_map(|scope| scope.globs.iter())
+                        .chain(self.reading.module_globs.get(&module).into_iter().flatten());
+                    for glob in globs {
+                        if glob.as_slice() == [PLATFORM]
+                            && PLATFORM_HANDLES.contains(&first.as_str())
+                        {
+                            return Ok(Some(format!("{PLATFORM}::{first}")));
+                        }
+                        if let Some(opened) = self.reading.module_of(&module, glob)
+                            && self
+                                .reading
+                                .module_uses
+                                .get(&opened)
+                                .is_some_and(|names| names.contains_key(first))
+                        {
+                            next.push((path.clone(), opened, false));
+                        }
+                    }
+                }
+            }
+            if next.is_empty() {
+                return Ok(None);
+            }
+            frontier = next;
+        }
+        Err(())
+    }
+
+    /// Read `path` for the item being read, when that item is written for the window.
+    fn judge_path(&mut self, path: Vec<String>) {
+        let Some((item, true)) = &self.item else {
+            return;
+        };
+        let item = item.clone();
+        match self.handle_named(&path) {
+            Ok(Some(named)) => {
+                self.found.entry(item).or_default().insert(named);
+            }
+            Ok(None) => {}
+            Err(()) => {
+                self.found
+                    .entry(item)
+                    .or_default()
+                    .insert(format!("`{}`, which does not settle", path.join("::")));
+            }
+        }
+    }
+
+    /// Every path a macro's tokens spell (`a::b::c`), read as [`Self::judge_path`] reads one.
+    fn judge_tokens(&mut self, tokens: proc_macro2::TokenStream) {
+        let tokens: Vec<TokenTree> = tokens.into_iter().collect();
+        let mut at = 0;
+        while at < tokens.len() {
+            match &tokens[at] {
+                TokenTree::Group(group) => {
+                    self.judge_tokens(group.stream());
+                    at += 1;
+                }
+                TokenTree::Ident(first) => {
+                    let mut path = vec![first.to_string()];
+                    at += 1;
+                    while let [
+                        TokenTree::Punct(a),
+                        TokenTree::Punct(b),
+                        TokenTree::Ident(next),
+                        ..,
+                    ] = &tokens[at..]
+                        && a.as_char() == ':'
+                        && b.as_char() == ':'
+                    {
+                        path.push(next.to_string());
+                        at += 3;
+                    }
+                    self.judge_path(path);
+                }
+                TokenTree::Punct(_) | TokenTree::Literal(_) => at += 1,
+            }
+        }
+    }
+
+    /// Read one item: `name` as a refusal says it, written for the window or not.
+    fn read(&mut self, name: String, for_the_window: bool, visit: impl FnOnce(&mut Self)) {
+        let outer = self.item.replace((name, for_the_window));
+        let block = self.block.take();
+        visit(self);
+        self.block = block;
+        self.item = outer;
+    }
+
+    fn module_name(&self) -> String {
+        self.modules.first().cloned().unwrap_or_default()
+    }
+
+    /// Each item read, with every handle it names.
+    fn refusals(self) -> Vec<String> {
+        self.found
+            .into_iter()
+            .map(|(item, named)| {
+                format!(
+                    "{item} names {} — the window's platform handle and its composition tree are \
+                     the native backend's own: code written for the window speaks to the platform \
+                     through the seam's doors",
+                    named.into_iter().collect::<Vec<_>>().join(", ")
+                )
+            })
+            .collect()
+    }
+}
+
+impl<'ast> Visit<'ast> for HandleWalk<'_, '_> {
+    fn visit_item(&mut self, node: &'ast syn::Item) {
+        let attrs = match node {
+            syn::Item::Fn(item) => &item.attrs,
+            syn::Item::Impl(item) => &item.attrs,
+            syn::Item::Mod(item) => &item.attrs,
+            syn::Item::Struct(item) => &item.attrs,
+            syn::Item::Enum(item) => &item.attrs,
+            syn::Item::Union(item) => &item.attrs,
+            syn::Item::Trait(item) => &item.attrs,
+            syn::Item::Type(item) => &item.attrs,
+            syn::Item::Macro(item) => &item.attrs,
+            _ => return syn::visit::visit_item(self, node),
+        };
+        if !test_only(attrs) {
+            syn::visit::visit_item(self, node);
+        }
+    }
+
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        let outer = self.modules.clone();
+        self.modules = outer
+            .iter()
+            .map(|module| format!("{module}::{}", node.ident))
+            .collect();
+        syn::visit::visit_item_mod(self, node);
+        self.modules = outer;
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        let inputs = signature_types(&node.sig);
+        let window = self.for_the_window(&node.sig.generics, &inputs);
+        let name = format!("`{}::{}`", self.module_name(), node.sig.ident);
+        self.read(name, window, |walk| syn::visit::visit_item_fn(walk, node));
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        let window = self.for_the_window(&node.generics, &[&*node.self_ty]);
+        let name = match &*node.self_ty {
+            syn::Type::Path(path) => path
+                .path
+                .segments
+                .last()
+                .map_or_else(String::new, |last| last.ident.to_string()),
+            _ => String::from("impl"),
+        };
+        let outer = self.block.replace((name.clone(), window));
+        let item = self.item.replace((format!("`impl {name}`"), window));
+        syn::visit::visit_item_impl(self, node);
+        self.item = item;
+        self.block = outer;
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        let (owner, block) = self.block.clone().unwrap_or_default();
+        let inputs = signature_types(&node.sig);
+        let window = block || self.for_the_window(&node.sig.generics, &inputs);
+        let name = format!("`{owner}::{}`", node.sig.ident);
+        self.read(name, window, |walk| {
+            syn::visit::visit_impl_item_fn(walk, node);
+        });
+    }
+
+    fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
+        let supertraits: Vec<syn::Type> = node
+            .supertraits
+            .iter()
+            .map(|bound| {
+                syn::Type::TraitObject(syn::TypeTraitObject {
+                    dyn_token: None,
+                    bounds: std::iter::once(bound.clone()).collect(),
+                })
+            })
+            .collect();
+        let inputs: Vec<&syn::Type> = supertraits.iter().collect();
+        let window = self.for_the_window(&node.generics, &inputs);
+        let name = node.ident.to_string();
+        let outer = self.block.replace((name.clone(), window));
+        let item = self.item.replace((format!("the trait `{name}`"), window));
+        syn::visit::visit_item_trait(self, node);
+        self.item = item;
+        self.block = outer;
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        let (owner, block) = self.block.clone().unwrap_or_default();
+        let inputs = signature_types(&node.sig);
+        let window = block || self.for_the_window(&node.sig.generics, &inputs);
+        let name = format!("`{owner}::{}`", node.sig.ident);
+        self.read(name, window, |walk| {
+            syn::visit::visit_trait_item_fn(walk, node);
+        });
+    }
+
+    fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
+        let window = self.for_the_window(&node.generics, &[]);
+        let name = format!("the type `{}::{}`", self.module_name(), node.ident);
+        self.read(name, window, |walk| {
+            syn::visit::visit_item_struct(walk, node)
+        });
+    }
+
+    fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
+        let window = self.for_the_window(&node.generics, &[]);
+        let name = format!("the type `{}::{}`", self.module_name(), node.ident);
+        self.read(name, window, |walk| syn::visit::visit_item_enum(walk, node));
+    }
+
+    fn visit_item_union(&mut self, node: &'ast syn::ItemUnion) {
+        let window = self.for_the_window(&node.generics, &[]);
+        let name = format!("the type `{}::{}`", self.module_name(), node.ident);
+        self.read(name, window, |walk| {
+            syn::visit::visit_item_union(walk, node)
+        });
+    }
+
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        let mut scope = UseScope::default();
+        for statement in &node.stmts {
+            if let syn::Stmt::Item(syn::Item::Use(declared)) = statement {
+                scope.leaves(&declared.tree, &mut Vec::new());
+            }
+        }
+        self.scopes.push(scope);
+        syn::visit::visit_block(self, node);
+        self.scopes.pop();
+    }
+
+    fn visit_path(&mut self, node: &'ast syn::Path) {
+        self.judge_path(segments(node));
+        syn::visit::visit_path(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        // A macro written at module level — an invocation or a `macro_rules!` body — is no item's
+        // and may stand in code written for the window: its tokens are read as the window's.
+        if self.item.is_none() {
+            let name = format!(
+                "the macro `{}!` in {}",
+                segments(&node.path).join("::"),
+                self.module_name()
+            );
+            self.read(name, true, |walk| walk.judge_tokens(node.tokens.clone()));
+        } else {
+            self.judge_tokens(node.tokens.clone());
+        }
+        syn::visit::visit_macro(self, node);
+    }
+
+    fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
+        match (&node.ident, &self.item) {
+            (Some(ident), None) => {
+                let name = format!("`macro_rules! {ident}` in {}", self.module_name());
+                self.read(name, true, |walk| {
+                    walk.judge_tokens(node.mac.tokens.clone());
+                });
+            }
+            _ => syn::visit::visit_item_macro(self, node),
+        }
+    }
+
+    fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
+        // A type alias is a name the walk does not follow: one naming a handle is refused wherever
+        // it is written, as Rules A and B refuse an alias of a holder.
+        let name = format!("the type alias `{}` in {}", node.ident, self.module_name());
+        self.read(name, true, |walk| syn::visit::visit_item_type(walk, node));
+    }
+
+    fn visit_impl_item_type(&mut self, node: &'ast syn::ImplItemType) {
+        let (owner, _) = self.block.clone().unwrap_or_default();
+        let name = format!("the associated type `{owner}::{}`", node.ident);
+        self.read(name, true, |walk| {
+            syn::visit::visit_impl_item_type(walk, node);
+        });
+    }
+
+    fn visit_trait_item_type(&mut self, node: &'ast syn::TraitItemType) {
+        let (owner, _) = self.block.clone().unwrap_or_default();
+        let name = format!("the associated type `{owner}::{}`", node.ident);
+        self.read(name, true, |walk| {
+            syn::visit::visit_trait_item_type(walk, node);
+        });
+    }
+
+    fn visit_item_use(&mut self, _: &'ast syn::ItemUse) {}
+}
+
+/// A signature's argument and return types: where an `impl Trait` puts the window in scope.
+fn signature_types(signature: &syn::Signature) -> Vec<&syn::Type> {
+    signature
+        .inputs
+        .iter()
+        .filter_map(|input| match input {
+            syn::FnArg::Typed(typed) => Some(&*typed.ty),
+            syn::FnArg::Receiver(_) => None,
+        })
+        .chain(match &signature.output {
+            syn::ReturnType::Type(_, output) => Some(&**output),
+            syn::ReturnType::Default => None,
+        })
+        .collect()
+}
+
+/// **No door of the seam hands a platform handle out**: every trait declared in the seam — its
+/// methods' signatures, its associated types' bounds and defaults — names neither handle.
+fn doors_handing_out_a_handle(index: &Index, reading: &Reading<'_>) -> Vec<String> {
+    let mut refusals = Vec::new();
+    for declared in index.traits() {
+        if !in_the_product(index, declared.whole()) || !declared.module_paths().contains(&SEAM) {
+            continue;
+        }
+        let parsed: syn::ItemTrait = syn::parse_str(index.text(declared.whole()))
+            .unwrap_or_else(|error| panic!("the door `{}` parses: {error}", declared.name()));
+        let mut walk = HandleWalk {
+            reading,
+            modules: vec![SEAM.to_owned()],
+            block: Some((declared.name().to_owned(), true)),
+            item: Some((format!("the door `{SEAM}::{}`", declared.name()), true)),
+            scopes: Vec::new(),
+            found: BTreeMap::new(),
+        };
+        for member in &parsed.items {
+            match member {
+                syn::TraitItem::Fn(method) => walk.visit_signature(&method.sig),
+                other => walk.visit_trait_item(other),
+            }
+        }
+        refusals.extend(walk.found.into_iter().map(|(door, named)| {
+            format!(
+                "{door} names {} — no door of the seam hands the platform handle out",
+                named.into_iter().collect::<Vec<_>>().join(", ")
+            )
+        }));
+    }
+    refusals
+}
+
 /// The fixture crate.
 fn fixture() -> Index {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2412,15 +2940,20 @@ fn row(kind: &str, owner: &str, name: &str) -> (String, String, String) {
 /// type, each introducing a name; a listed method behind a tuple self type holding a lifetime,
 /// introducing a name; a holder bounded, and a backend trait's supertrait, through a chain of
 /// re-exports of `Backend` past the resolver's hop limit; a seam type implementing that chain's far
-/// end (the native list's decision, and the door check, each refuse it); and a list row nothing
-/// uses. A
+/// end (the native list's decision, and the door check, each refuse it); the platform's handles
+/// in code written for the window (RULE C, `handles.rs`): in a signature over a door, through a
+/// renamed crate in a generic block's method, through the module's `use` and a body's renaming
+/// `use`, in a macro's tokens, in a holder's field and through a glob of the platform crate; a
+/// door of the seam handing the handle out; and a list row nothing uses. A
 /// module-level impl of a dependency's trait passes, and so do a module-level and a nested impl of
 /// a first-party trait spelled as a seam trait, which the resolver follows to that trait. The generic blocks (the bound written
 /// directly, through the prelude's glob, through a rename, in a `where` clause and through a
 /// supertrait), a holder built by inference inside a generic function, a trait method's default
 /// body written for the trait's own backend parameter and for a backend trait's `Self`, an enum's
 /// variant spelled as the backend, the listed native method, function and `const`, a type with no backend and a
-/// test module's native block pass.
+/// test module's native block pass; so do the platform's own glue naming both handles, and code
+/// written for the window naming the backend's associated types and the fixture's own
+/// `NativeWindow`.
 #[test]
 fn every_road_around_the_window_seam_is_named() {
     let index = fixture();
@@ -2444,12 +2977,40 @@ fn every_road_around_the_window_seam_is_named() {
         [
             "`Indirect::sneaks_through_a_supertrait` is written for the native backend in \
              crate::runtime — the window is reached through the seam",
+            "`Runtime::reaches_the_tree` names bt_platform::Compositor \
+             — the window's platform handle and its composition tree are the native \
+             backend's own: code written for the window speaks to the platform through the \
+             seam's doors",
             "`Runtime::sneaks_past_the_seam` is written for the native backend in crate::runtime \
              — the window is reached through the seam",
             "`Runtime::takes_the_native` names Runtime for the native backend — the window is \
              reached through the seam",
             "`Shell::fmt` names Native, Shell for the native backend — the window is reached \
              through the seam",
+            "`crate::handles::globbed::through_the_glob` names bt_platform::Compositor \
+             — the window's platform handle and its composition tree are the native \
+             backend's own: code written for the window speaks to the platform through the \
+             seam's doors",
+            "`crate::handles::hands_out_the_handle` names bt_platform::NativeWindow \
+             — the window's platform handle and its composition tree are the native \
+             backend's own: code written for the window speaks to the platform through the \
+             seam's doors",
+            "`crate::handles::holds_a_handle` names bt_platform::NativeWindow \
+             — the window's platform handle and its composition tree are the native \
+             backend's own: code written for the window speaks to the platform through the \
+             seam's doors",
+            "`crate::handles::renames_the_handle` names bt_platform::NativeWindow \
+             — the window's platform handle and its composition tree are the native \
+             backend's own: code written for the window speaks to the platform through the \
+             seam's doors",
+            "`crate::handles::says_it_in_a_macro` names bt_platform::Compositor \
+             — the window's platform handle and its composition tree are the native \
+             backend's own: code written for the window speaks to the platform through the \
+             seam's doors",
+            "`crate::handles::too_far` names `Far9`, which does not settle \
+             — the window's platform handle and its composition tree are the native \
+             backend's own: code written for the window speaks to the platform through the \
+             seam's doors",
             "`crate::runtime::aliases_a_holder_inside` names Runtime for the native backend — \
              the window is reached through the seam",
             "`crate::runtime::builds_by_a_literal` names Shell for the native backend — the \
@@ -2486,6 +3047,10 @@ fn every_road_around_the_window_seam_is_named() {
              guard does not read macros",
             "`macro_rules! door_through_a_reexport` at runtime.rs:384: a macro's tokens name \
              Host — the guard does not read macros",
+            "`macro_rules! hands_it_over` in crate::handles names bt_platform::Compositor \
+             — the window's platform handle and its composition tree are the native \
+             backend's own: code written for the window speaks to the platform through the \
+             seam's doors",
             "`macro_rules! makes_a_door` at runtime.rs:350: a macro's tokens name WindowHost — \
              the guard does not read macros",
             "`paste!` at runtime.rs:394: it builds names from pieces, which the guard cannot \
@@ -2528,6 +3093,8 @@ fn every_road_around_the_window_seam_is_named() {
              native backend — the window is reached through the seam",
             "the bound `crate::elsewhere::Bk20` in crate chains past the resolver's hop limit — \
              refused, never passed",
+            "the door `crate::window_seam::HandleDoor` names bt_platform::NativeWindow — no \
+             door of the seam hands the platform handle out",
             "the extern crate `self` at runtime.rs:415 — an `extern crate` is refused in product \
              files: the guard reads `use` items, not crate aliases",
             "the impl at lib.rs:102 inside `fn listed_rebuild` is a block of `Runtime` — a \
@@ -2634,12 +3201,20 @@ fn every_road_around_the_window_seam_is_named() {
             "the type `Inner` at lib.rs:155 inside `impl` — a body the guard does not read for \
              mentions (a native block's method, a listed function or `const`) introduces no \
              names",
+            "the type `crate::handles::Keeps` names bt_platform::NativeWindow \
+             — the window's platform handle and its composition tree are the native \
+             backend's own: code written for the window speaks to the platform through the \
+             seam's doors",
             "the type `crate::runtime::Counted` holds Runtime for the native backend — the \
              window is reached through the seam",
             "the type `crate::runtime::Defaulted` holds Runtime for the native backend — the \
              window is reached through the seam",
             "the type `crate::runtime::Keeper` holds Runtime for the native backend — the window \
              is reached through the seam",
+            "the type alias `Handle` in crate::handles names bt_platform::NativeWindow \
+             — the window's platform handle and its composition tree are the native \
+             backend's own: code written for the window speaks to the platform through the \
+             seam's doors",
             "the type alias `NativeBackend` in runtime.rs names Native for the native backend — \
              the window is reached through the seam",
             "the type alias `NativeRuntime` in runtime.rs names Native for the native backend — \

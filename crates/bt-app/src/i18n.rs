@@ -901,6 +901,9 @@ text_entries! {
     FilesPermissionDenied,
     FilesNotFound,
     FilesUnreadable,
+    /// The foot's right hand when a files card or column opened on the home folder because the
+    /// pane's folder could not be read (T-CWD-FROM-PROCESS). Never cut.
+    FilesFolderUnknown,
     /// **Length-sensitive**: the foot clips this from the left with
     /// `ellipsized_left`, so the tail is the half that survives.
     FilesRevealed,
@@ -3871,6 +3874,11 @@ impl Text {
             Self::FilesPermissionDenied => pick(lang, "Permission denied", "没有权限"),
             Self::FilesNotFound => pick(lang, "Folder not found", "文件夹不存在"),
             Self::FilesUnreadable => pick(lang, "Could not read folder", "无法读取文件夹"),
+            Self::FilesFolderUnknown => pick(
+                lang,
+                "Folder unknown",
+                "Folder unknown", // zh: pending T-CWD-FROM-PROCESS
+            ),
             // "File Explorer" is a Windows product and has a Chinese name of its
             // own; using the English one here would send the reader looking for
             // something their Start menu does not have.
@@ -6613,6 +6621,10 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // zh: pending T-CWD-FROM-PROCESS — the foot of a files card or column opened on the home
+        // folder because the pane's folder could not be read.
+        (Self::FilesFolderUnknown, HostPlatform::Windows),
+        (Self::FilesFolderUnknown, HostPlatform::MacOs),
         // zh: pending T-PROFILE-INSTALL-REFUSED-START — a change whose worker would not start, or
         // stopped before it finished.
         (Self::ChangeNotStarted, HostPlatform::Windows),

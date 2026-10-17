@@ -3353,7 +3353,8 @@ impl<B: Backend> Runtime<'_, B> {
         // Git page reaches a float only by being carried there — a column that
         // was on it when it popped out (`undock_files_column`).
         let state = seats::FilesLeafState {
-            root,
+            root: root.root,
+            folder_unknown: root.folder_unknown,
             ..seats::FilesLeafState::default()
         };
         self.place_float(

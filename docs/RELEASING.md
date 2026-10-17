@@ -1006,26 +1006,45 @@ into a fork of that repository unchanged.
 
 `InstallerType: zip` with `NestedInstallerType: portable` would, by default,
 extract the archive and put a **symlink** to `folio.exe` in
-`%LOCALAPPDATA%\Microsoft\WinGet\Links`. That is the one arrangement this
-product cannot survive: `folio.exe` looks for `conpty.dll` and
-`OpenConsole.exe` beside `current_exe()` and nowhere else, and `folio.msix`
-names the extracted folder as the program's external location. A link in a
-different directory is a `folio.exe` with no ConPTY and a package that
-registers against nothing.
+`%LOCALAPPDATA%\Microsoft\WinGet\Links`, with that folder on the user's `PATH`.
+Every file that came with the program — `conpty.dll`, `OpenConsole.exe`,
+`folio.msix` — stays in the package folder, and only `folio.exe` has a name in
+`Links`.
 
-`ArchiveBinariesDependOnPath: true` is meant to turn that off. With it, winget
-extracts the whole archive into one real folder under
+`ArchiveBinariesDependOnPath: true` turns that off. With it, winget extracts the
+whole archive into one real folder under
 `%LOCALAPPDATA%\Microsoft\WinGet\Packages\` and puts **that folder** on the
 user's `PATH`, so all ten files sit beside each other exactly as they do for
-somebody who unzipped the release by hand. It arrived in winget-cli 1.9 and is
-carried by manifest schema 1.9.0 onward; do not remove it. **An older winget
-still makes the symlink:** E2 (2026-09-27, winget 1.6, this manifest) found
-`%LOCALAPPDATA%\Microsoft\WinGet\Links\folio.exe` pointing at
-`<package folder>\folio-<version>\folio.exe`, with the `Links` folder on
-`PATH`. It does not matter for how Folio tells a winget copy
-(0.4.6, U-4): Folio resolves the executable's canonical path before comparing it
-with winget's record, and a start through the link resolves to the file inside
-the package.
+somebody who unzipped the release by hand. The field is in manifest schema 1.9.0
+onward (it is not in 1.7.0's or 1.8.0's), so a client older than winget-cli 1.9
+does not know it and makes the symlink anyway; `MinimumOSVersion` bounds the
+Windows build, not the client, and nothing else in a manifest can ask for a newer
+winget. Do not remove the field.
+
+**An older winget is not rare.** Windows 11 25H2 installed from Microsoft's own
+current evaluation media in September 2026 carries App Installer with winget
+**1.6.10121**, and keeps it until the Store updates App Installer — which it
+does by itself on a machine that reaches the Store with app updates on, and
+never on one where the Store is blocked or offline. On that client (E2, 2026-09-27; the 0.4.7 post-publish row,
+2026-10-08) `folio` resolves to `WinGet\Links\folio.exe`, a symbolic link to
+`<package folder>\folio-<version>\folio.exe`.
+
+What that costs depends on the release. **Up to 0.4.7** Folio looked for its
+ConPTY pair beside `current_exe()`, and Windows reports the path a process was
+started by: `GetModuleFileNameW` returns its path "in the same format that was
+specified when the module was loaded", so a start through the link is told the
+link. Such a start ran every pane on the Windows inbox ConPTY (no key records,
+no host-side clear, the resize behaviour the shipped pair is pinned to absent)
+and said so in `diagnostics.log`. **From 0.4.8** (T-EXE-SYMLINK-SIDECARS) the
+program's own files are found beside its resolved image
+(`bt_platform::running_image`: `GetFinalPathNameByHandleW` on the started path,
+which follows every link to the file itself): the ConPTY pair, `folio.msix`, the
+install-channel marker and the Explorer verb all come from the package folder,
+and `diagnostics.log` says once that the started path and the file differ. A
+start through the link and a start from the package folder then run the same
+program with the same files; the PATH shape differs and nothing else does. How
+Folio tells a winget copy (0.4.6, U-4) was never affected: it compares the
+canonical path with winget's record.
 
 `RelativeFilePath` names the folder **inside** the archive, which is
 `folio-<version>\folio.exe` — `package.ps1` zips the staging folder rather than
@@ -1076,10 +1095,11 @@ reads it.
 winget validate --manifest packaging\winget\manifests\w\WeiyiShi\Folio\<version>
 ```
 
-and then, on a machine that is **not** the one doing the work — the Windows 10
-virtual machine of `docs/plans/release/clean-vm.md`, or Windows Sandbox — the
-install itself, because `validate` only reads the YAML and the failure this
-manifest exists to avoid is a runtime one:
+and then, on a machine that is **not** the one doing the work — the Windows 11
+virtual machine of `docs/plans/release/clean-vm.md` (§4.5; it is the one with a
+network, which the install needs to fetch `InstallerUrl`) — the install itself,
+because `validate` only reads the YAML and the failure this manifest exists to
+avoid is a runtime one:
 
 ```powershell
 winget settings --enable LocalManifestFiles              # once, elevated
@@ -1096,12 +1116,43 @@ Defender, asked directly about the same bytes on the same machine, finds nothing
 in it. Without the override the local test cannot be run at all; nobody
 installing the published package is asked the question.
 
-What that has to show, beyond exiting 0: `folio` resolves on `PATH` to the
-extracted folder under `WinGet\Packages` and **not** to anything in
-`WinGet\Links`; `folio --version` prints the version this release claims;
-`conpty.dll`, `OpenConsole.exe` and `folio.msix` are in the same directory as
-the `folio.exe` that `PATH` resolved to; and `winget uninstall WeiyiShi.Folio`
-takes the folder and the `PATH` entry away again.
+**The install runs twice, once on each client**, both from the machine's
+`clean` snapshot: first on the winget the image carries, as it is, then on the
+current winget (App Installer updated in the guest, clean-vm.md §4.5 says how).
+Users have both — the image's client is what a fresh Windows 11 has until the
+Store updates it — and the two make different `PATH` shapes, so a release that
+passes on one has said nothing about the other. Record `winget --version` for
+each.
+
+What both runs have to show, beyond exiting 0: `folio --version` prints the
+version this release claims; `conpty.dll`, `OpenConsole.exe` and `folio.msix`
+are in the package folder `<package folder>\folio-<version>\`; a started Folio
+with one pane open has that folder's `conpty.dll` in its module list and no
+`ConPTY: this pane runs on the Windows inbox ConPTY` line in `diagnostics.log`;
+and `winget uninstall WeiyiShi.Folio` takes the folder and the `PATH` entry or
+link away again. Each run then has its own shape:
+
+| client | `PATH` gains | `folio` resolves to | `diagnostics.log` |
+| --- | --- | --- | --- |
+| **current** (1.9 or newer) | `<package folder>\folio-<version>` | that folder's `folio.exe`; nothing named `folio.exe` in `WinGet\Links` | no line about where Folio was started |
+| **the image's** (older than 1.9, e.g. 1.6.10121) | `%LOCALAPPDATA%\Microsoft\WinGet\Links` | `WinGet\Links\folio.exe`, a symbolic link whose target is `<package folder>\folio-<version>\folio.exe` | `Folio was started as …\WinGet\Links\folio.exe and runs from …\folio-<version>\folio.exe; its own files are looked for there` |
+
+On the current client the link shape **is** a failure: it means
+`ArchiveBinariesDependOnPath` no longer takes effect, and the manifest has to be
+looked at before it is submitted. On the image's client the folder shape is
+what winget does when it cannot make a symbolic link on that machine (the
+schema's own description of the default: a link "if supported", else the folder
+on `PATH`); the row records which it met. On either client a pane on the inbox
+ConPTY is a failure. When the image's own winget is already 1.9 or newer, the
+link road cannot be reached through winget on that image; the row says so, and
+the start through a link stays covered by `bt-platform`'s
+`a_program_started_through_a_link_finds_its_files_beside_the_real_file`.
+
+Two things both runs also show, and neither is a failure: winget's
+`Archive scan detected malware. Proceeding due to
+--ignore-local-archive-malware-scan` line (the local-manifest scan above), and a
+`Zone.Identifier` stream with `ZoneId=3` on every extracted file (see
+Troubleshooting).
 
 ### Submitting
 
@@ -1137,7 +1188,7 @@ it, check: the folder path and the three files' `PackageIdentifier` and
 `PackageVersion` agree; `InstallerSha256` is the zip's line of the published
 `SHA256SUMS.txt`, upper case; the `InstallerUrl` answers now that the page is
 published; `winget validate` passes; and the clean-machine install above shows
-what it has to.
+what it has to on both clients.
 
 Before opening it, read the checklist in that repository's pull-request
 template, and expect these to be what is asked about:
@@ -1179,6 +1230,16 @@ rehearsal and the release page is made by a person from the signed machine.
   `InstallLocation` the package folder the executable sits inside). A copy that
   reads as unknown there is a record Folio could not read; its line in
   `diagnostics.log` says which.
+- **Every file winget extracted carries `Zone.Identifier` `ZoneId=3`** (both
+  clients, the 0.4.7 post-publish row). winget marks the downloaded archive as
+  coming from the internet and the mark travels to what it extracts, as it does
+  when Explorer extracts a zip downloaded by a browser. So a start through the
+  shell's own open — an Explorer double-click on `folio.exe` in the package
+  folder, `Start-Process` — meets the same first-run warning as a hand-unpacked
+  copy, which `docs/install.md` already describes; typing `folio` in a shell
+  starts the process directly and is not asked. Nothing to change: the mark is
+  Windows' record of where the bytes came from, and removing it would be
+  removing the check for a copy that came from the internet.
 
 ## macOS
 

@@ -14,14 +14,13 @@ use crate::{
     a_right_press_is_on_the_pane_menus_head, answered_once, button_router_position, crumb_segments,
     drain_whole_units, files, files_row_activation, first_run, float, float_grasp, float_sizing_of,
     formula_tools, glass_allows_a_drop, hang_watch, image_zoom_notch, input, landing_for_aim,
-    live_viewport_mouse_hit, marks, mouse_trace, native_window, over_home_ground, palette,
-    platform_pointer_of, pointer_cursor, press_after_blur, press_files_node, press_pins_a_peek,
-    press_reaches_no_grid, press_spends_itself_closing, pressed_row_identity, profiles,
-    protocol_mouse_button, recoverable_wheel_scroll_amount, release_verdict, restore,
-    right_press_raises_terminal_menu, risen_frame, route_forwarded_mouse_button,
-    route_forwarded_mouse_motion, seats, settings, settling, toast, tooltip, update, upright_wheel,
-    web_page_cursor, websheet, wheel_axis, wheel_points_sideways, wheel_route, wheel_zoom_notches,
-    write_pty_input,
+    live_viewport_mouse_hit, marks, mouse_trace, over_home_ground, palette, pointer_cursor,
+    press_after_blur, press_files_node, press_pins_a_peek, press_reaches_no_grid,
+    press_spends_itself_closing, pressed_row_identity, profiles, protocol_mouse_button,
+    recoverable_wheel_scroll_amount, release_verdict, restore, right_press_raises_terminal_menu,
+    risen_frame, route_forwarded_mouse_button, route_forwarded_mouse_motion, seats, settings,
+    settling, toast, tooltip, update, upright_wheel, web_page_cursor, websheet, wheel_axis,
+    wheel_points_sideways, wheel_route, wheel_zoom_notches, write_pty_input,
 };
 use crate::{TextSizeAim, TextStep, wheel_steps_text_size};
 use anyhow::Context;
@@ -5443,43 +5442,6 @@ impl<B: Backend> Runtime<'_, B> {
             })
             .flatten();
         DropBatch::collect(&mut self.window.dropped_files, path, point, target);
-    }
-
-    /// **Where the cursor is, this instant, in this window's own pixels**
-    /// (GitHub issue #1 ②, owner's ruling 2026-09-16: a drop lands in the pane
-    /// under the cursor).
-    ///
-    /// **Two readers, and they are the two gestures that put a path on a command
-    /// line.** [`Self::collect_dropped_file`] asks it as an external drop
-    /// arrives, and [`Self::keep_the_paste_offer`] asks it as an internal drag is
-    /// let go of (review 2026-09-17). Both for one reason: there is only one
-    /// instant at which "where is the cursor" and "where was this let go of" are
-    /// the same question, and it is the one this process is standing in while
-    /// the platform delivers the release. Nothing else in this window reads it,
-    /// and the name is the platform's rather than either gesture's so that
-    /// neither road can grow a second door.
-    ///
-    /// **The units are `CursorMoved`'s and no conversion happens here**, which
-    /// was checked rather than assumed. On Windows a pointer event is
-    /// `WM_MOUSEMOVE`'s `lParam` — physical pixels from the client area's
-    /// top-left — which is precisely what `GetCursorPos` put through
-    /// `ScreenToClient` answers. On macOS winit takes its view's point and
-    /// multiplies by the window's backing scale, which is precisely what the
-    /// AppKit arm does with `NSEvent.mouseLocation` after the same two
-    /// conversions. So the platform's answer is already in the window's physical
-    /// pixels and is used as it stands; scaling it again here would square the
-    /// factor on every Retina and every 150% display.
-    ///
-    /// Neither `pointer_position` nor [`WindowRuntime::pointer_last_seen`] is
-    /// read: both say where the hand was *before* the drag, which is not where
-    /// this drop landed, and a routing built on either would be a guess wearing
-    /// a measurement's clothes.
-    pub(in crate::runtime) fn platform_pointer_now(&self) -> Option<PhysicalPosition<f64>> {
-        platform_pointer_of(
-            native_window(&self.window.window)
-                .ok()
-                .and_then(bt_platform::pointer_position_in_window),
-        )
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {

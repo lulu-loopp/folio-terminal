@@ -1320,6 +1320,31 @@ impl TestShell {
         size: PtySize,
         working_directory: Option<PathBuf>,
     ) -> Result<Self, PtyError> {
+        Self::spawn_shell_in_waking(
+            hygiene,
+            program,
+            arguments,
+            fallback_arguments,
+            environment,
+            size,
+            working_directory,
+            quiet(),
+        )
+    }
+
+    /// [`Self::spawn_shell_in`] with the wake the session's reader calls after each chunk it
+    /// queues — what a test waits on instead of polling the ring on a clock.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_shell_in_waking(
+        hygiene: Hygiene,
+        program: impl Into<OsString>,
+        arguments: &[OsString],
+        fallback_arguments: &dyn Fn() -> Vec<OsString>,
+        environment: &[(OsString, OsString)],
+        size: PtySize,
+        working_directory: Option<PathBuf>,
+        wake: OutputWake,
+    ) -> Result<Self, PtyError> {
         let program = program.into();
         Self::through(
             hygiene,
@@ -1330,7 +1355,7 @@ impl TestShell {
                     fallback_arguments,
                     environment,
                     size,
-                    quiet(),
+                    wake,
                     working_directory,
                     spawn,
                 )

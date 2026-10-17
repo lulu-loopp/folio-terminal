@@ -813,10 +813,11 @@ does not have to find it later.
 
 Committed-trial decision acknowledgement is part of the existing self-update transaction ownership above. The trial watch owns taking back or leaving the trial mark and then durably removing its accepted health receipt; the platform holder owns waiting for that acknowledgement, re-reading the mark, and atomically recording the final `unkept` fact before retiring the transaction (and, on macOS, before deleting `H/<txn>`).
 
-### 4.5 The window seam — the road from a window's code to the window, and what still crosses it (0.4.8)
+### 4.5 The window seam — the road from a window's code to the window (0.4.8)
 
-**`bt-app` reaches its window through `crate::window_seam`, with one named exception: the platform
-handle** (T-HEADLESS-RUNTIME-SEAM, 2026-10-13; corrected in its round 2). `App`, `WindowRuntime`,
+**`bt-app` reaches its window through `crate::window_seam`, the platform handle included**
+(T-HEADLESS-RUNTIME-SEAM, 2026-10-13; the handle behind the doors since
+T-NATIVE-HANDLE-BEHIND-THE-SEAM, 2026-10-17). `App`, `WindowRuntime`,
 `Runtime`, `FolioApp`, `NewWindowParts` and the helpers built from them hold their window through
 one type parameter, `B: window_seam::Backend`, whose associated types are the window's parts — the
 `winit` window (`WindowHost`: redraw, title, visibility, cursor, IME area, clipboard, the system
@@ -857,33 +858,36 @@ and the headless one alike.
   `Runtime::create`. The native list is unchanged by it: what `Runtime::create` still writes for
   `Native` — the window and its renderer, and the `App` and `WindowRuntime` assembled from them —
   is native.
-* **What still crosses the seam: the platform handle.** `WindowHost::native_handle` answers the
-  `bt_platform::NativeWindow` of a native window (and an error on a headless one), and
-  `CompositorDoor::platform_tree` the platform's composition tree a page's engine hangs in. Generic
-  code that holds one of those reaches the platform directly, past every door: the compiler sees a
-  `NativeWindow`, not a seam trait, and a headless window answers the call with an error, so the
-  branch behind it is never driven by a test. Today's uses (about forty-five call sites, through
-  `native_window(..)` or the two methods):
-  * the window's own state on the platform — `apply_acrylic`, `apply_always_on_top`,
-    `install_theme_class_background`, `apply_window_dark_mode`, `refresh_work_area`,
-    `window_is_iconic`, `window_is_hidden`, `window_is_exposed`, `window_snapshot`, `show`,
-    `glass_here`, `window_holding`, `transfer_tab`;
-  * focus and the foreground — `bring_owned_window_forward`, `take_owned_keyboard_focus`,
-    `request_owned_window_close`, `summon_quake`, `show_quake_window`,
-    `remember_summoned_arrangement`;
-  * attention — `raise_attention`, `replace_contradicted_flash` (the taskbar flash);
-  * input facts — `platform_pointer_now` (the input method's facts go through
-    `WindowHost::ime_facts` since T-IME-BRACKET-FACTS);
-  * the present — `finish_present_attempt`, `folios_own_metal_view`;
-  * web pages (the engine's host and its keyboard) — `webhost::step`, `webhost::rehost`
-    (`platform_tree`), `adopt_spare_web_page`, `apply_web_outcomes`, `open_web_address_on`,
-    `open_web_page_on`, `settle_the_web_keyboard`, `web_find_reported`,
-    `carry_the_pages_of_moved_panes`, `dock_the_page_of`, `open_search`;
-  * a preview picture's freshness — `check_picture_freshness`;
-  * construction — `create`, `open_window`, `new_window_runtime`.
+* **The platform handle stays behind the doors** (T-NATIVE-HANDLE-BEHIND-THE-SEAM, 2026-10-17).
+  No door hands generic code a `bt_platform::NativeWindow` or a `bt_platform::Compositor`: every
+  question and instruction the runtime puts to the system about its window is a door of its own,
+  grouped by what it does, and the native backend's doors make the same `bt-platform` call the
+  call site used to make with the handle:
+  * the window's place on the desktop (read) — `WindowHost::{is_iconic, is_cloaked, is_exposed,
+    outer_rect, work_area, glass_at, pointer_in_window, present_facts, holds_the_foreground}`;
+  * its dress and its standing (told) — `set_backdrop`, `set_topmost`, `set_dark_mode`,
+    `set_class_background`, `stand_at`;
+  * the keyboard and the foreground — `take_foreground`, `take_keyboard_focus`, `request_close`;
+  * attention — `flash`, `stop_flashing`; the taskbar button — `taskbar` (a `TaskbarDoor`);
+  * the system's news, heard from a window's birth — `watch_system_settings`, `watch_session_end`;
+  * a page's place for the web engine — `WindowHost::page_address` (the window's handle sealed in
+    `webhost::SeatAddress`, which only the engine reads) and `CompositorDoor::page_tree` (the tree
+    sealed in `window_seam::PageTree`, whose two walks — the install and the rehost — are the
+    seam's own).
 
-  Moving each behind a door of its own is T-NATIVE-HANDLE-BEHIND-THE-SEAM; until it lands, the
-  seam's guard holds the holders and the doors, and these call sites are what it does not hold.
+  The headless window is a recorder: it records each instruction as a typed `WindowEffect` with
+  its arguments and lets it through (where the product with no handle would be refused), and
+  answers each question with a documented stand-in a test can script (`headless::PlatformAnswers`;
+  the read defaults are the product's answers about a window whose handle cannot be got). The web
+  engine is the one group a headless window cannot carry through: it hosts no engine, so
+  `page_address` is recorded and refused, and its tree is no page tree. The handle itself is read
+  by `native_window_of` only, and that is called from native code only: the native backend's doors
+  in `window_seam`; `native_dpi_snapshot` (the native `WindowHost::dpi_snapshot`);
+  `folios_own_metal_view` (macOS, the surface target the constructors and the device-loss rebuild
+  choose); and the two native constructors (`Runtime::create`, `Runtime::open_window`), which
+  hand it to what they install on the window (the clipboard's owner, the custom frame, the touch
+  translation, the composition tree, the outer rectangle) — on the native list already. The seam's guard holds it: code written for the
+  window names neither type, and no door of the seam does (RULE C, `ARCHITECTURE-GUARDS.md`).
 * **The headless backend is test-only** (`crate::headless`, `#[cfg(test)]`): a window that records
   what it was told as typed values (`WindowEffect`, read from a `Ledger`), a renderer that keeps the
   frame's inputs for a test to read back and measures text with the production font environment, and
