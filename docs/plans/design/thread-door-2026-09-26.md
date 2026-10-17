@@ -6257,3 +6257,18 @@ counts (the endpoints' `SetEvent`/`CloseHandle`/`join` and `libc::write`/`close`
 `# effects` section gains `DirWatch::retire_within` on each arm (`worker-door-body`, reached from
 the watch steward's row through the steward's `Held` trait) and `video::shutdown_media_session`
 (`owner-door-body`, `MediaQuiet`).
+
+**Two limits, stated (the review of 2026-10-17).** *The endpoints' door is an accepted unbounded
+door with no product caller.* `AttentionPipe::retire` and `LaunchPipe::retire` (TD-4…TD-7) join
+the listener without a bound of their own: the listener leaves at its next wait, after the client
+it serves has had its frame or its `READ_DEADLINE` / step deadline, **and** after the caller's
+`deliver`, `decide` or `commit` closure has returned — and those closures are the caller's, with
+no patience this module can name, so no bound written here would be honest. A bounded form would
+also need a wait of its own (a poll's sleep or a receive), which the bare-site inventory refuses
+as growth, and a `WorkerCtx` door, which the completions ledger refuses without a product caller.
+Nothing in the product calls the door (the endpoints live in statics for the process's life); it
+is the road for tests and for any owner that comes later, which would bring the bound with it.
+*The watch steward never ends in the product.* Its worker runs for the process's life, so the
+watches it still holds when the process leaves go with the process and are not retired; a drop
+of them (and its one line each) happens only on an unwind of the steward, which the resident
+panic hook turns into the process's end before any drop runs.
