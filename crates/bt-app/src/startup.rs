@@ -13,6 +13,8 @@
 //! ran (`headless::StartupStep`). What the order is, is this module's — the one thing a test of
 //! the steps' order reads, and the one thing the product cannot do differently.
 
+use crate::shell_integration::{Migrated, QuestionsAsked, ScriptPrepared};
+
 /// **The process's steps, in the fields' order**: what [`begin`] is handed.
 pub(crate) struct FrontDoor<Removal, Parse, Claim> {
     /// A removal verb answered (`--remove-shell-integration`, `--remove-explorer-menu`): its
@@ -41,6 +43,11 @@ pub(crate) fn begin<Request, Resident>(
 }
 
 /// **The first window's steps, in the fields' order**: what [`resume`] is handed.
+///
+/// Three of them answer a witness only their product function makes (`Migrated`,
+/// `ScriptPrepared`, `QuestionsAsked`), so the two workers' steps cannot be handed each other's
+/// call, and none of the three can be handed no call. The window's and the first tab's are told
+/// apart by what they take and answer.
 pub(crate) struct FirstWindow<Migration, Script, Window, Questions, FirstTab> {
     /// The startup's observation of an older Folio line in a `$PROFILE`
     /// (`shell_integration::begin_startup_migration`), started on a worker nobody waits for.
@@ -69,17 +76,17 @@ pub(crate) struct FirstWindow<Migration, Script, Window, Questions, FirstTab> {
 pub(crate) fn resume<Answers, Window, Tabs, Error>(
     answers: &mut Answers,
     steps: FirstWindow<
-        impl FnOnce(),
-        impl FnOnce(),
+        impl FnOnce() -> Migrated,
+        impl FnOnce() -> ScriptPrepared,
         impl FnOnce(&mut Answers) -> Result<Window, Error>,
-        impl FnOnce(&mut Answers),
+        impl FnOnce(&mut Answers) -> QuestionsAsked,
         impl FnOnce(&mut Answers, &mut Window) -> Result<Tabs, Error>,
     >,
 ) -> Result<(Window, Tabs), Error> {
-    (steps.migration)();
-    (steps.script)();
+    let Migrated { .. } = (steps.migration)();
+    let ScriptPrepared { .. } = (steps.script)();
     let mut window = (steps.window)(answers)?;
-    (steps.questions)(answers);
+    let QuestionsAsked { .. } = (steps.questions)(answers);
     let tabs = (steps.first_tab)(answers, &mut window)?;
     Ok((window, tabs))
 }

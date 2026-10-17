@@ -56,7 +56,7 @@ use crate::{
 pub mod profile_marks;
 mod profile_runtime;
 pub use profile_runtime::{
-    ProfileInstallOutcome, begin_profile_install, begin_profile_install_undo,
+    Migrated, ProfileInstallOutcome, begin_profile_install, begin_profile_install_undo,
     begin_profile_observation_for, begin_removal, begin_startup_migration, profile_installs_for,
     remove_shell_integration, remove_shell_integration_at, take_profile_installs, take_removal,
 };
@@ -4790,12 +4790,15 @@ fn begin_powershell_preparation(questions: Vec<ParseQuestion>, effects: Preparat
 /// Prepare the script and ask the target parser about every command-bearing
 /// PowerShell row in this profile snapshot. Called at startup and after a table
 /// change; exact argv keys make unchanged rows free and changed rows new work.
-pub fn begin_powershell_preparation_for(programs: &profiles::ProfilePrograms) {
+///
+/// Answers [`QuestionsAsked`], the start's witness that its questions step asked them.
+pub fn begin_powershell_preparation_for(programs: &profiles::ProfilePrograms) -> QuestionsAsked {
     begin_powershell_preparation_over(
         profiles::table().profiles(),
         programs,
         PreparationEffects::MACHINE,
     );
+    QuestionsAsked(())
 }
 
 /// [`begin_powershell_preparation_for`] over rows and effects handed in: the questions are
@@ -4809,8 +4812,37 @@ fn begin_powershell_preparation_over(
 }
 
 /// Re-prepare only the script when a trial releases its durable write.
-pub fn begin_powershell_script_preparation() {
+///
+/// Answers [`ScriptPrepared`], the start's witness that its script step asked for this.
+pub fn begin_powershell_script_preparation() -> ScriptPrepared {
     begin_powershell_preparation(Vec::new(), PreparationEffects::MACHINE);
+    ScriptPrepared(())
+}
+
+/// **That a start's script step asked for the script's preparation** (T-STARTUP-ORDER-SHARED):
+/// the value `startup::FirstWindow::script` must answer, and only
+/// [`begin_powershell_script_preparation`] makes one.
+pub struct ScriptPrepared(());
+
+/// **That a start's questions step put the PowerShell rows' parser questions**
+/// (T-STARTUP-ORDER-SHARED): the value `startup::FirstWindow::questions` must answer, and only
+/// [`begin_powershell_preparation_for`] makes one.
+pub struct QuestionsAsked(());
+
+#[cfg(test)]
+impl ScriptPrepared {
+    /// The headless start's stand-in for the step.
+    pub(crate) fn stand_in() -> Self {
+        Self(())
+    }
+}
+
+#[cfg(test)]
+impl QuestionsAsked {
+    /// The headless start's stand-in for the step.
+    pub(crate) fn stand_in() -> Self {
+        Self(())
+    }
 }
 
 /// What one write into a profile did.

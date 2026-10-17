@@ -19483,7 +19483,9 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         Writer::Profiles => stores.profiles.release_trial(),
         Writer::Pins => stores.pins.release_trial(),
         Writer::UpdateCheck => update::release_trial(),
-        Writer::ProfileMigration => shell_integration::begin_startup_migration(),
+        Writer::ProfileMigration => {
+            shell_integration::begin_startup_migration();
+        }
         Writer::BashScript => {
             let _ = shell_integration::script_path();
         }
@@ -19491,7 +19493,9 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
             let _ = shell_integration::zdotdir_path();
         }
         // On a worker: the window thread waits for no disk here either.
-        Writer::PowerShellScript => shell_integration::begin_powershell_script_preparation(),
+        Writer::PowerShellScript => {
+            shell_integration::begin_powershell_script_preparation();
+        }
         Writer::PsReadLineUpgrade => {
             if let Some(documents) = psreadline::documents_directory()
                 && let Some(replacement) = psreadline::upgrade_recorded(
@@ -46086,30 +46090,36 @@ mod endpoint_claim_tests {
 /// `window`): the native window and everything built on it before its first tab, which
 /// `Runtime::create` assembles the window's runtime from.
 struct OpenedWindow {
-    restored: Option<RestoredPlacement>,
-    window: Arc<Window>,
-    ime_report: ime_report::Report,
-    native: bt_platform::NativeWindow,
-    custom_window_frame: bt_platform::CustomWindowFrame,
-    parked_pans: runtime::pointer::touch::ParkedPans,
-    platform_chrome: bt_platform::PlatformChrome,
-    ime_system_caret: bt_platform::ImeSystemCaret,
-    math_context_menu: bt_platform::MathContextMenu,
-    folder_picker: bt_platform::FolderPicker,
-    image_picker: bt_platform::ImagePicker,
-    save_picker: Option<bt_platform::SaveFilePicker>,
-    acrylic_available: bool,
-    window_time: Duration,
-    compositor: bt_platform::Compositor,
-    gpu: bt_render::GpuContext,
-    renderer: bt_render::WindowRenderer,
-    translucency_available: bool,
-    renderer_time: Duration,
-    render_physical: PhysicalSize<u32>,
-    probe_input: Option<Vec<u8>>,
-    pty_wake: PtyWakeSignal,
+    // **The fields stand in the reverse of the order they were built in**, because a struct drops
+    // its fields in declaration order: when the first tab fails and the opened window is dropped
+    // unassembled, everything built on the window — the renderer and the device, the composition
+    // tree, the pickers, the menu, the caret and the frame, each of which lets go of the window
+    // handle when it drops — goes before the window itself, as the locals they were went in
+    // reverse. The window, its handle and its placement drop last.
     /// When the panes' phase began, for the startup trace.
     phase_started: Instant,
+    pty_wake: PtyWakeSignal,
+    probe_input: Option<Vec<u8>>,
+    render_physical: PhysicalSize<u32>,
+    renderer_time: Duration,
+    translucency_available: bool,
+    renderer: bt_render::WindowRenderer,
+    gpu: bt_render::GpuContext,
+    compositor: bt_platform::Compositor,
+    window_time: Duration,
+    acrylic_available: bool,
+    save_picker: Option<bt_platform::SaveFilePicker>,
+    image_picker: bt_platform::ImagePicker,
+    folder_picker: bt_platform::FolderPicker,
+    math_context_menu: bt_platform::MathContextMenu,
+    ime_system_caret: bt_platform::ImeSystemCaret,
+    platform_chrome: bt_platform::PlatformChrome,
+    parked_pans: runtime::pointer::touch::ParkedPans,
+    custom_window_frame: bt_platform::CustomWindowFrame,
+    native: bt_platform::NativeWindow,
+    ime_report: ime_report::Report,
+    window: Arc<Window>,
+    restored: Option<RestoredPlacement>,
 }
 
 /// **What the first window's first-tab step made** (`startup::FirstWindow`'s `first_tab`): the
@@ -46513,7 +46523,7 @@ impl Runtime<'_, Native> {
                     // Folio's own `folio.ps1`, compared and repaired on a worker nobody waits for: the first
                     // PowerShell birth that arrives before it finishes prepares it on its own birth worker.
                     // The parser questions about the PowerShell rows follow when the walk has answered them.
-                    shell_integration::begin_powershell_script_preparation();
+                    shell_integration::begin_powershell_script_preparation()
                 },
                 window: |profile_programs: &mut profiles::ProfilePrograms| -> Result<OpenedWindow> {
                     // **The canvas, settled before there is a window to paint one in**
@@ -46821,7 +46831,7 @@ impl Runtime<'_, Native> {
                     // panes are made, without waiting. Everything below decides from these exactly as it
                     // always did from the probe that stood here; a row still unanswered is decided by nobody.
                     adopt_program_answers(profile_programs, programs_lane::take());
-                    shell_integration::begin_powershell_preparation_for(profile_programs);
+                    shell_integration::begin_powershell_preparation_for(profile_programs)
                 },
                 first_tab: |profile_programs: &mut profiles::ProfilePrograms,
                             opened: &mut OpenedWindow|

@@ -1451,8 +1451,14 @@ pub(crate) fn start(argv: &str, walk: Vec<Vec<String>>) -> HeadlessStart {
     let opened = crate::startup::resume(
         &mut answers,
         crate::startup::FirstWindow {
-            migration: || step(StartupStep::StartupMigration),
-            script: || step(StartupStep::ScriptPreparation),
+            migration: || {
+                step(StartupStep::StartupMigration);
+                crate::shell_integration::Migrated::stand_in()
+            },
+            script: || {
+                step(StartupStep::ScriptPreparation);
+                crate::shell_integration::ScriptPrepared::stand_in()
+            },
             // Handed the request the run carries, as `Runtime::create` is handed the parsed one.
             window: |answers: &mut Vec<String>| {
                 look(answers);
@@ -1463,6 +1469,7 @@ pub(crate) fn start(argv: &str, walk: Vec<Vec<String>>) -> HeadlessStart {
                 look(answers);
                 step(StartupStep::PowerShellQuestions);
                 ran.borrow_mut().asked = answers.clone();
+                crate::shell_integration::QuestionsAsked::stand_in()
             },
             first_tab: |answers: &mut Vec<String>, _window: &mut String| {
                 step(StartupStep::FirstTab);

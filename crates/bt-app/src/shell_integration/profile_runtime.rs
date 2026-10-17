@@ -75,13 +75,29 @@ fn script_at(data: &Path) -> PathBuf {
 /// **Held back in an update's trial** behind [`crate::update_trial::Writer::ProfileMigration`], as
 /// the migration it replaced was. The observation itself only reads; the commit's release calls
 /// this again, so the conditional Settings verb appears then.
-pub fn begin_startup_migration() {
+///
+/// Answers [`Migrated`], the start's witness that its migration step asked for this.
+pub fn begin_startup_migration() -> Migrated {
     begin_startup_migration_through(
         &STARTED,
         &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
         persist::storage_dir,
         crate::diagnostics::note,
     );
+    Migrated(())
+}
+
+/// **That a start's migration step asked for the startup migration** (T-STARTUP-ORDER-SHARED):
+/// the value `startup::FirstWindow::migration` must answer, and only [`begin_startup_migration`]
+/// makes one, so the step cannot be another step's call or no call at all.
+pub struct Migrated(());
+
+#[cfg(test)]
+impl Migrated {
+    /// The headless start's stand-in for the step.
+    pub(crate) fn stand_in() -> Self {
+        Self(())
+    }
 }
 
 /// [`begin_startup_migration`] with its latch, the executor its worker is started by, the data
