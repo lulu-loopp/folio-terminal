@@ -1452,19 +1452,29 @@ fn a_card_over_the_flyouts_file_leaves_the_flyout_its_own_answer() {
         .clone()
         .expect("the flyout asks its resample");
 
-    // The pointer leaves the reference: the flyout comes down, and its question stays out.
-    let now = Instant::now();
+    // The pointer leaves the reference for a cell of the shell that names nothing, through the
+    // window's own pointer-move handler: the flyout comes down, and its question stays out.
+    let body = crate::seats::pane_body_viewport(
+        &folio.window.tabs[0].seats,
+        &folio.window.tabs[0].seat_layout,
+        shell,
+        folio.window.renderer.scale_factor() as f32,
+    )
+    .expect("the shell has a body");
+    folio.move_to(PhysicalPosition::new(
+        f64::from(body.x) + 4.0,
+        f64::from(body.y + body.height) - 4.0,
+    ));
     assert!(
-        folio
-            .window
-            .peek_hover
-            .observe(None, PhysicalPosition::new(400.0, 400.0), now),
+        folio.window.peek_hover.active.is_none(),
         "the fixture's own precondition: leaving the span hides the flyout"
     );
-    folio
-        .runtime()
-        .present_peek_overlay(None)
-        .expect("the flyout comes down");
+    assert_eq!(
+        folio.window.peek_thumbnail_pending.as_ref(),
+        Some(&flyout),
+        "and its question stays out"
+    );
+    let now = Instant::now();
 
     // A files-column row over the same file raises the card, which asks its own resample.
     folio.window.file_peek = Some(crate::test_support::card_over(
@@ -1515,5 +1525,69 @@ fn a_card_over_the_flyouts_file_leaves_the_flyout_its_own_answer() {
             .held(crate::computation_lane::Share::Scale),
         0,
         "and asks nothing again"
+    );
+}
+
+/// RED (T-PEEK-SCALE-ADDRESS-BY-SURFACE review) — **a card answer the card no longer awaits is
+/// dropped**: the card asks its resample while the scale share is busy and comes down
+/// (`hide_file_peek`) before the answer lands. The late answer leaves `peek_picture` empty, as the
+/// teardown left it.
+///
+/// MUTATION: adopt every card answer in `Runtime::complete_peek_scale` (drop the awaited-size
+/// guard on the card's arm) — the late answer refills the slot of a card that is gone.
+#[test]
+fn a_late_card_answer_after_the_card_came_down_is_dropped() {
+    let (mut folio, mut lane, gate, shell, _panes) = two_panes_on_a_watched_lane("peek-card-late");
+    let file = scratch_png_named("晚到 late card");
+    let _written = crate::test_support::ScratchFile(file.clone());
+    std::fs::write(&file, png_bytes(600, 300)).expect("a scratch file this test owns");
+    let now = Instant::now();
+    folio.window.file_peek = Some(crate::test_support::card_over(
+        crate::RowHost::Column(shell),
+        &file,
+        crate::PeekClock::Settling(now),
+    ));
+    folio
+        .runtime()
+        .advance_file_peek(now)
+        .expect("the card comes up");
+    let read = lane.next_ended(
+        crate::computation_lane::Share::Decoration,
+        crate::computation_lane::fixtures::nobody,
+    );
+
+    // The scale share is busy when the read lands, so the card's resample waits.
+    gate.hold();
+    let entered = gate.entered();
+    let leaf = folio.runtime().focused_shell_address();
+    let busy = a_busy_resample(&lane, leaf);
+    assert!(
+        gate.wait_entered(entered + 1),
+        "the busy resample reaches the worker"
+    );
+    the_window_takes(&mut folio, vec![read]);
+    assert!(
+        folio.window.peek_card_pending.is_some(),
+        "the fixture's own precondition: the card asks its resample"
+    );
+
+    assert!(
+        folio.runtime().hide_file_peek(),
+        "the card that was showing comes down"
+    );
+    assert!(
+        folio.window.peek_card_pending.is_none() && folio.window.peek_picture.is_none(),
+        "the fixture's own precondition: the card's teardown clears both slots"
+    );
+    gate.release();
+    let resamples = every_resample_but(&mut lane, busy);
+    assert!(
+        !resamples.is_empty(),
+        "the fixture's own precondition: the card's answer comes home"
+    );
+    the_window_takes(&mut folio, resamples);
+    assert!(
+        folio.window.peek_picture.is_none(),
+        "a late card answer leaves the slot of a card that has gone empty"
     );
 }

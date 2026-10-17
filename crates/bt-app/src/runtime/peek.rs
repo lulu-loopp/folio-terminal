@@ -2895,8 +2895,9 @@ impl<B: Backend> Runtime<'_, B> {
     /// **Two hovers ask down this one lane**, the terminal's inline-image flyout and the file
     /// tree's glance card, because the question is identical — one content key at one display size
     /// — and the answer is the same pixels. They ask as two surfaces, and each answer comes home to
-    /// the surface it was asked for: its slot is filled, and its pending question cleared only by
-    /// its own answer. The day both want the same picture they ask twice, once each, and each is
+    /// the surface it was asked for: its pending question is cleared only by its own answer. The
+    /// card adopts only the answer it awaits; the flyout files every answer of its own, since its
+    /// next hover reads the slot before it looks at the pending question. The day both want the same picture they ask twice, once each, and each is
     /// answered (T-PEEK-SCALE-ADDRESS-BY-SURFACE): until then they were one address on the scale
     /// share, and whichever asked second superseded the other, whose slot waited on for an answer
     /// that was never coming.
@@ -2912,14 +2913,18 @@ impl<B: Backend> Runtime<'_, B> {
         );
         match surface {
             PeekSurface::Card => {
-                let awaited = self.window.peek_card_pending.as_ref() == Some(&delivered);
-                if awaited {
-                    self.window.peek_card_pending = None;
+                // Only the size the card awaits is adopted. Any other card answer is about a size
+                // it has moved on from, or a card that has come down (`hide_file_peek` cleared
+                // both slots): filed, it would replace a picture that matches or refill a slot a
+                // card that is gone no longer holds.
+                if self.window.peek_card_pending.as_ref() != Some(&delivered) {
+                    return Ok(());
                 }
+                self.window.peek_card_pending = None;
                 self.window.peek_picture = Some(PeekThumbnail::from_scaled(scaled));
                 // The card is chrome, and the picture it was waiting for owes the frame that
                 // shows it.
-                if awaited && self.refresh_overlay() {
+                if self.refresh_overlay() {
                     self.present_chrome_change()?;
                 }
             }
