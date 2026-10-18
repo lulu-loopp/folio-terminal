@@ -137,6 +137,38 @@ PSModulePath = <FolioModules> ; [<Documents>\WindowsPowerShell\Modules ;] <V>
 - **A live artefact is kept whole.** A running 5.1 maps the module's assembly; deleting it is refused (`os error 5`). The launch's prune deletes each version's assembly first and keeps the whole artefact when that is refused; after the shell ends the next launch removes it.
 - **A nested `pwsh` 7.6** finds its own `WindowsApps\…\Modules\PSReadLine` first.
 
+**Round 2 (review of 2026-10-17).**
+
+- **Constrained Language Mode no longer hangs on birth order.** The observation is a launch's
+  worker, and the first pane of a launch is usually born before it answers; a constrained machine's
+  pane born then got the prefix, and its loader, which defines `PSConsoleHostReadLine` only in
+  `FullLanguage`, left it on the host's legacy line editor. The decision now lives in the shell,
+  where the language mode is certain: outside `FullLanguage` the loader takes Folio's folder out of
+  the session's `PSModulePath`, removes Folio's module and imports `PSReadLine` by name — what the
+  host would have imported without the prefix, whose own script defines the function (measured: a
+  profile's `Remove-Module PSReadLine` then a by-name import of 2.0.0 leaves a working 2.0.0 pane,
+  the §2.3 row above). The observation still spares a pane it has answered for the round trip. A
+  `FullLanguage` first pane is never made to wait. A real lockdown cannot be entered from a test
+  without changing the machine (`__PSLockdownPolicy` is read from the machine's block only,
+  measured), so the test enters `ConstrainedLanguage` from the child's own profile and compares the
+  prefixed pane with one started without the prefix: the same module, from the same folder, on the
+  same module path. **Measured limit:** in a mode the profile set, the module imported again runs
+  its own script constrained, and its function's call into its type is refused
+  (`MethodInvocationNotSupportedInConstrainedLanguage`), so that pane takes lines with the host's own
+  input; the reference's module was imported before the mode changed. Under a machine's lockdown
+  the session is constrained from the host's import on and a module's script runs in the mode its
+  file's trust gives it, for the host's import and the loader's alike; that cannot be entered from a
+  test, so the claim pinned is the editor's identity, and its working under a real lockdown is
+  unmeasured (§5.4's VM rows are where it can be).
+- **A foreign PSReadLine is said once.** `folio.ps1`, after the profile, sends
+  `OSC 777;folio-psreadline;<version>` when a loaded PSReadLine is not under Folio's folder; the
+  session queues one `diagnostics.log` line per pane. Never a card.
+- **The fork in Documents keeps its no-op.** Where Folio's copy is not on a pane's path (its write
+  failed, say), a pane loads the fork an earlier Folio left in Documents; the fork anchors itself,
+  so `folio.ps1` excludes it from the reflection repair by its assembly's `-bt.` build stamp (what
+  `psreadline::installed_build` reads), not by a version number. Stated here rather than tested:
+  the fork's bytes are no longer in the tree to lay down a copy from.
+
 **The prefix stays in the pane's environment** (spike conclusion B, disposition (i)). Removing it after the load was measured to make any later by-name import or command lookup pull 2.0.0 in as a second module, which breaks the pane. Keeping it costs a nested `powershell.exe` typed in the pane its line editor (§2.1, F). A nested pwsh 7 is unaffected: it puts its own three folders first (measured).
 
 **When Folio's module cannot load at all.** Under every execution policy it loads (measured). What remains unmeasured is an application-control refusal of the DLL itself (WDAC, AppLocker DLL rules, Smart App Control). Under M the DLL is Microsoft-signed, which those policies generally admit. Under F it is unsigned. The spike measured what 5.1 does when the first-found PSReadLine fails: it prints its one line ("Cannot load PSReadline module. Console is running without PSReadline.") and does not fall back. The loader's guard then installs nothing, so the pane is plain and nothing red comes from Folio. The VM row in §5.4 measures this case. If it happens, the remedy is a ruling on that evidence, not a branch written in advance.

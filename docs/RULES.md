@@ -1544,12 +1544,21 @@ the pane's alone**: `PSModulePath` is composed with Folio's folder first, then
 what 5.1 would have had (Documents only where the account's value is unset or the
 machine's), and declared on that pane for its lifetime — only where the
 integration loader is composed, the program is not `pwsh`, and the edition was
-not observed in Constrained Language Mode. A `pwsh` started inside it keeps its
-own. **Folio's copy always wins in Folio's 5.1 panes** (owner ruling Q2): the
-loader imports it by its path, and a profile that imports PSReadLine by name
-gets the one already loaded. A profile that demands another version by number
-gets that version (measured 2026-10-17: the prompt and commands work, and the
-pane loses OSC 133 `C`/`D`) — the profile's choice, not repaired. **Nothing is
+not observed in Constrained Language Mode. **A constrained pane keeps the editor
+it would have had**, whichever came first: one born before the observation said
+so gets the prefix, and the loader — where the language mode is certain — takes
+Folio's folder back out of the session's `PSModulePath`, removes Folio's module
+and imports `PSReadLine` by name, the module the host would otherwise have
+loaded. A `pwsh` started inside it keeps its own. **Folio's copy always wins in
+Folio's 5.1 panes** (owner ruling Q2): the host imports it through the pane's
+`PSModulePath`, before any profile runs, and a profile that imports PSReadLine
+by name gets the one already loaded. A profile that demands another version by
+number gets that version (measured 2026-10-17: the prompt and commands work, and
+the pane loses OSC 133 `C`/`D`) — the profile's choice, not repaired; the
+integration says it once in `diagnostics.log`, naming the version, and never on
+a card. The fork an earlier Folio left in Documents, loaded where Folio's copy
+is not on a pane's path, keeps the resize chord's no-op, as it always had: it is
+told by its `-bt.` build stamp. **Nothing is
 written to Documents, `$PROFILE`, the account's environment or the marks
 record, and nothing asks**: there is no Settings row, no probe and no invitation
 (Q3). **The copy an earlier Folio wrote into Documents** (the fork,
