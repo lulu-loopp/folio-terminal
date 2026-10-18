@@ -75,6 +75,8 @@ pub(crate) struct TypeInfo {
 pub(crate) struct AliasInfo {
     pub(crate) generics: Vec<String>,
     pub(crate) target: Ty,
+    /// Whether the arms admit this declaration of the alias.
+    pub(crate) admitted: bool,
 }
 
 /// One callable's signature.
@@ -172,7 +174,8 @@ pub(crate) struct Tables<'i> {
     pub(crate) crates: BTreeSet<String>,
     pub(crate) admitted: Vec<Vec<bool>>,
     pub(crate) types: HashMap<TypeKey, TypeInfo>,
-    pub(crate) aliases: HashMap<TypeKey, AliasInfo>,
+    /// Each alias, once per declaration: one alias written on several `cfg` arms is several.
+    pub(crate) aliases: HashMap<TypeKey, Vec<AliasInfo>>,
     pub(crate) sigs: HashMap<ItemId, Sig>,
     pub(crate) impls: Vec<ImplInfo>,
     pub(crate) inherent: HashMap<(TypeKey, String), Vec<ItemId>>,
@@ -182,14 +185,39 @@ pub(crate) struct Tables<'i> {
     pub(crate) trait_declared: HashMap<TraitId, Vec<ItemId>>,
     pub(crate) trait_of_item: HashMap<ItemId, TraitId>,
     pub(crate) method_names: HashMap<String, Vec<ItemId>>,
+    /// Every `const` and `static` of a module, with its written type.
+    pub(crate) values: HashMap<(usize, String, String), Ty>,
+    /// The associated `const`s of each `impl` block's self type, by name.
+    pub(crate) associated_consts: BTreeSet<(SelfKey, String)>,
+    /// The `const`s each first-party trait declares.
+    pub(crate) trait_consts: BTreeSet<(TraitId, String)>,
+    /// The `impl` blocks whose self type is not placed ([`UnplacedImpl`]).
+    pub(crate) unplaced_impls: Vec<UnplacedImpl>,
     /// The free functions of each module, by name (one per `cfg` variant).
     pub(crate) functions: HashMap<(usize, String, String), Vec<ItemId>>,
     pub(crate) unparsed: Vec<String>,
     supertraits: RefCell<HashMap<TraitId, Result<BTreeSet<TraitId>, String>>>,
 }
 
-/// A refusal of the reading itself: an `impl` block's trait chained past the hop limit, which no
-/// table may file under nothing.
+/// Why an `impl` block's self type is not placed.
+pub(crate) enum SelfTypeFailure {
+    /// It names nothing the module tree holds (a macro-generated type), or several kinds of thing.
+    Unplaced(String),
+    /// It chains past the hop limit.
+    Cut(String),
+}
+
+/// **An `impl` block whose self type the module tree does not hold** — a type a macro generates
+/// (`bitflags!`, windows-rs's `#[implement]`, objc2's `define_class!`): why, and the methods
+/// written in it, which no typed call reaches and an untyped one lists as candidates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnplacedImpl {
+    pub what: String,
+    pub methods: Vec<ItemId>,
+}
+
+/// A refusal of the reading itself: an `impl` block's trait or self type chained past the hop
+/// limit, which no table may file under nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refusal {
     pub what: String,
@@ -228,10 +256,16 @@ impl<'i> Tables<'i> {
             trait_of_item: HashMap::new(),
             method_names: HashMap::new(),
             functions: HashMap::new(),
+            values: HashMap::new(),
+            unplaced_impls: Vec::new(),
+            associated_consts: BTreeSet::new(),
+            trait_consts: BTreeSet::new(),
             unparsed: Vec::new(),
             supertraits: RefCell::default(),
         };
         let mut refusals = Vec::new();
+        // Every type, alias and trait of every package first: an `impl` block or a signature of one
+        // package may name a type or an alias of a later one.
         for (at, (package, index)) in packages.iter().enumerate() {
             let admitted = index
                 .items()
@@ -251,9 +285,14 @@ impl<'i> Tables<'i> {
             tables.read_types(at, package, index);
             tables.read_aliases(at, package, index);
             tables.read_traits(package, index, at);
+        }
+        for (at, (package, index)) in packages.iter().enumerate() {
             if let Err(mut refused) = tables.read_impls(at, package, index) {
                 refusals.append(&mut refused);
             }
+        }
+        for (at, (package, index)) in packages.iter().enumerate() {
+            tables.read_values(at, package, index);
             tables.read_sigs(at, package, index);
         }
         if refusals.is_empty() {
@@ -387,16 +426,25 @@ impl<'i> Tables<'i> {
                 self.unparsed.push(format!("type alias {}", alias.name()));
                 continue;
             };
+            let admitted = admits(
+                &self.arms,
+                package,
+                index,
+                alias.whole().start(),
+                &alias.declared,
+                &alias.variant,
+            );
             for module in alias.module_paths() {
                 let mut written = self.written(package, module);
                 written.enter(&parsed.generics);
-                self.aliases.insert(
-                    (at, module.to_owned(), alias.name().to_owned()),
-                    AliasInfo {
+                self.aliases
+                    .entry((at, module.to_owned(), alias.name().to_owned()))
+                    .or_default()
+                    .push(AliasInfo {
                         generics: generic_names(&parsed.generics),
                         target: written.ty(&parsed.ty),
-                    },
-                );
+                        admitted,
+                    });
             }
         }
     }
@@ -465,7 +513,30 @@ impl<'i> Tables<'i> {
             let file = index
                 .file_at(block.whole().start())
                 .and_then(|file| index.files().iter().position(|it| std::ptr::eq(it, file)));
-            let self_keys = self.self_keys(&self_ty, file);
+            let self_keys = match self.self_keys(&self_ty, file) {
+                Ok(keys) => keys,
+                Err(SelfTypeFailure::Cut(what)) => {
+                    refusals.push(Refusal {
+                        what: format!(
+                            "the self type `{}` of {package}'s `impl` block in {module} ({what})",
+                            block.type_owner()
+                        ),
+                    });
+                    continue;
+                }
+                Err(SelfTypeFailure::Unplaced(why)) => {
+                    // A type a macro generates (`bitflags!`, `#[implement]`, a generated enum):
+                    // its methods are listed, never filed under nothing.
+                    self.unplaced_impls.push(UnplacedImpl {
+                        what: format!(
+                            "the self type `{}` of {package}'s `impl` block in {module}: {why}",
+                            block.type_owner()
+                        ),
+                        methods: members.remove(&position).unwrap_or_default(),
+                    });
+                    continue;
+                }
+            };
             let self_key = self_keys
                 .first()
                 .cloned()
@@ -553,6 +624,121 @@ impl<'i> Tables<'i> {
             Ok(())
         } else {
             Err(refusals)
+        }
+    }
+
+    /// Every `const` and `static`: a module's with its type, an `impl` block's by its self type, a
+    /// trait's by the trait.
+    fn read_values(&mut self, at: usize, package: &str, index: &Index) {
+        for value in index.values() {
+            let text = index.text(value.whole());
+            if let Some(owner) = value.type_owner() {
+                let start = value.whole().start();
+                let Some(block) = index.impls().iter().find(|block| block.body().holds(start))
+                else {
+                    self.unparsed
+                        .push(format!("the impl block of const {}", value.name()));
+                    continue;
+                };
+                let Some(header) = impl_header(index, block) else {
+                    continue;
+                };
+                let module = block
+                    .module_paths()
+                    .first()
+                    .map_or_else(|| "crate".to_owned(), |module| (*module).to_owned());
+                let mut written = self.written(package, &module);
+                written.enter(&header.generics);
+                let self_ty = written.ty(&header.self_ty);
+                let file = index
+                    .file_at(start)
+                    .and_then(|file| index.files().iter().position(|it| std::ptr::eq(it, file)));
+                let _ = owner;
+                for key in self.self_keys(&self_ty, file).unwrap_or_default() {
+                    self.associated_consts
+                        .insert((key, value.name().to_owned()));
+                }
+                continue;
+            }
+            if value.trait_name().is_some() {
+                let start = value.whole().start();
+                if let Some(declaration) = index
+                    .traits()
+                    .iter()
+                    .find(|declaration| declaration.body().holds(start))
+                {
+                    for id in self.traits.identities(package, declaration) {
+                        self.trait_consts.insert((id, value.name().to_owned()));
+                    }
+                }
+                continue;
+            }
+            let ty = match syn::parse_str::<syn::Item>(text) {
+                Ok(syn::Item::Const(constant)) => Some(constant.ty),
+                Ok(syn::Item::Static(value)) => Some(value.ty),
+                _ => None,
+            };
+            let Some(ty) = ty else {
+                self.unparsed
+                    .push(format!("const or static {}", value.name()));
+                continue;
+            };
+            for module in value.module_paths() {
+                let written = self.written(package, module);
+                self.values.insert(
+                    (at, module.to_owned(), value.name().to_owned()),
+                    written.ty(&ty),
+                );
+            }
+        }
+    }
+
+    /// **Whether `owner::name` is an associated `const`** — of the type's own impls, of a
+    /// first-party trait it implements, or of a trait a generic or a trait object is known by:
+    /// data, no call.
+    pub(crate) fn is_associated_const(&self, owner: &Ty, name: &str, written: &Written) -> bool {
+        let Ok(owner) = self.expand(owner.clone()) else {
+            return false;
+        };
+        let declared_by = |traits: &BTreeSet<TraitId>| {
+            traits.iter().any(|id| {
+                let mut closure = BTreeSet::from([id.clone()]);
+                if let Ok(supertraits) = self.supertraits_of(id) {
+                    closure.extend(supertraits);
+                }
+                closure
+                    .iter()
+                    .any(|id| self.trait_consts.contains(&(id.clone(), name.to_owned())))
+            })
+        };
+        match &owner {
+            Ty::Named(named) => match self.place(named) {
+                Placed::Types(keys) => keys.into_iter().any(|key| {
+                    let key = SelfKey::Type(key);
+                    if self
+                        .associated_consts
+                        .contains(&(key.clone(), name.to_owned()))
+                    {
+                        return true;
+                    }
+                    let (_, implemented) = self.trait_members(&key, name);
+                    let traits: BTreeSet<TraitId> =
+                        implemented.into_iter().map(|(id, _)| id).collect();
+                    declared_by(&traits)
+                }),
+                Placed::Foreign(path) => self
+                    .associated_consts
+                    .contains(&(SelfKey::Foreign(path), name.to_owned())),
+                _ => false,
+            },
+            Ty::Traits(bounds) => self
+                .bound_traits(bounds)
+                .is_ok_and(|(first, _)| declared_by(&first)),
+            Ty::Param(param) => written.trait_bounds.get(param).is_some_and(|bounds| {
+                self.bound_traits(bounds)
+                    .is_ok_and(|(first, _)| declared_by(&first))
+            }),
+            _ => false,
         }
     }
 
@@ -647,10 +833,14 @@ impl<'i> Tables<'i> {
     /// several arms of one module path, `cfg`-alternative files) is the one declared in the
     /// block's own file when there is one — a file is compiled whole, on one arm — and otherwise
     /// each of them, so that no method is filed under nothing.
-    fn self_keys(&self, ty: &Ty, file: Option<usize>) -> Vec<SelfKey> {
+    ///
+    /// `Err` is a self type the module tree cannot place (it names nothing, or several kinds of
+    /// thing) or that chains past the hop limit: filed under nothing, its methods would be missing
+    /// from every call on the type, so the reading refuses it.
+    fn self_keys(&self, ty: &Ty, file: Option<usize>) -> Result<Vec<SelfKey>, SelfTypeFailure> {
         match ty {
             Ty::Ref { inner, .. } => self.self_keys(inner, file),
-            Ty::Param(name) => vec![SelfKey::Blanket(name.clone())],
+            Ty::Param(name) => Ok(vec![SelfKey::Blanket(name.clone())]),
             Ty::Named(named) => match self.place(named) {
                 Placed::Types(keys) => {
                     let here: Vec<TypeKey> = keys
@@ -663,18 +853,29 @@ impl<'i> Tables<'i> {
                         .cloned()
                         .collect();
                     let chosen = if here.len() == 1 { here } else { keys };
-                    chosen.into_iter().map(SelfKey::Type).collect()
+                    Ok(chosen.into_iter().map(SelfKey::Type).collect())
                 }
-                Placed::Foreign(path) => vec![SelfKey::Foreign(path)],
-                Placed::Alias(key) => match self.aliases.get(&key) {
-                    Some(alias) => self.self_keys(&alias.target.clone(), file),
-                    None => vec![SelfKey::Other(named.name.clone())],
-                },
-                Placed::Trait | Placed::Unplaced(_) | Placed::Cut(_) => {
-                    vec![SelfKey::Other(named.name.clone())]
+                Placed::Foreign(path) => Ok(vec![SelfKey::Foreign(path)]),
+                Placed::Alias(key) => {
+                    let mut keys = Vec::new();
+                    for target in self.alias_targets(&key, &named.args) {
+                        keys.extend(self.self_keys(&target, file)?);
+                    }
+                    if keys.is_empty() {
+                        return Err(SelfTypeFailure::Unplaced(format!(
+                            "the alias `{}` names no type on any arm",
+                            named.name
+                        )));
+                    }
+                    Ok(keys)
                 }
+                Placed::Trait => Ok(vec![SelfKey::Other(format!("dyn {}", named.name))]),
+                Placed::Unplaced(why) => Err(SelfTypeFailure::Unplaced(why)),
+                Placed::Cut(what) => Err(SelfTypeFailure::Cut(format!(
+                    "{what} chains past the hop limit"
+                ))),
             },
-            other => vec![SelfKey::Other(other.spelling())],
+            other => Ok(vec![SelfKey::Other(other.spelling())]),
         }
     }
 
@@ -723,12 +924,37 @@ impl<'i> Tables<'i> {
                     foreign.insert(path.clone());
                 }
                 Named::Trait(..) => trait_found = true,
-                Named::Module(..) | Named::Function(..) | Named::Variant(..) => {}
+                Named::Module(..) | Named::Function(..) | Named::Value(..) | Named::Variant(..) => {
+                }
             }
         }
         match (types.len(), aliases.len(), foreign.len()) {
             (1.., 0, 0) => Placed::Types(types.into_iter().collect()),
             (0, 1, 0) => Placed::Alias(aliases.into_iter().next().unwrap_or_default()),
+            (_, 1.., 0) => {
+                // A name a type declares on one arm and an alias on another: the types of every
+                // arm, when each alias names a type.
+                let mut keys = types;
+                for alias in &aliases {
+                    for target in self.alias_targets(alias, &named.args) {
+                        let Ty::Named(target) = &target else {
+                            return Placed::Unplaced(format!(
+                                "the type path `{}` names an alias of no named type",
+                                path.join("::")
+                            ));
+                        };
+                        let Placed::Types(found) = self.place(target) else {
+                            return Placed::Unplaced(format!(
+                                "the type path `{}` names a type on one arm and an alias of no \
+                                 type on another",
+                                path.join("::")
+                            ));
+                        };
+                        keys.extend(found);
+                    }
+                }
+                Placed::Types(keys.into_iter().collect())
+            }
             (0, 0, 1) => Placed::Foreign(foreign.into_iter().next().unwrap_or_default()),
             (0, 0, 0) if trait_found => Placed::Trait,
             (0, 0, 0) => Placed::Unplaced(resolution.refused.unwrap_or_else(|| {
@@ -755,13 +981,38 @@ impl<'i> Tables<'i> {
             let Placed::Alias(key) = self.place(named) else {
                 return Ok(ty);
             };
-            let Some(alias) = self.aliases.get(&key) else {
-                return Ok(ty);
+            let targets = self.alias_targets(&key, &named.args);
+            let [target] = targets.as_slice() else {
+                return Ok(Ty::unknown(format!(
+                    "the arms of the alias `{}` name {} types",
+                    named.name,
+                    if targets.is_empty() {
+                        "no"
+                    } else {
+                        "different"
+                    }
+                )));
             };
-            let map = generic_map(&alias.generics, &named.args);
-            ty = alias.target.substitute(&map);
+            ty = target.clone();
         }
         Err("an alias chain longer than the hop limit".to_owned())
+    }
+
+    /// What an alias names with `args` substituted, once per distinct target its admitted arms
+    /// write: one alias on two arms naming one type is that type, and two types are two (never
+    /// the last one read).
+    fn alias_targets(&self, key: &TypeKey, args: &[Ty]) -> Vec<Ty> {
+        let mut targets: Vec<Ty> = Vec::new();
+        for alias in self.aliases.get(key).into_iter().flatten() {
+            if !alias.admitted {
+                continue;
+            }
+            let target = alias.target.substitute(&generic_map(&alias.generics, args));
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        targets
     }
 
     /// The standard type `ty` is, when it is one of the fixed list's.

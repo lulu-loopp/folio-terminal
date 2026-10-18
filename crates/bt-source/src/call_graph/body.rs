@@ -21,6 +21,8 @@ use crate::index::{ItemKind, Span};
 #[derive(Default)]
 struct Scope {
     bindings: BTreeMap<String, Ty>,
+    /// The `const`s and `static`s the block declares: items, so a nested `fn` sees them too.
+    values: BTreeMap<String, Ty>,
     nested: BTreeMap<String, Span>,
     names: Vec<(String, Vec<String>)>,
     globs: Vec<Vec<String>>,
@@ -216,7 +218,7 @@ impl<'t, 'i> Walker<'t, 'i> {
         self.scopes
             .iter()
             .rev()
-            .find_map(|scope| scope.bindings.get(name))
+            .find_map(|scope| scope.bindings.get(name).or_else(|| scope.values.get(name)))
     }
 
     fn nested(&self, name: &str) -> Option<Span> {
@@ -237,6 +239,18 @@ impl<'t, 'i> Walker<'t, 'i> {
                     let span = self.span_of(function.span());
                     if let Some(scope) = self.scopes.last_mut() {
                         scope.nested.insert(function.sig.ident.to_string(), span);
+                    }
+                }
+                syn::Item::Const(constant) => {
+                    let ty = self.written.ty(&constant.ty);
+                    if let Some(scope) = self.scopes.last_mut() {
+                        scope.values.insert(constant.ident.to_string(), ty);
+                    }
+                }
+                syn::Item::Static(value) => {
+                    let ty = self.written.ty(&value.ty);
+                    if let Some(scope) = self.scopes.last_mut() {
+                        scope.values.insert(value.ident.to_string(), ty);
                     }
                 }
                 syn::Item::Use(used) => {
@@ -375,10 +389,23 @@ impl<'t, 'i> Walker<'t, 'i> {
         }
     }
 
-    /// An item written inside a body: walked with a fresh scope, counted against the item it is
-    /// written in.
+    /// An item written inside a body: walked with the items and `use`s of the enclosing blocks in
+    /// scope and none of their bindings, counted against the item it is written in.
     fn nested_item(&mut self, item: &syn::Item) {
-        let saved_scopes = std::mem::replace(&mut self.scopes, vec![Scope::default()]);
+        // An item sees the items and the `use`s of the blocks around it, and none of their
+        // bindings.
+        let items_only: Vec<Scope> = self
+            .scopes
+            .iter()
+            .map(|scope| Scope {
+                bindings: BTreeMap::new(),
+                values: scope.values.clone(),
+                nested: scope.nested.clone(),
+                names: scope.names.clone(),
+                globs: scope.globs.clone(),
+            })
+            .collect();
+        let saved_scopes = std::mem::replace(&mut self.scopes, items_only);
         let saved = self.written.clone();
         match item {
             syn::Item::Fn(function) => {
@@ -1103,21 +1130,25 @@ impl<'t, 'i> Walker<'t, 'i> {
         written: &syn::Path,
     ) -> Answer {
         let name = segments.last().cloned().unwrap_or_default();
-        let resolution = self.tables.names.resolve(self.at, &self.module, segments);
-        let mut named = resolution.named.clone();
-        if named.is_empty() && segments.len() == 1 {
+        // A glob of a `use` written in the body is the innermost scope: what it opens comes before
+        // the module's names (a body's own `use` names were rewritten already).
+        let mut named = Vec::new();
+        let mut cut = false;
+        if segments.len() == 1 {
             for glob in globs {
                 let mut through = glob.clone();
                 through.push(name.clone());
-                named.extend(
-                    self.tables
-                        .names
-                        .resolve(self.at, &self.module, &through)
-                        .named,
-                );
+                let opened = self.tables.names.resolve(self.at, &self.module, &through);
+                cut |= opened.cut;
+                named.extend(opened.named);
             }
         }
-        if resolution.cut {
+        let resolution = self.tables.names.resolve(self.at, &self.module, segments);
+        cut |= resolution.cut;
+        if named.is_empty() {
+            named = resolution.named.clone();
+        }
+        if cut {
             return unresolved(Unresolved::Cutoff {
                 what: format!(
                     "the path `{}` in {} {}",
@@ -1137,6 +1168,17 @@ impl<'t, 'i> Walker<'t, 'i> {
                 }
                 Named::Variant(..) | Named::Type(..) => constructor = true,
                 Named::Foreign(path) => foreign.push(path.clone()),
+                Named::Value(at, module, value) => {
+                    // A `const` or a `static` called: what it holds is a function value.
+                    return unresolved(Unresolved::Dynamic {
+                        what: format!(
+                            "`{value}`, a `const` or `static` of {} {module} called: a function \
+                             pointer",
+                            self.tables.package(*at)
+                        ),
+                        candidates: Vec::new(),
+                    });
+                }
                 Named::Module(..) | Named::Trait(..) | Named::Alias(..) => {}
             }
         }
@@ -1241,9 +1283,10 @@ impl<'t, 'i> Walker<'t, 'i> {
         }
     }
 
-    /// **A path in value position**: a binding's type, or — for a function named as a value
-    /// (`spawn(worker)`, `.map(Self::f)`) — an edge to it ([`Via::Value`]). A constant, a unit
-    /// struct or variant, a static is data, and no edge.
+    /// **A path in value position**: a binding's type; data — a `const`, a `static`, an
+    /// associated `const`, a unit struct or a variant — with its type and no edge; anything else is
+    /// a function named as a value (`spawn(worker)`, `.map(Self::f)`), and **every** edge its path
+    /// gives is pushed with [`Via::Value`] — resolved, foreign or unresolved, never dropped.
     fn path_value(&mut self, path: &syn::ExprPath) -> Ty {
         if path.qself.is_none() && path.path.segments.len() == 1 {
             let name = path.path.segments[0].ident.to_string();
@@ -1256,26 +1299,22 @@ impl<'t, 'i> Walker<'t, 'i> {
                 return Ty::unknown("a function item");
             }
         }
+        if let Some(data) = self.data_type(path) {
+            return data;
+        }
         let (span, name) = path_site(self, path);
         let saved = self.edges.len();
         let answer = self.path_call(path);
         self.edges.truncate(saved);
-        let data = self.data_type(path);
         for (target, _) in &answer.targets {
-            match target {
-                Target::Item(_) | Target::Nested(_) | Target::Foreign(_) => {
-                    self.push(span, &name, target.clone(), Via::Value);
-                }
-                Target::Unresolved(Unresolved::Cutoff { .. }) => {
-                    self.push(span, &name, target.clone(), Via::Value);
-                }
-                _ => {}
-            }
+            self.push(span, &name, target.clone(), Via::Value);
         }
-        data.unwrap_or_else(|| Ty::unknown("a path's value"))
+        Ty::unknown("a function value")
     }
 
-    /// The type a path in value position is when it names a unit struct or an enum's variant.
+    /// **The type a path in value position has when it names data**: a unit struct or an enum's
+    /// variant (the type), a `const` or a `static` of a module (its written type), an associated
+    /// `const` (`Self::LIMIT`, `Type::MAX`, `T::ID`: untyped). `None` for a path that is no data.
     fn data_type(&self, path: &syn::ExprPath) -> Option<Ty> {
         if path.qself.is_some() {
             return None;
@@ -1288,12 +1327,37 @@ impl<'t, 'i> Walker<'t, 'i> {
             .collect();
         let (segments, _) = self.body_path(&segments);
         let resolution = self.tables.names.resolve(self.at, &self.module, &segments);
-        resolution.named.iter().find_map(|named| match named {
+        let found = resolution.named.iter().find_map(|named| match named {
             Named::Variant(at, module, owner, _) | Named::Type(at, module, owner) => Some(
                 super::decls::named_of(self.tables.package(*at), module, owner),
             ),
+            Named::Value(at, module, value) => Some(
+                self.tables
+                    .values
+                    .get(&(*at, module.clone(), value.clone()))
+                    .cloned()
+                    .unwrap_or_else(|| Ty::unknown("a value whose type is not read")),
+            ),
             _ => None,
-        })
+        });
+        if found.is_some() {
+            return found;
+        }
+        let (name, prefix) = segments.split_last()?;
+        if prefix.is_empty() {
+            return None;
+        }
+        let owner = match prefix {
+            [only] if only == "Self" => self.written.self_ty.clone()?,
+            [only] if self.written.params.contains(only) => Ty::Param(only.clone()),
+            _ => {
+                let written: syn::Path = syn::parse_str(&prefix.join("::")).ok()?;
+                self.written.path(&written)
+            }
+        };
+        self.tables
+            .is_associated_const(&owner, name, &self.written)
+            .then(|| Ty::unknown("an associated `const`"))
     }
 
     // ── macros ────────────────────────────────────────────────────────────
@@ -1313,8 +1377,26 @@ impl<'t, 'i> Walker<'t, 'i> {
             Target::Unresolved(Unresolved::Macro { name: name.clone() }),
             Via::Direct,
         );
+        let is_matches = mac
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "matches");
+        if mac.path.is_ident("cfg") {
+            // Its arguments are `cfg` predicates, not expressions: nothing runs.
+            return;
+        }
         self.macros.push(name);
-        if let Ok(arguments) =
+        if is_matches && let Ok((value, pattern, guard)) = mac.parse_body_with(matches_body) {
+            // The pattern binds over the guard, as a match arm's does.
+            let scrutinee = self.expr(&value);
+            self.scopes.push(Scope::default());
+            self.bind(&pattern, scrutinee, Mode::Move);
+            if let Some(guard) = guard {
+                self.condition(&guard);
+            }
+            self.scopes.pop();
+        } else if let Ok(arguments) =
             mac.parse_body_with(Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated)
         {
             for argument in &arguments {
@@ -1327,11 +1409,14 @@ impl<'t, 'i> Walker<'t, 'i> {
                     }
                 }
             }
-        } else if let Ok((value, guard)) = mac.parse_body_with(matches_body) {
-            self.expr(&value);
+        } else if let Ok((value, pattern, guard)) = mac.parse_body_with(matches_body) {
+            let scrutinee = self.expr(&value);
+            self.scopes.push(Scope::default());
+            self.bind(&pattern, scrutinee, Mode::Move);
             if let Some(guard) = guard {
-                self.expr(&guard);
+                self.condition(&guard);
             }
+            self.scopes.pop();
         } else if let Ok((value, length)) = mac.parse_body_with(repeat_body) {
             self.expr(&value);
             self.expr(&length);
@@ -1369,10 +1454,10 @@ fn path_site(walker: &Walker<'_, '_>, path: &syn::ExprPath) -> (Span, String) {
 }
 
 /// `matches!(value, pattern if guard)`.
-fn matches_body(input: syn::parse::ParseStream<'_>) -> syn::Result<(syn::Expr, Option<syn::Expr>)> {
+fn matches_body(input: syn::parse::ParseStream<'_>) -> syn::Result<MatchesBody> {
     let value: syn::Expr = input.parse()?;
     input.parse::<syn::Token![,]>()?;
-    let _pattern = syn::Pat::parse_multi_with_leading_vert(input)?;
+    let pattern = syn::Pat::parse_multi_with_leading_vert(input)?;
     let guard = if input.peek(syn::Token![if]) {
         input.parse::<syn::Token![if]>()?;
         Some(input.parse()?)
@@ -1382,8 +1467,11 @@ fn matches_body(input: syn::parse::ParseStream<'_>) -> syn::Result<(syn::Expr, O
     if input.peek(syn::Token![,]) {
         input.parse::<syn::Token![,]>()?;
     }
-    Ok((value, guard))
+    Ok((value, pattern, guard))
 }
+
+/// `matches!`'s value, pattern and guard.
+type MatchesBody = (syn::Expr, syn::Pat, Option<syn::Expr>);
 
 /// `vec![value; length]`.
 fn repeat_body(input: syn::parse::ParseStream<'_>) -> syn::Result<(syn::Expr, syn::Expr)> {

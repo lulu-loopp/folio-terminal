@@ -28,8 +28,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::index::{Index, ItemKind};
 
-/// How many `use` and glob hops a resolution follows — [`crate::TraitResolver`]'s limit.
-pub(crate) const HOPS: usize = 16;
+/// How many `use` and glob hops a resolution follows — [`crate::TraitResolver`]'s limit, one
+/// constant for both.
+pub(crate) use crate::traits::HOPS;
 
 /// What one name, or one path, names.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -39,6 +40,8 @@ pub(crate) enum Named {
     Type(usize, String, String),
     Alias(usize, String, String),
     Function(usize, String, String),
+    /// A `const` or a `static` of a module: data, no call.
+    Value(usize, String, String),
     /// A variant of a first-party enum: package, module, enum, variant.
     Variant(usize, String, String, String),
     /// A path that leaves the packages handed in, in full.
@@ -62,6 +65,7 @@ enum Declared {
     Type,
     Alias,
     Function,
+    Value,
 }
 
 #[derive(Default)]
@@ -207,6 +211,14 @@ impl<'i> Names<'i> {
             for alias in index.aliases() {
                 for module in alias.module_paths() {
                     declare(module, alias.name(), Declared::Alias);
+                }
+            }
+            for value in index.values() {
+                if value.type_owner().is_some() || value.trait_name().is_some() {
+                    continue;
+                }
+                for module in value.module_paths() {
+                    declare(module, value.name(), Declared::Value);
                 }
             }
             for item in index.items() {
@@ -355,9 +367,11 @@ impl<'i> Names<'i> {
                     Vec::new()
                 }
             }
-            Named::Trait(..) | Named::Alias(..) | Named::Function(..) | Named::Variant(..) => {
-                Vec::new()
-            }
+            Named::Trait(..)
+            | Named::Alias(..)
+            | Named::Function(..)
+            | Named::Value(..)
+            | Named::Variant(..) => Vec::new(),
         }
     }
 
@@ -400,6 +414,7 @@ impl<'i> Names<'i> {
                     Declared::Type => Named::Type(at, module, name),
                     Declared::Alias => Named::Alias(at, module, name),
                     Declared::Function => Named::Function(at, module, name),
+                    Declared::Value => Named::Value(at, module, name),
                 });
             }
         }

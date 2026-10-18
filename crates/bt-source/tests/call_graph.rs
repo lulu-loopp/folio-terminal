@@ -729,4 +729,219 @@ fn the_whole_product_walk_is_counted() {
         !kinds.contains_key("cutoff") && !kinds.contains_key("unparsed"),
         "the product has no cutoff and no unparsed body: {kinds:?}"
     );
+    eprintln!(
+        "CALL_GRAPH_UNPLACED_IMPLS\t{}\n  {}",
+        resolver.unplaced_impls().len(),
+        resolver
+            .unplaced_impls()
+            .iter()
+            .map(|unplaced| unplaced.what.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+    assert!(
+        resolver.unparsed().is_empty(),
+        "every declaration of the product parses for the call graph: {:?}",
+        resolver.unparsed()
+    );
+}
+
+// ── round 2 ───────────────────────────────────────────────────────────────
+
+/// What the sites named `site` in `caller`'s body go to, with how each is reached.
+fn at_via(resolver: &Resolver<'_>, caller: &str, site: &str) -> Vec<(String, Via)> {
+    let package = resolver.packages()[0];
+    let from = item(resolver, package, caller);
+    let mut found: Vec<(String, Via)> = resolver
+        .resolve_callees(from)
+        .iter()
+        .filter(|edge| edge.site.name == site)
+        .map(|edge| (spelled(resolver, edge), edge.via.clone()))
+        .collect();
+    found.sort();
+    found
+}
+
+/// RED (R9, round 2) — **a function named as a value whose path is no one item is an edge of its
+/// kind, with `Via::Value`, never dropped**: a derive's `default` (generated), `Self::f` with two
+/// traits declaring `f` (ambiguous), a `cfg(test)` function (other arm), a macro-generated one
+/// (path), a trait no implementation answers (dynamic); and data — a `const`, a `static`, a unit
+/// struct, an associated `const` — is no edge at all, while a method called on a `static` is
+/// typed by its declaration.
+///
+/// MUTATION: in `Walker::path_value`, push only the resolved, nested, foreign and cutoff targets
+/// (round 1's drop) — the generated, ambiguous, other-arm, path and dynamic edges are missing.
+#[test]
+fn a_function_value_that_is_no_one_item_is_an_edge_of_its_kind() {
+    let index = fixture("value_kinds");
+    let resolver = resolver("value_kinds", &index);
+    let value = |text: &str| vec![(text.to_owned(), Via::Value)];
+    assert_eq!(
+        at_via(&resolver, "root", "default"),
+        value("generated #[derive(Default)]")
+    );
+    assert_eq!(
+        at_via(&resolver, "root", "f"),
+        value(
+            "ambiguous f: cg-value_kinds crate::<Both as Again>::f, \
+             cg-value_kinds crate::<Both as Twice>::f"
+        )
+    );
+    assert_eq!(
+        at_via(&resolver, "root", "worker"),
+        value("other arm cg-value_kinds crate::worker")
+    );
+    assert_eq!(
+        at_via(&resolver, "root", "generated_fn"),
+        value("path generated_fn")
+    );
+    assert_eq!(at_via(&resolver, "generic", "alone"), value("dynamic "));
+    for data in ["LIMIT", "NAMES", "Unit", "CAP"] {
+        assert_eq!(
+            at_via(&resolver, "root", data),
+            Vec::new(),
+            "`{data}` is data, and no edge"
+        );
+    }
+    assert_eq!(
+        at(&resolver, "root", "lock"),
+        ["foreign std::sync::Mutex::lock"],
+        "a `static` is typed by its declaration"
+    );
+}
+
+/// RED (R7, round 2) — **one alias on two arms naming two types is neither of them taken alone**:
+/// over both arms the call is untyped and names both methods; with one arm fixed it is that arm's.
+///
+/// MUTATION: in `Tables::read_aliases`, keep one declaration per alias (the last read wins) — the
+/// call is one arm's type over both arms.
+#[test]
+fn an_alias_on_two_arms_is_neither_arm_alone() {
+    let index = fixture("alias_arms");
+    let resolver = resolver("alias_arms", &index);
+    assert_eq!(
+        at(&resolver, "root", "show"),
+        ["ambiguous show: cg-alias_arms crate::Narrow::show, cg-alias_arms crate::Wide::show"]
+    );
+    let windows = Resolver::new(
+        &[("cg-alias_arms", &*index)],
+        Arms::filtered(|query| {
+            query.compilation.permits_product()
+                && !query
+                    .predicates
+                    .iter()
+                    .any(|predicate| predicate == "not(windows)")
+        }),
+    )
+    .unwrap_or_else(|refusals| panic!("{refusals:?}"));
+    assert_eq!(
+        at(&windows, "root", "show"),
+        ["cg-alias_arms crate::Wide::show"]
+    );
+}
+
+/// RED (R10, round 2) — **a `fn` written in a body sees the block's items and `use`s**: its call
+/// of a sibling `fn` is the sibling, never the module's function of that name, and its call
+/// through the block's `use` is the function the `use` names.
+///
+/// MUTATION: in `Walker::nested_item`, walk the nested item with a fresh scope stack (round 1) —
+/// `sibling()` is the module's `crate::sibling` and `from_use()` names nothing.
+#[test]
+fn a_nested_fn_sees_the_blocks_items_and_uses() {
+    let index = fixture("nested_scope");
+    let resolver = resolver("nested_scope", &index);
+    assert_eq!(at(&resolver, "root", "sibling"), ["nested"]);
+    assert_eq!(
+        at(&resolver, "root", "from_use"),
+        ["cg-nested_scope crate::other::helper"]
+    );
+}
+
+/// RED (`Cutoff`, round 2) — **a name a body's glob opens past the hop limit is a cutoff**.
+///
+/// MUTATION: in `Walker::module_call`, discard the body globs' cutoff — `link20()` is a path edge.
+#[test]
+fn a_body_glob_past_the_hop_limit_is_a_cutoff() {
+    let index = fixture("cutoff");
+    let resolver = resolver("cutoff", &index);
+    assert_eq!(at(&resolver, "body_glob", "link20"), ["cutoff"]);
+}
+
+/// RED (round 2) — **an `impl` block whose self type the module tree does not hold (a type a macro
+/// generates) is listed with its methods**, never filed under nothing; only a self type chained
+/// past the hop limit refuses the reading (a refusal).
+///
+/// MUTATION: in `Tables::read_impls`, skip such a block without listing it (round 1 filed it under
+/// `SelfKey::Other`) — `unplaced_impls` is empty.
+#[test]
+fn an_impl_for_a_type_nothing_holds_is_listed() {
+    let index = fixture("refused");
+    let resolver = Resolver::new(&[("cg-refused", &*index)], Arms::product())
+        .unwrap_or_else(|refusals| panic!("{refusals:?}"));
+    let [unplaced] = resolver.unplaced_impls() else {
+        panic!("one unplaced impl: {:?}", resolver.unplaced_impls());
+    };
+    assert!(
+        unplaced.what.contains("`Missing`") && unplaced.what.contains("names nothing"),
+        "{}",
+        unplaced.what
+    );
+    assert_eq!(
+        keys(&resolver, &unplaced.methods),
+        ["cg-refused crate::Missing::lost"]
+    );
+}
+
+/// RED (round 2) — **an `impl` on an alias declared in a later package is the alias's type**: the
+/// types and aliases of every package are read before any `impl` block.
+///
+/// MUTATION: in `Tables::read`, read each package's `impl` blocks right after its own types (round
+/// 1's single pass) — the alias of the later package is not read yet and the block is refused.
+#[test]
+fn an_impl_on_a_later_packages_alias_is_its_type() {
+    let first = fixture_as("alias_later_a", "cg-alias_later_a");
+    let later = fixture_as("alias_later_b", "cg-alias_later_b");
+    let resolver = Resolver::new(
+        &[("cg-alias_later_a", &*first), ("cg-alias_later_b", &*later)],
+        Arms::product(),
+    )
+    .unwrap_or_else(|refusals| panic!("{refusals:?}"));
+    assert_eq!(
+        at(&resolver, "root", "speak"),
+        ["cg-alias_later_a crate::<Short as Speak>::speak"]
+    );
+}
+
+/// RED (round 2) — **a `const` and a `static` are index records**: a module's, an `impl` block's
+/// (with its owner) and a trait's (with the trait), and none for one written in a body.
+///
+/// MUTATION: in `lower.rs`, lower no `syn::Item::Static` — `NAMES` and `INBOX` are missing.
+#[test]
+fn a_const_and_a_static_are_index_records() {
+    let index = fixture("value_kinds");
+    let mut values: Vec<(String, Option<String>, bt_source::ValueKind)> = index
+        .values()
+        .iter()
+        .map(|value| {
+            (
+                value.name().to_owned(),
+                value.type_owner().map(ToOwned::to_owned),
+                value.kind(),
+            )
+        })
+        .collect();
+    values.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        values,
+        [
+            (
+                "CAP".to_owned(),
+                Some("Both".to_owned()),
+                bt_source::ValueKind::Const
+            ),
+            ("INBOX".to_owned(), None, bt_source::ValueKind::Static),
+            ("LIMIT".to_owned(), None, bt_source::ValueKind::Const),
+            ("NAMES".to_owned(), None, bt_source::ValueKind::Static),
+        ]
+    );
 }

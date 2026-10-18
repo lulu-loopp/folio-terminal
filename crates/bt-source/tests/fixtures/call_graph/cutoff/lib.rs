@@ -33,3 +33,8 @@ pub fn near() {
 pub fn far() {
     chain::link20();
 }
+
+pub fn body_glob() {
+    use chain::*;
+    link20();
+}

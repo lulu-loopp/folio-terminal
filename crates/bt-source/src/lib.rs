@@ -178,7 +178,7 @@ pub use index::{
     AliasRecord, Certainty, CommentKind, CommentRecord, ConditionalVariant, DeclarationPath,
     FileRecord, ImplRecord, Index, ItemIdentity, ItemKind, ItemRecord, LiteralRecord, LiteralValue,
     Location, MacroKind, MacroRecord, MacroShape, ModuleRecord, ModuleShape, Span, TokenKind,
-    TokenRecord, TraitRecord, UnsupportedMacroShape, UseRecord,
+    TokenRecord, TraitRecord, UnsupportedMacroShape, UseRecord, ValueKind, ValueRecord,
 };
 pub use manifest::{Package, TargetId, TargetKind, TargetRoot, Workspace};
 pub use paths::{is_inside, normalized};

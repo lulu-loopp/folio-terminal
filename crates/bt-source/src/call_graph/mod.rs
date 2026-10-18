@@ -26,7 +26,7 @@
 //! | R6 | UFCS `<X as Tr>::m()` | `X` stated: that impl's `m`, else `Tr`'s default; `X` a bound generic: R5; a foreign trait on a first-party `X`: its impl, else foreign. `<X>::m` is R3 | [`Target::Item`] |
 //! | R7 | Type alias `type A = B;` | Followed to `B` through [`crate::AliasRecord`]s, arguments substituted, up to the hop limit | as `B` |
 //! | R8 | Inline closure call `(\|x\| …)(y)`; any closure literal | The closure's body is walked as part of the item it is written in; each edge found inside carries [`CallSite::closure`] | [`Target::Closure`] |
-//! | R9 | A function named as a value: `spawn(worker)`, `.map(Self::f)` | Placed as R1/R3 | [`Target::Item`], [`Via::Value`] |
+//! | R9 | A path in value position: `spawn(worker)`, `.map(Self::f)` | Data — a `const` or `static` ([`crate::ValueRecord`]), an associated `const`, a unit struct or variant, a binding — is no edge (a `static` is typed by its declaration); anything else is placed as R1/R3 and **every** edge it gives is pushed | any [`Target`], [`Via::Value`] |
 //! | R10 | A `fn` or `impl` written inside a body | Walked as part of the enclosing item | [`Target::Nested`] |
 //! | R11 | A callee outside the packages handed in | Its full path after the first-party `use` items are followed (`std::sync::Mutex::lock`, `std::fs::write`) | [`Target::Foreign`]: a boundary, not a failure |
 //!
@@ -52,14 +52,18 @@
 //! **A type on several arms of one module path** (one name declared in `cfg`-alternative files) is
 //! asked on each arm and the answers are united; an arm whose type lacks the member adds a
 //! [`Unresolved::Path`] edge beside the others' items. An `impl` block's self type is the one
-//! declared in the block's own file when there is one. The standard library's guards and wrappers
+//! declared in the block's own file when there is one; an `impl` block whose self type the module
+//! tree does not hold (a macro-generated type) is listed with its methods
+//! ([`Resolver::unplaced_impls`]), and one chained past the hop limit refuses the reading. The
+//! standard library's guards and wrappers
 //! (`MutexGuard`, `Ref`, `RefMut`, `Pin`, …) deref to their pointee as `Box` and `Rc`/`Arc` do.
 //!
 //! **What is not read**, as limits: visibility; items a macro generates (a `bitflags!` type, a
-//! generated enum: a path through one is [`Unresolved::Path`]); the type of a `static` or a
-//! `const` (a call on one is untyped); a foreign function's return type beyond the census's fixed
-//! lists; a `#[cfg]` written on an expression that is no statement or match arm (a field
-//! initialiser's, an element's) — its code is walked as though the arms admitted it.
+//! generated enum, a `thread_local!` static: a path through one is [`Unresolved::Path`]); the
+//! type of an associated `const`; a foreign function's return type beyond the census's fixed
+//! lists; `cfg!`'s arguments, which are predicates; a `#[cfg]` written on an expression that is no
+//! statement or match arm (a field initialiser's, an element's) — its code is walked as though the
+//! arms admitted it. One alias on several arms naming different types is untyped, never one arm's.
 
 mod body;
 mod decls;
@@ -69,7 +73,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::Rc;
 
-pub use decls::Refusal;
+pub use decls::{Refusal, UnplacedImpl};
 
 use crate::declarations::Compilation;
 use crate::index::{FileRecord, Index, ItemRecord, Span};
@@ -347,6 +351,13 @@ impl<'i> Resolver<'i> {
             }
         }
         found
+    }
+
+    /// The `impl` blocks whose self type the module tree does not hold — a type a macro generates
+    /// — each with its methods: listed, never filed under nothing.
+    #[must_use]
+    pub fn unplaced_impls(&self) -> &[UnplacedImpl] {
+        &self.tables.unplaced_impls
     }
 
     /// Declarations the reading could not parse (a type, an alias, a signature, an `impl`
