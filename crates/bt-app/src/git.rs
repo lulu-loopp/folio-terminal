@@ -2456,24 +2456,16 @@ impl GitChild {
         }
     }
 
-    /// **The pipe readers of a child that was killed, let go before its fault is answered**
-    /// (T-ANSWER-AFTER-THE-FILE-IS-CLOSED): a contained child's whole tree has ended with it, so
-    /// every writer of both pipes is closed and each reader is at its end — joined here, the pipes
-    /// are closed before the fault leaves. A child whose hooks may outlive it is the exception
-    /// its policy names: a hook it started may still hold the pipes it inherited, for as long as
-    /// that hook lives, and waiting for it is the wait the timeout exists to refuse; its readers
-    /// are let go, and end when the last hook does. What they read is thrown away either way.
-    fn let_go_of_readers(
-        &self,
-        out: thread::JoinHandle<Vec<u8>>,
-        err: thread::JoinHandle<Vec<u8>>,
-    ) {
+    /// **Whether a killed child's pipe readers are at their end once it is reaped**
+    /// (T-ANSWER-AFTER-THE-FILE-IS-CLOSED): a contained child's whole tree ends with it, so every
+    /// writer of both pipes is closed and the readers are joined before its fault is answered. A
+    /// child whose hooks may outlive it is the exception its policy names: a hook it started may
+    /// still hold the pipes it inherited, for as long as that hook lives, and waiting for it is the
+    /// wait the timeout exists to refuse; its readers are let go, and end when the last hook does.
+    fn readers_end_with_it(&self) -> bool {
         match self {
-            Self::Contained(_) => {
-                let _ = out.join();
-                let _ = err.join();
-            }
-            Self::HooksMayOutlive(_) => {}
+            Self::Contained(_) => true,
+            Self::HooksMayOutlive(_) => false,
         }
     }
 
@@ -2654,31 +2646,15 @@ fn run_git_with_input(
     let out = drain(observed(child.take_stdout()));
     let err = drain(observed(child.take_stderr()));
     let deadline = Instant::now() + timeout;
-    loop {
+    let ended = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                // A pipe reader's panic is not an empty stream: under the resident panic hook it
-                // ends the process before this join (the reader is not contained), and where no
-                // fatal hook is installed the join carries it on.
-                let stdout = out.join().expect("a git pipe reader panicked");
-                let stderr =
-                    String::from_utf8_lossy(&err.join().expect("a git pipe reader panicked"))
-                        .into_owned();
-                return Ok(GitRun {
-                    ok: status.success(),
-                    code: status.code(),
-                    stdout,
-                    stderr,
-                });
-            }
+            Ok(Some(status)) => break Ok(status),
             Ok(None) => {}
             Err(error) => {
-                // Ended and reaped like a child past its time, and its readers let go with it,
-                // before the fault is answered.
+                // Ended and reaped like a child past its time, before the fault is answered.
                 let _ = child.kill();
                 let _ = child.wait();
-                child.let_go_of_readers(out, err);
-                return Err(GitFault::GitMissing(format!(
+                break Err(GitFault::GitMissing(format!(
                     "{} could not be waited for: {error}",
                     program_name(&command)
                 )));
@@ -2689,16 +2665,34 @@ fn run_git_with_input(
             // read back from it. A killed child does exit, and exit is what
             // `try_wait` reports — so a guard that went round the loop once more
             // after the kill would find the process finished and hand its half of
-            // an answer back as though it had merely failed. The two readers are
-            // let go before the fault is answered (`GitChild::let_go_of_readers`);
-            // their buffers are what is being thrown away here, deliberately.
+            // an answer back as though it had merely failed. What the readers
+            // read is thrown away, deliberately.
             let _ = child.kill();
             let _ = child.wait();
-            child.let_go_of_readers(out, err);
-            return Err(GitFault::TimedOut);
+            break Err(GitFault::TimedOut);
         }
         thread::sleep(GIT_POLL_INTERVAL);
-    }
+    };
+    // **The readers are let go before the answer leaves** (T-ANSWER-AFTER-THE-FILE-IS-CLOSED):
+    // joined for a child that ended on its own and for a killed one whose tree ended with it
+    // (`GitChild::readers_end_with_it`); a killed child whose hooks may outlive it leaves them to
+    // the hook that holds its pipes. A pipe reader's panic is not an empty stream: under the
+    // resident panic hook it ends the process before this join (the reader is not contained), and
+    // where no fatal hook is installed the join carries it on.
+    let ended = match ended {
+        Err(fault) if !child.readers_end_with_it() => return Err(fault),
+        ended => ended,
+    };
+    let stdout = out.join().expect("a git pipe reader panicked");
+    let stderr =
+        String::from_utf8_lossy(&err.join().expect("a git pipe reader panicked")).into_owned();
+    let status = ended?;
+    Ok(GitRun {
+        ok: status.success(),
+        code: status.code(),
+        stdout,
+        stderr,
+    })
 }
 
 /// Every question, wearing one fault.
