@@ -3258,7 +3258,7 @@ fn an_answer_is_published_after_its_resources_are_released(
         asked.refused.is_none() && run.settle(&mut found, |found| has_key(found, asked.key()));
     // Looked at the moment the terminal is found, with no wait: whatever still holds the file
     // held it when the answer became observable.
-    let free = answered && crate::test_support::nobody_holds(&file.0);
+    let free = answered && bt_testpath::nobody_holds(&file.0);
     let taken = run.lane.gate().taken();
     run.lane.gate().looked();
     if !answered {

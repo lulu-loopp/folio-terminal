@@ -5561,7 +5561,7 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
         let index = root.join(".git").join("index");
         let held = [
             index.with_extension("lock").exists(),
-            !crate::test_support::nobody_holds(&index),
+            !bt_testpath::nobody_holds(&index),
         ];
         let _ = std::fs::remove_dir_all(&root);
         assert!(

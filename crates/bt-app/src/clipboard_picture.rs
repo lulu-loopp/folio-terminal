@@ -944,7 +944,7 @@ mod tests {
             UNIX_EPOCH + Duration::from_secs(1_789_569_012),
         )
         .expect("a picture saves");
-        let free = crate::test_support::nobody_holds(&saved);
+        let free = bt_testpath::nobody_holds(&saved);
         let _ = fs::remove_dir_all(&folder);
         assert!(
             free,

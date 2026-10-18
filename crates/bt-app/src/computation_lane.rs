@@ -1940,7 +1940,7 @@ mod tests {
     /// and a GIF's first frame), a recording's frame and facts (a real one, and one that is no
     /// video, which Media Foundation refuses), a page's raster and a printed picture's decode.
     /// Each is asked through the product's door on the real lane; the moment its terminal is
-    /// taken, nobody holds the file (`test_support::nobody_holds`) and a writer saving over it
+    /// taken, nobody holds the file (`bt_testpath::nobody_holds`) and a writer saving over it
     /// finishes — what an editor does the moment the card has shown the answer
     /// (`runtime::preview::tests::a_set_aside_peek_answer_changes_nothing_on_the_window`).
     ///
@@ -2024,7 +2024,7 @@ mod tests {
             let ended = lane.next_ended(Share::Decoration, nobody);
             assert_eq!(ended.1, id, "{what}: its own answer");
             assert!(
-                crate::test_support::nobody_holds(file),
+                bt_testpath::nobody_holds(file),
                 "{what}: the answer is taken, and nobody holds the file"
             );
             let written = std::fs::write(file, b"saved over");
@@ -2065,7 +2065,7 @@ mod tests {
             panic!("the shipped GIF opens as an animation");
         };
         assert!(
-            !crate::test_support::nobody_holds(&gif.0),
+            !bt_testpath::nobody_holds(&gif.0),
             "the animation's cursor holds its file while the window keeps the animation"
         );
         let original = std::fs::read(&gif.0).expect("the file reads");
@@ -2076,7 +2076,7 @@ mod tests {
         );
         drop(opened);
         assert!(
-            crate::test_support::nobody_holds(&gif.0),
+            bt_testpath::nobody_holds(&gif.0),
             "the answer let go, nobody holds the file"
         );
     }

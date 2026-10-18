@@ -1830,7 +1830,7 @@ mod tests {
 
     /// RED (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **a listing's answer arrives with its directory
     /// already let go**: the real `bt-files-worker` lists a real folder, and the moment its answer
-    /// is in the channel nobody holds the folder (`test_support::nobody_holds`) — a rename or a
+    /// is in the channel nobody holds the folder (`bt_testpath::nobody_holds`) — a rename or a
     /// removal the person makes next is not refused by a read the column has finished with.
     ///
     /// MUTATION: leak a handle on the folder in `read_directory` (`std::mem::forget(std::fs::read_dir(path))`) — the answer arrives while
@@ -1852,7 +1852,7 @@ mod tests {
             path: dir.clone(),
         }));
         let answer = crate::lane::receive(&worker.responses, "the listing's answer");
-        let free = crate::test_support::nobody_holds(&dir);
+        let free = bt_testpath::nobody_holds(&dir);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(
             matches!(answer.outcome, DirOutcome::Listed(_)),

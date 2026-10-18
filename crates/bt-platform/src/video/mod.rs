@@ -1595,19 +1595,6 @@ mod tests {
         );
     }
 
-    /// Whether nobody holds `file` now: an exclusive open (no sharing at all) of
-    /// it succeeds at once, which any handle still open on it refuses with a
-    /// sharing violation.
-    fn nobody_holds(file: &Path) -> bool {
-        use std::os::windows::fs::OpenOptionsExt as _;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .share_mode(0)
-            .open(file)
-            .is_ok()
-    }
-
     /// A scratch copy of the shipped `.mp4`, named `name`, in a directory of its
     /// own that `dir` names.
     fn a_copy_of_the_fixture(dir: &Path, name: &str) -> std::path::PathBuf {
@@ -1647,11 +1634,11 @@ mod tests {
                 MFCreateSourceReaderFromByteStream(&file.stream, &attributes?).ok()?
             };
             assert!(
-                !nobody_holds(&copy),
+                !bt_testpath::nobody_holds(&copy),
                 "the fixture's own precondition: the open stream holds the file"
             );
             drop(file);
-            let free = nobody_holds(&copy);
+            let free = bt_testpath::nobody_holds(&copy);
             drop(reader);
             Some(free)
         });
@@ -1687,7 +1674,7 @@ mod tests {
             let _ = finished.send(());
             None
         });
-        let free = nobody_holds(&copy);
+        let free = bt_testpath::nobody_holds(&copy);
         // The walked-away thread ends on its own; the scratch file goes after it.
         let _ = done.recv_timeout(DECODER_PATIENCE);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1721,12 +1708,12 @@ mod tests {
             (
                 "the fixture",
                 first_frame(&real, 280, 160).is_some(),
-                nobody_holds(&real),
+                bt_testpath::nobody_holds(&real),
             ),
             (
                 "no video",
                 first_frame(&junk, 280, 160).is_some(),
-                nobody_holds(&junk),
+                bt_testpath::nobody_holds(&junk),
             ),
         ];
         let written = std::fs::write(&junk, vec![0x5a_u8; 256]);

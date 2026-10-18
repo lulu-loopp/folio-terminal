@@ -13621,7 +13621,7 @@ mod tests {
             want,
         }));
         let answer = crate::lane::receive(&worker.responses, "the read's answer");
-        let free = crate::test_support::nobody_holds(&path);
+        let free = bt_testpath::nobody_holds(&path);
         let written = std::fs::write(&path, "saved over\n");
         let _ = std::fs::remove_dir_all(&dir);
         assert!(

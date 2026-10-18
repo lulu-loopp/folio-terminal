@@ -651,11 +651,11 @@ mod tests {
         rig.sync(&both);
         let armed = rig.sync_after_the_wake(&both, "both folders armed").armed;
         assert_eq!(armed.len(), 2, "both folders are heard: {armed:?}");
-        let held_while_wanted = !crate::test_support::nobody_holds(&gone);
+        let held_while_wanted = !bt_testpath::nobody_holds(&gone);
         let one = BTreeSet::from([kept.clone()]);
         rig.sync(&one);
         rig.sync_after_the_wake(&one, "the round after the folder went");
-        let free = crate::test_support::nobody_holds(&gone);
+        let free = bt_testpath::nobody_holds(&gone);
         drop(rig);
         let _ = std::fs::remove_dir_all(&root);
         assert!(

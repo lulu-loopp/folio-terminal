@@ -812,8 +812,8 @@ mod tests {
             !answers.is_empty()
         });
         let free = [
-            crate::test_support::nobody_holds(&root),
-            crate::test_support::nobody_holds(&root.join("子 sub")),
+            bt_testpath::nobody_holds(&root),
+            bt_testpath::nobody_holds(&root.join("子 sub")),
         ];
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(free, [true, true], "nobody holds a folder the walk listed");
