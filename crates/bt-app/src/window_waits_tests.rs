@@ -8879,10 +8879,14 @@ fn call_graph(srcs: &[Src]) -> Resolver<'static> {
         }),
     )
     .unwrap_or_else(|refusals| {
+        let named: Vec<&str> = refusals
+            .iter()
+            .map(|refusal| refusal.what.as_str())
+            .collect();
         panic!(
-            "{} chains past the resolver's hop limit — refused, never passed: shorten the \
-             re-export chain, or raise `HOPS` in bt-source's `traits.rs` with its reason",
-            refusals[0].what
+            "the call graph refuses to read the product ({} refusals), never passed:\n  {}",
+            named.len(),
+            named.join("\n  ")
         )
     })
 }
