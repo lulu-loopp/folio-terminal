@@ -5607,9 +5607,7 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
             let pipes = heard.try_iter().count();
             let _ = tx.send((fault, pipes));
         });
-        let (fault, pipes) = rx
-            .recv_timeout(Duration::from_secs(60))
-            .expect("the guard came back");
+        let (fault, pipes) = crate::lane::receive(&rx, "the guard's fault");
         assert_eq!(fault, Some(GitFault::TimedOut));
         assert_eq!(
             pipes, 2,

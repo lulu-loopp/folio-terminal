@@ -1666,17 +1666,20 @@ mod tests {
         let dir = bt_testpath::temp_path("folio-video-given-up");
         let copy = a_copy_of_the_fixture(&dir, "录屏 slow.mp4");
         let url = HSTRING::from(copy.as_os_str());
+        let (release, held) = std::sync::mpsc::channel::<()>();
         let (finished, done) = std::sync::mpsc::channel();
         let answer = first_frame_through(&url, Duration::from_millis(20), move |stream| {
-            // Longer than any budget above, and holding the stream all the while.
-            std::thread::sleep(Duration::from_secs(2));
+            // Held until the test has looked, holding the stream all the while: a decode
+            // that cannot answer inside any budget, whatever the machine is doing.
+            let _ = held.recv();
             drop(stream);
             let _ = finished.send(());
             None
         });
         let free = bt_testpath::nobody_holds(&copy);
-        // The walked-away thread ends on its own; the scratch file goes after it.
-        let _ = done.recv_timeout(DECODER_PATIENCE);
+        // The walked-away thread is let go, and ends; the scratch file goes after it.
+        let _ = release.send(());
+        let _ = done.recv();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(answer, None, "a decode given up on is the module's silence");
         assert!(
