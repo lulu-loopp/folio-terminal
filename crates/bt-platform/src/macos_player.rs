@@ -192,7 +192,7 @@ use objc2_foundation::{NSDictionary, NSNotification, NSNotificationCenter, NSNum
 
 use super::engine::{
     EngineError, EngineState, FRAME_POLL_INTERVAL, Frame, FrameCost, IDLE_POLL_INTERVAL,
-    LedgerEntry, OPEN_BUDGET, SHUTDOWN_BUDGET, note_engine_shut_down,
+    LedgerEntry, OPEN_BUDGET, note_engine_shut_down,
 };
 use super::macos_video::displayed_size;
 use crate::macos_files::file_url;
@@ -283,9 +283,6 @@ impl Engine {
                         &commands,
                         &inbox,
                     );
-                    // Last of all, and read by `Engine::shutdown` to know
-                    // whether joining this thread will return — see there.
-                    shared.stopped.store(true, Ordering::Release);
                 },
             )
             // The one thing that can still fail here, and it fails without
@@ -467,46 +464,35 @@ impl Engine {
         }
     }
 
-    /// **Stop, release the player and join its thread**, now rather than at
-    /// drop.
+    /// **The door: tell the player's thread to stop, and let it go**
+    /// (T-DROP-DOORS, D-80): *a video engine is shut down through an explicit
+    /// door, not by its drop.*
     ///
-    /// The verb a pane calls when it closes or is handed a different file. It is
-    /// idempotent and [`Drop`] calls it, so a caller that forgets is not a
-    /// caller that leaks.
-    ///
-    /// # The join is bounded
-    ///
-    /// The Windows arm's review row R2-19, and the reason is the same on this
-    /// platform: a pane closes on the window's own thread, and the thread it is
-    /// closing may be inside a decoder. So the thread is asked to stop and this
-    /// waits [`SHUTDOWN_BUDGET`] for it to say it has — the flag it sets as its
-    /// very last act, which is what makes the `join` after it a formality that
-    /// returns at once. A thread that has not said so by then is let go rather
-    /// than waited on, and its engine is still on the ledger, which is the
-    /// truth.
+    /// The verb a pane calls when it closes or is handed a different file, on
+    /// the window's own thread — so it waits for nothing, the Windows arm's rule
+    /// for the Windows arm's reason (review row R2-19): the thread it is closing
+    /// may be inside a decoder. The `Shutdown` command is the whole of the
+    /// request; the thread releases its player, moves the ledger and leaves on
+    /// its own time. Idempotent.
     pub fn shutdown(&mut self) {
         let _ = self.commands.send(Command::Shutdown);
-        let Some(thread) = self.thread.take() else {
-            return;
-        };
-        let deadline = Instant::now() + SHUTDOWN_BUDGET;
-        while !self.shared.stopped.load(Ordering::Acquire) {
-            if Instant::now() >= deadline {
-                eprintln!(
-                    "video: an engine thread was still running {SHUTDOWN_BUDGET:?} \
-                     after it was told to stop; leaving it to finish"
-                );
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        let _ = thread.join();
+        self.thread.take();
     }
 }
 
 impl Drop for Engine {
+    /// Waits for nothing. After [`Engine::shutdown`] there is nothing left;
+    /// without it, the player's thread is told to stop and let go of — the
+    /// door's own request, which needs no wait — and the drop says so once.
     fn drop(&mut self) {
-        self.shutdown();
+        if self.thread.is_some() {
+            self.shutdown();
+            crate::door_skipped::say(
+                "a video engine (`macos_player::Engine`)",
+                "its shutdown door",
+                "its thread was told to stop and let go of",
+            );
+        }
     }
 }
 
@@ -531,9 +517,6 @@ struct Shared {
     /// immediately before the pump starts; [`Engine::state`] reads it to decide
     /// whether [`OPEN_BUDGET`] has been missed.
     built: std::sync::atomic::AtomicBool,
-    /// **Whether the engine thread has left.** Set once, as the thread's last
-    /// act, and read by [`Engine::shutdown`] so that its join is a bounded wait.
-    stopped: std::sync::atomic::AtomicBool,
 }
 
 /// One thing for the engine thread to do. The twin of the Windows arm's, with

@@ -7807,6 +7807,29 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 
+    /// **Every dirty buffer of this window's tabs handed to the storage worker,
+    /// for a shut answered `Save all`** (S-6b): each as a press on it would hand
+    /// it ([`preview::PreviewPool::save_for_a_shut`]) — the window thread writes
+    /// nothing — its answer said on the pane of its tab that shows its file, and
+    /// a refusal at the hand-over said there now. A buffer no pane of its tab
+    /// shows is said on no surface: if it does not land, the window's card names
+    /// it (`Runtime::settle_close_wait`).
+    pub(in crate::runtime) fn save_every_dirty_preview(&mut self) {
+        let refused = self.app.preview_saves.save_a_window_for_a_shut(self.window);
+        let now = Instant::now();
+        for (surface, source, why) in refused {
+            let still_shows_it = self
+                .preview_buffer_on(surface)
+                .is_some_and(|buffer| buffer.source() == &source);
+            if still_shows_it {
+                self.preview_pane_mut(surface).say(Some((
+                    preview::save_notice(preview::SaveOutcome::Failed(why)),
+                    now,
+                )));
+            }
+        }
+    }
+
     /// **The storage worker's answers about preview saves, heard by this
     /// window's buffers** (S-6a): each answer goes to the buffer that asked, if
     /// one of this window's tabs holds it ([`preview::PreviewSaves::deliver`]),
@@ -14119,6 +14142,48 @@ impl<B: Backend> Runtime<'_, B> {
 #[cfg(test)]
 #[path = "preview_tests.rs"]
 mod tests;
+
+/// **A shut's `Save all`, done by the two owners of what it touches** (S-6b round 3): the desk
+/// hands itself to the window ([`preview::PreviewSaves::save_a_window_for_a_shut`]), and the
+/// window walks its own tabs ([`WindowRuntime::save_every_dirty_preview`]) — so neither the
+/// application's desk nor the window's tabs is lent out of its owner.
+impl preview::PreviewSaves {
+    /// **Every dirty buffer of `window` handed to this desk, for a shut answered `Save all`**:
+    /// the refusals made at the hand-over, each with the surface to say it on.
+    fn save_a_window_for_a_shut<B: Backend>(
+        &mut self,
+        window: &mut WindowRuntime<B>,
+    ) -> Vec<(PreviewSurface, preview::PreviewSource, String)> {
+        window.save_every_dirty_preview(self)
+    }
+}
+
+impl<B: Backend> WindowRuntime<B> {
+    /// **This window's tabs, each one's dirty buffers handed to `saves`** as a press on each
+    /// would hand it ([`preview::PreviewPool::save_for_a_shut`]); a buffer is said on the pane
+    /// of its tab that shows its file, or on no surface. Answers the refusals made at the
+    /// hand-over.
+    fn save_every_dirty_preview(
+        &mut self,
+        saves: &mut preview::PreviewSaves,
+    ) -> Vec<(PreviewSurface, preview::PreviewSource, String)> {
+        let mut refused = Vec::new();
+        for tab in self.tabs.iter_mut() {
+            let shown: Vec<(PreviewSurface, preview::PreviewSource)> = tab
+                .preview_panes
+                .iter()
+                .filter_map(|(surface, pane)| pane.source().map(|source| (surface, source.clone())))
+                .collect();
+            refused.extend(tab.preview_pool.save_for_a_shut(saves, |source| {
+                shown
+                    .iter()
+                    .find(|(_, showing)| showing == source)
+                    .map_or(PreviewSurface::Peek, |(surface, _)| *surface)
+            }));
+        }
+        refused
+    }
+}
 
 /// **The preview's saves on the storage worker, as the application holds them**
 /// (S-6a) — written here and nowhere else: the press hands a request over

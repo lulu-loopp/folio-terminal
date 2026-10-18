@@ -5758,7 +5758,9 @@ pub(crate) mod tests {
             "and, the writer, it opens the launch endpoint the next launch hands over to"
         );
 
-        drop(endpoint);
+        if let Some(Ok(endpoint)) = endpoint {
+            let _ = endpoint.retire_within(crate::lane::PATIENCE);
+        }
         drop(resident);
         let _ = std::fs::remove_dir_all(&root);
     }

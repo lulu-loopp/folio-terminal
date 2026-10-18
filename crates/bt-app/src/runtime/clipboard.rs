@@ -544,9 +544,12 @@ impl<B: Backend> Runtime<'_, B> {
     /// roads do not share: it names the write for a reader of the error, and a
     /// drop that could not reach a shell is not a clipboard that could not.
     ///
-    /// **And the one place a paste may be asked about** (0.4.4 ticket 02). All four doors arrive
-    /// here, so [`stage_paste`] — and through it [`crate::paste_road`] — is asked exactly once per
-    /// paste, after the address is known to be live and before a byte is written. A paste it holds
+    /// **And the one place a paste may be asked about** (0.4.4 ticket 02). Both roads arrive here
+    /// — the clipboard's ([`Self::apply_clipboard_payload`], from the paste chord, the Edit menu and
+    /// the terminal's menu) and paths in hand ([`Self::paste_paths_into`], from a drop, a dragged
+    /// path and a saved clipboard picture) — so [`stage_paste`] — and through it
+    /// [`crate::paste_road`] — is asked exactly once per paste, after the address is known to be
+    /// live and before a byte is written. A paste it holds
     /// raises the card and sends nothing; the card's answer spends it through
     /// [`Self::answer_paste_card`].
     fn deliver_paste(
