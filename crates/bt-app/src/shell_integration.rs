@@ -1624,6 +1624,18 @@ fn powershell_single_quoted(value: &Path) -> String {
 /// finds the in-box PSReadLine 2.0.0, whose manifest exports that function, and imports it as a
 /// second PSReadLine beside Folio's (`Get-Module PSReadLine` then answered `2.4.5 2.0.0`). The
 /// function drive answers what is defined and loads nothing.
+///
+/// **A Windows PowerShell session that is not in `FullLanguage` gives Folio's module back**
+/// (T-INTEGRATION-INJECT-2-BUILD round 2): the shell is where the language mode is known for
+/// certain, and a pane can be born before the edition observation has said it
+/// ([`declare_psreadline_module`]). The host imported Folio's binary-only module before any
+/// profile ran; without the function this text defines only in `FullLanguage`, that pane would
+/// sit on the host's legacy line editor. So the `else` arm takes Folio's directory out of the
+/// session's `PSModulePath`, removes Folio's module and imports `PSReadLine` by name — the module
+/// the host would have imported had Folio's directory never been there (the in-box 2.0.0, or the
+/// account's own copy ahead of it), whose own script defines its function. It acts only on the
+/// module loaded from a directory named [`crate::psreadline::ARTEFACT`], so a pane Folio gave no
+/// prefix, and every pwsh 7 (which has no such arm), are untouched.
 #[must_use]
 pub fn powershell_load_command(program: &Path, script: &Path) -> String {
     let path = powershell_single_quoted(script);
@@ -1632,8 +1644,16 @@ pub fn powershell_load_command(program: &Path, script: &Path) -> String {
     } else {
         ""
     };
+    let give_back = if is_pwsh(program) {
+        String::new()
+    } else {
+        format!(
+            " else {{ $folioPSReadLine = Get-Module PSReadLine | Where-Object {{ (Split-Path (Split-Path (Split-Path $_.ModuleBase -Parent) -Parent) -Leaf) -eq '{artefact}' }}; if ($folioPSReadLine) {{ $folioModules = (Split-Path (Split-Path $folioPSReadLine.ModuleBase -Parent) -Parent).TrimEnd('\\'); $env:PSModulePath = ($env:PSModulePath -split ';' | Where-Object {{ $_ -and $_.TrimEnd('\\') -ne $folioModules }}) -join ';'; Remove-Module PSReadLine -Force; Import-Module PSReadLine }} }}",
+            artefact = crate::psreadline::ARTEFACT
+        )
+    };
     format!(
-        "if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {{ {revive}if ((Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) -and -not (Test-Path Function:PSConsoleHostReadLine)) {{ if (-not $Global:__FolioShellIntegration) {{ $Global:__FolioShellIntegration = @{{}} }}; $Global:__FolioShellIntegration.ReadLineType = (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine | Where-Object ImplementingAssembly | Select-Object -Last 1).ImplementingAssembly.GetType('Microsoft.PowerShell.PSConsoleReadLine'); function global:PSConsoleHostReadLine {{ $lastRunStatus = $?; Microsoft.PowerShell.Core\\Set-StrictMode -Off; $Global:__FolioShellIntegration.ReadLineType::ReadLine($host.Runspace, $ExecutionContext, $lastRunStatus) }} }}; if (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) {{ $folioScript = $null; try {{ $folioScript = [IO.File]::ReadAllText({path}) }} catch {{}}; if ($null -ne $folioScript) {{ . ([scriptblock]::Create($folioScript)) }} }} }}"
+        "if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {{ {revive}if ((Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) -and -not (Test-Path Function:PSConsoleHostReadLine)) {{ if (-not $Global:__FolioShellIntegration) {{ $Global:__FolioShellIntegration = @{{}} }}; $Global:__FolioShellIntegration.ReadLineType = (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine | Where-Object ImplementingAssembly | Select-Object -Last 1).ImplementingAssembly.GetType('Microsoft.PowerShell.PSConsoleReadLine'); function global:PSConsoleHostReadLine {{ $lastRunStatus = $?; Microsoft.PowerShell.Core\\Set-StrictMode -Off; $Global:__FolioShellIntegration.ReadLineType::ReadLine($host.Runspace, $ExecutionContext, $lastRunStatus) }} }}; if (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) {{ $folioScript = $null; try {{ $folioScript = [IO.File]::ReadAllText({path}) }} catch {{}}; if ($null -ne $folioScript) {{ . ([scriptblock]::Create($folioScript)) }} }} }}{give_back}"
     )
 }
 
@@ -5029,8 +5049,12 @@ fn prune_psreadline_artefacts(
 
 /// **Whether this edition's `-Command` text is observed to run in Constrained Language Mode** —
 /// the edition observation's own answer (`ProfileObservation::full_language`), the one the
-/// Profiles row reads. Before an observation is heard the answer is `false`: the loader's own
-/// guard decides in the shell, and the prefix is composed.
+/// Profiles row reads. Before an observation is heard, or after one failed, the answer is
+/// `false` and the prefix is composed: a `FullLanguage` pane — every first pane of a launch on an
+/// ordinary machine — gets Folio's module without waiting for the observation, and a pane that
+/// turns out to be constrained gives Folio's module back in the shell itself, where the language
+/// mode is known for certain ([`powershell_load_command`]'s `else` arm), ending on the editor it
+/// would have had without the prefix. This answer only spares such a pane the round trip.
 fn observed_constrained(program: &Path) -> bool {
     PROFILE_OBSERVATIONS
         .get_or_init(Default::default)
@@ -5184,7 +5208,9 @@ impl ModulePathFacts {
 /// first and ships 2.4.5 in-box), for a row the composer did not load into (`-File`,
 /// `-NonInteractive`, an uncomposable argv, the Shell integration switch off), or for an edition
 /// observed in Constrained Language Mode — each of those panes gets the account's PSReadLine,
-/// exactly as before. `facts` is asked only for a pane that will be composed.
+/// exactly as before. A constrained pane born before the observation said so does get the prefix,
+/// and its loader gives Folio's module back ([`observed_constrained`]): the outcome does not hang
+/// on which came first. `facts` is asked only for a pane that will be composed.
 ///
 /// The composed value is written into the last layer, `profile`, replacing the row's own
 /// `PSModulePath` (which it carries after Folio's entry): it is declared on the command

@@ -515,6 +515,18 @@ mod real_shell {
     /// row carries its own `-Command` text, whose parse answer is handed in as true (the startup's
     /// parser question is `real_command_rows_integrate_without_touching_account_state`'s subject).
     fn folio_pane(row: &[&str], command_row: bool, columns: u16, rows: u16) -> Pane {
+        pane_with_prefix(row, command_row, columns, rows, true)
+    }
+
+    /// [`folio_pane`], or — `prefix` false — the same pane with Folio's module written but no
+    /// module path declared: the pane this ticket's predecessor started, its reference.
+    fn pane_with_prefix(
+        row: &[&str],
+        command_row: bool,
+        columns: u16,
+        rows: u16,
+        prefix: bool,
+    ) -> Pane {
         let program = windows_powershell();
         let hygiene = Hygiene::new();
         let module =
@@ -542,36 +554,46 @@ mod real_shell {
             composed.arguments
         );
 
-        // The module path the test shell gives a Windows PowerShell — the account's fresh one — is
-        // what the pane would otherwise have, as the birth's environment would have it.
-        let before_folio: Vec<(OsString, OsString)> = hygiene
+        // The environment the test shell gives a Windows PowerShell — the account's fresh block —
+        // is what the pane would otherwise have, as the birth's environment would have it: whole,
+        // because the module path is compared expanded over it (`%ProgramFiles%` and the like).
+        // The command names only what the test shell sets; the rest of the block is this
+        // process's, which is what the child inherits.
+        let set: Vec<(OsString, OsString)> = hygiene
             .command(&program, bt_platform::quiet_command)
             .get_envs()
-            .filter(|(name, _)| environment_name_eq(name, OsStr::new(MODULE_PATH)))
             .filter_map(|(name, value)| Some((name.to_owned(), value?.to_owned())))
             .collect();
+        let before_folio: Vec<(OsString, OsString)> = std::env::vars_os()
+            .filter(|(name, _)| !set.iter().any(|(set, _)| environment_name_eq(set, name)))
+            .chain(set.iter().cloned())
+            .collect();
         let mut profile = Vec::new();
-        declare_psreadline_module(
-            &program,
-            composed.loads,
-            &before_folio,
-            &[],
-            &mut profile,
-            || ModulePathFacts {
-                module: Some(module.clone()),
-                documents: None,
-                machine: bt_platform::environment::machine_variable(MODULE_PATH),
-            },
-        );
-        let declared = profile
-            .iter()
-            .find(|(name, _)| environment_name_eq(name, OsStr::new(MODULE_PATH)))
-            .map(|(_, value)| value.to_string_lossy().into_owned())
-            .expect("a composed 5.1 pane declares its module path");
-        assert!(
-            declared.starts_with(&*module.to_string_lossy()),
-            "Folio's directory is first: {declared}"
-        );
+        if prefix {
+            declare_psreadline_module(
+                &program,
+                composed.loads,
+                &before_folio,
+                &[],
+                &mut profile,
+                || ModulePathFacts {
+                    module: Some(module.clone()),
+                    // The product's own facts: the Documents 5.1 would add is the account's, so the
+                    // composed path is the one a real pane is given, Documents entry included.
+                    documents: crate::psreadline::documents_directory(),
+                    machine: bt_platform::environment::machine_variable(MODULE_PATH),
+                },
+            );
+            let declared = profile
+                .iter()
+                .find(|(name, _)| environment_name_eq(name, OsStr::new(MODULE_PATH)))
+                .map(|(_, value)| value.to_string_lossy().into_owned())
+                .expect("a composed 5.1 pane declares its module path");
+            assert!(
+                declared.starts_with(&*module.to_string_lossy()),
+                "Folio's directory is first: {declared}"
+            );
+        }
 
         crate::test_support::install_host_answers();
         let home = hygiene.home();
@@ -1001,6 +1023,11 @@ mod real_shell {
     /// profile stands. `-ExecutionPolicy Bypass` on the row, because a dot-sourced file is a
     /// script and the subject here is what it does, not whether a policy lets it run.
     fn profile_pane(text: &str) -> (Pane, PathBuf) {
+        profile_pane_with_prefix(text, true)
+    }
+
+    /// [`profile_pane`], with or without Folio's module path ([`pane_with_prefix`]).
+    fn profile_pane_with_prefix(text: &str, prefix: bool) -> (Pane, PathBuf) {
         let profile = bt_testpath::temp_path("psreadline-profile").with_extension("ps1");
         std::fs::write(&profile, text).unwrap();
         let startup = format!(
@@ -1008,7 +1035,7 @@ mod real_shell {
             bt_pty::test_shell::HYGIENE,
             powershell_single_quoted(&profile)
         );
-        let pane = folio_pane(
+        let pane = pane_with_prefix(
             &[
                 "-NoLogo",
                 "-ExecutionPolicy",
@@ -1020,6 +1047,7 @@ mod real_shell {
             true,
             120,
             30,
+            prefix,
         );
         (pane, profile)
     }
@@ -1030,6 +1058,9 @@ mod real_shell {
                          + '@' + $_.ModuleBase }) -join ',') + '|' + (Get-PSReadLineOption).\
                          ContinuationPrompt + '|' + (Test-Path Function:PSConsoleHostReadLine) + \
                          '|E' + 'ND'";
+
+    /// What `folio.ps1` writes when the pane's PSReadLine is not Folio's, before the version.
+    const FOREIGN_REPORT: &str = "\x1b]777;folio-psreadline;";
 
     fn facts_of(output: &str) -> String {
         output
@@ -1078,6 +1109,10 @@ mod real_shell {
             "configured: {facts}"
         );
         assert_eq!(fields.get(2).copied(), Some("True"), "{facts}");
+        assert!(
+            !pane.output_since(0).contains(FOREIGN_REPORT),
+            "Folio's own PSReadLine is not reported"
+        );
         pane.close();
         let _ = std::fs::remove_file(profile);
     }
@@ -1143,13 +1178,122 @@ mod real_shell {
                 shown(&start),
                 shown(&pane.rows())
             );
+            let reported = pane
+                .output_since(0)
+                .contains(&format!("{FOREIGN_REPORT}2.0.0\x07"));
             pane.close();
             let _ = std::fs::remove_file(profile);
             assert!(
                 ran,
                 "{shape}: the profile ran, so what follows is its consequence"
             );
+            assert!(
+                reported,
+                "{shape}: the integration reports the version the profile demanded, once, for \
+                 Folio's log (`OSC 777;folio-psreadline;2.0.0`)"
+            );
         }
+    }
+
+    /// RED (T-INTEGRATION-INJECT-2-BUILD round 2) — **a pane born before the edition observation
+    /// has said anything gets Folio's copy**: the first pane of every launch on an ordinary
+    /// machine, which must not wait for that answer. Nothing is heard for Windows PowerShell here,
+    /// and the pane runs Folio's 2.4.5 with the loader's function defined.
+    ///
+    /// MUTATION: make `observed_constrained` read an unheard edition as constrained
+    /// (`is_none_or`) — red at the pane's own making (`folio_pane`: "a composed 5.1 pane declares
+    /// its module path").
+    #[test]
+    fn a_first_pane_born_before_the_observation_gets_folios_copy() {
+        let _turn = observation_turn();
+        PROFILE_OBSERVATIONS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&powershell_edition(&windows_powershell()));
+        let mut pane = folio_pane(&["-NoLogo"], false, 120, 30);
+        pane.until("the first prompt", |pane| {
+            pane.output_since(0).contains("\x1b]133;B")
+        });
+        pane.settle();
+        let facts = facts_of(&pane.run(FACTS, "|END"));
+        let fields: Vec<&str> = facts.split('|').collect();
+        let (version, base) = fields[0].split_once('@').expect("version@base");
+        assert_eq!(version, crate::psreadline::SHIPPED_VERSION, "{facts}");
+        assert!(
+            Path::new(base).starts_with(&pane.module),
+            "Folio's: {facts}"
+        );
+        assert_eq!(fields.get(2).copied(), Some("True"), "{facts}");
+        pane.close();
+    }
+
+    /// RED (T-INTEGRATION-INJECT-2-BUILD round 2) — **a constrained pane keeps exactly the editor
+    /// it would have had without Folio's prefix**, whether or not the observation had said so when
+    /// it was born. Constrained Language Mode is entered the way a test may enter it, inside the
+    /// child and never through the account's policy or environment: the profile sets the
+    /// session's language mode, so it holds from the profile on — after the host's own import,
+    /// before Folio's loader, which is where a machine's lockdown is found too. The same profile
+    /// runs in a pane with Folio's module path and in one without (the reference); both end on
+    /// the same one PSReadLine, from the same folder, with its function defined, in
+    /// `ConstrainedLanguage`, on the same module path (Folio's folder gone from it).
+    ///
+    /// **Measured, and the limit of this test** (2026-10-18): in the language mode a profile set,
+    /// the module the loader imports again runs its own script constrained, so its function's call
+    /// into its type is refused (`MethodInvocationNotSupportedInConstrainedLanguage`) and the host
+    /// takes the line with its own input; the reference pane's module was imported before the
+    /// mode changed. Under a machine's lockdown the session is constrained from the host's own
+    /// import on, and a module's script runs in the mode its file's trust gives it, for the
+    /// host's import and for this one alike — which no test can enter without changing the
+    /// machine. So this pins the editor's identity, not its working.
+    ///
+    /// MUTATION: drop the loader's `else` arm (`give_back` empty) — the prefixed pane keeps
+    /// Folio's module with no function: the host's legacy line editor.
+    #[test]
+    fn a_constrained_pane_keeps_the_editor_it_had_without_folios_prefix() {
+        let _turn = observation_turn();
+        const CONSTRAINED: &str =
+            "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\r\n";
+        const FACTS_AND_MODE: &str = "'BTPS' + 'RL|' + ((Get-Module PSReadLine | ForEach-Object { \
+                                      [string]$_.Version + '@' + $_.ModuleBase }) -join ',') + '|' \
+                                      + $ExecutionContext.SessionState.LanguageMode + '|' + \
+                                      (Test-Path Function:PSConsoleHostReadLine) + '|' +                                       $env:PSModulePath + '|' + ($Error | Select-Object -First 1 |                                       Out-String) + '|E' + 'ND'";
+        let mut seen = Vec::new();
+        for prefix in [false, true] {
+            let (mut pane, profile) = profile_pane_with_prefix(CONSTRAINED, prefix);
+            pane.until("the first prompt", |pane| {
+                pane.output_since(0).contains("PS ")
+            });
+            pane.settle();
+            let mark = pane.raw.len();
+            pane.pty
+                .write(format!("{FACTS_AND_MODE}\r").as_bytes())
+                .unwrap();
+            pane.until("the facts", |pane| pane.output_since(mark).contains("|END"));
+            let facts = facts_of(&pane.output_since(mark));
+            eprintln!("BT_PSRL_CONSTRAINED prefix={prefix} facts={facts}");
+            pane.close();
+            let _ = std::fs::remove_file(profile);
+            // The editor, the mode, the function and the module path; the last field, the first
+            // error, is measured and printed only (see the design note's round 2).
+            seen.push(facts.split('|').take(4).collect::<Vec<_>>().join("|"));
+        }
+        let reference: Vec<&str> = seen[0].split('|').collect();
+        assert_eq!(
+            reference.get(1).copied(),
+            Some("ConstrainedLanguage"),
+            "the reference pane is constrained: {}",
+            seen[0]
+        );
+        assert_eq!(
+            seen[1], seen[0],
+            "the prefixed pane ends on the reference's editor"
+        );
+        assert!(
+            !seen[1].contains(crate::psreadline::ARTEFACT),
+            "and not on Folio's: {}",
+            seen[1]
+        );
     }
 
     /// PIN (the spike's Follow-up B, pinned here) — **a pwsh 7 started inside a 5.1 pane keeps its

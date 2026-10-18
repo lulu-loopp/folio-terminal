@@ -44861,6 +44861,11 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
         for line in leaf.session.take_keyboard_protocol_notes() {
             diagnostics::note(&line);
         }
+        // **A pane whose PSReadLine is not Folio's after its profile ran** says so once, in the
+        // log and nowhere else (T-INTEGRATION-INJECT-2-BUILD round 2), on the same road.
+        for line in leaf.session.take_line_editor_notes() {
+            diagnostics::note(&line);
+        }
         Ok(DrainOutcome {
             // Taken here because this is the one place every leaf of every tab
             // passes through on every turn, which is the same sentence

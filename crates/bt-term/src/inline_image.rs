@@ -1565,6 +1565,10 @@ pub(crate) enum InlineImageStreamAction {
     /// one already standing is a question about the session's own ledger, and it is answered one
     /// layer up in [`crate::session::DualPlaneSession`]. This scanner only says what arrived.
     AttentionRequest(crate::session::AttentionRequest),
+    /// One `OSC 777;folio-psreadline;<version>`: Folio's PowerShell integration saying that the
+    /// pane's PSReadLine after the profile ran is not the one Folio gave it, and which version it
+    /// is (T-INTEGRATION-INJECT-2-BUILD). A report for the log, nothing else.
+    ForeignLineEditor(String),
     /// One OSC 7 report: the `file://` URI bytes the shell named its working directory with. An
     /// empty payload is the report "I no longer have one to give", which is a fact of its own and
     /// therefore still an action.
@@ -2170,12 +2174,20 @@ fn finish_osc_9(actions: &mut Vec<InlineImageStreamAction>, payload: &[u8], over
     );
 }
 
+/// `OSC 777`'s verb for Folio's own report about a pane's PSReadLine ([`finish_osc_777`]).
+const FOLIO_PSREADLINE_VERB: &[u8] = b"folio-psreadline";
+
 /// Read one terminated `OSC 777`.
 ///
-/// The sequence has a verb slot and exactly one verb anybody sends; WezTerm says so outright
+/// The sequence has a verb slot and exactly one verb anybody else sends; WezTerm says so outright
 /// ("only the notify extension is supported") and so does this. An unknown verb is dropped whole
 /// rather than read as a title, because `OSC 777;foo;bar` is somebody else's extension and its
 /// second field is not a name for anything.
+///
+/// **One verb is Folio's own**: `folio-psreadline;<version>`, which Folio's PowerShell integration
+/// (`folio.ps1`) sends once when the pane's PSReadLine after the profile ran is not the copy Folio
+/// put on the pane's module path. A version is digits, letters, `.`, `-` and `+`, at most 64 of
+/// them; anything else is not a version and the sequence is dropped.
 ///
 /// `OSC 777;notify;<title>` with no body is a notification: a title is a message. `OSC 777;notify`
 /// with neither is not — there is nothing in it to show.
@@ -2184,6 +2196,23 @@ fn finish_osc_777(actions: &mut Vec<InlineImageStreamAction>, payload: &[u8], ov
         return;
     }
     let (verb, rest) = split_once(payload, b';');
+    if verb == FOLIO_PSREADLINE_VERB {
+        if let Some(version) = rest
+            .filter(|version| {
+                !version.is_empty()
+                    && version.len() <= 64
+                    && version
+                        .iter()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b".-+".contains(byte))
+            })
+            .and_then(|version| std::str::from_utf8(version).ok())
+        {
+            actions.push(InlineImageStreamAction::ForeignLineEditor(
+                version.to_owned(),
+            ));
+        }
+        return;
+    }
     if verb != b"notify" {
         return;
     }
@@ -4197,6 +4226,7 @@ mod tests {
                         | InlineImageStreamAction::Progress(_)
                         | InlineImageStreamAction::Notification(_)
                         | InlineImageStreamAction::AttentionRequest(_)
+                        | InlineImageStreamAction::ForeignLineEditor(_)
                         | InlineImageStreamAction::TooLarge => {
                             panic!("fixture contains no image")
                         }

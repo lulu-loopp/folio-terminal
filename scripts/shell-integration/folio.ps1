@@ -270,7 +270,21 @@ $psReadLineVersion = $psReadLineModule.Version
 # (the retired `-ge 2.4.6`, which meant "Folio's fork" while saying "a version") would hand the
 # chord's no-op to a future upstream 2.4.6 that kept the defect. A version outside the proven
 # shape takes the no-op branch below and the chord is consumed, never leaked into the buffer.
-if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
+#
+# **Except the fork an earlier Folio installed into Documents** (`2.4.6-bt.*`), which a pane
+# still loads when Folio's own copy is not on its path (its write failed, say): it derives its
+# anchor from the prompt's own cell width and keeps its coordinates true across every resize,
+# so it gets the no-op as it always did. It is told by the build stamp in its assembly's
+# product version — what Folio itself reads to recognise it (`psreadline::installed_build`) —
+# not by its version number.
+$psReadLineSelfAnchors = $false
+try {
+    $psReadLineSelfAnchors = [Diagnostics.FileVersionInfo]::GetVersionInfo(
+        $psReadLineModule.ImplementingAssembly.Location).ProductVersion -like '*-bt.*'
+} catch {
+    # No assembly to ask is no fork.
+}
+if (-not $psReadLineSelfAnchors -and $psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
     Set-PSReadLineKeyHandler -Chord 'Ctrl+Alt+Shift+F12' -ScriptBlock {
         param($key, $arg)
         $historyNavigation = & $Global:__FolioShellIntegration.HistoryNavigationCapture
@@ -783,3 +797,27 @@ $Global:__FolioShellIntegration.SelfPrompt =
 # `the_integration_script_names_the_profiles_own_titles` is the pin that says so.
 $btEdition = if ($PSVersionTable.PSEdition -eq 'Core') { 'PowerShell 7' } else { 'Windows PowerShell 5.1' }
 [Console]::Write(([string][char]27) + ']0;' + $btEdition + [char]7)
+
+# **A Windows PowerShell pane whose PSReadLine is not the copy Folio gave it** says so once, for
+# Folio's diagnostics.log and nowhere else (T-INTEGRATION-INJECT-2-BUILD round 2). Folio's copy
+# is the first entry of the pane's module path whose folder sits in a `psmodules` folder and
+# holds a PSReadLine; this script runs after the profile, so a profile that demanded another
+# version by number (`Import-Module PSReadLine -RequiredVersion 2.0.0`) is what is found here: a
+# loaded PSReadLine that is not under Folio's folder, beside Folio's or instead of it.
+# `OSC 777;folio-psreadline;<version>` is Folio's own verb; Folio does not repair the pane.
+if ($PSVersionTable.PSEdition -ne 'Core') {
+    $folioModules = $env:PSModulePath -split ';' | Where-Object {
+        $_ -and (Split-Path (Split-Path $_ -Parent) -Leaf) -eq 'psmodules' -and
+            (Test-Path -LiteralPath (Join-Path $_ 'PSReadLine'))
+    } | Select-Object -First 1
+    $foreignPSReadLine = if ($folioModules) {
+        Get-Module PSReadLine | Where-Object {
+            -not ([string]$_.ModuleBase).StartsWith(
+                $folioModules.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)
+        } | Select-Object -First 1
+    }
+    if ($foreignPSReadLine) {
+        [Console]::Write(([string][char]27) + ']777;folio-psreadline;' +
+            [string]$foreignPSReadLine.Version + [char]7)
+    }
+}
