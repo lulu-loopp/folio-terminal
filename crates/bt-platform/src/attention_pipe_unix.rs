@@ -273,6 +273,13 @@ pub struct AttentionPipe {
     counts: Arc<Mutex<PipeCounts>>,
 }
 
+// SAFETY: `ended` is an `mpsc::Receiver`, which is `!Sync` because two threads receiving on it at
+// once would race; nothing receives on it but `retire_within`, which takes the value by `self` and
+// runs once on the sole owner. `stop` is a raw descriptor written only there and in the drop.
+// The counters are behind a mutex and the join handle is `Send + Sync` already. Written out
+// because a process-wide endpoint lives in a `static`, and a `static` needs `Sync`.
+unsafe impl Sync for AttentionPipe {}
+
 impl AttentionPipe {
     /// Open this process's endpoint for `directory` and start listening.
     ///
