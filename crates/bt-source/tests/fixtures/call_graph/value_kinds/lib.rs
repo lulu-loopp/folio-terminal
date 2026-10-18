@@ -1,7 +1,7 @@
 //! Functions named as values whose paths are no one item: every kind is an edge with `Via::Value`;
 //! data — a `const`, a `static`, a unit struct, an associated `const` — is no edge.
 
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 #[derive(Default)]
 pub struct Settings;
@@ -37,6 +37,7 @@ impl Both {
         spawn(Unit);
         spawn(Self::CAP);
         let _ = INBOX.lock();
+        LANE.ask();
     }
 }
 
@@ -62,6 +63,14 @@ generate!();
 pub const LIMIT: usize = 3;
 pub static NAMES: [&str; 1] = ["a"];
 pub static INBOX: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+pub static LANE: LazyLock<Lane> = LazyLock::new(|| Lane);
+
+pub struct Lane;
+
+impl Lane {
+    pub fn ask(&self) {}
+}
 
 pub struct Unit;
 

@@ -56,7 +56,7 @@
 //! tree does not hold (a macro-generated type) is listed with its methods
 //! ([`Resolver::unplaced_impls`]), and one chained past the hop limit refuses the reading. The
 //! standard library's guards and wrappers
-//! (`MutexGuard`, `Ref`, `RefMut`, `Pin`, …) deref to their pointee as `Box` and `Rc`/`Arc` do.
+//! (`MutexGuard`, `Ref`, `RefMut`, `Pin`, `LazyLock`, …) deref to their pointee as `Box` and `Rc`/`Arc` do.
 //!
 //! **What is not read**, as limits: visibility; items a macro generates (a `bitflags!` type, a
 //! generated enum, a `thread_local!` static: a path through one is [`Unresolved::Path`]); the

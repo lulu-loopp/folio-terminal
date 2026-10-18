@@ -767,7 +767,7 @@ fn at_via(resolver: &Resolver<'_>, caller: &str, site: &str) -> Vec<(String, Via
 /// traits declaring `f` (ambiguous), a `cfg(test)` function (other arm), a macro-generated one
 /// (path), a trait no implementation answers (dynamic); and data — a `const`, a `static`, a unit
 /// struct, an associated `const` — is no edge at all, while a method called on a `static` is
-/// typed by its declaration.
+/// typed by its declaration (through a `LazyLock` to its value).
 ///
 /// MUTATION: in `Walker::path_value`, push only the resolved, nested, foreign and cutoff targets
 /// (round 1's drop) — the generated, ambiguous, other-arm, path and dynamic edges are missing.
@@ -807,6 +807,11 @@ fn a_function_value_that_is_no_one_item_is_an_edge_of_its_kind() {
         at(&resolver, "root", "lock"),
         ["foreign std::sync::Mutex::lock"],
         "a `static` is typed by its declaration"
+    );
+    assert_eq!(
+        at(&resolver, "root", "ask"),
+        ["cg-value_kinds crate::Lane::ask"],
+        "a `static` behind a `LazyLock` derefs to its value"
     );
 }
 
@@ -940,6 +945,7 @@ fn a_const_and_a_static_are_index_records() {
                 bt_source::ValueKind::Const
             ),
             ("INBOX".to_owned(), None, bt_source::ValueKind::Static),
+            ("LANE".to_owned(), None, bt_source::ValueKind::Static),
             ("LIMIT".to_owned(), None, bt_source::ValueKind::Const),
             ("NAMES".to_owned(), None, bt_source::ValueKind::Static),
         ]

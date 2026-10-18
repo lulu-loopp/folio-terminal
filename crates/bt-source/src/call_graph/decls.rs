@@ -2134,7 +2134,8 @@ fn returns_self(name: &str) -> bool {
 }
 
 /// The standard library's guards and wrappers that `Deref` to their first argument, as `Box` and
-/// `Rc`/`Arc` do: a method or a field they do not have is their pointee's.
+/// `Rc`/`Arc` do (a `static LANE: LazyLock<Lane>` among them): a method or a field they do not have
+/// is their pointee's.
 pub(crate) fn is_std_guard(path: &[String]) -> bool {
     path.first()
         .is_some_and(|first| matches!(first.as_str(), "std" | "core" | "alloc"))
@@ -2149,6 +2150,8 @@ pub(crate) fn is_std_guard(path: &[String]) -> bool {
                     | "ManuallyDrop"
                     | "AssertUnwindSafe"
                     | "Pin"
+                    | "LazyLock"
+                    | "LazyCell"
             )
         })
 }
