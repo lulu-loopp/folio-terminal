@@ -1532,8 +1532,8 @@ fn an_edit_while_the_quit_waits_withdraws_it_and_the_next_quit_asks() {
 /// RED (S-6c) — **a quit's saves pending while a close's question is up: the question stays, a
 /// second close meets a busy gate, and the quit goes on once its saves land.**
 ///
-/// MUTATION: in `restore::DirtyGate::verdict`, ask `Busy` last (an empty list first) — the busy
-/// assertion goes red.
+/// MUTATION: in `restore::DirtyGate::is_busy`, answer only for a close that waits
+/// (`self.waiting.is_some()`) — the busy assertion goes red.
 #[test]
 fn a_quit_pending_beside_a_closes_question_leaves_the_question_alone() {
     let mut quitting = Quitting::open("busy", ["one.md", "two.md"]);

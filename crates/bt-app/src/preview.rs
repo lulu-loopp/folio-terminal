@@ -17119,8 +17119,10 @@ mod tests {
     /// undo back past the press is then an ordinary edit away from the file, which
     /// the quit saves — not a body sent that did not land, which it would name.
     ///
-    /// MUTATION: in `OnDisk::sent`, leave `unlanded` as it was — the undo finds
-    /// the body sent behind, owed, though its successor is on the disk.
+    /// MUTATION: leave the landing's `unlanded` (`OnDisk::hear`'s `Landed` arm) and
+    /// the history's position of the body sent (`UndoLog::sent_landed`) as they
+    /// were — the undo finds the body sent behind, owed, though its successor is
+    /// on the disk.
     #[test]
     fn the_quits_writer_settles_a_body_sent_that_it_writes_past() {
         let dir = scratch("quit-settles-unlanded");
