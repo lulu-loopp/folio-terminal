@@ -1899,4 +1899,172 @@ mod tests {
             "the open is unanswered until the file's next open"
         );
     }
+
+    /// A scratch copy of the shipped asset `asset` under the build directory, named after `tag` —
+    /// where a peek reads unasked, as a page beside it would name it.
+    fn scratch_copy(asset: &str, tag: &str) -> crate::test_support::ScratchFile {
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/assets")
+            .join(asset);
+        let extension = source
+            .extension()
+            .expect("an asset has an extension")
+            .to_owned();
+        let copy = crate::test_support::scratch_png_named(tag).with_extension(extension);
+        std::fs::copy(&source, &copy).expect("a scratch copy of a shipped asset");
+        crate::test_support::ScratchFile(copy)
+    }
+
+    /// A scratch file of `bytes` under the build directory, named after `tag` with `extension`.
+    fn scratch_bytes(tag: &str, extension: &str, bytes: &[u8]) -> crate::test_support::ScratchFile {
+        let file = crate::test_support::scratch_png_named(tag).with_extension(extension);
+        std::fs::write(&file, bytes).expect("a scratch file this test owns");
+        crate::test_support::ScratchFile(file)
+    }
+
+    /// RED (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **every read the decoration worker answers has
+    /// let go of its file by the time the window can take the answer**: a picture's pixels (a PNG,
+    /// and a GIF's first frame), a recording's frame and facts (a real one, and one that is no
+    /// video, which Media Foundation refuses), a page's raster and a printed picture's decode.
+    /// Each is asked through the product's door on the real lane; the moment its terminal is
+    /// taken, nobody holds the file (`test_support::nobody_holds`) and a writer saving over it
+    /// finishes — what an editor does the moment the card has shown the answer
+    /// (`runtime::preview::tests::a_set_aside_peek_answer_changes_nothing_on_the_window`).
+    ///
+    /// MUTATION: `std::mem::forget` the `File` in `bt_term`'s `read_and_decode_local_image`
+    /// (the handle outlives the decode) — "a picture's pixels: the answer is taken, and nobody
+    /// holds the file" fails. The recording's arm rests on
+    /// `bt_platform::video::tests::a_frame_given_up_on_leaves_its_file_free`.
+    #[test]
+    fn an_answered_read_has_let_go_of_its_file() {
+        crate::test_support::install_host_answers();
+        let png = scratch_bytes(
+            "截图 answered",
+            "png",
+            &crate::test_support::png_bytes(6, 3),
+        );
+        let gif = scratch_copy("folio-anim-test.gif", "动图 answered");
+        let mp4 = scratch_copy("folio-video-test.mp4", "录屏 answered");
+        let junk = scratch_bytes("录屏 not a video", "mp4", &[0x5a; 64]);
+        let pdf = scratch_copy("folio-pdf-test.pdf", "文档 answered");
+        let printed = scratch_bytes("截图 printed", "png", &crate::test_support::png_bytes(4, 4));
+        let leaf = probe_leaf();
+        let asks = [
+            (
+                "a picture's pixels",
+                &png.0,
+                MathWorkerRequest::PeekImage {
+                    leaf,
+                    path: png.0.clone(),
+                },
+            ),
+            (
+                "a GIF's first frame",
+                &gif.0,
+                MathWorkerRequest::PeekImage {
+                    leaf,
+                    path: gif.0.clone(),
+                },
+            ),
+            (
+                "a recording's frame",
+                &mp4.0,
+                MathWorkerRequest::PeekVideoFrame {
+                    leaf,
+                    path: mp4.0.clone(),
+                },
+            ),
+            (
+                "a file that is no video",
+                &junk.0,
+                MathWorkerRequest::PeekVideoFrame {
+                    leaf,
+                    path: junk.0.clone(),
+                },
+            ),
+            (
+                "a page's raster",
+                &pdf.0,
+                MathWorkerRequest::PeekPage {
+                    leaf,
+                    path: pdf.0.clone(),
+                    page: 0,
+                    fit: (160, 160),
+                    known: None,
+                },
+            ),
+            (
+                "a printed picture",
+                &printed.0,
+                MathWorkerRequest::InlineImage {
+                    leaf,
+                    task: bt_term::InlineImageTask {
+                        occurrence_id: 1,
+                        source: bt_term::InlineImageSource::LocalPath(printed.0.clone()),
+                    },
+                },
+            ),
+        ];
+        let (mut lane, _gate) = gated();
+        for (what, file, request) in asks {
+            let id = lane.lane.decorate(request).ok().expect("admitted");
+            let ended = lane.next_ended(Share::Decoration, nobody);
+            assert_eq!(ended.1, id, "{what}: its own answer");
+            assert!(
+                crate::test_support::nobody_holds(file),
+                "{what}: the answer is taken, and nobody holds the file"
+            );
+            let written = std::fs::write(file, b"saved over");
+            assert!(written.is_ok(), "{what}: the writer finishes: {written:?}");
+            assert!(
+                answer(ended.2).is_some(),
+                "{what}: the terminal carried an answer"
+            );
+        }
+    }
+
+    /// PIN (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **an animation's answer is the one that keeps
+    /// its file, because the file is the answer**: the open hands the window a cursor that streams
+    /// the frames still to come from the open file (`animation::FileAnimationSource`), so the
+    /// handle lives exactly as long as the window keeps the animation — and it is opened as every
+    /// read in this process is, sharing reading, writing and deletion, so a writer saving over the
+    /// file is never refused by it. Let the answer go and nobody holds the file.
+    ///
+    /// MUTATION: open the animation's file sharing nothing (or sharing reading only) — the writer
+    /// is refused while the window plays it.
+    #[test]
+    fn an_animations_answer_keeps_its_file_and_refuses_no_writer() {
+        let gif = scratch_copy("folio-anim-test.gif", "动图 playing");
+        let (mut lane, _gate) = gated();
+        let id = lane
+            .lane
+            .decorate(MathWorkerRequest::PeekAnimation {
+                leaf: probe_leaf(),
+                path: gif.0.clone(),
+            })
+            .ok()
+            .expect("admitted");
+        let ended = lane.next_ended(Share::Decoration, nobody);
+        assert_eq!(ended.1, id);
+        let opened = answer(ended.2).expect("the open answers");
+        let DecorationWorkerCompletion::PeekAnimation { frames: Ok(_), .. } = &opened.completion
+        else {
+            panic!("the shipped GIF opens as an animation");
+        };
+        assert!(
+            !crate::test_support::nobody_holds(&gif.0),
+            "the animation's cursor holds its file while the window keeps the animation"
+        );
+        let original = std::fs::read(&gif.0).expect("the file reads");
+        let written = std::fs::write(&gif.0, &original);
+        assert!(
+            written.is_ok(),
+            "and a writer saving over it is not refused: {written:?}"
+        );
+        drop(opened);
+        assert!(
+            crate::test_support::nobody_holds(&gif.0),
+            "the answer let go, nobody holds the file"
+        );
+    }
 }

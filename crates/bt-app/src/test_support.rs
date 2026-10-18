@@ -3029,6 +3029,36 @@ pub(crate) fn scratch_png_named(tag: &str) -> PathBuf {
     directory.join(format!("{}.png", bt_testpath::unique_name(tag)))
 }
 
+/// **Whether nobody holds `file` now** (T-ANSWER-AFTER-THE-FILE-IS-CLOSED): the strongest claim
+/// on a file this platform lets one opener make succeeds at once.
+///
+/// On Windows an open that shares nothing (`share_mode(0)`), which any handle still open on the
+/// file — this process's or another's, whatever it shares — refuses with a sharing violation: the
+/// refusal an editor saving over the file would meet. A Unix file has no such open: an open
+/// descriptor refuses no writer, no truncation and no unlink, so the equivalent fact is that an
+/// exclusive advisory lock (`flock`) is taken at once — what a lane that locks a file it reads
+/// would still be holding.
+pub(crate) fn nobody_holds(file: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(file)
+            .is_ok()
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(file)
+            .is_ok_and(|opened| opened.try_lock().is_ok())
+    }
+}
+
 /// **A scratch file a test wrote, removed when the test lets go of it** — on a red as on a green.
 pub(crate) struct ScratchFile(pub(crate) PathBuf);
 
