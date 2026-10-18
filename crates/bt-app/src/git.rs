@@ -2456,6 +2456,27 @@ impl GitChild {
         }
     }
 
+    /// **The pipe readers of a child that was killed, let go before its fault is answered**
+    /// (T-ANSWER-AFTER-THE-FILE-IS-CLOSED): a contained child's whole tree has ended with it, so
+    /// every writer of both pipes is closed and each reader is at its end — joined here, the pipes
+    /// are closed before the fault leaves. A child whose hooks may outlive it is the exception
+    /// its policy names: a hook it started may still hold the pipes it inherited, for as long as
+    /// that hook lives, and waiting for it is the wait the timeout exists to refuse; its readers
+    /// are let go, and end when the last hook does. What they read is thrown away either way.
+    fn let_go_of_readers(
+        &self,
+        out: thread::JoinHandle<Vec<u8>>,
+        err: thread::JoinHandle<Vec<u8>>,
+    ) {
+        match self {
+            Self::Contained(_) => {
+                let _ = out.join();
+                let _ = err.join();
+            }
+            Self::HooksMayOutlive(_) => {}
+        }
+    }
+
     fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
         match self {
             Self::Contained(child) => child.wait(),
@@ -2495,6 +2516,41 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> thread::JoinHandle<Vec<u8
     // out a thread; the behaviour is kept rather than turned into a quiet
     // half-drained pipe, which is a deadlock wearing a shrug.
     .expect("spawn a git pipe reader")
+}
+
+/// One pipe as [`drain`] reads it. The product's is the pipe itself; under test, a pipe whose end
+/// the thread that started the child asked to hear of (`PIPES_LET_GO`) says so when its reader
+/// drops it — which is how a test sees that the readers let go before the answer.
+#[cfg(not(test))]
+fn observed(pipe: Option<Box<dyn Read + Send>>) -> Option<Box<dyn Read + Send>> {
+    pipe
+}
+
+#[cfg(test)]
+fn observed(pipe: Option<Box<dyn Read + Send>>) -> Option<Box<dyn Read + Send>> {
+    struct Observed(Box<dyn Read + Send>, mpsc::Sender<()>);
+    impl Read for Observed {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+    impl Drop for Observed {
+        fn drop(&mut self) {
+            let _ = self.1.send(());
+        }
+    }
+    let heard = PIPES_LET_GO.with(|heard| heard.borrow().clone());
+    match (pipe, heard) {
+        (Some(pipe), Some(heard)) => Some(Box::new(Observed(pipe, heard))),
+        (pipe, _) => pipe,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Where the pipes of a child this thread starts say they were let go, when a test asks.
+    static PIPES_LET_GO: std::cell::RefCell<Option<mpsc::Sender<()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// The name of the program `command` starts, as a [`GitFault::GitMissing`]
@@ -2595,8 +2651,8 @@ fn run_git_with_input(
         )
         .expect("spawn a git stdin writer");
     }
-    let out = drain(child.take_stdout());
-    let err = drain(child.take_stderr());
+    let out = drain(observed(child.take_stdout()));
+    let err = drain(observed(child.take_stderr()));
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
@@ -2617,7 +2673,11 @@ fn run_git_with_input(
             }
             Ok(None) => {}
             Err(error) => {
+                // Ended and reaped like a child past its time, and its readers let go with it,
+                // before the fault is answered.
                 let _ = child.kill();
+                let _ = child.wait();
+                child.let_go_of_readers(out, err);
                 return Err(GitFault::GitMissing(format!(
                     "{} could not be waited for: {error}",
                     program_name(&command)
@@ -2629,11 +2689,12 @@ fn run_git_with_input(
             // read back from it. A killed child does exit, and exit is what
             // `try_wait` reports — so a guard that went round the loop once more
             // after the kill would find the process finished and hand its half of
-            // an answer back as though it had merely failed. The pipes close with
-            // the child, so the two reader threads end on their own; their
-            // buffers are what is being thrown away here, deliberately.
+            // an answer back as though it had merely failed. The two readers are
+            // let go before the fault is answered (`GitChild::let_go_of_readers`);
+            // their buffers are what is being thrown away here, deliberately.
             let _ = child.kill();
             let _ = child.wait();
+            child.let_go_of_readers(out, err);
             return Err(GitFault::TimedOut);
         }
         thread::sleep(GIT_POLL_INTERVAL);
@@ -5471,6 +5532,47 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
              this child would be waiting still",
         );
         assert_eq!(fault, Some(GitFault::TimedOut));
+    }
+
+    /// PIN (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **a contained child killed past its time has
+    /// had both its pipes let go when the fault is answered**: its tree ended with it, so every
+    /// writer is closed, and the readers are joined before `TimedOut` leaves — no reader still
+    /// holds a pipe of a question that is over.
+    ///
+    /// No mutation turns this red at will: without the join the readers still reach their end
+    /// while the child is reaped on this machine (measured three runs of three with the contained
+    /// arm letting its readers go), so the join is what makes the order a fact rather than a race
+    /// the reaping usually wins; this states the fact.
+    #[test]
+    fn a_child_killed_past_its_time_has_let_go_of_its_pipes_when_the_fault_is_answered() {
+        let (program, arguments) = match bt_platform::host_platform() {
+            bt_platform::HostPlatform::Windows => (
+                bt_platform::program_on_path(Path::new("ping")).expect("ping is on PATH"),
+                ["-t", "127.0.0.1"],
+            ),
+            bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => {
+                (PathBuf::from("tail"), ["-f", "/dev/null"])
+            }
+        };
+        let mut command = bt_platform::quiet_command(program);
+        command.args(arguments);
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let (let_go, heard) = mpsc::channel();
+            PIPES_LET_GO.with(|slot| *slot.borrow_mut() = Some(let_go));
+            let fault = run_git(command, Duration::from_millis(150)).err();
+            // Asked at once, with no wait: what has let go by now let go before the answer.
+            let pipes = heard.try_iter().count();
+            let _ = tx.send((fault, pipes));
+        });
+        let (fault, pipes) = rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the guard came back");
+        assert_eq!(fault, Some(GitFault::TimedOut));
+        assert_eq!(
+            pipes, 2,
+            "both pipes were let go before the fault was answered"
+        );
     }
 
     // ── ⑧ The two soft landings ────────────────────────────────────────────
