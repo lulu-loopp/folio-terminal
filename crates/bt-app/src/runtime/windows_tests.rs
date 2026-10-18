@@ -651,9 +651,9 @@ fn a_window_close_over_two_saves_waits_for_both_and_goes() {
 /// save and holds the shut — the file still holds what was read, nothing is closed. The worker
 /// writes it; on the turn its answer wakes, every save has landed and the window goes.
 ///
-/// MUTATION: in `Runtime::answer_exit`, answer *Save all* through the quit's synchronous writer
-/// again (`self.quit_save()?.is_complete()` for `saved_all`) — the "nothing written" assertion
-/// goes red: the window thread wrote the file.
+/// MUTATION: in `Runtime::answer_exit`, answer *Save all* by writing each dirty body on the
+/// window thread (the synchronous writer S-6c removed) — the "nothing written" assertion goes red:
+/// the window thread wrote the file.
 #[test]
 fn save_all_on_a_windows_question_waits_for_the_saves_and_goes() {
     let mut saving = Saving::open("save-all", &["全部 all.md"]);
@@ -1124,6 +1124,515 @@ fn a_close_bound_joins_the_wake_up_only_where_the_wait_is_decided() {
         saving.application.folio.close_waits_wake(now),
         None,
         "a leaving window's bound does not wake the loop"
+    );
+}
+
+// ── the quit's `Save` and a stop that cannot ask, on the storage lane (S-6c) ─────────────────
+
+/// **Two windows, each holding one tab with one preview of a real file typed into** — the first
+/// window's tab `1`, the second's tab `2` — their saves handed to a storage lane whose queue the
+/// test serves (`persist::StorageLane::scripted`: the real lane, the test the worker).
+struct Quitting {
+    application: HeadlessApplication,
+    jobs: crate::persist::ScriptedJobs,
+    /// The file behind each window's buffer: window 1's, then window 2's.
+    paths: Vec<std::path::PathBuf>,
+    /// The preview seat of each window's tab.
+    seats: Vec<bt_layout::SeatId>,
+    names: Vec<String>,
+    dir: std::path::PathBuf,
+}
+
+impl Quitting {
+    fn open(tag: &str, names: [&str; 2]) -> Self {
+        let dir = crate::test_support::disk_scratch(&format!("quit-saves-{tag}"));
+        let mut tabs = Vec::new();
+        let mut seats = Vec::new();
+        let mut paths = Vec::new();
+        for (at, name) in names.iter().enumerate() {
+            let path = dir.join(name);
+            std::fs::write(&path, READ).expect("the file is written");
+            let mut buffer = crate::test_support::buffer_read_from(&path);
+            assert!(buffer.edit_content(|body| {
+                body.push_str(TYPED);
+                true
+            }));
+            let (tab, seat) = tab_with_a_preview(at as u64 + 1, vec![buffer]);
+            tabs.push(tab);
+            seats.push(seat);
+            paths.push(path);
+        }
+        let second = tabs.pop().expect("the second tab");
+        let mut folio = HeadlessFolio::with_tabs(tag, tabs, 0);
+        let (lane, jobs) = crate::persist::StorageLane::scripted();
+        folio.app.preview_saves = crate::preview::PreviewSaves::on(lane);
+        let other = headless_window(
+            &folio.app,
+            HeadlessParts::new(&folio.app.gpu, 2, (1200, 800), 1.0, &folio.ledger),
+            vec![second],
+            0,
+        );
+        let mut application = HeadlessApplication::of(folio);
+        application.folio.windows.insert(WindowId::from(2), other);
+        let names = names
+            .iter()
+            .map(|name| crate::files_row_display_name(&dir.join(name)))
+            .collect();
+        Self {
+            application,
+            jobs,
+            paths,
+            seats,
+            names,
+            dir,
+        }
+    }
+
+    /// Window `1` or `2`.
+    fn runtime(&mut self, window: u64) -> crate::Runtime<'_, crate::headless::Headless> {
+        self.application
+            .folio
+            .runtime(WindowId::from(window))
+            .expect("the window is open")
+    }
+
+    fn app(&mut self) -> &mut crate::App<crate::headless::Headless> {
+        self.application
+            .folio
+            .app
+            .as_mut()
+            .expect("the application")
+    }
+
+    /// **The quit, asked and answered `Save`**, and the loop's next look at it.
+    fn quit_with_save(&mut self) {
+        let names = self.names.clone();
+        let app = self.app();
+        let mut quit = crate::quit::Quit::begin(names);
+        quit.answer(crate::quit::QuitAnswer::Save);
+        app.quit = Some(quit);
+        self.settle();
+    }
+
+    /// The loop's look at the quit (`FolioApp::settle_quit`).
+    fn settle(&mut self) {
+        self.application
+            .folio
+            .settle_quit(&self.application.event_loop)
+            .expect("the quit is spent");
+    }
+
+    /// **One turn after the worker's wake**: the answers heard by the buffers
+    /// (`AppEvent::DocumentsAnswered`), then the turn's look at the quit.
+    fn turn(&mut self) {
+        self.application
+            .folio
+            .take_document_answers()
+            .expect("the answers are heard");
+        self.settle();
+    }
+
+    /// What the quit owes now, if one is under way.
+    fn step(&mut self) -> Option<crate::quit::QuitStep> {
+        self.app().quit.as_ref().map(crate::quit::Quit::step)
+    }
+
+    /// Whether the quit has photographed every window and written the session.
+    fn went_on(&mut self) -> bool {
+        self.app()
+            .quit
+            .as_ref()
+            .is_some_and(crate::quit::Quit::document_is_written)
+    }
+
+    /// The cards on window `window`, by what they say.
+    fn cards(&mut self, window: u64) -> Vec<String> {
+        self.runtime(window)
+            .window
+            .toasts
+            .toasts()
+            .iter()
+            .map(|toast| toast.body().to_owned())
+            .collect()
+    }
+
+    /// Whether window `window`'s buffer is dirty.
+    fn dirty(&mut self, window: u64) -> bool {
+        self.runtime(window).window.tabs[0]
+            .preview_pool
+            .buffers()
+            .next()
+            .expect("the tab's buffer")
+            .dirty()
+    }
+
+    /// Type into window `window`'s buffer once more.
+    fn type_again(&mut self, window: u64) {
+        let runtime = self.runtime(window);
+        let pool = &mut runtime.window.tabs[0].preview_pool;
+        let source = pool
+            .buffers()
+            .next()
+            .expect("the tab's buffer")
+            .source()
+            .clone();
+        let buffer = pool.get_mut(&source).expect("the tab's buffer");
+        assert!(buffer.edit_content(|body| {
+            body.push_str("once more\n");
+            true
+        }));
+    }
+
+    /// What window `window`'s pane says, if anything.
+    fn pane_says(&mut self, window: u64) -> Option<String> {
+        let at = window as usize - 1;
+        let surface = crate::test_support::seat_of(crate::TabId(window), self.seats[at]);
+        self.runtime(window)
+            .preview_pane(surface)
+            .and_then(|pane| pane.notice().map(|(said, _)| said.clone()))
+    }
+
+    /// What the file behind window `window`'s buffer holds.
+    fn file(&self, window: u64) -> String {
+        std::fs::read_to_string(&self.paths[window as usize - 1]).expect("the file reads back")
+    }
+
+    /// **The worker serves the next save**, `crossing` written into the file under it.
+    fn serve(&self, crossing: Option<&str>) {
+        let job = crate::test_support::next_document(&self.jobs);
+        let _ = crate::test_support::serve_on_a_worker(
+            job,
+            crossing.map(|bytes| bytes.as_bytes().to_vec()),
+        );
+    }
+
+    /// **The worker ends** with every save it holds unanswered.
+    fn end_the_worker(&mut self) {
+        let (_, unserved) = crate::persist::StorageLane::scripted();
+        drop(std::mem::replace(&mut self.jobs, unserved));
+    }
+
+    /// The copies in the test's `recovered` folder, by what they hold.
+    fn copies(&self) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(self.dir.join(crate::preview::RECOVERED_FOLDER)) else {
+            return Vec::new();
+        };
+        let mut held: Vec<String> = entries
+            .map(|entry| {
+                std::fs::read_to_string(entry.expect("an entry").path()).expect("the copy reads")
+            })
+            .collect();
+        held.sort();
+        held
+    }
+}
+
+impl Drop for Quitting {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// RED (S-6c) — **the quit's `Save` over two windows writes nothing on the window thread: both
+/// saves go to the storage worker, the quit waits for them, its bound in the loop's wake-up, and
+/// once both have landed it goes on to the session write.**
+///
+/// MUTATION: in `Runtime::hand_over_every_save`, write each dirty body on the window thread in
+/// place of `save_every_dirty_preview` (the synchronous writer put back) — the "nothing is
+/// written" assertion goes red; in `quit::Quit::deadline`, drop the save step's arm — the bound
+/// assertion goes red.
+#[test]
+fn a_quits_save_hands_both_windows_saves_to_the_worker_and_goes_on_when_they_land() {
+    let mut quitting = Quitting::open("lands", ["one.md", "two.md"]);
+    let before = Instant::now();
+    quitting.quit_with_save();
+    assert_eq!(
+        (quitting.file(1), quitting.file(2)),
+        (READ.to_owned(), READ.to_owned()),
+        "nothing is written on the window thread"
+    );
+    assert_eq!(
+        quitting.step(),
+        Some(crate::quit::QuitStep::Save),
+        "the quit waits for its saves"
+    );
+    let bound = quitting
+        .app()
+        .quit
+        .as_ref()
+        .and_then(crate::quit::Quit::deadline);
+    assert!(
+        bound.is_some_and(|bound| bound >= before + crate::quit::QUIT_WAITS_FOR_ITS_SAVES),
+        "its bound is the loop's next wake-up: {bound:?}"
+    );
+
+    quitting.serve(None);
+    quitting.turn();
+    assert_eq!(
+        quitting.step(),
+        Some(crate::quit::QuitStep::Save),
+        "one has landed: it still waits"
+    );
+    quitting.serve(None);
+    quitting.turn();
+    assert!(
+        quitting.went_on(),
+        "both landed: the quit went on to the session write"
+    );
+    assert_eq!(
+        (quitting.file(1), quitting.file(2)),
+        (format!("{READ}{TYPED}"), format!("{READ}{TYPED}")),
+        "with what was typed in both files"
+    );
+}
+
+/// RED (S-6c) — **a conflict withdraws the quit: the pane says it, nothing is written over the
+/// other writer's bytes, the other window's save lands, and the card names the one that did not.**
+///
+/// MUTATION: in `FolioApp::settle_the_quits_saves`, go on whenever every save has answered (the
+/// `left.is_empty()` check answering `true`) — the "withdrawn" assertion goes red.
+#[test]
+fn a_conflict_withdraws_the_quit_and_its_pane_says_it() {
+    let mut quitting = Quitting::open("conflict", ["one.md", "two.md"]);
+    quitting.quit_with_save();
+    let theirs = "another writer\n";
+    quitting.serve(Some(theirs));
+    quitting.serve(None);
+    quitting.turn();
+    assert_eq!(quitting.step(), None, "the quit is withdrawn");
+    assert_eq!(
+        quitting.pane_says(1).as_deref(),
+        Some(crate::preview::preview_conflict_notice()),
+        "the pane says the conflict"
+    );
+    assert_eq!(quitting.file(1), theirs, "their bytes are in the file");
+    assert!(quitting.dirty(1), "and the edit is still in the window");
+    assert_eq!(
+        quitting.file(2),
+        format!("{READ}{TYPED}"),
+        "the other window's save landed"
+    );
+    assert_eq!(
+        quitting.cards(1),
+        [crate::i18n::quit_not_saved(&quitting.names[0])],
+        "the window's card names the one that did not"
+    );
+    assert_eq!(quitting.cards(2), Vec::<String>::new(), "and only that one");
+}
+
+/// RED (S-6c) — **the worker gone with both saves unanswered: the quit is withdrawn, and each
+/// window's card names its own buffer.**
+///
+/// MUTATION: in `FolioApp::settle_the_quits_saves`, say the cards on the first window named only
+/// (`break` after the first `say_the_quits_saves`) — the second window's assertion goes red.
+#[test]
+fn the_worker_gone_withdraws_the_quit_and_each_card_names_its_buffer() {
+    let mut quitting = Quitting::open("gone", ["one.md", "two.md"]);
+    quitting.quit_with_save();
+    quitting.end_the_worker();
+    quitting.turn();
+    assert_eq!(quitting.step(), None, "the quit is withdrawn");
+    assert_eq!(
+        quitting.cards(1),
+        [crate::i18n::quit_not_saved(&quitting.names[0])]
+    );
+    assert_eq!(
+        quitting.cards(2),
+        [crate::i18n::quit_not_saved(&quitting.names[1])]
+    );
+    assert_eq!(
+        (quitting.file(1), quitting.file(2)),
+        (READ.to_owned(), READ.to_owned())
+    );
+}
+
+/// RED (S-6c) — **at the bound with the saves still out, the quit is withdrawn saying, once, that
+/// they are still on their way; their late landing is heard by their buffers, and says nothing
+/// more.**
+///
+/// The turn is taken at the bound: the clock is the turn's, never waited for.
+///
+/// MUTATION: in `restore::SavesFound::of`, never find the bound (`OnTheirWay` whatever `now`) —
+/// the "withdrawn" assertion goes red: the quit waits for ever.
+#[test]
+fn at_the_bound_the_quit_says_its_saves_are_still_on_their_way() {
+    let mut quitting = Quitting::open("bound", ["one.md", "two.md"]);
+    quitting.quit_with_save();
+    let late = Instant::now() + crate::quit::QUIT_WAITS_FOR_ITS_SAVES;
+    assert!(
+        quitting
+            .application
+            .folio
+            .settle_the_quits_saves(late)
+            .expect("the quit's saves are looked at"),
+        "the bound decides"
+    );
+    quitting.settle();
+    assert_eq!(quitting.step(), None, "the quit is withdrawn");
+    for window in [1, 2] {
+        let name = quitting.names[window as usize - 1].clone();
+        assert_eq!(
+            quitting.cards(window),
+            [crate::i18n::quit_save_on_its_way(&name)],
+            "window {window}: in true words"
+        );
+    }
+
+    quitting.serve(None);
+    quitting.serve(None);
+    quitting.turn();
+    assert!(
+        !quitting.dirty(1) && !quitting.dirty(2),
+        "the late landings are heard by their buffers"
+    );
+    assert_eq!(quitting.cards(1).len(), 1, "and nothing more is said");
+}
+
+/// RED (S-6c) — **an edit while the quit waits supersedes its save: the quit is withdrawn at once,
+/// saying so once; the next quit asks again.**
+///
+/// MUTATION: in `restore::SavesFound::of`, drop the `Edited` arm — the "withdrawn" assertion goes
+/// red: the quit goes on waiting for the other window's save.
+#[test]
+fn an_edit_while_the_quit_waits_withdraws_it_and_the_next_quit_asks() {
+    let mut quitting = Quitting::open("edited", ["one.md", "two.md"]);
+    quitting.quit_with_save();
+    quitting.type_again(1);
+    quitting.settle();
+    assert_eq!(quitting.step(), None, "the quit is withdrawn");
+    assert_eq!(
+        quitting.cards(1),
+        [crate::i18n::quit_not_saved(&quitting.names[0])],
+        "said once"
+    );
+
+    quitting.serve(None);
+    quitting.serve(None);
+    quitting.turn();
+    assert!(
+        quitting.dirty(1),
+        "the body sent landed; the new one is not saved"
+    );
+    assert!(!quitting.dirty(2));
+    assert_eq!(quitting.cards(1).len(), 1, "and nothing more is said");
+
+    quitting.app().ask_to_quit();
+    quitting.settle();
+    let app = quitting.app();
+    let asking = app.quit.as_ref().expect("a quit is asked");
+    assert!(asking.is_asking(), "the next quit asks");
+    assert_eq!(
+        asking.names().len(),
+        1,
+        "about the edited buffer: {:?}",
+        asking.names()
+    );
+}
+
+/// RED (S-6c) — **a quit's saves pending while a close's question is up: the question stays, a
+/// second close meets a busy gate, and the quit goes on once its saves land.**
+///
+/// MUTATION: in `restore::DirtyGate::verdict`, ask `Busy` last (an empty list first) — the busy
+/// assertion goes red.
+#[test]
+fn a_quit_pending_beside_a_closes_question_leaves_the_question_alone() {
+    let mut quitting = Quitting::open("busy", ["one.md", "two.md"]);
+    quitting
+        .runtime(1)
+        .window
+        .dirty_gate
+        .open(restore::GateRequest::CloseTab(0));
+    quitting.quit_with_save();
+    let raised = quitting
+        .runtime(1)
+        .raise_dirty_gate(restore::GateRequest::Shut)
+        .expect("the close is asked");
+    assert_eq!(
+        raised,
+        restore::GateRaise::Busy,
+        "a second close meets a busy gate"
+    );
+    assert_eq!(
+        quitting.runtime(1).window.dirty_gate.request(),
+        Some(&restore::GateRequest::CloseTab(0)),
+        "and the question up is the one that was"
+    );
+
+    quitting.serve(None);
+    quitting.serve(None);
+    quitting.turn();
+    assert!(quitting.went_on(), "the saves landed: the quit went on");
+}
+
+/// RED (S-6c) — **a stop that cannot ask hands its saves to the storage worker: the window thread
+/// writes nothing over a file, and once the worker has served its queue only what did not land
+/// is copied into `recovered`.**
+///
+/// Both windows are stopped (`FolioApp::stop_every_window`, into this test's own folder): the two
+/// saves are on the lane and neither file has changed. The worker serves them before its end —
+/// the first lands, the second meets another writer's bytes — and the stop's second half
+/// (`App::finish`, after the session's close) keeps the second edit as a copy, never over their
+/// file.
+///
+/// MUTATION: in `Runtime::keep_unsaved_edits`, hand nothing over (drop the
+/// `save_every_dirty_preview` call, holding the pools only) — the first window's file still
+/// holds what was read, and two copies are made.
+#[test]
+fn a_stop_hands_its_saves_to_the_worker_and_copies_only_what_did_not_land() {
+    let mut quitting = Quitting::open("stop", ["one.md", "two.md"]);
+    let recovery = quitting.dir.join(crate::preview::RECOVERED_FOLDER);
+    quitting
+        .application
+        .folio
+        .stop_every_window_keeping_in(&recovery)
+        .expect("the windows stop");
+    assert_eq!(
+        (quitting.file(1), quitting.file(2)),
+        (READ.to_owned(), READ.to_owned()),
+        "nothing is written on the window thread"
+    );
+    let theirs = "another writer\n";
+    quitting.serve(None);
+    quitting.serve(Some(theirs));
+    quitting.app().finish();
+    assert_eq!(
+        quitting.file(1),
+        format!("{READ}{TYPED}"),
+        "the first landed"
+    );
+    assert_eq!(quitting.file(2), theirs, "their bytes stay in the second");
+    assert_eq!(
+        quitting.copies(),
+        [format!("{READ}{TYPED}")],
+        "and only the second edit is copied"
+    );
+}
+
+/// RED (S-6c) — **a save the worker never answers before the stop leaves is kept as a copy too.**
+///
+/// The worker is let go at its bound with both saves on its queue (the test serves none). The
+/// file may yet take them; the copies keep both edits whatever it does.
+///
+/// MUTATION: in `PreviewPool::kept_after_the_stop`, keep nothing of a buffer whose save is still
+/// out (`if buffer.on_disk.is_out() { continue; }`) — no copy is made.
+#[test]
+fn a_stop_whose_saves_are_still_out_keeps_both_edits_in_copies() {
+    let mut quitting = Quitting::open("stop-out", ["one.md", "two.md"]);
+    let recovery = quitting.dir.join(crate::preview::RECOVERED_FOLDER);
+    quitting
+        .application
+        .folio
+        .stop_every_window_keeping_in(&recovery)
+        .expect("the windows stop");
+    quitting.app().finish();
+    assert_eq!(
+        quitting.copies(),
+        [format!("{READ}{TYPED}"), format!("{READ}{TYPED}")],
+        "both edits are kept"
+    );
+    assert_eq!(
+        (quitting.file(1), quitting.file(2)),
+        (READ.to_owned(), READ.to_owned())
     );
 }
 

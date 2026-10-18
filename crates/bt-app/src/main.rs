@@ -13435,6 +13435,10 @@ struct App<B: Backend = Native> {
     /// `AppEvent::DocumentsAnswered` by the buffer that asked, in whichever
     /// window its tab now stands.
     preview_saves: preview::PreviewSaves,
+    /// **The buffers a stop that cannot ask handed to the storage worker**, held past their
+    /// windows until the worker has ended (S-6c; [`preview::StopKeeps`]). Empty on every
+    /// other road.
+    stop_keeps: preview::StopKeeps,
     preview_worker: preview::PreviewWorker,
     preview_worker_running: bool,
     preview_worker_notice_pending: bool,
@@ -14071,6 +14075,7 @@ impl<B: Backend> App<B> {
         } = parts;
         Self {
             preview_saves,
+            stop_keeps: preview::StopKeeps::default(),
             git_mutations,
             gpu,
             tab_ids,
@@ -19620,30 +19625,63 @@ fn what_a_close_wait_found(
     wait.awaited
         .iter()
         .map(|awaited| {
-            tabs.iter()
-                .find_map(|tab| tab.preview_pool.at_the_close(*awaited))
-                .map_or_else(
-                    || (String::new(), preview::AtTheClose::Saved),
-                    |(name, found)| (name.to_owned(), found),
-                )
+            where_a_save_stands(tabs, *awaited).map_or_else(
+                || (String::new(), preview::AtTheClose::Saved),
+                |(name, found)| (name.to_owned(), found),
+            )
         })
         .collect()
 }
 
-/// **Keep every dirty preview buffer of these tabs before a stop that cannot ask**
-/// (D-4, 0.4.8 G7) — the whole of [`Runtime::keep_unsaved_edits`] except its
-/// diagnostics lines. Every tab's pool and not the active tab's, on the quit
-/// gate's own reasoning: a dirty buffer on a tab nobody is looking at is still a
-/// dirty buffer. Each pool keeps its own through
-/// [`preview::PreviewPool::keep_dirty`].
-fn keep_unsaved_edits_over(
-    tabs: &mut [TabState],
-    recovery: &Path,
-    at: SystemTime,
-) -> Vec<preview::Kept> {
-    tabs.iter_mut()
-        .flat_map(|tab| tab.preview_pool.keep_dirty(recovery, at))
-        .collect()
+/// **What has become of one buffer a wait for saves is about**, with its name, if one of
+/// these tabs' pools holds it ([`preview::PreviewPool::at_the_close`]) — a close's wait reads
+/// its own window's tabs ([`what_a_close_wait_found`]), a quit's every window's
+/// (`FolioApp::settle_the_quits_saves`, S-6c), because a tab may move between windows
+/// while the quit waits.
+fn where_a_save_stands(
+    tabs: &[TabState],
+    awaited: preview::Awaited,
+) -> Option<(&str, preview::AtTheClose)> {
+    tabs.iter()
+        .find_map(|tab| tab.preview_pool.at_the_close(awaited))
+}
+
+/// **Buffer names by the window that holds them** (S-6c): what the quit's save step says on
+/// each window's card, in the order each window was first named.
+#[derive(Debug, Default)]
+struct ByWindow(Vec<(WindowId, Vec<String>)>);
+
+impl ByWindow {
+    fn add(&mut self, window: WindowId, name: String) {
+        match self.0.iter_mut().find(|(id, _)| *id == window) {
+            Some((_, names)) => names.push(name),
+            None => self.0.push((window, vec![name])),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The windows named, in order.
+    fn windows(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.0.iter().map(|(id, _)| *id)
+    }
+
+    /// The names in `window`.
+    fn of(&self, window: WindowId) -> &[String] {
+        self.0
+            .iter()
+            .find(|(id, _)| *id == window)
+            .map_or(&[], |(_, names)| names.as_slice())
+    }
+
+    /// Every name, window by window.
+    fn names(&self) -> impl Iterator<Item = &str> {
+        self.0
+            .iter()
+            .flat_map(|(_, names)| names.iter().map(String::as_str))
+    }
 }
 
 /// **The stores a trial's release writes through** (T-QUIT-DOCUMENTS round 3): the
@@ -56366,6 +56404,11 @@ impl<B: Backend> App<B> {
         // doors (§5.3 rows 16 and 16b).
         bt_platform::admission::exiting();
         self.session_store.close();
+        // **And, after a stop that cannot ask, what no file took** (S-6c): the storage worker
+        // has served what was queued before its end, the preview's saves among it, inside the
+        // close's one bound; the buffers the stop held hear the answers, and what did not land
+        // is copied into `recovered` (§5.3 row 20b). Nothing is held on any other road.
+        self.keep_what_the_stop_did_not_save(SystemTime::now());
     }
 
     /// **Ask for the quit transaction**, from whichever of the three doors the
@@ -56619,6 +56662,13 @@ impl<K: Copy + Eq + std::hash::Hash, W> Windows<K, W> {
     /// Every window, in no particular order: for a question whose answer does not depend on it.
     fn values(&self) -> impl Iterator<Item = &W> {
         self.open.values()
+    }
+
+    /// Every window with its key, in the opening order.
+    fn in_order(&self) -> impl Iterator<Item = (K, &W)> {
+        self.order
+            .iter()
+            .filter_map(|key| self.open.get(key).map(|window| (*key, window)))
     }
 
     /// The key of the window at `index` in the opening order.
@@ -68541,15 +68591,28 @@ impl<B: Backend> FolioApp<B> {
                 // Both of these are waits, and the loop has to go back round for
                 // them: one for a press, one for a browser process.
                 quit::QuitStep::Ask | quit::QuitStep::WaitForPages => return Ok(()),
+                // **The saves on the storage worker, and the quit waits for them** (S-6c): handed
+                // over once, as `Ctrl+S` hands one, then looked at on every turn their answers wake
+                // (`AppEvent::DocumentsAnswered`) until all have answered or the bound
+                // (`Quit::deadline`) has passed — never a wait on this thread.
                 quit::QuitStep::Save => {
-                    let mut report = quit::SaveReport::default();
-                    self.for_each_window(|runtime| {
-                        let theirs = runtime.quit_save()?;
-                        report.saved.extend(theirs.saved);
-                        report.failed.extend(theirs.failed);
-                        Ok(())
-                    })?;
-                    self.report_to_quit(|quit| quit.saved(&report));
+                    let now = Instant::now();
+                    let handed = self
+                        .app
+                        .as_ref()
+                        .and_then(|app| app.quit.as_ref())
+                        .is_some_and(|quit| quit.saves_awaited().is_some());
+                    if !handed {
+                        let mut awaited = Vec::new();
+                        self.for_each_window(|runtime| {
+                            awaited.extend(runtime.hand_over_every_save()?);
+                            Ok(())
+                        })?;
+                        self.report_to_quit(|quit| quit.saves_handed_over(awaited, now));
+                    }
+                    if !self.settle_the_quits_saves(now)? {
+                        return Ok(());
+                    }
                 }
                 quit::QuitStep::Discard => {
                     self.for_each_window(|runtime| runtime.quit_discard())?;
@@ -68805,6 +68868,122 @@ impl<B: Backend> FolioApp<B> {
                 }
             }
         }
+    }
+
+    /// **The quit's saves, looked at** (S-6c) — on each turn of its save step, once every
+    /// save has been handed to the storage worker. Answers whether the step is decided: the
+    /// quit gone on to its documents, or withdrawn; `false` while it waits.
+    ///
+    /// Each buffer it waits for is found in whichever standing window holds it now
+    /// (`where_a_save_stands`: a tab may have moved), and what they came to is read as a
+    /// close's wait reads it ([`restore::SavesFound`]). First match:
+    ///
+    /// | found | what happens |
+    /// |---|---|
+    /// | a body edited (or reloaded) since its save was handed over | withdrawn; the window's card names it, once ("Not saved: …"): the new body is a new save, and the next quit asks again |
+    /// | a save still on its way, before the bound | the quit goes on waiting |
+    /// | a save still on its way at the bound | withdrawn; the window's card names it in true words ("Still on its way to the disk: …"), beside any that did not land; its late answer is its buffer's, or the sink's |
+    /// | every save landed, and no window holds anything a quit would lose | the quit goes on, to its documents |
+    /// | a conflict, a save that did not land (refused, failed, the worker gone), or a buffer still owed | withdrawn; the panes said why (a conflict: nothing was written over the other writer's bytes); the window's card names them |
+    fn settle_the_quits_saves(&mut self, now: Instant) -> Result<bool> {
+        let Some((awaited, until)) = self
+            .app
+            .as_ref()
+            .and_then(|app| app.quit.as_ref())
+            .and_then(quit::Quit::saves_awaited)
+            .map(|(awaited, until)| (awaited.to_vec(), until))
+        else {
+            return Ok(true);
+        };
+        // Each buffer, where it stands now: its window, its name, what it came to. One no
+        // standing window holds any more — its tab closed, its window gone — loses nothing.
+        let mut found: Vec<(WindowId, String, preview::AtTheClose)> = Vec::new();
+        for awaited in awaited {
+            let place = self
+                .windows
+                .in_order()
+                .filter(|(_, window)| window.leaving.is_none())
+                .find_map(|(id, window)| {
+                    where_a_save_stands(&window.tabs, awaited)
+                        .map(|(name, at)| (id, name.to_owned(), at))
+                });
+            found.extend(place);
+        }
+        let read: Vec<(String, preview::AtTheClose)> = found
+            .iter()
+            .map(|(_, name, at)| (name.clone(), *at))
+            .collect();
+        let named = |what: &[preview::AtTheClose]| {
+            let mut by_window = ByWindow::default();
+            for (window, name, at) in &found {
+                if what.contains(at) {
+                    by_window.add(*window, name.clone());
+                }
+            }
+            by_window
+        };
+        let (not_saved, on_its_way) = match restore::SavesFound::of(&read, now, until) {
+            restore::SavesFound::OnTheirWay => return Ok(false),
+            // **Superseded** — the body handed over is not the body any more: the quit is
+            // withdrawn and says which, once; the new body is a new save, which the next quit
+            // asks the card about.
+            restore::SavesFound::Edited => {
+                (named(&[preview::AtTheClose::Edited]), ByWindow::default())
+            }
+            // **At the bound** — what is still on its way is said as that, and whatever has
+            // answered without landing is named beside it.
+            restore::SavesFound::PastTheBound => (
+                named(&[preview::AtTheClose::Conflict, preview::AtTheClose::NotSaved]),
+                named(&[preview::AtTheClose::OnItsWay]),
+            ),
+            // **Every save has answered**: what each window still holds that a quit would lose
+            // (`quit_names`) — a conflict, a save that did not land, a body owed (R1) or typed
+            // into since — is what did not get saved.
+            restore::SavesFound::Answered => {
+                let mut left = ByWindow::default();
+                for (id, window) in self.windows.in_order() {
+                    if window.leaving.is_some() {
+                        continue;
+                    }
+                    for tab in &window.tabs {
+                        for name in tab.preview_pool.quit_names() {
+                            left.add(id, name.to_owned());
+                        }
+                    }
+                }
+                if left.is_empty() {
+                    // **Every save landed**: the quit goes on through the doors it always did.
+                    self.report_to_quit(|quit| quit.saved(&quit::SaveReport::default()));
+                    return Ok(true);
+                }
+                (left, ByWindow::default())
+            }
+        };
+        let mut said: Vec<WindowId> = Vec::new();
+        for id in not_saved.windows().chain(on_its_way.windows()) {
+            if said.contains(&id) {
+                continue;
+            }
+            said.push(id);
+            if let Some(mut runtime) = self.runtime(id) {
+                runtime.say_the_quits_saves(not_saved.of(id), on_its_way.of(id))?;
+            }
+        }
+        // Each with what its window's card said of it.
+        let report = quit::SaveReport {
+            saved: Vec::new(),
+            failed: not_saved
+                .names()
+                .map(|name| (name.to_owned(), i18n::quit_not_saved(name)))
+                .chain(
+                    on_its_way
+                        .names()
+                        .map(|name| (name.to_owned(), i18n::quit_save_on_its_way(name))),
+                )
+                .collect(),
+        };
+        self.report_to_quit(|quit| quit.saved(&report));
+        Ok(true)
     }
 
     /// Open the transaction, if a chord asked for one and none is under way.
@@ -69212,14 +69391,19 @@ impl<B: Backend> FolioApp<B> {
     /// controlled failure ([`Self::fail`], twelve sites) and a loop stopped by
     /// something that is not a window closing (`exiting`).
     ///
-    /// First every window keeps what it would lose ([`Runtime::keep_unsaved_edits`]):
-    /// each dirty preview buffer written back through the quit's judged write, or,
-    /// where the file refuses or has changed on disk, copied into the data
-    /// directory's [`preview::RECOVERED_FOLDER`] — with one diagnostics line each
-    /// saying where the edit is. The writes are made on this thread and are done
-    /// when the call returns, as the quit's are; nothing waits for anything else.
-    /// Then every window, because the stop is the process's: a shell left running
-    /// behind a window nobody can see is the one outcome worse than stopping.
+    /// First the four hand-editable documents' owed changes are copied into the data
+    /// directory's [`preview::RECOVERED_FOLDER`]. Then every window, because the stop is the
+    /// process's: a shell left running behind a window nobody can see is the one outcome
+    /// worse than stopping. **Then every window keeps what it would lose**
+    /// ([`Runtime::keep_unsaved_edits`], S-6c): each dirty preview buffer's save is handed to
+    /// the storage worker as a press hands it — the window thread writes nothing over a file
+    /// — and the buffers are held past their windows; `App::finish`, which follows on both
+    /// roads, waits for the worker's end inside its one bound (§5.3 row 16b), and what did
+    /// not land is copied into `recovered` then, with one diagnostics line each saying where
+    /// the edit is. Every window keeps its edits whatever another window's close answered,
+    /// and after it has been photographed and let go: its open editor is committed by the
+    /// close before its saves are handed over, and the pools it is photographed with are
+    /// still in its tabs.
     /// `ending` for every one of them, and that is the point: this is the process
     /// stopping, not somebody closing five windows, so what was open stays in the
     /// file and nothing is filed away as "closed".
@@ -69228,19 +69412,20 @@ impl<B: Backend> FolioApp<B> {
     /// `ending` to this road or a row of its table, and the twelve `fail` sites to
     /// theirs.
     fn stop_every_window(&mut self) -> Result<()> {
-        let recovery = persist::storage_dir().join(preview::RECOVERED_FOLDER);
-        self.for_each_window(|runtime| {
-            runtime.keep_unsaved_edits(&recovery);
-            Ok(())
-        })?;
-        // **And the four hand-editable documents' owed changes** (T-QUIT-DOCUMENTS;
+        self.stop_every_window_keeping_in(&persist::storage_dir().join(preview::RECOVERED_FOLDER))
+    }
+
+    /// [`Self::stop_every_window`], what no file takes kept in `recovery` — the data
+    /// directory's `recovered` folder on both roads, a test's own folder in a test.
+    fn stop_every_window_keeping_in(&mut self, recovery: &Path) -> Result<()> {
+        // **The four hand-editable documents' owed changes** (T-QUIT-DOCUMENTS;
         // revisions (c)2 and (d)3), into the same folder — and every one that could be kept
         // nowhere said through the system's own box, before a window closes.
         if let Some(app) = self.app.as_mut() {
             app.with_documents(|documents| {
                 keep_owed_documents_over(
                     documents,
-                    &recovery,
+                    recovery,
                     SystemTime::now(),
                     &mut TheDisk,
                     &mut SystemBox,
@@ -69249,7 +69434,13 @@ impl<B: Backend> FolioApp<B> {
             // **And a trial release a quit held, disposed of** (T-QUIT-DOCUMENTS round 4).
             dispose_of_a_held_release_on_a_stop(app.quit.as_mut(), &mut app.session_store);
         }
-        self.for_each_window(|runtime| runtime.close_window(true))
+        let closed = self.for_each_window(|runtime| runtime.close_window(true));
+        for index in 0..self.windows.len() {
+            if let Some(mut runtime) = self.runtime_at(index) {
+                runtime.keep_unsaved_edits(recovery);
+            }
+        }
+        closed
     }
 
     fn about_to_wait_inner(&mut self, event_loop: &B::Loop) {

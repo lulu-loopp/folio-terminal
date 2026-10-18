@@ -7813,20 +7813,48 @@ impl<B: Backend> Runtime<'_, B> {
     /// nothing — its answer said on the pane of its tab that shows its file, and
     /// a refusal at the hand-over said there now. A buffer no pane of its tab
     /// shows is said on no surface: if it does not land, the window's card names
-    /// it (`Runtime::settle_close_wait`).
-    pub(in crate::runtime) fn save_every_dirty_preview(&mut self) {
+    /// it (`Runtime::settle_close_wait`). Answers the refusals, with why, and every
+    /// buffer the wait that follows waits for ([`preview::PreviewPool::close_awaited`]).
+    pub(in crate::runtime) fn save_every_dirty_preview(&mut self) -> preview::HandedOver {
         let refused = self.app.preview_saves.save_a_window_for_a_shut(self.window);
         let now = Instant::now();
+        let mut handed = preview::HandedOver::default();
         for (surface, source, why) in refused {
             let still_shows_it = self
                 .preview_buffer_on(surface)
                 .is_some_and(|buffer| buffer.source() == &source);
             if still_shows_it {
                 self.preview_pane_mut(surface).say(Some((
-                    preview::save_notice(preview::SaveOutcome::Failed(why)),
+                    preview::save_notice(preview::SaveOutcome::Failed(why.clone())),
                     now,
                 )));
             }
+            handed.refused.push((source, why));
+        }
+        handed.awaited = self
+            .window
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.preview_pool.close_awaited())
+            .collect();
+        handed
+    }
+
+    /// **Keep what this window would lose, on a stop that cannot ask** (D-4, 0.4.8 G7; S-6c):
+    /// the first half of the stop, once the window has been photographed and let go
+    /// (`FolioApp::stop_every_window`). Every dirty buffer's save is handed to the storage
+    /// worker as a press hands it ([`Self::save_every_dirty_preview`]) — the window thread
+    /// writes nothing — and every tab's pool is held past the window
+    /// ([`preview::StopKeeps`]) until the worker has ended, when what no file took is kept in
+    /// `recovery` (`App::keep_what_the_stop_did_not_save`). No card and no repaint: the
+    /// window is going with a process that is stopping, and its renderer may be what failed.
+    pub(crate) fn keep_unsaved_edits(&mut self, recovery: &Path) {
+        let handed = self.save_every_dirty_preview();
+        self.app.stop_keeps.handed(recovery, handed);
+        for tab in &mut self.window.tabs {
+            self.app
+                .stop_keeps
+                .hold(std::mem::take(&mut tab.preview_pool));
         }
     }
 
@@ -14203,6 +14231,17 @@ impl<B: Backend> crate::App<B> {
     pub(crate) fn sink_preview_save_answers(&mut self, answers: Vec<preview::SaveAnswer>) {
         for answer in answers {
             self.preview_saves.sink(answer);
+        }
+    }
+
+    /// **The second half of a stop that cannot ask** (S-6c; D-4, 0.4.8 G7), once the storage
+    /// worker has ended or been let go at its bound (`SessionStore::close`, §5.3 row 16b): the
+    /// buffers the stop held hear what came back, and whatever no file took is copied into the
+    /// `recovered` folder ([`preview::StopKeeps::keep`]), each said in `diagnostics.log` with
+    /// where its edit is. Nothing on every road but a stop.
+    pub(crate) fn keep_what_the_stop_did_not_save(&mut self, at: SystemTime) {
+        for kept in self.stop_keeps.keep(&mut self.preview_saves, at) {
+            crate::diagnostics::note(&kept.line());
         }
     }
 }

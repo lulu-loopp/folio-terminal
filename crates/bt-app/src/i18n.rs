@@ -2444,6 +2444,10 @@ text_entries! {
     /// filled by [`quit_documents_not_saved_in`]. A plain statement; its one choice is
     /// [`Self::QuitLeaveWithoutChange`].
     QuitDocumentsNotSaved,
+    /// **The card a quit answered `Save` raises when it stopped waiting for saves still on
+    /// their way to the disk** (S-6c, T-QUIT-AND-STOP-SAVES): `{names}` is the files, filled
+    /// by [`quit_save_on_its_way_in`]. The quit did not leave; the saves may yet land.
+    QuitSaveOnItsWay,
     /// The cancelled quit's one choice: leave, without the changes the card names.
     QuitLeaveWithoutChange,
     /// **What the system's own message box says when a stop could keep a change to one
@@ -4960,6 +4964,11 @@ impl Text {
                 "{files} could not be saved.",
                 "{files} could not be saved.", // zh: pending T-QUIT-DOCUMENTS
             ),
+            Self::QuitSaveOnItsWay => pick(
+                lang,
+                "Still on its way to the disk: {names}",
+                "Still on its way to the disk: {names}", // zh: pending T-QUIT-AND-STOP-SAVES
+            ),
             Self::QuitLeaveWithoutChange => pick(
                 lang,
                 "Leave without this change",
@@ -6678,6 +6687,10 @@ impl Text {
         // not landed, with no unsaved edits.
         (Self::GateTitleSaveNotLanded, HostPlatform::Windows),
         (Self::GateTitleSaveNotLanded, HostPlatform::MacOs),
+        // zh: pending T-QUIT-AND-STOP-SAVES — the card a quit raises over saves still on their
+        // way to the disk when it stopped waiting.
+        (Self::QuitSaveOnItsWay, HostPlatform::Windows),
+        (Self::QuitSaveOnItsWay, HostPlatform::MacOs),
         // zh: pending T-SHELL-BIRTH-DEATH — the face of a shell that ended at birth.
         (Self::ShellBirthDeath, HostPlatform::Windows),
         (Self::ShellBirthDeath, HostPlatform::MacOs),
@@ -8107,6 +8120,20 @@ fn quit_not_saved_in(lang: Lang, names: &str) -> String {
         Lang::English => format!("Not saved: {names}"),
         Lang::Chinese => format!("未能保存：{names}"),
     }
+}
+
+/// **What a quit answered `Save` says when it stopped waiting for saves still on their way**
+/// (S-6c): the names, and that they are not yet on the disk — true at the bound, whatever the
+/// worker answers later. [`quit_not_saved`]'s card, for the saves that have not answered.
+#[must_use]
+pub fn quit_save_on_its_way(names: &str) -> String {
+    quit_save_on_its_way_in(current(), names)
+}
+
+fn quit_save_on_its_way_in(lang: Lang, names: &str) -> String {
+    Text::QuitSaveOnItsWay
+        .in_lang(lang)
+        .replace("{names}", names)
 }
 
 /// **One row of `Move to window ▸`** (B9, user ruling 2026-08-25).
