@@ -2513,28 +2513,29 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> thread::JoinHandle<Vec<u8
 /// One pipe as [`drain`] reads it. The product's is the pipe itself; under test, a pipe whose end
 /// the thread that started the child asked to hear of (`PIPES_LET_GO`) says so when its reader
 /// drops it — which is how a test sees that the readers let go before the answer.
-#[cfg(not(test))]
 fn observed(pipe: Option<Box<dyn Read + Send>>) -> Option<Box<dyn Read + Send>> {
-    pipe
-}
-
-#[cfg(test)]
-fn observed(pipe: Option<Box<dyn Read + Send>>) -> Option<Box<dyn Read + Send>> {
-    struct Observed(Box<dyn Read + Send>, mpsc::Sender<()>);
-    impl Read for Observed {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            self.0.read(buf)
+    #[cfg(test)]
+    {
+        struct Observed(Box<dyn Read + Send>, mpsc::Sender<()>);
+        impl Read for Observed {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                self.0.read(buf)
+            }
+        }
+        impl Drop for Observed {
+            fn drop(&mut self) {
+                let _ = self.1.send(());
+            }
+        }
+        let heard = PIPES_LET_GO.with(|heard| heard.borrow().clone());
+        match (pipe, heard) {
+            (Some(pipe), Some(heard)) => Some(Box::new(Observed(pipe, heard))),
+            (pipe, _) => pipe,
         }
     }
-    impl Drop for Observed {
-        fn drop(&mut self) {
-            let _ = self.1.send(());
-        }
-    }
-    let heard = PIPES_LET_GO.with(|heard| heard.borrow().clone());
-    match (pipe, heard) {
-        (Some(pipe), Some(heard)) => Some(Box::new(Observed(pipe, heard))),
-        (pipe, _) => pipe,
+    #[cfg(not(test))]
+    {
+        pipe
     }
 }
 
