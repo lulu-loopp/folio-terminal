@@ -326,7 +326,7 @@ const NS_PER_MS: u64 = 1_000_000;
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 222;
+const STATION_COUNT: usize = 223;
 
 /// How deep the dispatched messages [`Heartbeat::message_began_at`] keeps
 /// apart can nest (ticket 64).
@@ -1061,6 +1061,11 @@ pub enum Station {
     /// the invitation (T-INTEGRATION-INJECT-2-BUILD): the last station moved into the hole so the
     /// bytes stay one run and every other station keeps the byte its door names.
     UpdateLeave = 112,
+    /// **The media session's way out** — `bt_platform::video::shutdown_media_session`, after
+    /// the loop: the engines the windows let go of, then the first-frame readers, waited for
+    /// within their bounds before `MFShutdown` (§5.3 row 27; door `MediaQuiet`, T-DROP-DOORS).
+    /// Byte 222, the run's end since `UpdateLeave` took byte 112.
+    MediaQuiet = 222,
 }
 
 impl Station {
@@ -1290,6 +1295,7 @@ impl Station {
             Self::UpdateJobOffer => "FolioApp::consider_update_offer",
             Self::UpdateJobProgress => "update_job::Job::drain_progress",
             Self::UpdateLeave => "update_handoff::leave_armed",
+            Self::MediaQuiet => "video::shutdown_media_session",
         }
     }
 
@@ -1533,6 +1539,7 @@ impl Station {
             219 => Self::TrialWritesReleased,
             220 => Self::UpdateJobOffer,
             221 => Self::UpdateJobProgress,
+            222 => Self::MediaQuiet,
             _ => Self::Starting,
         }
     }

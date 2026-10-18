@@ -641,10 +641,11 @@ impl<B: Backend> Runtime<'_, B> {
     /// the leaf that is leaving*: its `profile` (the seat's own, decided when it
     /// was created — never "the current default", so a seat restarted twice
     /// starts the same program both times), and
-    /// [`LeafSession::place_for_a_new_shell`], which is the **last trusted OSC 7
-    /// report**, else the folder the shell was put down in, and is explicitly not
-    /// a reading of the live process. The manual name is kept by not being touched: it is the
-    /// tab's (`TabSeed::manual_name`), and nothing here goes near a tab.
+    /// [`LeafSession::seed_place_for_a_new_shell`]: the **last trusted OSC 7 report**,
+    /// else the live shell process's folder (T-CWD-FROM-PROCESS, superseding the
+    /// contract's "not a reading of the live process" for this verb), else the folder
+    /// the shell was put down in. The manual name is kept by not being touched: it is
+    /// the tab's (`TabSeed::manual_name`), and nothing here goes near a tab.
     ///
     /// **The tree is not rebuilt** (§1.1, last row): this replaces the runtime
     /// state behind one leaf and moves no rectangle, so pin, tab and position all

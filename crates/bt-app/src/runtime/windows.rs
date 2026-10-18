@@ -12,7 +12,7 @@ use crate::{
     dpi_snapshot, dwm_dark_mode_owed, end_leaves_of, ensure_metrics_match_authoritative_scale,
     ensure_swapchain_matches_inner, first_term_leaf, float, focus_leaf_index, git, hang_watch,
     i18n, ime_outbound, ime_report, install_page_ground_color, install_theme_class_background,
-    marks, mouse_trace, native_window, new_window_runtime, notify, opening_window_attributes,
+    marks, mouse_trace, new_window_runtime, notify, opening_window_attributes,
     persisted_preview_pages, persisted_window_bounds, plan_launch, presentation_physical_size,
     preview, preview_source_of_recent, profiles, quit, rail_state_for, recorded_window_placement,
     render_sidebar_mode, render_tab_layout, restore, restore_row_seed, restore_window_placement,
@@ -35,6 +35,19 @@ use std::time::{Instant, SystemTime};
 use winit::dpi::LogicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::WindowId;
+
+/// **What a close's wait leaves the loop to do** (S-6b;
+/// [`Runtime::settle_close_wait`]): the two closes a window cannot re-run
+/// itself, because they are the loop's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AfterTheWait {
+    /// Nothing more: the wait goes on, was withdrawn, or was decided here.
+    Nothing,
+    /// The window's shut, re-run from the top — the close the OS asked for.
+    Shut,
+    /// The run's end with this ordinary window, re-run from the top: its close.
+    EndTheRunWith(WindowId),
+}
 
 impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn give_foreground_with_retry(&self) -> Result<()> {
@@ -136,7 +149,7 @@ impl Runtime<'_, Native> {
         // window that opened before or after it was changed is still a window of
         // this program.
         set_option_as_alt(&window, app.settings_store.loaded().option_sends_alt);
-        let native = native_window(&window)?;
+        let native = crate::native_window_of(&window)?;
         // A second window is a second owner the clipboard may go through — see
         // the first constructor's note.
         bt_platform::register_clipboard_owner(native);
@@ -537,7 +550,7 @@ impl Runtime<'_, Native> {
             app,
             window: &mut window,
         };
-        runtime.dress_new_window(native)?;
+        runtime.dress_new_window()?;
         // The seed above with this window's tabs written into it, taken here rather than left to
         // the caller so that no turn of the loop can find a paragraph with nothing in it. The
         // fallback it reads is the seed, which is what makes a maximized window's first snapshot
@@ -585,7 +598,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// application, and that is exactly why they are said once *per window*:
     /// §2.4's third rule — the setting changes every window, but the sentence
     /// said to DWM is one window's.
-    pub(crate) fn dress_new_window(&mut self, native: bt_platform::NativeWindow) -> Result<()> {
+    pub(crate) fn dress_new_window(&mut self) -> Result<()> {
         self.refresh_work_area();
         // **The window's ground, before the first frame** (§7.1.6c-4b). The
         // clear carries the ground's alpha, so a window that put this on after
@@ -606,7 +619,7 @@ impl<B: Backend> Runtime<'_, B> {
         // — so the row does not get a vote on this one window. Every other window
         // reads the row, exactly as it always did.
         if (self.is_quake_window() || self.app.settings_store.loaded().always_on_top)
-            && let Err(error) = bt_platform::set_window_topmost(native, true)
+            && let Err(error) = self.window.window.set_topmost(true)
         {
             eprintln!("recoverable always-on-top failure: {error}");
         }
@@ -616,7 +629,7 @@ impl<B: Backend> Runtime<'_, B> {
         self.apply_window_dark_mode()?;
         if self.app.acrylic_available
             && self.app.settings_store.loaded().acrylic
-            && let Err(error) = bt_platform::set_system_backdrop(native, true)
+            && let Err(error) = self.window.window.set_backdrop(true)
         {
             eprintln!("recoverable system backdrop failure: {error}");
         }
@@ -1123,10 +1136,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// succeeded is a different state with a different answer — no minimum at
     /// all, rather than a guess that could lock the user's window.
     pub(in crate::runtime) fn refresh_work_area(&mut self) {
-        let Ok(native) = native_window(&self.window.window) else {
-            return;
-        };
-        let Ok(rect) = bt_platform::get_work_area(native) else {
+        let Some(rect) = self.window.window.work_area() else {
             return;
         };
         let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
@@ -1189,8 +1199,7 @@ impl<B: Backend> Runtime<'_, B> {
         let is_quake = self.is_quake_window();
         let previous = self.app.window_picture(self.window.window.id());
         let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
-        let native = native_window(&self.window.window).ok();
-        let posture = if native.is_some_and(bt_platform::is_window_minimized) {
+        let posture = if self.window.window.is_iconic() {
             WindowPosture::Minimized
         } else if self.window.window.is_maximized() {
             WindowPosture::Maximized
@@ -1204,9 +1213,9 @@ impl<B: Backend> Runtime<'_, B> {
         // Measured only while the window is normal, because that is the only
         // posture whose rectangle is the user's; `recorded_window_placement`
         // states what the other two record instead.
-        let measured = native
-            .filter(|_| posture == WindowPosture::Normal)
-            .and_then(|native| bt_platform::get_window_rect(native).ok())
+        let measured = (posture == WindowPosture::Normal)
+            .then(|| self.window.window.outer_rect())
+            .flatten()
             .map(|rect| persisted_window_bounds(rect, scale));
         // What this window last said about itself, which is what the two
         // postures that have no rectangle of their own fall back to. A window
@@ -1359,9 +1368,8 @@ impl<B: Backend> Runtime<'_, B> {
         else {
             return Ok(());
         };
-        let native = native_window(&self.window.window)?;
         self.window.dwm_dark_mode = Some(dark);
-        if let Err(error) = bt_platform::set_window_dark_mode(native, dark) {
+        if let Err(error) = self.window.window.set_dark_mode(dark) {
             eprintln!("recoverable dark-mode failure: {error}");
         }
         Ok(())
@@ -1599,8 +1607,9 @@ impl<B: Backend> Runtime<'_, B> {
     /// user ruling 2026-08-25), which is [`quit::Quit::saved`]'s own rule one
     /// surface down and for its reason: a shut that closed the window after a
     /// half-finished save would take the half that is still only in memory
-    /// with it. The failures are already named on their own pane by
-    /// `quit_save`; the window stays, so the reader can see them there.
+    /// with it. The failures are named on their own pane as their answers come
+    /// back, and on the window's card; the window stays, so the reader can see
+    /// them there.
     ///
     /// **`Discard` drops only the dirty buffers**: every tab is about to be
     /// written to `session.json`, and its pool goes with it as the list of files
@@ -1614,11 +1623,176 @@ impl<B: Backend> Runtime<'_, B> {
     /// performed here so that everything else a close does still happens in the
     /// order it always did — and, for the run's end, so that `Cancel` leaves the
     /// ordinary window open and the summoned terminal never stands alone.
+    ///
+    /// **`Save all` hands every save to the storage worker and waits** (S-6b):
+    /// the window thread writes nothing ([`Self::save_and_wait`]); the shut is
+    /// held across turns until the saves have answered, and goes only if all of
+    /// them landed.
     fn answer_exit(&mut self, closes: WindowId, answer: restore::GateAnswer) -> Result<()> {
-        let saved_all = answer == restore::GateAnswer::Save && self.quit_save()?.is_complete();
+        if answer == restore::GateAnswer::Save {
+            return self.save_and_wait(closes);
+        }
         self.window.window_close_requested =
-            crate::answer_an_exit_over(&mut self.window.tabs, closes, answer, saved_all);
+            crate::answer_an_exit_over(&mut self.window.tabs, closes, answer, false);
         Ok(())
+    }
+
+    /// **`Save all`, answered on an exit's question** (S-6b): the open editor
+    /// committed as Enter commits it, then every dirty buffer's save handed to
+    /// the storage worker ([`Self::save_every_dirty_preview`]), and the shut
+    /// held while they are on their way ([`restore::CloseWait`] with `saving`).
+    /// A save refused at the hand-over is said on the pane that shows its file,
+    /// now; the wait finds it unsaved and the window stays.
+    fn save_and_wait(&mut self, closes: WindowId) -> Result<()> {
+        if self.uncommitted_edit_name().is_some() {
+            self.finish_rename(RenameExit::Blur)?;
+        }
+        self.save_every_dirty_preview();
+        let now = Instant::now();
+        let awaited = self
+            .window
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.preview_pool.close_awaited())
+            .collect();
+        let request = if closes == self.window_id() {
+            restore::GateRequest::Shut
+        } else {
+            restore::GateRequest::ShutWithTheRun(closes)
+        };
+        self.window.dirty_gate.wait(restore::CloseWait {
+            request,
+            tab: None,
+            awaited,
+            until: now + restore::CLOSE_WAITS_FOR_A_SAVE,
+            saving: true,
+        });
+        self.repaint_preview()
+    }
+
+    /// **A close waiting for its saves, looked at again** (S-6b) — on every turn
+    /// of the loop while one waits (`FolioApp::settle_close_waits`), which the
+    /// saves' answers wake (`DocumentsAnswered`) and its bound
+    /// ([`restore::DirtyGate::waits_until`]) ends.
+    ///
+    /// | what the wait finds ([`preview::AtTheClose`]) | what happens |
+    /// |---|---|
+    /// | a body edited (or reloaded) since the close was asked | withdrawn: nothing happens, and the next close asks again |
+    /// | a save still on its way, before the bound | the close goes on waiting |
+    /// | a save still on its way, at the bound | the question, as it always was, with the line saying a save is still on its way |
+    /// | a conflict the pane says | withdrawn: the pane stays, saying the conflict |
+    /// | every buffer saved | the close re-run from the top: nothing to ask, so it closes |
+    /// | a save that did not land — refused, failed on, the worker gone | the close re-run from the top: it asks, the pane having said why once |
+    ///
+    /// The shut's own `Save all` (`saving`) decides on the same findings: every
+    /// buffer saved re-requests the close; one that did not land, or a conflict,
+    /// keeps the window and names them on its card, as the synchronous save
+    /// always did; at the bound the question is put again, saying a save is
+    /// still on its way. A pane's close is re-run only while its tab is still
+    /// the one in front, a tab's only while that tab stands — otherwise the
+    /// close is withdrawn. What the loop itself must re-run — a window's shut,
+    /// or the run's end — is answered for it to do.
+    pub(crate) fn settle_close_wait(&mut self, now: Instant) -> Result<AfterTheWait> {
+        // Taken while it is looked at, and put back if it goes on waiting: every
+        // other road out of here is the wait's end.
+        let Some(wait) = self.window.dirty_gate.take_wait() else {
+            return Ok(AfterTheWait::Nothing);
+        };
+        let found = crate::what_a_close_wait_found(&self.window.tabs, &wait);
+        let finds = |what: preview::AtTheClose| found.iter().any(|(_, at)| *at == what);
+        if finds(preview::AtTheClose::Edited) {
+            return Ok(AfterTheWait::Nothing);
+        }
+        if finds(preview::AtTheClose::OnItsWay) && now < wait.until {
+            self.window.dirty_gate.wait(wait);
+            return Ok(AfterTheWait::Nothing);
+        }
+        let Some(request) = self.close_as_it_stands(&wait) else {
+            return Ok(AfterTheWait::Nothing);
+        };
+        if finds(preview::AtTheClose::OnItsWay) {
+            self.window.dirty_gate.open_after_the_wait(request);
+            if self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+            return Ok(AfterTheWait::Nothing);
+        }
+        if wait.saving {
+            let unsaved: Vec<String> = found
+                .into_iter()
+                .filter(|(_, at)| *at != preview::AtTheClose::Saved)
+                .map(|(name, _)| name)
+                .collect();
+            // **Every save landed, and something a close would lose is still
+            // here** (round 3): a body undone since its save, which the landing
+            // left in no file. The shut is re-run from the top and asks about it,
+            // as any close does; closing here would lose it unasked.
+            let still_losing = self
+                .window
+                .tabs
+                .iter()
+                .any(|tab| tab.preview_pool.close_names().next().is_some());
+            if unsaved.is_empty() && still_losing {
+                return Ok(match request {
+                    restore::GateRequest::ShutWithTheRun(closing) => {
+                        AfterTheWait::EndTheRunWith(closing)
+                    }
+                    _ => AfterTheWait::Shut,
+                });
+            }
+            let closes = match request {
+                restore::GateRequest::ShutWithTheRun(closing) => closing,
+                _ => self.window_id(),
+            };
+            self.window.window_close_requested = crate::answer_an_exit_over(
+                &mut self.window.tabs,
+                closes,
+                restore::GateAnswer::Save,
+                unsaved.is_empty(),
+            );
+            if unsaved.is_empty() {
+                return Ok(AfterTheWait::Nothing);
+            }
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                i18n::quit_not_saved(&unsaved.join(", ")),
+            )?;
+            return self.repaint_preview().map(|()| AfterTheWait::Nothing);
+        }
+        if finds(preview::AtTheClose::Conflict) {
+            return Ok(AfterTheWait::Nothing);
+        }
+        match request {
+            restore::GateRequest::ClosePane(seat) => self.close_pane(seat)?,
+            restore::GateRequest::CloseTab(index) => self.close_tab(index)?,
+            restore::GateRequest::Shut => return Ok(AfterTheWait::Shut),
+            restore::GateRequest::ShutWithTheRun(closing) => {
+                return Ok(AfterTheWait::EndTheRunWith(closing));
+            }
+            _ => {}
+        }
+        Ok(AfterTheWait::Nothing)
+    }
+
+    /// **The close a wait holds, as it can be re-run now** — `None` when its
+    /// subject has moved: a pane's tab no longer the one in front (the close
+    /// reads the tab in front), or a tab no longer in the strip. A tab that only
+    /// moved in the strip is closed where it now stands.
+    fn close_as_it_stands(&self, wait: &restore::CloseWait) -> Option<restore::GateRequest> {
+        match &wait.request {
+            restore::GateRequest::ClosePane(seat) => {
+                (Some(self.id) == wait.tab).then_some(restore::GateRequest::ClosePane(*seat))
+            }
+            restore::GateRequest::CloseTab(_) => self
+                .window
+                .tabs
+                .iter()
+                .position(|tab| Some(tab.id) == wait.tab)
+                .map(restore::GateRequest::CloseTab),
+            other => Some(other.clone()),
+        }
     }
 
     /// **The close an answer re-requested, taken by the event loop** — once: the
@@ -1912,9 +2086,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// Whether this window is iconic — Win32's own answer, and the same one
     /// [`Runtime::window_snapshot`] asks before it believes a rectangle.
     pub(in crate::runtime) fn window_is_iconic(&self) -> bool {
-        let iconic = native_window(&self.window.window)
-            .ok()
-            .is_some_and(bt_platform::is_window_minimized);
+        let iconic = self.window.window.is_iconic();
         self.window.diagnostic_minimized.set(iconic);
         iconic
     }
@@ -2130,6 +2302,11 @@ impl<B: Backend> Runtime<'_, B> {
         for web in self.window.web.values_mut() {
             let _ = web.close(&self.window.compositor);
         }
+        // **Every recording is told to stop, through its door, and none is waited for**
+        // (T-DROP-DOORS, D-80): each engine thread is asked to leave and let go of, and the
+        // one wait for them is the process's, at exit, before the platform they decode on
+        // is taken down (`bt_platform::video::shutdown_media_session`).
+        self.window.video.shutdown_all();
         // **Every child is told and none of them is waited for**
         // (T-PANE-CLOSE-OFF-THREAD). Each session comes out of its leaf, so
         // nothing left in this window can reach one that is being taken apart,

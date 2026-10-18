@@ -8,9 +8,9 @@ use crate::window_seam::prelude::*;
 use crate::{
     ImeCaretSource, ImeOwner, KeyboardOwner, LeafId, NewWindowPlan, NoticeHost, PreviewSurface,
     RenameClipboard, RenameExit, RenameVerdict, Runtime, Step, UserInputKind, composing_event_of,
-    composition_ruling, diagnostics, file_menu_powers, git_graph, goto_tab_index, hang_watch,
-    ime_caret_source, ime_commit_bytes, ime_cursor_area_of, ime_outbound, ime_owner, ime_report,
-    input, keyboard_owner_is_a_shell, keyhint, marks, menubar, paste_card_key, popup_takes_the_key,
+    composition_ruling, file_menu_powers, git_graph, goto_tab_index, hang_watch, ime_caret_source,
+    ime_commit_bytes, ime_cursor_area_of, ime_outbound, ime_owner, ime_report, input,
+    keyboard_owner_is_a_shell, keyhint, marks, menubar, paste_card_key, popup_takes_the_key,
     preedit_caret_byte, profiles, quit, rename_key, rename_pastes, restore, settings,
     settings_key_of, shortcuts, terminal_ime_cursor_area, toast, write_pty_input,
 };
@@ -2145,7 +2145,7 @@ impl<B: Backend> Runtime<'_, B> {
             facts,
         );
         let line = format!("{line} window={:?}", self.window.window.id());
-        diagnostics::note(&line);
+        self.window.window.note(&line);
         ime_report::TRACE.line(|| line);
     }
 
@@ -2191,7 +2191,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// The window's native facts are read through [`ime_native_facts`] only when
     /// a line will be written, at most [`ime_report::PAIRING_LINES_MAX`] times
     /// in the life of the window.
-    pub(crate) fn ime_bracket_line(
+    fn ime_bracket_line(
         &mut self,
         kind: ime_report::ImeKind,
         preedit_bytes: usize,
@@ -2224,7 +2224,7 @@ impl<B: Backend> Runtime<'_, B> {
             _ => 0,
         };
         if let Some(line) = self.ime_bracket_line(kind, preedit_bytes) {
-            diagnostics::note(&line);
+            self.window.window.note(&line);
             ime_report::TRACE.line(|| line);
         }
         if matches!(event, Ime::Enabled) {

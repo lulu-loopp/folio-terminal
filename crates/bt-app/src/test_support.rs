@@ -2577,6 +2577,7 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         birth_death_kept: false,
         spawn_fallback: None,
         foreground_program_cadence: foreground_program::Cadence::default(),
+        process_folder: crate::pane_folder::ProcessFolderMemo::default(),
         // No ConPTY, so no reader thread, so nothing to wake — see the field.
         wake: None,
         // Aimed at the tail, like every shell that has not been aimed.

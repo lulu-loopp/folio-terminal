@@ -24,6 +24,8 @@ fifty-one rows, plus two cross-cutting rows (doors, threads and lanes) that are
 not a subsystem but are a rule. Row 54, the look of the window, was added on
 2026-09-22 with the written UI spec. Row 55, tickets, was added on 2026-09-23:
 it is not a subsystem either, but a ruling about how every change is drafted.
+Row 56, the preview's load, watch and formulas, was added on 2026-10-17
+(T-CHAINS-72): the contract of a cross-crate chain that no row held.
 
 ---
 
@@ -66,6 +68,38 @@ The rule is spread across four places and that is itself the finding.
 Also: trailing entry 2026-09-23 *Decoration never covers text* — a pane's first
 shell-integration mark causes at most one extra grid change in its lifetime (the
 rail's reserve); the alternate screen and later marks cause none.
+**The order a resize runs in** (T-CHAINS-72, 2026-10-17; read off the code and its
+doc comments, and the contract of `docs/ARCHITECTURE.md` §7.2.2 — the entries above
+are still unfolded). This is the ordering `Runtime::flush_pending_pty_resize`
+represents, and a ticket that moves a hop keeps it:
+1. **The solve comes before the carry.** A new rectangle is solved into seat
+   rectangles, the rectangles into each pane's columns and rows, and only then
+   does a pane's grid or its shell hear anything; the solver takes no part in the
+   debounce (`Runtime::resize`; red line L10).
+2. **The picture follows the hand; the shell hears once per gesture** (owner's
+   ruling 2026-08-06). A shown pane's actor reflows in the solve's own turn
+   (`schedule_leaf_grid_change`); what waits is only the notification to the
+   pseudoconsole, until the pane's 200 ms quiet window has passed *and* no hand is
+   on the geometry (a held divider, the OS's size-move loop): one gesture, one
+   `ResizePseudoConsole`. A pane behind another tab defers its reflow to the same
+   release, and a tab brought forward re-solves.
+3. **At the release, four steps in this order, for every pane**
+   (`commit_leaf_resize`): the actor reflows if it is still behind the released
+   grid; the input-region phase is sampled; the pseudoconsole is told, only if the
+   grid is one the child has not got; and the request is reconciled
+   (`mark_pty_resize_requested_at`), or, when the child was told nothing, the
+   transaction is settled unchanged. The reconcile is not optional: without it the
+   resize epoch never quiesces, the PSReadLine repair is never paid and the pane's
+   decorations stay withheld.
+4. **A queued release always carries the last grid the pane was solved to.** A
+   solve that moved either grid queues a release and never cancels one, because
+   only a release closes the transaction `resize_at` opened; a solve that moved
+   neither schedules nothing. A shell still being born is owed the size it missed
+   and is told it when it lands (`apply_owed_shell_resize`).
+The release runs once per window turn, after every other task that can change a
+session (`Runtime::turn`), and the transaction closes in a later turn
+(`Runtime::finish_resize_if_quiescent`). All of it is on the window thread today
+(`docs/ARCHITECTURE.md` §5.3 row 12); the move to a session lane must keep it.
 
 ### 3. PTY and ConPTY — `not yet folded`
 Entries: §1.3 *the thread and resource model*; the `bt-pty` crate doc. Owner:
@@ -350,8 +384,9 @@ carry the paste rules.
 (owner's rulings 2026-09-22 and 2026-09-23; `DESIGN.md` trailing entry
 2026-09-23 *A multi-line paste into a shell that would run it line by line waits
 on a card in the middle of the window*). One rule, `paste_road`, asked once per
-paste by `stage_paste` from `Runtime::deliver_paste`, where all four paste doors
-converge: the card is raised when the `multiline_paste_ask` setting is on, the
+paste by `stage_paste` from `Runtime::deliver_paste`, where every paste gesture
+converges — the clipboard's road and the road of paths in hand (`docs/ARCHITECTURE.md`
+§7.2.3): the card is raised when the `multiline_paste_ask` setting is on, the
 payload was the clipboard's own text, the pane has not set `?2004`, and
 `input::pasted_line_count` is more than one (a single trailing separator does not
 count). **PowerShell asks nothing** (ruling 2026-09-22; `DESIGN.md` trailing
@@ -907,8 +942,10 @@ the login-session named pipe with a per-user socket on macOS.
 
 ### 30. Notifications and the asking/telling surfaces — `folded`, and the family rule is `nowhere written`
 **Rule.** The one written rule in this family is the attention lane's reach rule
-(row 29): at most one of the in-window marks, a taskbar flash — once per turn
-however many panes spoke, and **absent entirely on a desktop whose taskbar
+(row 29): at most one of the in-window marks, a taskbar flash — once per raise
+(`Runtime::raise_attention`, which the drain, the animation tick, the endpoint's
+wake and a contradicted flash's replacement each call) however many panes spoke in
+it (corrected 2026-10-17, T-CHAINS-72: it read "once per turn"), and **absent entirely on a desktop whose taskbar
 auto-hides** — or a desktop message, with the notification setting gating only
 the desktop arm. **Nothing maps a message kind to a surface kind.** Fifteen
 surface types exist before menus and inline fields, eighteen to twenty-one with
@@ -944,6 +981,9 @@ gesture raises **no surface at all**; a question is put only where no road
 lands the block unexecuted.
 
 ### 31. Settings and migrations — `not yet folded`
+The settings chain (`docs/ARCHITECTURE.md` §7.2.6: a press, its store, its receipt,
+the watch and the merge) is ruled in row 33; this row is the schema and its
+migrations.
 Entries: the M2 schema document §2; the `migrate.rs` module doc; §7.19 *the words
 on the settings page are written for the reader: a copy standard, a forbidden-word
 table, and a punctuation gate* (the second §7.19); 2026-09-23 *settings travel as
@@ -1013,7 +1053,14 @@ preferences; persists under the data directory; versioned through
 `persist::SettingsStore` / `SettingsV1` and a forward-only migration list;
 applied in process at its own door, and **re-read from disk when the storage watch
 hears it** (`docs/plans/design/settings-reread-2026-10-11.md`; owner ruling Q3,
-2026-10-11).
+2026-10-11). **A press is in force in memory at the press and is handed to the
+storage worker at once, with no debounce, and the file follows by receipt**
+(T-STORAGE-WORKER-REQUEST; until 2026-10-17 written only in `SettingsStore`'s doc
+comment): the write is made only if the file still holds the bytes Folio last read
+or wrote there, one write is in flight per document with the newest change waiting
+behind it, and only the worker's answer moves the store's revision. A settings
+write is a person's click, so there is nothing to coalesce, and a quiet window
+would only be a window in which the choice can be lost.
 *CLI* — audience: the outside world (a shell, Explorer, another Folio); carries
 per-launch placement and the seven argv doors; never persists; `cli::parse` is pure
 and total over the raw arguments, producing a request or a fault, and `resolve`
@@ -1878,6 +1925,56 @@ the row, as every browser shows a 404 or a 500. The "Cannot open" / did-not-load
 a load that reached nothing (a name that did not resolve, a connection refused or cut before a
 response).
 
+**The host's thread and its wake** (T-CHAINS-72, 2026-10-17; read off the code — the
+`webview` and `macos_webview` module headers in `bt-platform` and the doc of
+`AppEvent::WebPageSpoke` — and the contract of `docs/ARCHITECTURE.md` §7.2.5; the
+entries above are still unfolded):
+1. **The engine calls back on the window thread.** WebView2 delivers every callback
+   on the thread that created its environment and refuses an environment used from
+   any other (`0x802A000C`); the environment and the controller are asked for only
+   through window-thread doors (`doors::WebEnvironment`, `doors::WebController`),
+   inside the message pump winit turns. WKWebView's delegates are main-thread only.
+   So the host's event queue is a single-thread queue, not a channel, and nothing
+   about a callback is cross-thread.
+2. **A callback answers the engine only what cannot be answered later, and queues
+   the rest.** WebView2's arguments (`SetCancel`, `SetResponse`, `SetState`,
+   `SetHandled`, a dialog's accept) and WebKit's decision and completion handlers must
+   be settled before the callback returns, so these are decided inside it, from the
+   policy the caller handed the host at `WebHost::new` (the navigation gate and the
+   request gate) or from a fixed answer. The list is closed as of 2026-10-17 (every
+   `add_` registration of the Windows host and every WebKit delegate method of the
+   macOS host read):
+   - Windows: `NavigationStarting` asks the navigation gate and proceeds, cancels, or
+     cancels and navigates to the rewritten target; `FrameNavigationStarting` asks the
+     request gate and cancels a refused subframe; `WebResourceRequested` asks the
+     request gate, returns with nothing queued when allowed and answers an empty 403
+     when refused; `ScriptDialogOpening` returns without accepting or deferring, so the
+     page's alert, confirm or prompt is dismissed; `NewWindowRequested` is marked
+     handled, so the engine opens no window of its own; `DownloadStarting` is
+     cancelled; `PermissionRequested` is denied and `LaunchingExternalUriScheme`
+     cancelled, both with nothing queued; `AcceleratorKeyPressed` takes back a chord
+     this window owns, before the page sees the key; `MoveFocusRequested` is marked
+     handled. Every other registration only queues.
+   - macOS: `decidePolicyForNavigationAction:` asks the navigation gate for the main
+     frame and the request gate for a subframe, and answers before a rewrite is
+     started; `decidePolicyForNavigationResponse:` cancels a response that would be a
+     download; `didReceiveAuthenticationChallenge:` performs the default handling for a
+     server-trust challenge and rejects every other protection space;
+     `createWebViewWithConfiguration:` returns no view, so WebKit opens no window; the
+     three JavaScript panels (alert, confirm, prompt) complete at once as dismissed;
+     the media-capture and device-motion permission handlers answer `Deny`. Every other
+     delegate method only queues.
+   **Every event that is queued ends in `Shared::push`**, which pushes a `WebEvent` and
+   wakes the loop with `AppEvent::WebPageSpoke`, which carries nothing; what it means
+   for the pane — the refused request's notice, the new pane, the download's hand-off,
+   the dismissed dialog's notice — is decided on the next turn by `WebSeat::drive`,
+   which drives every window's seats, a closing window's included.
+3. **Nothing in the host blocks, and a callback may arrive for a pane that has
+   gone.** Creation is asynchronous — the pump is winit's and a nested one would run
+   the application re-entrantly — and a callback cannot be cancelled, so the
+   generation token of the seat's machine (`webhost::WebMachine`) decides whether
+   an answer is still anyone's.
+
 ### 50. The video engine — `not yet folded`
 Entries: §7.23 *video has a face: the first frame comes from the platform decoder,
 and the set that can be drawn is not the set that can be played*; §7.42 *video no
@@ -2079,12 +2176,54 @@ the site moved, not a row added; `scripts/ci/check-dead-code.ps1` is the gate.
 and the `DESIGN.md` entry of 2026-09-29 on it.
 **Overrides.** none found.
 
+### 56. The preview's load, watch and formulas — `folded`
+**Rule.** One sequence carries a file into a preview buffer and keeps it current
+(`docs/ARCHITECTURE.md` §7.2.4); four facts hold it:
+1. **A read is answered against the body it was issued for.** Every request the
+   preview worker (`bt-preview-worker`) receives carries a base minted only by
+   `PreviewBuffer::claim_head_read` — the buffer's incarnation and revision — and
+   the worker keeps only the newest request per target (the window, the tab, the
+   file and the kind of read; a replaced request ends with no outcome).
+   `PreviewBuffer::land_read` refuses an answer whose base the buffer has moved
+   past and keeps the body, the undo log, the caret and the selection; a buffer
+   evicted and opened again has a new incarnation, so a late answer for the old
+   one never lands in the new one.
+2. **A watch event is a question, never a load.** The kernel's news, heard on
+   `bt-dir-watch`, only wakes the window; the window's clock reads the file's stamp
+   after a quiet window, and a stamp the buffer already holds is no news.
+   `PreviewBuffer::note_disk_moved` then decides, in this order: a file that is gone
+   keeps the buffer, says so, and reads nothing; a file moved under unsaved edits is
+   read to compare and never overwritten, and the disagreement is said when the
+   bytes differ; a file moved under a clean body is re-read quietly, and a file that
+   still holds the body's bytes keeps the body and its history. The watch set is
+   every tab's pool, not only the panes on screen.
+3. **A formula's picture is the window's, keyed by its content.** A preview formula
+   is asked on the computation lane's decoration share (`bt-math-worker`) with a
+   `PreviewMathKey` — content, mode, size and ink, and no path, pane or tab — and
+   its answer lands in that window's `PreviewMathCache` under the key it travelled
+   with, so it serves whichever pane shows the same formula, and a late one lands
+   under its own key without touching a newer picture.
+4. **The application drains each worker's channel once.**
+   `FolioApp::drain_preview_answers` and `FolioApp::drain_math_answers` take every
+   answer once per process and offer the batch to each window in turn, which takes
+   only what is addressed to it (`answers_for`); what no window takes was addressed
+   to one that has closed, and is dropped.
+**From.** The rule is `nowhere written` in `DESIGN.md` as one sequence (ARCHITECTURE
+§7.2's first pass, 2026-09-23, said so); it is written here from the code's doc
+comments — `PreviewBase` and `PreviewBuffer::land_read` (§7.1.3v *a buffer knows
+which disk state it is holding, and a read is answered against the body it was
+issued for*, `T-EDIT-DISK`, folded in row 19), `PreviewBuffer::note_disk_moved` (user
+ruling 2026-08-29), the `preview_watch` module header, `PreviewMathKey`, and
+`FolioApp::drain_preview_answers` (the 2026-08-23 incident `docs/CONVENTIONS.md`
+records about addresses on a shared answer queue). T-CHAINS-72, 2026-10-17.
+**Overrides.** none found.
+
 ---
 
 ## What is folded, and what is not
 
-**Folded (22 rows):** 4, 5, 6, 8, 9, 18, 19, 22, 23, 29, 30, 33, 35, 37, 38, 41,
-42, 43, 52, 53, 54, 55. Row 46 is folded for the layering rule only.
+**Folded (23 rows):** 4, 5, 6, 8, 9, 18, 19, 22, 23, 29, 30, 33, 35, 37, 38, 41,
+42, 43, 52, 53, 54, 55, 56. Row 46 is folded for the layering rule only.
 
 **Not yet folded (33 rows):** everything else. For those rows the entries listed
 are still the authority, and a ticket that depends on one of them folds it — into

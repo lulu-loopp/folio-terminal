@@ -1,10 +1,11 @@
 //! **The keyboard's doors, driven on a headless window.** The blur (T-DISPATCHER-WRITES-INTO-DOORS):
 //! the window event loop's `Focused(false)` reaches the keyboard's two window facts through
 //! [`crate::Runtime::blurred`]. The input method's composition events (T-IME-BRACKET-FACTS):
-//! `Runtime::ime_input` on a window whose input-method facts door answers what the test scripted.
+//! `Runtime::ime_input` on a window whose input-method facts door answers what the test scripted,
+//! and the lines it says read back from the window's `diagnostics.log` door (T-DIAGNOSTICS-TEST-SINK).
 
 use crate::headless::{HeadlessApplication, HeadlessFolio, WindowEffect};
-use crate::ime_report::{ImeKind, NativeFacts};
+use crate::ime_report::NativeFacts;
 use crate::keyhint::KEY_HINT_DELAY;
 use crate::test_support::{leaf_saying, ringing_tab, tab_holding};
 use std::time::{Duration, Instant};
@@ -63,27 +64,38 @@ fn a_blur_clears_the_ime_and_the_key_hint_through_the_keyboards_door() {
     );
 }
 
-/// How many times the window's input-method facts were read since this was last asked.
-fn facts_read(folio: &HeadlessFolio) -> usize {
-    folio
-        .ledger
-        .take()
-        .into_iter()
-        .filter(|effect| *effect == WindowEffect::ImeFactsRead)
-        .count()
+/// What the window was told since this was last asked: how many times its input-method facts
+/// were read, and the `diagnostics.log` lines its runtime said through the window's door, as
+/// they were written.
+fn told(folio: &HeadlessFolio) -> (usize, Vec<String>) {
+    let mut facts_read = 0;
+    let mut noted = Vec::new();
+    for effect in folio.ledger.take() {
+        match effect {
+            WindowEffect::ImeFactsRead => facts_read += 1,
+            WindowEffect::Noted(line) => noted.push(line),
+            _ => {}
+        }
+    }
+    (facts_read, noted)
 }
 
-/// T-IME-BRACKET-FACTS (F4 design note §4.1): **a broken bracket's line carries the facts the
-/// window's facts door answers at the break**, and the door is asked at the break and nowhere
-/// else on the road. The headless window has no native handle, so a reading that went round the
-/// door would answer default facts (every field `None`) and read nothing from the door.
+/// T-IME-BRACKET-FACTS (F4 design note §4.1), T-DIAGNOSTICS-TEST-SINK: **a broken bracket's line
+/// carries the facts the window's facts door answers at the break, and is the line `ime_input`
+/// says** — read back from the window's `diagnostics.log` door, as it was written. The facts door
+/// is asked at the break and nowhere else on the road. The headless window has no native handle,
+/// so a reading that went round the door would answer default facts (every field `None`) and
+/// read nothing from the door.
 ///
 /// The composition is a Chinese and mixed-script pre-edit (`ni你`, five bytes), restarted while
-/// live (the line read back from the runtime's own bracket door), then torn down and ended twice,
-/// the second end unpaired — through `ime_input`, as winit delivers it.
+/// live, then torn down and ended twice, the second end unpaired — through `ime_input`, as winit
+/// delivers it.
 ///
-/// MUTATION: `ime_native_facts` reads `native_window(..)` and `snapshot` instead of
-/// `WindowHost::ime_facts` (or answers `NativeFacts::default()`) — no read, default facts — red.
+/// MUTATIONS: `ime_native_facts` reads `bt_platform::ime_observation::snapshot` directly instead of
+/// `WindowHost::ime_facts` (or answers `NativeFacts::default()`) — no read, default facts — red;
+/// `ime_input` formats a line of its own (the pairing line without its window, or any other
+/// words) or says it to `diagnostics::note` rather than the window's door — the restart's line is
+/// not the line written, red.
 #[test]
 fn a_restart_inside_a_live_composition_writes_the_windows_native_facts() {
     let mut folio = HeadlessFolio::with_tabs(
@@ -104,6 +116,12 @@ fn a_restart_inside_a_live_composition_writes_the_windows_native_facts() {
     folio.window.window.ime_facts.set(scripted);
     let window = folio.window.window.id;
     folio.ledger.take();
+    let broken = |shape: &str, live: usize| {
+        format!(
+            "Folio: the input method's composition bracket is broken — shape={shape} \
+             live_preedit_bytes={live} focused=false native={scripted:?} window={window:?}"
+        )
+    };
 
     let mut runtime = folio.runtime();
     runtime
@@ -112,24 +130,20 @@ fn a_restart_inside_a_live_composition_writes_the_windows_native_facts() {
     runtime
         .ime_input(Ime::Preedit("ni你".to_owned(), Some((5, 5))))
         .expect("a pre-edit is answered");
-    assert_eq!(facts_read(&folio), 0, "an unbroken bracket reads no facts");
-
-    let restart = folio
-        .runtime()
-        .ime_bracket_line(ImeKind::Enabled, 0)
-        .expect("a start inside a live composition is named");
-    assert!(
-        restart.contains("shape=restarted-inside-a-live-composition live_preedit_bytes=5 "),
-        "{restart}"
-    );
-    assert!(
-        restart.ends_with(&format!(" native={scripted:?} window={window:?}")),
-        "the restart's line carries the facts the window's door answered: {restart}"
-    );
     assert_eq!(
-        facts_read(&folio),
-        1,
-        "the break read the window's facts once"
+        told(&folio),
+        (0, Vec::new()),
+        "an unbroken bracket reads no facts and says nothing"
+    );
+
+    folio
+        .runtime()
+        .ime_input(Ime::Enabled)
+        .expect("a start inside a live composition is answered");
+    assert_eq!(
+        told(&folio),
+        (1, vec![broken("restarted-inside-a-live-composition", 5)]),
+        "the restart read the window's facts once and said the line that carries them"
     );
 
     let mut runtime = folio.runtime();
@@ -139,14 +153,74 @@ fn a_restart_inside_a_live_composition_writes_the_windows_native_facts() {
     runtime
         .ime_input(Ime::Disabled)
         .expect("an end is answered");
-    assert_eq!(facts_read(&folio), 0, "a paired end reads no facts");
+    assert_eq!(
+        told(&folio),
+        (0, Vec::new()),
+        "a paired end reads no facts and says nothing"
+    );
     folio
         .runtime()
         .ime_input(Ime::Disabled)
         .expect("an unpaired end is answered");
     assert_eq!(
-        facts_read(&folio),
-        1,
-        "the unpaired end, through ime_input, read the window's facts through its door"
+        told(&folio),
+        (1, vec![broken("ended-without-a-start", 0)]),
+        "the unpaired end, through ime_input, read the window's facts through its door and said so"
     );
+}
+
+/// T-DIAGNOSTICS-TEST-SINK — **a focus change says the IME observation line through the
+/// window's door**: the window gains the focus and loses it, through the event loop's own focus
+/// events; each says one `IME observation` line, with its reason, the facts the window's facts
+/// door answered and the window it was seen on.
+///
+/// MUTATION: `emit_ime_observation` says its line to `diagnostics::note` rather than the window's
+/// door — no line is noted, red; it says the report's line without the window (a line of its
+/// own) — red.
+#[test]
+fn a_focus_change_says_the_ime_observation_line_through_the_window() {
+    let folio = HeadlessFolio::with_tabs("headless-ime-observation", vec![ringing_tab(1, 1)], 0);
+    let scripted = NativeFacts {
+        hwnd: Some(0x5678),
+        context: Some(true),
+        hkl_low: Some(1033),
+        ..NativeFacts::default()
+    };
+    folio.window.window.ime_facts.set(scripted);
+    let window = folio.window.window.id;
+    let mut application = HeadlessApplication::of(folio);
+    application.window_event(WindowEvent::Focused(true));
+    application.window_event(WindowEvent::Focused(false));
+
+    let noted: Vec<String> = application
+        .runtime()
+        .window
+        .window
+        .ledger
+        .take()
+        .into_iter()
+        .filter_map(|effect| match effect {
+            WindowEffect::Noted(line) => Some(line),
+            _ => None,
+        })
+        .collect();
+    let [gained, lost] = noted.as_slice() else {
+        panic!("one line for each focus change: {noted:#?}");
+    };
+    for (line, reason, focused) in [(gained, "focus-gain", true), (lost, "focus-loss", false)] {
+        assert!(
+            line.starts_with(&format!("Folio: IME observation — reason={reason} at_ms=")),
+            "{line}"
+        );
+        assert!(
+            line.contains(&format!(" focused={focused} terminal=true web_host=false ")),
+            "{line}"
+        );
+        assert!(
+            line.ends_with(&format!(
+                " native={scripted:?} native_none=unknown mode_source=imm-compat window={window:?}"
+            )),
+            "the line carries the facts the window's door answered, and the window: {line}"
+        );
+    }
 }

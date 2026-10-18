@@ -1655,7 +1655,13 @@ fn a_reopened_recent_row_stands_in_its_folder(profile_id: &str) {
     // two folders are only names.
     let account = HomeIs(home.clone());
     let (leaf, working_directory) = reopened_from_recent(profile_id, &folder, &account);
-    let card = PathBuf::from(files_root_of(Some(&leaf.session), &account));
+    let card = PathBuf::from(
+        files_root_of(
+            Some(leaf.folder(&crate::pane_folder::SystemProcessFolders)),
+            &account,
+        )
+        .root,
+    );
     assert_eq!(
         working_directory.as_deref(),
         Some(folder.as_path()),
@@ -1701,4 +1707,120 @@ fn a_pi_pane_reopened_from_a_recent_row_shows_its_folder_on_the_files_card() {
 #[test]
 fn a_shell_reopened_from_a_recent_row_shows_its_folder_on_the_files_card() {
     a_reopened_recent_row_stands_in_its_folder(profiles::fallback_profile_id());
+}
+
+// ── T-CWD-FROM-PROCESS: the card's folder when the shell has said nothing ──
+
+/// A process door that answers `answer` and counts its asks.
+struct ScriptedProcessFolder {
+    answer: Result<PathBuf, bt_platform::process_folder::FolderRefusal>,
+    asked: std::cell::Cell<usize>,
+}
+
+impl pane_folder::ProcessFolders for ScriptedProcessFolder {
+    fn current_directory(
+        &self,
+        _shell: bt_pty::ShellProcessId,
+    ) -> Result<PathBuf, bt_platform::process_folder::FolderRefusal> {
+        self.asked.set(self.asked.get() + 1);
+        self.answer.clone()
+    }
+}
+
+/// The files card's root for `session`, its shell's process asked through `door`.
+fn card_of(
+    session: &bt_term::DualPlaneSession,
+    door: &ScriptedProcessFolder,
+    account: &HomeIs,
+) -> FilesRoot {
+    let shell = pane_folder::ShellMoment {
+        shell: bt_pty::ShellProcessId::for_test(4242),
+        output: 7,
+        exited: false,
+    };
+    let memo = pane_folder::ProcessFolderMemo::default();
+    files_root_of(
+        Some(pane_folder::pane_folder(session, Some(shell), &memo, door)),
+        account,
+    )
+}
+
+/// RED (T-CWD-FROM-PROCESS) — **the files card of a shell that reported nothing opens on its
+/// process's folder; when that cannot be read it opens on the home folder and its foot says
+/// "Folder unknown"; a shell that reported is never read.**
+///
+/// MUTATIONS (observed red): `files_root_of` without the `folder_unknown` bit (`FilesRoot::known`
+/// for the home) — the refused card is unmarked; `folder_foot_notice` answering "" — the foot says
+/// nothing; `reroot_files_state` keeping the bit — a chosen root still says "Folder unknown". The
+/// ladder's own order (a report before the process) is red in
+/// `pane_folder::tests::a_report_is_the_answer_and_the_door_is_never_asked`.
+#[test]
+fn the_files_card_opens_on_the_process_folder_or_says_the_folder_is_unknown() {
+    let root = bt_testpath::temp_path("process-card");
+    let home = root.join("家 home");
+    let account = HomeIs(home.clone());
+    let silent = leaf_saying("no report from this shell");
+    let moved = root.join("moved");
+
+    let door = ScriptedProcessFolder {
+        answer: Ok(moved.clone()),
+        asked: std::cell::Cell::new(0),
+    };
+    let card = card_of(&silent.session, &door, &account);
+    assert_eq!(card, FilesRoot::known(moved.display().to_string()));
+    assert_eq!(door.asked.get(), 1, "the process is asked once");
+    let state = seats::FilesLeafState {
+        root: card.root,
+        folder_unknown: card.folder_unknown,
+        ..seats::FilesLeafState::default()
+    };
+    assert_eq!(
+        folder_foot_notice(&state),
+        "",
+        "a folder that is known says nothing more"
+    );
+
+    let door = ScriptedProcessFolder {
+        answer: Err(bt_platform::process_folder::FolderRefusal::NoAccess),
+        asked: std::cell::Cell::new(0),
+    };
+    let card = card_of(&silent.session, &door, &account);
+    assert_eq!(
+        card,
+        FilesRoot {
+            root: home.display().to_string(),
+            folder_unknown: true,
+        },
+        "a refused read opens on the home folder, marked"
+    );
+    let mut state = seats::FilesLeafState {
+        root: card.root,
+        folder_unknown: card.folder_unknown,
+        ..seats::FilesLeafState::default()
+    };
+    assert_eq!(
+        folder_foot_notice(&state),
+        i18n::Text::FilesFolderUnknown.text(),
+        "the foot says the folder is unknown"
+    );
+    assert!(reroot_files_state(&mut state, &moved.display().to_string()));
+    assert_eq!(
+        folder_foot_notice(&state),
+        "",
+        "a chosen root is a known folder"
+    );
+
+    let reported = leaf_saying(&format!(
+        "\u{1b}]7;file://localhost{}\u{7}",
+        crate::test_support::host_uri_path(r"D:\reported")
+    ));
+    let door = ScriptedProcessFolder {
+        answer: Ok(moved.clone()),
+        asked: std::cell::Cell::new(0),
+    };
+    assert_eq!(
+        card_of(&reported.session, &door, &account),
+        FilesRoot::known(host_path(r"D:\reported").display().to_string())
+    );
+    assert_eq!(door.asked.get(), 0, "a shell that reported is never read");
 }

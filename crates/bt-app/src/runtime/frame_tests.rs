@@ -323,3 +323,116 @@ fn restart_shell_keeps_the_rung_and_the_old_leaf_until_its_replacement_exists() 
     );
     assert_eq!(pane.text_scale, rung, "at the pane's own rung");
 }
+
+/// RED (T-CWD-FROM-PROCESS, round 2) — **the window draws "Folder unknown" on the foot of a
+/// column opened on the home folder for a pane's folder nobody could say**: read off the chrome
+/// labels the headless window's glass was handed for the frame, so every layer between the
+/// column's state and the drawn strip is on the road — the foot's dressing
+/// (`Runtime::dress_files_feet`), the tree content carrying it, and the seat painter hanging it
+/// (`FootStrip::notice`). A column whose root is known draws no such label.
+///
+/// MUTATIONS (observed red): drop `tree.foot_notice = words.notice` in `dress_files_feet`; hand
+/// the column's `FootStrip` an empty `notice` in the seat painter — either way no label says it.
+#[test]
+fn a_column_on_a_folder_nobody_could_say_draws_folder_unknown_on_its_foot() {
+    let root = bt_testpath::temp_path("files-foot-unknown");
+    let mut folio = HeadlessFolio::with_tabs(
+        "files-foot-unknown",
+        vec![crate::test_support::tab_with_a_files_column(
+            1,
+            &root.display().to_string(),
+        )],
+        0,
+    );
+    let unknown = crate::i18n::Text::FilesFolderUnknown.text();
+    let drawn = |folio: &mut HeadlessFolio| -> bool {
+        folio.draw();
+        let runtime = folio.runtime();
+        let labels = &runtime.window.renderer.chrome.1;
+        labels.iter().any(|label| label.text == unknown)
+    };
+    assert!(!drawn(&mut folio), "a known root draws no such label");
+
+    {
+        let mut runtime = folio.runtime();
+        let seat = runtime
+            .seats
+            .files_seat()
+            .expect("the tab has a files column");
+        runtime
+            .files
+            .get_mut(&seat)
+            .expect("the column's state")
+            .folder_unknown = true;
+        runtime.refresh_chrome();
+    }
+    assert!(
+        drawn(&mut folio),
+        "the column's foot draws \"Folder unknown\""
+    );
+}
+
+/// RED (T-CWD-FROM-PROCESS, round 2) — **the root menu takes the shells' folders once, as it
+/// opens**: it is laid out every frame it is up, and a pane's folder is read on an ask. A shell
+/// that reports another folder while the menu is open changes nothing on it; the next opening
+/// reads again.
+///
+/// MUTATION (observed red): `root_choices` reading every pane through `LeafSession::folder` (the
+/// per-frame read) — the open menu offers the new folder.
+#[test]
+fn the_root_menu_reads_the_shells_folders_once_as_it_opens() {
+    let root = bt_testpath::temp_path("root-menu-once");
+    let first = root.join("first 一");
+    let second = root.join("second 二");
+    let mut folio = HeadlessFolio::with_tabs(
+        "root-menu-once",
+        vec![crate::test_support::tab_with_a_files_column(
+            1,
+            &root.display().to_string(),
+        )],
+        0,
+    );
+    let mut runtime = folio.runtime();
+    let column = runtime
+        .seats
+        .files_seat()
+        .expect("the tab has a files column");
+    let terminal = runtime.seats.terminals()[0];
+    let report = |folder: &Path| format!("\u{1b}]7;{}\u{7}", file_uri(folder));
+    let say = |runtime: &mut crate::Runtime<'_, crate::headless::Headless>, folder: &Path| {
+        runtime
+            .sessions
+            .get_mut(&terminal)
+            .expect("the terminal pane")
+            .session
+            .feed(report(folder).as_bytes())
+            .expect("the report is read");
+    };
+    let offers = |runtime: &crate::Runtime<'_, crate::headless::Headless>, folder: &Path| {
+        runtime
+            .root_choices(column)
+            .iter()
+            .any(|choice| Path::new(&choice.path) == folder)
+    };
+    say(&mut runtime, &first);
+    runtime.toggle_root_menu(column).expect("the menu opens");
+    assert!(
+        offers(&runtime, &first),
+        "the open menu offers where the shell stands"
+    );
+
+    say(&mut runtime, &second);
+    assert!(
+        !offers(&runtime, &second) && offers(&runtime, &first),
+        "a frame of the open menu does not read the shell again"
+    );
+
+    runtime.toggle_root_menu(column).expect("the menu shuts");
+    runtime
+        .toggle_root_menu(column)
+        .expect("the menu opens again");
+    assert!(
+        offers(&runtime, &second),
+        "the next opening reads the shell again"
+    );
+}

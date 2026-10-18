@@ -1,0 +1,23 @@
+# runtime-voice-direct-lines — the runtime roads (the `impl` blocks of bt-app's `Runtime`) that still
+# say their diagnostics.log line directly to `diagnostics::note` rather than through the window's
+# door, `WindowHost::note` (T-DIAGNOSTICS-TEST-SINK; ARCHITECTURE-GUARDS.md "Runtime voice").
+#
+# Held by bt-source's runtime_voice test (every direct line is a row, every row's count is its road's)
+# and, across commits, by scripts/ci/check-runtime-voice.ps1: **this list only shrinks** against the
+# merge base — no row added, no row's count grown. road: the item, as bt-source prints its identity;
+# shape: call (`diagnostics::note(…)`) or value (the voice handed on); count: how many; reason: why
+# no headless test reads the line yet.
+road	shape	count	reason
+crate::runtime::files::Runtime::ask_for_file_indexes_on_open	call	1	the palette's file index merged on its reopen: no headless test reopens an index
+crate::runtime::panes::Runtime::land_birth_death_fallback	value	3	a shell's exit and fallback lines (`exit_diagnostics`): no headless test lands a death
+crate::runtime::panes::Runtime::land_own_shell	value	3	a shell birth's refusal and fallback lines: no headless test lands a birth
+crate::runtime::panes::Runtime::land_pane_birth	value	1	held input's delivery line (`deliver_held_input`): no headless test lands a birth
+crate::runtime::panes::Runtime::land_restart	value	4	a restart's successor and fallback lines: no headless test lands a restart
+crate::runtime::preview::Runtime::adopt_clipboard_picture	call	1	a clipboard picture's adoption: no headless test pastes a picture
+crate::runtime::preview::Runtime::check_picture_freshness	call	2	the present's freshness lines (`present_diagnostics`): no headless test checks one
+crate::runtime::tabs::Runtime::reap_exited_tabs	call	1	the reaped shells' exit lines (`exit_diagnostics`): no headless test reaps a tab
+crate::runtime::tabs::Runtime::reap_exited_tabs	value	1	the last-resort shell's spawn failure (`exit_diagnostics`): no headless test reaps a tab
+crate::runtime::web::Runtime::make_spare_web_controller	call	4	the spare web page's retirement: no headless test makes a spare page
+crate::runtime::web::Runtime::warm_web_engine	call	1	the spare page's advance lines: no headless test warms the web engine
+crate::runtime::web::Runtime::warm_web_engine	value	1	the warm-up clock's line (`web_warmup`): no headless test warms the web engine
+crate::runtime::windows::Runtime::keep_unsaved_edits	call	1	a stop's kept preview edit: no headless test stops with an unsaved edit

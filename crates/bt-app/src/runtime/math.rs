@@ -1199,14 +1199,17 @@ impl<B: Backend> Runtime<'_, B> {
                     self.window.preview_math.land(*key, artifact);
                     true
                 }
+                // **Not gated on the tab being on screen** (T-SCALE-ADDRESS-PER-ASKER). A glance
+                // is the window's, and its pending slot waits for this answer whichever tab is in
+                // front: dropped because a tab switch came first, the slot stayed set, and the
+                // next hover over the same picture found its question "already asked" and showed
+                // nothing. What it shows, it shows over the hover in front now.
                 DecorationWorkerCompletion::PeekScaledImage { surface, scaled } => {
-                    if target_active {
-                        self.complete_peek_scale(surface, scaled)?;
-                    }
+                    self.complete_peek_scale(surface, scaled)?;
                     false
                 }
-                DecorationWorkerCompletion::PreviewScaledImage { scaled } => {
-                    self.complete_preview_scale(scaled)?;
+                DecorationWorkerCompletion::PreviewScaledImage { asker, scaled } => {
+                    self.complete_preview_scale(asker, scaled)?;
                     false
                 }
                 // A page's picture just got sharp. Nothing about the document

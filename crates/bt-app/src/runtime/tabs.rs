@@ -1427,8 +1427,8 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(());
         };
         let profile = leaf.profile.clone();
-        // §7.1.4's ladder, the one `Restart shell` reads: a shell that never reported is in the
-        // folder it was put down in.
+        // Where the pane stands, the one `Restart shell` reads: its report, else its shell
+        // process's folder (T-CWD-FROM-PROCESS), else the folder it was put down in.
         let cwd = leaf.seed_place_for_a_new_shell();
         // The source profile *is* the target profile, so `cwd_for_spawn` has no
         // namespace to cross and the folder arrives exactly as the shell reported
@@ -1619,8 +1619,9 @@ impl<B: Backend> Runtime<'_, B> {
     /// a popup nothing can dismiss.
     ///
     /// Where the chooser opens is the same courtesy every other door shows: the
-    /// folder the pane you are looking at is standing in (`standing_folder`: its
-    /// last OSC 7 report, else the folder it was opened in), and failing
+    /// folder the pane you are looking at is standing in (`LeafSession::folder`:
+    /// its last OSC 7 report, else its shell process's folder, else the folder it
+    /// was opened in), and failing
     /// that the place a tab of the default profile would have started in anyway.
     /// The second half is asked of the profile rather than of this process,
     /// because "wherever Folio happens to be running from" is
@@ -1629,7 +1630,10 @@ impl<B: Backend> Runtime<'_, B> {
     pub(in crate::runtime) fn browse_for_new_tab_root(&mut self) {
         let start = self
             .focused()
-            .and_then(|leaf| leaf.session.standing_folder().map(Path::to_path_buf))
+            .and_then(|leaf| {
+                leaf.folder(&crate::pane_folder::SystemProcessFolders)
+                    .into_folder()
+            })
             .or_else(|| {
                 // `working_directory` and not the whole place: this is a Windows
                 // dialog, and that field is by construction the half of a
@@ -3020,7 +3024,9 @@ impl<B: Backend> Runtime<'_, B> {
                 // about ([`Runtime::row_adopt_fits`]) — so it is reported the way
                 // every refusal between a survey and a release is, by the gesture
                 // having done nothing.
-                self.seat_a_files_column(payload.path.display().to_string())?;
+                self.seat_a_files_column(crate::FilesRoot::known(
+                    payload.path.display().to_string(),
+                ))?;
             }
         }
         Ok(true)
@@ -3568,9 +3574,11 @@ impl<B: Backend> Runtime<'_, B> {
     /// only when a tab has no live shell left has the tab itself ended. That is
     /// the same rule §7.1.4 already gives closing — the last pane closing is the
     /// tab closing — read from the other direction.
-    pub(in crate::runtime) fn reap_exited_tabs(&mut self) -> Result<()> {
+    ///
+    /// `now` is the instant the reaper looks, read by the turn as it calls this: an exited
+    /// shell's age and an ended tab's wait for its saves (S-6b) are judged against it.
+    pub(in crate::runtime) fn reap_exited_tabs(&mut self, now: Instant) -> Result<()> {
         let active = self.window.active_tab;
-        let now = Instant::now();
         let mut exits = Vec::new();
         let mut active_exited_panes = Vec::new();
         let mut exited = Vec::new();
@@ -3703,12 +3711,30 @@ impl<B: Backend> Runtime<'_, B> {
         // Only the ones whose close is nothing to ask: a tab that still holds an
         // unsaved preview waits for the reader, and the question is never put
         // from here (ticket 58).
+        let ended = exited.clone();
         let exited = crate::exited_tabs_the_loop_may_close(
             &self.window.dirty_gate,
             &self.window.tabs,
             self.window.active_tab,
             exited,
         );
+        // **And the ones whose wait for saves on their way ran out** (S-6b): no
+        // question can be asked of a tab that closes itself, so each closes with
+        // its pool let go, and its late answers reach the sink.
+        let ran_out = self.window.exited_tab_waits.ran_out(
+            &self.window.dirty_gate,
+            &self.window.tabs,
+            self.window.active_tab,
+            &ended,
+            &exited,
+            now,
+        );
+        for &index in &ran_out {
+            self.window.tabs[index].preview_pool.clear();
+        }
+        let mut exited = exited;
+        exited.extend(ran_out);
+        exited.sort_unstable();
         let retired_tabs: BTreeSet<_> = exited.iter().copied().collect();
         settle_exit_dispositions(&mut exits, &retired_tabs, active, active_retires_panes);
         exit_diagnostics::say_shell_exits(exits.iter().map(|(_, exit)| exit), |line| {

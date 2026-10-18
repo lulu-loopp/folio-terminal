@@ -704,7 +704,8 @@ fn fraction_of(elapsed: Duration, whole: Duration) -> f32 {
 /// Ordinary Rust all the way down: no COM crosses this type, so it may be held
 /// by a pane, **moved between surfaces** and dropped on any thread — which is
 /// the property [`VideoSeats::rehome`] is built on and the property
-/// `bt_platform::video::engine::Engine` was written to have.
+/// `bt_platform::video::engine::Engine` was written to have. It ends through
+/// [`VideoSeat::shutdown`]; its drop waits for nothing.
 pub struct VideoSeat {
     engine: Engine,
     path: PathBuf,
@@ -1142,11 +1143,14 @@ impl VideoSeat {
         held
     }
 
-    /// **Stop, release the engine and join its thread**, now rather than at drop.
+    /// **Tell the engine to stop, and let it go** — its shutdown door
+    /// (T-DROP-DOORS, D-80), which waits for nothing.
     ///
-    /// The verb a surface calls when it closes or is handed a different file.
-    /// Idempotent, and `Drop` calls it, so a surface that forgets is not a
-    /// surface that leaks — §7.42 ⑦.
+    /// The verb a surface calls when it closes or is handed a different file, on
+    /// the window's own thread. Idempotent. A seat dropped without it drops its
+    /// engine, whose own `Drop` makes the same request and says the door was
+    /// skipped — §7.42 ⑦'s ledger still comes back to where it was, and the one
+    /// wait for an engine to leave is the process's, at exit.
     pub fn shutdown(&mut self) {
         self.engine.shutdown();
     }
@@ -1417,12 +1421,6 @@ fn paint_bar(
     )
 }
 
-impl Drop for VideoSeat {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-
 /// **`m:ss`, and `h:mm:ss` once there is an hour to say.**
 ///
 /// [`crate::preview::format_duration`] and not a second formatter: the facts
@@ -1616,18 +1614,14 @@ impl VideoSeats {
             .any(|seat| seat.bar_is_moving(now, motion))
     }
 
-    /// **Every seat shut down, with nothing left running.** The door §7.42 ⑦'s
-    /// exit protocol comes through when a window closes.
+    /// **Every seat shut down: each engine told to stop and let go of.** The door
+    /// §7.42 ⑦'s exit protocol comes through when a window closes
+    /// (`Runtime::let_go_of_this_window`, every road that ends a window); it
+    /// waits for nothing (T-DROP-DOORS, D-80).
     pub fn shutdown_all(&mut self) {
         for (_, mut seat) in std::mem::take(&mut self.seats) {
             seat.shutdown();
         }
-    }
-}
-
-impl Drop for VideoSeats {
-    fn drop(&mut self) {
-        self.shutdown_all();
     }
 }
 
