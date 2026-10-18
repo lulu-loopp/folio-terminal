@@ -25,6 +25,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- On Windows, saving over a recording or another file right after Folio has shown it is no longer refused because Folio still has the file open. <!-- zh: pending T-ANSWER-AFTER-THE-FILE-IS-CLOSED -->
 - When Folio cannot save your window layout (a full disk, a folder that became read-only), it tells you once and stops trying again every couple of seconds; it tries again at your next change and when you quit. <!-- zh: pending T-SESSION-WRITER-NO-TIMER-RETRY -->
 - A picture that could not be loaded is no longer read again and again while the window holds many other pictures. <!-- zh: pending T-PEEK-CACHE-QUESTION-RECORDS -->
 - A GIF caught while it was being written plays once the write finishes. <!-- zh: pending T-ANIMATION-RECORDS-BOUND -->

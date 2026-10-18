@@ -15733,3 +15733,24 @@ The class behind T-PEEK-SCALE-ADDRESS-BY-SURFACE's instance, under CONVENTIONSã€
 - The 2026-10-08 entry's sentence that *the product never waits on the ledger*: the product waits on it once, on its way out, inside `MediaQuiet`; tests still wait on it only through `engines_outstanding_reaching`.
 
 **Pinned by** `video::engine::tests::an_engine_dropped_without_its_door_says_so_once` and `every_engine_is_shut_down_before_the_process_leaves` (every road still settles the ledger, on the engine thread's own time); `hang_watch::window_waits_tests::every_bare_site_is_a_row_and_every_row_a_site` (a poll or join put back in `Engine::shutdown` is a new bare site); the door table `every_owner_door_is_refused_on_a_worker_and_admitted_only_in_its_phases` (`MediaQuiet`, Exiting).
+
+### 2026-10-18 â€” A lane answers only after its work has let go of the file it read (T-ANSWER-AFTER-THE-FILE-IS-CLOSED)
+
+**What a person meets.** On Windows, an editor that saves over a recording (or any file the window has just read) the moment Folio has shown it is no longer refused with "the file is being used by another process". The window's glance, its preview, its Files column, its palette index and its Git page let go of what they read before their answer is taken.
+
+**Why.** A CI run (39055489876) failed once: `runtime::preview::tests::a_set_aside_peek_answer_changes_nothing_on_the_window` rewrote a 64-byte `.mp4` right after the decoration lane's answer about it and met a sharing violation. Media Foundation used to open the file inside `MFCreateSourceReaderFromURL` and close it when the last of its own references to its byte stream went, on the platform's schedule. That can come after the reader has been released and after the answer was published. A decode given up on at `FIRST_FRAME_BUDGET` kept the file on its abandoned thread for as long as it ran.
+
+**The rule.** A worker lets go of every handle it took for a request (file, directory, child process and its pipes, watch registration) before that request's terminal is published, so a consumer that has the answer knows the job is over. The order is the code's, not a race. Nothing retries around a sharing violation, in the product or in a test. For video, `bt_platform::video::first_frame` now opens the file itself (`TheFile`, `MFCreateFile`), lends the decoding thread a reference to the stream, and closes the stream (`IMFByteStream::Close`) before it returns, answered or given up on. A closed stream is a closed file, whatever still holds a reference to it. Git now reaps a child killed past its time, or one that could not be waited for, and joins its pipe readers before the fault is answered. The lane suite has a new claim, `AnAnswerIsPublishedAfterItsResourcesAreReleased`: each execution holds a file the suite lent it, locked, while its work runs, and the moment the consumer finds the terminal nobody may hold it. Every `# completions` row of a lane that reads or writes a resource now says so.
+
+**What stays, and why.**
+- An animation's open answers with a cursor that streams the open file. The cursor is the answer, so it holds the file for as long as the window keeps the animation. The file is opened sharing reading, writing and deletion, so a writer is never refused by it.
+- A git verb whose hooks may outlive it (`GitHookPolicy::HooksMayOutlive`) leaves its pipes to a hook that inherited them, by that policy.
+- A watcher still inside the kernel past `DIR_WATCH_RETIRE_BUDGET` is let go with its handles, never closed under it (D-40).
+- On macOS a reader's open descriptor refuses no writer, and AVFoundation has no close to call. A frame decode given up on there keeps its descriptor until its thread ends.
+
+**Pinned by**
+- `bt_platform::video::tests::{a_closed_file_is_free_though_a_reader_still_holds_its_stream, a_frame_given_up_on_leaves_its_file_free, an_answered_frame_leaves_its_file_free}`
+- `computation_lane::tests::{an_answered_read_has_let_go_of_its_file, an_animations_answer_keeps_its_file_and_refuses_no_writer}`
+- `lane_contract_tests::an_answer_is_published_after_its_resources_are_released_and_one_published_first_is_red` and the every-lane suite
+- `git::tests::{a_child_killed_past_its_time_has_let_go_of_its_pipes_when_the_fault_is_answered, a_git_questions_answer_comes_back_with_git_gone_from_the_repository}`
+- One test each for the Files listing, the preview read, the index walk, the saved clipboard picture, the watch steward and the background picture (`test_support::nobody_holds`)
