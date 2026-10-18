@@ -3037,15 +3037,19 @@ pub(crate) fn scratch_png_named(tag: &str) -> PathBuf {
 /// refusal an editor saving over the file would meet. A Unix file has no such open: an open
 /// descriptor refuses no writer, no truncation and no unlink, so the equivalent fact is that an
 /// exclusive advisory lock (`flock`) is taken at once — what a lane that locks a file it reads
-/// would still be holding.
+/// would still be holding. A directory is asked the same, read rather than written.
 pub(crate) fn nobody_holds(file: &Path) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt as _;
+        // What lets a directory be opened at all; a file opens with it as without it.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let directory = file.is_dir();
         std::fs::OpenOptions::new()
             .read(true)
-            .write(true)
+            .write(!directory)
             .share_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
             .open(file)
             .is_ok()
     }
@@ -3053,7 +3057,7 @@ pub(crate) fn nobody_holds(file: &Path) -> bool {
     {
         std::fs::OpenOptions::new()
             .read(true)
-            .write(true)
+            .write(!file.is_dir())
             .open(file)
             .is_ok_and(|opened| opened.try_lock().is_ok())
     }

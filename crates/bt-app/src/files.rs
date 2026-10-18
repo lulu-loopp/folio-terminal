@@ -1828,6 +1828,39 @@ mod tests {
         assert_eq!(take_files_worker_notice(&mut pending), None);
     }
 
+    /// RED (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **a listing's answer arrives with its directory
+    /// already let go**: the real `bt-files-worker` lists a real folder, and the moment its answer
+    /// is in the channel nobody holds the folder (`test_support::nobody_holds`) — a rename or a
+    /// removal the person makes next is not refused by a read the column has finished with.
+    ///
+    /// MUTATION: leak a handle on the folder in `read_directory` (`std::mem::forget(std::fs::read_dir(path))`) — the answer arrives while
+    /// the directory is held, and the exclusive open is refused.
+    #[test]
+    fn a_listings_answer_arrives_with_its_directory_let_go() {
+        let dir = bt_testpath::temp_path("bt-files-answered");
+        std::fs::create_dir_all(dir.join("子 sub")).expect("a scratch directory");
+        std::fs::write(dir.join("a.txt"), b"a").expect("a file in it");
+        let events = crate::headless::LoopEvents::default();
+        let worker = FilesWorker::spawn(events.proxy()).expect("the worker starts");
+        assert!(worker.request(DirRequest {
+            window: winit::window::WindowId::from(1_u64),
+            host: FilesHost::Docked(LeafId {
+                tab: crate::TabId(1),
+                seat: crate::SeatId(1),
+            }),
+            key: String::new(),
+            path: dir.clone(),
+        }));
+        let answer = crate::lane::receive(&worker.responses, "the listing's answer");
+        let free = crate::test_support::nobody_holds(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            matches!(answer.outcome, DirOutcome::Listed(_)),
+            "the folder lists"
+        );
+        assert!(free, "and nobody holds it when the answer is in");
+    }
+
     #[test]
     fn a_real_directory_reads_sorted_and_without_the_platforms_hidden_names() {
         let dir = bt_testpath::temp_path("bt-files");

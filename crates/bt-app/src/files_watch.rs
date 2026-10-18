@@ -633,6 +633,41 @@ mod tests {
         assert_eq!(rig.watch.counts(), (1, 0), "and the folder is not heard");
     }
 
+    /// RED (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **a folder no longer wanted is let go before the
+    /// steward's next answer**: two folders are watched through the real kernel door; the reader
+    /// stops wanting one, and by the wake that brings the round's reports nobody holds it — its
+    /// watch was retired, its directory handle closed, on the worker before the publication.
+    ///
+    /// MUTATION: `std::mem::forget` a departed member in the steward's `serve_ear` instead of
+    /// retiring it — the wake comes while the folder is still held.
+    #[test]
+    fn a_folder_no_longer_wanted_is_let_go_before_the_stewards_answer() {
+        let mut rig = Rig::over(crate::watch_steward::Kernel);
+        let root = bt_testpath::temp_path("folio-files-watch-let-go");
+        let (gone, kept) = (root.join("走 gone"), root.join("留 kept"));
+        std::fs::create_dir_all(&gone).expect("make the first watched folder");
+        std::fs::create_dir_all(&kept).expect("make the second watched folder");
+        let both = BTreeSet::from([gone.clone(), kept.clone()]);
+        rig.sync(&both);
+        let armed = rig.sync_after_the_wake(&both, "both folders armed").armed;
+        assert_eq!(armed.len(), 2, "both folders are heard: {armed:?}");
+        let held_while_wanted = !crate::test_support::nobody_holds(&gone);
+        let one = BTreeSet::from([kept.clone()]);
+        rig.sync(&one);
+        rig.sync_after_the_wake(&one, "the round after the folder went");
+        let free = crate::test_support::nobody_holds(&gone);
+        drop(rig);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            held_while_wanted,
+            "the fixture's own precondition: a watched folder is held by its watch"
+        );
+        assert!(
+            free,
+            "a folder no longer wanted is let go before the answer"
+        );
+    }
+
     /// PIN (B5 design note (c)2, the first of its pair) — **an unheard folder is
     /// tried again once when a reader asks for it, and heard again once it is
     /// back.**

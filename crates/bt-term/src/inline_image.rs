@@ -4495,6 +4495,44 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
+    /// RED (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **a background picture is
+    /// decoded from a file already closed when the picture comes back**: the
+    /// `background-picture` worker hands the window what this returns, and at
+    /// that moment nothing holds the file — an exclusive open (Windows) or an
+    /// exclusive lock (Unix) is taken at once.
+    ///
+    /// MUTATION: leak a handle on the file in `decode_background_image` (`std::mem::forget(std::fs::File::open(path))`) — the
+    /// picture comes back while the file is held, and the exclusive open is
+    /// refused.
+    #[test]
+    fn a_background_picture_comes_back_with_its_file_closed() {
+        let directory = bt_testpath::temp_path("betterterminal-background-closed");
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("壁纸 wallpaper.png");
+        let plane: image::ImageBuffer<image::Luma<u8>, Vec<u8>> = image::ImageBuffer::new(8, 8);
+        plane.save_with_format(&path, ImageFormat::Png).unwrap();
+        let ground = decode_background_image(&path, (64, 64));
+        #[cfg(windows)]
+        let free = {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .share_mode(0)
+                .open(&path)
+                .is_ok()
+        };
+        #[cfg(not(windows))]
+        let free = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .is_ok_and(|opened| opened.try_lock().is_ok());
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(ground.is_ok(), "the picture decodes");
+        assert!(free, "and nothing holds its file when it comes back");
+    }
+
     /// PIN — **the resample target is the largest monitor, one scale on both
     /// axes, and never an upscale.**
     #[test]

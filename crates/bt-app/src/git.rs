@@ -5528,6 +5528,53 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
         assert_eq!(fault, Some(GitFault::TimedOut));
     }
 
+    /// PIN (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **a git question's answer comes back with git
+    /// gone from the repository**: the work `bt-git-worker` runs for one question ([`answer`],
+    /// whose return is what the worker sends) asks a real git the status of a real repository,
+    /// and when it returns the child is reaped — no `index.lock` is left for the person's own git
+    /// to trip over, and nobody holds the index. The worker itself is not started here: it waits
+    /// for the process's program walk to say where git is (`GIT_LOCATION`), a slot the whole test
+    /// binary shares.
+    ///
+    /// No mutation turns this red at will: git's own exit is what removes its lock, and the
+    /// child is waited for before any answer is built (`run_git_with_input`).
+    #[test]
+    fn a_git_questions_answer_comes_back_with_git_gone_from_the_repository() {
+        let git = real_git();
+        let root = bt_testpath::temp_path("folio-git-answered");
+        std::fs::create_dir_all(&root).expect("a scratch folder can be made");
+        let run = |arguments: &[&str]| {
+            let owned: Vec<&OsStr> = arguments.iter().map(OsStr::new).collect();
+            run_git(git_command(&git, &root, &owned), GIT_COMMAND_TIMEOUT)
+                .expect("the scratch repository is built with the same git under test")
+        };
+        run(&["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("改动 change.txt"), b"one").expect("a file to stage");
+        run(&["add", "--", "改动 change.txt"]);
+        std::fs::write(root.join("改动 change.txt"), b"two").expect("a change to report");
+        let answer = answer(
+            &git,
+            &GitQuestion::Status { root: root.clone() },
+            GIT_COMMAND_TIMEOUT,
+            RECORDED_AT,
+        );
+        let index = root.join(".git").join("index");
+        let held = [
+            index.with_extension("lock").exists(),
+            !crate::test_support::nobody_holds(&index),
+        ];
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            matches!(answer, GitAnswer::Status { outcome: Ok(_), .. }),
+            "the status is answered"
+        );
+        assert_eq!(
+            held,
+            [false, false],
+            "no lock left and nobody holds the index"
+        );
+    }
+
     /// PIN (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **a contained child killed past its time has
     /// had both its pipes let go when the fault is answered**: its tree ended with it, so every
     /// writer is closed, and the readers are joined before `TimedOut` leaves — no reader still
