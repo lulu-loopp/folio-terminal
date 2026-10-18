@@ -215,7 +215,9 @@ pub struct LaunchPipe {
     said: mpsc::Receiver<io::Result<()>>,
 }
 
-// SAFETY: the only raw handle in this value is the stop event. Setting an event is thread-safe by
+// SAFETY: `said` is an `mpsc::Receiver`, `!Sync` because two threads receiving at once would race;
+// nothing receives on it after `start` returns but `retire_within`, which takes the value by `self`
+// and runs once on the sole owner. The only raw handle in this value is the stop event. Setting an event is thread-safe by
 // contract and is the only thing done with it before `retire_within`, which runs once on the sole owner
 // and joins the listener before closing it (a drop without it never closes it).
 unsafe impl Sync for LaunchPipe {}
