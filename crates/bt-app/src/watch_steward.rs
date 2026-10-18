@@ -141,11 +141,16 @@ pub trait Door: Send + Sync {
     ) -> std::io::Result<Box<dyn Held>>;
 }
 
-/// **A started watch, held by the worker**: dropping it stops it (on the worker), and an end it
-/// came to on its own is taken once.
+/// **A started watch, held by the worker**: it is retired through its door, on the worker
+/// ([`Held::retire_within`]), and an end it came to on its own is taken once.
 pub trait Held: Send {
     /// The error that ended the watch on its own, handed over once.
     fn take_failure(&mut self) -> Option<std::io::Error>;
+
+    /// **Retire the watch through its door** (T-DROP-DOORS, D-40): stop it, and wait — up to
+    /// `bound`, on the worker `ctx` lends — for its thread to leave. Answers whether it did; one
+    /// that did not is let go with what it holds.
+    fn retire_within(self: Box<Self>, ctx: &WorkerCtx, bound: std::time::Duration) -> bool;
 }
 
 /// **The platform's door**: `bt_platform::DirWatch`, by depth.
@@ -172,6 +177,10 @@ impl Door for Kernel {
 impl Held for bt_platform::DirWatch {
     fn take_failure(&mut self) -> Option<std::io::Error> {
         bt_platform::DirWatch::take_failure(self)
+    }
+
+    fn retire_within(self: Box<Self>, ctx: &WorkerCtx, bound: std::time::Duration) -> bool {
+        bt_platform::DirWatch::retire_within(*self, ctx, bound)
     }
 }
 
@@ -488,7 +497,7 @@ impl WatchSteward {
             };
             let mut reports = Vec::new();
             if ended {
-                self.take_the_ends(&mut reports);
+                self.take_the_ends(ctx, &mut reports);
             }
             for round in rounds {
                 self.serve_ear(ctx, round, &mut reports);
@@ -500,8 +509,9 @@ impl WatchSteward {
         }
     }
 
-    /// Every held watch that ended on its own becomes `Failed`, and its watch is dropped here.
-    fn take_the_ends(&mut self, reports: &mut Vec<(Ear, PathBuf, MemberReport)>) {
+    /// Every held watch that ended on its own becomes `Failed`, and its watch is retired here.
+    fn take_the_ends(&mut self, ctx: &WorkerCtx, reports: &mut Vec<(Ear, PathBuf, MemberReport)>) {
+        let lane = self.lane;
         for ((ear, path), member) in &mut self.members {
             let Member::Armed(held) = member else {
                 continue;
@@ -510,10 +520,13 @@ impl WatchSteward {
                 continue;
             };
             let cause = Cause::of(&error);
-            (self.lane.note)(&unheard_line(path, &cause));
+            (lane.note)(&unheard_line(path, &cause));
             reports.push((*ear, path.clone(), MemberReport::Failed(cause.clone())));
-            // The ended watch is dropped here, on the worker: its thread has already finished.
-            *member = Member::Failed(cause);
+            // The ended watch is retired here, on the worker, through its door: its thread has
+            // already finished, so the door's join is the formality the bound never reaches.
+            if let Member::Armed(ended) = std::mem::replace(member, Member::Failed(cause)) {
+                retire(lane, ctx, path, ended);
+            }
         }
     }
 
@@ -538,9 +551,11 @@ impl WatchSteward {
             .cloned()
             .collect();
         for key in departed {
-            // The drop — the stop and the join — happens here, on the worker. A
-            // report the ear never drained goes with it.
-            self.members.remove(&key);
+            // The retirement — the stop and the bounded join, through the watch's door —
+            // happens here, on the worker. A report the ear never drained goes with it.
+            if let Some(Member::Armed(held)) = self.members.remove(&key) {
+                retire(self.lane, ctx, &key.1, held);
+            }
             lock(&REPORTS).remove(&key);
         }
         // The ear closed: every member went above, and there is nothing to report.
@@ -616,8 +631,26 @@ impl WatchSteward {
             }
         };
         let report = member.report();
-        self.members.insert((ear, path.to_path_buf()), member);
+        if let Some(Member::Armed(replaced)) =
+            self.members.insert((ear, path.to_path_buf()), member)
+        {
+            retire(lane, ctx, path, replaced);
+        }
         report
+    }
+}
+
+/// **One watch retired through its door, on the worker** (T-DROP-DOORS, D-40), within
+/// [`bt_platform::DIR_WATCH_RETIRE_BUDGET`]; a watcher that does not leave in time is let go
+/// with what it holds, and `diagnostics.log` hears it once.
+fn retire(lane: &Steward, ctx: &WorkerCtx, path: &Path, held: Box<dyn Held>) {
+    if !held.retire_within(ctx, bt_platform::DIR_WATCH_RETIRE_BUDGET) {
+        (lane.note)(&format!(
+            "watch steward: the watcher of {} did not leave within {:?} of being told to stop; \
+             it is let go",
+            path.display(),
+            bt_platform::DIR_WATCH_RETIRE_BUDGET
+        ));
     }
 }
 
@@ -690,7 +723,10 @@ pub(crate) mod fake {
         attempts: BTreeMap<PathBuf, usize>,
         live: BTreeSet<PathBuf>,
         ended: BTreeMap<PathBuf, std::io::Error>,
+        /// Watches retired through their door.
         drops: usize,
+        /// Watches dropped without their door.
+        unretired: usize,
         hold_starts: bool,
         hold_drops: bool,
         /// Starts and drops in progress now.
@@ -765,7 +801,13 @@ pub(crate) mod fake {
             self.state().live.iter().cloned().collect()
         }
 
-        /// Wait until `count` watches have been dropped in all.
+        /// How many watches were dropped without their door — none, on every road the steward
+        /// takes.
+        pub(crate) fn unretired(&self) -> usize {
+            self.state().unretired
+        }
+
+        /// Wait until `count` watches have been retired in all.
         pub(crate) fn wait_for_drops(&self, count: usize) {
             self.wait_until("the drops", |state| state.drops >= count);
         }
@@ -883,6 +925,7 @@ pub(crate) mod fake {
             Ok(Box::new(FakeWatch {
                 door: self.clone(),
                 path: path.to_path_buf(),
+                retired: false,
             }))
         }
     }
@@ -891,16 +934,18 @@ pub(crate) mod fake {
     struct FakeWatch {
         door: FakeDoor,
         path: PathBuf,
+        /// Whether its door was called.
+        retired: bool,
     }
 
     impl Held for FakeWatch {
         fn take_failure(&mut self) -> Option<std::io::Error> {
             self.door.state().ended.remove(&self.path)
         }
-    }
 
-    impl Drop for FakeWatch {
-        fn drop(&mut self) {
+        /// The retirement: held where it happens while the test says so, then counted.
+        fn retire_within(mut self: Box<Self>, _ctx: &WorkerCtx, _bound: Duration) -> bool {
+            self.retired = true;
             self.door.state().drop_threads.push(thread_name());
             self.door
                 .pass(|state| &mut state.dropping, |state| state.hold_drops);
@@ -914,6 +959,16 @@ pub(crate) mod fake {
             state.live.remove(&self.path);
             state.drops += 1;
             self.door.0.changed.notify_all();
+            true
+        }
+    }
+
+    impl Drop for FakeWatch {
+        /// A watch dropped without its door is counted, so a road that forgets it is seen.
+        fn drop(&mut self) {
+            if !self.retired {
+                self.door.state().unretired += 1;
+            }
         }
     }
 }
@@ -1169,6 +1224,46 @@ mod tests {
             door.threads().1,
             vec!["watch-steward".to_owned(), "watch-steward".to_owned()]
         );
+    }
+
+    /// RED (T-DROP-DOORS, D-40) — **every watch the steward lets go of is retired through its
+    /// door, on the steward: a member that departs, one whose watch ended on its own, and an ear
+    /// that closes.** The fake counts a watch dropped without its door, and there is none.
+    ///
+    /// MUTATION: put `self.members.remove(&key);` back in `serve_ear` (the drop for the door)
+    /// and the departure is a drop without its door; put `*member = Member::Failed(cause);` back
+    /// in `take_the_ends` and the end is.
+    #[test]
+    fn every_watch_the_steward_lets_go_of_is_retired_through_its_door() {
+        let door = FakeDoor::default();
+        let (steward, wakes) = steward_over(&door);
+        let mut ear = quiet_ear(steward);
+        ear.want(
+            &BTreeSet::from([folder("留"), folder("走"), folder("终")]),
+            BTreeSet::new(),
+        );
+        wait_for_a_wake(&wakes, "the arming");
+        let _ = states(&ear);
+        ear.want(
+            &BTreeSet::from([folder("留"), folder("终")]),
+            BTreeSet::new(),
+        );
+        door.wait_for_drops(1);
+        door.end(&folder("终"));
+        door.wait_for_drops(2);
+        drop(ear);
+        door.wait_for_drops(3);
+        assert!(
+            door.live().is_empty(),
+            "every watch is gone: {:?}",
+            door.live()
+        );
+        assert_eq!(
+            door.unretired(),
+            0,
+            "a watch the steward let go of was dropped without its door"
+        );
+        assert_eq!(door.threads().1, vec!["watch-steward".to_owned(); 3]);
     }
 
     /// PIN (B5 design note, revisions (b)4, (c)3 and (e)3) — **only the steward starts or drops a

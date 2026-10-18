@@ -121,5 +121,17 @@ fn main() {
         );
         engine.shutdown();
     }
-    bt_platform::video::shutdown_media_session();
+    // **The media session's way out is an owner-thread door** (`doors::MediaQuiet`): this
+    // probe's `main` enters as the window thread and goes on its way out to be admitted it,
+    // and the door waits for the engines shut down above to leave before `MFShutdown`.
+    {
+        use bt_platform::admission::{admitted, doors, enter_window_thread, exiting};
+        assert!(
+            enter_window_thread(),
+            "this thread enters as the window thread"
+        );
+        assert!(exiting(), "and is on its way out");
+        admitted::<doors::MediaQuiet, _>(bt_platform::video::shutdown_media_session)
+            .expect("admitted on the way out");
+    }
 }

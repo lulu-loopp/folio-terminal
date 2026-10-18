@@ -139,7 +139,7 @@ impl<B: Backend> Runtime<'_, B> {
         }
         self.ask_for_file_indexes();
         let candidates = self.palette_candidates();
-        let note = self.palette_files_note();
+        let files_note = self.palette_files_note();
         // **The composed reading and not the buffer** (user ruling 2026-09-05):
         // a composition in progress is part of what the box is asking, so a
         // Chinese query narrows the list while it is being typed rather than
@@ -150,7 +150,7 @@ impl<B: Backend> Runtime<'_, B> {
             .as_ref()
             .map(|state| state.query().into_owned())
             .unwrap_or_default();
-        let listing = palette::arrange(&candidates, &query, note);
+        let listing = palette::arrange(&candidates, &query, files_note);
         if let Some(state) = self.window.palette.as_mut() {
             state.refill(listing, requeried);
         }

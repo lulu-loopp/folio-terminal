@@ -37,6 +37,7 @@
 //! `lastSession` (§7.1.4) rather than being written down as a piece of UI.
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, FLOAT_WINDOW_BORDER_LOGICAL_PX, FLOAT_WINDOW_RADIUS_LOGICAL_PX,
@@ -1202,6 +1203,18 @@ pub const GATE_FOCUSED_ANSWER: GateAnswer = GateAnswer::Cancel;
 pub fn gate_title_text() -> &'static str {
     crate::i18n::Text::GateTitleUnsaved.text()
 }
+/// The title of a close's question when the close would lose no edits, only
+/// saves that have not landed (S-6b, the coordinator's ruling on R1).
+#[must_use]
+pub fn gate_save_not_landed_title() -> &'static str {
+    crate::i18n::Text::GateTitleSaveNotLanded.text()
+}
+/// The line a close's question adds when it is asked at the end of its wait,
+/// a save still on its way to the disk (S-6b).
+#[must_use]
+pub fn gate_save_still_on_its_way_text() -> &'static str {
+    crate::i18n::Text::GateSaveStillOnItsWay.text()
+}
 /// The title of the gate in front of a working-tree discard (R14).
 ///
 /// It says *changes*, not *unsaved changes*, and the difference is the whole
@@ -1313,6 +1326,55 @@ pub fn gate_message(names: &[String]) -> String {
 pub struct DirtyGate {
     open: Option<GateRequest>,
     hover: Option<GateTarget>,
+    /// **A close waiting for the saves it would otherwise ask about** (S-6b):
+    /// held while they are on their way to the disk, and decided on their
+    /// answers — never a question while the answer is still coming.
+    waiting: Option<CloseWait>,
+    /// Whether the question up was put at the end of a wait, a save still on
+    /// its way: it says so ([`Self::lines`]).
+    after_the_wait: bool,
+}
+
+/// **How long a close waits for the saves it is about** (S-6b): the budget this
+/// process gives one session write to land, [`crate::persist::SESSION_SAVE_BUDGET`]
+/// — a writer's budget, derived and not written beside it; the storage worker
+/// itself has no bound on a write it is inside. A save of
+/// an ordinary document answers within a frame or two (S-6a measured a median
+/// of 3.5 ms, the slowest of sixty 56 ms); one still unanswered past the bound
+/// is a write the worker is stuck inside (a network share's flush), and the
+/// close asks as it always did, saying a save is still on its way. Read on the
+/// turn ([`DirtyGate::waits_until`] joins the loop's wake-up), never waited for
+/// on the thread: the answer itself wakes the loop (`DocumentsAnswered`).
+pub(crate) const CLOSE_WAITS_FOR_A_SAVE: Duration = crate::persist::SESSION_SAVE_BUDGET;
+
+/// **A close the gate holds while the saves it is about are on their way**
+/// (S-6b; design note side-effects-contract (b)8's close rule).
+///
+/// What the person sees meanwhile is the pane, the tab, the window — still
+/// there, nothing asked. On every turn the wait is looked at
+/// (`Runtime::settle_close_wait`): when every buffer it waits for is decided,
+/// the close is re-run from the top, as an answered question re-runs it, and
+/// finds nothing to ask — or asks, when a save did not land and the pane has
+/// said why. An edit while it waits withdraws it; a conflict withdraws it and
+/// leaves the pane to say the conflict; past [`Self::until`] the question is
+/// put as it always was, with one line saying a save is still on its way, and
+/// the save that lands later reaches the sink if its buffer is gone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CloseWait {
+    /// The close, as it is re-run once the saves have answered.
+    pub(crate) request: GateRequest,
+    /// **The tab a pane's or a tab's close is about**, by identity: a tab can
+    /// move in the strip, or another be brought to the front, while the close
+    /// waits, and the re-run is made only on the tab it was asked on.
+    pub(crate) tab: Option<crate::TabId>,
+    /// The buffers it waits for.
+    pub(crate) awaited: Vec<crate::preview::Awaited>,
+    /// When it stops waiting and asks ([`CLOSE_WAITS_FOR_A_SAVE`] after it began).
+    pub(crate) until: Instant,
+    /// **Whether the saves are the shut's own** — the question answered
+    /// `Save all`: the window goes once every one of them has landed, and
+    /// stays, naming the ones that did not, otherwise.
+    pub(crate) saving: bool,
 }
 
 /// **What putting a question to the gate came to** (ticket 58).
@@ -1336,8 +1398,13 @@ pub enum GateRaise {
     Raised,
     /// Nothing this request would lose: go on.
     NothingToAsk,
-    /// Another question is already up. Stop, and leave it as it is.
+    /// Another question is already up, or a close is waiting for its saves.
+    /// Stop, and leave it as it is.
     Busy,
+    /// **What this close would lose is on its way to the disk** (S-6b): the
+    /// close waits for the saves' answers ([`CloseWait`]) and is re-run then.
+    /// Stop.
+    Waiting,
 }
 
 impl GateRaise {
@@ -1672,6 +1739,60 @@ impl DirtyGate {
     pub fn open(&mut self, request: GateRequest) {
         self.open = Some(request);
         self.hover = None;
+        self.after_the_wait = false;
+    }
+
+    /// **Put `request` at the end of a close's wait** (S-6b): the question as
+    /// it always was, saying a save is still on its way.
+    pub(crate) fn open_after_the_wait(&mut self, request: GateRequest) {
+        self.open = Some(request);
+        self.hover = None;
+        self.after_the_wait = true;
+    }
+
+    /// **The lines under the title of the question up** — the request's own
+    /// ([`GateRequest::lines`]), and, when it was put at the end of a close's
+    /// wait, one more: a save is still on its way (S-6b).
+    pub fn lines(&self, names: &[String]) -> Vec<String> {
+        let Some(request) = &self.open else {
+            return Vec::new();
+        };
+        let mut lines = request.lines(names);
+        if self.after_the_wait {
+            lines.push(gate_save_still_on_its_way_text().to_owned());
+        }
+        lines
+    }
+
+    /// **Hold a close while its saves are on their way** (S-6b). Only a gate
+    /// that is free holds one ([`Self::verdict`]).
+    pub(crate) fn wait(&mut self, wait: CloseWait) {
+        debug_assert!(!self.is_busy(), "a busy gate holds no second close");
+        self.waiting = Some(wait);
+    }
+
+    /// The close waiting for its saves, if one is — a test's look at it.
+    #[cfg(test)]
+    pub(crate) fn waiting(&self) -> Option<&CloseWait> {
+        self.waiting.as_ref()
+    }
+
+    /// The close that waits, taken off the gate: to be looked at, and held
+    /// again ([`Self::wait`]) if it goes on waiting.
+    pub(crate) fn take_wait(&mut self) -> Option<CloseWait> {
+        self.waiting.take()
+    }
+
+    /// When the loop must come back to end a close's wait, if one waits — a
+    /// bound, never a look: every answer wakes the loop itself.
+    pub(crate) fn waits_until(&self) -> Option<Instant> {
+        self.waiting.as_ref().map(|wait| wait.until)
+    }
+
+    /// Whether a question is up or a close waits: either way no second request
+    /// may replace it or slip past it (ticket 58).
+    pub(crate) fn is_busy(&self) -> bool {
+        self.open.is_some() || self.waiting.is_some()
     }
 
     /// **What putting a request that would lose `at_risk` would answer**,
@@ -1682,7 +1803,7 @@ impl DirtyGate {
     /// would lose anything — may replace it or slip past it. Then an empty list
     /// is nothing to ask.
     pub fn verdict(&self, at_risk: &[String]) -> GateRaise {
-        if self.is_open() {
+        if self.is_busy() {
             GateRaise::Busy
         } else if at_risk.is_empty() {
             GateRaise::NothingToAsk
@@ -1705,6 +1826,7 @@ impl DirtyGate {
     /// Put it away and hand back what it was asking about.
     pub fn take(&mut self) -> Option<GateRequest> {
         self.hover = None;
+        self.after_the_wait = false;
         self.open.take()
     }
 

@@ -16,13 +16,13 @@ use std::time::Duration;
 
 /// The two halves of the count, read and written together under one lock.
 #[derive(Clone, Copy)]
-struct Counts {
+pub(crate) struct Counts {
     started: u64,
     shut_down: u64,
 }
 
 impl Counts {
-    fn outstanding(self) -> u64 {
+    pub(crate) fn outstanding(self) -> u64 {
         self.started.saturating_sub(self.shut_down)
     }
 }
@@ -44,8 +44,16 @@ static LEDGER: Ledger = Ledger {
 
 /// The counts. A poisoned lock means nothing here: what it guards is two
 /// integers that are only ever added to, so the value inside is the truth.
-fn counts() -> MutexGuard<'static, Counts> {
+pub(crate) fn counts() -> MutexGuard<'static, Counts> {
     LEDGER.counts.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// **What every movement of the counts is announced on** — for the one wait the
+/// product makes on them, the way out's (`video::shutdown_media_session`, door
+/// `MediaQuiet`), which holds that wait in its own body.
+#[cfg(windows)]
+pub(crate) fn moved() -> &'static Condvar {
+    &LEDGER.moved
 }
 
 /// Move the counts and tell every waiter.
@@ -89,7 +97,7 @@ pub(crate) fn note_engine_shut_down() {
 ///
 /// Tests only: this crate's, and those of a crate that names the
 /// `trust-harness` feature on its dev-dependency (`bt-app`'s). The product
-/// never waits on the ledger.
+/// waits on the ledger once, on its way out, inside its admitted door.
 #[cfg(any(test, feature = "trust-harness"))]
 pub(crate) fn outstanding_reaching(target: u64, patience: Duration) -> u64 {
     let (counts, _) = LEDGER

@@ -71,6 +71,12 @@ impl LaunchPipe {
     pub fn name(&self) -> &str {
         match self._never {}
     }
+
+    /// The door the real arms retire their endpoint through (T-DROP-DOORS). Unreachable.
+    pub fn retire_within(self, bound: std::time::Duration) -> bool {
+        let _ = bound;
+        match self._never {}
+    }
 }
 
 /// The name a launch endpoint for this data directory would have.
