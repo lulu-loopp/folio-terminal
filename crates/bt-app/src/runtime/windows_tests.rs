@@ -1543,10 +1543,16 @@ fn a_quit_pending_beside_a_closes_question_leaves_the_question_alone() {
         .dirty_gate
         .open(restore::GateRequest::CloseTab(0));
     quitting.quit_with_save();
-    let raised = quitting
-        .runtime(1)
-        .raise_dirty_gate(restore::GateRequest::Shut)
-        .expect("the close is asked");
+    let raised = {
+        let runtime = quitting.runtime(1);
+        let window = &mut *runtime.window;
+        crate::raise_dirty_gate_over(
+            &mut window.dirty_gate,
+            &window.tabs,
+            window.active_tab,
+            restore::GateRequest::Shut,
+        )
+    };
     assert_eq!(
         raised,
         restore::GateRaise::Busy,
