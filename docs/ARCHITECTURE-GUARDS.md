@@ -344,17 +344,19 @@ statement's or a match arm's `#[cfg]` the arms rule out), `Generated` (a derive'
 does not hold — a macro-generated one —, a method a stated type does not declare), `Cutoff` (a
 chain past the hop limit) and `Unparsed`. A first-party impl of a foreign trait runs only through
 an implicit call (a `Drop` at a scope's end, an operator, `?`, `for`) or a foreign callback, so
-`Reach::implicit` lists every admitted one by trait — `impl Drop for ComputationLane` among them —
-for a guard to review. The module doc carries the grammar table and the kinds.
+`Reach::implicit` lists every admitted one by trait — `impl Drop for ComputationLane` among
+them — for a guard to review. The module doc carries the grammar table and the kinds.
 
 How a guard uses it: build the resolver once over the packages it judges, with `Arms` saying which
 `cfg` arms count (the default is the product as `Compilation` reads it; bt-app passes its feature
 evaluation); turn its ledger's rows into roots and boundary items; walk; judge `reached`,
 `foreign` (by path) and `unresolved` (by kind), failing closed on what it has not reviewed. A
 guard that follows an unresolved edge on its own stated rule passes it to `walk_following`, and
-the edge stays in `unresolved` all the same. Where and what to do: `crates/bt-source/tests/call_graph.rs`
-holds a fixture per grammar row and per kind (`tests/fixtures/call_graph/`), each red under a named
-mutation, and prints the walk's counts over the real tree (`CALL_GRAPH_REAL_TREE`; not a timing — the timing-bound list only shrinks). When a guard
+the edge stays in `unresolved` all the same. Where and what to do:
+`crates/bt-source/tests/call_graph.rs` holds a fixture per grammar row and per kind
+(`tests/fixtures/call_graph/`), each red under a named mutation, and prints the walk's counts over
+the real tree (`CALL_GRAPH_REAL_TREE`; not a timing — the timing-bound list only shrinks). When a
+guard
 needs a shape the grammar does not have, the grammar is widened in a ticket of its own, with its
 fixture; a shape is never resolved by a guess.
 
@@ -406,12 +408,12 @@ block; an `if let`/`while let` binding, each `let` of a chain included, from the
 `let` through the later operands and the body; a match-arm pattern, and each `let` of its guard
 from the end of that `let`, through the arm; a `for` or closure binding over its body), the
 scopes read by parsing the function body with `syn`, and a product body that does not parse
-fails the test by name; a binding in a closed block or after the call does not shadow. What is
-not followed: a
-stored closure, a function pointer, `<X as Trait>::m`, a type written through an alias, a
-standard or third-party trait object (and a foreign supertrait's methods, even on a
-first-party implementing type), and an untyped receiver whose method name is shared; the call
-graph marks each of them as an unresolved edge, and the reach leaves them out.
+fails the test by name; a binding in a closed block or after the call does not shadow. The call
+graph also resolves `<X as Trait>::m` (to `X`'s impl, or the trait's default) and a type written
+through an alias (followed to what it names on every admitted arm). What is not followed: a stored
+closure, a function pointer, a standard or third-party trait object (and a foreign supertrait's
+methods, even on a first-party implementing type), and an untyped receiver whose method name is
+shared; the call graph marks each of them as an unresolved edge, and the reach leaves them out.
 When red, give the new answer, lane, thread or registry row its ledger row (or
 correct the row the code moved past); a status names the D-row or registry row
 that repairs it and only ever becomes `conforms` — never mark a row conforming
