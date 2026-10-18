@@ -1920,6 +1920,9 @@ pub(crate) enum Failure {
     WithdrawnStaysInLine { in_line: usize },
     /// The lane declares withdrawal and gives the suite no reading of its line.
     LineUnobserved,
+    /// A request was refused at round `round` of `rounds`, every request before it withdrawn: a
+    /// withdrawn request kept its place.
+    RefusedAfterWithdrawals { round: usize, rounds: usize },
 }
 
 /// A [`Failure`]'s kind, which is what [`EXPECTED_FAILURES`] pins: the counts beside it depend on
@@ -1963,6 +1966,7 @@ pub(crate) enum FailureKind {
     CancelledUndeclared,
     WithdrawnStaysInLine,
     LineUnobserved,
+    RefusedAfterWithdrawals,
 }
 
 #[cfg(test)]
@@ -2005,6 +2009,7 @@ impl Failure {
             Self::CancelledUndeclared { .. } => FailureKind::CancelledUndeclared,
             Self::WithdrawnStaysInLine { .. } => FailureKind::WithdrawnStaysInLine,
             Self::LineUnobserved => FailureKind::LineUnobserved,
+            Self::RefusedAfterWithdrawals { .. } => FailureKind::RefusedAfterWithdrawals,
         }
     }
 }
@@ -3385,9 +3390,9 @@ fn a_withdrawn_request_leaves_the_line(run: &mut Run<'_>) -> Result<(), Failure>
                 let (asked, _) = run.submit(0, question);
                 let Some(ticket) = asked.ticket else {
                     run.lane.gate().release();
-                    return Err(Failure::BoundBroken {
-                        declared: rounds,
-                        observed: question as usize,
+                    return Err(Failure::RefusedAfterWithdrawals {
+                        round: question as usize,
+                        rounds,
                     });
                 };
                 run.lane.withdraw(0, ticket);

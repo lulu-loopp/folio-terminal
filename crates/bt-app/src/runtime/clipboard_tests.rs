@@ -840,12 +840,11 @@ fn a_paste_past_its_deadline_is_cancelled_and_the_held_keys_go_in_order() {
 }
 
 /// RED (T-CLIPBOARD-LANE; (c)4; round 2) — **held input past the cap cancels the paste and goes in
-/// order, each write as it was typed**: a commit, then one that would take what the pane holds
-/// past `bt_pty::PTY_INPUT_RING_BYTES`, then a key — on the turn the cap is passed the paste is
-/// withdrawn and the three are offered to the shell in their order, each as its own write: the
-/// first and the key are taken, and the flood is refused exactly as the pane would have refused it
-/// with no paste in the way (it does not fit beside the first), its one line said by the pane's
-/// own door. Nothing is offered as one joined write that the pane would refuse whole.
+/// order, each write as it was typed**: a commit, then a flood larger than the pane's input ring
+/// on its own (`bt_pty::PTY_INPUT_RING_BYTES`), then a key — on the turn the cap is passed the
+/// paste is withdrawn and the three are offered to the shell as a burst, in their order, each as
+/// its own write: the first and the key are taken, and the flood, which does not fit beside the
+/// first, is refused and lost, its one line said by the pane's own door.
 ///
 /// MUTATION: make `PasteHold::over_the_cap` answer `false` — the paste stays owed and nothing is
 /// sent (`""`).
@@ -880,6 +879,107 @@ fn held_input_over_the_cap_cancels_the_paste_and_goes_in_order() {
     assert_eq!(sent_to_the_shell(&mut folio, 0), "中文z");
     assert_eq!(lane.sunk(), [crate::lane::Terminal::Cancelled]);
     hold.worker_hold().release();
+}
+
+/// RED (T-CLIPBOARD-LANE round 3) — **a write that fits alone but not beside the held writes
+/// before it is lost at the release**: two commits, each smaller than the pane's input ring, that
+/// together pass it, and a key. On the turn the cap is passed the paste is withdrawn and what was
+/// held goes as a burst in that one turn: the first commit and the key are taken, the second does
+/// not fit beside the first and is refused, with one line — where, unheld, the two would have
+/// reached the shell spread over the paste's second, and the shell could have read the first
+/// before the second came. What the person sees is what the release really does, not "nothing is
+/// lost".
+///
+/// MUTATION: make `PasteHold::over_the_cap` answer `false` — the paste stays owed and nothing is
+/// sent (`""`).
+#[test]
+fn a_write_that_fits_alone_but_not_beside_the_held_writes_is_lost_at_the_release() {
+    let mut folio = a_window_pasting("clipboard-lane-cap-burst", "粘贴 never");
+    let lane = recording_lane(
+        &mut folio,
+        &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
+    );
+    let hold = folio.window.window.clipboard.clone();
+    hold.worker_hold().hold();
+    chord(&mut folio, "v", KeyCode::KeyV);
+    hold.worker_hold()
+        .wait_standing("the paste on the clipboard lane's worker");
+    let ring = bt_pty::PTY_INPUT_RING_BYTES.get();
+    let first = "汉".repeat(ring / 6);
+    let second = "字".repeat(ring / 6 + 4);
+    assert!(
+        second.len() <= ring && first.len() + second.len() > ring,
+        "the fixture's own precondition: the second fits alone and not beside the first"
+    );
+    commit(&mut folio, &first);
+    commit(&mut folio, &second);
+    type_key(&mut folio, "z", KeyCode::KeyZ);
+    let asked = folio
+        .runtime()
+        .window
+        .clipboard
+        .pastes
+        .first()
+        .map(|owed| owed.asked_at)
+        .expect("a paste is owed");
+    folio
+        .runtime()
+        .settle_clipboard(asked)
+        .expect("the turn settles the clipboard");
+    assert_eq!(sent_to_the_shell(&mut folio, 0), format!("{first}z"));
+    assert_eq!(lane.sunk(), [crate::lane::Terminal::Cancelled]);
+    hold.worker_hold().release();
+}
+
+/// RED (T-CLIPBOARD-LANE round 3) — **a paste reads the clipboard as it stood at its press**: with
+/// the worker busy, `Ctrl+C` (the first copy), `Ctrl+V`, `Ctrl+C` (the second copy) — the second
+/// copy does not replace the first, because a paste was asked between them: it queues behind the
+/// paste, the paste pastes the first copy's text, and the clipboard ends holding the second's.
+///
+/// MUTATION: in `Runtime::submit_clipboard_write`, let a newer copy replace the older one whatever
+/// was asked between them (`replaces` always `true`) — the paste reads the clipboard as it was
+/// before the first copy (`旧 old`).
+#[test]
+fn a_paste_between_two_copies_reads_the_first_and_the_second_queues_behind_it() {
+    let mut folio = a_window_pasting("clipboard-lane-copy-paste-copy", "旧 old");
+    let hold = folio.window.window.clipboard.clone();
+    hold.worker_hold().hold();
+    // Something already on the worker, so every request below waits in its line.
+    let door: std::sync::Arc<dyn crate::clipboard_lane::ClipboardDoor> =
+        std::sync::Arc::new(hold.clone());
+    let busy = folio
+        .app
+        .clipboard_lane
+        .submit(door, crate::clipboard_lane::Ask::Text)
+        .expect("admitted");
+    hold.worker_hold()
+        .wait_standing("a request on the clipboard lane's worker");
+    folio
+        .runtime()
+        .submit_clipboard_write(
+            "一 first".to_owned(),
+            "the first copy",
+            crate::ClipboardWriteEffect::None,
+        )
+        .expect("the first copy is asked");
+    chord(&mut folio, "v", KeyCode::KeyV);
+    folio
+        .runtime()
+        .submit_clipboard_write(
+            "二 second".to_owned(),
+            "the second copy",
+            crate::ClipboardWriteEffect::None,
+        )
+        .expect("the second copy is asked");
+    hold.worker_hold().release();
+    folio.settle_clipboard();
+    assert_eq!(sent_to_the_shell(&mut folio, 0), "一 first");
+    assert_eq!(
+        folio.window.window.clipboard.take_written(),
+        ["一 first".to_owned(), "二 second".to_owned()],
+        "both copies were written, in order"
+    );
+    drop(busy);
 }
 
 /// RED (T-CLIPBOARD-LANE; (c)4) — **the worker's end ends the paste and releases the keys**: the

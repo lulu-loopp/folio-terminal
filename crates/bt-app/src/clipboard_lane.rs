@@ -32,10 +32,13 @@
 //!   refuses that request alone, at the door ([`Declined::NotStarted`], said once by the ledger),
 //!   and the next request starts it again.
 //! * **Capacity.** A window owes at most [`PASTES_OWED`] pastes (its desk: a paste past it is
-//!   refused on the window, said once) and one copy (a newer copy replaces the older,
-//!   [`ClipboardLane::supersede`]: the clipboard ends holding the newer either way). A paste is
-//!   never replaced by a later one: the later one queues behind it, and both read the clipboard in
-//!   order. The ledger owes at most [`BOUND`] identities at once — a full desk and a copy in the
+//!   refused on the window, said once). A paste reads the clipboard as it stood at its press, so
+//!   a newer copy replaces an older one still owed ([`ClipboardLane::supersede`]: the clipboard
+//!   ends holding the newer either way) only when no paste was asked after the older one, in any
+//!   window ([`ClipboardLane::a_paste_was_asked_after`]); otherwise it queues behind that paste. A
+//!   paste is never replaced by a later one: the later one queues behind it, and both read the
+//!   clipboard in order. Copies queue only behind pastes, so they count against the ledger's
+//!   bound beside them. The ledger owes at most [`BOUND`] identities at once — a full desk and a copy in the
 //!   window the person is in, and the same in the window they have just left: a paste is owed no
 //!   longer than [`PASTE_DEADLINE`], and the person is in one window at a time, so only a worker
 //!   stuck inside the platform (a program that does not answer `WM_DESTROYCLIPBOARD`, a source
@@ -255,6 +258,9 @@ pub(crate) struct ClipboardLane {
     executor: Executor,
     wake: Arc<dyn Fn() + Send + Sync>,
     sink: Sink,
+    /// The last paste this lane admitted, from any window — what decides whether a newer copy may
+    /// replace an older one ([`Self::a_paste_was_asked_after`]).
+    last_paste: std::sync::Mutex<Option<ClipboardId>>,
 }
 
 impl ClipboardLane {
@@ -289,6 +295,7 @@ impl ClipboardLane {
             executor: executor.clone(),
             wake,
             sink: Arc::new(sink),
+            last_paste: std::sync::Mutex::new(None),
         }
     }
 
@@ -304,7 +311,9 @@ impl ClipboardLane {
     ) -> Result<ClipboardRequest, Declined> {
         let queue = Arc::clone(&self.queue);
         let wake = Arc::clone(&self.wake);
-        self.queue
+        let paste = !matches!(ask, Ask::Write(_));
+        let admitted = self
+            .queue
             .ask(
                 Job { ask, door },
                 Abandoned(Arc::clone(&self.sink)),
@@ -322,7 +331,24 @@ impl ClipboardLane {
                 Refused::Faulted(_) => Declined::LaneGone,
                 Refused::NotStarted(words) => Declined::NotStarted(words),
                 Refused::TwinEnded => unreachable!("the clipboard lane joins nothing"),
-            })
+            })?;
+        if paste {
+            *self
+                .last_paste
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(admitted.id());
+        }
+        Ok(admitted)
+    }
+
+    /// **Whether a paste was admitted after `copy`**, in any window. A paste reads the clipboard
+    /// as it stood at its press, so a copy still waiting with a paste behind it may not be replaced
+    /// by a newer copy: the newer one queues behind the paste instead.
+    pub(crate) fn a_paste_was_asked_after(&self, copy: ClipboardId) -> bool {
+        self.last_paste
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some_and(|paste| paste > copy)
     }
 
     /// **The asker withdraws `request`** (`Cancelled`): it is ended `Cancelled` — unless its
@@ -423,13 +449,14 @@ pub(crate) struct OwedCopy {
     pub(crate) effect: ClipboardWriteEffect,
 }
 
-/// **What one window owes the clipboard's answers** — its pastes, in the order they were asked
-/// (at most [`PASTES_OWED`]), and one copy (the module's *Capacity*). Held by the window, so that
+/// **What one window owes the clipboard's answers** — its pastes and its copies, each in the
+/// order they were asked (at most [`PASTES_OWED`] pastes; a copy replaces the copy before it
+/// unless a paste was asked between them — the module's *Capacity*). Held by the window, so that
 /// closing it is what abandons them.
 #[derive(Default)]
 pub(crate) struct ClipboardAsks {
     pub(crate) pastes: Vec<OwedPaste>,
-    pub(crate) copy: Option<OwedCopy>,
+    pub(crate) copies: Vec<OwedCopy>,
 }
 
 impl ClipboardAsks {
@@ -445,7 +472,7 @@ impl ClipboardAsks {
     /// Whether the window owes nothing: no paste, and no copy.
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
-        self.pastes.is_empty() && self.copy.is_none()
+        self.pastes.is_empty() && self.copies.is_empty()
     }
 }
 

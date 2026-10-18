@@ -42,9 +42,10 @@ impl<B: Backend> Runtime<'_, B> {
     /// **Submit one copy to the clipboard lane**, and apply its effect only once the write has
     /// landed ([`Self::settle_clipboard`]). Answers whether the lane took it.
     ///
-    /// A window owes one copy at most: a newer copy replaces one not yet answered, which ends
-    /// `Superseded` — the clipboard ends holding the newer either way, and only the newer says it
-    /// landed. A copy the lane refuses at its door is said once, in `diagnostics.log`, with
+    /// A newer copy replaces the window's last copy not yet answered, which ends `Superseded` — the
+    /// clipboard ends holding the newer either way, and only the newer says it landed — **unless a
+    /// paste was asked after that copy**, in any window: a paste reads the clipboard as it stood at
+    /// its press, so the newer copy then queues behind the paste instead. A copy the lane refuses at its door is said once, in `diagnostics.log`, with
     /// `action`; one the clipboard refuses is said once by the lane's ledger. Neither says
     /// anything on screen, which is the owner's rule for a copy (2026-09-14 ②): only a copy that
     /// landed says it landed.
@@ -65,16 +66,21 @@ impl<B: Backend> Runtime<'_, B> {
             }
         };
         let newer = request.id();
-        if let Some(older) = self
-            .window
-            .clipboard
-            .copy
-            .replace(OwedCopy { request, effect })
-        {
+        let replaces = self.window.clipboard.copies.last().is_some_and(|older| {
+            !self
+                .app
+                .clipboard_lane
+                .a_paste_was_asked_after(older.request.id())
+        });
+        if replaces && let Some(older) = self.window.clipboard.copies.pop() {
             // An answer that came before the newer copy was asked is the older copy's own.
             let ended = self.app.clipboard_lane.supersede(older.request, newer);
             self.answer_copy(older.effect, ended)?;
         }
+        self.window
+            .clipboard
+            .copies
+            .push(OwedCopy { request, effect });
         Ok(true)
     }
 
@@ -528,14 +534,15 @@ impl<B: Backend> Runtime<'_, B> {
     /// paste is spent as soon as it has ended; a terminal's when it reaches the front of its pane's
     /// hold ([`Self::advance_the_hold`]). `now` is the turn's clock, read once by the caller.
     pub(crate) fn settle_clipboard(&mut self, now: Instant) -> Result<()> {
-        if let Some(ended) = self
-            .window
-            .clipboard
-            .copy
-            .as_mut()
-            .and_then(|owed| owed.request.take())
-            && let Some(owed) = self.window.clipboard.copy.take()
-        {
+        // The copies end in the order they were asked (one worker, first in first out); each that
+        // has is answered, in that order.
+        let mut at = 0;
+        while at < self.window.clipboard.copies.len() {
+            let Some(ended) = self.window.clipboard.copies[at].request.take() else {
+                at += 1;
+                continue;
+            };
+            let owed = self.window.clipboard.copies.remove(at);
             self.answer_copy(owed.effect, ended)?;
         }
         for owed in &mut self.window.clipboard.pastes {
