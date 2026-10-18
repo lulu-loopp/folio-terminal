@@ -35170,13 +35170,14 @@ pub(crate) mod font_lane_adapter {
                 .unwrap_or_else(PoisonError::into_inner)
                 .get(&generation)
                 .copied();
-            if let Some(question) = question {
-                door.execute(question);
-            }
-            Ok((
+            // The suite's file, held while the walk runs.
+            let held = question.map(|question| door.execute(question));
+            let walked = Ok((
                 answer(format!("Lane Contract Mono {generation}")),
                 Vec::new(),
-            ))
+            ));
+            drop(held);
+            walked
         });
         let (heard, counted) = (Arc::clone(&probe), Arc::clone(&said));
         let lane: &'static FontLane = Box::leak(Box::new(FontLane::new(

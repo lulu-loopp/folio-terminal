@@ -892,10 +892,16 @@ pub(crate) mod contract_adapter {
                     let door = move |ctx: &WorkerCtx| -> Door<MathWorkerRequest> {
                         let mut real = crate::run_decoration_worker(ctx);
                         Box::new(move |ctx: &WorkerCtx, request: MathWorkerRequest| {
-                            if let MathWorkerRequest::InlineImage { task, .. } = &request {
-                                gate.execute(task.occurrence_id);
-                            }
-                            real(ctx, request)
+                            // The suite's file, held while the real work runs.
+                            let held = match &request {
+                                MathWorkerRequest::InlineImage { task, .. } => {
+                                    Some(gate.execute(task.occurrence_id))
+                                }
+                                _ => None,
+                            };
+                            let answer = real(ctx, request);
+                            drop(held);
+                            answer
                         })
                     };
                     self.lane
@@ -911,12 +917,17 @@ pub(crate) mod contract_adapter {
                     let door = move |ctx: &WorkerCtx| -> Door<ScaleWorkerRequest> {
                         let mut real = crate::scale_door(ctx);
                         Box::new(move |ctx: &WorkerCtx, request: ScaleWorkerRequest| {
-                            if let ScaleWorkerRequest::Preview { task, .. } = &request
-                                && let Some(question) = question_of_content(&task.content_key)
-                            {
-                                gate.execute(question);
-                            }
-                            real(ctx, request)
+                            // The suite's file, held while the real work runs.
+                            let held = match &request {
+                                ScaleWorkerRequest::Preview { task, .. } => {
+                                    question_of_content(&task.content_key)
+                                        .map(|question| gate.execute(question))
+                                }
+                                _ => None,
+                            };
+                            let answer = real(ctx, request);
+                            drop(held);
+                            answer
                         })
                     };
                     self.lane
@@ -931,10 +942,12 @@ pub(crate) mod contract_adapter {
                     let door = move |ctx: &WorkerCtx| -> Door<PathWorkerRequest> {
                         let mut real = crate::path_door(ctx);
                         Box::new(move |ctx: &WorkerCtx, request: PathWorkerRequest| {
-                            if let Some(question) = question_of_path(&request.path) {
-                                gate.execute(question);
-                            }
-                            real(ctx, request)
+                            // The suite's file, held while the real work runs.
+                            let held = question_of_path(&request.path)
+                                .map(|question| gate.execute(question));
+                            let answer = real(ctx, request);
+                            drop(held);
+                            answer
                         })
                     };
                     self.lane

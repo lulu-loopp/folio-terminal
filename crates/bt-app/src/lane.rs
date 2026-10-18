@@ -1713,11 +1713,15 @@ pub(crate) enum Claim {
     /// A request whose requester has gone ends in the sink it is owed, and in no target (C6). For a
     /// lane whose target is the application, which does not go, the application is both.
     AnOrphanedAnswerReachesItsSink,
+    /// A request's answer is observable only once its work has let go of every handle it took for
+    /// it (T-ANSWER-AFTER-THE-FILE-IS-CLOSED): the moment the consumer finds the terminal, nobody
+    /// holds the file the work held — the order is the lane's, never a race its consumer wins.
+    AnAnswerIsPublishedAfterItsResourcesAreReleased,
 }
 
 #[cfg(test)]
 impl Claim {
-    pub(crate) const ALL: [Self; 12] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::FullLaneAnswersWithoutWaiting,
         Self::EveryRequestHasItsOwnIdentity,
         Self::OrderIsAsDeclared,
@@ -1730,6 +1734,7 @@ impl Claim {
         Self::AJoinedRequestCarriesItsTwin,
         Self::AFailureIsSaidOnce,
         Self::AnOrphanedAnswerReachesItsSink,
+        Self::AnAnswerIsPublishedAfterItsResourcesAreReleased,
     ];
 
     fn check(self, run: &mut Run<'_>) -> Result<(), Failure> {
@@ -1746,6 +1751,9 @@ impl Claim {
             Self::AJoinedRequestCarriesItsTwin => a_joined_request_carries_its_twin(run),
             Self::AFailureIsSaidOnce => a_failure_is_said_once(run),
             Self::AnOrphanedAnswerReachesItsSink => an_orphaned_answer_reaches_its_sink(run),
+            Self::AnAnswerIsPublishedAfterItsResourcesAreReleased => {
+                an_answer_is_published_after_its_resources_are_released(run)
+            }
         }
     }
 }
@@ -1820,6 +1828,10 @@ pub(crate) enum Failure {
     SaidOtherThanOnce { expected: usize, said: usize },
     /// A request whose requester had gone did not end in its sink.
     OrphanNotSunk { key: u64 },
+    /// The consumer found a request's terminal while the file its work had taken was still held.
+    HeldPastTheAnswer { key: u64 },
+    /// The lane's work never took the file the suite lent it: the claim cannot reach the lane.
+    NothingTaken,
 }
 
 /// A [`Failure`]'s kind, which is what [`EXPECTED_FAILURES`] pins: the counts beside it depend on
@@ -1857,6 +1869,8 @@ pub(crate) enum FailureKind {
     LinesUncounted,
     SaidOtherThanOnce,
     OrphanNotSunk,
+    HeldPastTheAnswer,
+    NothingTaken,
 }
 
 #[cfg(test)]
@@ -1893,6 +1907,8 @@ impl Failure {
             Self::LinesUncounted { .. } => FailureKind::LinesUncounted,
             Self::SaidOtherThanOnce { .. } => FailureKind::SaidOtherThanOnce,
             Self::OrphanNotSunk { .. } => FailureKind::OrphanNotSunk,
+            Self::HeldPastTheAnswer { .. } => FailureKind::HeldPastTheAnswer,
+            Self::NothingTaken => FailureKind::NothingTaken,
         }
     }
 }
@@ -2192,6 +2208,23 @@ struct GateState {
     executed: Vec<u64>,
     /// The questions whose execution panics.
     planted: Vec<u64>,
+    /// The file the suite lends every execution, when it does: each one holds it, opened and
+    /// locked, for as long as it keeps the [`Taken`] it was handed.
+    lent: Option<std::path::PathBuf>,
+    /// How many executions took the lent file.
+    taken: usize,
+    /// Whether the suite has looked at the lent file since the last lend.
+    looked: bool,
+}
+
+/// **What one execution holds of the file the suite lent it** ([`Gate::lend`]): the file, opened
+/// and exclusively locked, or nothing when nothing was lent. It stands for the handle a lane's
+/// real work takes for its request — the file a decode reads, the pipe a child writes into — and
+/// the adapter keeps it for exactly as long as its work runs.
+#[cfg(test)]
+#[must_use = "an execution holds the lent file for as long as its work runs"]
+pub(crate) struct Taken {
+    _held: Option<std::fs::File>,
 }
 
 /// What a panic the suite plants in a request says — the same words each time, so that two in a
@@ -2229,11 +2262,56 @@ impl Gate {
     }
 
     /// **Called by a scripted task as it executes `question`**, inside its panic catch: recorded,
-    /// and the panic planted in it fired.
-    pub(crate) fn execute(&self, question: u64) {
-        lock(&self.state).executed.push(question);
+    /// the file the suite lent taken (opened and exclusively locked) and handed back for the work
+    /// to hold while it runs, and the panic planted in it fired.
+    pub(crate) fn execute(&self, question: u64) -> Taken {
+        let lent = {
+            let mut state = lock(&self.state);
+            state.executed.push(question);
+            state.lent.clone()
+        };
+        let taken = Taken {
+            _held: lent.map(|lent| {
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&lent)
+                    .expect("the file the suite lent opens");
+                file.lock().expect("the file the suite lent locks");
+                lock(&self.state).taken += 1;
+                file
+            }),
+        };
         self.changed.notify_all();
         self.fire(question);
+        taken
+    }
+
+    /// From now on every execution takes `file` ([`Self::execute`]), and the suite has not looked.
+    pub(crate) fn lend(&self, file: std::path::PathBuf) {
+        let mut state = lock(&self.state);
+        state.lent = Some(file);
+        state.looked = false;
+    }
+
+    /// How many executions took the lent file.
+    fn taken(&self) -> usize {
+        lock(&self.state).taken
+    }
+
+    /// The suite has looked at the lent file: a planted lane that kept it past its answer lets
+    /// it go now.
+    fn looked(&self) {
+        let mut state = lock(&self.state);
+        state.lent = None;
+        state.looked = true;
+        self.changed.notify_all();
+    }
+
+    /// **For a planted lane only**: wait, within the suite's patience, until the suite has looked
+    /// at the lent file.
+    pub(crate) fn wait_looked(&self) -> bool {
+        self.wait_for(|state| state.looked)
     }
 
     /// The next worker start the suite's executor is asked for is refused by the thread door,
@@ -3164,6 +3242,35 @@ fn an_orphaned_answer_reaches_its_sink(run: &mut Run<'_>) -> Result<(), Failure>
             Ok(())
         }
     }
+}
+
+#[cfg(test)]
+fn an_answer_is_published_after_its_resources_are_released(
+    run: &mut Run<'_>,
+) -> Result<(), Failure> {
+    // A file the suite owns, lent to the work: it holds it, opened and locked, while it runs.
+    let file = crate::test_support::ScratchFile(bt_testpath::temp_path("lane-suite-lent"));
+    std::fs::write(&file.0, b"held by the work while it runs").expect("the suite's own file");
+    run.lane.gate().lend(file.0.clone());
+    let (asked, _) = run.submit(0, 0);
+    let mut found = Vec::new();
+    let answered =
+        asked.refused.is_none() && run.settle(&mut found, |found| has_key(found, asked.key()));
+    // Looked at the moment the terminal is found, with no wait: whatever still holds the file
+    // held it when the answer became observable.
+    let free = answered && crate::test_support::nobody_holds(&file.0);
+    let taken = run.lane.gate().taken();
+    run.lane.gate().looked();
+    if !answered {
+        return Err(Failure::NoAnswer);
+    }
+    if taken == 0 {
+        return Err(Failure::NothingTaken);
+    }
+    if !free {
+        return Err(Failure::HeldPastTheAnswer { key: asked.key() });
+    }
+    Ok(())
 }
 
 /// **Run one claim on one lane**: how many requests it asked, and what it found. Whatever the

@@ -661,10 +661,11 @@ pub(crate) mod contract_adapter {
                     .unwrap_or_else(PoisonError::into_inner)
                     .get(&generation)
                     .copied();
-                if let Some(question) = question {
-                    door.execute(question);
-                }
-                generation.is_multiple_of(2)
+                // The suite's file, held while the ask runs.
+                let held = question.map(|question| door.execute(question));
+                let hidden = generation.is_multiple_of(2);
+                drop(held);
+                hidden
             },
             move |_line: &str| {
                 counted.fetch_add(1, Ordering::SeqCst);

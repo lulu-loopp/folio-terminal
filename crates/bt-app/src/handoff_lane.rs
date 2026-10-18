@@ -1601,9 +1601,9 @@ pub(crate) mod contract_adapter {
             &Executor::scripted(Arc::clone(&gate)),
             move |_ctx| {
                 move |_window: NativeWindow, handoff: &Handoff| {
-                    if let Some(question) = question_of(handoff) {
-                        door.execute(question);
-                    }
+                    // The suite's file, held while the hand-off runs.
+                    let held = question_of(handoff).map(|question| door.execute(question));
+                    drop(held);
                     Ok(())
                 }
             },

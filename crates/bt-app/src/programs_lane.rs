@@ -1964,7 +1964,9 @@ pub(crate) mod contract_adapter {
                 .and_then(|path| path.strip_prefix(QUESTION))
                 .and_then(|question| question.parse().ok())
             {
-                self.0.execute(question);
+                // The suite's file, held while the walk asks about this path.
+                let held = self.0.execute(question);
+                drop(held);
             }
             false
         }

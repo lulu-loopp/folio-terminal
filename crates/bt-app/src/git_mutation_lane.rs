@@ -1145,12 +1145,17 @@ pub(crate) mod contract_adapter {
             let gate = Arc::clone(&self.gate);
             let door = move |_: &WorkerCtx| -> Door {
                 Box::new(move |_: &WorkerCtx, question: &GitQuestion| {
-                    if let GitQuestion::Write { paths, .. } = question
-                        && let Some(asked) = paths.first().and_then(|path| question_of(path))
-                    {
-                        gate.execute(asked);
-                    }
-                    went_through(question)
+                    // The suite's file, held while the verb runs.
+                    let held = match question {
+                        GitQuestion::Write { paths, .. } => paths
+                            .first()
+                            .and_then(|path| question_of(path))
+                            .map(|asked| gate.execute(asked)),
+                        _ => None,
+                    };
+                    let answer = went_through(question);
+                    drop(held);
+                    answer
                 })
             };
             match self.lane.ask_through(request, door) {
