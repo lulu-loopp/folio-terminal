@@ -11,11 +11,11 @@ use crate::window_seam::prelude::*;
 use crate::{
     ClipboardWriteEffect, Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey,
     PasteOffer, PasteTarget, PreparedClipboardPaste, PreviewSurface, Runtime, StagedPaste,
-    TextFieldSeat, UserInputKind, clear_copied_selection, diagnostics, i18n,
-    input_line_needs_a_space_first, menubar, offer_pty_input, paste_answer_text, paste_body,
-    paste_card_step, paste_offer_is_kept, paste_target_is_live, pending_paste_in,
-    prepare_clipboard_paste, prepare_dropped_paste, profile_banner_name, restore, seats,
-    selection_to_copy, stage_paste, take_pending_paste, text_field, toast,
+    TextFieldSeat, UserInputKind, clear_copied_selection, i18n, input_line_needs_a_space_first,
+    menubar, offer_pty_input, paste_answer_text, paste_body, paste_card_step, paste_offer_is_kept,
+    paste_target_is_live, pending_paste_in, prepare_clipboard_paste, prepare_dropped_paste,
+    profile_banner_name, restore, seats, selection_to_copy, stage_paste, take_pending_paste,
+    text_field, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -45,10 +45,12 @@ impl<B: Backend> Runtime<'_, B> {
     /// A newer copy replaces the window's last copy not yet answered, which ends `Superseded` — the
     /// clipboard ends holding the newer either way, and only the newer says it landed — **unless a
     /// paste was asked after that copy**, in any window: a paste reads the clipboard as it stood at
-    /// its press, so the newer copy then queues behind the paste instead. A copy the lane refuses at its door is said once, in `diagnostics.log`, with
-    /// `action`; one the clipboard refuses is said once by the lane's ledger. Neither says
-    /// anything on screen, which is the owner's rule for a copy (2026-09-14 ②): only a copy that
-    /// landed says it landed.
+    /// its press, so the newer copy then queues behind the paste instead.
+    ///
+    /// A copy the lane refuses at its door is said once, through the window's door
+    /// (`WindowHost::note`, `diagnostics.log` in the product), with `action`; one the clipboard
+    /// refuses is said once by the lane's ledger. Neither says anything on screen, which is the
+    /// owner's rule for a copy (2026-09-14 ②): only a copy that landed says it landed.
     pub(crate) fn submit_clipboard_write(
         &mut self,
         text: String,
@@ -58,7 +60,7 @@ impl<B: Backend> Runtime<'_, B> {
         let request = match self.ask_the_clipboard(Ask::Write(text)) {
             Ok(request) => request,
             Err(declined) => {
-                diagnostics::note(&format!(
+                self.window.window.note(&format!(
                     "the clipboard lane refused a copy at its door; {action} ignored: {}",
                     declined.reason()
                 ));
@@ -486,7 +488,7 @@ impl<B: Backend> Runtime<'_, B> {
         let now = Instant::now();
         self.settle_clipboard(now)?;
         if self.window.clipboard.pastes.len() >= PASTES_OWED {
-            diagnostics::note(&format!(
+            self.window.window.note(&format!(
                 "the clipboard lane: a paste was refused on the window: {PASTES_OWED} pastes are \
                  already owed"
             ));
@@ -495,7 +497,7 @@ impl<B: Backend> Runtime<'_, B> {
         let request = match self.ask_the_clipboard(ask) {
             Ok(request) => request,
             Err(declined) => {
-                diagnostics::note(&format!(
+                self.window.window.note(&format!(
                     "the clipboard lane refused a paste at its door: {}",
                     declined.reason()
                 ));
@@ -569,7 +571,7 @@ impl<B: Backend> Runtime<'_, B> {
             if let Some(request) = request {
                 self.app.clipboard_lane.withdraw(request);
             }
-            diagnostics::note(&format!(
+            self.window.window.note(&format!(
                 "the clipboard lane: a paste was cancelled: {}",
                 why.words()
             ));
