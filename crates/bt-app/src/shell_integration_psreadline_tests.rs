@@ -1257,7 +1257,9 @@ mod real_shell {
         const FACTS_AND_MODE: &str = "'BTPS' + 'RL|' + ((Get-Module PSReadLine | ForEach-Object { \
                                       [string]$_.Version + '@' + $_.ModuleBase }) -join ',') + '|' \
                                       + $ExecutionContext.SessionState.LanguageMode + '|' + \
-                                      (Test-Path Function:PSConsoleHostReadLine) + '|' +                                       $env:PSModulePath + '|' + ($Error | Select-Object -First 1 |                                       Out-String) + '|E' + 'ND'";
+                                      (Test-Path Function:PSConsoleHostReadLine) + '|' + \
+                                      $env:PSModulePath + '|' + ($Error | Select-Object -First 1 | \
+                                      Out-String) + '|E' + 'ND'";
         let mut seen = Vec::new();
         for prefix in [false, true] {
             let (mut pane, profile) = profile_pane_with_prefix(CONSTRAINED, prefix);
