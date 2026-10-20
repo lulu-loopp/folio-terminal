@@ -65132,7 +65132,7 @@ mod application_change_tests {
             .find("settle_application_change")
             .expect("the loop settles what the application changed");
         let waited = door
-            .find("wake_deadline")
+            .find("let mut wake = ")
             .expect("the loop asks every window for its next wake-up");
         assert!(
             settled < waited,
