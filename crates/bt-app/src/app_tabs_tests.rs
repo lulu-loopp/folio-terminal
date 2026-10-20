@@ -286,18 +286,13 @@ fn two_presses_on_one_tab_inside_the_double_click_window_are_a_double_click() {
     );
 }
 
-/// The same, with something on the clipboard, answering what a copy or a cut
-/// asked to put there.
+/// The same, answering what a copy or a cut asked to put on the clipboard.
 fn press_with_clipboard(
     editor: &mut TabRename,
     key: &Key,
     modifiers: ModifiersState,
-    holding: &str,
 ) -> (RenameVerdict, Option<String>) {
-    let mut clipboard = RenameClipboard {
-        paste: holding,
-        copied: None,
-    };
+    let mut clipboard = RenameClipboard { copied: None };
     let verdict = rename_key(editor, key, modifiers, &mut clipboard);
     (verdict, clipboard.copied)
 }
@@ -717,29 +712,25 @@ fn the_name_editor_carries_a_selection_word_verbs_and_a_clipboard() {
     // The clipboard, in both directions. A cut takes what it copied; a copy
     // with nothing selected puts nothing there rather than emptying it.
     let mut copying = TabRename::open(A, Some("release"));
-    let (verdict, copied) =
-        press_with_clipboard(&mut copying, &Key::Character("c".into()), ctrl, "");
+    let (verdict, copied) = press_with_clipboard(&mut copying, &Key::Character("c".into()), ctrl);
     assert_eq!(verdict, RenameVerdict::Held, "the chord never leaves");
     assert_eq!(copied.as_deref(), Some("release"));
     assert_eq!(copying.text(), "release", "and a copy takes nothing away");
 
     let mut cutting = TabRename::open(A, Some("release"));
-    let (_, cut) = press_with_clipboard(&mut cutting, &Key::Character("x".into()), ctrl, "");
+    let (_, cut) = press_with_clipboard(&mut cutting, &Key::Character("x".into()), ctrl);
     assert_eq!(cut.as_deref(), Some("release"));
     assert_eq!(cutting.text(), "", "a cut takes what it copied");
 
+    // A paste lands through the editor's insert door, on the turn the clipboard lane answers
+    // (`Runtime::rename_ime`, T-CLIPBOARD-LANE).
     let mut pasting = TabRename::open(A, None);
-    press_with_clipboard(
-        &mut pasting,
-        &Key::Character("v".into()),
-        ctrl,
-        "pasted name",
-    );
+    pasting.insert("pasted name");
     assert_eq!(pasting.text(), "pasted name");
     assert_eq!(pasting.caret(), "pasted name".len());
 
     let mut empty = TabRename::open(A, None);
-    let (_, nothing) = press_with_clipboard(&mut empty, &Key::Character("c".into()), ctrl, "");
+    let (_, nothing) = press_with_clipboard(&mut empty, &Key::Character("c".into()), ctrl);
     assert_eq!(
         nothing, None,
         "a copy with nothing selected leaves the clipboard as it was"
@@ -789,14 +780,9 @@ const LEAF_ONE: LeafId = LeafId {
 /// the count is in the hundreds for a draft this field will hold at all.
 #[test]
 fn a_long_pasted_name_costs_one_shaping_pass() {
-    let ctrl = command_modifier();
     let mut editor = TabRename::open_files_new(LEAF_ONE, "", false, true);
-    press_with_clipboard(
-        &mut editor,
-        &Key::Character("v".into()),
-        ctrl,
-        &"j".repeat(200_000),
-    );
+    // The paste's own door: the clipboard lane's answer lands through `insert`.
+    editor.insert(&"j".repeat(200_000));
 
     let mut passes = 0usize;
     {
@@ -844,16 +830,15 @@ fn a_long_pasted_name_costs_one_shaping_pass() {
 /// the third case below matters: a plain `insert` is bounded too, so an IME
 /// commit and a held key cannot walk around it.
 ///
-/// RED GATE: bound the clipboard in `clipboard_line` instead and the direct
-/// `insert` below carries 200 000 characters into the draft; drop the bound
-/// and the first assertion reads 200 000.
+/// RED GATE: bound the clipboard at `Runtime::apply_clipboard_text_to_field`
+/// instead and the `insert` below carries 200 000 characters into the draft;
+/// drop the bound and the first assertion reads 200 000.
 #[test]
 fn a_name_field_accepts_no_more_than_a_name() {
-    let ctrl = command_modifier();
     let huge = "j".repeat(200_000);
 
     let mut name = TabRename::open_files_new(LEAF_ONE, "", false, true);
-    press_with_clipboard(&mut name, &Key::Character("v".into()), ctrl, &huge);
+    name.insert(&huge);
     assert_eq!(
         name.text().chars().count(),
         NAME_DRAFT_LIMIT,
@@ -867,7 +852,7 @@ fn a_name_field_accepts_no_more_than_a_name() {
     );
 
     let mut address = TabRename::open_address(LEAF_ONE, "");
-    press_with_clipboard(&mut address, &Key::Character("v".into()), ctrl, &huge);
+    address.insert(&huge);
     assert_eq!(
         address.text().chars().count(),
         ADDRESS_DRAFT_LIMIT,

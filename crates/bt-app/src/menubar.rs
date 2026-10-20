@@ -749,7 +749,7 @@ pub(crate) trait ClipboardDoors {
     /// The clipboard into the focused shell (`Runtime::paste_from_clipboard`).
     fn paste_into_terminal(&mut self) -> anyhow::Result<()>;
     /// The quick edit's selection onto the clipboard.
-    fn copy_document_selection(&mut self);
+    fn copy_document_selection(&mut self) -> anyhow::Result<()>;
     /// The clipboard into the quick edit.
     fn paste_into_document(&mut self) -> anyhow::Result<()>;
     /// The clipboard into the one-line field that holds the keyboard.
@@ -782,8 +782,7 @@ pub(crate) fn run_clipboard_verb(
         ClipboardSeat::Field(field) => doors.paste_into_field(field),
         ClipboardSeat::PreviewDocument => {
             if copying {
-                doors.copy_document_selection();
-                Ok(())
+                doors.copy_document_selection()
             } else {
                 doors.paste_into_document()
             }

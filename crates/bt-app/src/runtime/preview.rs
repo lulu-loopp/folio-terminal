@@ -53,7 +53,7 @@ use crate::{
     surface_takes_image_zoom, switcher_rows, tab_owes_frame, tab_trailing_targets, table_block,
     text_field, tick_owes_a_present, toast, tooltip, trace_sink, video_frame_texture_key,
     video_seat, video_still_destination, viewport_of_rect, visible_range, webhost, webnav,
-    wheel_points_sideways, window_taskbar_progress, write_terminal_clipboard_text,
+    wheel_points_sideways, window_taskbar_progress,
 };
 use crate::{LeafView, TextScale};
 use anyhow::Context;
@@ -6342,7 +6342,7 @@ impl<B: Backend> Runtime<'_, B> {
             // rule next door: the reader has not asked for it to go away, and a
             // highlight that vanished the instant the button came up would be a
             // highlight nobody could check.
-            self.copy_preview_text_selection(drag.surface);
+            self.copy_preview_text_selection(drag.surface)?;
         }
         Ok(true)
     }
@@ -6835,9 +6835,9 @@ impl<B: Backend> Runtime<'_, B> {
                 self.preview_pane_mut(surface).place_caret(caret);
                 self.repaint_preview()?;
             }
-            preview_edit::EditCommand::Copy => self.copy_preview_selection(),
+            preview_edit::EditCommand::Copy => self.copy_preview_selection()?,
             preview_edit::EditCommand::Cut => {
-                self.copy_preview_selection();
+                self.copy_preview_selection()?;
                 self.edit_preview(|content, caret| {
                     !caret.is_empty() && preview_edit::insert(content, caret, "")
                 })?;
@@ -7640,12 +7640,12 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// Put the selection on the clipboard, through the door the terminal's own
     /// copy already uses.
-    pub(in crate::runtime) fn copy_preview_selection(&mut self) {
+    pub(in crate::runtime) fn copy_preview_selection(&mut self) -> Result<()> {
         let Some(surface) = self.preview_keyboard_surface() else {
-            return;
+            return Ok(());
         };
         let Some(caret) = self.preview_pane(surface).map(|pane| pane.caret()) else {
-            return;
+            return Ok(());
         };
         let Some(text) = self
             .preview_buffer_on(surface)
@@ -7653,11 +7653,16 @@ impl<B: Backend> Runtime<'_, B> {
             .map(|content| caret.selected(content).to_owned())
             .filter(|text| !text.is_empty())
         else {
-            return;
+            return Ok(());
         };
-        if let Err(error) = write_terminal_clipboard_text(&self.window.window, &text) {
-            eprintln!("recoverable preview copy failure: {error:#}");
-        }
+        // A copy the clipboard refuses is said once by the clipboard lane's ledger, and the
+        // selection stays, so the reader can try again.
+        self.submit_clipboard_write(
+            text,
+            "copy the quick edit's selection",
+            crate::ClipboardWriteEffect::None,
+        )
+        .map(drop)
     }
 
     /// Paste into the buffer, with the breaks the *file* uses.
@@ -7665,17 +7670,18 @@ impl<B: Backend> Runtime<'_, B> {
     /// A clipboard on this platform carries CRLF whatever it was copied from, so
     /// pasting it verbatim into a file written with bare newlines is how a
     /// one-line paste turns the next diff into a whole-file rewrite.
+    ///
+    /// Asked of the clipboard lane (`clipboard_lane`) for the page that holds the keyboard, and
+    /// landed on the turn it answers if that page still holds it; a refused read is said once by
+    /// the lane's ledger.
     pub(in crate::runtime) fn paste_into_preview(&mut self) -> Result<()> {
-        let text = match hang_watch::during(hang_watch::Station::ClipboardRead, || {
-            self.window.window.clipboard_text()
-        }) {
-            Ok(text) => text,
-            Err(error) => {
-                eprintln!("recoverable preview paste failure: {error}");
-                return Ok(());
-            }
+        let Some(surface) = self.preview_keyboard_surface() else {
+            return Ok(());
         };
-        self.apply_clipboard_text_to_preview(&text)
+        self.ask_for_a_paste(
+            crate::clipboard_lane::PasteInto::Preview(surface),
+            crate::clipboard_lane::Ask::Text,
+        )
     }
 
     pub(in crate::runtime) fn apply_clipboard_text_to_preview(&mut self, text: &str) -> Result<()> {
