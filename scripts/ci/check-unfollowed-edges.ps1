@@ -23,11 +23,17 @@
 # compare, so pass" road: no origin/main, no merge base, or an unreadable seed is exit 2.
 #
 # For its own tests (`check-unfollowed-edges-tests.ps1`), `-ListPath` and `-BaselinePath` replace
-# the working tree's list and the baseline read through git.
+# the working tree's list and the baseline read through git; `-Repo` and `-Seed` run the git road
+# in a planted repository with a planted seed.
+#
+# **A grown key's reason must be new**: dated, and other than the reason its row had at the
+# baseline, so a key grown again does not pass under the decision taken for its old count.
 
 param(
     [string] $ListPath,
-    [string] $BaselinePath
+    [string] $BaselinePath,
+    [string] $Repo,
+    [string] $Seed
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,11 +44,11 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -Er
 
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
-$repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$repo = if ($Repo) { $Repo } else { Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
 $relative = "docs/plans/UNFOLLOWED-EDGES.tsv"
 $header = "file`titem`tkind`tname`tsites`treason"
 # The commit that seeded the list (T-BT-SOURCE-CALL-GRAPH round 3, on the tree merged with main).
-$seed = "09388cb627a0739d18b9a7603c9a151f6544be56"
+$seed = if ($Seed) { $Seed } else { "09388cb627a0739d18b9a7603c9a151f6544be56" }
 
 # A row is a data line: not blank, not a comment, not the header. Its key is its first four
 # columns, tab-joined; a key on two rows is refused rather than read as either.
@@ -141,6 +147,10 @@ foreach ($key in $now.Keys) {
         $shrunk += 1
     }
     if ($null -eq $change) { continue }
+    if ($before.ContainsKey($key) -and $row.Reason -ceq $before[$key].Reason) {
+        $refused += "    $(Format-Key $key): $change, under the reason its row had at ${from} ('$($row.Reason)'): a grown key takes a new dated reason"
+        continue
+    }
     if (Test-Dated $row.Reason) {
         $allowed += 1
     } else {
