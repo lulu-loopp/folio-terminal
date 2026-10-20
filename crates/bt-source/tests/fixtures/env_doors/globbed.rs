@@ -6,3 +6,7 @@ use std::env::*;
 pub fn under_a_glob() -> bool {
     var_os("BT_FIXTURE_GLOB").is_some()
 }
+
+pub fn env_without_its_use() -> bool {
+    env::var_os("BT_FIXTURE_NO_USE").is_some()
+}

@@ -95,6 +95,26 @@ pub fn renamed() -> Option<OsString> {
     read_door("BT_FIXTURE_RENAMED")
 }
 
+pub fn not_one_literal() -> Option<OsString> {
+    std::env::var_os(r"BT_FIXTURE_TRIMMED ".trim())
+}
+
+pub fn commented_reader() -> Option<OsString> {
+    std::env::/* a comment */var_os("BT_FIXTURE_COMMENTED")
+}
+
+pub fn commented_module() -> Option<OsString> {
+    std::/* a comment */env::var_os("BT_FIXTURE_COMMENTED_MODULE")
+}
+
+pub fn longer_path() -> Option<OsString> {
+    crate::std::env::var_os("BT_FIXTURE_LONGER")
+}
+
+pub fn lower_case_door() -> Option<OsString> {
+    std::env::var_os("bt_fixture_lower")
+}
+
 pub struct Shell;
 
 impl Shell {

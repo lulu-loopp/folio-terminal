@@ -718,9 +718,12 @@ reads, and a row whose item reads nothing is stale. Its categories are `entry`
 (the product's entry reader and the tools' own entries), `door` (a behaviour or
 test door still read where it is used; the ticket column names the follow-up
 that moves it) and `unjudged` (a refused shape that reads no `BT_` door; the
-reason says what it reads). **The list only shrinks**: when red, move the read
-to the entry and hand the answer down as a parameter or an installed answer;
-review refuses an added row, and the grammar is not widened to quiet a refusal.
+reason says what it reads, and T-ENV-UNJUDGED-ROWS rewrites each). A name is a
+`BT_` name in any case, as Windows reads it. **The list only shrinks**:
+`scripts/ci/check-env-doors.ps1` refuses, against the merge base, a row added
+and a row that reads a name or holds a refusal its base row did not. When red,
+move the read to the entry and hand the answer down as a parameter or an
+installed answer; the grammar is not widened to quiet a refusal.
 
 ## Machine-independent paths
 

@@ -49,6 +49,8 @@
 //!
 //! # The list
 //!
+//! A name is a `BT_` name in any case (`bt_card_trace` is the door `BT_CARD_TRACE` to Windows).
+//!
 //! `docs/plans/ENV-DOORS.tsv` names every product item that reads a `BT_` name in a supported
 //! shape or holds a refused shape, keyed by file and item, and the list is an **equality**: every
 //! such item has exactly its row, the row's names are exactly the `BT_` names the item reads, its
@@ -56,8 +58,10 @@
 //! Its categories: `entry` (a program's entry: `bt_app::entry_doors` and the tools' own entries),
 //! `door` (a behaviour or test door not moved to the entry yet; the ticket column names the
 //! follow-up that moves it) and `unjudged` (a refused shape reading names that are not `BT_` doors;
-//! the reason says what it reads). **The list only shrinks**: a new reader is moved to the entry
-//! rather than listed, and review refuses an added row.
+//! the reason says what it reads; the follow-up T-ENV-UNJUDGED-ROWS rewrites each). **The list
+//! only shrinks**: a new reader is moved to the entry rather than listed, and
+//! `scripts/ci/check-env-doors.ps1` refuses, against the merge base, a row added or a row that
+//! reads a name or holds a refusal its base row did not.
 //!
 //! # What it does not see
 //!
@@ -191,7 +195,8 @@ fn scan(index: &Index, root: &Path) -> BTreeMap<(String, String), Reads> {
             item.map_or_else(|| "-".to_owned(), identity_of),
         );
         match finding {
-            Finding::Read(read) if read.starts_with("BT_") => {
+            // In any case: Windows reads `bt_card_trace` as the door `BT_CARD_TRACE`.
+            Finding::Read(read) if read.to_ascii_uppercase().starts_with("BT_") => {
                 found.entry(key).or_default().names.insert(read);
             }
             Finding::Read(_) => {}
@@ -235,11 +240,17 @@ fn judge(
     if let Some(finding) = in_a_use(index, token, name) {
         return finding;
     }
+    if interrupted(before) {
+        return Some(Finding::Refused("a comment between the tokens"));
+    }
     let supported_path = if before == "::" {
         match previous_name {
             Some("env") => {
                 let env_at = at - 1;
                 let before_env = gap_before(index, tokens, env_at, file);
+                if interrupted(before_env) {
+                    return Some(Finding::Refused("a comment between the tokens"));
+                }
                 let qualified = before_env == "::"
                     && env_at
                         .checked_sub(1)
@@ -314,6 +325,12 @@ fn gap_before<'a>(index: &'a Index, tokens: &[TokenRecord], at: usize, file: Spa
         .filter(|end| *end >= file.start())
         .unwrap_or(file.start());
     index.union()[start..tokens[at].span().start()].trim()
+}
+
+/// Whether the bytes between two tokens are a path separator with something else beside it —
+/// a comment written inside the path (`std::env::/*…*/var_os`), which this grammar does not read.
+fn interrupted(gap: &str) -> bool {
+    gap != "::" && gap.contains("::")
 }
 
 /// Whether a module-level `use` of the file holding `file` globs `std::env::*`.
@@ -670,6 +687,14 @@ fn the_grammar_reads_each_supported_shape_and_refuses_each_other_one() {
         ),
         ("crate::bare", row(&["BT_FIXTURE_BARE"], &[])),
         (
+            "crate::commented_module",
+            row(&[], &["a comment between the tokens"]),
+        ),
+        (
+            "crate::commented_reader",
+            row(&[], &["a comment between the tokens"]),
+        ),
+        (
             "crate::computed",
             row(
                 &[],
@@ -682,6 +707,10 @@ fn the_grammar_reads_each_supported_shape_and_refuses_each_other_one() {
         ),
         ("crate::formatted", row(&[], &["a computed argument"])),
         (
+            "crate::globbed::env_without_its_use",
+            row(&[], &["a path this grammar does not read"]),
+        ),
+        (
             "crate::globbed::under_a_glob",
             row(&[], &["a bare reader under a glob of `std::env`"]),
         ),
@@ -691,6 +720,15 @@ fn the_grammar_reads_each_supported_shape_and_refuses_each_other_one() {
         ),
         ("crate::literal", row(&["BT_FIXTURE_LITERAL"], &[])),
         ("crate::literal_os", row(&["BT_FIXTURE_LITERAL_OS"], &[])),
+        (
+            "crate::longer_path",
+            row(&[], &["a path this grammar does not read"]),
+        ),
+        ("crate::lower_case_door", row(&["bt_fixture_lower"], &[])),
+        (
+            "crate::not_one_literal",
+            row(&[], &["an argument that is not one string literal"]),
+        ),
         (
             "crate::other_module_path",
             row(&[], &["a path this grammar does not read"]),
