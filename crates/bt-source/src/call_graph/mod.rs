@@ -54,16 +54,26 @@
 //! [`Unresolved::Path`] edge beside the others' items. An `impl` block's self type is the one
 //! declared in the block's own file when there is one; an `impl` block whose self type the module
 //! tree does not hold (a macro-generated type) is listed with its methods
-//! ([`Resolver::unplaced_impls`]), and one chained past the hop limit refuses the reading. The
-//! standard library's guards and wrappers
-//! (`MutexGuard`, `Ref`, `RefMut`, `Pin`, `LazyLock`, …) deref to their pointee as `Box` and `Rc`/`Arc` do.
+//! ([`Resolver::unplaced_impls`]), and its methods are reachable only as [`Unresolved::Ambiguous`]
+//! candidates, never through a typed call; one chained past the hop limit refuses the reading.
+//! The standard library's guards and wrappers (`MutexGuard`, `Ref`, `RefMut`, `Pin`, `LazyLock`,
+//! …) deref to their pointee as `Box` and `Rc`/`Arc` do.
+//!
+//! **A `const`'s or `static`'s initializer is a body of the graph** ([`Node::Value`]): a use of
+//! the value is a [`Target::Value`] edge to it — [`Via::Deref`] for a `LazyLock` or `LazyCell`,
+//! whose initializer runs on its first deref, [`Via::Value`] otherwise — and the walk follows its
+//! calls and the functions it names as values, a closure's included. A `const` holding a function
+//! pointer, called, is that edge and a [`Unresolved::Dynamic`] whose candidates are the functions
+//! the initializer names.
 //!
 //! **What is not read**, as limits: visibility; items a macro generates (a `bitflags!` type, a
 //! generated enum, a `thread_local!` static: a path through one is [`Unresolved::Path`]); the
-//! type of an associated `const`; a foreign function's return type beyond the census's fixed
-//! lists; `cfg!`'s arguments, which are predicates; a `#[cfg]` written on an expression that is no
-//! statement or match arm (a field initialiser's, an element's) — its code is walked as though the
-//! arms admitted it. One alias on several arms naming different types is untyped, never one arm's.
+//! type of an associated `const`, and its initializer when reached through a generic (`T::ID`),
+//! which is the trait's own declaration only; a foreign function's return type beyond the
+//! census's fixed lists; `cfg!`'s arguments, which are predicates; a `#[cfg]` written on an
+//! expression that is no statement or match arm (a field initialiser's, an element's) — its code
+//! is walked as though the arms admitted it. One alias on several arms naming different types is
+//! untyped, never one arm's.
 
 mod body;
 mod decls;
@@ -106,6 +116,42 @@ impl ItemId {
     pub const fn item(self) -> usize {
         self.item as usize
     }
+}
+
+/// **A `const` or a `static` of the packages handed in** ([`crate::ValueRecord`]): its package's
+/// position and its position in that package's [`Index::values`]. Its initializer is a body of the
+/// graph, walked when a use of the value reaches it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ValueId {
+    package: u32,
+    value: u32,
+}
+
+impl ValueId {
+    pub(crate) fn new(package: usize, value: usize) -> Self {
+        Self {
+            package: u32::try_from(package).unwrap_or(u32::MAX),
+            value: u32::try_from(value).unwrap_or(u32::MAX),
+        }
+    }
+
+    #[must_use]
+    pub const fn package(self) -> usize {
+        self.package as usize
+    }
+
+    /// The value's position in its package's [`Index::values`].
+    #[must_use]
+    pub const fn value(self) -> usize {
+        self.value as usize
+    }
+}
+
+/// **A body of the graph**: a callable item's, or a `const`'s or `static`'s initializer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Node {
+    Item(ItemId),
+    Value(ValueId),
 }
 
 /// What an arm filter is asked about one declaration path of one thing: its package, its file, the
@@ -175,6 +221,9 @@ pub enum Via {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Target {
     Item(ItemId),
+    /// A `const`'s or `static`'s initializer, reached by a use of the value: [`Via::Value`], or
+    /// [`Via::Deref`] for a `LazyLock`/`LazyCell`, whose initializer runs on its first deref.
+    Value(ValueId),
     /// A tuple struct's or tuple variant's constructor: no body.
     Constructor,
     /// An inline closure, whose body is the caller's.
@@ -221,7 +270,7 @@ pub enum Unresolved {
 /// One call edge.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Edge {
-    pub from: ItemId,
+    pub from: Node,
     pub site: CallSite,
     pub to: Target,
     pub via: Via,
@@ -320,6 +369,59 @@ impl<'i> Resolver<'i> {
         format!("{} {module}::{label}", self.package(id))
     }
 
+    /// A node named the way [`Self::key`] names an item; a value is `package module::NAME`.
+    #[must_use]
+    pub fn node_key(&self, node: Node) -> String {
+        match node {
+            Node::Item(id) => self.key(id),
+            Node::Value(id) => {
+                let record = self.value_record(id);
+                let module = record.module_paths().first().copied().unwrap_or("crate");
+                let owner = record
+                    .type_owner()
+                    .or(record.trait_name())
+                    .map(|owner| format!("{owner}::"))
+                    .unwrap_or_default();
+                format!(
+                    "{} {module}::{owner}{}",
+                    self.tables.package(id.package()),
+                    record.name()
+                )
+            }
+        }
+    }
+
+    /// The index a node's body is written in.
+    #[must_use]
+    pub fn node_index(&self, node: Node) -> &'i Index {
+        match node {
+            Node::Item(id) => self.tables.index(id.package()),
+            Node::Value(id) => self.tables.index(id.package()),
+        }
+    }
+
+    #[must_use]
+    pub fn value_record(&self, id: ValueId) -> &'i crate::ValueRecord {
+        &self.tables.index(id.package()).values()[id.value()]
+    }
+
+    /// **Every edge of one `const`'s or `static`'s initializer**: its calls, and the functions it
+    /// names as values (the closure of a `LazyLock::new(|| …)` included, its edges carrying the
+    /// closure).
+    #[must_use]
+    pub fn value_callees(&self, value: ValueId) -> Vec<Edge> {
+        body::Walker::value(&self.tables, value)
+    }
+
+    /// The edges of a node's body: [`Self::resolve_callees`] or [`Self::value_callees`].
+    #[must_use]
+    pub fn node_callees(&self, node: Node) -> Vec<Edge> {
+        match node {
+            Node::Item(id) => self.resolve_callees(id),
+            Node::Value(id) => self.value_callees(id),
+        }
+    }
+
     /// **Every call edge of one item's body**, in source order. An item with no body has none; a
     /// body `syn` does not parse is one [`Unresolved::Unparsed`] edge.
     #[must_use]
@@ -374,9 +476,11 @@ impl<'i> Resolver<'i> {
 #[derive(Clone, Debug, Default)]
 pub struct Reach {
     pub reached: BTreeSet<ItemId>,
+    /// The `const` and `static` initializers the walk reached.
+    pub values: BTreeSet<ValueId>,
     pub stopped_at: BTreeSet<ItemId>,
-    pub foreign: Vec<(Edge, Vec<ItemId>)>,
-    pub unresolved: Vec<(Edge, Vec<ItemId>)>,
+    pub foreign: Vec<(Edge, Vec<Node>)>,
+    pub unresolved: Vec<(Edge, Vec<Node>)>,
     /// Every first-party impl only an implicit call or a foreign callback runs, by trait
     /// ([`Resolver::implicit`]): not narrowed by the walk, for the guard to review.
     pub implicit: BTreeMap<String, BTreeSet<ItemId>>,
@@ -385,7 +489,7 @@ pub struct Reach {
 /// **The call graph**: a resolver's edges, computed once per item and kept.
 pub struct CallGraph<'r, 'i> {
     resolver: &'r Resolver<'i>,
-    edges: RefCell<HashMap<ItemId, Rc<Vec<Edge>>>>,
+    edges: RefCell<HashMap<Node, Rc<Vec<Edge>>>>,
 }
 
 impl<'r, 'i> CallGraph<'r, 'i> {
@@ -402,19 +506,19 @@ impl<'r, 'i> CallGraph<'r, 'i> {
         self.resolver
     }
 
-    /// One item's edges ([`Resolver::resolve_callees`]), kept.
+    /// One node's edges ([`Resolver::node_callees`]), kept.
     #[must_use]
-    pub fn edges(&self, item: ItemId) -> Rc<Vec<Edge>> {
-        if let Some(known) = self.edges.borrow().get(&item) {
+    pub fn edges(&self, node: Node) -> Rc<Vec<Edge>> {
+        if let Some(known) = self.edges.borrow().get(&node) {
             return Rc::clone(known);
         }
-        let found = Rc::new(self.resolver.resolve_callees(item));
-        self.edges.borrow_mut().insert(item, Rc::clone(&found));
+        let found = Rc::new(self.resolver.node_callees(node));
+        self.edges.borrow_mut().insert(node, Rc::clone(&found));
         found
     }
 
-    /// **The walk**: from `roots`, along every [`Target::Item`] edge, each item once, stopping at
-    /// the items of `boundary` (recorded, not expanded).
+    /// **The walk**: from `roots`, along every [`Target::Item`] and [`Target::Value`] edge, each
+    /// body once, stopping at the items of `boundary` (recorded, not expanded).
     #[must_use]
     pub fn walk(&self, roots: &[ItemId], boundary: &BTreeSet<ItemId>) -> Reach {
         self.walk_following(roots, boundary, &|_| Vec::new())
@@ -434,16 +538,16 @@ impl<'r, 'i> CallGraph<'r, 'i> {
             implicit: self.resolver.implicit(),
             ..Reach::default()
         };
-        let mut parent: HashMap<ItemId, Option<ItemId>> = HashMap::new();
-        let mut queue: VecDeque<ItemId> = VecDeque::new();
+        let mut parent: HashMap<Node, Option<Node>> = HashMap::new();
+        let mut queue: VecDeque<Node> = VecDeque::new();
         for root in roots {
-            if parent.insert(*root, None).is_none() {
-                queue.push_back(*root);
+            if parent.insert(Node::Item(*root), None).is_none() {
+                queue.push_back(Node::Item(*root));
             }
         }
-        let path_to = |parent: &HashMap<ItemId, Option<ItemId>>, item: ItemId| -> Vec<ItemId> {
-            let mut path = vec![item];
-            let mut at = item;
+        let path_to = |parent: &HashMap<Node, Option<Node>>, node: Node| -> Vec<Node> {
+            let mut path = vec![node];
+            let mut at = node;
             while let Some(Some(up)) = parent.get(&at) {
                 path.push(*up);
                 at = *up;
@@ -451,32 +555,40 @@ impl<'r, 'i> CallGraph<'r, 'i> {
             path.reverse();
             path
         };
-        while let Some(item) = queue.pop_front() {
-            if boundary.contains(&item) {
-                reach.stopped_at.insert(item);
-                continue;
+        while let Some(node) = queue.pop_front() {
+            match node {
+                Node::Item(item) if boundary.contains(&item) => {
+                    reach.stopped_at.insert(item);
+                    continue;
+                }
+                Node::Item(item) => {
+                    reach.reached.insert(item);
+                }
+                Node::Value(value) => {
+                    reach.values.insert(value);
+                }
             }
-            reach.reached.insert(item);
-            let edges = self.edges(item);
+            let edges = self.edges(node);
             for edge in edges.iter() {
                 let mut next = Vec::new();
                 match &edge.to {
-                    Target::Item(id) => next.push(*id),
+                    Target::Item(id) => next.push(Node::Item(*id)),
+                    Target::Value(id) => next.push(Node::Value(*id)),
                     Target::Foreign(_) => {
-                        reach.foreign.push((edge.clone(), path_to(&parent, item)));
-                        next.extend(follow(edge));
+                        reach.foreign.push((edge.clone(), path_to(&parent, node)));
+                        next.extend(follow(edge).into_iter().map(Node::Item));
                     }
                     Target::Unresolved(_) => {
                         reach
                             .unresolved
-                            .push((edge.clone(), path_to(&parent, item)));
-                        next.extend(follow(edge));
+                            .push((edge.clone(), path_to(&parent, node)));
+                        next.extend(follow(edge).into_iter().map(Node::Item));
                     }
                     Target::Constructor | Target::Closure(_) | Target::Nested(_) => {}
                 }
                 for id in next {
                     if let std::collections::hash_map::Entry::Vacant(slot) = parent.entry(id) {
-                        slot.insert(Some(item));
+                        slot.insert(Some(node));
                         queue.push_back(id);
                     }
                 }

@@ -12,10 +12,10 @@ use syn::spanned::Spanned;
 
 use super::decls::{Answer, Tables, trait_self};
 use super::names::Named;
-use super::{CallSite, Edge, ItemId, Target, Unresolved, Via};
+use super::{CallSite, Edge, ItemId, Node, Target, Unresolved, ValueId, Via};
 use crate::census::types::{Receiver, Std, Ty, Written, option_of, std_named};
 use crate::declarations::cfg_predicates;
-use crate::index::{ItemKind, Span};
+use crate::index::{ConditionalVariant, DeclarationPath, ItemKind, Span};
 
 /// One lexical scope: its bindings, the `fn` items written in it, and its `use` items.
 #[derive(Default)]
@@ -38,7 +38,11 @@ enum Mode {
 
 pub(crate) struct Walker<'t, 'i> {
     tables: &'t Tables<'i>,
-    from: ItemId,
+    from: Node,
+    /// What the body's own declaration stands on: a statement's `#[cfg]` is read on top of it.
+    arm_declared: &'i [DeclarationPath],
+    arm_variant: &'i ConditionalVariant,
+    arm_offset: usize,
     at: usize,
     package: String,
     module: String,
@@ -69,7 +73,10 @@ impl<'t, 'i> Walker<'t, 'i> {
         let base = record.whole().start();
         let mut walker = Walker {
             tables,
-            from,
+            from: Node::Item(from),
+            arm_declared: record.declaration_paths(),
+            arm_variant: record.variant(),
+            arm_offset: record.whole().start(),
             at: from.package(),
             package: package.clone(),
             module: module.clone(),
@@ -95,7 +102,7 @@ impl<'t, 'i> Walker<'t, 'i> {
             Ok(parsed) => parsed,
             Err(error) => {
                 walker.edges.push(Edge {
-                    from,
+                    from: Node::Item(from),
                     site: CallSite {
                         span: record.whole(),
                         name: record.name().to_owned(),
@@ -130,6 +137,94 @@ impl<'t, 'i> Walker<'t, 'i> {
             }
         }
         walker.function(&signature, &block);
+        walker.edges
+    }
+
+    /// **Every edge of one `const`'s or `static`'s initializer**: the expression walked as a body
+    /// in the module, the `impl` block or the trait it is written in. A trait's `const` with no
+    /// default has none; an initializer `syn` does not parse is one [`Unresolved::Unparsed`] edge.
+    pub(crate) fn value(tables: &'t Tables<'i>, id: ValueId) -> Vec<Edge> {
+        let index = tables.index(id.package());
+        let record = &index.values()[id.value()];
+        let package = tables.package(id.package()).to_owned();
+        let start = record.whole().start();
+        let module = record
+            .module_paths()
+            .first()
+            .map_or_else(|| "crate".to_owned(), |module| (*module).to_owned());
+        let text = index.text(record.whole());
+        let mut walker = Walker {
+            tables,
+            from: Node::Value(id),
+            arm_declared: &record.declared,
+            arm_variant: record.variant(),
+            arm_offset: start,
+            at: id.package(),
+            package: package.clone(),
+            module: module.clone(),
+            written: tables.written(&package, &module),
+            scopes: vec![Scope::default()],
+            closures: Vec::new(),
+            macros: Vec::new(),
+            dead: 0,
+            base: start,
+            text,
+            edges: Vec::new(),
+        };
+        let expr = if record.type_owner().is_some() {
+            if let Some(block) = index.impls().iter().find(|block| block.body().holds(start))
+                && let Some(header) = crate::census::types::impl_header(index, block)
+            {
+                walker.written.enter(&header.generics);
+                walker.written.self_ty = Some(walker.written.ty(&header.self_ty));
+            }
+            syn::parse_str::<syn::ImplItem>(text).map(|parsed| match parsed {
+                syn::ImplItem::Const(constant) => Some(constant.expr),
+                _ => None,
+            })
+        } else if record.trait_name().is_some() {
+            if let Some(declaration) = index
+                .traits()
+                .iter()
+                .find(|declaration| declaration.body().holds(start))
+                && let Some(trait_id) = tables
+                    .traits
+                    .identities(&package, declaration)
+                    .into_iter()
+                    .next()
+            {
+                walker.written.self_ty = Some(trait_self(&trait_id));
+            }
+            syn::parse_str::<syn::TraitItem>(text).map(|parsed| match parsed {
+                syn::TraitItem::Const(constant) => constant.default.map(|(_, expr)| expr),
+                _ => None,
+            })
+        } else {
+            syn::parse_str::<syn::Item>(text).map(|parsed| match parsed {
+                syn::Item::Const(constant) => Some(*constant.expr),
+                syn::Item::Static(value) => Some(*value.expr),
+                _ => None,
+            })
+        };
+        match expr {
+            Ok(Some(expr)) => {
+                walker.expr(&expr);
+            }
+            Ok(None) => {}
+            Err(error) => walker.edges.push(Edge {
+                from: Node::Value(id),
+                site: CallSite {
+                    span: record.whole(),
+                    name: record.name().to_owned(),
+                    closure: None,
+                    macro_arg: None,
+                },
+                to: Target::Unresolved(Unresolved::Unparsed {
+                    why: error.to_string(),
+                }),
+                via: Via::Direct,
+            }),
+        }
         walker.edges
     }
 
@@ -292,16 +387,15 @@ impl<'t, 'i> Walker<'t, 'i> {
         if predicates.is_empty() {
             return false;
         }
-        let record = self.tables.record(self.from);
         let index = self.tables.index(self.at);
-        let Some(file) = index.file_at(record.whole().start()) else {
+        let Some(file) = index.file_at(self.arm_offset) else {
             return false;
         };
-        let admitted = record.declaration_paths().iter().any(|path| {
+        let admitted = self.arm_declared.iter().any(|path| {
             let all: Vec<String> = path
                 .predicates()
                 .iter()
-                .chain(record.variant().predicates())
+                .chain(self.arm_variant.predicates())
                 .chain(&predicates)
                 .cloned()
                 .collect();
@@ -309,7 +403,7 @@ impl<'t, 'i> Walker<'t, 'i> {
                 file,
                 &all,
                 path.compilation()
-                    .and(record.variant().compilation())
+                    .and(self.arm_variant.compilation())
                     .and(compilation),
             )
         });
@@ -1169,15 +1263,44 @@ impl<'t, 'i> Walker<'t, 'i> {
                 Named::Variant(..) | Named::Type(..) => constructor = true,
                 Named::Foreign(path) => foreign.push(path.clone()),
                 Named::Value(at, module, value) => {
-                    // A `const` or a `static` called: what it holds is a function value.
-                    return unresolved(Unresolved::Dynamic {
-                        what: format!(
-                            "`{value}`, a `const` or `static` of {} {module} called: a function \
-                             pointer",
-                            self.tables.package(*at)
-                        ),
-                        candidates: Vec::new(),
-                    });
+                    // A `const` or a `static` called: what it holds is a function value. Its
+                    // initializer is reached (the functions it names are edges there), and the
+                    // call is dynamic with those functions as its candidates.
+                    let values = self
+                        .tables
+                        .module_values
+                        .get(&(*at, module.clone(), value.clone()))
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut candidates = Vec::new();
+                    for id in &values {
+                        for edge in Walker::value(self.tables, *id) {
+                            if let (Target::Item(item), Via::Value) = (&edge.to, &edge.via) {
+                                candidates.push(*item);
+                            }
+                        }
+                    }
+                    candidates.sort();
+                    candidates.dedup();
+                    let mut targets: Vec<(Target, Via)> = values
+                        .into_iter()
+                        .map(|id| (Target::Value(id), Via::Value))
+                        .collect();
+                    targets.push((
+                        Target::Unresolved(Unresolved::Dynamic {
+                            what: format!(
+                                "`{value}`, a `const` or `static` of {} {module} called: a \
+                                 function pointer",
+                                self.tables.package(*at)
+                            ),
+                            candidates,
+                        }),
+                        Via::Direct,
+                    ));
+                    return Answer {
+                        targets,
+                        ..Answer::default()
+                    };
                 }
                 Named::Module(..) | Named::Trait(..) | Named::Alias(..) => {}
             }
@@ -1299,7 +1422,12 @@ impl<'t, 'i> Walker<'t, 'i> {
                 return Ty::unknown("a function item");
             }
         }
-        if let Some(data) = self.data_type(path) {
+        if let Some((data, values)) = self.data(path) {
+            // Data is no call; a `const`'s or `static`'s initializer is reached by the use.
+            let (span, name) = path_site(self, path);
+            for (id, via) in values {
+                self.push(span, &name, Target::Value(id), via);
+            }
             return data;
         }
         let (span, name) = path_site(self, path);
@@ -1312,10 +1440,13 @@ impl<'t, 'i> Walker<'t, 'i> {
         Ty::unknown("a function value")
     }
 
-    /// **The type a path in value position has when it names data**: a unit struct or an enum's
-    /// variant (the type), a `const` or a `static` of a module (its written type), an associated
-    /// `const` (`Self::LIMIT`, `Type::MAX`, `T::ID`: untyped). `None` for a path that is no data.
-    fn data_type(&self, path: &syn::ExprPath) -> Option<Ty> {
+    /// **The type a path in value position has when it names data**, with the values whose
+    /// initializers the use reaches: a unit struct or an enum's variant (the type, no value), a
+    /// `const` or a `static` of a module (its written type; [`Via::Deref`] for a `LazyLock` or a
+    /// `LazyCell`, whose initializer runs on the first deref, [`Via::Value`] otherwise), an
+    /// associated `const` (`Self::LIMIT`, `Type::MAX`, `T::ID`: untyped, [`Via::Value`]). `None`
+    /// for a path that is no data.
+    fn data(&self, path: &syn::ExprPath) -> Option<(Ty, Vec<(ValueId, Via)>)> {
         if path.qself.is_some() {
             return None;
         }
@@ -1328,16 +1459,33 @@ impl<'t, 'i> Walker<'t, 'i> {
         let (segments, _) = self.body_path(&segments);
         let resolution = self.tables.names.resolve(self.at, &self.module, &segments);
         let found = resolution.named.iter().find_map(|named| match named {
-            Named::Variant(at, module, owner, _) | Named::Type(at, module, owner) => Some(
+            Named::Variant(at, module, owner, _) | Named::Type(at, module, owner) => Some((
                 super::decls::named_of(self.tables.package(*at), module, owner),
-            ),
-            Named::Value(at, module, value) => Some(
-                self.tables
+                Vec::new(),
+            )),
+            Named::Value(at, module, value) => {
+                let key = (*at, module.clone(), value.clone());
+                let ty = self
+                    .tables
                     .values
-                    .get(&(*at, module.clone(), value.clone()))
+                    .get(&key)
                     .cloned()
-                    .unwrap_or_else(|| Ty::unknown("a value whose type is not read")),
-            ),
+                    .unwrap_or_else(|| Ty::unknown("a value whose type is not read"));
+                let via = if self.tables.is_lazy(&ty) {
+                    Via::Deref
+                } else {
+                    Via::Value
+                };
+                let values = self
+                    .tables
+                    .module_values
+                    .get(&key)
+                    .into_iter()
+                    .flatten()
+                    .map(|id| (*id, via.clone()))
+                    .collect();
+                Some((ty, values))
+            }
             _ => None,
         });
         if found.is_some() {
@@ -1355,9 +1503,13 @@ impl<'t, 'i> Walker<'t, 'i> {
                 self.written.path(&written)
             }
         };
-        self.tables
-            .is_associated_const(&owner, name, &self.written)
-            .then(|| Ty::unknown("an associated `const`"))
+        let values = self.tables.associated_values(&owner, name, &self.written);
+        (!values.is_empty()).then(|| {
+            (
+                Ty::unknown("an associated `const`"),
+                values.into_iter().map(|id| (id, Via::Value)).collect(),
+            )
+        })
     }
 
     // ── macros ────────────────────────────────────────────────────────────

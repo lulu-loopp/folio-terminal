@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::names::{Named, Names, canonical_std};
-use super::{ArmQuery, Arms, ItemId, Target, Unresolved, Via};
+use super::{ArmQuery, Arms, ItemId, Target, Unresolved, ValueId, Via};
 use crate::census::types::{
     Method, Named as TyNamed, Receiver, Std, Ty, Written, closures_by_position, entry_method,
     external_method, impl_header, impl_of, iterator_method, prelude_method, std_kind, std_method,
@@ -187,10 +187,12 @@ pub(crate) struct Tables<'i> {
     pub(crate) method_names: HashMap<String, Vec<ItemId>>,
     /// Every `const` and `static` of a module, with its written type.
     pub(crate) values: HashMap<(usize, String, String), Ty>,
+    /// The `const`s and `static`s of each module, by name (one per `cfg` variant).
+    pub(crate) module_values: HashMap<(usize, String, String), Vec<ValueId>>,
     /// The associated `const`s of each `impl` block's self type, by name.
-    pub(crate) associated_consts: BTreeSet<(SelfKey, String)>,
-    /// The `const`s each first-party trait declares.
-    pub(crate) trait_consts: BTreeSet<(TraitId, String)>,
+    pub(crate) associated_consts: BTreeMap<(SelfKey, String), Vec<ValueId>>,
+    /// The `const`s each first-party trait declares, by name.
+    pub(crate) trait_consts: BTreeMap<(TraitId, String), Vec<ValueId>>,
     /// The `impl` blocks whose self type is not placed ([`UnplacedImpl`]).
     pub(crate) unplaced_impls: Vec<UnplacedImpl>,
     /// The free functions of each module, by name (one per `cfg` variant).
@@ -212,6 +214,8 @@ pub(crate) enum SelfTypeFailure {
 /// written in it, which no typed call reaches and an untyped one lists as candidates.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnplacedImpl {
+    /// `package module Type`: the block, by where it is written and the type it names.
+    pub key: String,
     pub what: String,
     pub methods: Vec<ItemId>,
 }
@@ -258,8 +262,9 @@ impl<'i> Tables<'i> {
             functions: HashMap::new(),
             values: HashMap::new(),
             unplaced_impls: Vec::new(),
-            associated_consts: BTreeSet::new(),
-            trait_consts: BTreeSet::new(),
+            module_values: HashMap::new(),
+            associated_consts: BTreeMap::new(),
+            trait_consts: BTreeMap::new(),
             unparsed: Vec::new(),
             supertraits: RefCell::default(),
         };
@@ -528,6 +533,7 @@ impl<'i> Tables<'i> {
                     // A type a macro generates (`bitflags!`, `#[implement]`, a generated enum):
                     // its methods are listed, never filed under nothing.
                     self.unplaced_impls.push(UnplacedImpl {
+                        key: format!("{package} {module} {}", block.type_owner()),
                         what: format!(
                             "the self type `{}` of {package}'s `impl` block in {module}: {why}",
                             block.type_owner()
@@ -630,7 +636,8 @@ impl<'i> Tables<'i> {
     /// Every `const` and `static`: a module's with its type, an `impl` block's by its self type, a
     /// trait's by the trait.
     fn read_values(&mut self, at: usize, package: &str, index: &Index) {
-        for value in index.values() {
+        for (position, value) in index.values().iter().enumerate() {
+            let id = ValueId::new(at, position);
             let text = index.text(value.whole());
             if let Some(owner) = value.type_owner() {
                 let start = value.whole().start();
@@ -656,7 +663,9 @@ impl<'i> Tables<'i> {
                 let _ = owner;
                 for key in self.self_keys(&self_ty, file).unwrap_or_default() {
                     self.associated_consts
-                        .insert((key, value.name().to_owned()));
+                        .entry((key, value.name().to_owned()))
+                        .or_default()
+                        .push(id);
                 }
                 continue;
             }
@@ -667,8 +676,11 @@ impl<'i> Tables<'i> {
                     .iter()
                     .find(|declaration| declaration.body().holds(start))
                 {
-                    for id in self.traits.identities(package, declaration) {
-                        self.trait_consts.insert((id, value.name().to_owned()));
+                    for trait_id in self.traits.identities(package, declaration) {
+                        self.trait_consts
+                            .entry((trait_id, value.name().to_owned()))
+                            .or_default()
+                            .push(id);
                     }
                 }
                 continue;
@@ -684,6 +696,10 @@ impl<'i> Tables<'i> {
                 continue;
             };
             for module in value.module_paths() {
+                self.module_values
+                    .entry((at, module.to_owned(), value.name().to_owned()))
+                    .or_default()
+                    .push(id);
                 let written = self.written(package, module);
                 self.values.insert(
                     (at, module.to_owned(), value.name().to_owned()),
@@ -693,51 +709,84 @@ impl<'i> Tables<'i> {
         }
     }
 
-    /// **Whether `owner::name` is an associated `const`** — of the type's own impls, of a
-    /// first-party trait it implements, or of a trait a generic or a trait object is known by:
-    /// data, no call.
-    pub(crate) fn is_associated_const(&self, owner: &Ty, name: &str, written: &Written) -> bool {
+    /// **The associated `const`s `owner::name` names** — of the type's own impls, of a first-party
+    /// trait it implements, or of a trait a generic or a trait object is known by — each a value
+    /// whose initializer the graph walks. Empty: no associated `const`.
+    pub(crate) fn associated_values(
+        &self,
+        owner: &Ty,
+        name: &str,
+        written: &Written,
+    ) -> Vec<ValueId> {
         let Ok(owner) = self.expand(owner.clone()) else {
-            return false;
+            return Vec::new();
         };
-        let declared_by = |traits: &BTreeSet<TraitId>| {
-            traits.iter().any(|id| {
+        let declared_by = |traits: &BTreeSet<TraitId>| -> Vec<ValueId> {
+            let mut found = Vec::new();
+            for id in traits {
                 let mut closure = BTreeSet::from([id.clone()]);
                 if let Ok(supertraits) = self.supertraits_of(id) {
                     closure.extend(supertraits);
                 }
-                closure
-                    .iter()
-                    .any(|id| self.trait_consts.contains(&(id.clone(), name.to_owned())))
-            })
-        };
-        match &owner {
-            Ty::Named(named) => match self.place(named) {
-                Placed::Types(keys) => keys.into_iter().any(|key| {
-                    let key = SelfKey::Type(key);
-                    if self
-                        .associated_consts
-                        .contains(&(key.clone(), name.to_owned()))
-                    {
-                        return true;
+                for id in &closure {
+                    if let Some(values) = self.trait_consts.get(&(id.clone(), name.to_owned())) {
+                        found.extend(values.iter().copied());
                     }
-                    let (_, implemented) = self.trait_members(&key, name);
-                    let traits: BTreeSet<TraitId> =
-                        implemented.into_iter().map(|(id, _)| id).collect();
-                    declared_by(&traits)
-                }),
+                }
+            }
+            found
+        };
+        let mut found = match &owner {
+            Ty::Named(named) => match self.place(named) {
+                Placed::Types(keys) => keys
+                    .into_iter()
+                    .flat_map(|key| {
+                        let key = SelfKey::Type(key);
+                        let mut found: Vec<ValueId> = self
+                            .associated_consts
+                            .get(&(key.clone(), name.to_owned()))
+                            .cloned()
+                            .unwrap_or_default();
+                        if found.is_empty() {
+                            let (_, implemented) = self.trait_members(&key, name);
+                            let traits: BTreeSet<TraitId> =
+                                implemented.into_iter().map(|(id, _)| id).collect();
+                            found = declared_by(&traits);
+                        }
+                        found
+                    })
+                    .collect(),
                 Placed::Foreign(path) => self
                     .associated_consts
-                    .contains(&(SelfKey::Foreign(path), name.to_owned())),
-                _ => false,
+                    .get(&(SelfKey::Foreign(path), name.to_owned()))
+                    .cloned()
+                    .unwrap_or_default(),
+                _ => Vec::new(),
             },
             Ty::Traits(bounds) => self
                 .bound_traits(bounds)
-                .is_ok_and(|(first, _)| declared_by(&first)),
-            Ty::Param(param) => written.trait_bounds.get(param).is_some_and(|bounds| {
-                self.bound_traits(bounds)
-                    .is_ok_and(|(first, _)| declared_by(&first))
-            }),
+                .map(|(first, _)| declared_by(&first))
+                .unwrap_or_default(),
+            Ty::Param(param) => written
+                .trait_bounds
+                .get(param)
+                .and_then(|bounds| self.bound_traits(bounds).ok())
+                .map(|(first, _)| declared_by(&first))
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        found.sort();
+        found.dedup();
+        found
+    }
+
+    /// Whether a value's declared type is a `LazyLock` or a `LazyCell`, whose initializer runs on
+    /// its first deref.
+    pub(crate) fn is_lazy(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Named(named) => matches!(self.place(named), Placed::Foreign(path)
+                if path.first().is_some_and(|first| matches!(first.as_str(), "std" | "core"))
+                    && path.last().is_some_and(|last| last == "LazyLock" || last == "LazyCell")),
             _ => false,
         }
     }
