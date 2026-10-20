@@ -8000,7 +8000,7 @@ fn every_answering_app_event_is_the_signal_of_a_completions_row() {
 }
 
 /// The door each lane of the lane suite enters by, by its `LaneName` variant.
-const LANE_DOORS: [(&str, &str); 9] = [
+const LANE_DOORS: [(&str, &str); 10] = [
     ("Handoff", "Runtime::hand_off"),
     ("Font", "request_font_walk"),
     ("Taskbar", "taskbar_lane::request"),
@@ -8010,6 +8010,7 @@ const LANE_DOORS: [(&str, &str); 9] = [
     ("Programs", "programs_lane::request"),
     ("GitMutation", "GitMutationLane::ask"),
     ("Storage", "DocumentState::send_owed"),
+    ("Clipboard", "Runtime::ask_for_a_paste"),
 ];
 
 /// RED (S-1, rounds 1 and 2) — **every lane of the lane suite is a row of the ledger.**
@@ -8019,7 +8020,7 @@ const LANE_DOORS: [(&str, &str); 9] = [
 /// names its door in [`LANE_DOORS`], and that door is a `# completions` row's; a door listed for a
 /// variant the enum no longer has is refused too.
 ///
-/// MUTATION: add a variant `Clipboard` to `LaneName` (and nowhere else that compiles without it)
+/// MUTATION: add a variant `Kettle` to `LaneName` (and nowhere else that compiles without it)
 /// or drop a line of [`LANE_DOORS`], and it goes red naming the lane.
 #[test]
 fn every_lane_is_a_completions_row() {

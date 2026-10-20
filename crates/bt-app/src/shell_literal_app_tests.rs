@@ -35,14 +35,14 @@ fn unavailable_clipboard_paste_keeps_state_and_allows_a_retry() {
         spelling: None,
         wsl_distribution: None,
     };
-    let unavailable = prepare_clipboard_paste(Err("injected contention".into()), &recipient, false);
-    assert!(unavailable.text.is_none());
-    assert!(unavailable.notice.is_some());
+    // An unavailable clipboard is its request's `Failed` on the clipboard lane, and nothing is
+    // prepared or written (`runtime::clipboard::tests::
+    // a_paste_whose_open_is_refused_five_times_says_so_once_and_writes_nothing`).
     assert!(pty_writes.is_empty());
     assert!(session.view_selection().is_some());
     assert!(projection.selection().is_some());
     let retry = prepare_clipboard_paste(
-        Ok(bt_platform::ClipboardPayload::Text("paste me".into())),
+        bt_platform::ClipboardPayload::Text("paste me".into()),
         &recipient,
         false,
     );
@@ -688,7 +688,7 @@ fn a_transformed_paste_never_takes_the_clipboard_road() {
     ));
     let recipient = tab.sessions[&target.seat].paste_recipient.clone();
     let prepared = prepare_clipboard_paste(
-        Ok(bt_platform::ClipboardPayload::Files(vec![first, second])),
+        bt_platform::ClipboardPayload::Files(vec![first, second]),
         &recipient,
         false,
     );
