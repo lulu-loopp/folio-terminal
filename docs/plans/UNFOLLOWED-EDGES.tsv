@@ -453,6 +453,23 @@ crates/bt-app/src/cli.rs	bt-app crate::cli::value_for	Ambiguous	is_some_and	1
 crates/bt-app/src/cli.rs	bt-app crate::cli::value_for	Ambiguous	len	1	
 crates/bt-app/src/cli.rs	bt-app crate::cli::value_for	Ambiguous	starts_with	1	
 crates/bt-app/src/cli.rs	bt-app crate::cli::value_for	Ambiguous	to_str	1	
+crates/bt-app/src/clipboard_lane.rs	bt-app crate::clipboard_lane::<Abandoned as Owed<ClipboardId>>::sink	Dynamic	(value)	1	
+crates/bt-app/src/clipboard_lane.rs	bt-app crate::clipboard_lane::ClipboardLane::a_paste_was_asked_after	Ambiguous	is_some_and	1	
+crates/bt-app/src/clipboard_lane.rs	bt-app crate::clipboard_lane::ClipboardLane::a_paste_was_asked_after	Ambiguous	unwrap_or_else	1	
+crates/bt-app/src/clipboard_lane.rs	bt-app crate::clipboard_lane::ClipboardLane::start	Dynamic	ledger_wake	1	
+crates/bt-app/src/clipboard_lane.rs	bt-app crate::clipboard_lane::ClipboardLane::submit	Ambiguous	id	1	
+crates/bt-app/src/clipboard_lane.rs	bt-app crate::clipboard_lane::ClipboardLane::submit	Ambiguous	unwrap_or_else	1	
+crates/bt-app/src/clipboard_lane.rs	bt-app crate::clipboard_lane::PasteHold::hold	Ambiguous	iter	1	
+crates/bt-app/src/clipboard_lane.rs	bt-app crate::clipboard_lane::PasteHold::hold	Ambiguous	len	1	
+crates/bt-app/src/clipboard_lane.rs	bt-app crate::clipboard_lane::PasteHold::hold	Ambiguous	map	1	
+crates/bt-app/src/clipboard_lane.rs	bt-app crate::clipboard_lane::PasteHold::hold	Ambiguous	push_back	1	
+crates/bt-app/src/clipboard_lane.rs	bt-app crate::clipboard_lane::PasteHold::hold	Ambiguous	sum	1	
+crates/bt-app/src/clipboard_lane.rs	bt-app crate::clipboard_lane::PasteHold::pastes	Ambiguous	collect	1	
+crates/bt-app/src/clipboard_lane.rs	bt-app crate::clipboard_lane::PasteHold::pastes	Ambiguous	filter_map	1	
+crates/bt-app/src/clipboard_lane.rs	bt-app crate::clipboard_lane::PasteHold::pastes	Ambiguous	iter	1	
+crates/bt-app/src/clipboard_lane.rs	bt-app crate::clipboard_lane::PasteHold::pop_front	Ambiguous	pop_front	1	
+crates/bt-app/src/clipboard_lane.rs	bt-app crate::clipboard_lane::PasteHold::queue_paste	Ambiguous	push_back	1	
+crates/bt-app/src/clipboard_lane.rs	bt-app crate::clipboard_lane::run_clipboard_lane	Dynamic	wake	1	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::encode_png	Ambiguous	map_err	1	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::first_free_index	Ambiguous	saturating_add	1	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::names_in	Ambiguous	collect	1	
@@ -1709,6 +1726,9 @@ crates/bt-app/src/lane.rs	bt-app crate::lane::Ledger::mint	Ambiguous	is_none	1
 crates/bt-app/src/lane.rs	bt-app crate::lane::Ledger::mint	Ambiguous	len	1	
 crates/bt-app/src/lane.rs	bt-app crate::lane::Ledger::mint	Ambiguous	unwrap_or	1	
 crates/bt-app/src/lane.rs	bt-app crate::lane::Ledger::mint	Dynamic	from	1	
+crates/bt-app/src/lane.rs	bt-app crate::lane::Ledger::owes	Ambiguous	get	1	
+crates/bt-app/src/lane.rs	bt-app crate::lane::Ledger::owes	Ambiguous	is_none	1	
+crates/bt-app/src/lane.rs	bt-app crate::lane::Ledger::owes	Ambiguous	is_some_and	1	
 crates/bt-app/src/lane.rs	bt-app crate::lane::Ledger::publish	Ambiguous	get	1	
 crates/bt-app/src/lane.rs	bt-app crate::lane::Ledger::publish	Ambiguous	is_none	2	
 crates/bt-app/src/lane.rs	bt-app crate::lane::Ledger::release	Dynamic	(value)	1	
@@ -1740,6 +1760,10 @@ crates/bt-app/src/lane.rs	bt-app crate::lane::Queue::next	Ambiguous	pop_front	1
 crates/bt-app/src/lane.rs	bt-app crate::lane::Queue::next	Ambiguous	unwrap_or_else	1	
 crates/bt-app/src/lane.rs	bt-app crate::lane::Queue::serve	Dynamic	run	1	
 crates/bt-app/src/lane.rs	bt-app crate::lane::Queue::serve	Dynamic	wake	1	
+crates/bt-app/src/lane.rs	bt-app crate::lane::Queue::withdraw	Ambiguous	and_then	1	
+crates/bt-app/src/lane.rs	bt-app crate::lane::Queue::withdraw	Ambiguous	iter	1	
+crates/bt-app/src/lane.rs	bt-app crate::lane::Queue::withdraw	Ambiguous	position	1	
+crates/bt-app/src/lane.rs	bt-app crate::lane::Queue::withdraw	Ambiguous	remove	1	
 crates/bt-app/src/lane.rs	bt-app crate::lane::lock	Ambiguous	unwrap_or_else	1	
 crates/bt-app/src/lane.rs	bt-app crate::lane::task	Ambiguous	map_err	1	
 crates/bt-app/src/lane.rs	bt-app crate::lane::task	Dynamic	run	1	
@@ -2044,7 +2068,7 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::create	Ambiguous	ok	1
 crates/bt-app/src/main.rs	bt-app crate::Runtime::create	Ambiguous	platform_chrome	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::create	Ambiguous	presentation_geometry	3	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::create	Ambiguous	scale_factor	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::create	Ambiguous	send_event	22	
+crates/bt-app/src/main.rs	bt-app crate::Runtime::create	Ambiguous	send_event	23	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::create	Ambiguous	set_ime_allowed	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::create	Ambiguous	set_seat_viewport	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::create	Ambiguous	take	1	
@@ -2459,9 +2483,9 @@ crates/bt-app/src/main.rs	bt-app crate::plan_windows	Ambiguous	clone	2
 crates/bt-app/src/main.rs	bt-app crate::plan_windows	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::plan_windows	Ambiguous	next	1	
 crates/bt-app/src/main.rs	bt-app crate::plan_windows	Dynamic	pinned	2	
-crates/bt-app/src/main.rs	bt-app crate::prepare_clipboard_paste	Ambiguous	text	2	
+crates/bt-app/src/main.rs	bt-app crate::prepare_clipboard_paste	Ambiguous	text	1	
 crates/bt-app/src/main.rs	bt-app crate::prepare_clipboard_paste	Ambiguous	then_some	1	
-crates/bt-app/src/main.rs	bt-app crate::prepare_clipboard_paste	Ambiguous	to_owned	2	
+crates/bt-app/src/main.rs	bt-app crate::prepare_clipboard_paste	Ambiguous	to_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::press_after_blur	Ambiguous	map_or	1	
 crates/bt-app/src/main.rs	bt-app crate::press_reaches_no_grid	Dynamic	seat_holds_a_shell	1	
 crates/bt-app/src/main.rs	bt-app crate::preview_document_height	Dynamic	mono	2	
@@ -2595,9 +2619,6 @@ crates/bt-app/src/main.rs	bt-app crate::what_a_close_wait_found	Ambiguous	map_or
 crates/bt-app/src/main.rs	bt-app crate::what_a_close_wait_found	Ambiguous	to_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::wheel_points_sideways	Ambiguous	abs	2	
 crates/bt-app/src/main.rs	bt-app crate::winit_outer_rect	Ambiguous	saturating_add	2	
-crates/bt-app/src/main.rs	bt-app crate::write_selection_text	Dynamic	write	1	
-crates/bt-app/src/main.rs	bt-app crate::write_terminal_clipboard_text	Ambiguous	context	1	
-crates/bt-app/src/main.rs	bt-app crate::write_terminal_clipboard_text	Ambiguous	map_err	1	
 crates/bt-app/src/marks.rs	bt-app crate::marks::Backdrop::luminance_under	Dynamic	covers	2	
 crates/bt-app/src/marks.rs	bt-app crate::marks::Backdrop::luminance_under	Dynamic	over	2	
 crates/bt-app/src/marks.rs	bt-app crate::marks::Band::append	Ambiguous	map	1	
@@ -3915,16 +3936,20 @@ crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime
 crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime::replace_contradicted_flash	Ambiguous	then_some	1	
 crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime::toast_anchor_rect	Ambiguous	flatten	1	
 crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::apply_clipboard_payload	Ambiguous	is_empty	1	
-crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::clipboard_line	Ambiguous	as_deref	1	
-crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::clipboard_line	Ambiguous	map	1	
-crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::clipboard_line	Ambiguous	ok	1	
-crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::clipboard_line	Ambiguous	unwrap_or_default	1	
-crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::copy_math_latex	Ambiguous	context	1	
-crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::copy_math_latex	Ambiguous	map_err	1	
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::ask_for_a_paste	Ambiguous	id	1	
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::ask_for_a_paste	Ambiguous	reason	1	
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::copy_math_latex	Ambiguous	map	1	
 crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::copy_path_to_clipboard	Ambiguous	into_owned	1	
 crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::paste_card_layout	Dynamic	word	1	
-crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::paste_into_field	Ambiguous	unwrap_or_default	1	
-crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::copy_policy_command_with	Dynamic	write	1	
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::paste_withdrawn	Ambiguous	is_some_and	1	
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::paste_withdrawn	Ambiguous	then_some	1	
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::say_the_clipboard_busy	Ambiguous	text	1	
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::say_the_clipboard_busy	Ambiguous	to_owned	1	
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::settle_clipboard	Ambiguous	is_none	1	
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::spend_paste	Ambiguous	text	1	
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::spend_paste	Ambiguous	to_owned	1	
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::submit_clipboard_write	Ambiguous	id	1	
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::submit_clipboard_write	Ambiguous	reason	1	
 crates/bt-app/src/runtime/configuration.rs	bt-app crate::runtime::configuration::<MergeTurn as keybindings_merge::KeybindingsWindow>::keybindings_put_in_force	Ambiguous	collect	1	
 crates/bt-app/src/runtime/configuration.rs	bt-app crate::runtime::configuration::<MergeTurn as keybindings_merge::KeybindingsWindow>::keybindings_put_in_force	Ambiguous	map	1	
 crates/bt-app/src/runtime/configuration.rs	bt-app crate::runtime::configuration::Runtime::export_settings_to	Ambiguous	collect	1	
@@ -4286,9 +4311,6 @@ crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::wheel_
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::arrange_palette	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::palette_field_look	Ambiguous	text	1	
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::palette_field_look	Ambiguous	to_owned	1	
-crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::palette_key	Ambiguous	as_deref	1	
-crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::palette_key	Ambiguous	is_empty	1	
-crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::palette_key	Ambiguous	is_some	1	
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::run_palette_row	Ambiguous	clone	2	
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::run_palette_row	Ambiguous	map	1	
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::aimed_seat_kind	Ambiguous	map	1	
@@ -8597,6 +8619,9 @@ crates/bt-platform/src/lib.rs	bt-platform crate::judge_file_name	Ambiguous	unwra
 crates/bt-platform/src/lib.rs	bt-platform crate::macos_clipboard::clipboard_text	Ambiguous	map	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::macos_clipboard::clipboard_text	Ambiguous	ok_or_else	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::macos_clipboard::clipboard_text	Ambiguous	to_string	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::macos_clipboard::on_the_main_queue	Ambiguous	exec_sync	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::macos_clipboard::on_the_main_queue	Ambiguous	expect	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::macos_clipboard::on_the_main_queue	Dynamic	work	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::macos_ime::cancel_composition	Ambiguous	client	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::macos_ime::cancel_composition	Ambiguous	discardMarkedText	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::macos_ime::cancel_composition	Ambiguous	unmarkText	1	
@@ -8828,6 +8853,9 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::cjk_font_table	Am
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::cjk_font_table	Ambiguous	to_vec	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::client_area_animation_enabled	Ambiguous	cast	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::client_area_animation_enabled	Ambiguous	map_err	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::clipboard_owner	Ambiguous	lock	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::clipboard_owner	Ambiguous	map_err	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::clipboard_owner	Ambiguous	ok_or_else	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::clipboard_text	Ambiguous	cast	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::clipboard_text	Ambiguous	is_null	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::clipboard_text	Ambiguous	iter	1	
