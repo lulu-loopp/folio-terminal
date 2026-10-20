@@ -137,37 +137,22 @@ pub fn probe_25(t: bt_render::WindowTarget) -> impl Sized {
 }
 
 /// `bt_pty::PtySession::spawn_shell_in` - all
-pub fn probe_26(size: bt_pty::PtySize, wake: bt_pty::OutputWake) -> impl Sized {
-    bt_pty::PtySession::spawn_shell_in(
-        "probe",
-        &[],
-        &Vec::new,
-        &[],
-        size,
-        wake,
-        None,
-        &bt_pty::PtyRecording::none(),
-    ) // probe: bt_pty::PtySession::spawn_shell_in
+pub fn probe_26(
+    size: bt_pty::PtySize,
+    wake: bt_pty::OutputWake,
+    p: &bt_pty::PtyRecording,
+) -> impl Sized {
+    bt_pty::PtySession::spawn_shell_in("probe", &[], &Vec::new, &[], size, wake, None, p) // probe: bt_pty::PtySession::spawn_shell_in
 }
 
 /// `bt_pty::PtySession::spawn_refreshed` - all
 pub fn probe_27(
     r: bt_pty::EnvironmentRefresh,
-    size: bt_pty::PtySize,
-    wake: bt_pty::OutputWake,
+    s: bt_pty::PtySize,
+    w: bt_pty::OutputWake,
+    p: &bt_pty::PtyRecording,
 ) -> impl Sized {
-    bt_pty::PtySession::spawn_refreshed(
-        "probe",
-        &[],
-        &Vec::new,
-        &[],
-        &[],
-        r,
-        size,
-        wake,
-        None,
-        &bt_pty::PtyRecording::none(),
-    ) // probe: bt_pty::PtySession::spawn_refreshed
+    bt_pty::PtySession::spawn_refreshed("probe", &[], &Vec::new, &[], &[], r, s, w, None, p) // probe: bt_pty::PtySession::spawn_refreshed
 }
 
 /// `bt_pty::PtySession::resize` - all
