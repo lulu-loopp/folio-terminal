@@ -810,7 +810,11 @@ fn a_function_value_that_is_no_one_item_is_an_edge_of_its_kind() {
             "`{data}` is data: its use reaches its initializer and calls nothing"
         );
     }
-    assert_eq!(at_via(&resolver, "root", "Unit"), Vec::new(), "a unit struct is no edge");
+    assert_eq!(
+        at_via(&resolver, "root", "Unit"),
+        Vec::new(),
+        "a unit struct is no edge"
+    );
     assert_eq!(
         at(&resolver, "root", "lock"),
         ["foreign std::sync::Mutex::lock"],
