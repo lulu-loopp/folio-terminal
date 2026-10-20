@@ -18,9 +18,9 @@
 # after a fix writes. Keys compare ordinally.
 #
 # The baseline is the list committed at `git merge-base HEAD origin/main`. When the merge base has
-# no list (the branch that introduces it), the baseline is the list as the commit that added it
-# carried it. There is no "nothing to compare, so pass" road: no origin/main, no merge base, or no
-# commit that added the list is exit 2.
+# no list (the branch that introduces it), the baseline is the list as T-BT-SOURCE-CALL-GRAPH seeded
+# it, pinned below by commit (as check-census-unknowns.ps1 pins census-1's). There is no "nothing to
+# compare, so pass" road: no origin/main, no merge base, or an unreadable seed is exit 2.
 #
 # For its own tests (`check-unfollowed-edges-tests.ps1`), `-ListPath` and `-BaselinePath` replace
 # the working tree's list and the baseline read through git.
@@ -41,6 +41,8 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -Er
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $relative = "docs/plans/UNFOLLOWED-EDGES.tsv"
 $header = "file`titem`tkind`tname`tsites`treason"
+# The commit that seeded the list (T-BT-SOURCE-CALL-GRAPH round 3, on the tree merged with main).
+$seed = "09388cb627a0739d18b9a7603c9a151f6544be56"
 
 # A row is a data line: not blank, not a comment, not the header. Its key is its first four
 # columns, tab-joined; a key on two rows is refused rather than read as either.
@@ -111,15 +113,13 @@ if ($ListPath) {
         if ($LASTEXITCODE -eq 0) {
             $from = "the merge base $($base.Substring(0, 12))"
         } else {
-            $added = @(& git log --diff-filter=A --format=%H -- $relative 2>$null)
-            if ($LASTEXITCODE -ne 0 -or $added.Count -eq 0) {
-                Write-Host "the merge base $($base.Substring(0, 12)) has no $relative, and no commit on this branch added it."
+            $text = (& git show "${seed}:${relative}" 2>$null) | Out-String
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "the merge base $($base.Substring(0, 12)) has no $relative, and the seed $($seed.Substring(0, 12)) cannot be read in this clone."
                 Write-Host "This is not a pass: the comparison did not happen."
                 exit 2
             }
-            $seed = $added[-1]
-            $text = (& git show "${seed}:${relative}" 2>$null) | Out-String
-            $from = "the commit that added it, $($seed.Substring(0, 12))"
+            $from = "the seed $($seed.Substring(0, 12))"
         }
         $before = Read-UnfollowedEdges ($text -split "`r?`n") "$relative at $from"
     } finally {
