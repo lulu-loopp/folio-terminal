@@ -204,6 +204,13 @@ and the `folio.exe` the `launch` row starts, for `bt-platform`'s ignored
 | --- | --- | --- | --- | --- |
 | `BT_PASTE_CRT_CONSUMER` | absolute path to the separately compiled `paste_paths_crt.exe` fixture | Set by the developer or acceptance coordinator when explicitly running the ignored Windows direct-CRT test. Names the consumer that receives the encoder's literal through the quiet process door; the test checks its captured argument count and UTF-16 units. | No file is written by this switch; consumer output is captured through pipes. | not set; the test is ignored by default and fails if explicitly run without this value |
 
+`BT_PSREADLINE_NOOP_PROBE` and `BT_PSREADLINE_REANCHOR_PROBE` — set to `1` on the Windows
+PowerShell pane `bt-app`'s `shell_integration::psreadline_tests::real_shell::the_fork_an_earlier_folio_left_keeps_the_resize_chords_no_op`
+starts, and read only by `folio.ps1`'s resize-chord handlers in that pane: the first makes the
+no-op handler write `OSC 777;BT_PSREADLINE_NOOP`, the second makes the reflection repair write
+`OSC 777;BT_PSREADLINE_REANCHOR=…`, so the test can tell which handler took the chord. A product
+session never has either; the terminal ignores both sequences.
+
 **Folio's local-data root for its PSReadLine has no variable.** The pane's module is
 written under `%LOCALAPPDATA%\Folio\psmodules\` (`shell_integration::local_data_root`),
 and no `BT_` name moves that root, in a test build or any other (it follows
