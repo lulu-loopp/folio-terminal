@@ -2511,39 +2511,17 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> thread::JoinHandle<Vec<u8
 }
 
 /// One pipe as [`drain`] reads it. The product's is the pipe itself; under test, a pipe whose end
-/// the thread that started the child asked to hear of (`PIPES_LET_GO`) says so when its reader
-/// drops it — which is how a test sees that the readers let go before the answer.
+/// the thread that started the child asked to hear of says so when its reader drops it
+/// (`tests::observed`) — which is how a test sees that the readers let go before the answer.
 fn observed(pipe: Option<Box<dyn Read + Send>>) -> Option<Box<dyn Read + Send>> {
     #[cfg(test)]
     {
-        struct Observed(Box<dyn Read + Send>, mpsc::Sender<()>);
-        impl Read for Observed {
-            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-                self.0.read(buf)
-            }
-        }
-        impl Drop for Observed {
-            fn drop(&mut self) {
-                let _ = self.1.send(());
-            }
-        }
-        let heard = PIPES_LET_GO.with(|heard| heard.borrow().clone());
-        match (pipe, heard) {
-            (Some(pipe), Some(heard)) => Some(Box::new(Observed(pipe, heard))),
-            (pipe, _) => pipe,
-        }
+        tests::observed(pipe)
     }
     #[cfg(not(test))]
     {
         pipe
     }
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Where the pipes of a child this thread starts say they were let go, when a test asks.
-    static PIPES_LET_GO: std::cell::RefCell<Option<mpsc::Sender<()>>> =
-        const { std::cell::RefCell::new(None) };
 }
 
 /// The name of the program `command` starts, as a [`GitFault::GitMissing`]
@@ -4606,6 +4584,37 @@ pub fn take_git_worker_notice(notice_pending: &mut bool) -> Option<&'static str>
 mod tests {
     use super::*;
     use crate::test_support::host_path;
+
+    thread_local! {
+        /// Where the pipes of a child this thread starts say they were let go, when a test asks.
+        static PIPES_LET_GO: std::cell::RefCell<Option<mpsc::Sender<()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// A pipe that says, to the sender this thread's test set (`PIPES_LET_GO`), when its reader
+    /// lets it go.
+    struct Observed(Box<dyn Read + Send>, mpsc::Sender<()>);
+
+    impl Read for Observed {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+
+    impl Drop for Observed {
+        fn drop(&mut self) {
+            let _ = self.1.send(());
+        }
+    }
+
+    /// [`super::observed`]'s test arm: the pipe, observed when this thread's test asked.
+    pub(super) fn observed(pipe: Option<Box<dyn Read + Send>>) -> Option<Box<dyn Read + Send>> {
+        let heard = PIPES_LET_GO.with(|heard| heard.borrow().clone());
+        match (pipe, heard) {
+            (Some(pipe), Some(heard)) => Some(Box::new(Observed(pipe, heard))),
+            (pipe, _) => pipe,
+        }
+    }
 
     /// RED mutation: classify `checkout` as contained; the hook-capable set no
     /// longer matches the reviewed command inventory.
