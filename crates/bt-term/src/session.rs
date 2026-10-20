@@ -2491,7 +2491,7 @@ impl DualPlaneSession {
         }
         self.line_editor_notes.push(format!(
             "shell integration: this pane's PSReadLine after its profile ran is {version}, not \
-             Folio's (a profile imported it); Folio does not repair it"
+             Folio's"
         ));
     }
 
@@ -39632,7 +39632,7 @@ mod tests {
             session.take_line_editor_notes(),
             [
                 "shell integration: this pane's PSReadLine after its profile ran is 2.0.0, not \
-              Folio's (a profile imported it); Folio does not repair it"
+              Folio's"
             ]
         );
         session

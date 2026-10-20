@@ -5315,8 +5315,8 @@ impl Text {
             ),
             Self::LegacyPsReadLineRemovedToast => pick(
                 lang,
-                "Removed. Other PowerShell windows now use their own PSReadLine.",
-                "Removed. Other PowerShell windows now use their own PSReadLine.", // zh: pending T-INTEGRATION-INJECT-2-BUILD
+                "Removed. PowerShell windows opened from now on use their own PSReadLine.",
+                "Removed. PowerShell windows opened from now on use their own PSReadLine.", // zh: pending T-INTEGRATION-INJECT-2-BUILD
             ),
             Self::ShellProfileAddedToast => pick(
                 lang,

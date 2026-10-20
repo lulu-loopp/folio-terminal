@@ -527,6 +527,19 @@ mod real_shell {
         rows: u16,
         prefix: bool,
     ) -> Pane {
+        pane_with(row, command_row, columns, rows, prefix, &[])
+    }
+
+    /// [`pane_with_prefix`] with `environment` written over the pane's last layer, after Folio's
+    /// own declaration.
+    fn pane_with(
+        row: &[&str],
+        command_row: bool,
+        columns: u16,
+        rows: u16,
+        prefix: bool,
+        environment: &[(OsString, OsString)],
+    ) -> Pane {
         let program = windows_powershell();
         let hygiene = Hygiene::new();
         let module =
@@ -595,6 +608,10 @@ mod real_shell {
             );
         }
 
+        for (name, value) in environment {
+            profile.retain(|(existing, _)| !environment_name_eq(existing, name));
+            profile.push((name.clone(), value.clone()));
+        }
         crate::test_support::install_host_answers();
         let home = hygiene.home();
         let hygiene = hygiene.with_powershell_shape(super::tests::test_shell_shape(
@@ -1258,8 +1275,9 @@ mod real_shell {
                                       [string]$_.Version + '@' + $_.ModuleBase }) -join ',') + '|' \
                                       + $ExecutionContext.SessionState.LanguageMode + '|' + \
                                       (Test-Path Function:PSConsoleHostReadLine) + '|' + \
-                                      $env:PSModulePath + '|' + ($Error | Select-Object -First 1 | \
-                                      Out-String) + '|E' + 'ND'";
+                                      $env:PSModulePath + '|' + (Get-Command Get-PSReadLineOption).\
+                                      ImplementingType.Assembly.Location + '|' + ($Error | \
+                                      Select-Object -First 1 | Out-String) + '|E' + 'ND'";
         let mut seen = Vec::new();
         for prefix in [false, true] {
             let (mut pane, profile) = profile_pane_with_prefix(CONSTRAINED, prefix);
@@ -1276,9 +1294,11 @@ mod real_shell {
             eprintln!("BT_PSRL_CONSTRAINED prefix={prefix} facts={facts}");
             pane.close();
             let _ = std::fs::remove_file(profile);
-            // The editor, the mode, the function and the module path; the last field, the first
-            // error, is measured and printed only (see the design note's round 2).
-            seen.push(facts.split('|').take(4).collect::<Vec<_>>().join("|"));
+            // The editor, the mode, the function, the module path and the assembly the module's
+            // cmdlets run from — which code answers, not only which module object is listed
+            // (round 3a); the last field, the first error, is measured and printed only (see the
+            // design note's round 2).
+            seen.push(facts.split('|').take(5).collect::<Vec<_>>().join("|"));
         }
         let reference: Vec<&str> = seen[0].split('|').collect();
         assert_eq!(
@@ -1295,6 +1315,123 @@ mod real_shell {
             !seen[1].contains(crate::psreadline::ARTEFACT),
             "and not on Folio's: {}",
             seen[1]
+        );
+    }
+
+    /// The fork an earlier Folio shipped, laid down from the tree's own history into `modules`
+    /// (`<modules>\PSReadLine\2.4.6\`), each file held to its `psreadline::LEGACY_FILES` hash. The
+    /// bytes left the tree with T-INTEGRATION-INJECT-2-BUILD's step 3 (`d7e307a2`); its parent
+    /// still holds them, and CI's checkouts carry the whole history.
+    fn lay_the_fork_from_history(modules: &Path) {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let leaf = modules.join("PSReadLine").join("2.4.6");
+        for (name, pinned) in crate::psreadline::LEGACY_FILES {
+            let shown = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .arg("show")
+                .arg(format!("d7e307a2^:assets/psreadline/2.4.6/{name}"))
+                .output()
+                .expect("git runs");
+            assert!(
+                shown.status.success(),
+                "the fork's {name} is in the history: {}",
+                String::from_utf8_lossy(&shown.stderr)
+            );
+            assert_eq!(
+                bt_winres::digest::hex(&bt_winres::digest::sha256(&shown.stdout)),
+                pinned,
+                "{name} is the fork Folio last shipped"
+            );
+            let target = leaf.join(name);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, &shown.stdout).unwrap();
+        }
+    }
+
+    /// RED (T-INTEGRATION-INJECT-2-BUILD round 3a) — **the fork an earlier Folio left in Documents
+    /// keeps the resize chord's no-op** where a pane loads it (Folio's copy not on its path): it
+    /// anchors itself, and `folio.ps1` tells it by its assembly's `2.4.6-bt.` stamp. The fork is a
+    /// script-root module — its `ImplementingAssembly` is empty — so the stamp is read from the
+    /// assembly its exported cmdlet is implemented in. The fork's own bytes, from the history,
+    /// first on the pane's module path; the chord paid with a typed line; the dev probes say which
+    /// handler took it.
+    ///
+    /// MUTATION (observed red): read the stamp from `$psReadLineModule.ImplementingAssembly`, the
+    /// round-2 spelling — the lookup throws, the fork reads as no fork, and the reflection repair
+    /// takes the chord (`BT_PSREADLINE_REANCHOR=`).
+    #[test]
+    fn the_fork_an_earlier_folio_left_keeps_the_resize_chords_no_op() {
+        let _turn = observation_turn();
+        let root = bt_testpath::temp_path("psreadline-fork-history");
+        let modules = root.join("Modules");
+        lay_the_fork_from_history(&modules);
+        let path = format!(
+            "{};{}",
+            modules.display(),
+            bt_platform::environment::machine_variable(MODULE_PATH)
+                .unwrap_or_default()
+                .to_string_lossy()
+        );
+        let mut pane = pane_with(
+            &["-NoLogo", "-ExecutionPolicy", "Bypass"],
+            false,
+            120,
+            30,
+            false,
+            &[
+                (OsString::from(MODULE_PATH), OsString::from(path)),
+                (
+                    OsString::from("BT_PSREADLINE_NOOP_PROBE"),
+                    OsString::from("1"),
+                ),
+                (
+                    OsString::from("BT_PSREADLINE_REANCHOR_PROBE"),
+                    OsString::from("1"),
+                ),
+            ],
+        );
+        pane.until("the first prompt", |pane| {
+            pane.output_since(0).contains("\x1b]133;B")
+        });
+        pane.settle();
+        let facts = pane.run(
+            "'BTPS' + 'RL|' + (Get-Module PSReadLine).ModuleBase + '|' + [Diagnostics.\
+             FileVersionInfo]::GetVersionInfo((Get-Module PSReadLine).ExportedCmdlets['Get-\
+             PSReadLineOption'].ImplementingType.Assembly.Location).ProductVersion + '|E' + 'ND'",
+            "|END",
+        );
+        let facts = facts_of(&facts);
+        eprintln!("BT_PSRL_FORK facts={facts}");
+        let (base, stamp) = facts.split_once('|').expect("base|stamp");
+        assert!(
+            Path::new(base).starts_with(&modules),
+            "the pane runs the fork: {facts}"
+        );
+        assert!(
+            stamp.starts_with(&crate::psreadline::family_prefix()),
+            "the fork's stamp: {facts}"
+        );
+        let mark = pane.raw.len();
+        pane.pty.write(b"echo fork").unwrap();
+        pane.settle();
+        pane.pty.write(b"\x1b[24;8~").unwrap();
+        let answered = pane.reached_within(Duration::from_secs(20), |pane| {
+            let output = pane.output_since(mark);
+            output.contains("BT_PSREADLINE_NOOP") || output.contains("BT_PSREADLINE_REANCHOR=")
+        });
+        let output = pane.output_since(mark);
+        eprintln!(
+            "BT_PSRL_FORK chord_answered={answered} noop={} reanchor={}",
+            output.contains("BT_PSREADLINE_NOOP"),
+            output.contains("BT_PSREADLINE_REANCHOR=")
+        );
+        pane.close();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(answered, "a handler took the chord");
+        assert!(
+            output.contains("BT_PSREADLINE_NOOP") && !output.contains("BT_PSREADLINE_REANCHOR="),
+            "the fork's chord is the no-op, never the reflection repair"
         );
     }
 

@@ -275,14 +275,17 @@ $psReadLineVersion = $psReadLineModule.Version
 # still loads when Folio's own copy is not on its path (its write failed, say): it derives its
 # anchor from the prompt's own cell width and keeps its coordinates true across every resize,
 # so it gets the no-op as it always did. It is told by the build stamp in its assembly's
-# product version — what Folio itself reads to recognise it (`psreadline::installed_build`) —
-# not by its version number.
-$psReadLineSelfAnchors = $false
-try {
-    $psReadLineSelfAnchors = [Diagnostics.FileVersionInfo]::GetVersionInfo(
-        $psReadLineModule.ImplementingAssembly.Location).ProductVersion -like '*-bt.*'
-} catch {
-    # No assembly to ask is no fork.
+# product version, `2.4.6-bt.` and what follows — the prefix Folio itself reads to recognise it
+# (`psreadline::installed_build`) — not by its version number. **The assembly is the one the
+# module's own cmdlets are implemented in**: the fork is a script-root module (its RootModule is
+# `PSReadLine.psm1`, the DLL a nested module), so its `ImplementingAssembly` is empty, while the
+# cmdlet it exports names the code that runs whatever shape the module has.
+$psReadLineSelfAnchors = & {
+    $cmdlet = $psReadLineModule.ExportedCmdlets['Get-PSReadLineOption']
+    if (-not $cmdlet) { return $false }
+    $location = $cmdlet.ImplementingType.Assembly.Location
+    if (-not $location) { return $false }
+    [Diagnostics.FileVersionInfo]::GetVersionInfo($location).ProductVersion -like '2.4.6-bt.*'
 }
 if (-not $psReadLineSelfAnchors -and $psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
     Set-PSReadLineKeyHandler -Chord 'Ctrl+Alt+Shift+F12' -ScriptBlock {
@@ -805,7 +808,7 @@ $btEdition = if ($PSVersionTable.PSEdition -eq 'Core') { 'PowerShell 7' } else {
 # version by number (`Import-Module PSReadLine -RequiredVersion 2.0.0`) is what is found here: a
 # loaded PSReadLine that is not under Folio's folder, beside Folio's or instead of it.
 # `OSC 777;folio-psreadline;<version>` is Folio's own verb; Folio does not repair the pane.
-if ($PSVersionTable.PSEdition -ne 'Core') {
+if ($PSVersionTable.PSEdition -ne 'Core') { & {
     $folioModules = $env:PSModulePath -split ';' | Where-Object {
         $_ -and (Split-Path (Split-Path $_ -Parent) -Leaf) -eq 'psmodules' -and
             (Test-Path -LiteralPath (Join-Path $_ 'PSReadLine'))
@@ -820,4 +823,4 @@ if ($PSVersionTable.PSEdition -ne 'Core') {
         [Console]::Write(([string][char]27) + ']777;folio-psreadline;' +
             [string]$foreignPSReadLine.Version + [char]7)
     }
-}
+} }
