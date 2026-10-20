@@ -3,11 +3,13 @@
 //! small crate; each test names the mutation of the engine that turns it red. The last test runs
 //! the engine over `bt-app` and its first-party dependencies and prints what it met.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bt_source::call_graph::{Arms, CallGraph, Edge, ItemId, Resolver, Target, Unresolved, Via};
+use bt_source::call_graph::{
+    Arms, CallGraph, Edge, ItemId, Node, Resolver, Target, Unresolved, Via,
+};
 use bt_source::{
     DiskScope, Index, TargetId, TargetKind, TargetRoot, Universe, Vendor, Workspace, is_vendored,
     report, universes,
@@ -69,6 +71,7 @@ fn spelled(resolver: &Resolver<'_>, edge: &Edge) -> String {
     match &edge.to {
         Target::Item(id) => resolver.key(*id),
         Target::Constructor => "constructor".to_owned(),
+        Target::Value(id) => format!("value {}", resolver.node_key(Node::Value(*id))),
         Target::Closure(_) => "closure".to_owned(),
         Target::Nested(_) => "nested".to_owned(),
         Target::Foreign(path) => format!("foreign {}", path.join("::")),
@@ -146,17 +149,14 @@ fn a_helper_two_calls_deep_is_reached() {
     };
     assert_eq!(spelled(&resolver, edge), "foreign std::fs::write");
     assert_eq!(
-        keys(&resolver, path),
-        keys(
-            &resolver,
-            &[
-                root,
-                item(&resolver, "cg-two_deep", "helper"),
-                item(&resolver, "cg-two_deep", "helper2"),
-            ]
-        )
+        path,
+        &[
+            Node::Item(root),
+            Node::Item(item(&resolver, "cg-two_deep", "helper")),
+            Node::Item(item(&resolver, "cg-two_deep", "helper2")),
+        ],
+        "the path starts at the root"
     );
-    assert_eq!(path.first(), Some(&root), "the path starts at the root");
 }
 
 /// RED — **a method found through two first-party `Deref` steps is the target's, and each step's
@@ -620,9 +620,9 @@ fn the_walk_stops_at_the_boundary_and_visits_once() {
     assert_eq!(
         path,
         &[
-            root,
-            item(&resolver, "cg-walk", "ping"),
-            item(&resolver, "cg-walk", "pong")
+            Node::Item(root),
+            Node::Item(item(&resolver, "cg-walk", "ping")),
+            Node::Item(item(&resolver, "cg-walk", "pong")),
         ]
     );
 }
@@ -766,7 +766,8 @@ fn at_via(resolver: &Resolver<'_>, caller: &str, site: &str) -> Vec<(String, Via
 /// kind, with `Via::Value`, never dropped**: a derive's `default` (generated), `Self::f` with two
 /// traits declaring `f` (ambiguous), a `cfg(test)` function (other arm), a macro-generated one
 /// (path), a trait no implementation answers (dynamic); and data — a `const`, a `static`, a unit
-/// struct, an associated `const` — is no edge at all, while a method called on a `static` is
+/// struct, an associated `const` — is no call (a value's use is an edge to its initializer, a unit
+/// struct's no edge), while a method called on a `static` is
 /// typed by its declaration (through a `LazyLock` to its value).
 ///
 /// MUTATION: in `Walker::path_value`, push only the resolved, nested, foreign and cutoff targets
@@ -796,13 +797,20 @@ fn a_function_value_that_is_no_one_item_is_an_edge_of_its_kind() {
         value("path generated_fn")
     );
     assert_eq!(at_via(&resolver, "generic", "alone"), value("dynamic "));
-    for data in ["LIMIT", "NAMES", "Unit", "CAP"] {
+    // Data is no call: a `const`'s or `static`'s use is an edge to its initializer only (round
+    // 3), and a unit struct is no edge at all.
+    for (data, initializer) in [
+        ("LIMIT", "value cg-value_kinds crate::LIMIT"),
+        ("NAMES", "value cg-value_kinds crate::NAMES"),
+        ("CAP", "value cg-value_kinds crate::Both::CAP"),
+    ] {
         assert_eq!(
             at_via(&resolver, "root", data),
-            Vec::new(),
-            "`{data}` is data, and no edge"
+            value(initializer),
+            "`{data}` is data: its use reaches its initializer and calls nothing"
         );
     }
+    assert_eq!(at_via(&resolver, "root", "Unit"), Vec::new(), "a unit struct is no edge");
     assert_eq!(
         at(&resolver, "root", "lock"),
         ["foreign std::sync::Mutex::lock"],
@@ -949,5 +957,327 @@ fn a_const_and_a_static_are_index_records() {
             ("LIMIT".to_owned(), None, bt_source::ValueKind::Const),
             ("NAMES".to_owned(), None, bt_source::ValueKind::Static),
         ]
+    );
+}
+
+// ── round 3 ───────────────────────────────────────────────────────────────
+
+/// RED (round 3) — **a `static`'s and a `const`'s initializer is a body of the graph**: a use of a
+/// `LazyLock` static reaches its initializer with `Via::Deref` (it runs on the first deref), and
+/// the walk follows the initializer's calls and the functions it names as values, inside its
+/// closure too; a `const` holding a function pointer, named or called, reaches the function, and
+/// the call is dynamic with the initializer's function as its candidate.
+///
+/// MUTATIONS: in `Walker::path_value`, push no edge for a value's use (round 2's data rule) —
+/// `probe`, `run` and `note` are not reached from `root`; in `Walker::module_call`, answer a
+/// called `const` with the dynamic edge alone — `target` is not reached from `calls_const`.
+#[test]
+fn a_static_or_const_initializer_is_walked_from_its_use() {
+    let index = fixture("lazy_init");
+    let resolver = resolver("lazy_init", &index);
+    let graph = CallGraph::new(&resolver);
+    let package = "cg-lazy_init";
+    let root = item(&resolver, package, "root");
+    let edges = resolver.resolve_callees(root);
+    let cell: Vec<(&Target, &Via)> = edges
+        .iter()
+        .filter(|edge| edge.site.name == "CELL")
+        .map(|edge| (&edge.to, &edge.via))
+        .collect();
+    assert!(
+        matches!(cell.as_slice(), [(Target::Value(_), Via::Deref)]),
+        "a use of a `LazyLock` static reaches its initializer by its deref: {cell:?}"
+    );
+    let reached = |from: ItemId| -> Vec<String> {
+        let reach = graph.walk(&[from], &BTreeSet::new());
+        keys(
+            &resolver,
+            &reach.reached.iter().copied().collect::<Vec<_>>(),
+        )
+    };
+    let from_root = reached(root);
+    for name in ["probe", "run", "note", "Lane::ask"] {
+        assert!(
+            from_root.contains(&format!("{package} crate::{name}")),
+            "`{name}` is reached through `CELL`'s initializer: {from_root:?}"
+        );
+    }
+    let calls = item(&resolver, package, "calls_const");
+    assert!(reached(calls).contains(&format!("{package} crate::target")));
+    let call: Vec<String> = resolver
+        .resolve_callees(calls)
+        .iter()
+        .filter(|edge| edge.site.name == "F")
+        .map(|edge| spelled(&resolver, edge))
+        .collect();
+    assert!(
+        call.contains(&format!("dynamic {package} crate::target")),
+        "the call of `F` is dynamic with the initializer's function as its candidate: {call:?}"
+    );
+    let names = item(&resolver, package, "names_const");
+    assert!(reached(names).contains(&format!("{package} crate::target")));
+    let initializer = resolver
+        .resolve_callees(root)
+        .iter()
+        .find_map(|edge| match edge.to {
+            Target::Value(id) => Some(id),
+            _ => None,
+        })
+        .expect("`CELL` is a value edge");
+    let closure_edges: Vec<String> = resolver
+        .value_callees(initializer)
+        .iter()
+        .filter(|edge| edge.site.closure.is_some())
+        .map(|edge| edge.site.name.clone())
+        .collect();
+    assert!(
+        closure_edges.contains(&"probe".to_owned()) && closure_edges.contains(&"note".to_owned()),
+        "the initializer's closure carries its edges: {closure_edges:?}"
+    );
+}
+
+/// The macro-generated types whose `impl` blocks the module tree cannot place, by package, module
+/// and type, once per block — a shrink-only list: a block that joins it is refused here (its type
+/// is to be written where the tree can read it, or the list widened in a change that says why),
+/// and a row whose block is gone is refused as stale. Their methods are reachable only as
+/// `Ambiguous` candidates, never through a typed call.
+const UNPLACED_IMPLS: [&str; 24] = [
+    "alacritty_terminal crate::term TermMode",
+    "alacritty_terminal crate::term TermMode",
+    "bt-app crate::i18n Text",
+    "bt-platform crate::explorer_command Command_Impl",
+    "bt-platform crate::explorer_command Factory_Impl",
+    "bt-platform crate::http DownloadTransport",
+    "bt-platform crate::http DownloadTransport",
+    "bt-platform crate::http DownloadTransport",
+    "bt-platform crate::http Transport",
+    "bt-platform crate::http Transport",
+    "bt-platform crate::http Transport",
+    "bt-platform crate::macos_dialogs DeferredFormulaMenu",
+    "bt-platform crate::macos_impl SystemSettingsObserver",
+    "bt-platform crate::macos_impl WindowButtonsObserver",
+    "bt-platform crate::macos_menu MenuTarget",
+    "bt-platform crate::macos_notify NotificationDelegate",
+    "bt-platform crate::macos_services ServicesProvider",
+    "bt-platform crate::video::engine Notify_Impl",
+    "bt-platform crate::video::macos_player EndWatch",
+    "bt-platform crate::webview::macos Gate",
+    "bt-pty crate ConPtySource",
+    "mitex-parser crate::syntax SyntaxKind",
+    "mitex-parser crate::syntax SyntaxKind",
+    "mitex-parser crate::syntax SyntaxKind",
+];
+
+/// The resolver over every workspace package but this one (bt-app's first-party packages and
+/// the vendored ones as what they are).
+fn real_tree() -> Vec<(String, Arc<Index>)> {
+    let workspace = Workspace::read(&workspace_root()).expect("this workspace");
+    workspace
+        .packages()
+        .iter()
+        .filter(|package| package.name() != "bt-source")
+        .map(|package| {
+            let vendor = if is_vendored(package.directory()) {
+                Vendor::Included
+            } else {
+                Vendor::Excluded
+            };
+            let universe = universes::crate_sources(package, vendor)
+                .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+            let index = Index::shared(&universe)
+                .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+            (package.name().to_owned(), index)
+        })
+        .collect()
+}
+
+/// RED (round 3) — **the `impl` blocks of types the module tree does not hold are exactly the
+/// named list** ([`UNPLACED_IMPLS`]): a 25th is refused, and so is a row whose block is gone.
+///
+/// MUTATION: remove one row of the list — the block it named is refused as unlisted.
+#[test]
+fn the_unplaced_impls_are_the_named_list() {
+    let held = real_tree();
+    let packages: Vec<(&str, &Index)> = held
+        .iter()
+        .map(|(name, index)| (name.as_str(), &**index))
+        .collect();
+    let resolver =
+        Resolver::new(&packages, Arms::product()).unwrap_or_else(|refusals| panic!("{refusals:?}"));
+    let mut found: Vec<&str> = resolver
+        .unplaced_impls()
+        .iter()
+        .map(|unplaced| unplaced.key.as_str())
+        .collect();
+    found.sort_unstable();
+    let mut listed: Vec<&str> = UNPLACED_IMPLS.to_vec();
+    listed.sort_unstable();
+    assert_eq!(
+        found, listed,
+        "the impl blocks of types the module tree does not hold are the named list (UNPLACED_IMPLS)"
+    );
+}
+
+/// One row of the unfollowed-edges list: a site's key and how many calls stand behind it.
+type SiteKey = (String, String, String, String);
+
+/// **The unfollowed edges of the real tree, by site**: walking from every product callable of
+/// bt-app, every `Dynamic` edge and every `Ambiguous` edge with other than one candidate — the
+/// calls the door reach does not follow (`window_waits_tests::followed`, whose `.into()` to the
+/// product's `From` impls is followed and left out here too) — keyed by its file, the item (or
+/// value) it is written in, its kind and the call's name.
+fn unfollowed_sites(resolver: &Resolver<'_>) -> BTreeMap<SiteKey, usize> {
+    let roots: Vec<ItemId> = resolver
+        .callables("bt-app")
+        .into_iter()
+        .filter(|id| resolver.admitted(*id))
+        .collect();
+    let graph = CallGraph::new(resolver);
+    let reach = graph.walk(&roots, &BTreeSet::new());
+    let root = workspace_root()
+        .canonicalize()
+        .expect("the workspace root resolves");
+    let mut sites: BTreeMap<SiteKey, usize> = BTreeMap::new();
+    for (edge, _) in &reach.unresolved {
+        let kind = match &edge.to {
+            Target::Unresolved(Unresolved::Dynamic { .. }) => "Dynamic",
+            Target::Unresolved(Unresolved::Ambiguous { candidates, .. })
+                if candidates.len() != 1 && edge.site.name != "into" =>
+            {
+                "Ambiguous"
+            }
+            _ => continue,
+        };
+        let file = resolver
+            .node_index(edge.from)
+            .file_at(edge.site.span.start())
+            .map(|file| {
+                let path = file
+                    .path()
+                    .canonicalize()
+                    .unwrap_or_else(|_| file.path().to_path_buf());
+                path.strip_prefix(&root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .unwrap_or_default();
+        *sites
+            .entry((
+                file,
+                resolver.node_key(edge.from),
+                kind.to_owned(),
+                edge.site.name.clone(),
+            ))
+            .or_default() += 1;
+    }
+    sites
+}
+
+/// The committed list's path, from the workspace root.
+fn unfollowed_list() -> PathBuf {
+    workspace_root()
+        .join("docs")
+        .join("plans")
+        .join("UNFOLLOWED-EDGES.tsv")
+}
+
+/// RED (round 3) — **the committed `docs/plans/UNFOLLOWED-EDGES.tsv` is the real tree's unfollowed
+/// edges, site by site** ([`unfollowed_sites`]): a key the tree has and the list does not, a key
+/// the list has and the tree does not, and a key whose `sites` differ are each named. Across
+/// commits `scripts/ci/check-unfollowed-edges.ps1` holds the list to the merge base's (no key added
+/// or grown without a dated reason). Every run leaves the rendering, the committed reasons kept,
+/// in `target/unfollowed-edges/UNFOLLOWED-EDGES.tsv`; `scripts/generate-unfollowed-edges.ps1`
+/// copies it.
+///
+/// MUTATION: delete one row of the committed list — the test names its key as in the tree and not
+/// on the list.
+#[test]
+fn the_unfollowed_edges_are_the_committed_list() {
+    let held = real_tree();
+    let packages: Vec<(&str, &Index)> = held
+        .iter()
+        .map(|(name, index)| (name.as_str(), &**index))
+        .collect();
+    let resolver =
+        Resolver::new(&packages, Arms::product()).unwrap_or_else(|refusals| panic!("{refusals:?}"));
+    let sites = unfollowed_sites(&resolver);
+    let committed_text = std::fs::read_to_string(unfollowed_list()).unwrap_or_default();
+    let mut committed: BTreeMap<SiteKey, (usize, String)> = BTreeMap::new();
+    for line in committed_text.lines() {
+        if line.is_empty() || line.starts_with('#') || line.starts_with("file\t") {
+            continue;
+        }
+        let cells: Vec<&str> = line.split('\t').collect();
+        assert_eq!(
+            cells.len(),
+            6,
+            "UNFOLLOWED-EDGES.tsv: a row of six columns: {line}"
+        );
+        let count: usize = cells[4]
+            .parse()
+            .unwrap_or_else(|_| panic!("UNFOLLOWED-EDGES.tsv: a count in `sites`: {line}"));
+        committed.insert(
+            (
+                cells[0].to_owned(),
+                cells[1].to_owned(),
+                cells[2].to_owned(),
+                cells[3].to_owned(),
+            ),
+            (count, cells[5].to_owned()),
+        );
+    }
+    let mut rendering = String::from(
+        "# UNFOLLOWED-EDGES - generated by scripts/generate-unfollowed-edges.ps1 from bt_source::call_graph\n\
+         # (T-BT-SOURCE-CALL-GRAPH round 3): every Dynamic edge and every Ambiguous edge with other than one\n\
+         # candidate met walking from every product callable of bt-app, by site (file, item, kind, the call's\n\
+         # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;\n\
+         # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown\n\
+         # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.\n\
+         file\titem\tkind\tname\tsites\treason\n",
+    );
+    for (key, count) in &sites {
+        let reason = committed.get(key).map_or("", |(_, reason)| reason.as_str());
+        rendering.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{count}\t{reason}\n",
+            key.0, key.1, key.2, key.3
+        ));
+    }
+    let out = workspace_root().join("target").join("unfollowed-edges");
+    std::fs::create_dir_all(&out).expect("target/unfollowed-edges");
+    std::fs::write(out.join("UNFOLLOWED-EDGES.tsv"), &rendering).expect("the rendering is written");
+    let mut differences = Vec::new();
+    for (key, count) in &sites {
+        match committed.get(key) {
+            None => differences.push(format!("in the tree, not on the list: {key:?} ({count})")),
+            Some((listed, _)) if listed != count => {
+                differences.push(format!(
+                    "{key:?}: {count} in the tree, {listed} on the list"
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    for key in committed.keys() {
+        if !sites.contains_key(key) {
+            differences.push(format!("on the list, not in the tree: {key:?}"));
+        }
+    }
+    eprintln!(
+        "UNFOLLOWED_SITES\tkeys {}\tcalls {}",
+        sites.len(),
+        sites.values().sum::<usize>()
+    );
+    assert!(
+        differences.is_empty(),
+        "docs/plans/UNFOLLOWED-EDGES.tsv and the tree disagree ({} differences; the rendering is in \
+         target/unfollowed-edges/, regenerate with scripts/generate-unfollowed-edges.ps1):\n  {}",
+        differences.len(),
+        differences
+            .iter()
+            .take(40)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n  ")
     );
 }
