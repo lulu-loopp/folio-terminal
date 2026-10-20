@@ -2041,7 +2041,9 @@ mod tests {
     /// the frames still to come from the open file (`animation::FileAnimationSource`), so the
     /// handle lives exactly as long as the window keeps the animation — and it is opened as every
     /// read in this process is, sharing reading, writing and deletion, so a writer saving over the
-    /// file is never refused by it. Let the answer go and nobody holds the file.
+    /// file is never refused by it. Let the answer go and nobody holds the file. (That the cursor
+    /// holds the file while it is kept is not asserted: on Windows an exclusive open would show it,
+    /// but a Unix descriptor takes no lock, so `bt_testpath::nobody_holds` cannot see it there.)
     ///
     /// MUTATION: open the animation's file sharing nothing (or sharing reading only) — the writer
     /// is refused while the window plays it.
@@ -2064,10 +2066,6 @@ mod tests {
         else {
             panic!("the shipped GIF opens as an animation");
         };
-        assert!(
-            !bt_testpath::nobody_holds(&gif.0),
-            "the animation's cursor holds its file while the window keeps the animation"
-        );
         let original = std::fs::read(&gif.0).expect("the file reads");
         let written = std::fs::write(&gif.0, &original);
         assert!(
