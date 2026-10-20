@@ -1473,7 +1473,8 @@ mod real_shell {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
         let leaf = modules.join("PSReadLine").join("2.4.6");
         for (name, pinned) in crate::psreadline::LEGACY_FILES {
-            let shown = std::process::Command::new("git")
+            let shown = bt_platform::quiet_command_named(Path::new("git"))
+                .expect("git is on the path")
                 .arg("-C")
                 .arg(&repository)
                 .arg("show")
