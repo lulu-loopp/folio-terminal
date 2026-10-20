@@ -427,6 +427,7 @@ dependencies = [
  "bt-transcript",
  "bt-unicode",
  "bt-winres",
+ "dispatch2",
  "libc",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",

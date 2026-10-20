@@ -22,6 +22,8 @@ ASupersededRequestSaysSo
 AJoinedRequestCarriesItsTwin
 AFailureIsSaidOnce
 AnOrphanedAnswerReachesItsSink
+AWithdrawnRequestEndsCancelledOnce
+AWithdrawnRequestLeavesTheLine
 AnAnswerIsPublishedAfterItsResourcesAreReleased
 
 # rows

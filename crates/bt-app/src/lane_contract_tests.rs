@@ -1,9 +1,10 @@
 //! **The lane contract's suite, run on every lane** (D-33; `crate::lane`; `docs/plans/design/
 //! window-thread-budget-2026-09-25.md` §R-D).
 //!
-//! Seven adapters — the OS hand-off lane (the reference), the font lane, the taskbar lane, the
-//! computation lane's three shares and the program-walk lane — each run every [`Claim`]; [`judge`] holds the
-//! verdicts to [`EXPECTED_FAILURES`]. Each adapter lives beside its lane, where the lane's private
+//! Ten adapters — the OS hand-off lane (the reference), the font lane, the taskbar lane, the
+//! computation lane's three shares, the program-walk lane, the git mutation lane, the storage
+//! worker and the clipboard lane — each run every [`Claim`]; [`judge`] holds the verdicts to
+//! [`EXPECTED_FAILURES`]. Each adapter lives beside its lane, where the lane's private
 //! parts are.
 //!
 //! The seam the lanes will be built on (`crate::lane`'s `Executor`, `Ledger` and hooks; S-3) is
@@ -20,12 +21,12 @@ use crate::lane::{
     Adapter, Admission, Bound, Bounds, Cancellation, Claim, Contract, Delivered, Delivery,
     EXPECTED_FAILURES, Executor, ExpectedFailure, Failure, FailureKind, Gate, HANDOFF, LaneName,
     LaneUnderTest, Ledger, Order, Outcome, Owed, PLANTED_PANIC, Refused, Replacement, Request,
-    Saying, TaskFailure, Terminal, Verdict, WakeProbe, WorkerEnd, check, judge, receive, run_suite,
-    task,
+    Saying, TaskFailure, Terminal, Verdict, WakeProbe, Withdrawal, WorkerEnd, check, judge,
+    receive, run_suite, task,
 };
 
 /// Every lane's adapter. A lane missing here is a lane [`judge`] reports as skipped.
-fn adapters() -> [Adapter; 9] {
+fn adapters() -> [Adapter; 10] {
     [
         Adapter {
             lane: LaneName::Handoff,
@@ -62,6 +63,10 @@ fn adapters() -> [Adapter; 9] {
         Adapter {
             lane: LaneName::Storage,
             make: crate::persist::contract_adapter::make,
+        },
+        Adapter {
+            lane: LaneName::Clipboard,
+            make: crate::clipboard_lane::contract_adapter::make,
         },
     ]
 }
@@ -1015,6 +1020,16 @@ enum Planted {
     AlsoSinks,
     /// The ledger is built with no wake: the worker's end is recorded and announced to nobody.
     DeathUnwoken,
+    /// The asker's withdrawal leaves the job in line, and the worker runs it, never asking
+    /// whether it is still owed.
+    WithdrawnStillRuns,
+    /// The asker's withdrawal leaves the job in line; the worker skips it when it gets there.
+    WithdrawnStaysInLine,
+    /// The asker lets a request go when it withdraws it, without ending it `Cancelled` or taking it
+    /// out of line: the worker runs it, and its answer goes to the sink.
+    WithdrawnInSilence,
+    /// The worker ends question 1 `Cancelled`, on a lane whose askers withdraw nothing.
+    CancelsUnasked,
     /// The worker publishes a request's answer while its work still holds the file it took,
     /// and lets the file go after.
     PublishesBeforeLettingGo,
@@ -1036,7 +1051,14 @@ const SCRIPTED_FIFO: Contract = Contract {
         answers_held: Bound::At(SCRIPTED_BOUND),
     },
     cancellation: Cancellation::Abandon,
+    withdrawal: Withdrawal::Never,
     saying: Saying::PerRequest,
+};
+
+/// The same lane, its asker withdrawing a request it holds (`Cancelled`).
+const SCRIPTED_WITHDRAWING: Contract = Contract {
+    withdrawal: Withdrawal::ByTheAsker,
+    ..SCRIPTED_FIFO
 };
 
 /// The same lane, declaring that a streak of the same failure is said once.
@@ -1057,6 +1079,7 @@ const SCRIPTED_LATEST: Contract = Contract {
         answers_held: Bound::Unbounded,
     },
     cancellation: Cancellation::Abandon,
+    withdrawal: Withdrawal::Never,
     saying: Saying::PerRequest,
 };
 
@@ -1153,6 +1176,15 @@ fn scripted_lane(contract: &'static Contract, policy: Policy, planted: Planted) 
     Executor::scripted(Arc::clone(&gate))
         .start_worker("lane-contract-scripted", Arc::clone(&ledger), move |ctx| {
             while let Some((id, question)) = jobs.next() {
+                // A request its asker withdrew is dropped before its work.
+                if planted != Planted::WithdrawnStillRuns && !publish.owes(id) {
+                    continue;
+                }
+                if planted == Planted::CancelsUnasked && question == 1 {
+                    publish.publish(id, Terminal::Cancelled);
+                    wake.woke();
+                    continue;
+                }
                 // What a planted lane keeps of the suite's file past its answer.
                 let past = Mutex::new(None);
                 let attempt = || {
@@ -1351,6 +1383,33 @@ impl LaneUnderTest for ScriptedLane {
         unreachable!("a scripted lane's target is the asking target, not the application");
     }
 
+    fn withdraw(&mut self, target: u32, ticket: u64) {
+        let at = self
+            .asked
+            .iter()
+            .position(|asked| asked.target == target && asked.request.id() == ticket)
+            .expect("the suite withdraws a request the lane holds");
+        let asked = self.asked.remove(at);
+        if !matches!(
+            self.planted,
+            Planted::WithdrawnStillRuns
+                | Planted::WithdrawnStaysInLine
+                | Planted::WithdrawnInSilence
+        ) {
+            locked(&self.queue.jobs)
+                .waiting
+                .retain(|(waiting, _)| *waiting != ticket);
+        }
+        if self.planted != Planted::WithdrawnInSilence {
+            self.ledger.publish(ticket, Terminal::Cancelled);
+        }
+        drop(asked);
+    }
+
+    fn in_line(&self) -> Option<usize> {
+        Some(locked(&self.queue.jobs).waiting.len())
+    }
+
     fn sunk(&mut self) -> Vec<Delivered> {
         std::mem::take(&mut *locked(&self.kept.sunk))
     }
@@ -1395,6 +1454,16 @@ fn a_lane_built_on_the_seam_keeps_every_claim() {
     for (contract, policy, claim) in [
         (&SCRIPTED_STREAKS, Policy::Fifo, Claim::AFailureIsSaidOnce),
         (
+            &SCRIPTED_WITHDRAWING,
+            Policy::Fifo,
+            Claim::AWithdrawnRequestEndsCancelledOnce,
+        ),
+        (
+            &SCRIPTED_WITHDRAWING,
+            Policy::Fifo,
+            Claim::AWithdrawnRequestLeavesTheLine,
+        ),
+        (
             &SCRIPTED_LATEST,
             Policy::Latest,
             Claim::ASupersededRequestSaysSo,
@@ -1411,6 +1480,74 @@ fn a_lane_built_on_the_seam_keeps_every_claim() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// RED (T-CLIPBOARD-LANE) — **A withdrawn request ends `Cancelled` once**: the FIFO lane on the
+/// seam whose asker withdraws a waiting request ends it `Cancelled` in its sink, never in a
+/// target, and its worker never runs it; the same lane planted to run what was withdrawn, or to
+/// let it go without a terminal of its own, is red, and so is a lane that declares no withdrawal
+/// and says `Cancelled`.
+///
+/// MUTATION: make `Ledger::owes` answer `true` for every identity — the clean withdrawing lane
+/// runs what was withdrawn (`CancelledButRun`), and the test is red.
+#[test]
+fn a_withdrawn_request_ends_cancelled_once_and_a_run_or_silent_one_is_red() {
+    let claim = Claim::AWithdrawnRequestEndsCancelledOnce;
+    assert_eq!(
+        on_scripted(&SCRIPTED_WITHDRAWING, Policy::Fifo, Planted::Nothing, claim),
+        Ok(())
+    );
+    assert_eq!(
+        on_scripted(&SCRIPTED_FIFO, Policy::Fifo, Planted::Nothing, claim),
+        Ok(())
+    );
+    let kinds = [
+        (&SCRIPTED_WITHDRAWING, Planted::WithdrawnStillRuns),
+        (&SCRIPTED_WITHDRAWING, Planted::WithdrawnInSilence),
+        (&SCRIPTED_FIFO, Planted::CancelsUnasked),
+    ]
+    .map(|(contract, planted)| {
+        on_scripted(contract, Policy::Fifo, planted, claim).map_err(|failure| failure.kind())
+    });
+    assert_eq!(
+        kinds,
+        [
+            Err(FailureKind::CancelledButRun),
+            Err(FailureKind::CancelledInSilence),
+            Err(FailureKind::CancelledUndeclared),
+        ]
+    );
+}
+
+/// RED (T-CLIPBOARD-LANE round 2) — **A withdrawn request leaves the line**: the FIFO lane on the
+/// seam whose asker withdraws, one after another and past the bound, requests the held worker has
+/// not reached leaves nothing waiting; the same lane planted to leave a withdrawn job in line is
+/// red, though its worker skips the job, and a lane that declares no withdrawal is asked one
+/// request.
+///
+/// MUTATION: make `Queue::withdraw` leave the job in line (drop its `remove`) — the clipboard lane
+/// fails this claim with `WithdrawnStaysInLine` in the lane suite.
+#[test]
+fn a_withdrawn_request_leaves_the_line_and_a_lane_keeping_it_is_red() {
+    let claim = Claim::AWithdrawnRequestLeavesTheLine;
+    assert_eq!(
+        on_scripted(&SCRIPTED_WITHDRAWING, Policy::Fifo, Planted::Nothing, claim),
+        Ok(())
+    );
+    assert_eq!(
+        on_scripted(&SCRIPTED_FIFO, Policy::Fifo, Planted::Nothing, claim),
+        Ok(())
+    );
+    assert_eq!(
+        on_scripted(
+            &SCRIPTED_WITHDRAWING,
+            Policy::Fifo,
+            Planted::WithdrawnStaysInLine,
+            claim
+        )
+        .map_err(|failure| failure.kind()),
+        Err(FailureKind::WithdrawnStaysInLine)
+    );
 }
 
 /// RED (S-3) — **A superseded request says so**: the latest-value lane on the seam ends each
