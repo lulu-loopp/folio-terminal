@@ -3574,9 +3574,11 @@ impl<B: Backend> Runtime<'_, B> {
     /// only when a tab has no live shell left has the tab itself ended. That is
     /// the same rule §7.1.4 already gives closing — the last pane closing is the
     /// tab closing — read from the other direction.
-    pub(in crate::runtime) fn reap_exited_tabs(&mut self) -> Result<()> {
+    ///
+    /// `now` is the instant the reaper looks, read by the turn as it calls this: an exited
+    /// shell's age and an ended tab's wait for its saves (S-6b) are judged against it.
+    pub(in crate::runtime) fn reap_exited_tabs(&mut self, now: Instant) -> Result<()> {
         let active = self.window.active_tab;
-        let now = Instant::now();
         let mut exits = Vec::new();
         let mut active_exited_panes = Vec::new();
         let mut exited = Vec::new();
@@ -3709,12 +3711,30 @@ impl<B: Backend> Runtime<'_, B> {
         // Only the ones whose close is nothing to ask: a tab that still holds an
         // unsaved preview waits for the reader, and the question is never put
         // from here (ticket 58).
+        let ended = exited.clone();
         let exited = crate::exited_tabs_the_loop_may_close(
             &self.window.dirty_gate,
             &self.window.tabs,
             self.window.active_tab,
             exited,
         );
+        // **And the ones whose wait for saves on their way ran out** (S-6b): no
+        // question can be asked of a tab that closes itself, so each closes with
+        // its pool let go, and its late answers reach the sink.
+        let ran_out = self.window.exited_tab_waits.ran_out(
+            &self.window.dirty_gate,
+            &self.window.tabs,
+            self.window.active_tab,
+            &ended,
+            &exited,
+            now,
+        );
+        for &index in &ran_out {
+            self.window.tabs[index].preview_pool.clear();
+        }
+        let mut exited = exited;
+        exited.extend(ran_out);
+        exited.sort_unstable();
         let retired_tabs: BTreeSet<_> = exited.iter().copied().collect();
         settle_exit_dispositions(&mut exits, &retired_tabs, active, active_retires_panes);
         exit_diagnostics::say_shell_exits(exits.iter().map(|(_, exit)| exit), |line| {

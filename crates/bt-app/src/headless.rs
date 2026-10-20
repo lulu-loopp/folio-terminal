@@ -69,6 +69,9 @@ pub(crate) enum WindowEffect {
     OptionAsAlt(bool),
     /// The window's input-method facts read (`WindowHost::ime_facts`).
     ImeFactsRead,
+    /// A line the window's runtime said in `diagnostics.log` (`WindowHost::note`), as it would
+    /// have been written — at most [`NOTES_KEPT`] of them between two takes of the ledger.
+    Noted(String),
     /// The system's blur behind the ground, on or off (`WindowHost::set_backdrop`).
     Backdrop(bool),
     /// The window told to stay above other windows, or not (`WindowHost::set_topmost`).
@@ -97,8 +100,6 @@ pub(crate) enum WindowEffect {
     SessionEndWatched,
     /// A page's place in the window asked for, for the web engine (`WindowHost::page_address`).
     PageAddressed(bt_platform::PageVisual),
-    /// Text put on the clipboard.
-    ClipboardWritten(String),
     /// A hand-off to the system: a file opened, a path revealed, an address handed over.
     HandedOff(bt_platform::Handoff),
     /// A frame presented: how many seats it carried and what asked for it.
@@ -159,19 +160,75 @@ pub(crate) enum WindowEffect {
     WindowOpened,
 }
 
+/// **How many `diagnostics.log` lines a ledger keeps between two takes** (T-DIAGNOSTICS-TEST-SINK).
+/// A line past them is counted ([`Ledger::notes_beyond_the_cap`]) and not kept, so a road a test
+/// drives through a long run of events does not grow the ledger by a line per event, and a plain
+/// [`Ledger::take`] after one refuses with the count rather than hand back a shorter record. A
+/// test's bound, not a product budget and not derived from one: 32 mirrors the input method's
+/// bound on a window's bracket lines (`ime_report::PAIRING_LINES_MAX`); the product's own bounds
+/// on a road's lines are the road's.
+pub(crate) const NOTES_KEPT: usize = 32;
+
 /// **A window's effects, in the order its doors were knocked on.** One per headless window,
 /// shared by its stand-ins.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Ledger(Rc<RefCell<Vec<WindowEffect>>>);
+pub(crate) struct Ledger(Rc<RefCell<Entries>>);
+
+/// What a [`Ledger`] holds: the effects, and the `diagnostics.log` lines counted past
+/// [`NOTES_KEPT`] since the last take.
+#[derive(Debug, Default)]
+struct Entries {
+    effects: Vec<WindowEffect>,
+    notes_kept: usize,
+    notes_beyond_the_cap: usize,
+}
 
 impl Ledger {
     fn record(&self, effect: WindowEffect) {
-        self.0.borrow_mut().push(effect);
+        self.0.borrow_mut().effects.push(effect);
+    }
+
+    /// A line said in `diagnostics.log`: kept as [`WindowEffect::Noted`] while fewer than
+    /// [`NOTES_KEPT`] are held, counted after.
+    fn note(&self, line: &str) {
+        let mut entries = self.0.borrow_mut();
+        if entries.notes_kept < NOTES_KEPT {
+            entries.notes_kept += 1;
+            entries.effects.push(WindowEffect::Noted(line.to_owned()));
+        } else {
+            entries.notes_beyond_the_cap += 1;
+        }
     }
 
     /// Everything recorded so far, emptied.
+    ///
+    /// # Panics
+    ///
+    /// When a line was said past [`NOTES_KEPT`] since the last take: what a test reads back would
+    /// be missing lines the road said, so it fails loudly with the count rather than pass on a
+    /// shorter record. The cap's own test reads the count first ([`Self::take_with_the_count`]).
     pub(crate) fn take(&self) -> Vec<WindowEffect> {
-        std::mem::take(&mut self.0.borrow_mut())
+        let beyond = self.notes_beyond_the_cap();
+        assert!(
+            beyond == 0,
+            "{beyond} diagnostics.log line(s) were said past the ledger's {NOTES_KEPT} and not \
+             kept; take the ledger more often"
+        );
+        self.take_with_the_count().0
+    }
+
+    /// Everything recorded so far, emptied, and how many lines were said past the cap — which the
+    /// take empties too.
+    fn take_with_the_count(&self) -> (Vec<WindowEffect>, usize) {
+        let mut entries = self.0.borrow_mut();
+        entries.notes_kept = 0;
+        let beyond = std::mem::take(&mut entries.notes_beyond_the_cap);
+        (std::mem::take(&mut entries.effects), beyond)
+    }
+
+    /// How many `diagnostics.log` lines were said past [`NOTES_KEPT`] since the last take.
+    pub(crate) fn notes_beyond_the_cap(&self) -> usize {
+        self.0.borrow().notes_beyond_the_cap
     }
 }
 
@@ -246,8 +303,9 @@ pub(crate) struct HeadlessWindow {
     pub(crate) scale: f64,
     pub(crate) focused: bool,
     pub(crate) ledger: Ledger,
-    /// What the clipboard holds, as this window's doors read and write it.
-    pub(crate) clipboard: RefCell<Option<String>>,
+    /// What the clipboard holds, as this window's clipboard door reads and writes it on the
+    /// clipboard lane's worker.
+    pub(crate) clipboard: HeadlessClipboard,
     /// What the window's input-method facts door answers: whatever the test scripted, default
     /// facts (every field `None`) until it does.
     pub(crate) ime_facts: Cell<NativeFacts>,
@@ -484,28 +542,19 @@ impl WindowHost for HeadlessWindow {
         self.ledger.record(WindowEffect::ImeFactsRead);
         self.ime_facts.get()
     }
+    fn note(&self, line: &str) {
+        self.ledger.note(line);
+    }
     fn set_option_as_alt(&self, option_sends_alt: bool) {
         self.ledger
             .record(WindowEffect::OptionAsAlt(option_sends_alt));
     }
-    fn clipboard_text(&self) -> Result<String, String> {
-        self.clipboard
-            .borrow()
-            .clone()
-            .ok_or_else(|| "the headless clipboard holds no text".to_owned())
-    }
-    fn set_clipboard_text(&self, text: &str) -> Result<(), String> {
-        *self.clipboard.borrow_mut() = Some(text.to_owned());
-        self.ledger
-            .record(WindowEffect::ClipboardWritten(text.to_owned()));
-        Ok(())
-    }
-    fn clipboard_payload(&self) -> Result<bt_platform::ClipboardPayload, String> {
-        self.clipboard
-            .borrow()
-            .clone()
-            .map(bt_platform::ClipboardPayload::Text)
-            .ok_or_else(|| "the headless clipboard holds nothing".to_owned())
+    fn clipboard(
+        &self,
+        lane: &crate::clipboard_lane::ClipboardLane,
+        ask: crate::clipboard_lane::Ask,
+    ) -> Result<crate::clipboard_lane::ClipboardRequest, crate::clipboard_lane::Declined> {
+        lane.submit(Arc::new(self.clipboard.clone()), ask)
     }
     fn hand_off(
         &self,
@@ -529,6 +578,88 @@ impl WindowHost for HeadlessWindow {
                 bottom: self.size.height as i32,
             },
         })
+    }
+}
+
+/// **The headless window's clipboard** — the scripted door its requests are served through on
+/// the clipboard lane's worker (T-CLIPBOARD-LANE): what it holds, what was written to it, the
+/// opens it refuses (as another program holding it open would make `OpenClipboard` refuse), and
+/// a hold the test can keep the worker in. Nothing here reaches the machine's clipboard.
+#[derive(Clone, Default)]
+pub(crate) struct HeadlessClipboard(Arc<ClipboardScript>);
+
+#[derive(Default)]
+pub(crate) struct ClipboardScript {
+    held: Mutex<Option<String>>,
+    written: Mutex<Vec<String>>,
+    refused_opens: Mutex<usize>,
+    hold: crate::lane::Hold,
+}
+
+/// How many times the platform's door asks `OpenClipboard` before it gives up — `bt_platform`'s
+/// five attempts.
+const OPEN_ATTEMPTS: usize = 5;
+
+impl HeadlessClipboard {
+    /// The clipboard now holds `text`, as if another program had copied it.
+    pub(crate) fn holds(&self, text: &str) {
+        *locked(&self.0.held) = Some(text.to_owned());
+    }
+
+    /// Everything written to it since the last time this was asked, in order.
+    pub(crate) fn take_written(&self) -> Vec<String> {
+        std::mem::take(&mut locked(&self.0.written))
+    }
+
+    /// The next `opens` attempts to open it are refused, as while another program holds it.
+    pub(crate) fn refuse_opens(&self, opens: usize) {
+        *locked(&self.0.refused_opens) = opens;
+    }
+
+    /// The hold the worker stands in before it opens the clipboard.
+    pub(crate) fn worker_hold(&self) -> &crate::lane::Hold {
+        &self.0.hold
+    }
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl crate::clipboard_lane::ClipboardDoor for HeadlessClipboard {
+    fn serve(
+        &self,
+        _worker: &bt_platform::admission::WorkerCtx,
+        ask: &crate::clipboard_lane::Ask,
+    ) -> Result<crate::clipboard_lane::Reply, String> {
+        use crate::clipboard_lane::{Ask, Reply};
+        self.0.hold.pass();
+        {
+            let mut refused = locked(&self.0.refused_opens);
+            let spent = (*refused).min(OPEN_ATTEMPTS);
+            *refused -= spent;
+            if spent == OPEN_ATTEMPTS {
+                return Err(format!(
+                    "OpenClipboard failed after {OPEN_ATTEMPTS} attempts: the headless clipboard \
+                     is held open by another program"
+                ));
+            }
+        }
+        match ask {
+            Ask::Text => locked(&self.0.held)
+                .clone()
+                .map(Reply::Text)
+                .ok_or_else(|| "the headless clipboard holds no text".to_owned()),
+            Ask::Payload => locked(&self.0.held)
+                .clone()
+                .map(|text| Reply::Payload(bt_platform::ClipboardPayload::Text(text)))
+                .ok_or_else(|| "the headless clipboard holds nothing".to_owned()),
+            Ask::Write(text) => {
+                *locked(&self.0.held) = Some(text.clone());
+                locked(&self.0.written).push(text.clone());
+                Ok(Reply::Written)
+            }
+        }
     }
 }
 
@@ -1253,7 +1384,7 @@ impl HeadlessParts {
                 scale,
                 focused: true,
                 ledger: ledger.clone(),
-                clipboard: RefCell::new(None),
+                clipboard: HeadlessClipboard::default(),
                 ime_facts: Cell::new(NativeFacts::default()),
                 answers: Cell::new(PlatformAnswers::default()),
             },
@@ -1374,6 +1505,32 @@ impl HeadlessFolio {
             window: &mut self.window,
         }
     }
+
+    /// **Every clipboard request the window has made, answered and spent** (T-CLIPBOARD-LANE):
+    /// the clipboard lane's worker serves them on its own thread, so the test waits, within the
+    /// lane suite's patience, until the window's turn — which takes each answer as the loop's wake
+    /// would bring it — finds nothing owed.
+    ///
+    /// The turn's clock is held at the moment the owed paste was asked, so the paste's deadline
+    /// never falls inside the wait: a test that means the deadline passes its own clock to
+    /// `Runtime::settle_clipboard`.
+    pub(crate) fn settle_clipboard(&mut self) {
+        crate::lane::wait_until("the window's clipboard answers", || {
+            let mut runtime = self.runtime();
+            let now = runtime
+                .window
+                .clipboard
+                .pastes
+                .iter()
+                .map(|owed| owed.asked_at)
+                .min()
+                .unwrap_or_else(Instant::now);
+            runtime
+                .settle_clipboard(now)
+                .expect("the clipboard's answers are spent");
+            runtime.window.clipboard.is_empty()
+        });
+    }
 }
 
 /// **A headless application with its one window**: the loop's own `FolioApp`, for the doors a
@@ -1455,6 +1612,7 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
         event_proxy: proxy.clone(),
         handoff_lane: handoff_lane::HandoffLane::spawn(wake(|| AppEvent::HandoffAnswered))
             .expect("the handoff lane starts"),
+        clipboard_lane: clipboard_lane::ClipboardLane::spawn(wake(|| AppEvent::ClipboardAnswered)),
         layout_tables: layout_tables::LayoutTables::spawn(proxy.clone(), Vec::new())
             .expect("the layout tables start"),
         math_worker: Arc::new(computation_lane::ComputationLane::new(wake(|| {
@@ -1711,6 +1869,7 @@ mod tests {
             PhysicalSize::new(3, 18).into(),
         );
         window.set_option_as_alt(true);
+        window.note("诊断 a line, said as it is written");
         // The window's questions to the system answer the documented stand-ins, and record
         // nothing; its instructions record what they were told.
         assert!(!window.is_iconic() && !window.is_cloaked() && window.is_exposed());
@@ -1754,10 +1913,26 @@ mod tests {
             window.page_address(page).is_err(),
             "a headless window hosts no web engine, and says so"
         );
-        window
-            .set_clipboard_text("剪贴 clip")
-            .expect("the headless clipboard takes text");
-        assert_eq!(window.clipboard_text().as_deref(), Ok("剪贴 clip"));
+        // The clipboard's request reaches the window's own scripted door, on the lane's worker.
+        let clipboard_lane = crate::clipboard_lane::ClipboardLane::spawn(|| {});
+        let mut write = window
+            .clipboard(
+                &clipboard_lane,
+                crate::clipboard_lane::Ask::Write("剪贴 clip".to_owned()),
+            )
+            .expect("the lane admits the write");
+        let mut ended = None;
+        crate::lane::wait_until("the headless clipboard's write", || {
+            ended = write.take();
+            ended.is_some()
+        });
+        assert_eq!(
+            ended,
+            Some(crate::lane::Terminal::Done(
+                crate::clipboard_lane::Reply::Written
+            ))
+        );
+        assert_eq!(window.clipboard.take_written(), ["剪贴 clip".to_owned()]);
         let lane =
             crate::handoff_lane::HandoffLane::spawn(|| {}).expect("the hand-off lane starts");
         assert!(
@@ -1870,6 +2045,7 @@ mod tests {
                 WindowEffect::Cursor(Cursor::Icon(CursorIcon::Text)),
                 WindowEffect::ImeArea([10, 20, 3, 18]),
                 WindowEffect::OptionAsAlt(true),
+                WindowEffect::Noted("诊断 a line, said as it is written".to_owned()),
                 WindowEffect::StoodAt(bt_platform::WindowRect {
                     left: 10,
                     top: 20,
@@ -1889,7 +2065,6 @@ mod tests {
                 WindowEffect::SystemSettingsWatched,
                 WindowEffect::SessionEndWatched,
                 WindowEffect::PageAddressed(page),
-                WindowEffect::ClipboardWritten("剪贴 clip".to_owned()),
                 WindowEffect::HandedOff(bt_platform::Handoff::Reveal(folder.clone())),
                 WindowEffect::Presented {
                     seats: 0,
@@ -1926,6 +2101,56 @@ mod tests {
         assert!(
             matches!(sent.as_slice(), [AppEvent::PtyOutput]),
             "the loop's one wake: {sent:?}"
+        );
+    }
+
+    /// RED (T-DIAGNOSTICS-TEST-SINK) — **the window's `diagnostics.log` door keeps the exact text
+    /// of every line up to its cap, and counts the rest**: [`NOTES_KEPT`] lines are kept in the
+    /// order said, byte for byte (a line of several scripts, a line with a tab); the one past them
+    /// is counted and not kept; a plain take refuses, loudly, rather than hand back a record
+    /// missing a line; a take with the count empties both, and the next line is kept again.
+    ///
+    /// MUTATION: keep every line (no cap) — the ledger holds one line too many and counts none;
+    /// record a line trimmed or reformatted — the kept text differs; let `take` pass with lines
+    /// past the cap — the refusal does not come.
+    #[test]
+    fn the_window_keeps_the_lines_it_is_told_up_to_its_cap_and_counts_the_rest() {
+        crate::test_support::on_the_window_thread();
+        let ledger = Ledger::default();
+        let device = HeadlessDevice::new(14.0);
+        let parts = HeadlessParts::new(&device, 8, (640, 480), 1.0, &ledger);
+        let said: Vec<String> = (0..=NOTES_KEPT)
+            .map(|line| format!("Folio: 第{line}行 line	{line} — said "))
+            .collect();
+        for line in &said {
+            parts.window.note(line);
+        }
+        assert_eq!(
+            ledger.notes_beyond_the_cap(),
+            1,
+            "the line past the cap is counted"
+        );
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ledger.take()));
+        assert!(
+            refused.is_err(),
+            "a take with a line past the cap fails loudly, and leaves the ledger as it was"
+        );
+        let kept: Vec<WindowEffect> = said[..NOTES_KEPT]
+            .iter()
+            .cloned()
+            .map(WindowEffect::Noted)
+            .collect();
+        assert_eq!(
+            ledger.take_with_the_count(),
+            (kept, 1),
+            "the first {NOTES_KEPT}, as they were said, and the one past them counted"
+        );
+        assert_eq!(ledger.notes_beyond_the_cap(), 0, "a take empties the count");
+        parts.window.note("after the take");
+        assert_eq!(
+            ledger.take(),
+            vec![WindowEffect::Noted("after the take".to_owned())],
+            "the cap is per take"
         );
     }
 

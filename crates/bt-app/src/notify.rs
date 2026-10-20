@@ -269,9 +269,9 @@ pub fn desktop_reach(tab_is_active: bool, place: WindowPlace) -> crate::attentio
 pub enum Interruption {
     /// The in-window marks and nothing beyond them.
     Nothing,
-    /// `bt_platform::flash_window` on this window's taskbar button — **once per turn however many
-    /// panes spoke**, because the button is the window's and flashing it twice is not twice as
-    /// much of anything.
+    /// `bt_platform::flash_window` on this window's taskbar button — **once per
+    /// `Runtime::raise_attention` however many panes spoke in it**, because the button is the
+    /// window's and flashing it twice is not twice as much of anything.
     FlashTheTaskbarButton,
     /// A message on the desktop.
     PutItOnTheDesktop,

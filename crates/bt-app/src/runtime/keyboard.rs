@@ -8,9 +8,9 @@ use crate::window_seam::prelude::*;
 use crate::{
     ImeCaretSource, ImeOwner, KeyboardOwner, LeafId, NewWindowPlan, NoticeHost, PreviewSurface,
     RenameClipboard, RenameExit, RenameVerdict, Runtime, Step, UserInputKind, composing_event_of,
-    composition_ruling, diagnostics, file_menu_powers, git_graph, goto_tab_index, hang_watch,
-    ime_caret_source, ime_commit_bytes, ime_cursor_area_of, ime_outbound, ime_owner, ime_report,
-    input, keyboard_owner_is_a_shell, keyhint, marks, menubar, paste_card_key, popup_takes_the_key,
+    composition_ruling, file_menu_powers, git_graph, goto_tab_index, hang_watch, ime_caret_source,
+    ime_commit_bytes, ime_cursor_area_of, ime_outbound, ime_owner, ime_report, input,
+    keyboard_owner_is_a_shell, keyhint, marks, menubar, paste_card_key, popup_takes_the_key,
     preedit_caret_byte, profiles, quit, rename_key, rename_pastes, restore, settings,
     settings_key_of, shortcuts, terminal_ime_cursor_area, toast, write_pty_input,
 };
@@ -1395,20 +1395,16 @@ impl<B: Backend> Runtime<'_, B> {
         // is exactly what that layering says: Esc reaches the child only when
         // the owner is the terminal.
         if self.window.rename.is_some() {
-            // The clipboard is read **before** the editor is taken and only when
-            // the chord is the one that needs it — `settings_field_key`'s own
-            // borrow order, for its own reason: the read is a call into another
-            // process and a field that made it every keystroke would be paying
-            // for a paste nobody asked for.
-            let pasted = if rename_pastes(&event.logical_key, self.window.modifiers) {
-                self.clipboard_line()
-            } else {
-                String::new()
-            };
-            let mut clipboard = RenameClipboard {
-                paste: &pasted,
-                copied: None,
-            };
+            // **A paste is asked of the clipboard lane, and only for the chord
+            // that is one** (`clipboard_lane`): the read is a call into another
+            // process, and a field that made it every keystroke would be paying
+            // for a paste nobody asked for. The editor is not touched by the
+            // chord itself; the line lands through the field's own insert door
+            // on the turn the clipboard answers, if the editor is still open.
+            if rename_pastes(&event.logical_key, self.window.modifiers) {
+                return self.paste_into_field(crate::TextFieldSeat::TabName);
+            }
+            let mut clipboard = RenameClipboard { copied: None };
             let mut editor = self.window.rename.take().expect("the editor is open");
             let verdict = rename_key(
                 &mut editor,
@@ -2160,7 +2156,7 @@ impl<B: Backend> Runtime<'_, B> {
             facts,
         );
         let line = format!("{line} window={:?}", self.window.window.id());
-        diagnostics::note(&line);
+        self.window.window.note(&line);
         ime_report::TRACE.line(|| line);
     }
 
@@ -2206,7 +2202,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// The window's native facts are read through [`ime_native_facts`] only when
     /// a line will be written, at most [`ime_report::PAIRING_LINES_MAX`] times
     /// in the life of the window.
-    pub(crate) fn ime_bracket_line(
+    fn ime_bracket_line(
         &mut self,
         kind: ime_report::ImeKind,
         preedit_bytes: usize,
@@ -2239,7 +2235,7 @@ impl<B: Backend> Runtime<'_, B> {
             _ => 0,
         };
         if let Some(line) = self.ime_bracket_line(kind, preedit_bytes) {
-            diagnostics::note(&line);
+            self.window.window.note(&line);
             ime_report::TRACE.line(|| line);
         }
         if matches!(event, Ime::Enabled) {
@@ -2403,7 +2399,7 @@ impl<B: Backend> Runtime<'_, B> {
                 // deliberately accepts it exactly like Windows Terminal: every commit reaches PTY.
                 write_pty_input(
                     self.focused()
-                        .map_or(PtyTarget::Nowhere, |leaf| leaf.input_target()),
+                        .map_or(PtyTarget::Nowhere, |leaf| leaf.person_input_target()),
                     &ime_commit_bytes(&text),
                     "write IME UTF-8 commit to PTY",
                 )?;

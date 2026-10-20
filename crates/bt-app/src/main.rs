@@ -50,6 +50,7 @@ mod attention_words;
 mod card_trace;
 mod cardhint;
 mod cli;
+mod clipboard_lane;
 mod clipboard_picture;
 mod cmdrail;
 mod coalesce;
@@ -873,6 +874,13 @@ enum AppEvent {
     /// window's own picture mailbox by the time this is sent, and this says only
     /// that there is one.
     ClipboardPictureReady,
+    /// **The clipboard has answered a window's request** (`clipboard_lane`, `docs/DESIGN.md`
+    /// 2026-10-17 — *the clipboard is asked on its own lane*).
+    ///
+    /// [`Self::HandoffAnswered`]'s family: a paste's text, a copy landed, or a refusal, answered on
+    /// the lane's worker after the press that asked was handled. Carries nothing: the answers are
+    /// in the lane's ledger, held by the window that asked, and this says only that there is one.
+    ClipboardAnswered,
     /// **A hand-off to the system has been answered** (`handoff_lane`, `docs/DESIGN.md`
     /// 2026-09-22 — *a hand-off to the system runs on its own lane*).
     ///
@@ -937,6 +945,9 @@ impl AppEvent {
             // The station the acquisition opened, charged again for the half of
             // the same gesture that finishes it.
             Self::ClipboardPictureReady => Station::ClipboardRead,
+            // The station the clipboard's gestures were charged to while they waited on this
+            // thread, charged now for the turn that spends what the lane answered.
+            Self::ClipboardAnswered => Station::ClipboardRead,
             Self::FileIndexReady => Station::FileIndex,
             Self::WebPageSpoke => Station::WebSpoke,
             Self::PsReadLineProbed
@@ -1141,8 +1152,9 @@ struct PasteTarget {
 /// **Which road one prepared paste takes into one pane** (0.4.4 tickets 02 and 03).
 ///
 /// The answer of [`paste_road`], which is the **one** place the window decides whether a paste
-/// asks: all four paste doors reach it through `Runtime::deliver_paste`, and nothing else in the
-/// tree asks the question (the design note's §1, "four doors, one road").
+/// asks: every paste gesture reaches it through `Runtime::deliver_paste` — the clipboard's road
+/// and the road of paths in hand both end there — and nothing else in the tree asks the question
+/// (the design note's §1, "four doors, one road", written when there were four gestures).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PasteRoad {
     /// Today's bytes, now: [`paste_text`], bracketed if the program asked for it.
@@ -12677,6 +12689,11 @@ struct LeafSession {
     /// with the shell it was about. Written by `stage_paste`; read by the card's layout, draw and
     /// hit; taken by the card's answer.
     pending_paste: Option<PendingPaste>,
+    /// **The person's input to this pane, held behind a paste it is owed** (`clipboard_lane`):
+    /// `Some` from the paste's press until its answer is spent — or, when the answer raised the
+    /// paste card, until the card is answered — and released to the shell then, in its order.
+    /// On the leaf for [`Self::pending_paste`]'s reason: a closed pane takes it with it.
+    paste_hold: Option<clipboard_lane::PasteHold>,
 }
 
 /// **What a pane in birth holds until its shell exists** — one road with two triggers: the walk
@@ -13376,6 +13393,10 @@ struct App<B: Backend = Native> {
     /// (`handoff_lane`). On the application, like the workers beside it: the ids it mints have to
     /// be unique across windows, because an answer finds its window by id.
     handoff_lane: handoff_lane::HandoffLane,
+    /// **The clipboard lane** — the one thread every read and write of the clipboard runs on
+    /// (`clipboard_lane`). On the application for the hand-off lane's reason: one clipboard, one
+    /// worker, and ids unique across windows.
+    clipboard_lane: clipboard_lane::ClipboardLane,
     /// The process's per-HKL Shift tables and their dedicated worker road.
     /// Registry reads and layout-DLL loads happen only on that worker; key
     /// events read this map and never wait.
@@ -13971,6 +13992,7 @@ struct AppParts<B: Backend> {
     tab_ids: TabIds,
     event_proxy: LoopProxy,
     handoff_lane: handoff_lane::HandoffLane,
+    clipboard_lane: clipboard_lane::ClipboardLane,
     layout_tables: layout_tables::LayoutTables,
     math_worker: Arc<computation_lane::ComputationLane>,
     foreground_program_worker: foreground_program::Worker,
@@ -14025,6 +14047,7 @@ impl<B: Backend> App<B> {
             tab_ids,
             event_proxy,
             handoff_lane,
+            clipboard_lane,
             layout_tables,
             math_worker,
             foreground_program_worker,
@@ -14076,6 +14099,7 @@ impl<B: Backend> App<B> {
             tab_ids,
             event_proxy,
             handoff_lane,
+            clipboard_lane,
             layout_tables,
             math_worker,
             foreground_program_worker,
@@ -14696,6 +14720,9 @@ struct WindowRuntime<B: Backend = Native> {
     background_decode: BackgroundDecodeMailbox,
     /// Where the clipboard picture worker leaves its one answer (§7.61).
     clipboard_picture: ClipboardPictureMailbox,
+    /// **What this window owes the clipboard's answers** (`clipboard_lane`): one paste and one
+    /// copy at most. On the window for the hand-offs' reason: a closed window takes them with it.
+    clipboard: clipboard_lane::ClipboardAsks,
     /// **The profile a standing card can put back** — which card it belongs to,
     /// the row itself, and where it was (§7.1.6c-6b).
     ///
@@ -16097,6 +16124,9 @@ struct WindowRuntime<B: Backend = Native> {
     /// The dirty-buffer gate, when one of the three doors has stopped to ask
     /// (P123-P125).
     dirty_gate: restore::DirtyGate,
+    /// **The ended tabs whose close waits for saves on their way** (S-6b), kept
+    /// by the loop's cleanup (`Runtime::reap_exited_tabs`).
+    exited_tab_waits: ExitedTabWaits,
     /// The PSReadLine invitation, when the probe has found a shell that would
     /// benefit (§7.1.6c-3b).
     psreadline_invite: psreadline::Invite,
@@ -19434,43 +19464,25 @@ fn dirty_gate_names(
     // of the three, because a reader looking at a card does not know which
     // question raised it and a name that carries its room in one card and
     // not in another is two cards.
+    // **And a clean buffer whose save has not landed** (S-6b, the coordinator's
+    // ruling on R1): the close would leave nobody to say how that save ended.
     let one_tab = |tab: &TabState| {
         let where_ = tab.display_title();
         tab.preview_pool
-            .dirty_names(None)
+            .close_names()
             .map(|name| unsaved_line(name, &where_))
             .collect::<Vec<_>>()
     };
     match request {
-        // **Only the tab's LAST preview pane.** "The pool outlives any ONE
-        // pane — only the LAST preview pane's close would strand it" (P123),
-        // so closing one of two asks nothing at all.
-        restore::GateRequest::ClosePane(seat) => {
-            let tab = active_item(tabs, active_tab);
-            let previews = tab
-                .seats
-                .tree()
-                .seats_in_order()
-                .into_iter()
-                .filter(|found| found.kind == bt_layout::SeatKind::Preview)
-                .count();
-            let closing_a_preview = tab
-                .seats
-                .tree()
-                .find_seat(*seat)
-                .is_some_and(|found| found.kind == bt_layout::SeatKind::Preview);
-            if closing_this_pane_strands_the_pool(closing_a_preview, previews) {
-                one_tab(tab)
-            } else {
-                Vec::new()
-            }
-        }
-        restore::GateRequest::CloseTab(index) => tabs.get(*index).map(one_tab).unwrap_or_default(),
-        // The run's end, asked in the summoned terminal, loses what its shut
-        // would: every tab's dirty buffers.
-        restore::GateRequest::Shut | restore::GateRequest::ShutWithTheRun(_) => {
-            tabs.iter().flat_map(one_tab).collect()
-        }
+        // The pane's tab, the tab, or every tab: the pools the close would lose.
+        restore::GateRequest::ClosePane(_)
+        | restore::GateRequest::CloseTab(_)
+        | restore::GateRequest::Shut
+        | restore::GateRequest::ShutWithTheRun(_) => tabs_a_close_loses(tabs, active_tab, request)
+            .into_iter()
+            .flatten()
+            .flat_map(one_tab)
+            .collect(),
         // A discard names one file, and it is never empty — which matters,
         // because `raise_dirty_gate` treats an empty list as "there is
         // nothing to ask about" and lets the verb through. There is always
@@ -19505,12 +19517,79 @@ fn dirty_gate_names(
     }
 }
 
+/// **The tabs whose pools one close would lose** — `None` for a request that is
+/// not a close of a pane, a tab or a window.
+fn tabs_a_close_loses<'t>(
+    tabs: &'t [TabState],
+    active_tab: usize,
+    request: &restore::GateRequest,
+) -> Option<Vec<&'t TabState>> {
+    match request {
+        // **Only the tab's LAST preview pane.** "The pool outlives any ONE
+        // pane — only the LAST preview pane's close would strand it" (P123),
+        // so closing one of two asks nothing at all.
+        restore::GateRequest::ClosePane(seat) => {
+            let tab = active_item(tabs, active_tab);
+            let previews = tab
+                .seats
+                .tree()
+                .seats_in_order()
+                .into_iter()
+                .filter(|found| found.kind == bt_layout::SeatKind::Preview)
+                .count();
+            let closing_a_preview = tab
+                .seats
+                .tree()
+                .find_seat(*seat)
+                .is_some_and(|found| found.kind == bt_layout::SeatKind::Preview);
+            Some(
+                if closing_this_pane_strands_the_pool(closing_a_preview, previews) {
+                    vec![tab]
+                } else {
+                    Vec::new()
+                },
+            )
+        }
+        restore::GateRequest::CloseTab(index) => Some(tabs.get(*index).into_iter().collect()),
+        // The run's end, asked in the summoned terminal, loses what its shut
+        // would: every tab's dirty buffers.
+        restore::GateRequest::Shut | restore::GateRequest::ShutWithTheRun(_) => {
+            Some(tabs.iter().collect())
+        }
+        _ => None,
+    }
+}
+
+/// **The title of the question a gate puts over these tabs** — the request's own
+/// ([`restore::GateRequest::title`]), but for a close that would lose no edits,
+/// only saves that have not landed (S-6b): its words are then that, since
+/// "discard unsaved changes" would not be true of a clean buffer.
+fn gate_title_over(
+    tabs: &[TabState],
+    active_tab: usize,
+    request: &restore::GateRequest,
+) -> &'static str {
+    match tabs_a_close_loses(tabs, active_tab, request) {
+        Some(losing)
+            if !losing
+                .iter()
+                .any(|tab| tab.preview_pool.a_close_loses_edits()) =>
+        {
+            restore::gate_save_not_landed_title()
+        }
+        _ => request.title(),
+    }
+}
+
 /// **Put `request` to a window's gate over that window's tabs** (ticket 58) —
 /// the whole of [`Runtime::raise_dirty_gate`] except the repaint.
 ///
 /// What the request would lose is read off the tabs, and the gate answers with
-/// it: [`restore::GateRaise::Busy`] while another question is up (its request
-/// kept), [`restore::GateRaise::NothingToAsk`] when nothing is at risk, and
+/// it: [`restore::GateRaise::Busy`] while another question is up or a close
+/// waits (its request kept), [`restore::GateRaise::NothingToAsk`] when nothing
+/// is at risk, [`restore::GateRaise::Waiting`] when the request is a close and
+/// a save of every dirty buffer it would lose is already on its way — the close
+/// waits for their answers instead of asking ([`close_wait_over`], S-6b) — and
 /// otherwise [`restore::GateRaise::Raised`] with the gate now holding this one.
 fn raise_dirty_gate_over(
     gate: &mut restore::DirtyGate,
@@ -19519,7 +19598,63 @@ fn raise_dirty_gate_over(
     request: restore::GateRequest,
 ) -> restore::GateRaise {
     let at_risk = dirty_gate_names(tabs, active_tab, &request);
+    if gate.verdict(&at_risk) == restore::GateRaise::Raised
+        && let Some(wait) = close_wait_over(tabs, active_tab, &request, Instant::now())
+    {
+        gate.wait(wait);
+        return restore::GateRaise::Waiting;
+    }
     gate.raise(request, &at_risk)
+}
+
+/// **The wait a close is held in, when everything it would lose is on its way to
+/// the disk** (S-6b) — `None` when the request is not a close, or one dirty
+/// buffer it would lose has no save of its body on the way
+/// ([`preview::PreviewPool::saves_a_close_awaits`]): that close asks now, as it
+/// always did. The wait names the tab a pane's or a tab's close is about by its
+/// identity, and ends [`restore::CLOSE_WAITS_FOR_A_SAVE`] after `now`.
+fn close_wait_over(
+    tabs: &[TabState],
+    active_tab: usize,
+    request: &restore::GateRequest,
+    now: Instant,
+) -> Option<restore::CloseWait> {
+    let mut awaited = Vec::new();
+    for tab in tabs_a_close_loses(tabs, active_tab, request)? {
+        awaited.extend(tab.preview_pool.saves_a_close_awaits()?);
+    }
+    let tab = match request {
+        restore::GateRequest::ClosePane(_) => Some(active_item(tabs, active_tab).id),
+        restore::GateRequest::CloseTab(index) => tabs.get(*index).map(|tab| tab.id),
+        _ => None,
+    };
+    Some(restore::CloseWait {
+        request: request.clone(),
+        tab,
+        awaited,
+        until: now + restore::CLOSE_WAITS_FOR_A_SAVE,
+        saving: false,
+    })
+}
+
+/// **What has become of every buffer a close waits for**, by name, read off the
+/// window's tabs (S-6b): a buffer no pool here holds any more — its tab gone, or
+/// discarded — loses nothing, and is read as saved.
+fn what_a_close_wait_found(
+    tabs: &[TabState],
+    wait: &restore::CloseWait,
+) -> Vec<(String, preview::AtTheClose)> {
+    wait.awaited
+        .iter()
+        .map(|awaited| {
+            tabs.iter()
+                .find_map(|tab| tab.preview_pool.at_the_close(*awaited))
+                .map_or_else(
+                    || (String::new(), preview::AtTheClose::Saved),
+                    |(name, found)| (name.to_owned(), found),
+                )
+        })
+        .collect()
 }
 
 /// **Keep every dirty preview buffer of these tabs before a stop that cannot ask**
@@ -19831,8 +19966,9 @@ fn keep_owed_documents_over(
 /// to re-run — `closes`, the window itself for a shut and the run's last ordinary
 /// window for [`restore::GateRequest::ShutWithTheRun`] — or `None` when nothing
 /// closes. The whole of [`Runtime::answer_exit`] but the write, which `Save all`
-/// has already made through [`Runtime::quit_save`] (`saved_all`: whether all of
-/// it landed).
+/// hands to the storage worker and waits for across turns (S-6b): its answer is
+/// spent here once the saves have answered (`Runtime::settle_close_wait`;
+/// `saved_all`: whether all of them landed).
 ///
 /// `Cancel` touches nothing and closes nothing. `Save all` closes only when every
 /// write landed ([`quit::Quit::saved`]'s rule one surface down). `Discard` drops
@@ -19881,6 +20017,86 @@ fn exited_tabs_the_loop_may_close(
             gate.verdict(&at_risk).proceeds()
         })
         .collect()
+}
+
+/// **The ended tabs whose close waits for saves on their way** (S-6b, the
+/// coordinator's ruling on R1): a tab whose shells have all exited, which the
+/// loop would close but for saves still on the storage worker, is not torn down
+/// until they land — then it has nothing to ask and closes as any ended tab does
+/// — or until its wait's bound ([`restore::CLOSE_WAITS_FOR_A_SAVE`] from the first
+/// turn it was found waiting). No question can be asked of a tab that closes
+/// itself, so at the bound a tab that waits only for clean buffers' saves closes
+/// with its pool let go: each late answer reaches the sink, which says a save
+/// that did not land once in `diagnostics.log`. A tab still waiting for a dirty
+/// body's save at the bound stands, as an ended tab with unsaved edits always
+/// has: whether those go is the reader's turn. A tab whose close loses something
+/// no save is on its way for — a save that did not land, a conflict — stands
+/// too, its pane saying why.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ExitedTabWaits {
+    /// Each waiting tab's bound; `None` once the bound has passed and the tab
+    /// stands.
+    until: BTreeMap<TabId, Option<Instant>>,
+}
+
+impl ExitedTabWaits {
+    /// **The ended tabs whose wait ran out, to be closed now with their pools
+    /// let go** — of `ended`, those not already `closing` — and every other wait
+    /// brought level with the tabs as they stand at `now`. Nothing moves while
+    /// a question is up or a close waits on the gate (ticket 58).
+    fn ran_out(
+        &mut self,
+        gate: &restore::DirtyGate,
+        tabs: &[TabState],
+        active_tab: usize,
+        ended: &[usize],
+        closing: &[usize],
+        now: Instant,
+    ) -> Vec<usize> {
+        if gate.is_busy() {
+            return Vec::new();
+        }
+        let mut ran_out = Vec::new();
+        let mut until = BTreeMap::new();
+        for &index in ended.iter().filter(|index| !closing.contains(index)) {
+            let Some(tab) = tabs.get(index) else {
+                continue;
+            };
+            let Some(wait) = close_wait_over(
+                tabs,
+                active_tab,
+                &restore::GateRequest::CloseTab(index),
+                now,
+            ) else {
+                continue;
+            };
+            match self.until.get(&tab.id).copied().unwrap_or(Some(wait.until)) {
+                Some(bound) if now >= bound => {
+                    if wait.awaited.iter().any(|awaited| awaited.was_dirty()) {
+                        until.insert(tab.id, None);
+                    } else {
+                        ran_out.push(index);
+                    }
+                }
+                standing => {
+                    until.insert(tab.id, standing);
+                }
+            }
+        }
+        self.until = until;
+        ran_out
+    }
+
+    /// When the loop must come back to end a wait, if one is still to end after
+    /// `now` — a bound, never a look: each landing wakes the loop itself.
+    fn next_after(&self, now: Instant) -> Option<Instant> {
+        self.until
+            .values()
+            .flatten()
+            .copied()
+            .filter(|bound| *bound > now)
+            .min()
+    }
 }
 
 impl<B: Backend> Deref for Runtime<'_, B> {
@@ -21433,13 +21649,23 @@ enum TextFieldSeat {
 }
 
 /// What a clipboard write should say once the platform's clipboard path has
-/// accepted it.
+/// accepted it — applied on the turn the clipboard lane's answer is taken, and
+/// only for a write that landed (owner ruling 2026-09-14 ②).
+#[derive(Clone, Debug, PartialEq)]
 enum ClipboardWriteEffect {
     None,
     Toast {
         anchor: toast::ToastAnchor,
         text: String,
     },
+    /// `Ctrl+C`'s own rule: the selection that was copied goes away — in the pane
+    /// it was made in, and only while it is still the text that was copied.
+    ClearSelection {
+        target: PasteTarget,
+        copied: String,
+    },
+    /// The formula's tick: the block's LaTeX has landed.
+    MathCopied(MathBlockAnchor),
 }
 
 /// **Which text field holds the keyboard**, read off the rung the ladder
@@ -22304,6 +22530,8 @@ fn write_pty_input(pty: PtyTarget<'_>, bytes: &[u8], what: &'static str) -> Resu
 enum PtyTarget<'a> {
     Shell(&'a PtySession),
     Birth(&'a PaneBirth),
+    /// Held behind a paste the pane is owed (`clipboard_lane::PasteHold`).
+    BehindAPaste(&'a clipboard_lane::PasteHold),
     Nowhere,
 }
 
@@ -22322,6 +22550,17 @@ impl LeafSession {
     /// Where bytes offered to this pane go — see [`PtyTarget`].
     fn input_target(&self) -> PtyTarget<'_> {
         PtyTarget::of(self.pty.as_ref(), self.birth.as_ref())
+    }
+
+    /// **Where the person's input to this pane goes** — keys, input-method commits, mouse
+    /// reports, a pasted or dropped path: behind the paste this pane is owed while one is
+    /// ([`Self::paste_hold`]), else where [`Self::input_target`] says. A program's own replies
+    /// and the window's repairs are not the person's, and never wait behind a paste.
+    fn person_input_target(&self) -> PtyTarget<'_> {
+        match &self.paste_hold {
+            Some(hold) => PtyTarget::BehindAPaste(hold),
+            None => self.input_target(),
+        }
     }
 
     /// Whether this pane is in birth for its shell and the shell has answered — the landing is
@@ -22364,6 +22603,10 @@ fn offer_pty_input(pty: PtyTarget<'_>, bytes: &[u8], what: &'static str) -> Resu
                 }
             };
         }
+        PtyTarget::BehindAPaste(hold) => {
+            hold.hold(bytes);
+            return Ok(PtyInput::HeldForPaste);
+        }
         PtyTarget::Nowhere => return Ok(PtyInput::NoChild),
     };
     match hang_watch::during(hang_watch::Station::PtyInput, || {
@@ -22402,12 +22645,15 @@ enum PtyInput {
     /// Kept for a shell being born, which receives them first, in order — the part the
     /// pseudoconsole's input ring plays for a shell that exists.
     HeldForBirth,
+    /// Kept behind a paste the pane is owed, and released to it, in order, right after the
+    /// paste's own bytes (`clipboard_lane::PasteHold`).
+    HeldForPaste,
 }
 
 impl PtyInput {
     /// Whether this window actually sent the bytes.
     const fn queued(self) -> bool {
-        matches!(self, Self::Queued | Self::HeldForBirth)
+        matches!(self, Self::Queued | Self::HeldForBirth | Self::HeldForPaste)
     }
 }
 
@@ -24913,23 +25159,17 @@ impl TabRename {
 /// selection on the clipboard (the cut then takes it), `Ctrl+V` puts one line of
 /// the clipboard in, `Ctrl+←`/`Ctrl+→` and `Ctrl+Backspace` walk and eat by
 /// word, and `Shift` with any motion drags the selection's far end along.
-/// **The clipboard, as one key press can reach it** (0.3).
+/// **The clipboard, as one key press can reach it** (0.3): what the press wants put on it, read
+/// back by the caller ([`Self::copied`]). A paste is not here: the window asks the clipboard lane
+/// for it when the chord is one ([`rename_pastes`], T-CLIPBOARD-LANE) and never hands the chord to
+/// [`rename_key`]; the line lands through the editor's own insert door (`Runtime::rename_ime`) on
+/// the turn the clipboard answers.
 ///
-/// Handed in rather than read here, on `settings_field_key`'s own arrangement:
-/// asking the system what it is holding is a call into another process, and a
-/// field that made it on every keystroke would pay for a paste it was not being
-/// asked for. The caller reads the clipboard only when the chord *is* a paste
-/// ([`rename_pastes`]), and reads [`Self::copied`] back afterwards to learn
-/// whether this press wants anything put there.
-///
-/// A struct rather than two parameters because it keeps [`rename_key`] pure: the
-/// whole editor stays testable without a window handle, which is what the tests
-/// this migration is pinned by depend on.
+/// A struct rather than a bare return because it keeps [`rename_key`] pure: the whole editor
+/// stays testable without a window handle, which is what the tests this migration is pinned by
+/// depend on.
 #[derive(Debug, Default)]
-struct RenameClipboard<'a> {
-    /// What the clipboard holds, already cut to one line — empty unless this
-    /// press was a paste.
-    paste: &'a str,
+struct RenameClipboard {
     /// What this press wants put on the clipboard, if anything.
     copied: Option<String>,
 }
@@ -24950,7 +25190,7 @@ fn rename_key(
     editor: &mut TabRename,
     key: &Key,
     modifiers: ModifiersState,
-    clipboard: &mut RenameClipboard<'_>,
+    clipboard: &mut RenameClipboard,
 ) -> RenameVerdict {
     use text_field::TextMove;
     // A chord is not text: an Alt- or Win-modified key is swallowed unhandled,
@@ -25006,9 +25246,6 @@ fn rename_key(
                 editor.field.delete();
                 editor.clamp_scroll();
             }
-        }
-        _ if rename_pastes(key, modifiers) => {
-            editor.insert(clipboard.paste);
         }
         // Every other `Ctrl`-letter chord: swallowed, for the reason the whole
         // ladder is ordered by — the thing underneath this editor is a shell.
@@ -42755,6 +42992,7 @@ fn bare_leaf(
         frame_image_references: FrameImageReferences::default(),
         // Nothing has been pasted into a shell that has just started.
         pending_paste: None,
+        paste_hold: None,
         birth: None,
         successor: None,
     }
@@ -45567,6 +45805,7 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         background_picture: None,
         background_decode: BackgroundDecodeMailbox::default(),
         clipboard_picture: ClipboardPictureMailbox::default(),
+        clipboard: clipboard_lane::ClipboardAsks::default(),
         dwm_dark_mode: None,
         translucency_available,
         custom_window_frame,
@@ -45772,6 +46011,7 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         root_menu: profiles::RootMenu::default(),
         root_menu_shell_folders: Vec::new(),
         dirty_gate: restore::DirtyGate::default(),
+        exited_tab_waits: ExitedTabWaits::default(),
         psreadline_invite: psreadline::Invite::default(),
         paste_card_hover: None,
         update_card: update_card::Card::default(),
@@ -47242,6 +47482,12 @@ impl Runtime<'_, Native> {
                 let _ = proxy.send_event(AppEvent::HandoffAnswered);
             }
         })?;
+        let clipboard_lane = clipboard_lane::ClipboardLane::spawn({
+            let proxy = proxy.clone();
+            move || {
+                let _ = proxy.send_event(AppEvent::ClipboardAnswered);
+            }
+        });
         // This observation has no refusal: off Windows it is the empty list,
         // and an empty list starts no layout-table worker at all.
         let keyboard_layouts = bt_platform::keyboard_layouts();
@@ -47268,6 +47514,7 @@ impl Runtime<'_, Native> {
             tab_ids,
             event_proxy: proxy.clone(),
             handoff_lane,
+            clipboard_lane,
             layout_tables,
             math_worker,
             foreground_program_worker,
@@ -54294,7 +54541,7 @@ impl<B: Backend> Runtime<'_, B> {
         // panic is not.
         write_pty_input(
             self.focused()
-                .map_or(PtyTarget::Nowhere, |leaf| leaf.input_target()),
+                .map_or(PtyTarget::Nowhere, |leaf| leaf.person_input_target()),
             bytes,
             context,
         )?;
@@ -58120,7 +58367,10 @@ mod hold_station_tests {
         // (the station, the first call it claims) — in the order `turn` runs them.
         let run = [
             ("Station::DpiSettle", "self.settle_deferred_dpi()?;"),
-            ("Station::Pickers", "self.apply_math_context_menu_result();"),
+            (
+                "Station::Pickers",
+                "self.apply_math_context_menu_result()?;",
+            ),
             ("Station::PaneRows", "self.settle_pane_notices()?;"),
             ("Station::Clocks", "self.raise_first_run_if_due()"),
             (
@@ -60373,7 +60623,7 @@ mod formula_tool_seat_tests {
         let copy = method_body("Runtime", "copy_math_latex");
         assert!(
             copy.find("self.live_paste_target(target)").unwrap()
-                < copy.find("window.set_clipboard_text").unwrap()
+                < copy.find("self.submit_clipboard_write(").unwrap()
         );
         let validate = method_body("Runtime", "live_paste_target");
         assert!(validate.contains("tab.sessions.get(&target.seat)"));
@@ -67462,6 +67712,75 @@ impl<B: Backend> FolioApp<B> {
         first_error.map_or(Ok(()), Err)
     }
 
+    /// **Every window's close that waits for its saves, looked at** (S-6b) — once
+    /// a turn, which the saves' answers wake (`AppEvent::DocumentsAnswered`, heard
+    /// by the buffers first: [`Self::take_preview_save_answers`]) and the waits'
+    /// bound ends (`restore::DirtyGate::waits_until`, in the turn's wake-up).
+    ///
+    /// Each window decides its own (`Runtime::settle_close_wait`); a pane's or a
+    /// tab's close is re-run there. The two closes that are the loop's are re-run
+    /// here, from the top, through the doors they always came through: a
+    /// window's shut as the OS close it was (`WindowEvent::CloseRequested`, which
+    /// puts the gate again and now finds nothing to ask — or asks), the run's end
+    /// as the close of the ordinary window that ends it (`Self::close`, which
+    /// asks the summoned terminal again). A close a `Save all` wait re-requested
+    /// is taken as the dispatcher takes one.
+    /// **When the loop must come back to end a close's wait** (S-6b): the soonest bound of a
+    /// close waiting on a gate, or of an ended tab waiting for its saves, after `now`. A leaving
+    /// window's waits are not decided (`Self::settle_close_waits` skips it), and no close's wait
+    /// is decided while a quit is under way, so neither joins the wake-up: their bounds would be
+    /// a wake-up in the past on every turn. The answers themselves wake the loop.
+    fn close_waits_wake(&self, now: Instant) -> Option<Instant> {
+        if self.app.as_ref().is_some_and(|app| app.quit.is_some()) {
+            return None;
+        }
+        self.windows
+            .values()
+            .filter(|window| window.leaving.is_none())
+            .flat_map(|window| {
+                [
+                    window.dirty_gate.waits_until(),
+                    window.exited_tab_waits.next_after(now),
+                ]
+            })
+            .flatten()
+            .min()
+    }
+
+    fn settle_close_waits(&mut self, event_loop: &B::Loop, now: Instant) -> Result<()> {
+        // **Not while a quit is under way** (round 3): the quit's card is the one question,
+        // and a wait decided under it would close a pane or a tab mid-quit, or put the gate's
+        // question beneath the card. The waits stand; a quit that is cancelled leaves them to
+        // be looked at on the next turn, and one that goes on takes their windows with it.
+        if self.app.as_ref().is_some_and(|app| app.quit.is_some()) {
+            return Ok(());
+        }
+        for index in 0..self.windows.len() {
+            let Some(id) = self.windows.key_at(index) else {
+                continue;
+            };
+            let Some(mut runtime) = self.runtime_at(index) else {
+                continue;
+            };
+            if runtime.window.leaving.is_some() {
+                continue;
+            }
+            let after = runtime.settle_close_wait(now)?;
+            let requested = runtime.take_close_request();
+            match after {
+                runtime::AfterTheWait::Nothing => {}
+                runtime::AfterTheWait::Shut => {
+                    self.on_window_event(event_loop, id, WindowEvent::CloseRequested);
+                }
+                runtime::AfterTheWait::EndTheRunWith(closing) => self.close(closing)?,
+            }
+            if let Some(closing) = requested {
+                self.close(closing)?;
+            }
+        }
+        Ok(())
+    }
+
     fn announce_recovered_edits(&mut self) -> Result<()> {
         let Some(announcement) = recovered::take() else {
             return Ok(());
@@ -69076,8 +69395,11 @@ impl<B: Backend> FolioApp<B> {
         if let Some(app) = self.app.as_mut() {
             app.web_pages_open = pages_open;
         }
+        // **A close waiting for its saves, first** (S-6b): what it closes is settled
+        // by the rest of this turn, as an event's close is.
         if let Err(error) = self
-            .settle_window_ring()
+            .settle_close_waits(event_loop, Instant::now())
+            .and_then(|()| self.settle_window_ring())
             .and_then(|()| self.settle_update_card())
             .and_then(|()| self.settle_application_change())
             .and_then(|()| self.settle_restore_answer())
@@ -69208,7 +69530,10 @@ impl<B: Backend> FolioApp<B> {
             .as_ref()
             .and_then(|app| app.quit.as_ref())
             .and_then(quit::Quit::deadline);
-        let wake_deadline = earliest_deadline([wake_deadline, quit_wake]);
+        // **And every close's bound, while it waits for its saves** (S-6b): the answers
+        // wake the loop themselves; the clock is only the bound.
+        let close_wake = self.close_waits_wake(now);
+        let wake_deadline = earliest_deadline([wake_deadline, quit_wake, close_wake]);
         event_loop
             .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
@@ -70349,6 +70674,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // list is a fact about the machine and any of them may be showing a
             // picker drawn from it.
             AppEvent::HandoffAnswered => self.answer_handoffs(),
+            // **Every window takes what the clipboard answered it** (`clipboard_lane`): each
+            // request is held by the window that asked, so a window with nothing owed costs a
+            // look at two empty slots.
+            AppEvent::ClipboardAnswered => {
+                self.for_each_window(|runtime| runtime.settle_clipboard(Instant::now()))
+            }
             //
             // An answer older than the list on screen is dropped inside
             // `adopt_scanned_families` (ticket 50) and reads here as "nothing
@@ -70809,42 +71140,29 @@ fn ime_commit_bytes(text: &str) -> Vec<u8> {
     text.as_bytes().to_vec()
 }
 
-fn copy_selection(
+/// **The text a copy of this pane's selection puts on the clipboard**, or `None` when there is no
+/// selection — or, for copy-on-select (`ignore_empty`), when it is empty. `Ctrl+C` writes an
+/// empty selection as the empty text it is.
+fn selection_to_copy(session: &DualPlaneSession, ignore_empty: bool) -> Option<String> {
+    session
+        .selection_text()
+        .filter(|text| !(ignore_empty && text.is_empty()))
+}
+
+/// **`Ctrl+C`'s selection, taken down once its copy has landed** — only while the selection is
+/// still the text that was copied: a selection made again between the press and the clipboard's
+/// answer is the person's newer one, and stays. Answers whether it was taken down.
+fn clear_copied_selection(
     session: &mut DualPlaneSession,
     projection: &mut ViewportProjection,
-    write: impl FnOnce(&str) -> Result<()>,
+    copied: &str,
 ) -> bool {
-    if !write_selection_text(session, false, write) {
+    if session.selection_text().as_deref() != Some(copied) {
         return false;
     }
     session.set_view_selection(None);
     projection.set_selection(None);
     true
-}
-
-fn write_selection_text(
-    session: &DualPlaneSession,
-    ignore_empty: bool,
-    write: impl FnOnce(&str) -> Result<()>,
-) -> bool {
-    let Some(text) = session.selection_text() else {
-        return false;
-    };
-    if ignore_empty && text.is_empty() {
-        return false;
-    }
-    if !recoverable_clipboard_write(write(&text), "copy") {
-        return false;
-    }
-    true
-}
-
-fn write_terminal_clipboard_text(window: &impl WindowHost, text: &str) -> Result<()> {
-    hang_watch::during(hang_watch::Station::ClipboardWrite, || {
-        window.set_clipboard_text(text)
-    })
-    .map_err(|error| anyhow!(error))
-    .context("write terminal selection to clipboard")
 }
 
 /// **The copy tick's own clock, read in one place** (audit 2026-09-15, RB-1).
@@ -70880,16 +71198,6 @@ fn retire_spent_math_copy(said: &mut Option<(MathBlockAnchor, Instant)>, now: In
     false
 }
 
-fn recoverable_clipboard_write(result: Result<()>, action: &str) -> bool {
-    match result {
-        Ok(()) => true,
-        Err(error) => {
-            eprintln!("clipboard is temporarily unavailable; {action} ignored: {error:#}");
-            false
-        }
-    }
-}
-
 /// The payload and later path refusals are separate causes, both delivered to the app's toast host.
 #[derive(Default)]
 struct PreparedClipboardPaste {
@@ -70909,14 +71217,17 @@ struct PreparedClipboardPaste {
     picture: Vec<bt_platform::PictureBytes>,
 }
 
+/// **What a paste does with what the clipboard answered** — the clipboard lane's `Done` for a
+/// terminal paste. A read that failed never reaches here: it is its request's `Failed`, said once by
+/// the lane's ledger, and its notice is the window's (`Runtime::spend_paste`).
 fn prepare_clipboard_paste(
-    payload: std::result::Result<bt_platform::ClipboardPayload, String>,
+    payload: bt_platform::ClipboardPayload,
     recipient: &shell_literal::Recipient,
     leading_space: bool,
 ) -> PreparedClipboardPaste {
     use bt_platform::ClipboardPayload;
     match payload {
-        Ok(ClipboardPayload::Files(paths)) => {
+        ClipboardPayload::Files(paths) => {
             let insertion = shell_literal::paths_text(&paths, recipient, leading_space);
             PreparedClipboardPaste {
                 text: (!insertion.text.is_empty()).then_some(insertion.text),
@@ -70924,7 +71235,7 @@ fn prepare_clipboard_paste(
                 ..PreparedClipboardPaste::default()
             }
         }
-        Ok(ClipboardPayload::Text(text)) => PreparedClipboardPaste {
+        ClipboardPayload::Text(text) => PreparedClipboardPaste {
             text: Some(text),
             clipboard_text: true,
             ..PreparedClipboardPaste::default()
@@ -70934,22 +71245,14 @@ fn prepare_clipboard_paste(
         // every browser does — is a text paste, and a source that puts a file
         // beside a thumbnail of it is a path paste. This arm is what is left:
         // a picture and nothing else.
-        Ok(ClipboardPayload::Picture(offered)) => PreparedClipboardPaste {
+        ClipboardPayload::Picture(offered) => PreparedClipboardPaste {
             picture: offered,
             ..PreparedClipboardPaste::default()
         },
-        Ok(ClipboardPayload::Nothing) => PreparedClipboardPaste::default(),
-        Ok(ClipboardPayload::Refused(bt_platform::UnsupportedKind::Promise)) => {
+        ClipboardPayload::Nothing => PreparedClipboardPaste::default(),
+        ClipboardPayload::Refused(bt_platform::UnsupportedKind::Promise) => {
             PreparedClipboardPaste {
                 notice: Some(i18n::Text::PasteClipboardPromise.text().to_owned()),
-                ..PreparedClipboardPaste::default()
-            }
-        }
-        Err(_) => {
-            // Native error strings never need to carry the source's names or text into diagnostics.
-            eprintln!("clipboard acquisition failed; paste ignored");
-            PreparedClipboardPaste {
-                notice: Some(i18n::Text::PasteClipboardRead.text().to_owned()),
                 ..PreparedClipboardPaste::default()
             }
         }
@@ -71023,7 +71326,7 @@ fn prepare_dropped_paste(
     leading_space: bool,
 ) -> PreparedClipboardPaste {
     prepare_clipboard_paste(
-        Ok(bt_platform::ClipboardPayload::Files(paths)),
+        bt_platform::ClipboardPayload::Files(paths),
         recipient,
         leading_space,
     )
@@ -77653,7 +77956,11 @@ fn main() -> Result<()> {
     // The door is `bt_viewport`'s because `bt-app` depends on the three crates
     // that write these lines and none of them can name this module; see
     // `bt_viewport::trace`.
-    let _trace_shutdown = trace_sink::start();
+    let trace_shutdown = trace_sink::start();
+    // **A value dropped without its retire door says so here, once** (T-DROP-DOORS): from now on
+    // the platform's line about a skipped door is a diagnostics note, never a wait.
+    bt_platform::door_skipped::install(diagnostics::note);
+    bt_pty::say_skipped_doors_through(diagnostics::note);
     ime_outbound::install();
     bt_render::set_trace_writer(trace_sink::stderr_line);
     if doors.startup {
@@ -77787,9 +78094,10 @@ fn main() -> Result<()> {
     let event_loop = match builder.build() {
         Ok(event_loop) => event_loop,
         Err(error) => {
-            // The way out from before the loop: `_trace_shutdown`'s drop flushes the trace, which
-            // is an exit door (§5.3 row 17), so the phase says so first.
+            // The way out from before the loop: the trace writer is retired through its flush
+            // door, which is an exit door (§5.3 row 17), so the phase says so first (D-78).
             bt_platform::admission::exiting();
+            let _ = trace_shutdown.flush_through_its_door();
             return Err(anyhow::Error::new(error).context("create winit event loop"));
         }
     };
@@ -77852,8 +78160,13 @@ fn main() -> Result<()> {
     // or from `Starting` when the loop stopped before its first turn.
     bt_platform::admission::exiting();
     // The session that outlived every question is released once the loop has
-    // returned, never before a question could still be in flight.
-    bt_platform::video::shutdown_media_session();
+    // returned, never before a question could still be in flight — and never
+    // before the engines every window's teardown let go of have left (D-80). An
+    // owner-thread door (`doors::MediaQuiet`, row 27), admitted on the way out; a
+    // refusal leaves the platform to the process's end.
+    let _ = bt_platform::admission::admitted::<doors::MediaQuiet, _>(
+        bt_platform::video::shutdown_media_session,
+    );
     // **An update's exit guard** (0.4.6 U-34): after a Restart to update, this
     // process leaves behind the applier it started, or starts Folio again —
     // here, with the loop over and the session's sentinel gone, after letting
@@ -77896,9 +78209,10 @@ fn main() -> Result<()> {
     // the failure that queue exists for is a writer stuck in a kernel write,
     // and waiting on it forever here would move the hang to the end of the run.
     //
-    // An owner-thread door (`doors::TraceFlush`, row 17), admitted on the way out. A refusal
-    // loses what is still queued, as the flush's own timeout does.
-    let _ = bt_platform::admission::admitted::<doors::TraceFlush, _>(trace_sink::flush);
+    // An owner-thread door (`doors::TraceFlush`, row 17), admitted on the way out, through the
+    // writer's own door (D-78). A refusal loses what is still queued, as the flush's own timeout
+    // does.
+    let _ = trace_shutdown.flush_through_its_door();
     // **The uninstaller, after *Uninstall* on the Settings card, is the very last
     // act** (T-UNINSTALL-UX): started detached, with `--after-pid` naming this
     // process, so it touches nothing until this process has gone. Nothing for any
@@ -80055,8 +80369,13 @@ mod palette_wiring_tests {
             "the paste chord is the window's own predicate, not a second spelling"
         );
         assert!(
-            method_body("Runtime", "clipboard_line").contains("text_field::one_line"),
-            "and what it hands the field is one line of printable text"
+            keys.contains("self.paste_into_field(crate::TextFieldSeat::Palette)"),
+            "the chord asks the clipboard lane for the palette's paste"
+        );
+        assert!(
+            method_body("Runtime", "apply_clipboard_text_to_field")
+                .contains("text_field::one_line"),
+            "and what the answer hands the field is one line of printable text"
         );
         assert!(
             keys.contains("input::one_line_field_key(field, key, self.window.modifiers)"),
@@ -80713,7 +81032,7 @@ mod edit_menu_clipboard_tests {
     fn a_copy_over_a_files_column_or_a_read_only_preview_takes_the_terminals_selection() {
         use super::{
             Bias, DualPlaneSession, ImeOwner, TextFieldSeat, ViewSelection, ViewportProjection,
-            clipboard_focus_of, copy_selection,
+            clear_copied_selection, clipboard_focus_of, selection_to_copy,
         };
         use crate::menubar::{ClipboardDoors, run_clipboard_verb};
         use std::num::NonZeroU32;
@@ -80734,18 +81053,21 @@ mod edit_menu_clipboard_tests {
                     clipboard,
                     ..
                 } = self;
-                copy_selection(session, projection, |text| {
-                    clipboard.push(text.to_owned());
-                    Ok(())
-                });
+                // What `Runtime::copy_selection` asks of the clipboard lane, and what its landed
+                // write's effect does.
+                if let Some(text) = selection_to_copy(session, false) {
+                    clipboard.push(text.clone());
+                    clear_copied_selection(session, projection, &text);
+                }
                 Ok(())
             }
             fn paste_into_terminal(&mut self) -> anyhow::Result<()> {
                 self.knocked.push("paste_into_terminal");
                 Ok(())
             }
-            fn copy_document_selection(&mut self) {
+            fn copy_document_selection(&mut self) -> anyhow::Result<()> {
                 self.knocked.push("copy_document_selection");
+                Ok(())
             }
             fn paste_into_document(&mut self) -> anyhow::Result<()> {
                 self.knocked.push("paste_into_document");
@@ -82089,7 +82411,7 @@ mod clipboard_path_tests {
                 session.feed(b"\x1b[?2004h").unwrap();
             }
             let prepared = prepare_clipboard_paste(
-                bt_platform::clipboard::read_payload(&mut clipboard),
+                bt_platform::clipboard::read_payload(&mut clipboard).expect("the fake answers"),
                 &recipient(),
                 input_line_needs_a_space_first(&session),
             );
@@ -82128,7 +82450,7 @@ mod clipboard_path_tests {
                 fetched: Vec::new(),
             };
             let prepared = prepare_clipboard_paste(
-                bt_platform::clipboard::read_payload(&mut clipboard),
+                bt_platform::clipboard::read_payload(&mut clipboard).expect("the fake answers"),
                 &recipient(),
                 true,
             );
@@ -82166,7 +82488,7 @@ mod clipboard_path_tests {
             fetched: Vec::new(),
         };
         let prepared = prepare_clipboard_paste(
-            bt_platform::clipboard::read_payload(&mut beside_text),
+            bt_platform::clipboard::read_payload(&mut beside_text).expect("the fake answers"),
             &recipient(),
             false,
         );
@@ -82188,7 +82510,7 @@ mod clipboard_path_tests {
         // picture-only clipboard answers.
         assert!(
             prepare_clipboard_paste(
-                bt_platform::clipboard::read_payload(&mut alone),
+                bt_platform::clipboard::read_payload(&mut alone).expect("the fake answers"),
                 &recipient(),
                 false,
             )
@@ -82197,7 +82519,7 @@ mod clipboard_path_tests {
         );
 
         let prepared = prepare_clipboard_paste(
-            Ok(bt_platform::ClipboardPayload::Picture(vec![shot()])),
+            bt_platform::ClipboardPayload::Picture(vec![shot()]),
             &recipient(),
             false,
         );
@@ -82219,7 +82541,7 @@ mod clipboard_path_tests {
         let written = PathBuf::from("/tmp/folio/clipboard/20260916-143012-1.png");
         for leading_space in [false, true] {
             let as_a_copied_file = prepare_clipboard_paste(
-                Ok(bt_platform::ClipboardPayload::Files(vec![written.clone()])),
+                bt_platform::ClipboardPayload::Files(vec![written.clone()]),
                 &recipient(),
                 leading_space,
             );
@@ -82245,24 +82567,26 @@ mod clipboard_path_tests {
         assert!(shell_literal::refusal_notice(&refused.refused).is_some());
     }
 
+    /// An acquisition error is not a payload: it is the clipboard lane's `Failed`, said once by the
+    /// lane's ledger, and its notice is the window's (`runtime::clipboard::tests::
+    /// a_paste_whose_open_is_refused_five_times_says_so_once_and_writes_nothing`).
     #[test]
-    fn nothing_is_silent_and_payload_refusal_acquisition_error_and_path_error_each_report() {
+    fn nothing_is_silent_and_a_payload_refusal_and_a_path_error_each_report() {
         use bt_platform::{ClipboardPayload, UnsupportedKind};
         for payload in [
             ClipboardPayload::Nothing,
             ClipboardPayload::Picture(Vec::new()),
         ] {
-            let prepared = prepare_clipboard_paste(Ok(payload), &recipient(), false);
+            let prepared = prepare_clipboard_paste(payload, &recipient(), false);
             assert!(prepared.text.is_none());
             assert!(prepared.notice.is_none());
             assert!(prepared.picture.is_empty());
         }
-        for result in [
-            Ok(ClipboardPayload::Refused(UnsupportedKind::Promise)),
-            Err("injected read failure".into()),
-            Ok(ClipboardPayload::Files(vec!["/bad\tname".into()])),
+        for payload in [
+            ClipboardPayload::Refused(UnsupportedKind::Promise),
+            ClipboardPayload::Files(vec!["/bad\tname".into()]),
         ] {
-            let prepared = prepare_clipboard_paste(result, &recipient(), true);
+            let prepared = prepare_clipboard_paste(payload, &recipient(), true);
             assert!(prepared.text.is_none());
             assert!(prepared.notice.is_some());
         }
@@ -82270,26 +82594,27 @@ mod clipboard_path_tests {
 
     #[test]
     fn terminal_is_the_only_new_clipboard_caller_and_k144_keeps_focus() {
+        // T-CLIPBOARD-LANE: the board is read on the clipboard lane's worker, through the one
+        // door the product compiles, and the terminal's paste asks that lane for the payload; its
+        // answer is applied where the lane's terminal is spent.
         assert_eq!(
             in_product_items(&found(
-                needle!(Pattern::text("bt_platform::clipboard_payload()")),
+                needle!(Pattern::text("bt_platform::clipboard_payload(")),
                 View::Raw
             )),
             1,
             "the board is read in one place the product compiles"
         );
         let paste = method_body("Runtime", "paste_from_clipboard_into");
-        let read = paste
-            .find("self.window.window.clipboard_payload()")
-            .expect("the terminal door reads the clipboard");
-        let applied = paste
-            .find("self.apply_clipboard_payload(target, payload)")
-            .expect("the terminal door applies the clipboard payload");
         assert!(
-            read < applied,
-            "the payload apply step must follow the clipboard read"
+            paste.contains("PasteInto::Terminal(target), Ask::Payload"),
+            "the terminal door asks the clipboard lane for the payload:\n{paste}"
         );
-        assert!(paste.contains("hang_watch::Station::ClipboardRead"));
+        let spend = method_body("Runtime", "spend_paste");
+        assert!(
+            spend.contains("self.apply_clipboard_payload(target, payload)"),
+            "the payload the lane answered is applied where the paste is spent:\n{spend}"
+        );
         assert!(!paste.contains("paste_recipient") && !paste.contains("deliver_paste("));
         assert!(!paste.contains("set_focus("));
         assert!(!paste.contains("set_files_keyboard("));
@@ -82360,7 +82685,7 @@ mod clipboard_path_tests {
                     let dropped =
                         prepare_dropped_paste(vec![path.into()], &recipient, leading_space);
                     let copied = prepare_clipboard_paste(
-                        Ok(ClipboardPayload::Files(vec![path.into()])),
+                        ClipboardPayload::Files(vec![path.into()]),
                         &recipient,
                         leading_space,
                     );
@@ -82614,7 +82939,7 @@ mod clipboard_path_tests {
                     let dropped =
                         prepare_dropped_paste(vec![name.into()], &recipient, leading_space);
                     let copied = prepare_clipboard_paste(
-                        Ok(ClipboardPayload::Files(vec![name.into()])),
+                        ClipboardPayload::Files(vec![name.into()]),
                         &recipient,
                         leading_space,
                     );
@@ -83122,9 +83447,9 @@ mod clipboard_path_tests {
         // (`send_paste`, 0.4.4 ticket 02), which `deliver_paste` answers with.
         let send = method_body("Runtime", "send_paste");
         assert!(
-            send.contains(
-                "offer_pty_input(PtyTarget::of(pty.as_ref(), birth.as_ref()), bytes, context)"
-            ) && send.contains("Ok(landed.queued())"),
+            send.contains("offer_pty_input(target, bytes, context)")
+                && send.contains("None => PtyTarget::of(pty.as_ref(), birth.as_ref()),")
+                && send.contains("Ok(landed.queued())"),
             "the paste reports the wrapper's success rather than what the ring \
              did with the bytes:\n{send}"
         );

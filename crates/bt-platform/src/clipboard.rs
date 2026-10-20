@@ -1,5 +1,32 @@
 //! Clipboard acquisition port (paste-paths design §1). Content is read only on a gesture.
 //! A candidate survey is not a payload: an empty file list may require fetching the next rung.
+//!
+//! **Every clipboard door is a worker's** (T-CLIPBOARD-LANE): [`crate::clipboard_text`],
+//! [`crate::set_clipboard_text`] and [`crate::clipboard_payload`] take the [`WorkerCtx`] the thread
+//! door lends a worker's body, so the window thread — which has none — cannot open the clipboard,
+//! and the one contention wait (`OpenClipboard` asked again with 5, 10, 20 and 40 ms between) is
+//! the clipboard lane's worker's:
+//!
+//! ```compile_fail
+//! // RED (T-CLIPBOARD-LANE) — a function the thread door did not start has no capability to
+//! // hand the clipboard's door.
+//! fn on_the_window_thread() -> Result<String, String> {
+//!     bt_platform::clipboard_text()
+//! }
+//! ```
+//!
+//! MUTATION: make `clipboard_text` take no capability and the block above compiles. The control
+//! is the same read inside a body the door started, handed the lent `ctx`:
+//!
+//! ```no_run
+//! let _ = bt_platform::spawn_at_priority(
+//!     "doc-probe",
+//!     bt_platform::ThreadPriority::BelowNormal,
+//!     |ctx| bt_platform::clipboard_text(ctx),
+//! );
+//! ```
+//!
+//! [`WorkerCtx`]: crate::admission::WorkerCtx
 
 use std::path::PathBuf;
 

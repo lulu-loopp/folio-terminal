@@ -297,16 +297,24 @@ pub(crate) trait WindowHost {
     /// associates a context, focuses or notifies. Default facts (every field `None`) where the
     /// platform has none to read: off Windows, or a window with no native handle.
     fn ime_facts(&self) -> bt_platform::ime_observation::NativeFacts;
+    /// **A line this window's runtime says in `diagnostics.log`** (T-DIAGNOSTICS-TEST-SINK):
+    /// [`crate::diagnostics::note`] — the resident log, and a console run's trace queue — said
+    /// through the window a runtime road has in hand, so that the headless window can keep the
+    /// exact text the road wrote. Any thread may call `diagnostics::note`; this door is the
+    /// window thread's, where a `Runtime` method runs.
+    fn note(&self, line: &str);
     /// macOS's Option key as Alt, or as the composing key the keyboard prints with.
     fn set_option_as_alt(&self, option_sends_alt: bool);
     /// The window's scale and rectangle as the platform reports them, beside winit's.
     fn dpi_snapshot(&self) -> anyhow::Result<crate::DpiSnapshot>;
-    /// `bt_platform::clipboard_text`: the clipboard's text, read on this window's thread.
-    fn clipboard_text(&self) -> Result<String, String>;
-    /// `bt_platform::set_clipboard_text`: text put on the clipboard.
-    fn set_clipboard_text(&self, text: &str) -> Result<(), String>;
-    /// `bt_platform::clipboard_payload`: whatever the clipboard holds, as a paste reads it.
-    fn clipboard_payload(&self) -> Result<bt_platform::ClipboardPayload, String>;
+    /// **One clipboard request, put on the clipboard lane for this window** — served through this
+    /// window's clipboard door: the machine's (`clipboard_lane::PlatformClipboard`), or a test's
+    /// own. Returns at once with the request, or the lane's refusal at its door.
+    fn clipboard(
+        &self,
+        lane: &crate::clipboard_lane::ClipboardLane,
+        ask: crate::clipboard_lane::Ask,
+    ) -> Result<crate::clipboard_lane::ClipboardRequest, crate::clipboard_lane::Declined>;
     /// **One hand-off to the system, put on the OS hand-off lane** for this window — or why the
     /// window could not be named to the lane's door.
     fn hand_off(
@@ -482,20 +490,21 @@ impl WindowHost for Arc<Window> {
             .map(bt_platform::ime_observation::snapshot)
             .unwrap_or_default()
     }
+    fn note(&self, line: &str) {
+        crate::diagnostics::note(line);
+    }
     fn set_option_as_alt(&self, option_sends_alt: bool) {
         crate::option_as_alt(self, option_sends_alt);
     }
     fn dpi_snapshot(&self) -> anyhow::Result<crate::DpiSnapshot> {
         crate::native_dpi_snapshot(self)
     }
-    fn clipboard_text(&self) -> Result<String, String> {
-        bt_platform::clipboard_text()
-    }
-    fn set_clipboard_text(&self, text: &str) -> Result<(), String> {
-        bt_platform::set_clipboard_text(text)
-    }
-    fn clipboard_payload(&self) -> Result<bt_platform::ClipboardPayload, String> {
-        bt_platform::clipboard_payload()
+    fn clipboard(
+        &self,
+        lane: &crate::clipboard_lane::ClipboardLane,
+        ask: crate::clipboard_lane::Ask,
+    ) -> Result<crate::clipboard_lane::ClipboardRequest, crate::clipboard_lane::Declined> {
+        lane.submit(Arc::new(crate::clipboard_lane::PlatformClipboard), ask)
     }
     fn hand_off(
         &self,

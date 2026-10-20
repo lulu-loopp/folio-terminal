@@ -311,6 +311,34 @@ the rules on a fixture. When red, regenerate with
 edit a row. A header count that grows (reads not attributed, calls not
 followed) means the map sees less; the change that regenerates it says why.
 
+## Cross-crate chains
+
+The rule: every backticked span in a chain table of `docs/ARCHITECTURE.md` §7,
+in every cell but `crate`, is a code name that resolves to a product item of the
+row's crate, or a thread name a string literal in first-party product code spells
+(T-CHAINS-72). §7 is hand-written and the ticket that moves a hop edits its row;
+this guard is what makes a row that was not edited go red instead of going stale.
+The grammar is listed in §7's own header and in the guard's doc: `item` at the
+crate's root, `module::item` in the module it is declared in, `Type::member`
+(a method, a field or a variant, its impl anywhere in the crate),
+`module::Type::member`, any of them after a package segment, and
+`a-thread-name`. Refused, by row or by table, and never skipped: every other
+shape between backticks, a name that resolves nowhere, an item that stands only
+in a test build, a package named outside the crate cell, a row whose cells do not
+match the header, a `crate` cell that is not one package, an `entry` cell with no
+span, an unpaired backtick, a table without the separator as its second line, a
+table with no rows, a table without the two columns, and a document without §7 or
+a §7 without a table.
+
+Where and what to do: `crates/bt-source/tests/chains.rs`
+`every_name_in_the_chain_tables_is_an_item_of_its_crate` (about 11 s, most of it
+lowering `bt-app`), with every refusal planted in
+`a_chain_row_names_an_item_or_is_refused_by_name` and
+`a_section_the_guard_cannot_read_is_refused`. When red, read where the hop went
+and edit the row to the item it is now; what is not a code name or a thread is
+written outside the backticks, or the grammar is widened in its own change with a
+planted case.
+
 ## Window-wait registry and effects
 
 The rule: work reachable from the window thread does not block, and every
@@ -414,7 +442,13 @@ identities the share's generation beside the minted number so a later share neve
 storage worker (T-STORAGE-WORKER-ON-THE-SEAM, `persist::StorageLane`) on `Ledger` and `Executor` with a
 line of its own, as the hand-off lane is — one FIFO, the trial's receipt served ahead of it, and each job
 kind's own answer road, read only once the request's terminal has been taken (`persist::OnTheWorker`), or
-left to the lane's sink at admission by a reader that reads its road alone. A lane of
+left to the lane's sink at admission by a reader that reads its road alone; and the clipboard lane
+(T-CLIPBOARD-LANE, `clipboard_lane`) on `lane::Queue`, its asker a window that replaces a copy it
+owes by a newer one (`Superseded`; a paste is never replaced, it queues) and withdraws a paste it no
+longer wants (`Cancelled`, which the claim `AWithdrawnRequestEndsCancelledOnce` holds every lane to:
+once, in the sink, never run when its work had not begun — and never said by a lane that declares
+no withdrawal; and `AWithdrawnRequestLeavesTheLine`: a withdrawn request leaves the worker's line,
+so the bound holds of the line as of the ledger). A lane of
 several threads keeps one ledger per thread, so one thread's end ends only its own requests,
 and keeps what each request asked, so a `Failed` one is settled — as its surface's own error,
 or held by its pane — and asked again only by new input to that surface, rather than left in
@@ -724,6 +758,42 @@ reason says what it reads, and T-ENV-UNJUDGED-ROWS rewrites each). A name is a
 and a row that reads a name or holds a refusal its base row did not. When red,
 move the read to the entry and hand the answer down as a parameter or an
 installed answer; the grammar is not widened to quiet a refusal.
+
+## Runtime voice
+
+The rule: a `Runtime` method says its `diagnostics.log` line through the window it
+has in hand, `WindowHost::note` (T-DIAGNOSTICS-TEST-SINK, 2026-10-17). The door's
+native arm is `diagnostics::note` — the resident log and a console run's trace
+queue, both process-wide and unreadable by a test — and the headless window keeps
+the exact text on its ledger (`WindowEffect::Noted`, at most `headless::NOTES_KEPT`
+lines between two takes — a test's bound mirroring `ime_report::PAIRING_LINES_MAX`,
+not derived from it — the rest counted by `Ledger::notes_beyond_the_cap`, and a
+plain `Ledger::take` after one refuses with the count rather than hand back a
+shorter record), so a headless test asserts the line the road wrote, not the line a builder would have
+written. A road a headless test drives says its line through the door; the roads
+no headless test drives yet keep their direct lines, each a row with its reason,
+and the list only shrinks.
+
+Where and what to do: `crates/bt-source/tests/runtime_voice.rs`
+(`bt_app_runtime_roads_say_their_lines_through_the_window`) reads every product
+`impl` block of `Runtime` through `bt-source` and counts each mention of
+`diagnostics::note` by the item holding it — a call, or the voice handed on as a
+value (a helper's `say`, a body's `use`) — against
+`docs/plans/runtime-voice-direct-lines.tsv` (road, shape, count, reason), both ways (an unlisted line, a count above its row, and a row whose
+road says fewer or none are refused). What it cannot read is refused by its line,
+never passed: a bare `note` in a runtime road that is neither that path's tail nor
+a method after `.` (a name a `use`, a renamed module or a local gives it), and a
+`use` anywhere in the package that names the voice or opens its module by a glob.
+Not read, as limits: a free function a runtime method calls that says a line of
+its own, a stored closure or function pointer holding the voice, and the other
+backend holders (`FolioApp`, `App`), which have no window in hand. Its fixture
+(`tests/fixtures/runtime_voice/`) plants each refusal
+(`every_direct_line_in_a_runtime_road_is_named`). When red, say the line through
+`self.window.window.note(..)` and read it back in the road's headless test; a row
+whose road moved to the door is taken off in the same change. Across commits
+`scripts/ci/check-runtime-voice.ps1` holds the list to the merge base's (or its
+seed): a row the base does not carry, or a count that grew, is refused by identity
+(`gates-can-fail` plants a row). A row is never added for a new line.
 
 ## Machine-independent paths
 

@@ -857,6 +857,16 @@ impl DirWatch {
         match self._never {}
     }
 
+    /// The door the real arms retire a watch through (T-DROP-DOORS). Unreachable.
+    pub fn retire_within(
+        self,
+        ctx: &crate::admission::WorkerCtx,
+        bound: std::time::Duration,
+    ) -> bool {
+        let _ = (ctx, bound);
+        match self._never {}
+    }
+
     /// The tree contract. Refused; M2-1.
     pub fn start(
         ctx: &crate::admission::WorkerCtx,

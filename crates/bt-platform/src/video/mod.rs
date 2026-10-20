@@ -119,6 +119,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::admission::{WaitToken, doors};
+use crate::engine_ledger;
 use windows::Win32::Media::MediaFoundation::{
     IMF2DBuffer, IMFMediaBuffer, IMFSourceReader, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE,
     MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_PD_DURATION, MF_SOURCE_READER_ALL_STREAMS,
@@ -509,17 +511,36 @@ static MEDIA_SESSION_STARTS: AtomicU32 = AtomicU32::new(0);
 ///
 /// # Where it is called from
 ///
-/// Once, from `bt-app`'s `main`, after the event loop has returned — and, since
-/// route B, **after every [`engine::Engine`] has been shut down**. A platform
-/// torn down under a decoder that is still running is the same shape §7.35 spent
-/// a slice on, so the ordering is asserted here rather than remembered at the
-/// call site.
-pub fn shutdown_media_session() {
-    debug_assert_eq!(
-        engine::engines_outstanding(),
-        0,
-        "an engine is still standing: `MFShutdown` is the last thing this process does"
-    );
+/// Once, from `bt-app`'s `main`, after the event loop has returned — **an
+/// owner-thread door** (`doors::MediaQuiet`, §5.3 row 27), admitted on the way
+/// out. Every [`engine::Engine`] has been told to stop by then (each window's
+/// teardown shuts its seats down, a request that waits for nothing —
+/// T-DROP-DOORS, D-80), and this is where the process waits for them: until the
+/// engine ledger reads zero, within [`engine::SHUTDOWN_BUDGET`], before anything
+/// else. A platform torn down under a decoder that is still running is the same
+/// shape §7.35 spent a slice on; one that is still running past the bound is
+/// said, and the platform goes down over it, as it does over a reader.
+pub fn shutdown_media_session(token: WaitToken<'_, doors::MediaQuiet>) {
+    let _ = token;
+    let deadline = Instant::now() + engine::SHUTDOWN_BUDGET;
+    let mut counts = engine_ledger::counts();
+    while counts.outstanding() > 0 {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            eprintln!(
+                "video: {} engine thread(s) still running {:?} after the last window told \
+                 them to stop; shutting Media Foundation down over them",
+                counts.outstanding(),
+                engine::SHUTDOWN_BUDGET
+            );
+            break;
+        }
+        let (next, _) = engine_ledger::moved()
+            .wait_timeout(counts, left)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        counts = next;
+    }
+    drop(counts);
     if MEDIA_SESSION_STARTS.load(Ordering::Relaxed) == 0 {
         return;
     }

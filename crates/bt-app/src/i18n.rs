@@ -444,6 +444,9 @@ text_entries! {
     PastePathNushell,
     PasteClipboardPromise,
     PasteClipboardRead,
+    /// Another program held the clipboard past a paste's deadline, or the clipboard lane could
+    /// take no more requests (T-CLIPBOARD-LANE).
+    PasteClipboardBusy,
     /// The clipboard held a picture and the file Folio writes for it could not
     /// be written (§7.61).
     PasteClipboardPicture,
@@ -1958,6 +1961,12 @@ text_entries! {
     GateDelete,
     GateClear,
     GateTitleUnsaved,
+    /// The line a close's question adds when it is put at the end of its wait for
+    /// a save that is still on its way to the disk (S-6b).
+    GateSaveStillOnItsWay,
+    /// The title of a close's question when what it would lose is only saves
+    /// that have not reached the disk, over buffers with no unsaved edits (S-6b).
+    GateTitleSaveNotLanded,
     /// It says *changes*, not *unsaved changes*: the file on disk is saved, and
     /// what is about to go is the difference between it and what git has.
     GateTitleGitDiscard,
@@ -3321,6 +3330,11 @@ impl Text {
                 lang,
                 "The clipboard could not be read. Copy again and retry.",
                 "剪贴板无法读取。重新复制后再试。",
+            ),
+            Self::PasteClipboardBusy => pick(
+                lang,
+                "The clipboard was busy, so nothing was pasted. Try again.",
+                "The clipboard was busy, so nothing was pasted. Try again.", // zh: pending T-CLIPBOARD-LANE
             ),
             Self::PasteClipboardPicture => pick(
                 lang,
@@ -4891,6 +4905,16 @@ impl Text {
             Self::GateDelete => pick(lang, "Delete", "删除"),
             Self::GateClear => pick(lang, "Clear", "清除"),
             Self::GateTitleUnsaved => pick(lang, "Discard unsaved changes?", "放弃未保存的改动？"),
+            Self::GateSaveStillOnItsWay => pick(
+                lang,
+                "A save is still on its way to the disk.",
+                "A save is still on its way to the disk.", // zh: pending T-CLOSE-GATE-WAITS
+            ),
+            Self::GateTitleSaveNotLanded => pick(
+                lang,
+                "A save has not reached the disk. Close anyway?",
+                "A save has not reached the disk. Close anyway?", // zh: pending T-CLOSE-GATE-WAITS
+            ),
             Self::GateTitleGitDiscard => pick(lang, "Discard changes?", "放弃改动？"),
             Self::GateTitleGitDelete => pick(lang, "Delete this file?", "删除这个文件？"),
             Self::GateTitleGitDeleteBranch => pick(lang, "Delete this branch?", "删除这个分支？"),
@@ -6654,6 +6678,18 @@ impl Text {
         (Self::PreviewSaveUnlanded, HostPlatform::MacOs),
         (Self::PreviewSaveTooMany, HostPlatform::Windows),
         (Self::PreviewSaveTooMany, HostPlatform::MacOs),
+        // zh: pending T-CLOSE-GATE-WAITS — the line a close's question adds when its wait for a
+        // save on its way ran out.
+        (Self::GateSaveStillOnItsWay, HostPlatform::Windows),
+        (Self::GateSaveStillOnItsWay, HostPlatform::MacOs),
+        // zh: pending T-CLOSE-GATE-WAITS — the title of a close's question over saves that have
+        // not landed, with no unsaved edits.
+        (Self::GateTitleSaveNotLanded, HostPlatform::Windows),
+        (Self::GateTitleSaveNotLanded, HostPlatform::MacOs),
+        // zh: pending T-CLIPBOARD-LANE — the notice a terminal paste says when the clipboard was
+        // busy past its deadline.
+        (Self::PasteClipboardBusy, HostPlatform::Windows),
+        (Self::PasteClipboardBusy, HostPlatform::MacOs),
         // zh: pending T-SHELL-BIRTH-DEATH — the face of a shell that ended at birth.
         (Self::ShellBirthDeath, HostPlatform::Windows),
         (Self::ShellBirthDeath, HostPlatform::MacOs),
@@ -9851,6 +9887,7 @@ mod tests {
             Text::PastePathNushell,
             Text::PasteClipboardPromise,
             Text::PasteClipboardRead,
+            Text::PasteClipboardBusy,
             Text::PasteClipboardPicture,
             Text::PasteProfileOverride,
         ];

@@ -210,14 +210,15 @@ pub const OPEN_BUDGET: Duration = Duration::from_secs(5);
 pub use crate::video_load::LOAD_ANSWER_PATIENCE;
 pub use crate::video_load::{LOAD_BUDGET, Length};
 
-/// **How long [`Engine::shutdown`] waits for the engine thread to say it has
-/// left** (review row R2-19).
+/// **How long the way out waits for every engine thread a shutdown let go of to
+/// say it has left** (review row R2-19; T-DROP-DOORS, D-80).
 ///
-/// The thread's ending is a `Shutdown` command it is already waiting on, the
+/// A thread's ending is a `Shutdown` command it is already waiting on, the
 /// engine's own `Shutdown` call and an apartment being left — microseconds, on
 /// every ordinary close. Two seconds is therefore never reached except by a
-/// thread that is inside the platform and not coming back soon, and reaching it
-/// costs the window nothing: the thread is left to finish rather than waited on.
+/// thread that is inside the platform and not coming back soon. It is spent
+/// once, by the process, in [`super::shutdown_media_session`] before
+/// `MFShutdown` — never by a close: [`Engine::shutdown`] waits for nothing.
 pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);
 
 /// **Which Direct3D device the frames are decoded onto.**
@@ -486,9 +487,6 @@ impl Engine {
                         &commands,
                         &inbox,
                     );
-                    // Last of all, and read by `Engine::shutdown` to know
-                    // whether joining this thread will return — see there.
-                    shared.stopped.store(true, Ordering::Release);
                 },
             )
             // The one thing that can still fail here, and it fails without
@@ -522,7 +520,6 @@ impl Engine {
                 move |_ctx| {
                     shared.built.store(true, Ordering::Release);
                     Pump::new(media, deadline).run(&shared, &inbox);
-                    shared.stopped.store(true, Ordering::Release);
                 },
             )
             .expect("a thread for the scripted engine")
@@ -714,51 +711,40 @@ impl Engine {
         }
     }
 
-    /// **Stop, release the engine and join its thread**, now rather than at drop.
+    /// **The door: tell the engine thread to stop, and let it go** (T-DROP-DOORS,
+    /// D-80): *a video engine is shut down through an explicit door, not by its
+    /// drop.*
     ///
-    /// The verb a pane calls when it closes or is handed a different file. It is
-    /// idempotent and [`Drop`] calls it, so a caller that forgets is not a caller
-    /// that leaks — see [`engines_shut_down`].
-    ///
-    /// # The join is bounded (review row R2-19)
-    ///
-    /// A pane closes on the window's own thread, and the thread it is closing is
-    /// inside somebody else's decoder: one `IMFMediaEngine` call on a broken
-    /// stream or a wedged driver is a wait with no ending, and an unbounded
-    /// `join` here would hand the window that wait. So the thread is asked to
-    /// stop, and this waits [`SHUTDOWN_BUDGET`] for it to say it has — the flag
-    /// it sets as its very last act, which is what makes the `join` after it a
-    /// formality that returns at once.
-    ///
-    /// A thread that has not said so by then is **let go rather than waited on**.
-    /// It is still inside the platform, so it is left to finish and unwind on
-    /// its own, exactly as the first-frame reader that overran its budget is
-    /// (`super::within_budget`); its engine is still on the ledger, which is the
-    /// truth — [`engines_outstanding`] is not zero, because an engine is still
-    /// standing.
+    /// The verb a pane calls when it closes or is handed a different file, on the
+    /// window's own thread — so it waits for nothing. The thread it is closing may
+    /// be inside somebody else's decoder: one `IMFMediaEngine` call on a broken
+    /// stream or a wedged driver is a wait with no ending (review row R2-19), and
+    /// the two-second poll and join this used to be put up to that much of it on
+    /// the window for every engine a sweep closed. The `Shutdown` command is the
+    /// whole of the request: the thread releases its engine, moves the ledger
+    /// ([`engines_shut_down`]) and leaves on its own time, and the one wait for
+    /// it is the process's, once, at exit ([`super::shutdown_media_session`],
+    /// bounded by [`SHUTDOWN_BUDGET`]), before the platform it decodes on is
+    /// taken down. Idempotent.
     pub fn shutdown(&mut self) {
         let _ = self.commands.send(Command::Shutdown);
-        let Some(thread) = self.thread.take() else {
-            return;
-        };
-        let deadline = Instant::now() + SHUTDOWN_BUDGET;
-        while !self.shared.stopped.load(Ordering::Acquire) {
-            if Instant::now() >= deadline {
-                eprintln!(
-                    "video: an engine thread was still running {SHUTDOWN_BUDGET:?} \
-                     after it was told to stop; leaving it to finish"
-                );
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        let _ = thread.join();
+        self.thread.take();
     }
 }
 
 impl Drop for Engine {
+    /// Waits for nothing. After [`Engine::shutdown`] there is nothing left; without
+    /// it, the engine thread is told to stop and let go of — the door's own
+    /// request, which needs no wait — and the drop says so once.
     fn drop(&mut self) {
-        self.shutdown();
+        if self.thread.is_some() {
+            self.shutdown();
+            crate::door_skipped::say(
+                "a video engine (`video::engine::Engine`)",
+                "its shutdown door",
+                "its thread was told to stop and let go of",
+            );
+        }
     }
 }
 
@@ -787,10 +773,6 @@ struct Shared {
     /// [`Engine::state`] reads it to decide whether [`OPEN_BUDGET`] has been
     /// missed — a question that only has an answer while this is `false`.
     built: AtomicBool,
-    /// **Whether the engine thread has left.** Set once, as the thread's last
-    /// act, and read by [`Engine::shutdown`] so that its join is a bounded wait
-    /// rather than an unbounded one — see there.
-    stopped: AtomicBool,
 }
 
 enum Command {
@@ -810,8 +792,8 @@ enum Command {
 
 /// How many media engines this process has created, and how many it has shut
 /// down. Equal at every moment no engine is alive, which is what the structural
-/// gate reads: an [`Engine`] that is dropped, forgotten, or unwound past by a
-/// panic goes through the same [`Engine::shutdown`]. The counts are
+/// gate reads: an [`Engine`] that is dropped without its door makes the same
+/// request [`Engine::shutdown`] does. The counts are
 /// `crate::engine_ledger`'s, the one ledger both platform arms move.
 #[must_use]
 pub fn engines_started() -> u64 {
@@ -826,7 +808,7 @@ pub fn engines_shut_down() -> u64 {
 
 /// How many engines are alive right now. **Zero is the only value this may have
 /// when the process leaves**, which is what [`super::shutdown_media_session`]
-/// asserts on a debug build.
+/// waits for, within [`SHUTDOWN_BUDGET`], before `MFShutdown`.
 #[must_use]
 pub fn engines_outstanding() -> u64 {
     engine_ledger::outstanding()
@@ -837,7 +819,7 @@ pub fn engines_outstanding() -> u64 {
 /// ended on — `target`, or what stood when `patience` ran out.
 ///
 /// An engine is counted on its own thread after [`Engine::open`] has returned,
-/// and taken off on that thread after [`Engine::shutdown`] may have returned,
+/// and taken off on that thread after [`Engine::shutdown`] has returned,
 /// so a test that concludes something from the count waits for the movement
 /// rather than for a clock. Tests only (this crate's, and a crate's that names
 /// the `trust-harness` feature on its dev-dependency).
@@ -1807,11 +1789,10 @@ mod tests {
     ///
     /// **The lock alone is not enough, because it only stops the next test
     /// starting an engine — not the last test's engine leaving.** A count is
-    /// taken off by the engine's own thread, and [`Engine::shutdown`] is allowed
-    /// to return before that thread has got there: a thread that has not said it
-    /// stopped within [`SHUTDOWN_BUDGET`] is let go rather than waited on, and
-    /// takes its count off some milliseconds later — under whoever holds this by
-    /// then. So the gate waits for the ledger to come back to quiet before it
+    /// taken off by the engine's own thread, and [`Engine::shutdown`] returns
+    /// before that thread has got there — it waits for nothing (T-DROP-DOORS) —
+    /// so the count comes off some milliseconds later, under whoever holds this
+    /// by then. So the gate waits for the ledger to come back to quiet before it
     /// hands over, and quiet is zero: between the tests that make engines, no
     /// engine of this process is alive. A wait that runs out leaves its caller no
     /// worse off than it would have been, since it reads its own baseline either
@@ -2139,6 +2120,10 @@ mod tests {
     ///
     /// MUTATION: remove `impl Drop for Engine` and the second and third arms go
     /// red while the first stays green.
+    ///
+    /// Since T-DROP-DOORS the door waits for nothing (D-80): the fall is the
+    /// engine thread's own, after `shutdown` has returned, and a drop without the
+    /// door makes the same request — which is why every arm still settles.
     #[test]
     fn every_engine_is_shut_down_before_the_process_leaves() {
         let _ledger = ledger_gate();
@@ -2557,5 +2542,34 @@ mod tests {
         let known = script.turns(&engine, 2);
         assert_eq!(known.length(), Length::Known(5.0), "{known:?}");
         engine.shutdown();
+    }
+
+    /// RED (T-DROP-DOORS, D-80) — **an engine dropped without its door says so
+    /// once, and one shut down through it says nothing at its drop.**
+    ///
+    /// Both on a thread of their own, within the suite's patience: the drop's
+    /// count is that thread's. The engine is a scripted one, so nothing here
+    /// touches Media Foundation; that the door and the drop both still end the
+    /// engine is [`every_engine_is_shut_down_before_the_process_leaves`]'s.
+    ///
+    /// MUTATION: take the saying out of `Drop` and the first count is zero; drop
+    /// the `self.thread.take()` from `shutdown` and the second is one.
+    #[test]
+    fn an_engine_dropped_without_its_door_says_so_once() {
+        let opened = Instant::now();
+        let script = Script::new(still_loading(), opened);
+        let dropped = Engine::scripted(script.clone(), LoadDeadline::from_open(opened));
+        assert_eq!(
+            crate::door_skipped::dropped_alone(dropped, "an engine's drop"),
+            1,
+            "a drop without the door says so once"
+        );
+        let mut closed = Engine::scripted(script, LoadDeadline::from_open(opened));
+        closed.shutdown();
+        assert_eq!(
+            crate::door_skipped::dropped_alone(closed, "a shut-down engine's drop"),
+            0,
+            "a drop after the door says nothing"
+        );
     }
 }

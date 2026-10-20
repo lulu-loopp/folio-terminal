@@ -9282,6 +9282,33 @@ pub mod macos_update;
 /// M4–M8, E-12). Refused by name off macOS.
 pub mod install_flip;
 
+/// **A value dropped without its retire door, said once** (T-DROP-DOORS): the line and the
+/// per-thread count every door-owning value's `Drop` uses when its owner never called the door.
+pub mod door_skipped;
+
+/// **One word from an endpoint's listener — or its end — within `bound`**: the one bounded receive
+/// the two endpoints make, on every arm that has one (T-DROP-DOORS, D-79). Windows' `start`
+/// waits on it for the listener's first word (§5.3 row 24); every arm's `retire_within` waits on it
+/// for the listener's end, which is the receiver hearing `Disconnected` once the sender the
+/// listener's body holds has gone with it.
+#[cfg(any(windows, unix))]
+pub(crate) fn listener_says_within<T>(
+    said: &std::sync::mpsc::Receiver<T>,
+    bound: std::time::Duration,
+) -> Result<T, std::sync::mpsc::RecvTimeoutError> {
+    said.recv_timeout(bound)
+}
+
+/// **How long a directory watch's retirement waits for its watcher thread to leave**
+/// (`DirWatch::retire_within`, T-DROP-DOORS D-40), on the worker that holds the watch. The
+/// thread's ending is a stop it is already waiting on — microseconds on every ordinary
+/// retirement — so the bound is reached only by a thread inside the kernel and not coming back
+/// soon, and reaching it costs the worker two seconds and the process three handles.
+pub const DIR_WATCH_RETIRE_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How often that wait asks whether the thread has left.
+const DIR_WATCH_RETIRE_POLL: std::time::Duration = std::time::Duration::from_millis(2);
+
 /// **A worker's waits** — `sleep_within`, the one sleep a worker that polls
 /// may take, asked for with the worker's own `WorkerCtx`
 /// (`docs/plans/design/thread-door-2026-09-26.md` (j)13; U-28).
@@ -9470,7 +9497,7 @@ mod windows_impl {
         WheelScrollAmount, WindowRect, composition_visual_offset, custom_frame_hit_test,
         hold_pending_pos_to, logical_px_for_dpi, window_skirt,
     };
-    use crate::admission::{WaitToken, doors};
+    use crate::admission::{WaitToken, WorkerCtx, doors};
 
     /// Classify one absolute `PATH` directory without ever touching a remote server. Drive type
     /// is asked from the lexical root first; only a local or removable path reaches metadata.
@@ -12909,6 +12936,10 @@ mod windows_impl {
         Ok(enabled != 0)
     }
 
+    /// **The clipboard's one declared contention wait** (side-effects contract C5 rule 3,
+    /// T-CLIPBOARD-LANE): five opens, with 5, 10, 20 and 40 ms between them while another program
+    /// holds the clipboard open — 75 ms at most, and only ever on the clipboard lane's worker,
+    /// whose capability every caller of [`open_clipboard_with_retry`] hands in.
     fn retry_open_clipboard(
         mut open: impl FnMut() -> Result<(), String>,
         mut wait: impl FnMut(std::time::Duration),
@@ -12959,11 +12990,13 @@ mod windows_impl {
         owners.push(owner);
     }
 
-    /// The newest registered window that is still one of this thread's, with
-    /// the ones that are not dropped from the list on the way past.
+    /// The newest registered window that `still_ours` still answers for — one
+    /// of this thread's ([`owner_window`]) or of this process's
+    /// ([`clipboard_owner`]) — with the ones it does not dropped from the list
+    /// on the way past.
     ///
-    /// Split out from [`owner_window`] and given the liveness question as a
-    /// closure so that the choice can be stated without a window existing —
+    /// Given the liveness question as a closure so that the choice can be
+    /// stated without a window existing —
     /// see `the_windows_clipboard_finds_its_owner_itself`.
     fn newest_live_owner(
         registered: &mut Vec<NativeWindow>,
@@ -12994,14 +13027,13 @@ mod windows_impl {
         thread != 0 && thread == unsafe { GetCurrentThreadId() }
     }
 
-    /// The window the clipboard and the input method act through.
+    /// The window the input method acts through: the newest registered window of this thread.
     ///
-    /// **The same window serves both**, and that is a fact about IMM32 rather
-    /// than a convenience: the system gives a *thread* one default input
-    /// context and associates it with every window that thread creates, so
-    /// `ImmGetContext` answers the same `HIMC` for any window of this thread —
-    /// which is why [`cancel_composition`] cancels the composition in flight
-    /// whichever of this process's windows it is handed.
+    /// **The input method's question, and the window thread's**: the system gives a *thread* one
+    /// default input context and associates it with every window that thread creates, so
+    /// `ImmGetContext` answers the same `HIMC` for any window of this thread — which is why
+    /// [`cancel_composition`] cancels the composition in flight whichever of this process's
+    /// windows it is handed. The clipboard asks [`clipboard_owner`] instead, from its own worker.
     pub(super) fn owner_window() -> Result<HWND, String> {
         let mut owners = CLIPBOARD_OWNERS
             .get_or_init(|| Mutex::new(Vec::new()))
@@ -13012,24 +13044,65 @@ mod windows_impl {
             .ok_or_else(|| "no window of this thread owns the clipboard".to_owned())
     }
 
-    pub(super) fn open_clipboard_with_retry(hwnd: HWND) -> Result<(), String> {
+    /// Whether this handle still names a window of this process, on whichever of its threads.
+    ///
+    /// `GetWindowThreadProcessId` answers 0 for a handle that is no longer a window at all, and
+    /// the process it writes for one that is settles the other half: a recycled handle that now
+    /// belongs to another program fails the same test as a closed one.
+    fn window_is_of_this_process(window: NativeWindow) -> bool {
+        use windows::Win32::System::Threading::GetCurrentProcessId;
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+
+        let mut process = 0_u32;
+        // SAFETY: the handle is not dereferenced (an invalid one is answered with 0), and the out
+        // parameter is a live local.
+        let thread = unsafe { GetWindowThreadProcessId(window.as_hwnd(), Some(&mut process)) };
+        // SAFETY: takes no arguments and answers for the calling process.
+        thread != 0 && process == unsafe { GetCurrentProcessId() }
+    }
+
+    /// **The window the clipboard is opened with, from the clipboard lane's worker**
+    /// (T-CLIPBOARD-LANE): the newest registered window still standing in this process.
+    ///
+    /// The open is the calling thread's — `OpenClipboard` locks the clipboard to the thread that
+    /// opened it, and only that thread may close it — while the window it is handed is only
+    /// recorded as the owner `EmptyClipboard` makes. A window of the window thread is the right
+    /// owner for that: its thread pumps messages, so `WM_DESTROYCLIPBOARD`, sent to the owner
+    /// when another program empties the clipboard, is answered at once. A message-only window of
+    /// the worker's own would hold that program until the worker next pumped, and the worker
+    /// waits on its queue, not on messages.
+    fn clipboard_owner() -> Result<HWND, String> {
+        let mut owners = CLIPBOARD_OWNERS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .map_err(|_| "clipboard owner list lock poisoned".to_owned())?;
+        newest_live_owner(&mut owners, window_is_of_this_process)
+            .map(NativeWindow::as_hwnd)
+            .ok_or_else(|| "no window of this process owns the clipboard".to_owned())
+    }
+
+    /// **Open the clipboard on the clipboard lane's worker** (`worker`, the capability the thread
+    /// door lent it), with [`clipboard_owner`] as its owner, through the one declared contention
+    /// wait ([`retry_open_clipboard`], each pause through [`crate::wait::sleep_within`]).
+    pub(super) fn open_clipboard_with_retry(worker: &WorkerCtx) -> Result<(), String> {
+        let hwnd = clipboard_owner()?;
         retry_open_clipboard(
             || {
-                // SAFETY: `hwnd` is a live window of the calling thread — see `owner_window` — and
-                // all clipboard transactions run on the event-loop thread that owns it. A failed
-                // open acquires no resource that needs cleanup.
+                // SAFETY: `hwnd` is a live window of this process — see `clipboard_owner` — and is
+                // only recorded as the owner; the open is this worker's own and is closed on this
+                // thread. A failed open acquires no resource that needs cleanup.
                 unsafe { OpenClipboard(Some(hwnd)) }.map_err(|error| error.to_string())
             },
-            std::thread::sleep,
+            |delay| crate::wait::sleep_within(worker, delay),
         )
     }
 
-    pub fn clipboard_text() -> Result<String, String> {
-        let hwnd = owner_window()?;
-        // SAFETY: all calls run on winit's event-loop thread. The clipboard remains open while the
-        // borrowed global-memory handle is locked, its UTF-16 content is copied, and then both the
-        // memory and clipboard are released before returning.
-        open_clipboard_with_retry(hwnd)?;
+    /// **The clipboard's text**, read on the clipboard lane's worker (`worker`).
+    pub fn clipboard_text(worker: &WorkerCtx) -> Result<String, String> {
+        // SAFETY: the calls below run on the worker that opened the clipboard. It remains open
+        // while the borrowed global-memory handle is locked, its UTF-16 content is copied, and then
+        // both the memory and clipboard are released before returning.
+        open_clipboard_with_retry(worker)?;
         unsafe {
             let result = (|| {
                 IsClipboardFormatAvailable(CF_UNICODETEXT)
@@ -13068,14 +13141,15 @@ mod windows_impl {
         }
     }
 
-    pub fn set_clipboard_text(text: &str) -> Result<(), String> {
-        let hwnd = owner_window()?;
+    /// **Put one string on the clipboard**, as `CF_UNICODETEXT`, on the clipboard lane's worker
+    /// (`worker`).
+    pub fn set_clipboard_text(worker: &WorkerCtx, text: &str) -> Result<(), String> {
         let mut units = text.encode_utf16().collect::<Vec<_>>();
         units.push(0);
-        // SAFETY: the event-loop thread owns the clipboard for this transaction. The movable
+        // SAFETY: the worker that opened the clipboard owns it for this transaction. The movable
         // allocation is locked only while copying the NUL-terminated UTF-16 payload. After a
         // successful SetClipboardData Windows owns it; every earlier failure frees it locally.
-        open_clipboard_with_retry(hwnd)?;
+        open_clipboard_with_retry(worker)?;
         unsafe {
             let result = (|| {
                 EmptyClipboard().map_err(|error| format!("EmptyClipboard failed: {error}"))?;
@@ -16656,16 +16730,18 @@ mod windows_impl {
 
         /// **The clipboard finds its own owner window** (M1-9).
         ///
-        /// `OpenClipboard` wants a window of the calling thread and
-        /// `SetClipboardData` fails outright if the open was made with none, so
-        /// this backend has to produce one — from the windows its own
-        /// constructors registered, and never from a parameter, because there
-        /// is no window on the other platforms this door now opens on.
+        /// `SetClipboardData` fails outright if the open was made with no
+        /// owner window, so this backend has to produce one — from the windows
+        /// its own constructors registered, and never from a parameter, because
+        /// there is no window on the other platforms this door now opens on.
+        /// The clipboard lane's worker asks for a window of this process
+        /// (`clipboard_owner`), the input method for one of its own thread
+        /// (`owner_window`); both choose through this.
         ///
         /// Three claims: the newest window still standing is the one used, a
-        /// handle that no longer names a window of this thread is dropped
-        /// rather than tried, and a process with none left says so instead of
-        /// opening the clipboard with a null owner.
+        /// handle that no longer names a window it may use is dropped rather
+        /// than tried, and a process with none left says so instead of opening
+        /// the clipboard with a null owner.
         ///
         /// MUTATION: return the *first* registered handle instead of the last
         /// and the first assertion goes red; keep the dead handles and the
@@ -17040,7 +17116,7 @@ mod windows_impl {
     /// A raw `HANDLE` is not `Send` because it is a pointer-shaped value and the
     /// compiler cannot know what it points at. These three are process-wide
     /// kernel objects with exactly one user apiece — the watcher thread — and
-    /// [`DirWatch::drop`] joins that thread before closing any of them, so there
+    /// [`DirWatch::retire_within`] joins that thread before closing any of them, so there
     /// is no moment at which two threads hold one of these and no moment at which
     /// a closed handle is still reachable.
     #[derive(Clone, Copy)]
@@ -17308,6 +17384,50 @@ mod windows_impl {
             self.end.take_failure()
         }
 
+        /// **The door: stop the watch, and wait — up to `bound`, on the worker `ctx`
+        /// lends — for its thread to leave; then close its handles.** Answers whether
+        /// the thread left in time (T-DROP-DOORS, D-40): *a directory watch is
+        /// retired through its bounded door on the worker that holds it, never by
+        /// its drop.*
+        ///
+        /// The thread cancels its own read: the stop event is one of the two things
+        /// it waits on, so setting it is enough, and a `CancelIoEx` from here would
+        /// be a second thread reaching into an operation whose `OVERLAPPED` lives on
+        /// that thread's stack. The handles are closed only once it has gone — a
+        /// handle closed while the thread still held it would be a handle reused for
+        /// something else by the time it got round to using it. A thread still
+        /// inside the kernel past `bound` is let go with the three handles it holds,
+        /// which the process's end closes: never a handle closed under a reader.
+        pub fn retire_within(
+            mut self,
+            ctx: &crate::admission::WorkerCtx,
+            bound: std::time::Duration,
+        ) -> bool {
+            // SAFETY: the stop event lives until the handles are closed below, after
+            // the thread that shares it has gone.
+            unsafe {
+                let _ = SetEvent(self.stop.0);
+            }
+            let Some(thread) = self.thread.take() else {
+                return true;
+            };
+            let deadline = std::time::Instant::now() + bound;
+            while !thread.is_finished() {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                crate::wait::sleep_within(ctx, crate::DIR_WATCH_RETIRE_POLL);
+            }
+            let _ = thread.join();
+            // SAFETY: the only other user of these handles has been joined.
+            unsafe {
+                close(self.dir.0);
+                close(self.change.0);
+                close(self.stop.0);
+            }
+            true
+        }
+
         /// Start watching `path` and everything under it.
         ///
         /// `wake` is called on the watcher thread, once per notification, with
@@ -17517,25 +17637,24 @@ mod windows_impl {
     }
 
     impl Drop for DirWatch {
+        /// Waits for nothing. After [`DirWatch::retire_within`] there is nothing left;
+        /// without it, the thread is told to stop and let go of, with the three handles
+        /// it may still be using left to the process's end — a handle closed while the
+        /// thread still held it would be a handle reused for something else by the
+        /// time it got round to using it — and the drop says so once.
         fn drop(&mut self) {
-            // The thread cancels its own read: the stop event is one of the two
-            // things it is waiting on, so setting it is enough, and a
-            // `CancelIoEx` from here would be a second thread reaching into an
-            // operation whose `OVERLAPPED` lives on that thread's stack.
-            unsafe {
-                let _ = SetEvent(self.stop.0);
-            }
             if let Some(thread) = self.thread.take() {
-                let _ = thread.join();
-            }
-            // Only now: a handle closed while the thread still held it would be a
-            // handle reused for something else by the time it got round to using
-            // it, which is the one Win32 bug that reads as a different subsystem
-            // misbehaving.
-            unsafe {
-                close(self.dir.0);
-                close(self.change.0);
-                close(self.stop.0);
+                // SAFETY: setting an event is sound from any thread that has it, and
+                // this one is never closed on this road.
+                unsafe {
+                    let _ = SetEvent(self.stop.0);
+                }
+                drop(thread);
+                crate::door_skipped::say(
+                    "a directory watch (`DirWatch`)",
+                    "its retire door",
+                    "its watcher was told to stop and let go of, with its three handles",
+                );
             }
         }
     }
@@ -19725,42 +19844,71 @@ pub use portable_ime::cancel_composition;
 /// touched: the Windows arm does not translate either, and `bt-app`'s own paste
 /// path already normalises what it receives.
 ///
+/// **Asked from the clipboard lane's worker, answered on the main thread**
+/// (T-CLIPBOARD-LANE). Every door here takes the worker's capability, as the
+/// Windows arm's does — one signature on every platform — and the owner's
+/// ruling of 2026-10-11 (Q2) keeps the pasteboard itself on the owner thread
+/// until the experiment that asks whether `NSPasteboard` behaves off it (the
+/// side-effects contract's E-2) has answered. So the worker hands the calls to
+/// the main dispatch queue and waits there ([`on_the_main_queue`]): the
+/// pasteboard is touched only on the main thread, and the window's own turn
+/// never waits — the main queue runs the calls between the loop's events. No
+/// main-thread code waits on the clipboard lane, so the hand-over cannot
+/// deadlock.
+///
 /// **Not compiled on this workspace's CI Windows runners**, only checked for
-/// `aarch64-apple-darwin`. Selector existence, the main-thread question and
-/// every real byte moved stay for a Mac ticket
-/// (`docs/plans/port/probe-x6-cross-check-2026-09-12.md`).
+/// `aarch64-apple-darwin`. Selector existence and every real byte moved stay
+/// for a Mac ticket (`docs/plans/port/probe-x6-cross-check-2026-09-12.md`).
 #[cfg(target_os = "macos")]
 mod macos_clipboard {
     use objc2::rc::Retained;
     use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
     use objc2_foundation::NSString;
 
+    use crate::admission::WorkerCtx;
+
+    /// **Run `work` on the main thread, and wait for its answer on this worker**
+    /// (`_worker`, the capability the thread door lent it: a window thread has
+    /// none, and the main thread waiting on its own queue would never return).
+    pub(crate) fn on_the_main_queue<R: Send>(
+        _worker: &WorkerCtx,
+        work: impl FnOnce() -> R + Send,
+    ) -> R {
+        let mut answer = None;
+        dispatch2::DispatchQueue::main().exec_sync(|| answer = Some(work()));
+        answer.expect("the main queue runs the work it is handed before it returns")
+    }
+
     /// What the general pasteboard holds as plain text, or why it holds none.
-    pub fn clipboard_text() -> Result<String, String> {
-        let pasteboard: Retained<NSPasteboard> = NSPasteboard::generalPasteboard();
-        // SAFETY: a message send to the session's own pasteboard, which AppKit
-        // keeps alive for the process. Nothing is borrowed across the send, and
-        // what comes back is a `Retained` that owns its string for as long as
-        // it is read here.
-        let text = unsafe { pasteboard.stringForType(NSPasteboardTypeString) };
-        text.map(|text| text.to_string())
-            .ok_or_else(|| "pasteboard has no plain text".to_owned())
+    pub fn clipboard_text(worker: &WorkerCtx) -> Result<String, String> {
+        on_the_main_queue(worker, || {
+            let pasteboard: Retained<NSPasteboard> = NSPasteboard::generalPasteboard();
+            // SAFETY: a message send to the session's own pasteboard, on the
+            // main thread, which AppKit keeps alive for the process. Nothing is
+            // borrowed across the send, and what comes back is a `Retained` that
+            // owns its string for as long as it is read here.
+            let text = unsafe { pasteboard.stringForType(NSPasteboardTypeString) };
+            text.map(|text| text.to_string())
+                .ok_or_else(|| "pasteboard has no plain text".to_owned())
+        })
     }
 
     /// Put one string on the general pasteboard, as plain text.
-    pub fn set_clipboard_text(text: &str) -> Result<(), String> {
-        let pasteboard: Retained<NSPasteboard> = NSPasteboard::generalPasteboard();
-        pasteboard.clearContents();
-        let value = NSString::from_str(text);
-        // SAFETY: as above, and the string outlives the send — the pasteboard
-        // copies what it is given. `clearContents` above is what makes this a
-        // legal write: the pasteboard has to be owned and its types declared
-        // before anything can be written into it.
-        if unsafe { pasteboard.setString_forType(&value, NSPasteboardTypeString) } {
-            Ok(())
-        } else {
-            Err("NSPasteboard refused the text".to_owned())
-        }
+    pub fn set_clipboard_text(worker: &WorkerCtx, text: &str) -> Result<(), String> {
+        on_the_main_queue(worker, || {
+            let pasteboard: Retained<NSPasteboard> = NSPasteboard::generalPasteboard();
+            pasteboard.clearContents();
+            let value = NSString::from_str(text);
+            // SAFETY: as above, and the string outlives the send — the
+            // pasteboard copies what it is given. `clearContents` above is what
+            // makes this a legal write: the pasteboard has to be owned and its
+            // types declared before anything can be written into it.
+            if unsafe { pasteboard.setString_forType(&value, NSPasteboardTypeString) } {
+                Ok(())
+            } else {
+                Err("NSPasteboard refused the text".to_owned())
+            }
+        })
     }
 }
 
@@ -19788,13 +19936,16 @@ mod portable_clipboard {
     /// What the clipboard holds. Nobody has been asked, so the honest answer is
     /// the reason rather than an empty string, which would read as a clipboard
     /// that really is empty.
-    pub fn clipboard_text() -> Result<String, String> {
+    pub fn clipboard_text(_worker: &crate::admission::WorkerCtx) -> Result<String, String> {
         Err("this platform has no clipboard backend".to_owned())
     }
 
     /// Put one string on the clipboard. Refused, and said so — the caller's own
     /// failure path already turns this into a line a reader sees.
-    pub fn set_clipboard_text(text: &str) -> Result<(), String> {
+    pub fn set_clipboard_text(
+        _worker: &crate::admission::WorkerCtx,
+        text: &str,
+    ) -> Result<(), String> {
         let _ = text;
         Err("this platform has no clipboard backend".to_owned())
     }
@@ -21772,7 +21923,9 @@ mod watch_contract_tests {
     /// thread other than the scheduling one races the callback it is trying to
     /// stop. The shape that makes it impossible is structural rather than
     /// careful — `DirWatch` holds no stream pointer, so `drop` has nothing to
-    /// invalidate; it signals a run loop source and joins.
+    /// invalidate; it signals a run loop source. Since T-DROP-DOORS the drop waits
+    /// for nothing (the join is the door's, `retire_within`, which the macOS door
+    /// tests hold by behaviour).
     ///
     /// MUTATION: put an `FSEventStreamStop` in `Drop::drop` and this names it.
     #[test]
@@ -21793,9 +21946,9 @@ mod watch_contract_tests {
             );
         }
         assert!(
-            body.contains("self.stopper.signal()") && body.contains("thread.join()"),
-            "`drop` is signal-and-join, or the cancellation is a flag somebody notices later:\n\
-             {body}"
+            body.contains("self.stopper.signal()"),
+            "`drop` signals the watcher's run loop, or the cancellation is a flag somebody \
+             notices later:\n{body}"
         );
         let watcher =
             source_test::body(&ItemQuery::function("watch_loop").in_module("crate::macos_watch"));
@@ -23376,6 +23529,7 @@ mod thread_priority_tests {
 mod dir_watch_tests {
     use super::{DirWatch, admission::WorkerCtx, windows_impl::first_read_gate};
     use std::{
+        path::Path,
         sync::mpsc,
         time::{Duration, Instant},
     };
@@ -23454,7 +23608,7 @@ mod dir_watch_tests {
         rx.recv_timeout(ARRIVES_WITHIN)
             .expect("and reports one several directories down: the watch is recursive");
 
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
         // Drain whatever was already in flight when the watch was dropped — the
         // claim is about what happens *after* the cancellation, not about a
         // notification that had already been posted.
@@ -23547,7 +23701,7 @@ mod dir_watch_tests {
             recursive_reads_before,
             "a shallow watch never asks the kernel for the tree below the directory it was given"
         );
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
     }
 
     /// RED — **a shallow watch can say which entry moved** (user ruling
@@ -23617,7 +23771,7 @@ mod dir_watch_tests {
             "and it names the *directory* whose write time a build moved, which \
              is the entry a repository root hears the whole build through"
         );
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
     }
 
     /// RED (T-PALETTE-DEEP) — **a named tree watch reports a file below the root by its
@@ -23660,7 +23814,7 @@ mod dir_watch_tests {
             next_word(&rx).expect("the root sentinel completes the observation"),
             "the named tree watch reports `one/two/deep.txt` before the later root sentinel"
         );
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
     }
 
     /// PIN — **`start` returns already listening.**
@@ -23714,7 +23868,7 @@ mod dir_watch_tests {
             "`start` returned with no read outstanding — everything that moved in that window \
              reached nobody, and Windows does not send it again"
         );
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
     }
 
     /// PIN — **a path that cannot be watched fails quietly and finally.**
@@ -23815,7 +23969,7 @@ mod dir_watch_tests {
             watch.take_failure().is_none(),
             "and handed over once, not every time it is asked"
         );
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
     }
 
     /// PIN (T-DIRWATCH-LIFECYCLE) — **the named door hears the end as
@@ -23852,7 +24006,109 @@ mod dir_watch_tests {
             "and nothing is said after it: the watcher thread has finished"
         );
         assert!(!watch.is_armed());
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
+    }
+
+    /// **A watch retired the way the product retires one**: through its door, on a worker the
+    /// thread door started, within `bound`. Answers whether the watcher left in time.
+    fn retired_within(watch: DirWatch, bound: Duration) -> bool {
+        on_a_worker(move |ctx| watch.retire_within(ctx, bound))
+    }
+
+    /// [`retired_within`] within the product's own bound.
+    fn retired(watch: DirWatch) -> bool {
+        retired_within(watch, crate::DIR_WATCH_RETIRE_BUDGET)
+    }
+
+    /// A watch on `path` whose watcher stands inside its wake until the test lets it go (drops
+    /// the sender: every wake after that passes at once, since one write can be several
+    /// notifications), and the flag the wake raises on its way out. Written into, so the watcher is in the wake when this
+    /// returns.
+    fn a_held_watch(
+        path: &Path,
+    ) -> (
+        DirWatch,
+        mpsc::Sender<()>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let (entered, inside) = mpsc::channel();
+        let (release, held) = mpsc::channel::<()>();
+        let left = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let leaving = std::sync::Arc::clone(&left);
+        let watched = path.to_path_buf();
+        let watch = on_a_worker(move |ctx| {
+            DirWatch::start(ctx, &watched, move |_| {
+                let _ = entered.send(());
+                let _ = held.recv();
+                leaving.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        })
+        .expect("watch a directory this process just made");
+        std::fs::write(path.join("hold.txt"), b"x").expect("write into the watched directory");
+        crate::door_skipped::received(&inside, "the watcher inside its wake");
+        (watch, release, left)
+    }
+
+    /// RED (T-DROP-DOORS, D-40) — **the door waits for the watcher to leave, and a watcher that
+    /// does not leave within the bound is let go.**
+    ///
+    /// The watcher is held inside its wake. A door with no time at all answers `false` at once
+    /// and lets it go; a door called while the hold is let go answers `true`, and when it does
+    /// the wake has returned.
+    ///
+    /// MUTATION: return `true` from `retire_within` without the wait and the first door says the
+    /// watcher left while it stands in the wake; drop the `is_finished` loop for a bare `join`
+    /// and the first door never answers within the suite's patience.
+    #[test]
+    fn the_door_waits_for_the_watcher_within_its_bound() {
+        let _turn = first_read_gate::watchers_take_turns();
+        let scratch = Scratch::new("retire-held");
+        let (watch, release, _left) = a_held_watch(&scratch.0);
+        assert!(
+            !retired_within(watch, Duration::ZERO),
+            "a watcher standing in its wake has not left within no time at all"
+        );
+        drop(release);
+
+        let (watch, release, left) = a_held_watch(&scratch.0);
+        let (going, on_its_way) = mpsc::channel();
+        let (answered, heard) = mpsc::channel();
+        let leaving = std::sync::Arc::clone(&left);
+        std::thread::spawn(move || {
+            let _ = going.send(());
+            let left_in_time = retired_within(watch, crate::door_skipped::PATIENCE);
+            let _ = answered.send((
+                left_in_time,
+                leaving.load(std::sync::atomic::Ordering::SeqCst),
+            ));
+        });
+        crate::door_skipped::received(&on_its_way, "the retiring thread");
+        drop(release);
+        let (left_in_time, wake_returned) =
+            crate::door_skipped::received(&heard, "the door, once the watcher is let go");
+        assert!(left_in_time, "the watcher left within the door's bound");
+        assert!(
+            wake_returned,
+            "the door answered before the watcher left its wake"
+        );
+    }
+
+    /// RED (T-DROP-DOORS, D-40) — **a watch dropped without its door waits for nothing, and says
+    /// so once.**
+    ///
+    /// The watcher is held inside its wake for the whole of the drop: a drop that joined it would
+    /// stand until the test let go, and the test lets go only after the drop has answered.
+    ///
+    /// MUTATION: put the join back in `Drop` and the drop's thread does not answer within the
+    /// suite's patience; take the saying out and the count is zero.
+    #[test]
+    fn a_watch_dropped_without_its_door_waits_for_nothing_and_says_so_once() {
+        let _turn = first_read_gate::watchers_take_turns();
+        let scratch = Scratch::new("drop-held");
+        let (watch, release, _left) = a_held_watch(&scratch.0);
+        let skipped = crate::door_skipped::dropped_alone(watch, "a drop while the watcher is held");
+        assert_eq!(skipped, 1, "the drop says its skipped door once");
+        drop(release);
     }
 }
 
@@ -26607,7 +26863,7 @@ mod macos_file_urls;
 #[cfg(target_os = "macos")]
 pub use macos_clipboard_payload::clipboard_payload;
 #[cfg(not(any(windows, target_os = "macos")))]
-pub fn clipboard_payload() -> Result<ClipboardPayload, String> {
+pub fn clipboard_payload(_worker: &admission::WorkerCtx) -> Result<ClipboardPayload, String> {
     Err("terminal clipboard acquisition is unavailable on this platform".to_owned())
 }
 
