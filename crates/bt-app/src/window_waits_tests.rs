@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use bt_platform::admission::{DoorKey, Phase, doors};
+use bt_source::call_graph::{Arms, CallGraph, Edge, ItemId, Resolver, Target, Unresolved};
 use bt_source::{
     Certainty, FileRecord, ImplRecord, Index, ItemKind, ItemQuery, ItemRecord, MacroKind,
     Occurrence, ResolveCutoff, TargetKind, TraitId, TraitResolver,
@@ -1774,6 +1775,13 @@ struct World {
     /// path each block writes, resolved in its own module), each with the product methods
     /// written in it.
     implementations: BTreeMap<TraitId, Vec<Implementation>>,
+    /// **bt-source's call graph over the same packages** (T-BT-SOURCE-CALL-GRAPH), under the
+    /// product's arms as this guard reads them ([`Src::product_item`]): what a door's reach is
+    /// walked with ([`door_reach`]). Its packages are [`World::srcs`] in order, so an
+    /// [`ItemId::package`] is a position in `srcs`.
+    graph: Resolver<'static>,
+    /// The product's `From::from` implementations: what an `.into()` reaches ([`followed`]).
+    from_impls: Vec<ItemId>,
 }
 
 /// One product `impl` block of a first-party trait, and the product methods written in it.
@@ -2001,6 +2009,23 @@ impl World {
                 }
             }
         }
+        let graph = call_graph(&srcs);
+        let from_impls = callables
+            .get("from")
+            .into_iter()
+            .flatten()
+            .filter(|callable| {
+                callable
+                    .trait_name
+                    .as_deref()
+                    .is_some_and(|name| name == "From" || name.starts_with("From<"))
+            })
+            .filter_map(|callable| {
+                callable
+                    .record
+                    .and_then(|record| graph.id_of(srcs[callable.src].package, record))
+            })
+            .collect();
         Self {
             srcs,
             reach,
@@ -2010,6 +2035,8 @@ impl World {
             resolver,
             declared,
             implementations,
+            graph,
+            from_impls,
         }
     }
 
@@ -8458,75 +8485,110 @@ fn builder_thread_names(world: &World) -> BTreeSet<String> {
     names
 }
 
-/// The first-party callables one call site names: what the resolver answers, unless the call is a
-/// method on a receiver whose type the source does not state and the name is carried by more than
-/// one first-party method — then the call names nobody in particular, and it is left out rather
-/// than taken to be every method of that name (which would make every door reach nearly every
-/// function).
-///
-/// **A call on a receiver stated to be a first-party trait names that trait's implementations,
-/// and nothing else** ([`Body::receiver_traits`], [`World::trait_methods`]): `driver.prepare(…)`
-/// with `driver: &dyn Driver` names `prepare` of every product `impl` of
-/// `crate::update_job::Driver`, on every platform arm the records carry, and the trait's own
-/// default `prepare` only for an impl that does not override it. The receiver's stated type is
-/// `dyn Trait` (bare, behind `&`, `Box`, `Arc`, `Rc`), `impl Trait`, or a generic parameter bound
-/// by the trait, inline or in a `where` clause; in a trait's default method `self` is the trait;
-/// a path call names the trait when its qualifier resolves to one (`Driver::prepare`) or is a
-/// bound parameter (`D::prepare`). A trait is its identity ([`TraitId`], resolved by
-/// [`TraitResolver`]), so two traits of one name are never followed together. The answer is never
-/// united with the by-name one: the trait's implementations are what dispatch can run. Dynamic
-/// dispatch can run any of them, so following all of them is the conservative direction for the
-/// question the reach answers (*is this body reached?*) without naming anything dispatch cannot
-/// run. A trait with no first-party implementation adds nothing. A call whose stated traits are
-/// all standard or third-party, or whose method no first-party trait among them declares (a
-/// foreign supertrait's), is read as an untyped one is; so is a parameter another binding of its
-/// name shadows in scope at the call ([`shadowed_at`]). Not followed, here as before: a stored
-/// closure, a
-/// function pointer, `<X as Trait>::m`, a type written through an alias, and an untyped receiver
-/// whose method name is shared — S-2a's call graph is what follows those.
-fn named_callees(body: &Body<'_>, site: &Site) -> Vec<(usize, &'static ItemRecord)> {
-    let callees = resolved(body, site);
-    let untyped_method = matches!(site.form, Form::Method(_)) && !body.receiver_is_typed(site);
-    let by_name = if untyped_method && callees.len() > 1 {
-        Vec::new()
-    } else {
-        callees
-    };
-    let Some(stated) = body.receiver_traits(site) else {
-        return by_name;
-    };
-    body.world
-        .trait_methods(&stated, site.name)
-        .unwrap_or(by_name)
+/// **bt-source's call graph over `srcs`**, under the arms a product build of each package has
+/// ([`Src::product_file`], [`product_build_permits`] with the package's features): the same
+/// "product item" this guard reads everywhere else. A trait chained past the resolver's hop limit
+/// on an `impl` block is refused by name ([`decided`]'s words).
+fn call_graph(srcs: &[Src]) -> Resolver<'static> {
+    let arms: Vec<Src> = srcs
+        .iter()
+        .map(|src| Src {
+            package: src.package,
+            index: src.index,
+            features: src.features,
+        })
+        .collect();
+    let packages: Vec<(&'static str, &'static Index)> =
+        srcs.iter().map(|src| (src.package, src.index)).collect();
+    Resolver::new(
+        &packages,
+        Arms::filtered(move |query| {
+            arms.iter()
+                .find(|src| src.package == query.package)
+                .is_some_and(|src| {
+                    query.compilation.permits_product()
+                        && src.product_file(query.file)
+                        && product_build_permits(query.predicates, src.features)
+                })
+        }),
+    )
+    .unwrap_or_else(|refusals| {
+        let named: Vec<&str> = refusals
+            .iter()
+            .map(|refusal| refusal.what.as_str())
+            .collect();
+        panic!(
+            "the call graph refuses to read the product ({} refusals), never passed:\n  {}",
+            named.len(),
+            named.join("\n  ")
+        )
+    })
 }
 
-/// **The functions a door reaches**: the door's own declarations and every product function
-/// their calls name ([`named_callees`]), followed to a fixed point. `callees`
-/// caches each function's answer across doors.
+/// **What a door's reach follows along one edge of bt-source's call graph.** A resolved edge is
+/// followed. Of the rest, two of today's reaches are kept by name, so that the reach never shrinks
+/// in silence — and S-2b's request-door guard fails closed on every one of these edges whatever
+/// this reach does with them:
+///
+/// * an **untyped receiver whose method name one first-party method carries**
+///   ([`Unresolved::Ambiguous`] with one candidate) is that method, as the token resolver's
+///   by-name answer always took it; a name several methods carry names nobody;
+/// * an **`.into()`** reaches every product `From::from` ([`World::from_impls`]), the blanket
+///   `Into` being the standard library's and its `From` the program's.
+///
+/// Nothing else that is not resolved is followed: a dynamic edge (a stored closure, a function
+/// pointer, a trait object no first-party implementation answers, a foreign trait object), a
+/// macro's expansion, a generated callee, another arm's code, a foreign callee. A chain past the
+/// resolver's hop limit fails by name, as [`decided`] does, and so does a body that does not
+/// parse.
+fn followed(world: &World, edge: &Edge) -> Vec<ItemId> {
+    match &edge.to {
+        Target::Item(id) => vec![*id],
+        Target::Unresolved(Unresolved::Cutoff { what }) => panic!(
+            "{what} chains past the resolver's hop limit — refused, never passed: shorten the \
+             re-export chain, or raise `HOPS` in bt-source's `traits.rs` with its reason"
+        ),
+        Target::Unresolved(Unresolved::Unparsed { why }) => panic!(
+            "`{}` does not parse for the call graph: {why}",
+            world.graph.node_key(edge.from)
+        ),
+        _ if edge.site.name == "into" => world.from_impls.clone(),
+        Target::Unresolved(Unresolved::Ambiguous { candidates, .. }) if candidates.len() == 1 => {
+            candidates.clone()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The call graph's item for `record` of `srcs[src]`.
+fn item_id(world: &World, src: usize, record: &ItemRecord) -> ItemId {
+    world
+        .graph
+        .id_of(world.srcs[src].package, record)
+        .expect("an indexed item is an item of the call graph")
+}
+
+/// **The functions a door reaches**: the door's own declarations and every product function the
+/// call graph's edges lead to from them ([`followed`]), each once.
 fn door_reach(
     world: &World,
     door: &[&'static ItemRecord],
     package: usize,
-    callees: &mut HashMap<(usize, usize), Vec<(usize, &'static ItemRecord)>>,
+    graph: &CallGraph<'_, 'static>,
 ) -> BTreeMap<(usize, usize), &'static ItemRecord> {
-    let mut reach = BTreeMap::new();
-    let mut work: Vec<(usize, &'static ItemRecord)> =
-        door.iter().map(|record| (package, *record)).collect();
-    while let Some((at, record)) = work.pop() {
-        let key = (at, record.whole().start());
-        if reach.insert(key, record).is_some() {
-            continue;
-        }
-        let next = callees.entry(key).or_insert_with(|| {
-            let body = Body::new(world, at, record);
-            body.sites()
-                .iter()
-                .flat_map(|site| named_callees(&body, site))
-                .collect()
-        });
-        work.extend(next.iter().copied());
-    }
-    reach
+    let roots: Vec<ItemId> = door
+        .iter()
+        .map(|record| item_id(world, package, record))
+        .collect();
+    graph
+        .walk_following(&roots, &BTreeSet::new(), &|edge| followed(world, edge))
+        .reached
+        .into_iter()
+        .map(|id| {
+            let record = world.graph.record(id);
+            ((id.package(), record.whole().start()), record)
+        })
+        .collect()
 }
 
 /// The doors that hand work to a thread started elsewhere, each with the function that starts it
@@ -8629,14 +8691,14 @@ fn uncalled_bodies() -> BTreeSet<&'static str> {
 /// `docs/plans/completions-door-starts.tsv`, which is refused when stale or unused. Every body must be reached from some row, or be one of
 /// `docs/plans/completions-uncalled-bodies.tsv` ([`UNCALLED_BODIES`]); a door process's body (`enter_standalone_main`) needs its row like
 /// any other. A row's thread that the product starts under no such name is refused too. This is
-/// the interim reachability `bt-source`'s items allow ([`named_callees`]): a call on a receiver
-/// stated to be a first-party trait (`dyn Trait` behind `&`, `Box`, `Arc` or `Rc`, `impl Trait`, a
-/// bound generic parameter, `Trait::m`) is followed into that trait's implementations — the trait
-/// by its identity, every platform arm, its default only where an impl does not override it — and
-/// nothing else; a call through a stored closure or a function pointer, `<X as Trait>::m`, a call
-/// on a value known only by a standard or third-party trait, a receiver whose type is written
-/// through an alias or not written at all and whose method name is shared is not followed (S-2a's
-/// call graph is). With the trait identity, no worker body is served through a same-named trait
+/// bt-source's call graph walked ([`door_reach`], [`followed`]): a call on a receiver stated to be
+/// a first-party trait (`dyn Trait` behind `&`, `Box`, `Arc` or `Rc`, `impl Trait`, a bound generic
+/// parameter, `Trait::m`) is followed into that trait's implementations — the trait by its
+/// identity, every platform arm, its default only where an impl does not override it — and
+/// nothing else; a call through a stored closure or a function pointer, a call on a value known
+/// only by a standard or third-party trait, and a receiver whose type the rules do not state and
+/// whose method name is shared are unresolved edges the reach does not follow. With the trait
+/// identity, no worker body is served through a same-named trait
 /// (`a_trait_is_its_identity_and_a_default_runs_only_where_it_is_not_overridden` holds it over the
 /// real tree), and the five `completions-door-starts.tsv` lines are each used and none is stale
 /// (this test).
@@ -8653,6 +8715,88 @@ fn every_worker_door_body_is_reached_from_a_completions_door() {
         "the worker door bodies and the ledger's doors:\n  {}",
         failures.join("\n  ")
     );
+}
+
+/// **The call graph's walk from every completions door, counted and printed**
+/// (T-BT-SOURCE-CALL-GRAPH): one walk per `# completions` row's door over one [`CallGraph`] (its
+/// edges kept across doors, as [`worker_door_body_failures`] keeps them), with what it met. Not a
+/// timing: the timing-bound list only shrinks, so the cost is measured outside the suite.
+#[test]
+fn the_call_graph_walk_from_every_completions_door_is_counted() {
+    let world = World::new();
+    let graph = CallGraph::new(&world.graph);
+    let (mut doors, mut reached, mut unresolved) = (0, BTreeSet::new(), 0);
+    for row in completions() {
+        let Ok(records) = door_records(&world, row.door) else {
+            continue;
+        };
+        let package = door_key(row.door).package;
+        let Some(at) = world.srcs.iter().position(|src| src.package == package) else {
+            continue;
+        };
+        let roots: Vec<ItemId> = records
+            .iter()
+            .map(|record| item_id(&world, at, record))
+            .collect();
+        let reach = graph.walk_following(&roots, &BTreeSet::new(), &|edge| followed(&world, edge));
+        doors += 1;
+        unresolved += reach.unresolved.len();
+        reached.extend(reach.reached);
+    }
+    eprintln!(
+        "CALL_GRAPH_COMPLETIONS\tdoors {doors}\titems reached {}\tunresolved edges met {unresolved}",
+        reached.len()
+    );
+    assert!(doors > 0, "the ledger has doors");
+}
+
+/// **Each completions door's unfollowed edges**: the `Ambiguous` and `Dynamic` edges its walk
+/// meets that [`followed`] does not follow — the calls the door reach cannot see through, and
+/// the ones S-2b's guard will fail closed on — by door, counted once per edge.
+fn unfollowed_by_door(world: &World) -> BTreeMap<&'static str, usize> {
+    let graph = CallGraph::new(&world.graph);
+    let mut counts = BTreeMap::new();
+    for row in completions() {
+        let Ok(records) = door_records(world, row.door) else {
+            continue;
+        };
+        let package = door_key(row.door).package;
+        let Some(at) = world.srcs.iter().position(|src| src.package == package) else {
+            continue;
+        };
+        let roots: Vec<ItemId> = records
+            .iter()
+            .map(|record| item_id(world, at, record))
+            .collect();
+        let reach = graph.walk_following(&roots, &BTreeSet::new(), &|edge| followed(world, edge));
+        let unfollowed = reach
+            .unresolved
+            .iter()
+            .filter(|(edge, _)| {
+                matches!(
+                    edge.to,
+                    Target::Unresolved(Unresolved::Ambiguous { .. } | Unresolved::Dynamic { .. })
+                ) && followed(world, edge).is_empty()
+            })
+            .count();
+        *counts.entry(row.door).or_default() += unfollowed;
+    }
+    counts
+}
+
+/// **The unfollowed edges of each completions door, printed** — a diagnostic, never a gate: the
+/// doors share their reach, so one untyped call raises many doors' counts at once. The gate is by
+/// site: bt-source's `the_unfollowed_edges_are_the_committed_list` holds
+/// `docs/plans/UNFOLLOWED-EDGES.tsv` to the tree, and `scripts/ci/check-unfollowed-edges.ps1`
+/// holds the list to the merge base's.
+#[test]
+fn the_unfollowed_edges_of_each_completions_door_are_printed() {
+    let world = World::new();
+    let counts = unfollowed_by_door(&world);
+    for (door, count) in &counts {
+        eprintln!("UNFOLLOWED_BY_DOOR	{door}	{count}");
+    }
+    assert!(!counts.is_empty(), "the ledger has doors");
 }
 
 /// What [`every_worker_door_body_is_reached_from_a_completions_door`] refuses, with `effects` as
@@ -8675,7 +8819,7 @@ fn worker_door_body_failures(world: &World, effects: &[Vec<&str>]) -> Vec<String
         .map(|thread| format!("a row names thread `{thread}`, which the product never starts"))
         .collect();
     // Which roots each row's door leads to, among the threads the row names.
-    let mut callees = HashMap::new();
+    let graph = CallGraph::new(&world.graph);
     let mut served: BTreeSet<usize> = BTreeSet::new();
     for row in &rows {
         let Ok(records) = door_records(world, row.door) else {
@@ -8685,7 +8829,7 @@ fn worker_door_body_failures(world: &World, effects: &[Vec<&str>]) -> Vec<String
         let Some(at) = world.srcs.iter().position(|src| src.package == package) else {
             continue;
         };
-        let reach = door_reach(world, &records, at, &mut callees);
+        let reach = door_reach(world, &records, at, &graph);
         for (index, root) in roots.iter().enumerate() {
             if !row.threads.contains(&root.name.as_str()) {
                 continue;
@@ -8793,6 +8937,8 @@ fn worker_door_body_failures(world: &World, effects: &[Vec<&str>]) -> Vec<String
 // (`ReceiverTypingSourceShapes::trait_shape_field` is the field's), or in one it must refuse.
 #[cfg(any())]
 mod trait_dispatch_source_shapes {
+    use std::rc::Rc;
+
     use crate::preview_wrap::Cache;
     use crate::update_job::Driver;
     use crate::update_prepare_windows::PreparePoint;
@@ -9065,20 +9211,21 @@ fn implementations_of(world: &World, id: &TraitId, method: &str) -> BTreeSet<Str
         .collect()
 }
 
-/// The keys of what the calls of `method` in the fixture function `shape` name.
+/// The keys of what the calls of `method` in the fixture function `shape` name: the call graph's
+/// edges at those sites, as a door's reach follows them ([`followed`]).
 fn named_in_shape(world: &World, shape: &str, method: &str) -> BTreeSet<String> {
     let (src, record) = fixture(world, shape);
-    let body = Body::new(world, src, record);
-    let sites: Vec<Site> = body
-        .sites()
+    let edges: Vec<Edge> = world
+        .graph
+        .resolve_callees(item_id(world, src, record))
         .into_iter()
-        .filter(|site| site.name == method)
+        .filter(|edge| edge.site.name == method)
         .collect();
-    assert!(!sites.is_empty(), "`{shape}` calls `{method}`");
-    sites
+    assert!(!edges.is_empty(), "`{shape}` calls `{method}`");
+    edges
         .iter()
-        .flat_map(|site| named_callees(&body, site))
-        .map(|(at, record)| key_of(&world.srcs[at], record))
+        .flat_map(|edge| followed(world, edge))
+        .map(|id| key_of(&world.srcs[id.package()], world.graph.record(id)))
         .collect()
 }
 
@@ -9101,10 +9248,11 @@ const PLANTED_DRIVER_BODY: &str = "bt-app\t-\tcrate::update_prepare_macos::prepa
 /// `prepare`, every platform arm, and not `preview_wrap::Cache::prepare` or any other method of
 /// that name.
 ///
-/// MUTATIONS: make [`named_callees`] return `by_name` before it asks for the receiver's traits
-/// (no trait expansion) — the planted body runs on `bt-update-job` with no row's door leading
-/// there; give a path call the union of the trait's implementations and the by-name answer
-/// (round 1's rule) — `D::prepare` names `preview_wrap::Cache::prepare` too.
+/// MUTATIONS: in bt-source's call graph, answer a call on a stated trait as an untyped one
+/// (`Tables::dispatch_bounds` returning `Tables::untyped`) — with several `prepare`s the call names
+/// nobody and the planted body runs on `bt-update-job` with no row's door leading there; give the
+/// dispatch the untyped answer's candidates too (round 1's union) — `D::prepare` names
+/// `preview_wrap::Cache::prepare` too.
 #[test]
 fn a_trait_object_call_reaches_every_first_party_implementation() {
     let world = World::new();
@@ -9165,7 +9313,7 @@ fn a_trait_object_call_reaches_every_first_party_implementation() {
         .iter()
         .position(|src| src.package == package)
         .expect("the door's package is a product package");
-    let reached: BTreeSet<String> = door_reach(&world, &records, at, &mut HashMap::new())
+    let reached: BTreeSet<String> = door_reach(&world, &records, at, &CallGraph::new(&world.graph))
         .iter()
         .map(|((at, _), record)| key_of(&world.srcs[*at], record))
         .collect();
@@ -9757,7 +9905,7 @@ fn an_unparsable_shadow_body_is_reported_by_name() {
 fn a_trait_with_no_first_party_impl_adds_nothing_to_the_reach() {
     let world = World::new();
     let (src, record) = fixture(&world, "std_trait_shape");
-    let reach: Vec<String> = door_reach(&world, &[record], src, &mut HashMap::new())
+    let reach: Vec<String> = door_reach(&world, &[record], src, &CallGraph::new(&world.graph))
         .iter()
         .map(|((at, _), record)| key_of(&world.srcs[*at], record))
         .collect();
