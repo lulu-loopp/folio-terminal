@@ -1,6 +1,7 @@
 //! `frame` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::wake_owner::WakeOwner;
 use crate::window_seam::prelude::*;
 use crate::{
     BrokerAim, Drag, FILES_NOTICE_DWELL, FOOT_REVEAL_FEEDBACK, Fading, FrameImageReferences,
@@ -11,8 +12,8 @@ use crate::{
     foreground_program_deadline, git, hang_watch, hyperlink_activation, ime_outbound,
     mark_leaf_painted, math_copy_window, present_diagnostics, present_gate, preview,
     pty_drain_says_nothing_new, pty_frame_is_unchanged, sample_window_place, seats, settings,
-    settling, startup_poll_delay, take_math_worker_notice, toast, trace_sink,
-    trace_unchanged_present, update, webhost,
+    settling, startup_poll_delay, take_math_worker_notice,
+    toast, trace_sink, trace_unchanged_present, update, webhost,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -1636,7 +1637,7 @@ impl<B: Backend> Runtime<'_, B> {
         &mut self,
         now: Instant,
         application_clocks: bool,
-    ) -> Result<Option<Instant>> {
+    ) -> Result<Option<(WakeOwner, Instant)>> {
         self.check_picture_freshness(now, false);
         // **The frame debt belongs to the turn that incurs it** (owner's report
         // 2026-09-18). Opened here rather than cleared wherever it is paid,
@@ -2175,63 +2176,63 @@ impl<B: Backend> Runtime<'_, B> {
             && self.window.settings.category() == settings::SettingsCategory::About)
             .then(|| update::last_checked_deadline(now, update::unix_epoch_ms()))
             .flatten();
-        const DEADLINE_OWNERS: [&str; 56] = [
-            "startup poll",
-            "IME cursor",
-            "shell caret",
-            "tab press",
-            "rename caret",
-            "strip animation",
-            "web teardown",
-            "PTY resize",
-            "resize finish",
-            "synchronized update",
-            "live stability",
-            "foreground program",
-            "PTY coalesce",
-            "attention credential",
-            "tooltip",
-            "key hint",
-            "Cards hint",
-            "toast",
-            "command flash",
-            "command rails",
-            "terminal thumbs",
-            "layout peek",
-            "file peek",
-            "file-peek close grace",
-            "file-peek dwell",
-            "float",
-            "revealed foot",
-            "web zoom acknowledgement",
-            "web dialog acknowledgement",
-            "preview save notice",
-            "preview refusal",
-            "chevrons",
-            "pane menu",
-            "terminal menu",
-            "tab menu",
-            "drag spring",
-            "drag auto-scroll",
-            "hyperlink hover",
-            "peek hover",
-            "formula tools",
-            "formula toggle",
-            "formula-copy acknowledgement",
-            "preview resample",
-            "session save",
-            "schemes watch",
-            "storage watch",
-            "git watch",
-            "update check",
-            "About last checked",
-            "preview watch",
-            "files watch",
-            "refused frame",
-            "window title",
-            "search walk",
-            "web engine warm-up",
-            "spare web controller",
+        const DEADLINE_OWNERS: [WakeOwner; 56] = [
+            WakeOwner::StartupPoll,
+            WakeOwner::ImeCursor,
+            WakeOwner::ShellCaret,
+            WakeOwner::TabPress,
+            WakeOwner::RenameCaret,
+            WakeOwner::StripAnimation,
+            WakeOwner::WebTeardown,
+            WakeOwner::PtyResize,
+            WakeOwner::ResizeFinish,
+            WakeOwner::SynchronizedUpdate,
+            WakeOwner::LiveStability,
+            WakeOwner::ForegroundProgram,
+            WakeOwner::PtyCoalesce,
+            WakeOwner::AttentionCredential,
+            WakeOwner::Tooltip,
+            WakeOwner::KeyHint,
+            WakeOwner::CardsHint,
+            WakeOwner::Toast,
+            WakeOwner::CommandFlash,
+            WakeOwner::CommandRails,
+            WakeOwner::TerminalThumbs,
+            WakeOwner::LayoutPeek,
+            WakeOwner::FilePeek,
+            WakeOwner::FilePeekCloseGrace,
+            WakeOwner::FilePeekDwell,
+            WakeOwner::Float,
+            WakeOwner::RevealedFoot,
+            WakeOwner::WebZoomAcknowledgement,
+            WakeOwner::WebDialogAcknowledgement,
+            WakeOwner::PreviewSaveNotice,
+            WakeOwner::PreviewRefusal,
+            WakeOwner::Chevrons,
+            WakeOwner::PaneMenu,
+            WakeOwner::TerminalMenu,
+            WakeOwner::TabMenu,
+            WakeOwner::DragSpring,
+            WakeOwner::DragAutoScroll,
+            WakeOwner::HyperlinkHover,
+            WakeOwner::PeekHover,
+            WakeOwner::FormulaTools,
+            WakeOwner::FormulaToggle,
+            WakeOwner::FormulaCopyAcknowledgement,
+            WakeOwner::PreviewResample,
+            WakeOwner::SessionSave,
+            WakeOwner::SchemesWatch,
+            WakeOwner::StorageWatch,
+            WakeOwner::GitWatch,
+            WakeOwner::UpdateCheck,
+            WakeOwner::AboutLastChecked,
+            WakeOwner::PreviewWatch,
+            WakeOwner::FilesWatch,
+            WakeOwner::RefusedFrame,
+            WakeOwner::WindowTitle,
+            WakeOwner::SearchWalk,
+            WakeOwner::WebEngineWarmUp,
+            WakeOwner::SpareWebController,
         ];
         let deadlines = [
             startup_deadline,
@@ -2527,13 +2528,13 @@ impl<B: Backend> Runtime<'_, B> {
             && at.saturating_duration_since(now) < Duration::from_millis(100)
         {
             trace_sink::stderr_line(format!(
-                "BT_PERF_TRACE idle_wake owner={owner:?} in_us={}",
+                "BT_PERF_TRACE idle_wake owner={:?} in_us={}",
+                owner.name(),
                 at.saturating_duration_since(now).as_micros(),
             ));
         }
-        let wake_deadline = wake.map(|(_, at)| at);
         self.reap_exited_tabs(now)?;
-        Ok(wake_deadline)
+        Ok(wake)
     }
 }
 
