@@ -358,11 +358,14 @@ and their methods are reachable only as `Ambiguous` candidates.
 and every `Ambiguous` edge with other than one candidate met walking from every product callable
 of bt-app — the calls the door reach does not follow — keyed by file, item, kind and the call's
 name, with `sites` (the calls behind the key) and a `reason`.
-`the_unfollowed_edges_are_the_committed_list` holds the list equal to the tree; `scripts/ci/check-unfollowed-edges.ps1` holds it to the merge
-base's, refusing a key added or grown unless its reason is `YYYY-MM-DD: <why>`
-(`check-unfollowed-edges-tests.ps1` plants each verdict). When red, type the receiver or resolve
-the call; when the door reach must go blind there, regenerate with
-`scripts/generate-unfollowed-edges.ps1` and date the reason. The per-door counts are printed by
+`the_unfollowed_edges_are_the_committed_list` holds the list equal to the tree;
+`scripts/ci/check-unfollowed-edges.ps1` holds it to the merge base's, refusing a key added or
+grown unless its reason is `YYYY-MM-DD: <why>` — for a grown key, a reason other than the one the
+base's row had (`check-unfollowed-edges-tests.ps1` plants each verdict). When red, type the
+receiver or resolve the call; when the door reach must go blind there, regenerate with
+`scripts/generate-unfollowed-edges.ps1` and date the reason. A function the walk reaches for the
+first time brings its sites in as added keys — expected, and each takes a dated reason like any
+other. The per-door counts are printed by
 `window_waits_tests::the_unfollowed_edges_of_each_completions_door_are_printed`, a diagnostic.
 
 How a guard uses it: build the resolver once over the packages it judges, with `Arms` saying which
