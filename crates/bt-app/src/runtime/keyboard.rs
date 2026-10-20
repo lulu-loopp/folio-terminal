@@ -1381,20 +1381,16 @@ impl<B: Backend> Runtime<'_, B> {
         // is exactly what that layering says: Esc reaches the child only when
         // the owner is the terminal.
         if self.window.rename.is_some() {
-            // The clipboard is read **before** the editor is taken and only when
-            // the chord is the one that needs it — `settings_field_key`'s own
-            // borrow order, for its own reason: the read is a call into another
-            // process and a field that made it every keystroke would be paying
-            // for a paste nobody asked for.
-            let pasted = if rename_pastes(&event.logical_key, self.window.modifiers) {
-                self.clipboard_line()
-            } else {
-                String::new()
-            };
-            let mut clipboard = RenameClipboard {
-                paste: &pasted,
-                copied: None,
-            };
+            // **A paste is asked of the clipboard lane, and only for the chord
+            // that is one** (`clipboard_lane`): the read is a call into another
+            // process, and a field that made it every keystroke would be paying
+            // for a paste nobody asked for. The editor is not touched by the
+            // chord itself; the line lands through the field's own insert door
+            // on the turn the clipboard answers, if the editor is still open.
+            if rename_pastes(&event.logical_key, self.window.modifiers) {
+                return self.paste_into_field(crate::TextFieldSeat::TabName);
+            }
+            let mut clipboard = RenameClipboard { copied: None };
             let mut editor = self.window.rename.take().expect("the editor is open");
             let verdict = rename_key(
                 &mut editor,
@@ -2388,7 +2384,7 @@ impl<B: Backend> Runtime<'_, B> {
                 // deliberately accepts it exactly like Windows Terminal: every commit reaches PTY.
                 write_pty_input(
                     self.focused()
-                        .map_or(PtyTarget::Nowhere, |leaf| leaf.input_target()),
+                        .map_or(PtyTarget::Nowhere, |leaf| leaf.person_input_target()),
                     &ime_commit_bytes(&text),
                     "write IME UTF-8 commit to PTY",
                 )?;

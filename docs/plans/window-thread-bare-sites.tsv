@@ -175,7 +175,6 @@ bt-platform	[windows]	crate::video::within_budget	std::sync::mpsc::Receiver::rec
 bt-platform	[windows]	crate::windows_impl::<DirWatch as Drop>::drop	windows::Win32::System::Threading::SetEvent	1
 bt-platform	[windows]	crate::windows_impl::close	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::windows_impl::directory_folds_case	windows::Win32::Foundation::CloseHandle	1
-bt-platform	[windows]	crate::windows_impl::open_clipboard_with_retry	std::thread::sleep	1
 bt-platform	[windows]	crate::windows_impl::write_to_console	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows] [not(test)]	crate::handoff::windows_handoff::shell_execute_w	windows::Win32::UI::Shell::ShellExecuteW	1
 bt-pty	-	crate::InputRing::take	std::sync::Condvar::wait	1

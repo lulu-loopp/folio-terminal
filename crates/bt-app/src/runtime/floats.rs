@@ -1787,10 +1787,7 @@ impl<B: Backend> Runtime<'_, B> {
                 // The clipboard door copy-on-select uses, so the menu and the
                 // drag write the same bytes and both leave the selection
                 // standing — the terminal's row's own rule, one surface over.
-                profiles::TermMenuRow::Copy => {
-                    self.copy_preview_text_selection(surface);
-                    Ok(())
-                }
+                profiles::TermMenuRow::Copy => self.copy_preview_text_selection(surface).map(drop),
                 profiles::TermMenuRow::SelectAll => {
                     let selection = match &self.preview_pane(surface).map(|pane| pane.doc()) {
                         Some(PreviewDocument::Markdown { blocks, .. }) => {
@@ -1816,10 +1813,7 @@ impl<B: Backend> Runtime<'_, B> {
             // which clears the selection afterwards — right for a keystroke that
             // ends a gesture, wrong for a menu row that was reached by pointing
             // at what is still highlighted.
-            profiles::TermMenuRow::Copy => {
-                self.copy_selection_on_release(seat);
-                Ok(())
-            }
+            profiles::TermMenuRow::Copy => self.copy_selection_on_release(seat),
             profiles::TermMenuRow::Paste => self.paste_from_clipboard_into(seat),
             profiles::TermMenuRow::SelectAll => self.select_all_in_pane(seat),
             profiles::TermMenuRow::Find => self.open_search(seat),
@@ -3636,8 +3630,8 @@ impl<B: Backend> menubar::ClipboardDoors for Runtime<'_, B> {
         self.paste_from_clipboard()
     }
 
-    fn copy_document_selection(&mut self) {
-        self.copy_preview_selection();
+    fn copy_document_selection(&mut self) -> Result<()> {
+        self.copy_preview_selection()
     }
 
     fn paste_into_document(&mut self) -> Result<()> {

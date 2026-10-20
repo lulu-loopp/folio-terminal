@@ -728,7 +728,7 @@ impl<B: Backend> Runtime<'_, B> {
         };
         match command {
             PreviewTextCommand::Copy => {
-                self.copy_preview_text_selection(surface);
+                self.copy_preview_text_selection(surface)?;
             }
             PreviewTextCommand::SelectAll => {
                 let selection = match &self.preview_pane(surface).map(|pane| pane.doc()) {
@@ -2558,14 +2558,14 @@ impl<B: Backend> Runtime<'_, B> {
         }]
     }
 
-    pub(in crate::runtime) fn apply_math_context_menu_result(&mut self) {
+    pub(in crate::runtime) fn apply_math_context_menu_result(&mut self) -> Result<()> {
         let Some(result) = self.window.math_context_menu.take_result() else {
-            return;
+            return Ok(());
         };
         let anchor = self.window.pending_math_context_anchor.take();
         self.drop_mouse_route();
         match (result, anchor) {
-            (Ok(true), Some((target, anchor))) => self.copy_math_latex(target, &anchor),
+            (Ok(true), Some((target, anchor))) => self.copy_math_latex(target, &anchor)?,
             (Ok(true), None) => {
                 eprintln!("recoverable formula context-menu result had no pending anchor");
             }
@@ -2574,6 +2574,7 @@ impl<B: Backend> Runtime<'_, B> {
                 eprintln!("recoverable formula context-menu failure: {error}");
             }
         }
+        Ok(())
     }
 
     /// **Re-key every pane of every tab** (review row R5-5).

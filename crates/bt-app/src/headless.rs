@@ -100,8 +100,6 @@ pub(crate) enum WindowEffect {
     SessionEndWatched,
     /// A page's place in the window asked for, for the web engine (`WindowHost::page_address`).
     PageAddressed(bt_platform::PageVisual),
-    /// Text put on the clipboard.
-    ClipboardWritten(String),
     /// A hand-off to the system: a file opened, a path revealed, an address handed over.
     HandedOff(bt_platform::Handoff),
     /// A frame presented: how many seats it carried and what asked for it.
@@ -305,8 +303,9 @@ pub(crate) struct HeadlessWindow {
     pub(crate) scale: f64,
     pub(crate) focused: bool,
     pub(crate) ledger: Ledger,
-    /// What the clipboard holds, as this window's doors read and write it.
-    pub(crate) clipboard: RefCell<Option<String>>,
+    /// What the clipboard holds, as this window's clipboard door reads and writes it on the
+    /// clipboard lane's worker.
+    pub(crate) clipboard: HeadlessClipboard,
     /// What the window's input-method facts door answers: whatever the test scripted, default
     /// facts (every field `None`) until it does.
     pub(crate) ime_facts: Cell<NativeFacts>,
@@ -550,24 +549,12 @@ impl WindowHost for HeadlessWindow {
         self.ledger
             .record(WindowEffect::OptionAsAlt(option_sends_alt));
     }
-    fn clipboard_text(&self) -> Result<String, String> {
-        self.clipboard
-            .borrow()
-            .clone()
-            .ok_or_else(|| "the headless clipboard holds no text".to_owned())
-    }
-    fn set_clipboard_text(&self, text: &str) -> Result<(), String> {
-        *self.clipboard.borrow_mut() = Some(text.to_owned());
-        self.ledger
-            .record(WindowEffect::ClipboardWritten(text.to_owned()));
-        Ok(())
-    }
-    fn clipboard_payload(&self) -> Result<bt_platform::ClipboardPayload, String> {
-        self.clipboard
-            .borrow()
-            .clone()
-            .map(bt_platform::ClipboardPayload::Text)
-            .ok_or_else(|| "the headless clipboard holds nothing".to_owned())
+    fn clipboard(
+        &self,
+        lane: &crate::clipboard_lane::ClipboardLane,
+        ask: crate::clipboard_lane::Ask,
+    ) -> Result<crate::clipboard_lane::ClipboardRequest, crate::clipboard_lane::Declined> {
+        lane.submit(Arc::new(self.clipboard.clone()), ask)
     }
     fn hand_off(
         &self,
@@ -591,6 +578,88 @@ impl WindowHost for HeadlessWindow {
                 bottom: self.size.height as i32,
             },
         })
+    }
+}
+
+/// **The headless window's clipboard** — the scripted door its requests are served through on
+/// the clipboard lane's worker (T-CLIPBOARD-LANE): what it holds, what was written to it, the
+/// opens it refuses (as another program holding it open would make `OpenClipboard` refuse), and
+/// a hold the test can keep the worker in. Nothing here reaches the machine's clipboard.
+#[derive(Clone, Default)]
+pub(crate) struct HeadlessClipboard(Arc<ClipboardScript>);
+
+#[derive(Default)]
+pub(crate) struct ClipboardScript {
+    held: Mutex<Option<String>>,
+    written: Mutex<Vec<String>>,
+    refused_opens: Mutex<usize>,
+    hold: crate::lane::Hold,
+}
+
+/// How many times the platform's door asks `OpenClipboard` before it gives up — `bt_platform`'s
+/// five attempts.
+const OPEN_ATTEMPTS: usize = 5;
+
+impl HeadlessClipboard {
+    /// The clipboard now holds `text`, as if another program had copied it.
+    pub(crate) fn holds(&self, text: &str) {
+        *locked(&self.0.held) = Some(text.to_owned());
+    }
+
+    /// Everything written to it since the last time this was asked, in order.
+    pub(crate) fn take_written(&self) -> Vec<String> {
+        std::mem::take(&mut locked(&self.0.written))
+    }
+
+    /// The next `opens` attempts to open it are refused, as while another program holds it.
+    pub(crate) fn refuse_opens(&self, opens: usize) {
+        *locked(&self.0.refused_opens) = opens;
+    }
+
+    /// The hold the worker stands in before it opens the clipboard.
+    pub(crate) fn worker_hold(&self) -> &crate::lane::Hold {
+        &self.0.hold
+    }
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl crate::clipboard_lane::ClipboardDoor for HeadlessClipboard {
+    fn serve(
+        &self,
+        _worker: &bt_platform::admission::WorkerCtx,
+        ask: &crate::clipboard_lane::Ask,
+    ) -> Result<crate::clipboard_lane::Reply, String> {
+        use crate::clipboard_lane::{Ask, Reply};
+        self.0.hold.pass();
+        {
+            let mut refused = locked(&self.0.refused_opens);
+            let spent = (*refused).min(OPEN_ATTEMPTS);
+            *refused -= spent;
+            if spent == OPEN_ATTEMPTS {
+                return Err(format!(
+                    "OpenClipboard failed after {OPEN_ATTEMPTS} attempts: the headless clipboard \
+                     is held open by another program"
+                ));
+            }
+        }
+        match ask {
+            Ask::Text => locked(&self.0.held)
+                .clone()
+                .map(Reply::Text)
+                .ok_or_else(|| "the headless clipboard holds no text".to_owned()),
+            Ask::Payload => locked(&self.0.held)
+                .clone()
+                .map(|text| Reply::Payload(bt_platform::ClipboardPayload::Text(text)))
+                .ok_or_else(|| "the headless clipboard holds nothing".to_owned()),
+            Ask::Write(text) => {
+                *locked(&self.0.held) = Some(text.clone());
+                locked(&self.0.written).push(text.clone());
+                Ok(Reply::Written)
+            }
+        }
     }
 }
 
@@ -1315,7 +1384,7 @@ impl HeadlessParts {
                 scale,
                 focused: true,
                 ledger: ledger.clone(),
-                clipboard: RefCell::new(None),
+                clipboard: HeadlessClipboard::default(),
                 ime_facts: Cell::new(NativeFacts::default()),
                 answers: Cell::new(PlatformAnswers::default()),
             },
@@ -1436,6 +1505,32 @@ impl HeadlessFolio {
             window: &mut self.window,
         }
     }
+
+    /// **Every clipboard request the window has made, answered and spent** (T-CLIPBOARD-LANE):
+    /// the clipboard lane's worker serves them on its own thread, so the test waits, within the
+    /// lane suite's patience, until the window's turn — which takes each answer as the loop's wake
+    /// would bring it — finds nothing owed.
+    ///
+    /// The turn's clock is held at the moment the owed paste was asked, so the paste's deadline
+    /// never falls inside the wait: a test that means the deadline passes its own clock to
+    /// `Runtime::settle_clipboard`.
+    pub(crate) fn settle_clipboard(&mut self) {
+        crate::lane::wait_until("the window's clipboard answers", || {
+            let mut runtime = self.runtime();
+            let now = runtime
+                .window
+                .clipboard
+                .pastes
+                .iter()
+                .map(|owed| owed.asked_at)
+                .min()
+                .unwrap_or_else(Instant::now);
+            runtime
+                .settle_clipboard(now)
+                .expect("the clipboard's answers are spent");
+            runtime.window.clipboard.is_empty()
+        });
+    }
 }
 
 /// **A headless application with its one window**: the loop's own `FolioApp`, for the doors a
@@ -1517,6 +1612,7 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
         event_proxy: proxy.clone(),
         handoff_lane: handoff_lane::HandoffLane::spawn(wake(|| AppEvent::HandoffAnswered))
             .expect("the handoff lane starts"),
+        clipboard_lane: clipboard_lane::ClipboardLane::spawn(wake(|| AppEvent::ClipboardAnswered)),
         layout_tables: layout_tables::LayoutTables::spawn(proxy.clone(), Vec::new())
             .expect("the layout tables start"),
         math_worker: Arc::new(computation_lane::ComputationLane::new(wake(|| {
@@ -1822,10 +1918,26 @@ mod tests {
             window.page_address(page).is_err(),
             "a headless window hosts no web engine, and says so"
         );
-        window
-            .set_clipboard_text("剪贴 clip")
-            .expect("the headless clipboard takes text");
-        assert_eq!(window.clipboard_text().as_deref(), Ok("剪贴 clip"));
+        // The clipboard's request reaches the window's own scripted door, on the lane's worker.
+        let clipboard_lane = crate::clipboard_lane::ClipboardLane::spawn(|| {});
+        let mut write = window
+            .clipboard(
+                &clipboard_lane,
+                crate::clipboard_lane::Ask::Write("剪贴 clip".to_owned()),
+            )
+            .expect("the lane admits the write");
+        let mut ended = None;
+        crate::lane::wait_until("the headless clipboard's write", || {
+            ended = write.take();
+            ended.is_some()
+        });
+        assert_eq!(
+            ended,
+            Some(crate::lane::Terminal::Done(
+                crate::clipboard_lane::Reply::Written
+            ))
+        );
+        assert_eq!(window.clipboard.take_written(), ["剪贴 clip".to_owned()]);
         let lane =
             crate::handoff_lane::HandoffLane::spawn(|| {}).expect("the hand-off lane starts");
         assert!(
@@ -1958,7 +2070,6 @@ mod tests {
                 WindowEffect::SystemSettingsWatched,
                 WindowEffect::SessionEndWatched,
                 WindowEffect::PageAddressed(page),
-                WindowEffect::ClipboardWritten("剪贴 clip".to_owned()),
                 WindowEffect::HandedOff(bt_platform::Handoff::Reveal(folder.clone())),
                 WindowEffect::Presented {
                     seats: 0,

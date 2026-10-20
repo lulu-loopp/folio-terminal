@@ -1554,7 +1554,7 @@ impl<B: Backend> Runtime<'_, B> {
         let pty = self.window.tabs[active]
             .sessions
             .get(&seat)
-            .map_or(PtyTarget::Nowhere, |leaf| leaf.input_target());
+            .map_or(PtyTarget::Nowhere, |leaf| leaf.person_input_target());
         write_pty_input(pty, bytes, context)
     }
 
@@ -5071,10 +5071,10 @@ impl<B: Backend> Runtime<'_, B> {
                     self.press_math_toggle(target, &math_hit.anchor)?;
                 }
                 (MouseButton::Left, MathHitTarget::CopyLatex) => {
-                    self.copy_math_latex(target, &math_hit.anchor);
-                    // The tick has to reach the glass: nothing else in this
-                    // gesture asks for a frame, so without this the
-                    // acknowledgement would wait for the next thing to twitch.
+                    self.copy_math_latex(target, &math_hit.anchor)?;
+                    // The press's own frame: nothing else in this gesture asks
+                    // for one. The tick itself reaches the glass on the turn the
+                    // copy lands (`ClipboardWriteEffect::MathCopied`).
                     self.repaint_hovered_pane()?;
                 }
                 (MouseButton::Right, _) => match self.window.math_context_menu.request() {

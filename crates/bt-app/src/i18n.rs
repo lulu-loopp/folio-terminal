@@ -443,6 +443,9 @@ text_entries! {
     PastePathNushell,
     PasteClipboardPromise,
     PasteClipboardRead,
+    /// Another program held the clipboard past a paste's deadline, or the clipboard lane could
+    /// take no more requests (T-CLIPBOARD-LANE).
+    PasteClipboardBusy,
     /// The clipboard held a picture and the file Folio writes for it could not
     /// be written (§7.61).
     PasteClipboardPicture,
@@ -3301,6 +3304,11 @@ impl Text {
                 lang,
                 "The clipboard could not be read. Copy again and retry.",
                 "剪贴板无法读取。重新复制后再试。",
+            ),
+            Self::PasteClipboardBusy => pick(
+                lang,
+                "The clipboard was busy, so nothing was pasted. Try again.",
+                "The clipboard was busy, so nothing was pasted. Try again.", // zh: pending T-CLIPBOARD-LANE
             ),
             Self::PasteClipboardPicture => pick(
                 lang,
@@ -6634,6 +6642,10 @@ impl Text {
         // not landed, with no unsaved edits.
         (Self::GateTitleSaveNotLanded, HostPlatform::Windows),
         (Self::GateTitleSaveNotLanded, HostPlatform::MacOs),
+        // zh: pending T-CLIPBOARD-LANE — the notice a terminal paste says when the clipboard was
+        // busy past its deadline.
+        (Self::PasteClipboardBusy, HostPlatform::Windows),
+        (Self::PasteClipboardBusy, HostPlatform::MacOs),
         // zh: pending T-SHELL-BIRTH-DEATH — the face of a shell that ended at birth.
         (Self::ShellBirthDeath, HostPlatform::Windows),
         (Self::ShellBirthDeath, HostPlatform::MacOs),
@@ -9540,6 +9552,7 @@ mod tests {
             Text::PastePathNushell,
             Text::PasteClipboardPromise,
             Text::PasteClipboardRead,
+            Text::PasteClipboardBusy,
             Text::PasteClipboardPicture,
             Text::PasteProfileOverride,
         ];
