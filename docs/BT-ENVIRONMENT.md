@@ -252,7 +252,12 @@ matched back out: `BT_APP_INPUT_OK`, `BT_FILL_080_XXXXXXXXXXXXXXXXXXXXXXXX`,
 `bt-repaint-oracle`, `bt-zoom-perf`, `bt-replay`, `bt-record` and the ConPTY
 probes read a further set of `BT_PROBE_*`, `BT_ZOOM_PERF_*` and `BT_CONPTY_*`
 names. Those binaries are not part of a release archive and are not covered by the
-check above; their switches are documented where they are read.
+check above; their switches are documented where they are read. They read their own
+switches in their own code, as a program's entry does; the libraries under them
+read none (T-DIAGNOSTIC-DOORS-AT-THE-ENTRY). So `bt-replay` hands `BT_PERF_TRACE`
+to the renderer and the session itself, and `bt-conpty-width-probe`, which hands
+its pane no recording request, no longer honours `BT_PTY_DUMP`: its pane is not
+recorded whatever the shell that started it has set.
 
 The macOS sheet probe (`crates/bt-platform/tests/macos_sheet.rs`) is outside the
 check for the same reason — the walk excludes `tests/` — and reads two of its

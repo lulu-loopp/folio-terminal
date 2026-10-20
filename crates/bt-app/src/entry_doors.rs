@@ -194,9 +194,7 @@ impl EntryDoors {
             bt_platform::hotkey::trace_into(path.clone());
         }
         bt_term::install_diagnostics(self.term.clone());
-        if self.perf {
-            bt_viewport::trace::switch_on_perf();
-        }
+        bt_viewport::trace::install_perf(self.perf);
         INSTALLED.get_or_init(|| self)
     }
 }
