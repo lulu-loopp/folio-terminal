@@ -16,6 +16,13 @@ pub fn root() {
     S();
 }
 
+pub const A: fn() = || B();
+pub const B: fn() = || A();
+
+pub fn pair() {
+    A();
+}
+
 pub struct Holder;
 
 impl Holder {

@@ -1312,16 +1312,27 @@ fn a_self_referential_function_pointer_value_is_read_once() {
         "`F()` reaches `F`'s initializer: {f:?}"
     );
     assert!(
-        f.iter().any(|spelled| spelled.starts_with("dynamic ")),
-        "`F()` is dynamic: {f:?}"
+        f.contains(&"dynamic ".to_owned()),
+        "`F()` is dynamic with no candidate (`g` is a block-local fn, not an indexed item): {f:?}"
     );
     let s = at(&resolver, "root", "S");
     assert!(
         s.iter().any(|spelled| spelled.starts_with("value ")),
         "{s:?}"
     );
+    assert!(
+        s.contains(&"dynamic ".to_owned()),
+        "`S()` is dynamic with no candidate: {s:?}"
+    );
     let reach = graph.walk(&[root], &BTreeSet::new());
     assert_eq!(reach.values.len(), 2, "both initializers are reached once");
+    let pair = item(&resolver, package, "pair");
+    let mutual = graph.walk(&[pair], &BTreeSet::new());
+    assert_eq!(
+        mutual.values.len(),
+        2,
+        "`A()` reaches both closures once and the walk ends"
+    );
     let call = item(&resolver, package, "call");
     let spelled = at(&resolver, "call", "H");
     assert_eq!(

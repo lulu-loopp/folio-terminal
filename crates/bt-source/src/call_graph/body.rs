@@ -1579,6 +1579,10 @@ impl Walker<'_, '_> {
     /// being read is not read again inside its own reading — the inner call's candidates are then
     /// the ones the outer reading finds, and it is said so — so the reading is bounded by the
     /// values it holds open.
+    ///
+    /// The nested reading's edges are dropped except the `Via::Value` candidates taken from it; the
+    /// "called inside its own initializer" `Dynamic` produced for a re-entry is a marker in that
+    /// dropped list, not a reported edge.
     fn called_values(&self, values: &[ValueId], what: &str) -> Answer {
         let mut candidates = Vec::new();
         let mut within = false;

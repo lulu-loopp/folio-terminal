@@ -65,17 +65,17 @@ try {
     & $git @("commit", "-q", "-m", "base without the list")
     $baseCommit = (& git -C $repo rev-parse HEAD).Trim()
 
-    function Invoke-Repo([string]$name, [string]$seed, [int]$expected) {
+    function Invoke-Repo([string]$name, [string]$seed, [int]$expected, [string]$refusal = "") {
         $arguments = @("-NoProfile", "-File", $gate, "-Repo", $repo)
         if ($seed) { $arguments += @("-Seed", $seed) }
         $output = & pwsh @arguments 2>&1 | Out-String
         $code = $LASTEXITCODE
-        $ok = if ($expected -eq 1) { $code -ne 0 -and $code -ne 2 } else { $code -eq $expected }
-        if (-not $ok) { throw "case '$name': expected exit $expected, got $code`n$output" }
+        $ok = if ($expected -eq 1) { $code -ne 0 -and $code -ne 2 -and $output.Contains($refusal) } else { $code -eq $expected }
+        if (-not $ok) { throw "case '$name': expected exit $expected$(if ($refusal) { " with '$refusal'" }), got $code`n$output" }
         Write-Host "ok  $name"
     }
 
-    Invoke-Repo "missing-list" "" 1
+    Invoke-Repo "missing-list" "" 1 "is not in the tree"
     [IO.File]::WriteAllLines($listFile, $base)
     & $git @("add", "docs/plans/UNFOLLOWED-EDGES.tsv")
     & $git @("commit", "-q", "-m", "the list")
@@ -84,10 +84,10 @@ try {
     & $git @("update-ref", "refs/remotes/origin/main", $baseCommit)
     Invoke-Repo "seed-fallback-unchanged" $seedCommit 0
     [IO.File]::WriteAllLines($listFile, $base + "crates/a/src/lib.rs`ta crate::h`tAmbiguous`tget`t1`t")
-    Invoke-Repo "seed-fallback-added-undated" $seedCommit 1
+    Invoke-Repo "seed-fallback-added-undated" $seedCommit 1 "grew against the seed"
     Invoke-Repo "seed-unreadable" ("0" * 40) 2
     & $git @("update-ref", "refs/remotes/origin/main", $seedCommit)
-    Invoke-Repo "merge-base-added-undated" $seedCommit 1
+    Invoke-Repo "merge-base-added-undated" $seedCommit 1 "grew against the merge base"
 
     Write-Host "check-unfollowed-edges.ps1: every planted case gave its verdict. PASS"
 } finally {
