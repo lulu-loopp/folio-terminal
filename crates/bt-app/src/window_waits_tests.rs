@@ -8549,7 +8549,7 @@ fn followed(world: &World, edge: &Edge) -> Vec<ItemId> {
         ),
         Target::Unresolved(Unresolved::Unparsed { why }) => panic!(
             "`{}` does not parse for the call graph: {why}",
-            world.graph.key(edge.from)
+            world.graph.node_key(edge.from)
         ),
         _ if edge.site.name == "into" => world.from_impls.clone(),
         Target::Unresolved(Unresolved::Ambiguous { candidates, .. }) if candidates.len() == 1 => {
@@ -8783,154 +8783,20 @@ fn unfollowed_by_door(world: &World) -> BTreeMap<&'static str, usize> {
     counts
 }
 
-/// **The unfollowed edges of each completions door, ceilinged** ([`UNFOLLOWED_CEILINGS`]): a door
-/// whose walk meets more `Ambiguous` or `Dynamic` edges it does not follow than its row allows is
-/// refused, so the door reach does not go blind a call at a time; a door with no row, and a row
-/// with no door, are refused too. A count below its ceiling is printed, for the row to be lowered.
-///
-/// MUTATION: set a row one below its door's count (`<Machine as World>::on_a_worker` to 12) — the
-/// door is named with both numbers; an untyped call of a shared method name added to a door's
-/// reach does the same.
+/// **The unfollowed edges of each completions door, printed** — a diagnostic, never a gate: the
+/// doors share their reach, so one untyped call raises many doors' counts at once. The gate is by
+/// site: bt-source's `the_unfollowed_edges_are_the_committed_list` holds
+/// `docs/plans/UNFOLLOWED-EDGES.tsv` to the tree, and `scripts/ci/check-unfollowed-edges.ps1`
+/// holds the list to the merge base's.
 #[test]
-fn no_door_meets_more_unfollowed_edges_than_its_ceiling() {
+fn the_unfollowed_edges_of_each_completions_door_are_printed() {
     let world = World::new();
     let counts = unfollowed_by_door(&world);
-    let ceilings: BTreeMap<&str, usize> = UNFOLLOWED_CEILINGS.iter().copied().collect();
-    let mut failures = Vec::new();
     for (door, count) in &counts {
-        match ceilings.get(door) {
-            None => failures.push(format!(
-                "`{door}` meets {count} unfollowed edges and has no row"
-            )),
-            Some(ceiling) if count > ceiling => failures.push(format!(
-                "`{door}` meets {count} unfollowed edges, past its ceiling {ceiling}"
-            )),
-            Some(ceiling) if count < ceiling => {
-                eprintln!("UNFOLLOWED_BELOW_CEILING\t{door}\t{count}\t{ceiling}");
-            }
-            Some(_) => {}
-        }
+        eprintln!("UNFOLLOWED_BY_DOOR	{door}	{count}");
     }
-    for door in ceilings.keys() {
-        if !counts.contains_key(door) {
-            failures.push(format!("`{door}` has a ceiling and is no completions door"));
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "the completions doors' unfollowed edges:\n  {}",
-        failures.join("\n  ")
-    );
+    assert!(!counts.is_empty(), "the ledger has doors");
 }
-
-/// **Each completions door's ceiling of unfollowed edges** ([`unfollowed_by_door`]), measured
-/// on the tree T-BT-SOURCE-CALL-GRAPH round 2 merged (`origin/main` `a919fe77`): the
-/// `Ambiguous` edges with other than one candidate and the `Dynamic` edges each door's walk
-/// meets and does not follow. A row is only ever lowered — to the count a change brings it
-/// to — and a door the ledger gains gets its measured row.
-const UNFOLLOWED_CEILINGS: &[(&str, usize)] = &[
-    ("<Machine as World>::on_a_worker", 13),
-    ("DocumentState::ask_read", 29),
-    ("DocumentState::send_owed", 42),
-    ("EarHandle::want", 105),
-    ("FilesWorker::request", 1),
-    ("FolioApp::hand_the_update_over", 425),
-    ("FolioApp::recovered_from_a_lost_device", 82),
-    ("GitMutationLane::ask", 524),
-    ("GitWorker::request", 1),
-    ("IndexWorker::request", 1),
-    ("Job::answer_verb", 634),
-    ("Job::consider", 456),
-    ("LayoutTables::shifted_character", 1),
-    ("NotificationDesk::show", 48),
-    ("PageShrinker::send", 0),
-    ("PreviewBuffer::request_save", 42),
-    ("PreviewBuffer::write_now_for_quit", 156),
-    ("PreviewWorker::request", 1),
-    ("Runtime::apply_claude_hooks", 6505),
-    ("Runtime::apply_codex_notify", 6479),
-    ("Runtime::apply_copilot_hooks", 6493),
-    ("Runtime::apply_ime_cursor_area", 42),
-    ("Runtime::apply_pointer_cursor", 523),
-    ("Runtime::apply_psreadline", 6535),
-    ("Runtime::clipboard_line", 55),
-    ("Runtime::close_pane", 10126),
-    ("Runtime::copy_math_latex", 47),
-    ("Runtime::flush_title", 17),
-    ("Runtime::hand_off", 7935),
-    ("Runtime::observe_window_place", 130),
-    ("Runtime::open_from_notification", 9345),
-    ("Runtime::open_window", 10455),
-    ("Runtime::paste_from_clipboard_into", 8226),
-    ("Runtime::paste_into_field", 8130),
-    ("Runtime::paste_into_preview", 7063),
-    ("Runtime::present_seats_and_commit", 853),
-    ("Runtime::reap_exited_tabs", 10174),
-    ("Runtime::refresh_psreadline_installed", 49),
-    ("Runtime::reload_background_picture", 110),
-    ("Runtime::rename_files_row", 6492),
-    ("Runtime::rename_preview_file", 10126),
-    ("Runtime::resize", 9296),
-    ("Runtime::save_clipboard_picture", 6541),
-    ("SessionStore::flush_if_due", 421),
-    ("SessionStore::hand_over_final", 412),
-    ("SessionStore::queue_launch_backup", 407),
-    ("SessionStore::write_receipt", 407),
-    ("SessionWriter::close", 2),
-    ("SessionWriter::wait_for", 2),
-    ("StorageLane::send_recovered", 15),
-    ("VideoSeats::close", 2),
-    ("VideoSeats::open", 146),
-    ("WebSeat::rehost", 309),
-    ("WebSeat::start_environment", 47),
-    ("WebSeat::step", 600),
-    ("attention_copilot::begin_probe", 15),
-    ("bt_platform::FolderPicker::request", 18),
-    ("bt_platform::video::prewarm", 10),
-    ("bt_platform::video::shutdown_media_session", 10),
-    ("close_wait_over", 5),
-    ("commit_leaf_resize", 1017),
-    ("diagnostics::note", 13),
-    ("dispatch_decoration_task", 3465),
-    ("explorer_menu::begin_probe", 188),
-    ("explorer_menu::request", 165),
-    ("foreground_program::request", 3),
-    ("gpu_door::open_first_window", 152),
-    ("install_channel::begin", 179),
-    ("launch_wire::hand_over", 263),
-    ("locale_declaration::ask", 17),
-    ("main", 3371),
-    ("offer_pty_input", 38),
-    ("open_the_data_directorys_endpoints", 365),
-    ("owner_door::set_visible", 0),
-    ("programs_lane::request", 321),
-    ("psreadline::begin_probe", 17),
-    ("psreadline::upgrade_recorded", 140),
-    ("pty_door::request_shell", 529),
-    ("pty_door::wait_for_retirements", 2),
-    ("recovered::ask", 63),
-    ("request_font_walk", 64),
-    ("request_page_environment", 31),
-    ("schedule_parse_retry", 39),
-    ("settings::monospace_family_files", 140),
-    (
-        "shell_integration::profile_runtime::begin_profile_install",
-        699,
-    ),
-    ("shell_integration::profile_runtime::begin_removal", 695),
-    ("spawn_powershell_preparation", 38),
-    ("spawn_profile_observation", 612),
-    ("taskbar_lane::request", 81),
-    ("trace_sink::flush", 10),
-    ("trace_sink::stderr_line", 13),
-    ("uninstall::remover_standalone", 5),
-    ("uninstall::run", 1707),
-    ("update::spawn_check", 197),
-    ("update_handoff::leave_armed", 40),
-    ("update_trial::begin_watch", 486),
-    ("update_trial::take_the_claim_within", 62),
-    ("write_terminal_clipboard_text", 46),
-];
 
 /// What [`every_worker_door_body_is_reached_from_a_completions_door`] refuses, with `effects` as
 /// the ledger's `# effects` rows.
