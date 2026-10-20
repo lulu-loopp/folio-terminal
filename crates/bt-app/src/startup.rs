@@ -4,7 +4,8 @@
 //! A start is split in two by the event loop, and so is this order. [`begin`] is the process's
 //! half, which `fn main` calls before there is a loop: the removal verbs, the command line, the
 //! hand-over. [`resume`] is the first window's half, which `Runtime::create` calls when the loop
-//! first resumes: the startup migration and the script's preparation before the window, the
+//! first resumes: Windows PowerShell's language question, the startup migration and the
+//! script's preparation before the window, the
 //! window, the PowerShell questions before the first tab, the first tab. The window's
 //! half needs the running loop the process's half builds, so nothing can call it first.
 //!
@@ -13,7 +14,7 @@
 //! ran (`headless::StartupStep`). What the order is, is this module's — the one thing a test of
 //! the steps' order reads, and the one thing the product cannot do differently.
 
-use crate::shell_integration::{Migrated, QuestionsAsked, ScriptPrepared};
+use crate::shell_integration::{LanguageAsked, Migrated, QuestionsAsked, ScriptPrepared};
 
 /// **The process's steps, in the fields' order**: what [`begin`] is handed.
 pub(crate) struct FrontDoor<Removal, Parse, Claim> {
@@ -44,11 +45,15 @@ pub(crate) fn begin<Request, Resident>(
 
 /// **The first window's steps, in the fields' order**: what [`resume`] is handed.
 ///
-/// Three of them answer a witness only their product function makes (`Migrated`,
-/// `ScriptPrepared`, `QuestionsAsked`), so the two workers' steps cannot be handed each other's
-/// call, and none of the three can be handed no call. The window's and the first tab's are told
-/// apart by what they take and answer.
-pub(crate) struct FirstWindow<Migration, Script, Window, Questions, FirstTab> {
+/// Four of them answer a witness only their product function makes (`LanguageAsked`,
+/// `Migrated`, `ScriptPrepared`, `QuestionsAsked`), so the workers' steps cannot be handed each
+/// other's call, and none of the four can be handed no call. The window's and the first tab's are
+/// told apart by what they take and answer.
+pub(crate) struct FirstWindow<Language, Migration, Script, Window, Questions, FirstTab> {
+    /// Windows PowerShell's language-mode question (`shell_integration::begin_language_question`,
+    /// T-INTEGRATION-INJECT-2-BUILD round 3b): first, so the first 5.1 birth waits for as little
+    /// of it as there is left.
+    pub(crate) language: Language,
     /// The startup's observation of an older Folio line in a `$PROFILE`
     /// (`shell_integration::begin_startup_migration`), started on a worker nobody waits for.
     pub(crate) migration: Migration,
@@ -64,11 +69,13 @@ pub(crate) struct FirstWindow<Migration, Script, Window, Questions, FirstTab> {
     pub(crate) first_tab: FirstTab,
 }
 
-/// **The first window's half of a start**: the startup migration and the script's preparation,
-/// then the window, then the PowerShell questions, then the first tab.
+/// **The first window's half of a start**: Windows PowerShell's language question, the startup
+/// migration and the script's preparation, then the window, then the PowerShell questions, then
+/// the first tab.
 ///
-/// The two workers start before the window because neither is the window's to wait for: what
-/// they do is done by the time a PowerShell is born, or that birth prepares the script itself.
+/// The three workers start before the window because none is the window's to wait for: what they
+/// do is done by the time a PowerShell is born, or that birth waits for the language answer (on
+/// its birth worker) or prepares the script itself.
 /// The questions are asked before the first tab because a PowerShell row's pane composes its
 /// command line from the answer, and a question asked after the birth is one the birth could not
 /// have found answered in time. `answers` is what the steps share: the program walk's answers, which the
@@ -76,6 +83,7 @@ pub(crate) struct FirstWindow<Migration, Script, Window, Questions, FirstTab> {
 pub(crate) fn resume<Answers, Window, Tabs, Error>(
     answers: &mut Answers,
     steps: FirstWindow<
+        impl FnOnce() -> LanguageAsked,
         impl FnOnce() -> Migrated,
         impl FnOnce() -> ScriptPrepared,
         impl FnOnce(&mut Answers) -> Result<Window, Error>,
@@ -83,6 +91,7 @@ pub(crate) fn resume<Answers, Window, Tabs, Error>(
         impl FnOnce(&mut Answers, &mut Window) -> Result<Tabs, Error>,
     >,
 ) -> Result<(Window, Tabs), Error> {
+    let LanguageAsked { .. } = (steps.language)();
     let Migrated { .. } = (steps.migration)();
     let ScriptPrepared { .. } = (steps.script)();
     let mut window = (steps.window)(answers)?;
@@ -104,15 +113,17 @@ mod tests {
         ]
     }
 
-    /// RED (T-STARTUP-ORDER-SHARED) — **a start runs its eight steps in one order**: a removal
-    /// verb, the command line, the hand-over, the startup migration, the script's preparation, the
+    /// RED (T-STARTUP-ORDER-SHARED; T-INTEGRATION-INJECT-2-BUILD round 3b) — **a start runs its
+    /// nine steps in one order**: a removal verb, the command line, the hand-over, Windows
+    /// PowerShell's language question, the startup migration, the script's preparation, the
     /// window, the PowerShell questions, the first tab — through `begin` and `resume`,
     /// the functions `main` and `Runtime::create` call, with the headless start's stand-ins. The
     /// hand-over is handed what the parse read.
     ///
     /// MUTATIONS: swap the removal and the parse in `begin` — the command line is read before a
     /// removal verb is answered; swap the script's preparation and the window in
-    /// `resume` — the window opens before the script is being prepared.
+    /// `resume` — the window opens before the script is being prepared; ask the language question
+    /// after the window — the first 5.1 pane would wait for all of it.
     #[test]
     fn the_startup_steps_run_in_their_order() {
         let argv = r"folio --cwd D:\项目 --profile pwsh";
@@ -123,6 +134,7 @@ mod tests {
                 StartupStep::Removal,
                 StartupStep::CommandLine,
                 StartupStep::HandOver,
+                StartupStep::LanguageQuestion,
                 StartupStep::StartupMigration,
                 StartupStep::ScriptPreparation,
                 StartupStep::WindowOpened,

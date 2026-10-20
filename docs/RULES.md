@@ -1590,13 +1590,24 @@ artefacts and keeps whole one a running shell still holds. **The module path is
 the pane's alone**: `PSModulePath` is composed with Folio's folder first, then
 what 5.1 would have had (Documents only where the account's value is unset or the
 machine's), and declared on that pane for its lifetime — only where the
-integration loader is composed, the program is not `pwsh`, and the edition was
-not observed in Constrained Language Mode. **A constrained pane keeps the editor
-it would have had**, whichever came first: one born before the observation said
-so gets the prefix, and the loader — where the language mode is certain — takes
-Folio's folder back out of the session's `PSModulePath`, removes Folio's module
-and imports `PSReadLine` by name, the module the host would otherwise have
-loaded. A `pwsh` started inside it keeps its own. **Folio's copy always wins in
+integration loader is composed, the program is not `pwsh`, and **the edition
+answered `FullLanguage`**. The prefix is composed from a known answer and from
+nothing else (ruling B′, 2026-10-18): the edition is asked its language mode
+(`-NoProfile -NonInteractive`, `$ExecutionContext.SessionState.LanguageMode`)
+at launch, before the window; a 5.1 birth that arrives before the answer waits
+for it on its birth worker, never the window thread, within the question's own
+patience. Timing changes how long a pane takes, never which editor it gets.
+Three rows: **`FullLanguage`** — prefix and loader, as above; **a constrained
+machine** (any other mode, an application-control lockdown) — no prefix and no
+loader, the pane is exactly the Shell-integration-off pane, and
+`diagnostics.log` says once per launch that Folio's PSReadLine is not offered;
+**an account whose own profile switches the session to `ConstrainedLanguage`**
+— the edition answered `FullLanguage`, so the host imported Folio's copy, and
+the constrained profile leaves the pane on the host's legacy line editor: the
+account's own choice, recorded and not repaired, beside the version-demand row
+below. A question that fails or runs out of patience gives that birth no
+prefix, one line, and the next 5.1 birth asks again. No answer is kept across
+launches. A `pwsh` started inside it keeps its own. **Folio's copy always wins in
 Folio's 5.1 panes** (owner ruling Q2): the host imports it through the pane's
 `PSModulePath`, before any profile runs, and a profile that imports PSReadLine
 by name gets the one already loaded. A profile that demands another version by

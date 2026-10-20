@@ -165,15 +165,16 @@ fn declared(profile: &[(OsString, OsString)]) -> Vec<String> {
 /// `PSModulePath`, once; no other pane is declared anything, and the machine is not even asked
 /// (the note's §2.3, §5.1 "no prefix when the loader is not composed").
 ///
-/// No prefix for: a pane the composer did not load into (`loads` false: the switch off, `-File`,
-/// `-NonInteractive`, an argv it refused), pwsh 7 (its own folders come first and its in-box
-/// editor is already 2.4.5), a program that is not a PowerShell, an edition observed in
-/// Constrained Language Mode (the loader does nothing there), and an executable that carries no
-/// module — any target but Windows, which is the macOS twin of the real panes below: the
-/// composition adds nothing to any pane's environment.
+/// No prefix for: a pane the composer did not load into, or whose edition did not answer
+/// `FullLanguage` (`loads` false: the switch off, `-File`, `-NonInteractive`, an argv it refused,
+/// a constrained or unanswered edition — [`language::windows_powershell_birth`] decides that
+/// before this), pwsh 7 (its own folders come first and its in-box editor is already 2.4.5), a
+/// program that is not a PowerShell, and an executable that carries no module — any target but
+/// Windows, which is the macOS twin of the real panes below: the composition adds nothing to any
+/// pane's environment.
 ///
-/// MUTATION: drop `observed_constrained` from `declare_psreadline_module`'s guard — the
-/// Constrained case is declared a prefix.
+/// MUTATION: drop `!loads` from `declare_psreadline_module`'s guard — the pane the loader was not
+/// composed into is declared a prefix.
 #[test]
 fn a_prefix_is_declared_only_where_the_loader_is_and_once() {
     let _turn = observation_turn();
@@ -244,44 +245,6 @@ fn a_prefix_is_declared_only_where_the_loader_is_and_once() {
             assert!(!asked.get(), "{why}: the machine is not asked");
         }
     }
-
-    let program = Path::new("powershell.exe");
-    let constrained = ProfileObservation {
-        full_language: false,
-        path: PathBuf::from("profile.ps1"),
-        scopes: super::tests::scopes(
-            crate::psreadline::ExecutionPolicy::Undefined,
-            crate::psreadline::ExecutionPolicy::Undefined,
-            crate::psreadline::ExecutionPolicy::Undefined,
-            crate::psreadline::ExecutionPolicy::Undefined,
-            crate::psreadline::ExecutionPolicy::Undefined,
-        ),
-        edition_says: Some(true),
-        location: ProfileLocation {
-            local_fixed: true,
-            marked: false,
-        },
-        ordinary_process: None,
-        seen: ProfileRevision::default(),
-    };
-    publish_profile_observation(program, next_observation(), constrained);
-    let asked = Cell::new(false);
-    let mut profile = row_layer.clone();
-    declare_psreadline_module(
-        program,
-        true,
-        &before,
-        &[],
-        &mut profile,
-        facts_with(Some(module), &asked),
-    );
-    PROFILE_OBSERVATIONS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .remove(&powershell_edition(program));
-    assert_eq!(profile, row_layer, "Constrained Language Mode: no prefix");
-    assert!(!asked.get(), "and the machine is not asked");
 }
 
 /// RED (T-INTEGRATION-INJECT-2-BUILD) — **the writer lays the module down whole, the manifest
@@ -469,6 +432,301 @@ fn a_trial_names_a_current_durable_module_and_otherwise_writes_its_own() {
 /// `HistorySaveStyle SaveNothing` read back before a byte is typed — and writes only under that
 /// test's own directory. The account's Documents is never named (the composer is handed none), so
 /// nothing the account installed can stand in for the module under test.
+/// A Windows PowerShell 5.1 row's composition with a script of the test's own named: the argv and
+/// whether it loads, for the integration decision `integration`.
+fn composed_5_1(integration: bool) -> ComposedBirth {
+    static SCRIPT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let script = SCRIPT.get_or_init(|| {
+        let script = bt_testpath::temp_path("psreadline-birth-script").join(SCRIPT_FILE_PS1);
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, SCRIPT_PS1).unwrap();
+        script
+    });
+    compose_with_prepared_and_retry(
+        Path::new("powershell.exe"),
+        &[os("-NoLogo")],
+        integration,
+        || Some(script.clone()),
+        |_| {},
+    )
+}
+
+/// RED (T-INTEGRATION-INJECT-2-BUILD round 3b, ruling B′) — **a constrained edition's birth is the
+/// Shell-integration-off birth, byte for byte**: no loader in its argv, the last-resort shell
+/// composed the same, and no module path declared. `FullLanguage` gives the loader and the prefix;
+/// a program that is not Windows PowerShell 5.1, or a birth with the switch off, asks the edition
+/// nothing.
+///
+/// MUTATION: give `Language::Constrained` the integration (`integration: true`) — its argv carries
+/// the loader the switch-off birth does not.
+#[test]
+fn a_constrained_answer_gives_the_switch_off_birth() {
+    use language::{Language, WindowsPowerShellBirth, windows_powershell_birth};
+    let program = Path::new("powershell.exe");
+    let birth = windows_powershell_birth(program, true, || Language::Constrained);
+    assert_eq!(
+        birth,
+        WindowsPowerShellBirth {
+            integration: false,
+            prefix: false
+        },
+        "the switch-off decision: what `last_resort_arguments` is composed from too"
+    );
+    let off = composed_5_1(false);
+    assert_eq!(
+        composed_5_1(birth.integration),
+        off,
+        "the argv, byte for byte"
+    );
+    assert!(!off.loads);
+    let before = vec![(
+        os("PSModulePath"),
+        os(r"C:\Program Files\WindowsPowerShell\Modules"),
+    )];
+    let asked = Cell::new(false);
+    let mut profile = Vec::new();
+    declare_psreadline_module(
+        program,
+        off.loads && birth.prefix,
+        &before,
+        &[],
+        &mut profile,
+        facts_with(
+            Some(PathBuf::from(r"C:\Local\psmodules\cb9390e97332")),
+            &asked,
+        ),
+    );
+    assert!(profile.is_empty(), "no module path: {profile:?}");
+    assert!(!asked.get());
+
+    let full = windows_powershell_birth(program, true, || Language::Full);
+    assert_eq!(
+        full,
+        WindowsPowerShellBirth {
+            integration: true,
+            prefix: true
+        }
+    );
+    assert!(composed_5_1(full.integration).loads, "the loader, as today");
+    for (program, integration) in [
+        ("pwsh.exe", true),
+        ("powershell.exe", false),
+        ("cmd.exe", true),
+    ] {
+        let birth = windows_powershell_birth(Path::new(program), integration, || {
+            panic!("{program}: no question is asked")
+        });
+        assert!(!birth.prefix, "{program}");
+        assert_eq!(birth.integration, integration, "{program}");
+    }
+}
+
+/// `body` on a worker the thread door started — a birth worker's stand-in.
+fn on_a_worker<T: Send + 'static>(
+    body: impl FnOnce(&bt_platform::admission::WorkerCtx) -> T + Send + 'static,
+) -> std::thread::JoinHandle<T> {
+    bt_platform::spawn_at_priority(
+        "language-birth",
+        bt_platform::ThreadPriority::BelowNormal,
+        body,
+    )
+    .expect("the thread door starts a thread")
+}
+
+/// Births of Windows PowerShell made against `cell` on threads of their own, each born before an
+/// answer is filed: their decisions once `answer` has been filed while every one of them was
+/// waiting, and a birth's made afterwards. The answer is filed only once each early birth is
+/// waiting in the cell, read from the cell itself — no clock.
+fn births_around_a_late_answer(
+    cell: &std::sync::Arc<language::LanguageCell>,
+    early: usize,
+    answer: language::Language,
+) -> (
+    Vec<language::WindowsPowerShellBirth>,
+    language::WindowsPowerShellBirth,
+) {
+    use language::windows_powershell_birth;
+    let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let births: Vec<_> = (0..early)
+        .map(|_| {
+            let cell = std::sync::Arc::clone(cell);
+            let asked = std::sync::Arc::clone(&asked);
+            on_a_worker(move |worker| {
+                windows_powershell_birth(Path::new("powershell.exe"), true, || {
+                    cell.for_birth(worker, || {
+                        asked.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                        true
+                    })
+                    .0
+                })
+            })
+        })
+        .collect();
+    while cell.waiting() < early && !births.iter().all(std::thread::JoinHandle::is_finished) {
+        std::thread::yield_now();
+    }
+    cell.file(answer);
+    let early: Vec<_> = births
+        .into_iter()
+        .map(|birth| birth.join().unwrap())
+        .collect();
+    assert_eq!(
+        asked.load(std::sync::atomic::Ordering::Acquire),
+        1,
+        "one question for all the births that waited"
+    );
+    let cell = std::sync::Arc::clone(cell);
+    let late = on_a_worker(move |worker| {
+        windows_powershell_birth(Path::new("powershell.exe"), true, || {
+            cell.for_birth(worker, || panic!("a known answer asks nothing"))
+                .0
+        })
+    })
+    .join()
+    .unwrap();
+    (early, late)
+}
+
+/// RED (T-INTEGRATION-INJECT-2-BUILD round 3b, ruling B′) — **an answer that lands late composes
+/// the same birth for a pane born before it and one born after**: the births that came first
+/// wait for it — on their own threads, as on the birth worker — and then compose from it, so
+/// timing changes how long a pane takes and never which editor it gets. Both answers: a
+/// `FullLanguage` edition's early panes get Folio's PSReadLine, a constrained edition's get the
+/// switch-off pane, exactly as the late one does.
+///
+/// MUTATION: compose while unanswered (`for_birth` answering `Failed` for a question still out
+/// instead of waiting) — the early births are composed without the prefix the late one has.
+#[test]
+fn an_answer_that_lands_late_composes_the_same_birth_before_and_after() {
+    for answer in [language::Language::Full, language::Language::Constrained] {
+        let cell = std::sync::Arc::new(language::LanguageCell::new());
+        let (early, late) = births_around_a_late_answer(&cell, 3, answer);
+        for birth in &early {
+            assert_eq!(
+                *birth, late,
+                "{answer:?}: born before the answer, the same birth"
+            );
+        }
+        assert_eq!(
+            late.prefix,
+            answer == language::Language::Full,
+            "{answer:?}"
+        );
+    }
+}
+
+/// RED (T-INTEGRATION-INJECT-2-BUILD round 3b) — **a birth that waited for the answer says so in
+/// `diagnostics.log`, how long and what it heard; one that found it answered says nothing.** The
+/// wait is the price of the ruling, and the log is where it is visible in the field.
+///
+/// MUTATION: drop the line from `language_for_birth_in` — the waiting birth says nothing.
+#[test]
+fn a_birth_that_waited_says_so() {
+    use language::{Language, LanguageCell, language_for_birth_in};
+    let cell = std::sync::Arc::new(LanguageCell::new());
+    let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let waiting = {
+        let cell = std::sync::Arc::clone(&cell);
+        let said = std::sync::Arc::clone(&said);
+        on_a_worker(move |worker| {
+            language_for_birth_in(&cell, worker, || true, &|line| {
+                said.lock().unwrap().push(line.to_owned());
+            })
+        })
+    };
+    while cell.waiting() == 0 && !waiting.is_finished() {
+        std::thread::yield_now();
+    }
+    cell.file(Language::Full);
+    assert_eq!(waiting.join().unwrap(), Language::Full);
+    let lines = said.lock().unwrap().clone();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].starts_with("Windows PowerShell: a pane waited ")
+            && lines[0].ends_with(" ms for the edition's language mode (Full)"),
+        "{lines:?}"
+    );
+    let answered = on_a_worker(move |worker| {
+        language_for_birth_in(&cell, worker, || panic!("answered"), &|line| {
+            panic!("a birth that did not wait says nothing: {line}")
+        })
+    })
+    .join()
+    .unwrap();
+    assert_eq!(answered, Language::Full);
+}
+
+/// RED (T-INTEGRATION-INJECT-2-BUILD round 3b, ruling B′) — **a failed or timed-out question gives
+/// that birth no prefix and one line, and the next birth asks again**; a constrained machine is
+/// said once per launch however many panes are born; `FullLanguage` says nothing. The question's
+/// end is bounded by its own patience, and every end files an answer, so no birth waits past it.
+///
+/// MUTATION: give `Language::Failed` the prefix (`prefix: true`) — a birth whose question failed is
+/// declared Folio's module path on no answer at all.
+#[test]
+fn a_failed_question_gives_no_prefix_and_one_line() {
+    use language::{Language, LanguageCell, say_with, windows_powershell_birth};
+    let failed = windows_powershell_birth(Path::new("powershell.exe"), true, || Language::Failed);
+    assert!(!failed.prefix, "no prefix on no answer");
+    assert!(
+        failed.integration,
+        "the loader, over the account's own editor, as before"
+    );
+
+    let cell = std::sync::Arc::new(LanguageCell::new());
+    cell.ask(|| false);
+    // The question asked again fails too: its worker files the failure, as every end does.
+    let (answer, asked_again) = on_a_worker(move |worker| {
+        let mut asked_again = false;
+        let (answer, _) = cell.for_birth(worker, || {
+            asked_again = true;
+            cell.file(Language::Failed);
+            true
+        });
+        (answer, asked_again)
+    })
+    .join()
+    .unwrap();
+    assert_eq!(
+        answer,
+        Language::Failed,
+        "a start refused is a failed question"
+    );
+    assert!(asked_again, "and the next birth asks again");
+
+    let said = std::cell::RefCell::new(Vec::<String>::new());
+    let note = |line: &str| said.borrow_mut().push(line.to_owned());
+    let launch = std::sync::atomic::AtomicBool::new(false);
+    say_with(Language::Failed, Some("timed out"), &launch, &note);
+    assert_eq!(said.borrow().len(), 1);
+    assert!(
+        said.borrow()[0].contains("could not be asked (timed out)"),
+        "{:?}",
+        said.borrow()
+    );
+    for _ in 0..3 {
+        say_with(Language::Constrained, None, &launch, &note);
+    }
+    say_with(Language::Full, None, &launch, &note);
+    assert_eq!(
+        said.borrow().len(),
+        2,
+        "constrained once, Full never: {:?}",
+        said.borrow()
+    );
+    assert!(
+        said.borrow()[1].contains("runs constrained on this machine"),
+        "{:?}",
+        said.borrow()
+    );
+    assert_eq!(language::language_from("FullLanguage\r\n"), Language::Full);
+    assert_eq!(
+        language::language_from("ConstrainedLanguage\r\n"),
+        Language::Constrained
+    );
+    assert_eq!(language::language_from(""), Language::Failed);
+}
+
 #[cfg(windows)]
 mod real_shell {
     use super::*;
@@ -1040,11 +1298,6 @@ mod real_shell {
     /// profile stands. `-ExecutionPolicy Bypass` on the row, because a dot-sourced file is a
     /// script and the subject here is what it does, not whether a policy lets it run.
     fn profile_pane(text: &str) -> (Pane, PathBuf) {
-        profile_pane_with_prefix(text, true)
-    }
-
-    /// [`profile_pane`], with or without Folio's module path ([`pane_with_prefix`]).
-    fn profile_pane_with_prefix(text: &str, prefix: bool) -> (Pane, PathBuf) {
         let profile = bt_testpath::temp_path("psreadline-profile").with_extension("ps1");
         std::fs::write(&profile, text).unwrap();
         let startup = format!(
@@ -1064,7 +1317,7 @@ mod real_shell {
             true,
             120,
             30,
-            prefix,
+            true,
         );
         (pane, profile)
     }
@@ -1210,112 +1463,6 @@ mod real_shell {
                  Folio's log (`OSC 777;folio-psreadline;2.0.0`)"
             );
         }
-    }
-
-    /// RED (T-INTEGRATION-INJECT-2-BUILD round 2) — **a pane born before the edition observation
-    /// has said anything gets Folio's copy**: the first pane of every launch on an ordinary
-    /// machine, which must not wait for that answer. Nothing is heard for Windows PowerShell here,
-    /// and the pane runs Folio's 2.4.5 with the loader's function defined.
-    ///
-    /// MUTATION: make `observed_constrained` read an unheard edition as constrained
-    /// (`is_none_or`) — red at the pane's own making (`folio_pane`: "a composed 5.1 pane declares
-    /// its module path").
-    #[test]
-    fn a_first_pane_born_before_the_observation_gets_folios_copy() {
-        let _turn = observation_turn();
-        PROFILE_OBSERVATIONS
-            .get_or_init(Default::default)
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(&powershell_edition(&windows_powershell()));
-        let mut pane = folio_pane(&["-NoLogo"], false, 120, 30);
-        pane.until("the first prompt", |pane| {
-            pane.output_since(0).contains("\x1b]133;B")
-        });
-        pane.settle();
-        let facts = facts_of(&pane.run(FACTS, "|END"));
-        let fields: Vec<&str> = facts.split('|').collect();
-        let (version, base) = fields[0].split_once('@').expect("version@base");
-        assert_eq!(version, crate::psreadline::SHIPPED_VERSION, "{facts}");
-        assert!(
-            Path::new(base).starts_with(&pane.module),
-            "Folio's: {facts}"
-        );
-        assert_eq!(fields.get(2).copied(), Some("True"), "{facts}");
-        pane.close();
-    }
-
-    /// RED (T-INTEGRATION-INJECT-2-BUILD round 2) — **a constrained pane keeps exactly the editor
-    /// it would have had without Folio's prefix**, whether or not the observation had said so when
-    /// it was born. Constrained Language Mode is entered the way a test may enter it, inside the
-    /// child and never through the account's policy or environment: the profile sets the
-    /// session's language mode, so it holds from the profile on — after the host's own import,
-    /// before Folio's loader, which is where a machine's lockdown is found too. The same profile
-    /// runs in a pane with Folio's module path and in one without (the reference); both end on
-    /// the same one PSReadLine, from the same folder, with its function defined, in
-    /// `ConstrainedLanguage`, on the same module path (Folio's folder gone from it).
-    ///
-    /// **Measured, and the limit of this test** (2026-10-18): in the language mode a profile set,
-    /// the module the loader imports again runs its own script constrained, so its function's call
-    /// into its type is refused (`MethodInvocationNotSupportedInConstrainedLanguage`) and the host
-    /// takes the line with its own input; the reference pane's module was imported before the
-    /// mode changed. Under a machine's lockdown the session is constrained from the host's own
-    /// import on, and a module's script runs in the mode its file's trust gives it, for the
-    /// host's import and for this one alike — which no test can enter without changing the
-    /// machine. So this pins the editor's identity, not its working.
-    ///
-    /// MUTATION: drop the loader's `else` arm (`give_back` empty) — the prefixed pane keeps
-    /// Folio's module with no function: the host's legacy line editor.
-    #[test]
-    fn a_constrained_pane_keeps_the_editor_it_had_without_folios_prefix() {
-        let _turn = observation_turn();
-        const CONSTRAINED: &str =
-            "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\r\n";
-        const FACTS_AND_MODE: &str = "'BTPS' + 'RL|' + ((Get-Module PSReadLine | ForEach-Object { \
-                                      [string]$_.Version + '@' + $_.ModuleBase }) -join ',') + '|' \
-                                      + $ExecutionContext.SessionState.LanguageMode + '|' + \
-                                      (Test-Path Function:PSConsoleHostReadLine) + '|' + \
-                                      $env:PSModulePath + '|' + (Get-Command Get-PSReadLineOption).\
-                                      ImplementingType.Assembly.Location + '|' + ($Error | \
-                                      Select-Object -First 1 | Out-String) + '|E' + 'ND'";
-        let mut seen = Vec::new();
-        for prefix in [false, true] {
-            let (mut pane, profile) = profile_pane_with_prefix(CONSTRAINED, prefix);
-            pane.until("the first prompt", |pane| {
-                pane.output_since(0).contains("PS ")
-            });
-            pane.settle();
-            let mark = pane.raw.len();
-            pane.pty
-                .write(format!("{FACTS_AND_MODE}\r").as_bytes())
-                .unwrap();
-            pane.until("the facts", |pane| pane.output_since(mark).contains("|END"));
-            let facts = facts_of(&pane.output_since(mark));
-            eprintln!("BT_PSRL_CONSTRAINED prefix={prefix} facts={facts}");
-            pane.close();
-            let _ = std::fs::remove_file(profile);
-            // The editor, the mode, the function, the module path and the assembly the module's
-            // cmdlets run from — which code answers, not only which module object is listed
-            // (round 3a); the last field, the first error, is measured and printed only (see the
-            // design note's round 2).
-            seen.push(facts.split('|').take(5).collect::<Vec<_>>().join("|"));
-        }
-        let reference: Vec<&str> = seen[0].split('|').collect();
-        assert_eq!(
-            reference.get(1).copied(),
-            Some("ConstrainedLanguage"),
-            "the reference pane is constrained: {}",
-            seen[0]
-        );
-        assert_eq!(
-            seen[1], seen[0],
-            "the prefixed pane ends on the reference's editor"
-        );
-        assert!(
-            !seen[1].contains(crate::psreadline::ARTEFACT),
-            "and not on Folio's: {}",
-            seen[1]
-        );
     }
 
     /// The fork an earlier Folio shipped, laid down from the tree's own history into `modules`

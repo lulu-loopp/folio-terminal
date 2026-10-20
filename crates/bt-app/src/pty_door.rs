@@ -199,6 +199,17 @@ fn bear(
         Some(gone) => (gone.arguments, gone.working_directory),
         None => (arguments, working_directory),
     };
+    // **A Windows PowerShell 5.1 birth composes from the edition's known language mode**
+    // (T-INTEGRATION-INJECT-2-BUILD round 3b, ruling B′): `FullLanguage` gives Folio's loader and
+    // PSReadLine; a constrained edition's pane is the Shell-integration-off pane, byte for byte; a
+    // birth before the answer waits for it here, on the birth worker; a failed question gives the
+    // loader without the prefix.
+    let birth = shell_integration::windows_powershell_birth(
+        std::path::Path::new(&program),
+        powershell_integration,
+        || shell_integration::language_for_birth(ctx, std::path::Path::new(&program)),
+    );
+    let powershell_integration = birth.integration;
     let composed = shell_integration::compose_powershell_birth_loading(
         std::path::Path::new(&program),
         &arguments,
@@ -239,7 +250,7 @@ fn bear(
     // worker — and its directory put first on the pane's own module path, after the row's layer.
     shell_integration::declare_psreadline_module(
         Path::new(&program),
-        composed.loads,
+        composed.loads && birth.prefix,
         &before_folio,
         &folio_environment,
         &mut profile_environment,

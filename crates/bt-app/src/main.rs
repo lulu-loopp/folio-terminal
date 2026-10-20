@@ -46767,13 +46767,15 @@ impl Runtime<'_, Native> {
         // module from its local data folder, so the launch replaces nothing; it only finds out,
         // on a worker, whether the Terminal page owes the copy's removal row.
         psreadline::begin_legacy_observation();
-        // **The first window, in `startup::resume`'s order**: the startup migration and
-        // the script's preparation, the window, the PowerShell questions, the first tab. What the
+        // **The first window, in `startup::resume`'s order**: Windows PowerShell's language
+        // question, the startup migration and the script's preparation, the window, the
+        // PowerShell questions, the first tab. What the
         // steps share is the program walk's answers, adopted by the window's title and by the
         // questions, and read by the first tab.
         let (opened, first) = startup::resume(
             &mut profile_programs,
             startup::FirstWindow {
+                language: shell_integration::begin_language_question,
                 migration: shell_integration::begin_startup_migration,
                 script: || {
                     // Folio's own `folio.ps1`, compared and repaired on a worker nobody waits for: the first
