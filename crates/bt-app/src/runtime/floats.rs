@@ -1878,7 +1878,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// reason: a menu cannot be both waiting to open its child and holding it
     /// open against the rows.
     pub(in crate::runtime) fn advance_term_menu(&mut self, now: Instant) -> Result<()> {
-        let Some(menu) = self.window.term_menu.as_ref() else {
+        let Some(menu) = self.window.term_menu.as_mut() else {
             return Ok(());
         };
         let Some(due) = menu.submenu_hold_until else {
@@ -1887,6 +1887,13 @@ impl<B: Backend> Runtime<'_, B> {
         if now < due {
             return Ok(());
         }
+        // **A matured hold is spent on the turn it comes due, whatever follows**
+        // (T-WINDOW-THREAD-UNDER-LOAD). Left standing by a road below that cannot act — a rest
+        // whose pointer has left the window, a heading that has no child to open — it was an
+        // instant in the past that the wake fold handed `ControlFlow::WaitUntil` on every turn,
+        // and the loop spun until the next pointer move. Whatever the roads below arm again
+        // (the hover they drive) is a new hold of its own.
+        menu.submenu_hold_until = None;
         if menu.submenu_open {
             self.set_term_submenu(false)?;
             if let Some(position) = self.window.pointer_position {

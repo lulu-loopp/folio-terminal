@@ -12,7 +12,7 @@ use crate::{
     foreground_program_deadline, git, hang_watch, hyperlink_activation, ime_outbound,
     mark_leaf_painted, math_copy_window, present_diagnostics, present_gate, preview,
     pty_drain_says_nothing_new, pty_frame_is_unchanged, sample_window_place, seats, settings,
-    settling, startup_poll_delay, take_math_worker_notice,
+    settling, spend_foreground_program_cadences, startup_poll_delay, take_math_worker_notice,
     toast, trace_sink, trace_unchanged_present, update, webhost,
 };
 use anyhow::Context;
@@ -1751,6 +1751,11 @@ impl<B: Backend> Runtime<'_, B> {
             .quit
             .as_ref()
             .is_some_and(crate::quit::Quit::holds_the_storage_worker);
+        // The storage worker's two clocks — the storage watch's re-read and the autosave — run
+        // under this one predicate, and the wake fold books them under it too
+        // (T-WINDOW-THREAD-UNDER-LOAD): a clock reported while its spender is held is an instant
+        // the loop would spin on.
+        let storage_clocks = application_clocks && !quit_holds_the_worker;
         if application_clocks {
             // A poll of the world outside this process, put back on the clock
             // run's name the moment it returns (T-STATION-SPLIT).
@@ -1758,7 +1763,7 @@ impl<B: Backend> Runtime<'_, B> {
             hang_watch::during(hang_watch::Station::ClockAdvanceSchemeWatch, || {
                 self.advance_scheme_watch(now)
             })?;
-            if !quit_holds_the_worker {
+            if storage_clocks {
                 hang_watch::during(hang_watch::Station::ClockAdvanceStorageWatch, || {
                     self.advance_storage_watch(now)
                 })?;
@@ -1795,6 +1800,12 @@ impl<B: Backend> Runtime<'_, B> {
         // `ProcessFailed` does not arrive at all and `BrowserProcessExited`
         // arrived late in one of eight measured shutdowns and never in another.
         self.advance_web_page(now)?;
+        // **The foreground-program cadence of every pane**, which the fold below books for every
+        // leaf of every tab and which nothing else spends on a turn the window publishes no frame
+        // for (T-WINDOW-THREAD-UNDER-LOAD; see [`spend_foreground_program_cadences`]).
+        let window = self.window_id();
+        let requests = self.app.decoration_senders().foreground;
+        spend_foreground_program_cadences(window, &mut self.window.tabs, &requests, now);
         // Ahead of the strip's own animation tick: paying the press's promise
         // activates a tab, and the strip that is redrawn afterwards should be
         // the one the switch produced.
@@ -1847,7 +1858,7 @@ impl<B: Backend> Runtime<'_, B> {
         hang_watch::during(hang_watch::Station::ClockAdvanceGitWatch, || {
             self.advance_git_watch()
         })?;
-        if application_clocks && !quit_holds_the_worker {
+        if storage_clocks {
             // `flush_if_due` stamps [`hang_watch::Station::Autosave`] itself,
             // and since T-STATION-SPLIT that name covers the file it writes and
             // nothing else: the clock run below says its own name on the very
@@ -2274,7 +2285,14 @@ impl<B: Backend> Runtime<'_, B> {
             // A standing credential's ten minutes, and only while one is standing. A window whose
             // panes are asking for nothing reports nothing and costs no wake-ups at all — which is
             // every window, almost always.
-            attention_ledger_deadline(&self.window.tabs),
+            // Spent by `settle_attention`, which runs behind the strip's tick and the window's frame
+            // gate (`advance_strip_animation`), so it is booked no earlier than the turn that gate
+            // admits (T-WINDOW-THREAD-UNDER-LOAD): a due credential refused by the gate is an
+            // instant the loop would otherwise spin on until the gate opens.
+            attention_ledger_deadline(&self.window.tabs).map(|due| {
+                self.strip_animation_next_tick(self.window.frame_clock.interval())
+                    .map_or(due, |tick| due.max(tick))
+            }),
             // The tip's 380ms while one is settling, and the fade's own frames
             // until it lands. A window with no tip under the pointer reports
             // nothing and costs no wake-ups at all.
@@ -2434,7 +2452,8 @@ impl<B: Backend> Runtime<'_, B> {
             // in the past must be impossible rather than merely unreached.
             math_copy_window(self.window.math_copied.as_ref().map(|(_, at)| at), now),
             self.preview_resample_deadline(),
-            application_clocks
+            // Under its spender's own predicate (`storage_clocks`, T-WINDOW-THREAD-UNDER-LOAD).
+            storage_clocks
                 .then(|| self.app.session_store.deadline())
                 .flatten(),
             // The schemes folder's own debounce, on the same terms: absent for
@@ -2444,7 +2463,8 @@ impl<B: Backend> Runtime<'_, B> {
                 .flatten(),
             // And the storage folder's, on exactly the same terms — absent for
             // every window in which nothing at all has been written lately.
-            application_clocks
+            // Under its spender's own predicate (`storage_clocks`, T-WINDOW-THREAD-UNDER-LOAD).
+            storage_clocks
                 .then(|| self.app.storage_watch.deadline())
                 .flatten(),
             // The debounce a change notification started (R31's D): the
@@ -2541,3 +2561,7 @@ impl<B: Backend> Runtime<'_, B> {
 #[cfg(test)]
 #[path = "frame_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "wake_fold_tests.rs"]
+mod wake_fold_tests;
