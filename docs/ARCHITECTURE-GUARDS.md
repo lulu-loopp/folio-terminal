@@ -742,8 +742,9 @@ from `std::env` are no read. Every other shape that names one of the four is a
 refusal by file and line, never a silent skip: a computed argument (a
 parameter, `format!`, another module's constant, a macro's `$name`), an
 enumeration (`vars()`, `vars_os()`), the reader handed on as a value, a path
-through another module, a bare reader under a glob of `std::env`, and a `use`
-that renames a reader. Extending the grammar is another ticket. Its fixture
+through another module (any other bytes beside a separator, `<T as X>::var_os`
+among them), a comment between the tokens (`std::env::/*…*/var_os`), a bare
+reader under a glob of `std::env`, and a `use` that renames a reader. Extending the grammar is another ticket. Its fixture
 `tests/fixtures/env_doors` plants one function per shape, and the test holds
 the scan to a table. The list `docs/plans/ENV-DOORS.tsv` is an equality keyed
 by file and item: every item that reads a `BT_` name or holds a refusal has

@@ -44,7 +44,9 @@
 //! macro's `$name`), `vars()`/`vars_os()` (an enumeration of the whole environment), the function
 //! handed on as a value (`.map(std::env::var_os)`), a path through another module
 //! (`other::var_os(…)`, `env::var_os` in a file with no `use std::env;`), a comment between the
-//! tokens, and a `use` that renames one of them or globs `std::env::*`. Extending the grammar is
+//! tokens (a separator with a comment beside it; any other bytes beside a separator, as in
+//! `<T as X>::var_os(…)`, are a path this grammar does not read), and a `use` that renames one of
+//! them or globs `std::env::*`. Extending the grammar is
 //! another ticket.
 //!
 //! # The list
@@ -240,16 +242,16 @@ fn judge(
     if let Some(finding) = in_a_use(index, token, name) {
         return finding;
     }
-    if interrupted(before) {
-        return Some(Finding::Refused("a comment between the tokens"));
+    if let Some(why) = interrupted(before) {
+        return Some(Finding::Refused(why));
     }
     let supported_path = if before == "::" {
         match previous_name {
             Some("env") => {
                 let env_at = at - 1;
                 let before_env = gap_before(index, tokens, env_at, file);
-                if interrupted(before_env) {
-                    return Some(Finding::Refused("a comment between the tokens"));
+                if let Some(why) = interrupted(before_env) {
+                    return Some(Finding::Refused(why));
                 }
                 let qualified = before_env == "::"
                     && env_at
@@ -327,10 +329,19 @@ fn gap_before<'a>(index: &'a Index, tokens: &[TokenRecord], at: usize, file: Spa
     index.union()[start..tokens[at].span().start()].trim()
 }
 
-/// Whether the bytes between two tokens are a path separator with something else beside it —
-/// a comment written inside the path (`std::env::/*…*/var_os`), which this grammar does not read.
-fn interrupted(gap: &str) -> bool {
-    gap != "::" && gap.contains("::")
+/// Why the bytes between two tokens, a path separator with something else beside it, are a path
+/// this grammar does not read — `None` when they are not that. A comment written inside the path
+/// (`std::env::/*…*/var_os`) says so; anything else (`<T as X>::var_os`, a generic's `>::`) is a
+/// path of another shape.
+fn interrupted(gap: &str) -> Option<&'static str> {
+    if gap == "::" || !gap.contains("::") {
+        return None;
+    }
+    Some(if gap.contains("/*") || gap.contains("//") {
+        "a comment between the tokens"
+    } else {
+        "a path this grammar does not read"
+    })
 }
 
 /// Whether a module-level `use` of the file holding `file` globs `std::env::*`.
@@ -728,6 +739,10 @@ fn the_grammar_reads_each_supported_shape_and_refuses_each_other_one() {
         (
             "crate::not_one_literal",
             row(&[], &["an argument that is not one string literal"]),
+        ),
+        (
+            "crate::a_qualified_path",
+            row(&[], &["a path this grammar does not read"]),
         ),
         (
             "crate::other_module_path",

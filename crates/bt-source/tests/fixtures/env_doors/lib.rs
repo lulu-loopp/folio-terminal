@@ -123,6 +123,10 @@ impl Shell {
     }
 }
 
+pub fn a_qualified_path(shell: &Shell) -> Option<OsString> {
+    <Shell as Probe>::var_os(shell, "BT_FIXTURE_QUALIFIED")
+}
+
 pub fn a_method(shell: &Shell) -> Option<OsString> {
     shell.var_os("BT_FIXTURE_METHOD")
 }
