@@ -1024,6 +1024,13 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-env-doors.ps1
 
+      # The environment-door gate's scratch-repository suite plants its three refusals (an
+      # added row, a row reading a new name, a row holding more refusals) and requires each to
+      # fail for its own reason, while the no-base, unchanged and shrink cases pass.
+      - name: the environment-door gate can actually fail
+        shell: pwsh
+        run: ./scripts/ci/check-env-doors-tests.ps1
+
       # Gate G3: the crates a browser build reads name no clock of the standard
       # library (`scripts/ci/check-clock-guard.ps1` states the source set and what
       # is out of it by name). The workspace test above ran the same reading;

@@ -19,14 +19,22 @@
 # It passes, loudly, when the base has no list - that is how the commit that
 # introduces the list passes. It does not pass when there is no base at all.
 
+# `-Repo` and `-Relative` exist for `check-env-doors-tests.ps1`, which runs this
+# gate against scratch repositories; CI runs it with the defaults.
+
+param(
+    [string]$Repo = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
+    [string]$Relative = "docs/plans/ENV-DOORS.tsv"
+)
+
 $ErrorActionPreference = "Stop"
 
 if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -ErrorAction SilentlyContinue) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
-$repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$relative = "docs/plans/ENV-DOORS.tsv"
+$repo = $Repo
+$relative = $Relative
 $list = Join-Path $repo $relative
 
 if (-not (Test-Path -LiteralPath $list)) {
