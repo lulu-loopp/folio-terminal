@@ -62,9 +62,11 @@
 //! **A `const`'s or `static`'s initializer is a body of the graph** ([`Node::Value`]): a use of
 //! the value is a [`Target::Value`] edge to it — [`Via::Deref`] for a `LazyLock` or `LazyCell`,
 //! whose initializer runs on its first deref, [`Via::Value`] otherwise — and the walk follows its
-//! calls and the functions it names as values, a closure's included. A `const` holding a function
-//! pointer, called, is that edge and a [`Unresolved::Dynamic`] whose candidates are the functions
-//! the initializer names.
+//! calls and the functions it names as values, a closure's included. A `const` or `static`
+//! holding a function pointer, called (`F()`, `Self::F()`, `Type::F()`), is that edge and a
+//! [`Unresolved::Dynamic`] whose candidates are the functions the initializer names; an
+//! initializer that names its own value again is read once, its inner call's candidates the outer
+//! reading's.
 //!
 //! **What is not read**, as limits: visibility; items a macro generates (a `bitflags!` type, a
 //! generated enum, a `thread_local!` static: a path through one is [`Unresolved::Path`]); the

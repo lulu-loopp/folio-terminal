@@ -193,6 +193,9 @@ pub(crate) struct Tables<'i> {
     pub(crate) associated_consts: BTreeMap<(SelfKey, String), Vec<ValueId>>,
     /// The `const`s each first-party trait declares, by name.
     pub(crate) trait_consts: BTreeMap<(TraitId, String), Vec<ValueId>>,
+    /// The values whose function candidates are being read now: a reading that reaches one of them
+    /// again (a self-referential initializer) does not read it again.
+    pub(crate) reading: RefCell<BTreeSet<ValueId>>,
     /// The `impl` blocks whose self type is not placed ([`UnplacedImpl`]).
     pub(crate) unplaced_impls: Vec<UnplacedImpl>,
     /// The free functions of each module, by name (one per `cfg` variant).
@@ -262,6 +265,7 @@ impl<'i> Tables<'i> {
             functions: HashMap::new(),
             values: HashMap::new(),
             unplaced_impls: Vec::new(),
+            reading: RefCell::default(),
             module_values: HashMap::new(),
             associated_consts: BTreeMap::new(),
             trait_consts: BTreeMap::new(),

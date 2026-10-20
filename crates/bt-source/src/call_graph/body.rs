@@ -1209,6 +1209,10 @@ impl<'t, 'i> Walker<'t, 'i> {
                 None
             };
             if let Some(owner) = owner {
+                let values = self.tables.associated_values(&owner, &name, &self.written);
+                if !values.is_empty() {
+                    return self.called_values(&values, &format!("the associated `{name}`"));
+                }
                 return self.tables.associated(&owner, &name, &self.written);
             }
         }
@@ -1263,44 +1267,19 @@ impl<'t, 'i> Walker<'t, 'i> {
                 Named::Variant(..) | Named::Type(..) => constructor = true,
                 Named::Foreign(path) => foreign.push(path.clone()),
                 Named::Value(at, module, value) => {
-                    // A `const` or a `static` called: what it holds is a function value. Its
-                    // initializer is reached (the functions it names are edges there), and the
-                    // call is dynamic with those functions as its candidates.
                     let values = self
                         .tables
                         .module_values
                         .get(&(*at, module.clone(), value.clone()))
                         .cloned()
                         .unwrap_or_default();
-                    let mut candidates = Vec::new();
-                    for id in &values {
-                        for edge in Walker::value(self.tables, *id) {
-                            if let (Target::Item(item), Via::Value) = (&edge.to, &edge.via) {
-                                candidates.push(*item);
-                            }
-                        }
-                    }
-                    candidates.sort();
-                    candidates.dedup();
-                    let mut targets: Vec<(Target, Via)> = values
-                        .into_iter()
-                        .map(|id| (Target::Value(id), Via::Value))
-                        .collect();
-                    targets.push((
-                        Target::Unresolved(Unresolved::Dynamic {
-                            what: format!(
-                                "`{value}`, a `const` or `static` of {} {module} called: a \
-                                 function pointer",
-                                self.tables.package(*at)
-                            ),
-                            candidates,
-                        }),
-                        Via::Direct,
-                    ));
-                    return Answer {
-                        targets,
-                        ..Answer::default()
-                    };
+                    return self.called_values(
+                        &values,
+                        &format!(
+                            "`{value}`, a `const` or `static` of {} {module}",
+                            self.tables.package(*at)
+                        ),
+                    );
                 }
                 Named::Module(..) | Named::Trait(..) | Named::Alias(..) => {}
             }
@@ -1357,6 +1336,10 @@ impl<'t, 'i> Walker<'t, 'i> {
                 self.written.path(&path)
             };
             if let Ty::Named(_) | Ty::Param(_) | Ty::Traits(_) = &owner {
+                let values = self.tables.associated_values(&owner, &name, &self.written);
+                if !values.is_empty() {
+                    return self.called_values(&values, &format!("the associated `{name}`"));
+                }
                 return self.tables.associated(&owner, &name, &self.written);
             }
         }
@@ -1583,6 +1566,60 @@ fn is_constructor_path(path: &[String]) -> bool {
         if std == "std"
             && matches!((module.as_str(), ty.as_str()), ("option", "Option") | ("result", "Result"))
             && matches!(variant.as_str(), "Some" | "Ok" | "Err"))
+}
+
+impl Walker<'_, '_> {
+    /// **A `const` or a `static` called** (`F()`, `Self::F()`, `Type::F()`): what it holds is a
+    /// function value. The call is a [`Target::Value`] edge to each initializer — the walk reaches
+    /// the functions it names there — and a [`Unresolved::Dynamic`] whose candidates are those
+    /// functions.
+    ///
+    /// The candidates are read by walking the initializer, which may name the value again (`const
+    /// F: fn() = { fn g() { F() } g };`, `static S: fn() = || S();`): a value whose candidates are
+    /// being read is not read again inside its own reading — the inner call's candidates are then
+    /// the ones the outer reading finds, and it is said so — so the reading is bounded by the
+    /// values it holds open.
+    fn called_values(&self, values: &[ValueId], what: &str) -> Answer {
+        let mut candidates = Vec::new();
+        let mut within = false;
+        for id in values {
+            if !self.tables.reading.borrow_mut().insert(*id) {
+                within = true;
+                continue;
+            }
+            let edges = Walker::value(self.tables, *id);
+            self.tables.reading.borrow_mut().remove(id);
+            for edge in edges {
+                if let (Target::Item(item), Via::Value) = (&edge.to, &edge.via) {
+                    candidates.push(*item);
+                }
+            }
+        }
+        candidates.sort();
+        candidates.dedup();
+        let mut targets: Vec<(Target, Via)> = values
+            .iter()
+            .map(|id| (Target::Value(*id), Via::Value))
+            .collect();
+        targets.push((
+            Target::Unresolved(Unresolved::Dynamic {
+                what: if within {
+                    format!(
+                        "{what} called inside its own initializer: a function pointer, whose \
+                         candidates are the outer reading's"
+                    )
+                } else {
+                    format!("{what} called: a function pointer")
+                },
+                candidates,
+            }),
+            Via::Direct,
+        ));
+        Answer {
+            targets,
+            ..Answer::default()
+        }
+    }
 }
 
 fn unresolved(kind: Unresolved) -> Answer {
