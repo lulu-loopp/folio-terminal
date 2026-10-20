@@ -1323,17 +1323,15 @@ fn a_self_referential_function_pointer_value_is_read_once() {
     let reach = graph.walk(&[root], &BTreeSet::new());
     assert_eq!(reach.values.len(), 2, "both initializers are reached once");
     let call = item(&resolver, package, "call");
-    for site in ["H"] {
-        let spelled = at(&resolver, "call", site);
-        assert_eq!(
-            spelled
-                .iter()
-                .filter(|spelled| *spelled == "dynamic cg-value_cycle crate::target")
-                .count(),
-            2,
-            "`Self::H()` and `Holder::H()` are dynamic with the initializer's function: {spelled:?}"
-        );
-    }
+    let spelled = at(&resolver, "call", "H");
+    assert_eq!(
+        spelled
+            .iter()
+            .filter(|spelled| *spelled == "dynamic cg-value_cycle crate::target")
+            .count(),
+        2,
+        "`Self::H()` and `Holder::H()` are dynamic with the initializer's function: {spelled:?}"
+    );
     let reached = graph.walk(&[call], &BTreeSet::new());
     assert!(
         keys(
