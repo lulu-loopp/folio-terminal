@@ -347,6 +347,24 @@ an implicit call (a `Drop` at a scope's end, an operator, `?`, `for`) or a forei
 `Reach::implicit` lists every admitted one by trait — `impl Drop for ComputationLane` among
 them — for a guard to review. The module doc carries the grammar table and the kinds.
 
+A `const`'s or `static`'s initializer is a body of the graph (`Node::Value`): a use of the value
+reaches it (`Via::Deref` for a `LazyLock`, whose initializer runs on the first deref), and its
+calls and the functions it names as values are edges. An `impl` block whose self type the module
+tree does not hold — a macro-generated type — is listed with its methods
+(`Resolver::unplaced_impls`); `the_unplaced_impls_are_the_named_list` holds the list (24 blocks),
+and their methods are reachable only as `Ambiguous` candidates.
+
+**The unfollowed edges, by site.** `docs/plans/UNFOLLOWED-EDGES.tsv` lists every `Dynamic` edge
+and every `Ambiguous` edge with other than one candidate met walking from every product callable
+of bt-app — the calls the door reach does not follow — keyed by file, item, kind and the call's
+name, with `sites` (the calls behind the key) and a `reason`.
+`the_unfollowed_edges_are_the_committed_list` holds the list equal to the tree; `scripts/ci/check-unfollowed-edges.ps1` holds it to the merge
+base's, refusing a key added or grown unless its reason is `YYYY-MM-DD: <why>`
+(`check-unfollowed-edges-tests.ps1` plants each verdict). When red, type the receiver or resolve
+the call; when the door reach must go blind there, regenerate with
+`scripts/generate-unfollowed-edges.ps1` and date the reason. The per-door counts are printed by
+`window_waits_tests::the_unfollowed_edges_of_each_completions_door_are_printed`, a diagnostic.
+
 How a guard uses it: build the resolver once over the packages it judges, with `Arms` saying which
 `cfg` arms count (the default is the product as `Compilation` reads it; bt-app passes its feature
 evaluation); turn its ledger's rows into roots and boundary items; walk; judge `reached`,
