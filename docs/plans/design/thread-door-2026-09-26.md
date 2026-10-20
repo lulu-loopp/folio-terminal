@@ -6274,3 +6274,7 @@ Its worker runs for the process's life, so the watches it still holds when the p
 with the process and are not retired; a drop of them (and its one line each) happens only on an
 unwind of the steward, which the resident panic hook turns into the process's end before any drop
 runs.
+
+## Amendment, 2026-10-17 — row 26 repaid (T-CLIPBOARD-LANE)
+
+Row 26 (the Windows clipboard's open, `retry_open_clipboard`'s 5, 10, 20 and 40 ms between five `OpenClipboard` attempts, on the window thread) is `done`. Every road that opened the clipboard — `windows_impl::{clipboard_text, set_clipboard_text}` and `WindowsClipboard::begin` — is now reached only from the clipboard lane's `bt-clipboard` worker (`clipboard_lane`, S-7), and the three doors (`bt_platform::{clipboard_text, set_clipboard_text, clipboard_payload}`) take that worker's `WorkerCtx` on every arm, so the window thread cannot call them (the `compile_fail` in `bt_platform`'s `clipboard` module). The contention wait stays, bounded and declared, on the worker (side-effects contract C5 rule 3): each pause goes through `bt_platform::wait::sleep_within`, the registered worker wait, and the bare-site row `bt-platform [windows] crate::windows_impl::open_clipboard_with_retry std::thread::sleep` leaves the inventory. The registry's completions rows for the clipboard name `bt-clipboard` and `ClipboardAnswered` and conform.

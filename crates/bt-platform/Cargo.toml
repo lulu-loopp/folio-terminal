@@ -357,6 +357,12 @@ path = "examples/hotkey_probe.rs"
 # long standing, and it is what `-[NSApplication dockTile]` answers with.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+# **`dispatch2` 0.3.1, and not a package**: it is in `Cargo.lock` already (the
+# `objc2-core-*` crates carry it), and its features here pull nothing the lock
+# does not list. T-CLIPBOARD-LANE hands the pasteboard's calls from the
+# clipboard lane's worker to the main dispatch queue (`exec_sync`), because the
+# owner's ruling of 2026-10-11 (Q2) keeps `NSPasteboard` on the main thread.
+dispatch2 = { version = "0.3", default-features = false, features = ["std", "objc2"] }
 # The completion handlers this crate passes to AppKit and to Foundation:
 # `-[NSSavePanel beginSheetModalForWindow:completionHandler:]`, which is how a
 # panel is a sheet on a window rather than a nested modal loop inside a winit

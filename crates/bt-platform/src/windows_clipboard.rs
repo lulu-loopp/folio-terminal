@@ -21,6 +21,7 @@ use windows::{
     core::w,
 };
 
+use crate::admission::WorkerCtx;
 use crate::clipboard::{
     Candidate, ClipboardPayload, ClipboardPort, ClipboardTypes, DibHeader, MAX_PICTURE_BYTES,
     MAX_PICTURE_SIDE, PictureBytes, PictureEncoding, PictureSource, TopDownPixels,
@@ -34,14 +35,15 @@ const CF_BITMAP: u32 = 2;
 const CF_DIB: u32 = 8;
 const CF_DIBV5: u32 = 17;
 
-#[derive(Default)]
-struct WindowsClipboard {
+/// One open interval of the clipboard, held by the clipboard lane's worker (`worker`).
+struct WindowsClipboard<'a> {
+    worker: &'a WorkerCtx,
     opened: bool,
 }
 
-impl ClipboardPort for WindowsClipboard {
+impl ClipboardPort for WindowsClipboard<'_> {
     fn begin(&mut self) -> Result<(), String> {
-        crate::windows_impl::open_clipboard_with_retry(crate::windows_impl::owner_window()?)?;
+        crate::windows_impl::open_clipboard_with_retry(self.worker)?;
         self.opened = true;
         Ok(())
     }
@@ -397,7 +399,7 @@ fn global_bytes(format: u32) -> Option<Vec<u8>> {
     }
 }
 
-impl Drop for WindowsClipboard {
+impl Drop for WindowsClipboard<'_> {
     fn drop(&mut self) {
         if self.opened {
             // SAFETY: unwind cleanup for this object's own open interval.
@@ -406,12 +408,17 @@ impl Drop for WindowsClipboard {
     }
 }
 
-pub fn clipboard_payload() -> Result<ClipboardPayload, String> {
+/// **Whatever the clipboard holds, as a paste reads it** — on the clipboard lane's worker
+/// (`worker`), which holds the one open interval, its survey included.
+pub fn clipboard_payload(worker: &WorkerCtx) -> Result<ClipboardPayload, String> {
     // SAFETY: diagnostic context only. Delayed rendering may advance this value successfully;
     // equality after GetClipboardData would reject that success (design ruling ④).
     let sequence = unsafe { GetClipboardSequenceNumber() };
     eprintln!("clipboard read: sequence={sequence}");
-    read_payload(&mut WindowsClipboard::default())
+    read_payload(&mut WindowsClipboard {
+        worker,
+        opened: false,
+    })
 }
 
 #[cfg(test)]
